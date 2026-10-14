@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
@@ -118,5 +119,23 @@ def create_mock_automation_router(
             credential_revision=request.credential_revision,
             reason=request.reason,
         ))
+
+    @router.post('/api/v1/mock-automation/unfilled-population',dependencies=[Depends(authorize)])
+    async def publish_native_unfilled_population(request: Request):
+        supervisor=require_mock_automation_supervisor()
+        body=bytearray()
+        async for chunk in request.stream():
+            if len(body)+len(chunk)>1024*1024:
+                raise HTTPException(413,'NATIVE_UNFILLED_PUBLICATION_TOO_LARGE')
+            body.extend(chunk)
+        try:
+            document=json.loads(body)
+            if not isinstance(document,dict):raise ValueError('native publication must be an object')
+        except (ValueError,UnicodeError) as error:
+            raise HTTPException(400,'INVALID_NATIVE_UNFILLED_PUBLICATION_JSON') from error
+        try:
+            return await run_mock_automation_operation(supervisor.publish_native_unfilled_population(document))
+        except (KeyError,TypeError) as error:
+            raise HTTPException(400,'INVALID_NATIVE_UNFILLED_PUBLICATION_STRUCTURE') from error
 
     return router

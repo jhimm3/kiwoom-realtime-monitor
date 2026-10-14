@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Awaitable, Callable, Iterator
@@ -16,7 +18,9 @@ from kiwoom_monitor.domain.order_contract import (
     BrokerOrderSnapshot,
     OrderIntent,
     OrderSide,
+    OrderState,
     OrderType,
+    TERMINAL_ORDER_STATES,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord, ExecutionRepository
 
@@ -41,6 +45,46 @@ class ExecutionRuntime:
         self._state_lock = RLock()
         self._new_orders_enabled = True  # Preserve the existing explicitly enabled manual transport.
         self._retired = False
+        self._observation_revision = 0
+        self._observation_operations = 0
+        self._observation_lock = RLock()
+        self._observation_listener = None
+
+    @property
+    def observation_revision(self) -> int:
+        with self._observation_lock:
+            return self._observation_revision
+
+    @property
+    def observation_in_progress(self) -> bool:
+        with self._observation_lock:
+            return self._observation_operations > 0
+
+    @contextmanager
+    def _observe_operation(self):
+        with self._observation_lock:
+            self._observation_operations += 1
+        self._order_observation_changed()
+        try:
+            yield
+        finally:
+            with self._observation_lock:
+                self._observation_operations -= 1
+            self._order_observation_changed()
+
+    def set_observation_listener(self, listener) -> None:
+        with self._observation_lock:
+            self._observation_listener = listener
+
+    def _order_observation_changed(self) -> None:
+        with self._observation_lock:
+            self._observation_revision += 1
+            listener = self._observation_listener
+        if listener is not None:
+            try:
+                listener()
+            except Exception:
+                logging.getLogger(__name__).exception("계좌 RAM 관측 무효화 알림 실패")
 
     def start(
         self, *, lease_seconds: int = 60, new_orders_enabled: bool | None = None,
@@ -72,7 +116,7 @@ class ExecutionRuntime:
 
     def stop(self) -> bool:
         # The bundle owner must drain gateway/monitor work before releasing its lease.
-        with self._operation_lock, self._state_lock:
+        with self._operation_lock, self._state_lock, self._observe_operation():
             self._active, self._new_orders_enabled, self._retired = False, False, True
             return self._repository.release_runtime("mock", self.account_ref, self.run_id, self.owner_token)
 
@@ -91,7 +135,7 @@ class ExecutionRuntime:
     def submit(
         self, intent: OrderIntent, account: AccountSnapshot, *, reference_price: int | None = None,
     ) -> ExecutionRecord:
-        with self._operation_lock:
+        with self._operation_lock, self._observe_operation():
             self._require_active(intent)
             if not self._new_orders_enabled:
                 raise RuntimeError("MOCK_NEW_ORDERS_DISABLED")
@@ -105,6 +149,15 @@ class ExecutionRuntime:
 
     def load_active_intents(self) -> tuple[ExecutionRecord, ...]:
         return self._repository.active_intents("mock", self.account_ref, self.run_id)
+
+    def load_account_active_intents(self):
+        return self._repository.account_active_intents(self.account_ref)
+
+    def load_intent_events(self, intent_id: str):
+        return self._repository.events(intent_id)
+
+    def load_intent_claim_approval(self, intent_id: str):
+        return self._repository.claim_approval(intent_id)
 
     def server_now(self) -> datetime:
         value = self._now()
@@ -126,15 +179,18 @@ class ExecutionRuntime:
 
     def submit_automation_intent(
         self, intent: OrderIntent, account: AccountSnapshot, *, reference_price: int | None = None,
-        spec_id: str, control_revision: int,
+        spec_id: str, control_revision: int, replacement_claim: dict | None = None,
+        protection_claim: dict | None = None,
     ) -> ExecutionRecord:
         """Submit one approved automation intent without leaving the account gate open."""
-        with self._operation_lock:
+        with self._operation_lock, self._observe_operation():
             self._require_active(intent)
             if self._new_orders_enabled:
                 raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
             self._repository.bind_automation_control(
                 spec_id=spec_id, control_revision=control_revision,
+                replacement_claim=replacement_claim,
+                **({'protection_claim':protection_claim} if protection_claim is not None else {}),
             )
             self._new_orders_enabled = True
             try:
@@ -152,7 +208,7 @@ class ExecutionRuntime:
                 self._new_orders_enabled = False
 
     def reconcile(self, intent_id: str, snapshot: BrokerOrderSnapshot) -> ExecutionRecord:
-        with self._operation_lock:
+        with self._operation_lock, self._observe_operation():
             record = self._repository.load(intent_id)
             if record is None:
                 raise KeyError(f"unknown order intent: {intent_id}")
@@ -160,12 +216,70 @@ class ExecutionRuntime:
             return self._lifecycle.reconcile(intent_id, snapshot)
 
     def cancel(self, intent_id: str, quantity: int = 0) -> ExecutionRecord:
-        with self._operation_lock:
+        with self._operation_lock, self._observe_operation():
             record = self._repository.load(intent_id)
             if record is None:
                 raise KeyError(f"unknown order intent: {intent_id}")
             self._require_active(record.intent)
             return self._lifecycle.cancel(intent_id, quantity)
+
+    def cancel_automation_intent(
+        self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
+        before_cancel_claim: Callable[[], None] | None = None,
+        cancel_retry_claim: dict | None = None,
+    ) -> ExecutionRecord:
+        """One guarded cancellation claim for the exact assessed native order.
+
+        Purpose selection belongs to the runner. This primitive grants no
+        replacement authority. A prior claim needs an explicit bounded native
+        protective retry proof; default callers retain once-only cancellation.
+        """
+        with self._operation_lock:
+            self._require_active(expected.intent)
+            if self._new_orders_enabled:
+                raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
+            self._repository.bind_automation_control(spec_id=spec_id, control_revision=control_revision)
+            try:
+                record = self._repository.load(expected.intent.intent_id)
+                if record is None:
+                    raise KeyError(f"unknown order intent: {expected.intent.intent_id}")
+                if cancel_retry_claim is not None and record.state in TERMINAL_ORDER_STATES:
+                    return record  # REST resolved it; do not submit another cancellation.
+                history = self._repository.events(record.intent.intent_id)
+                if cancel_retry_claim is None and any(event.get("event_type") == "CANCEL_STARTED" for event in history):
+                    return record  # Includes ACK loss, rejection and a restored runtime.
+                if cancel_retry_claim is not None:
+                    responses=[row for row in history if row.get('event_type') in {
+                        'CANCEL_STARTED','CANCEL_REJECTED','CANCEL_RESPONSE_UNKNOWN','CANCEL_ACCEPTED'}]
+                    count=sum(row.get('event_type')=='CANCEL_STARTED' for row in history)
+                    if (before_cancel_claim is None or not responses or responses[-1]['event_type']!='CANCEL_REJECTED'
+                            or responses[-1]['event_id']!=cancel_retry_claim.get('reject_event_id')
+                            or count+1!=cancel_retry_claim.get('attempt')):
+                        raise ValueError('MOCK_PROTECTIVE_CANCEL_RETRY_NATIVE_RESPONSE_CHANGED')
+                # REST recovery advances confirmation timestamps even without
+                # changing exposure. Preserve every intent/state/fill field;
+                # only monotonic confirmation time may advance.
+                if (replace(record, last_broker_as_of=expected.last_broker_as_of,
+                            updated_at=expected.updated_at) != expected
+                        or (expected.last_broker_as_of is not None and (
+                            record.last_broker_as_of is None
+                            or record.last_broker_as_of < expected.last_broker_as_of))):
+                    raise ValueError("MOCK_AUTOMATION_CANCEL_ASSESSED_ORDER_CHANGED")
+                if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
+                    raise ValueError("MOCK_AUTOMATION_CANCEL_REQUIRES_RECONCILED_ORDER")
+                if before_cancel_claim is not None:
+                    before_cancel_claim()
+                if cancel_retry_claim is not None:
+                    self._repository.bind_automation_control(spec_id=spec_id,control_revision=control_revision,
+                        cancel_retry_claim=cancel_retry_claim)
+                with self._observe_operation():
+                    return self._lifecycle.cancel(
+                        record.intent.intent_id, 0,
+                        after_cancel_claim=self._repository.clear_automation_control,
+                    )
+            finally:
+                self._repository.clear_automation_control()
+                self._new_orders_enabled = False
 
     def _require_active(self, intent: OrderIntent) -> None:
         with self._state_lock:
@@ -293,6 +407,38 @@ class ManualMockOrderGateway:
 
     async def cancel(self, intent_id: str, quantity: int = 0) -> ExecutionRecord:
         return await self._command(lambda: self._cancel(intent_id, quantity))
+
+    async def cancel_automation_intent(
+        self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
+        before_cancel_claim: Callable[[], None] | None = None,
+        cancel_retry_claim: dict | None = None,
+    ) -> ExecutionRecord:
+        """Reuse account refresh, command serialization and credential drain."""
+        return await self._command(lambda: self._cancel_automation_intent(
+            expected, spec_id=spec_id, control_revision=control_revision,
+            before_cancel_claim=before_cancel_claim,
+            **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
+        ))
+
+    async def _cancel_automation_intent(
+        self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
+        before_cancel_claim: Callable[[], None] | None = None,
+        cancel_retry_claim: dict | None = None,
+    ) -> ExecutionRecord:
+        async with self._command_lock:
+            current = await asyncio.to_thread(self.load, expected.intent.intent_id)
+            if current.intent != expected.intent:
+                raise ValueError("MOCK_AUTOMATION_CANCEL_ASSESSED_ORDER_CHANGED")
+            history = await asyncio.to_thread(self._repository.events, current.intent.intent_id)
+            if (current.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+                    and (cancel_retry_claim is not None or not any(event.get("event_type") == "CANCEL_STARTED" for event in history))):
+                await self._account_refresh()
+            return await asyncio.to_thread(
+                self._runtime.cancel_automation_intent, expected,
+                spec_id=spec_id, control_revision=control_revision,
+                before_cancel_claim=before_cancel_claim,
+                **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
+            )
 
     async def _cancel(self, intent_id: str, quantity: int) -> ExecutionRecord:
         async with self._command_lock:

@@ -5,16 +5,19 @@ from __future__ import annotations
 from .diagnostic_replay_contract import captured_workload
 
 from .diagnostic_workloads import is_paused
-from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL
+from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL, ObservationRevisionPage
 from .observation_frame_recovery import (
     ObservationFrameRecovery, drain_thread_call, trim_bar_frames, trim_universe_frames,
 )
 
 import asyncio
+from contextlib import ExitStack
+from copy import deepcopy
 import json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import (
@@ -24,10 +27,12 @@ from kiwoom_monitor.application.market_session_schedule import (
 from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
     StrategyState,
-    evaluate_breakout_bar,
 )
+from kiwoom_monitor.application.pullback_reacceleration_strategy import PullbackReaccelerationConfig
 from kiwoom_monitor.application.research_families import (
     BREAKOUT_FAMILY_ID,
+    family_for_config,
+    parse_strategy_config,
     shadow_monitor_id_for_config,
 )
 from kiwoom_monitor.application.research_replay import (
@@ -40,6 +45,7 @@ from kiwoom_monitor.application.research_replay import (
 
 logger = logging.getLogger(__name__)
 INPUT_KINDS = ("top20_membership", "minute_bar")
+SUPPORTED_INPUTS = ("minute_bar/KRX/closed/complete", "top20_membership/as_available")
 
 
 class CandidateMonitor:
@@ -48,7 +54,7 @@ class CandidateMonitor:
     def __init__(
         self,
         store: Any,
-        config: BreakoutStrategyConfig,
+        config: BreakoutStrategyConfig | PullbackReaccelerationConfig,
         *,
         poll_seconds: float,
         universe_max_age_seconds: int,
@@ -58,13 +64,16 @@ class CandidateMonitor:
             raise ValueError("universe_max_age_seconds must be positive")
         self._store = store
         self._config = config
+        self._family = family_for_config(config)
+        if tuple(self._family.contract["required_inputs"]) != SUPPORTED_INPUTS:
+            raise ValueError("unsupported shadow candidate input contract")
         self._poll_seconds = max(0.5, float(poll_seconds))
         self._universe_max_age_seconds = int(universe_max_age_seconds)
         if session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
             raise ValueError(f"unsupported research session profile: {session_profile}")
         self._session_profile = session_profile
         self.monitor_id = shadow_monitor_id_for_config(
-            BREAKOUT_FAMILY_ID, config, session_profile,
+            self._family.family_id, config, session_profile,
         )
         self._cursor = 0
         self._state = StrategyState()
@@ -79,6 +88,7 @@ class CandidateMonitor:
         self._delivery_protocol: str | None = None
         self._frame_recovery: ObservationFrameRecovery | None = None
         self._frame_recovery_receipt: dict[str, Any] | None = None
+        self._iteration_lock = RLock()
         self._restore_or_bootstrap()
 
     @classmethod
@@ -86,12 +96,13 @@ class CandidateMonitor:
         cls, store: Any, config_json: str, *, poll_seconds: float,
         universe_max_age_seconds: int,
         session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
+        family_id: str = BREAKOUT_FAMILY_ID,
     ) -> "CandidateMonitor":
         try:
             document = json.loads(config_json)
             if not isinstance(document, dict):
                 raise ValueError("strategy config must be an object")
-            config = BreakoutStrategyConfig(**document)
+            config = parse_strategy_config(family_id, document)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid shadow candidate strategy config: {error}") from error
         return cls(
@@ -99,6 +110,11 @@ class CandidateMonitor:
             universe_max_age_seconds=universe_max_age_seconds,
             session_profile=session_profile,
         )
+
+    @property
+    def required_inputs(self) -> tuple[str, ...]:
+        """The registered strategy contract; this reader accepts complete KRX minute bars."""
+        return tuple(self._family.contract["required_inputs"])
 
     @property
     def quality(self) -> dict[str, Any]:
@@ -169,38 +185,90 @@ class CandidateMonitor:
             await asyncio.sleep(self._poll_seconds)
 
     def run_once(self, *, limit: int = 1000) -> int:
-        if self._bootstrap_pending:
-            self._bootstrap()
-            return 0  # Initial history is seeded without historical decisions.
-        if self._frame_recovery is not None:
-            recovery = self._frame_recovery
-            if recovery.advance(self._store, INPUT_KINDS, limit):
-                self._save_checkpoint(reason="legacy_frames_recovery", recovery=recovery)
-                self._bars, self._universes = recovery.bars, recovery.universes
-                self._delivery_protocol = OBSERVATION_DELIVERY_PROTOCOL
-                self._frame_recovery_receipt = recovery.receipt()
-                self._frame_recovery = None
-            return 0  # Repair input frames only, never re-run historical strategy decisions.
-        observations = self._store.load_observation_revisions_after(
-            self._cursor, INPUT_KINDS, limit,
-        )
+        with self._iteration_lock:
+            if self._bootstrap_pending:
+                self._bootstrap()
+                return 0  # Initial history is seeded without historical decisions.
+            if self._frame_recovery is not None:
+                recovery = self._frame_recovery
+                if recovery.advance(self._store, INPUT_KINDS, limit):
+                    self._save_checkpoint(reason="legacy_frames_recovery", recovery=recovery)
+                    self._bars, self._universes = recovery.bars, recovery.universes
+                    self._delivery_protocol = OBSERVATION_DELIVERY_PROTOCOL
+                    self._frame_recovery_receipt = recovery.receipt()
+                    self._frame_recovery = None
+                return 0  # Repair input frames only, never re-run historical strategy decisions.
+            observations = self._store.load_observation_revisions_after(
+                self._cursor, INPUT_KINDS, limit,
+            )
+            return self._consume_observations(observations)
+
+    def consume_observation_page(
+        self, page: ObservationRevisionPage, *, after_sequence: int, source_store: Any,
+        _frame_cache: dict | None = None,
+    ) -> int:
+        """Consume a native safe-prefix page supplied in RAM, without reading the store."""
+        with self._iteration_lock:
+            if source_store is not self._store:
+                raise ValueError("shadow page belongs to another source store")
+            if self._bootstrap_pending or self._frame_recovery is not None:
+                raise RuntimeError("shadow input recovery must finish before shared delivery")
+            if not isinstance(page, ObservationRevisionPage):
+                raise TypeError("shadow delivery requires a native observation page")
+            if not 0 <= after_sequence <= self._cursor:
+                raise ValueError("shadow page starts after the consumer cursor")
+            page = deepcopy(page)
+            if len(page.rows) > 5000:
+                raise ValueError("shadow page exceeds the input budget")
+            if not page.ready:
+                if page.rows:
+                    raise ValueError("unsafe shadow page must not contain observations")
+                return self._consume_observations(())
+            if page.safe_through < self._cursor:
+                raise ValueError("shadow cursor is beyond the source safe prefix")
+            previous = after_sequence
+            for row in page.rows:
+                sequence = int(row.get("accepted_sequence", 0))
+                if not previous < sequence <= page.safe_through or row.get("kind") not in INPUT_KINDS:
+                    raise ValueError("shadow page is out of order or source scope")
+                previous = sequence
+            if not page.rows and not page.exhausted:
+                raise ValueError("shadow page has no progress")
+            rows = tuple(row for row in page.rows if int(row["accepted_sequence"]) > self._cursor)
+            return self._consume_observations(rows, _frame_cache=_frame_cache)
+
+    def _consume_observations(self, observations, *, _frame_cache=None) -> int:
         for observation in observations:
-            self._consume(observation)
+            if _frame_cache is None:
+                self._consume(observation)
+            else:
+                self._consume(observation, _frame_cache=_frame_cache)
             self._cursor = max(self._cursor, int(observation.get("accepted_sequence", 0)))
         if observations or self._checkpoint_pending:
             self._save_checkpoint(reason="processed" if observations else "retry")
         return len(observations)
 
-    def _consume(self, observation: Mapping[str, Any]) -> None:
+    def _consume(self, observation: Mapping[str, Any], *, _frame_cache=None) -> None:
+        # Only the shared native-page round supplies this cache. Its sequence keys
+        # refer to that one validated page; immutable frames outlive no round.
+        kind = observation.get("kind")
+        key = (int(observation.get("accepted_sequence", 0)),
+               self._session_profile if kind != "top20_membership" else "top20_membership")
+        if _frame_cache is not None and key in _frame_cache:
+            frames = _frame_cache[key]
+        elif kind == "top20_membership":
+            frames = tuple(replay_candidate_universe((observation,)))
+        else:
+            frames = tuple(replay_krx_minute_bars(
+                (observation,), strict=True, session_profile=self._session_profile,
+            ))
+        if _frame_cache is not None:
+            _frame_cache[key] = frames
         if observation.get("kind") == "top20_membership":
-            frames = replay_candidate_universe((observation,))
             if frames:
                 self._universes.append(frames[0])
                 self._trim_universes(frames[0].available_at)
             return
-        frames = replay_krx_minute_bars(
-            (observation,), strict=True, session_profile=self._session_profile,
-        )
         if not frames:
             if observation.get("kind") == "minute_bar":
                 self._quality = {
@@ -218,7 +286,7 @@ class CandidateMonitor:
         self._bars[(evaluation_bar.code, evaluation_bar.observation_key)] = evaluation_bar
         self._trim_bars(evaluation_bar.code)
         usable_universes, freshness = self._fresh_universes(evaluation_bar.available_at)
-        evaluation = evaluate_breakout_bar(
+        evaluation = self._family.evaluate_bar(
             run_id=self.monitor_id,
             evaluation_bar=evaluation_bar,
             bar_history=tuple(self._bars.values()),
@@ -226,14 +294,14 @@ class CandidateMonitor:
             config=self._config,
             state=self._state,
         )
-        self._state = evaluation.state
         candidate = evaluation.candidate_event.to_dict() if evaluation.candidate_event else None
         if candidate is not None:
             candidate["decision_reasons"] = list(evaluation.decision.reasons)
-        expires_at = self._state.candidate_expires_at if candidate is not None else ""
+        expires_at = evaluation.state.candidate_expires_at if candidate is not None else ""
         self._store.save_shadow_evaluation(
             self.monitor_id, evaluation.decision.to_dict(), candidate, expires_at,
         )
+        self._state = evaluation.state
         self._quality = {
             "status": "READY" if freshness == "fresh" else "STALE",
             "reason": freshness if freshness != "fresh" else ";".join(evaluation.decision.reasons),
@@ -374,3 +442,60 @@ class CandidateMonitor:
         with db_call_source(f"candidate_monitor.{reason}"):
             self._store.save_shadow_monitor_state(self.monitor_id, document)
         self._checkpoint_pending = False
+
+
+def run_shadow_monitors_once(monitors, *, limit: int = 1000) -> dict[str, Any]:
+    """Read one safe page and fan it out; no task, writer, or shared strategy state."""
+    monitors = tuple(monitors)
+    if not 1 <= len(monitors) <= 32 or not 1 <= limit <= 5000:
+        raise ValueError("shared shadow delivery requires 1..32 consumers and a 1..5000 row budget")
+    if any(not isinstance(monitor, CandidateMonitor) for monitor in monitors):
+        raise TypeError("shared shadow delivery requires candidate monitors")
+    store = monitors[0]._store
+    if any(monitor._store is not store for monitor in monitors):
+        raise ValueError("shared shadow consumers must use the same source store")
+    if len({monitor.monitor_id for monitor in monitors}) != len(monitors):
+        raise ValueError("shared shadow consumers must have distinct monitor IDs")
+    result = {"processed": {}, "errors": {}, "deferred": [], "checkpoint_pending": {},
+              "cursors": {}, "shared_reads": 0,
+              "rows_read": 0, "after_sequence": None, "safe_through": None, "read_state": "idle"}
+    with ExitStack() as locks:
+        for monitor in sorted(monitors, key=lambda monitor: monitor.monitor_id):
+            locks.enter_context(monitor._iteration_lock)
+        if any(monitor._task is not None and not monitor._task.done() for monitor in monitors):
+            raise RuntimeError("individual shadow worker must stop before shared delivery")
+        ready = []
+        for monitor in monitors:
+            result["processed"][monitor.monitor_id] = 0
+            if monitor._bootstrap_pending or monitor._frame_recovery is not None:
+                result["deferred"].append(monitor.monitor_id)
+                try:
+                    monitor.run_once(limit=limit)
+                except Exception as error:
+                    result["errors"][monitor.monitor_id] = f"{type(error).__name__}: {error}"
+                result["checkpoint_pending"][monitor.monitor_id] = monitor._checkpoint_pending
+                result["cursors"][monitor.monitor_id] = monitor._cursor
+            else:
+                ready.append(monitor)
+        if not ready:
+            return result
+        after = min(monitor._cursor for monitor in ready)
+        page = deepcopy(store.load_observation_revision_page(after, INPUT_KINDS, limit))
+        result.update(shared_reads=1, rows_read=len(page.rows), after_sequence=after,
+                      safe_through=page.safe_through,
+                      read_state="ready" if page.ready else page.reason or "waiting_safe_prefix")
+        frame_cache = {}
+        for monitor in ready:
+            previous_cursor = monitor._cursor
+            try:
+                result["processed"][monitor.monitor_id] = monitor.consume_observation_page(
+                    page, after_sequence=after, source_store=store, _frame_cache=frame_cache,
+                )
+            except Exception as error:
+                result["errors"][monitor.monitor_id] = f"{type(error).__name__}: {error}"
+                result["processed"][monitor.monitor_id] = sum(
+                    previous_cursor < int(row["accepted_sequence"]) <= monitor._cursor for row in page.rows
+                )
+            result["checkpoint_pending"][monitor.monitor_id] = monitor._checkpoint_pending
+            result["cursors"][monitor.monitor_id] = monitor._cursor
+    return result

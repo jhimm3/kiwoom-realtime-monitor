@@ -216,7 +216,7 @@ class DiagnosticTraceApiTests(unittest.TestCase):
                 started = response.json()
                 self.assertEqual(4, started['schema_version'])
                 self.assertTrue(started['payload_capture']['large_inputs'])
-                self.assertEqual('blocks_v1_and_chunk_bundle_v1', started['payload_storage'])
+                self.assertEqual('blocks_v1_shared_v1_and_chunk_bundle_v1', started['payload_storage'])
                 with capture_owner('shadow', 'fixture', 'actor'):
                     store.save_shadow_monitor_state('m', {'frames': [1, 2, 3]})
                 response = request_api(app, "POST", "/api/v1/diagnostics/trace/stop", headers=HEADERS)
@@ -293,6 +293,9 @@ class DiagnosticTraceApiTests(unittest.TestCase):
             self.assertFalse(capture["top20_input_capture"]["downstream_replay_supported"])
             self.assertEqual("observed_paths_only", capture["coverage"])
             self.assertFalse(capture["overhead_verified"])
+            self.assertEqual(10 * 1024**2, capture['deferred_persistence']['write_bytes_per_second'])
+            self.assertEqual(trace._DEFERRED_WRITE_BYTES_PER_SECOND,
+                             capture['deferred_persistence']['write_bytes_per_second'])
             large = capture['large_input_capture']
             self.assertEqual((4, 'large_inputs', False),
                              (large['schema_version'], large['request_field'], large['default']))

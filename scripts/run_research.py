@@ -111,6 +111,9 @@ def execute_research(
     resource_guard: ResearchResourceGuard | None = None,
     *, execution_scope: str | None = None, expected_code_hash: str | None = None,
     final_execution: Mapping[str, str] | None = None,
+    position_target_plan: tuple | None = None,
+    unfilled_action_plan: tuple | None = None,
+    position_action_study=None, position_study_case=None,position_study_cohort=None,position_study_context=None,
 ) -> ResearchRunResult:
     def partition_checkpoint():
         if cancel_requested is not None and cancel_requested():
@@ -159,7 +162,10 @@ def execute_research(
     ) if bundle_replay or partition_replay else None
     family = family_for_config(config)
     run_id, spec = research_run_identity(dataset, config, execution_config, evaluation_spec,
-                                        session_profile=session_profile, execution_scope=execution_scope)
+                                        session_profile=session_profile, execution_scope=execution_scope,
+                                        position_target_plan=position_target_plan,unfilled_action_plan=unfilled_action_plan,
+                                        position_action_study=position_action_study,position_study_case=position_study_case,
+                                        position_study_cohort=position_study_cohort,position_study_context=position_study_context)
     if expected_code_hash is not None and spec['code_hash'] != expected_code_hash:
         raise ValueError('research implementation changed during locked validation')
     if final_scope:
@@ -190,6 +196,17 @@ def execute_research(
     decision_count = 0
     last_available_at: datetime | None = None
     pending_evaluations = []
+    if position_study_case is not None and position_study_case.branch_action != 'HOLD':
+        position_target_plan=(position_study_case.request,)
+    study_key=((position_study_case.request.decision_time.astimezone(timezone.utc),position_study_case.request.symbol)
+               if position_study_case is not None else None)
+    used_study=False
+    target_plan = {(request.decision_time.astimezone(timezone.utc),request.symbol):request
+                   for request in position_target_plan or ()}
+    used_targets = set()
+    unfilled_plan={(request.decision_time.astimezone(timezone.utc),request.symbol):request
+                   for request in unfilled_action_plan or ()}
+    used_unfilled=set()
 
     def flush_evaluations() -> None:
         if pending_evaluations:
@@ -230,7 +247,13 @@ def execute_research(
             latest_codes = universe[-1].codes if universe else ()
             execution_key = (evaluation_bar.code, evaluation_bar.observation_key)
             if execution_key not in processed_execution_bars:
-                bar_events = engine.process_bar(evaluation_bar)
+                lineage=((engine.observe_unfilled_bar(evaluation_bar),) if unfilled_action_plan is not None else ())
+                bar_events = lineage + engine.process_bar(evaluation_bar)
+                if ((position_target_plan is not None or unfilled_action_plan is not None or position_study_case is not None)
+                        and not any(e.event_type=='MARK' for e in bar_events)
+                        and evaluation_bar.market_phase=='CONTINUOUS'
+                        and (engine.portfolio.position is None or engine.portfolio.position.symbol==evaluation_bar.code)):
+                    bar_events += (engine.observe_position_value(evaluation_bar),)
                 if bar_events:
                     flush_evaluations()
                 repository.append_execution_events(bar_events)
@@ -245,7 +268,7 @@ def execute_research(
                 engine.portfolio.pending_order is not None
                 and engine.portfolio.pending_order.symbol == evaluation_bar.code
             )
-            if evaluation_bar.code not in latest_codes and not managed_symbol:
+            if evaluation_bar.code not in latest_codes and not managed_symbol and (cutoff_utc,evaluation_bar.code) not in unfilled_plan:
                 continue
             evaluation = family.evaluate_bar(
                 run_id=run_id,
@@ -265,9 +288,34 @@ def execute_research(
             })
             decision_count += 1
             append_logical({"strategy": logical_evaluation_document(evaluation)})
-            decision_events = engine.process_decision(
-                evaluation.decision, evaluation.state, source_bar=evaluation_bar,
-            )
+            target_key=(cutoff_utc,evaluation_bar.code)
+            if study_key == target_key:
+                if used_study:raise ValueError('native study case cut was observed twice')
+                proof=engine.observe_position_study_case(spec['position_action_study']['study_policy_ref'],
+                    position_action_study,position_study_case,source_bar=evaluation_bar,
+                    historical_context=spec.get('position_study_context'))
+                repository.append_execution_events((proof,));execution_events.append(proof)
+                append_logical({'execution':proof.to_dict()});used_study=True
+            target_request=target_plan.get(target_key)
+            unfilled_request=unfilled_plan.get(target_key)
+            if study_key == target_key and position_study_case.branch_action == 'HOLD':
+                # An independent HOLD branch observes the same goal/pre-state;
+                # it submits no target and follows the registered family.
+                decision_events=engine.process_decision(evaluation.decision,evaluation.state,source_bar=evaluation_bar)
+            elif unfilled_request is not None and evaluation.decision.final_action != 'EXIT':
+                decision_events=engine.process_unfilled_action(unfilled_request,source_bar=evaluation_bar)
+                used_unfilled.add(target_key)
+            elif target_request is not None and evaluation.decision.final_action != 'EXIT':
+                decision_events=engine.process_position_target(target_request,source_bar=evaluation_bar)
+                used_targets.add(target_key)
+            elif (unfilled_action_plan is not None and evaluation.decision.final_action=='ENTER'
+                    and engine.portfolio.pending_order is not None
+                    and engine.portfolio.pending_order.limit_execution_version):
+                decision_events=()
+            else:
+                decision_events = engine.process_decision(
+                    evaluation.decision, evaluation.state, source_bar=evaluation_bar,
+                )
             if decision_events or evaluation.candidate_event is not None or len(pending_evaluations) >= 128:
                 flush_evaluations()
             repository.append_execution_events(decision_events)
@@ -277,6 +325,12 @@ def execute_research(
             if evaluation.candidate_event is not None:
                 candidate_count += 1
                 candidate_events.append(evaluation.candidate_event)
+        if position_study_case is not None and not used_study:
+            raise ValueError('native study case cut was not observed')
+        if set(target_plan)!=used_targets:
+            raise ValueError('position target plan has missing, duplicate, or EXIT-preempted source cuts')
+        if set(unfilled_plan)!=used_unfilled:
+            raise ValueError('unfilled action plan has missing or EXIT-preempted source cuts')
         if cancel_requested is not None and cancel_requested():
             raise ResearchRunCancelled("research run cancellation requested")
         flush_evaluations()
@@ -464,7 +518,9 @@ def execute_rank_comparison(
     )
 
 
-def research_run_identity(dataset, config, execution_config, evaluation_spec, *, session_profile=None, execution_scope=None):
+def research_run_identity(dataset, config, execution_config, evaluation_spec, *, session_profile=None, execution_scope=None,
+                          position_target_plan=None, unfilled_action_plan=None,
+                          position_action_study=None,position_study_case=None,position_study_cohort=None,position_study_context=None):
     """Shared scientific identity; default legacy run identity is unchanged."""
     if execution_scope not in (None, 'independent_development_validation/v1', 'independent_final_holdout/v1'):
         raise ValueError('unsupported research execution scope')
@@ -475,6 +531,68 @@ def research_run_identity(dataset, config, execution_config, evaluation_spec, *,
     spec = _run_spec(dataset.manifest, config, execution_config, evaluation_spec, session_profile=session_profile)
     if execution_scope is not None:
         spec['execution_scope'] = execution_scope
+    if position_action_study is not None or position_study_case is not None:
+        from kiwoom_monitor.application.position_target import (position_action_study_spec,
+            PositionActionStudyPolicy,PositionActionStudyCase)
+        descriptor=dataset.manifest.get('development_partition',{})
+        role=DevelopmentPartitionSpec.from_dict(descriptor['spec']).evaluation_for(
+            ResearchEvaluationSpec.from_dict(descriptor['evaluation'])).folds[0].role if descriptor else None
+        if (execution_scope != 'independent_development_validation/v1' or session_profile != 'krx-regular/v1'
+                or position_target_plan is not None or unfilled_action_plan is not None
+                or not isinstance(position_action_study,PositionActionStudyPolicy)
+                or not isinstance(position_study_case,PositionActionStudyCase)
+                or role != position_action_study.development_role):
+            raise ValueError('position study requires its own independent native branch')
+        spec['position_action_study']=position_action_study_spec(position_action_study,position_study_case,spec)
+        if position_study_context is not None:
+            from kiwoom_monitor.application.research_evaluation import validate_position_study_historical_context
+            validate_position_study_historical_context(position_study_context,dataset.manifest,position_study_case.request,dataset=dataset)
+            spec['position_study_context']=json.loads(json.dumps(position_study_context,ensure_ascii=False,allow_nan=False))
+        if position_study_cohort is not None:
+            from kiwoom_monitor.application.position_target import validate_position_action_study_cohort
+            spec['position_action_study_cohort']=validate_position_action_study_cohort(position_study_cohort,
+                position_action_study,position_study_case,spec,dataset.manifest)
+        if position_study_case.branch_action != 'HOLD':position_target_plan=(position_study_case.request,)
+    elif position_study_cohort is not None or position_study_context is not None:
+        raise ValueError('native cohort requires an explicit v2 study case')
+    if unfilled_action_plan is not None:
+        from kiwoom_monitor.application.research_execution import UnfilledResearchAction,UNFILLED_EXECUTION_VERSION
+        if (execution_scope!='independent_development_validation/v1' or session_profile!='krx-regular/v1'
+                or position_target_plan is not None or not isinstance(unfilled_action_plan,tuple)
+                or not 2<=len(unfilled_action_plan)<=200
+                or any(not isinstance(r,UnfilledResearchAction) for r in unfilled_action_plan)):
+            raise ValueError('unfilled plan requires bounded independent KRX development instructions')
+        if (len({(r.decision_time,r.symbol) for r in unfilled_action_plan})!=len(unfilled_action_plan)
+                or len({r.symbol for r in unfilled_action_plan})!=1
+                or tuple(sorted(unfilled_action_plan,key=lambda r:r.decision_time))!=unfilled_action_plan):
+            raise ValueError('unfilled plan requires ordered unique single-symbol source cuts')
+        serialized=json.dumps([r.to_dict() for r in unfilled_action_plan],ensure_ascii=False)
+        if len(serialized.encode('utf-8'))>256*1024:
+            raise ValueError('unfilled plan exceeds 256 KiB')
+        spec['unfilled_action_execution']={'version':UNFILLED_EXECUTION_VERSION,
+            'fill_basis':'subsequent_minute_open_full_quantity_with_volume/v1',
+            'cancel_latency_seconds':0,'partial_fills_supported':False}
+        spec['unfilled_action_plan']=json.loads(serialized)
+    if position_target_plan is not None:
+        from kiwoom_monitor.application.position_target import PositionTargetShadowRequest, _json_value
+        from kiwoom_monitor.application.research_execution import POSITION_TARGET_EXECUTION_VERSION
+        if (execution_scope!='independent_development_validation/v1' or session_profile!='krx-regular/v1'
+                or not isinstance(position_target_plan,tuple) or not 1<=len(position_target_plan)<=200):
+            raise ValueError('position target plan requires an explicit bounded independent KRX development run')
+        if any(not isinstance(r,PositionTargetShadowRequest) or r.target_policy is None
+               or r.account_ref!='research-single-position' or r.cost_model!=execution_config.cost_model for r in position_target_plan):
+            raise ValueError('position target plan must use native paper account, costs and automatic policy')
+        first=position_target_plan[0]
+        if (len({(r.decision_time,r.symbol) for r in position_target_plan})!=len(position_target_plan)
+                or any(r.target_policy!=first.target_policy or r.policy_version!=first.policy_version for r in position_target_plan)):
+            raise ValueError('position target plan requires unique source cuts and one unchanged policy')
+        spec['position_action_execution']={'version':POSITION_TARGET_EXECUTION_VERSION,
+            'source_policy_version':first.policy_version,
+            'target_policy':json.loads(json.dumps(asdict(first.target_policy),default=_json_value))}
+        serialized=json.dumps([asdict(r) for r in position_target_plan],default=_json_value,ensure_ascii=False)
+        if len(serialized.encode('utf-8'))>256*1024:
+            raise ValueError('position target plan exceeds 256 KiB')
+        spec['position_target_plan']=json.loads(serialized)
     return _content_id('run', {'dataset_id': dataset.manifest.get('dataset_id', ''),
                               'revision_ids_hash': dataset.manifest.get('revision_ids_hash', ''), 'spec': spec}), spec
 

@@ -23,6 +23,7 @@ for item in (ROOT,ROOT/'src'):
         sys.path.insert(0,str(item))
 
 from scripts.prepared_historical_archive_v2 import SEARCH,MARKET,SCOPES,WORLD_EXCLUSION,world_service_excluded,_writer,_transaction,_json
+from scripts.prepared_historical_archive_inputs import generation, contract_blockers, missing_coverage
 from scripts.select_historical_news_page_keys import _request_fields
 from kiwoom_monitor.infrastructure.historical_backfill import parse_naver_historical_search_page
 from kiwoom_monitor.infrastructure.naver_stock_market_news import parse_page as parse_market_page
@@ -87,6 +88,8 @@ def capture(path: Path,raw_path: Path,scope: str,*,max_rows: int=0,batch_size: i
     if path.resolve()==raw_path.resolve():
         raise ValueError('archive cannot be a source')
     with _raw(raw_path) as (raw,fp), _writer(path) as db:
+        if generation(db):
+            raise ValueError('adopted generation preserves existing raw capture; recapture forbidden')
         _tables(db); manifest=_manifest(db,raw,scope,fp)
         def record(table: str,key: str,payload: dict) -> None:
             added=_evidence(db,scope,table,key,payload)
@@ -97,7 +100,9 @@ def capture(path: Path,raw_path: Path,scope: str,*,max_rows: int=0,batch_size: i
             while manifest['last'][table]<cutoff and (not max_rows or done<max_rows):
                 take=min(batch_size,max_rows-done) if max_rows else batch_size
                 extra=" AND provider='naver_historical_search'" if table=='source_pages' else ''
-                rows=raw.execute('SELECT rowid AS source_rowid,* FROM '+table+' WHERE rowid>? AND rowid<=?'+extra+' ORDER BY rowid LIMIT ?',(manifest['last'][table],cutoff,take)).fetchall()
+                # Provider-first indexes otherwise scan/sort the whole remaining
+                # provider range for every small batch. Preserve rowid keyset reads.
+                rows=raw.execute('SELECT rowid AS source_rowid,* FROM '+table+' NOT INDEXED WHERE rowid>? AND rowid<=?'+extra+' ORDER BY rowid LIMIT ?',(manifest['last'][table],cutoff,take)).fetchall()
                 if not rows:
                     manifest['last'][table]=cutoff
                     with _transaction(db):
@@ -179,13 +184,14 @@ def finish_coverage(path: Path) -> dict:
         _tables(db)
         scopes={}
         blockers=[]
+        blockers.extend(contract_blockers(db))
         for scope in SCOPES:
             saved=db.execute('SELECT value_json FROM archive_build_manifest WHERE key=?',('source_capture_v2_'+scope,)).fetchone()
             source=db.execute('SELECT source_sha256,state FROM archive_sources_v2 WHERE scope=?',(scope,)).fetchone()
             if not saved or json.loads(saved[0]).get('state')!='complete' or not source or source[1]!='complete':
                 blockers.append(scope+'_source_capture_incomplete'); continue
             n=db.execute('SELECT COUNT(*) FROM archive_source_coverage_v2 WHERE scope=?',(scope,)).fetchone()[0]
-            missing=db.execute('SELECT COUNT(*) FROM archive_source_coverage_v2 c LEFT JOIN archive_input_progress p ON p.scope=c.scope AND p.stock_code=c.stock_code AND p.identity=c.identity WHERE c.scope=? AND (p.input_hash IS NULL OR p.input_hash<>c.input_hash)',(scope,)).fetchone()[0]
+            missing=missing_coverage(db,scope)
             unlinked=db.execute("SELECT COUNT(*) FROM archive_input_progress p WHERE p.scope=? AND p.progress_state<>'source_excluded' AND NOT EXISTS(SELECT 1 FROM archive_source_coverage_v2 c WHERE c.scope=p.scope AND c.stock_code=p.stock_code AND c.identity=p.identity)",(scope,)).fetchone()[0]
             if missing: blockers.append(scope+'_received_keys_without_prepared_input')
             if unlinked: blockers.append(scope+'_prepared_keys_without_raw_mapping')

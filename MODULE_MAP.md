@@ -1,5 +1,91 @@
 # 현재 모듈 지도
 
+Windows 회귀의 임시 자료 격리는 기존 `scripts/run_regression.py::_run_process`가 소유한다. 현재 checkout의 실행 소스와 기존 Windows Job 프로세스 종료 경계를 유지하고 fixture만 사용자 AppData Temp의 worker별 경로에 둔다. 로그/결과는 기존 output, 실패 임시 자료의 위치/상태는 같은 worker 보고서다. 새 수집기·DB·Manager·주문 경로는 없다. 실제 worker 환경과 실패 보존, 공유 읽기 핸들의 native 게시 차단은 기존 `test_run_regression`과 worker fixture에서 검증한다.
+
+R4 v2 행동별 추가 자료는 기존 position_target 정책 DTO/입력 adapter/행동 선택 함수에서 처리하고 UI와 기존 selected record가 후보별 결측을 전달한다. 상위 비중의 가중치0 소비자는 Runtime이 이미 가진 typed ThemeMembership을 같은 allocation adapter 호출로 넘겨 점수 구성요소의 lease와 위험 소속을 분리한다. 기존 owner/collector/writer와 hot 호출 깊이는 유지한다. A03의 과거 Paper 정책→현재 native 모델 지원은 [설계 재검토](docs/AI_TRADING_SYSTEM_REDESIGN.md#a03-설계-재검토) 대상이다.
+
+R4 정책별 자료 계약은 기존 position_target의 불변 `PositionActionCapabilitySelectionPolicy` DTO와 공통 `_native_selection_inputs`가 담당한다. 기존 Runtime은 필요한 R3 결과만 전달하고, app 설정/복원은 이 정책의 테마 의존성을 확인한다. 테마 없는 v2는 같은 Runtime에서 가격·계좌·Risk·기존 선택 기록만 소비한다. 기존 allocation adapter는 사용 가중치별 점수 결측을 보존하며 테마 집중 위험 정보는 유지한다. candidate_monitor_dialog는 요구/결측 자료를 표시한다. 공통 판단·수집·저장 소유자와 hot 호출 깊이는 유지하고 별도 엔진/relay는 추가하지 않았다. [계약](API_CONTRACT.md)·[현재 범위](docs/CURRENT_STATUS.md).
+
+R4 현재 가격은 기존 Collector.automation_price_observation→동일 RAM snapshot.trade_references→MarketThemeShadowRuntime의 공통 비교 경로다. 기존 Runtime 한 파일에서 조회 집합·source/gap/TTL·계좌 관측을 연결하며 테마·초봉 창과 가격 요구를 구분한다. 테마 전략의 입력 요건과 상위 비중의 맥락 요구는 별도이고 새 수집/저장/계좌 owner·relay 계층이 없다. [현재 범위](docs/CURRENT_STATUS.md)
+
+v2 REENTER는 기존 research_evaluation의 case proof/가치 adapter/cohort/게시 경계 안에서 지원한다. 같은 파일의 native prefix helper는 미해결 주문/선행 완전 청산 사실을 v1 가치 계산과 v2 상태 검증이 공유하는 책임이며 relay가 아니다. 기능 파일1개·같은 reader/writer/4borrow 유지, 명시 준비에서만 Python helper 한 단계·실시간 경로 변경 없음. 실제 입력 감사와 통제 재진입 모델, 현재 적용 승인을 구분한다.
+
+이하 설명은 해당 시점의 기록이다.
+
+자동 비중의 HOLD/EXIT는 기존 market_theme_shadow_inputs의 같은 하위 요청 생성에서 명시 수량 계약으로 전달한다. ADD/REDUCE/REENTER sizing 경로와 상위 목표/ref/receipt TTL은 보존한다. 기능 파일/호출 깊이 동일·새 함수/owner/relay 없음. 현재 R4의 근거 승인과 분리한다.
+
+이하 설명은 해당 시점의 기록이다.
+
+입력 묶음은 기존 market_theme_shadow_inputs의 공통 allocation 변환 마지막에서 동결하고 기존 RAM runtime.latest_results의 만료 투영에서 제거한다. 주요 기능 수정 파일2개/기존 계좌 관측8개 파일·호출 깊이 동일, 새 owner/relay 없음. pure freeze 함수 한 호출은 이미 계산한 입력과 원래 refs/TTL을 hash/연결하는 경계 책임이며 계산 엔진/수집/저장/계좌 borrow를 추가하지 않는다. 기존 categorical selected recording에 optional payload만 포함하고 recording signature에 bundle/cut ref를 추가하지 않아 quote-only 변화마다 DB write를 만들지 않는다. [86단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#86-개발-마무리-범위-고정과-공통-입력원본-근거-묶음)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+과거 맥락 준비/연결은 기존 research_evaluation의 dataset 순수 변환→run_research의 기존 identity/실행→PaperExecutionEngine의 기존 case metadata→기존 readonly loader/source decoder→기존 RAM goal 경로다. 기존 순위/theme 입력과 연구 저장 경계를 사용해 새로운 owner/relay/writer를 추가하지 않는다. 주요 기능 파일은 기존 CLI/EV helper/loader 3개에서 case 실행 소유자research_execution과 RAM inputs를 포함한5개이며 추가 준비 함수는 dataset 값 검증 책임이다. hot path의83단계 관측8개 파일/호출 깊이는 동일하다. 공통 H1/D5 모듈은 기존 것을 재사용하고 scientific hash dependency에 명시했다. 원래 Paper case event 수·거래 값 계산 깊이는 동일하며 처음 source 게시에만 case별 과거 분석이 추가된다. [85단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#85-기존-연구-입력의-과거-순위테마-맥락-연결)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+EV 원본 준비/재생·계보 확인은 기존 research_evaluation과 market_theme_shadow_inputs의 두 기능 파일에 추가했다. 기존 ResearchRepository의 include_source_record 선택 transaction을 재사용하고 저장소/공개 HTTP/client/runtime owner를 새로 만들지 않는다. 기존 study source 검증 본체를 같은 파일의 _decode_native_position_sources로 공유하므로 중복 native validation을 추가하지 않는다. 준비 경로는 기존 CLI→EV helper→loader의 3개 주요 파일로 동일하고 원본 검증 helper 호출 한 단계가 명시 준비/최초 게시에서만 추가된다. 83단계의 관측 전달8개 파일/실시간 호출 깊이는 동일하며 status/틱/RAM 소비에 source read/replay를 추가하지 않는다. [84단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#84-상위-ev-원본-출처-재생과-r4-연구-중복-확인)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+현재 상태 전달은 기존 app.position_account_source의 계좌 borrow 1회→MockAutomationSupervisor의 현재 owner/epoch fence→MockAutomationRunner.position_study_state의 기존 immutable StrategyState/보호 notice 복사→기존 market_theme_shadow_inputs의 current goal binding 경로다. 기존 account monitor는 별도 borrow 없이 RAM epoch만 검사한다. 새 Manager/collector/task/writer/table 없음. 현재 관측 전달의 주요 파일은 기존 app/계좌 owner/계좌 monitor/RAM runtime/inputs/position_target 6개에서 등록 supervisor/Runner를 포함한 8개로 늘었다. 기존 app→계좌 owner→monitor 관측 호출에 app→supervisor→Runner→기존 검증 함수 경로를 추가했으며 각 책임은 등록 수명·계좌 epoch·체결/보호 상태 소유자 확인이다. 새 relay 전용 계층 없이 기존 lifecycle owner를 사용한다. 기본 DTO 대신 필드 추가 없는 v1을 보존하고 opt-in subtype만 쓰므로 기존 default ID/asdict 계약이 같다. [83단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#83-native-runner-체결보호-상태의-동일-계좌-ram-관측)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+v2 게시/결합은 기존 ResearchRepository 동일 transaction의 선택 source record→research_evaluation native 준비/재생→기존 CentralContentClient/인증 app router→market_theme_shadow_inputs decoder/현재 binding→MarketThemeShadowRuntime 동일 슬롯/드레인 경로다. 기존 5개 핵심 소유자를 재사용하고 새 Manager/engine/collector/task/writer/table 없음. 추가 decoder는 원래 scientific/source/case proof를 재검증하는 경계 책임이며 목표 binding은 기존 RAM 변환 함수에서 같은 observation을 소비한다. 기존 v1 기본 호출/SQL 계약을 유지한다. [82단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#82-v2-연구-근거의-공통-ram-게시와-현재-목표risk-결합)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+v2 cohort는 position_target.py의 사전 동결/검증→run_research.py의 동일 시작 명세→기존 Paper/ResearchRepository→research_evaluation.py의 동일 per-run readonly borrow/기존 case reader/공통 통계 경로다. 80단계의 핵심 5파일/소유자를 유지하며 이번 production 수정은 3파일이다. 비교 내부 한 단계는 누락 모집단·짝 상태·aggregate budget/기한을 검증하는 독립 책임이다. 새 engine/Manager/collector/task/writer/table/저장 계약 없음. 같은 입력의 branch별 기록은 기존 독립 가상 연구 실행이며 실시간 수집/DB 루프에 추가하지 않았다. 현재 RAM 소비는 후속이다. [81단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#81-v2-native-짝-모집단-동결과-공통-통계)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+v2 native study/case는 기존 position_target.py 순수 계약→run_research.py 동결 spec/계획→같은 PaperExecutionEngine/ResearchRepository writer→research_evaluation.py 기존 source guard/가치 adapter의 5파일 경로다. 기존 자동 목표/native 연구의 동일 소유자를 재사용하고 추가한 두 class는 불변 DTO다. 새 실행 엔진/Manager/collector/task/writer/table/공개 DB 계약 없음. 현재 RAM 소비 경로에는 v2를 추가하지 않았으며 per-run source read/SQL 계약 delta 0이다. [80단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#80-v2-연구-규칙순간별-case-계약과-native-증명-첫-구현)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+준비된 native 모델은 기존 PC CentralContentClient→기존 인증 operational router/state lock→기존 market_theme_shadow_inputs의 순수 재생 decoder→기존 MarketThemeShadowRuntime 슬롯/owned drain→position_target의 상위/하위 계산 경로다. 입력/Runtime/계산을 이해하는 기존 핵심 3모듈을 그대로 사용하고 두 기존 HTTP/클라이언트 경계에 명시 게시를 더했다. 새 Manager/엔진 class/collector/task/writer/table/DB 계약·주문 경로 없음. 공통 frame 계산은 한 번이며 선택 교체/close·세대 fence는 같은 owner 책임이다. [78단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#78-준비된-native-모델의-공통-ram-게시와-상위하위-목표-연결)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+전체 출구/스트레스는 기존 research_execution.py의 명시 순수 모델→같은 Paper _sell_fill와 research_evaluation.py의 기존 native readonly bar proof adapter→position_target.py typed 근거/계좌 전체 비중의 기존 4모듈 경로다. 기존 ResearchRepository/preview CLI를 재사용한다. 새 Manager/엔진 class/task/collector/writer/table/공개 DB 계약 없음. native 주문 6모듈과 공통 RAM 수명은 그대로이며 RAM 게시가 후속이다. [77단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#77-전체-보유-출구-capacity와-명시-스트레스-연구-근거)
+
+배분 EV는 기존 research_evaluation.py native reader→같은 Paper 재생→position_target.py R4 paired 비교→typed EV/상위 비중 계산의 기존 책임 안에서 준비한다. 기존 ResearchRepository readonly loader/preview CLI를 재사용한다. 새 Manager/엔진/task/수집/writer/table/공개 DB 계약 없음. 정확한 가격/수량/비용/horizon과 원래 TTL이 추가 경계이며 native 실행 6모듈·공통 RAM 수명은 유지한다. [76단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#76-배분-ev의-native-연구-공급과-검증-크기-제한)
+
+75단계 입력 소유자는 기존 Collector의 선택적 KRX trade reference/RAM snapshot→기존 market_theme_shadow_runtime/inputs의 단일 native 변환→기존 계좌/Risk owner다. 설정은 기존 app/operational router를 재사용하며 새 Manager/task/writer/table/공개 DB 계약은 없다. R4와 account cut을 공유하고 원래 6모듈 실행 경로/순수 상위→하위 계산은 유지한다. 실제 배분 EV·출구 Capacity·스트레스 producer는 미공급이므로 목표 계산은 BLOCKED다. [75단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#75-동적-비중의-공통-ram-사실과-native-계좌-risk-연결)
+
+동적 비중 첫 계산은 기존 application/position_target.py의 계좌 상위 배분→기존 목표 수량/비용 계산과 기존 preview_market_theme_shadow.py CLI의 2+1모듈 경로다. 시장/테마·EV/Capacity/Risk는 supplied 연구 입력이며 공통 native RAM adapter는 후속이다. 새 collector/writer/table/task/Manager/주문 경로 없음; 소비 계약/forwarding delta 0. [74단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#74-실제-모의계좌-수락-준비-확인과-상위-동적-비중-계산-시작)
+
+현재 종목 손절 입력은 기존 Collector의 승인 KRX RAM → 기존 Supervisor의 계좌 runtime fanout → Runner Risk/보호 요청이며, 주문의 기존 6모듈 경로를 유지한다. native Risk는 실제 상세 FILL의 optional owned_entry_prices를 같은 JSON writer에 기록하고 Runner와 정수 원가 계산을 공유한다. database_execution의 같은 QUEUED cursor가 후보 package/정규 stop_loss_bps와 현재 owned 원가를 검사한다. 새로운 Manager/task/collector/writer/table/공개 DB 계약 없음; 소비 감사 delta 0. [73단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#73-승인된-collector-ram-가격의-즉시-종목-손절과-native-보호-exit)
+
+2026-10-14 원장 결과 게시의 변경 소유자는 기존 infrastructure/central_content_client.py(PC readonly 준비/HTTP) → application/research_evaluation.py(공통 bounded codec) → central_server/mock_automation_routes.py(기존 인증/stream 상한/오류) → mock_automation_supervisor.py(기존 계좌 수명·lock/current control/owned drain) → mock_automation_runner.py(현재 원주문·동결 정책/단일 RAM) 5파일이다. 새 전달용 계층은 없고 각 기존 소유자의 독립 책임을 사용한다. 전송 경계를 연결해 5모듈을 이해해야 하며 기존 native 주문/취소의 6모듈 경로·깊이는 그대로다. 기존 연구 Paper/원장 writer·collector/스키마는 유지한다. 새로운 repository same-name reader 후보 1개(36→37)를 검토했고 직접 store 367/공개 계약 107/forwarding 60은 같다. [72단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#72-pc-native-원장-결과의-인증-게시와-기존-runner-ram-접수).
+
+2026-10-14 생성/기록은 기존 scripts/run_research.py→application/research_execution.py의 PaperExecutionEngine→infrastructure/persistence/research_repository.py 같은 writer의 3모듈 경로다. 명시 읽기는 기존 repository readonly snapshot→research_evaluation.py 공통 선택/독립 LIMIT adapter→같은 PaperExecutionEngine 재생의 3모듈 경로이며 관련 소유자는 총 4파일이다. 새 Manager/엔진/task/writer/table/collector 없이 순수 모델 정책과 별도 읽기 의미를 기존 소유자 안에 추가했다. 실제 주문의 기존 6모듈 경로는 유지하고 store 소비/저장 계약/forwarding delta 0이다. [71단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#71-기존-연구-실행기의-지정가-분기와-native-미체결-결과-읽기).
+
+2026-10-14 입력 연결은 기존 research_evaluation.py의 독립 WAIT/REPRICE DTO/공통 짝 계산 → order_lifecycle.py의 현재 미체결 결합/요약 → mock_automation_runner.py의 bounded RAM 접수/사건 캐시·동결 후보 비용/등록 family 판단이다. 실제 주문의 기존 6모듈 깊이는 그대로이며 순수 입력 쪽만 공통 비교를 호출한다. 새 엔진/Manager/수집기/task/writer/table/collection 없음. source 소비/저장 계약/forwarding delta 0. native 모집단 생성/출처 reader는 후속이다. [70단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#70-waitreprice-짝-입력동결-비용익절-판단의-공통-연결).
+
+2026-10-14 보호 취소 회복은 기존 order_lifecycle.py 순수 판단 → mock_automation_runner.py 현재 사건/기한·checkpoint → execution_runtime.py 기존 gateway/취소 → ExecutionRepository의 control 바인딩 → database_execution.py 같은 CANCEL_STARTED transaction이다. 기존 domain/execution_activation.py의 동결 정책에 optional 한도/지연을 추가한다. 새 Manager/엔진/task/writer/table/collection 없이 6모듈 경로·기존 호출 깊이를 유지한다. source 소비/저장 공개 계약/forwarding 추가 0. [69단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#69-취소-거절불확실-이후-bounded-보호-대응).
+
+2026-10-14 첫 native 계좌 일손실 보호 EXIT는 기존 mock_automation_risk.py의 순수 고정 결정/검증 → mock_automation_runner.py의 현재 full cut/ACK·동일 owned 작업 → mock_automation_execution.py의 원래 EXIT 승인 → execution_runtime.py/lifecycle/ExecutionRepository → database_execution.py의 같은 QUEUED transaction이다. 원래 6모듈 실행 경로를 유지하고 기존 Risk 모듈의 독립 보호 정책을 연결했다. 실행 proof는 같은 JSON이며 좁은 protection_claim reader가 ACK 유실의 원래 목적/루트를 복구한다. 새로운 Manager/엔진/task/writer/table/collection 없음. [68단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#68-운영-risk-보호-요청의-첫-exit-생성과-native-claim-확인).
+
+2026-10-14 입력 공급은 기존 `realtime_collector.py`의 승인 KRX 최신 trade 읽기와 `mock_account_monitor.py`의 ACK Risk/전체 주문 cut이 소유한다. 기존 `app.py`→`mock_automation_supervisor.py` 조립이 같은 Collector callback을 activate/resume Runner에 전달하고, `mock_automation_runner.py`가 원주문 목적/원래 목표·기한 등록 및 사건/기한 공급을 소유한다. native 취소의 Runner→gateway→runtime→lifecycle→repository→DB 6모듈 호출 경로/깊이는 유지하며 입력 이해에 필요한 Collector/Monitor 두 기존 소유자를 연결했다. 별도 수집/초봉/분석·Manager/엔진/writer/table/collection/독립 task는 추가하지 않는다. 무체결 flat BUY의 위험 축소 취소만 제한적으로 허용하며 native Risk/신규 주문 gate는 유지한다. [67단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#67-기존-collector계좌-입력의-자동-공급과-원래-주문-관리-등록). 아래 과거 단계의 supplier 미연결 표현은 당시 기록이다.
+
+2026-10-14 목적별 소비는 기존 `mock_automation_runner.py`가 WAIT/CANCEL/ABANDON/REPRICE를 분기하고 `execution_runtime.py`의 gateway 계좌 refresh/owned command→runtime 잠금 안 취소 직전 재검증→기존 lifecycle/원장/CANCEL_STARTED를 사용한다. 취소/대체 주문의 동결 bounds는 `mock_automation_execution.py` 순수 helper 하나로 공유한다. 변경 전후 native 6모듈 취소 경로는 동일하며 Monitor·lifecycle·DB writer/store 계약/collector 책임은 이동하지 않는다. runtime에 optional before-claim callback을 추가해 refresh 뒤 의미/TTL을 재검증하며 기본 수동/기존 자동 호출은 같은 경로다. 새로운 Manager/엔진/수집/writer/table/collection/독립 task 없음. [66단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#66-목적별-자동-취소와-취소-직전-native-계좌risk-재검증).
+
+2026-10-14 `mock_automation_runner.py`가 단일 RAM cut 수신/내용·순서·용량/TTL 검증·사건/기한 합치기·동일 wake/owned drain을 소유한다. 명시 idle API와 running consumer가 같은 잠금 core→기존 고정 gate/runtime/lifecycle/repository/DB를 호출한다. 새 파일/Manager/collector/writer/table/collection/독립 background task는 없다. 기존 native 6모듈 경로를 유지하며 Runner 내부 core 한 단계는 경쟁 호출 차단/종료 합류 책임이다. `offer_unfilled_execution_inputs`의 production producer와 자동 취소 caller는 미연결이다. [65단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#65-running-runner의-사건기한-소비와-고정-주문의-동일-native-실행).
+
+2026-10-14 동결 미체결 실행 정책은 `domain/execution_activation.py`/기존 publication builder가 소유한다. `mock_automation_runner.py`의 idle 명시 dispatcher→`mock_automation_execution.py`의 최신 목적/v3 고정 승인→기존 runtime/lifecycle/repository·`database_execution.py` QUEUED fence를 재사용한다. claim metadata는 native intent writer가 같은 JSON/transaction에서 쓰고 event writer가 보존하며 ExecutionRepository에서 좁게 읽는다. 기존 6단계 runner→gate→runtime→lifecycle→repository→DB이며 native authority/정책 책임 때문에 두 repository·domain/builder 계약을 함께 수정했다. 전달용 Manager·별도 엔진/writer/task·새 table/collection은 없다. running 자동 사건/기한/입력 연결은 후속이다. [64단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출).
+
+2026-10-14 모의 자동 취소의 실행 기반은 기존 `central_server/execution_runtime.py` gateway/runtime와 `application/order_lifecycle.py`를 재사용한다. gateway는 owned command·계좌 갱신/credential drain, runtime은 exact native 주문·중복 claim/owner/control, lifecycle은 CANCEL_STARTED→단발 취소→기존 대사를 소유한다. 같은 native event transaction에서 control을 검사하고 claim ACK 뒤 해제한다. 전달 계층/새 task·writer·collection은 추가하지 않았으며 목적별 production caller/대체 주문 승인은 후속이다. [63단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#63-모의계좌-자동-취소의-native-실행-경계).
+
+2026-10-14 운영 Risk 자동 전달은 기존 `mock_account_monitor.py`의 ACK된 Risk/계좌 RAM cut·listener 수명 → `mock_automation_risk.py`의 기존 spec 한도 기반 순수 trigger → 같은 `mock_automation_runner.py`의 보호 요청/합치기·기존 wake/checkpoint다. 전체 broker 주문/체결 페이지·Risk 계산/저장을 복제하지 않고 기존 Runtime/Position listener·gateway·실제 주문 책임을 유지한다. 새 Manager/Service/독립 task는 없다. 현재 자동 요청/검토까지이며 취소/재주문/실제 제출은 사용자 순서 ②다. [62단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#62-운영-risk의-자동-보호-요청-연결과-개발-순서-개정).
+
+2026-10-14 목적별 OFF 검토는 같은 3개 핵심 파일(`order_lifecycle.py` manifest 검증 → `mock_automation_runner.py` 고정 child/보호 RAM 상태·동일 loop/checkpoint → `mock_automation_execution.py` 공유 안전 검사/원래 승인·현재 Risk의 목적 gate)을 유지한다. 두 gate의 중복 안전 검사를 순수 helper 한 곳으로 추출했고 caller/Risk 저장·제출/취소 책임은 이동하지 않는다. 공통 검사 호출 한 단계가 추가됐지만 전달용 Manager/Service나 새 모듈은 없다. 실제 주문 원장/flat 대사는 기존 repository/runtime가 소유하며 운영 보호 producer와 자동 취소/재주문은 후속이다. [60단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#60-목적별-고정-대체-주문-검토와-보호-요청의-우선-처리).
+
+2026-10-14 native 미체결 시도는 같은 `order_lifecycle.py`의 bounded manifest/projector·root 보존 목적 정책, 기존 `mock_automation_runner.py`의 닫힌 owner 검토/체결 동기화/checkpoint와 `mock_automation_execution.py`의 공유 native Risk 검증/전송 없는 기존 gate 평가를 연결한다. 기존 repository/runtime/독립 시계를 재사용하며 새 Manager/Service/task·DB writer는 없다. 실제 목적별 child 승인/보호 우선 wake-up·자동 재주문은 후속이다. [59단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#59-native-parent-child-시도-투영과-닫힌-owner-gate-검토).
+
+2026-10-14 미체결 실행 전 검토는 기존 `application/order_lifecycle.py`의 순수 계획·receipt 검증, `central_server/mock_automation_runner.py`의 명시 idle 호출/기존 checkpoint 복구, `application/mock_automation_session_clock.py`의 독립 보호 기한 힌트를 연결한다. 기존 ExecutionRepository/ForwardEvaluationRepository reader와 document writer를 재사용한다. 실제 native attempt/owner Risk 승인·다회 재시도·자동 보호 전송은 후속이며 새 Manager/Service/task는 없다. [58단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#58-미체결-검토-계획의-기존-checkpoint-복구와-실행-전-검증).
+
 소스 대조: 2026-10-11 · 제품 2.1.0 · [현재 상태](docs/CURRENT_STATUS.md) · [현재 아키텍처](ARCHITECTURE_CURRENT.md) · [문서 안내](docs/README.md)
 
 경로는 저장소 또는 `src/kiwoom_monitor/` 기준이다. 작업 전 [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md)을 읽고 관련 책임·호출자·테스트를 확인한다. 구현 수량·실행 시간·과거 후보 배포 기록은 [이전 지도와 단계별 근거](docs/archive/2026-10-11/history/MODULE_MAP_through_20261011.md)에 보존했다.
@@ -33,7 +119,7 @@
 | 시장 봉·시총·coverage·이벤트 조회 API | `central_server/market_read_routes.py`, `central_server/app.py` | 봉/시총/거래대금 비교/coverage/외부 봉 일곱 API는 여섯 메서드의 `MarketReadStore`를 쓰고 현재 collector를 매 요청 app.state getter로 읽는다. 시장 이벤트 API는 별도 세 메서드의 `MarketEventReadStore`로 VI·코호트·상한가 이력, 비활성 코호트 포함 현재값, 조건검색 문서와 app이 구성한 기존 서비스의 현재 상태를 읽는다. 세 router 등록 위치로 기존 API 순서를 유지한다. 수집기/store/service 생성·시작/종료·RAM/DB 저장 의미·SOR·cutoff·DB source tag는 기존 경계에 유지한다. app helper alias와 FastAPI의 선택적 import도 보존한다. |
 | 모의 자동매매 후보·명세 게시/조회 API | `central_server/mock_publication_routes.py`, `infrastructure/persistence/forward_evaluation_repository.py`, `application/mock_automation_specification.py`, `central_server/app.py` | 두 strict 요청 모델, scope/과학적 구현 hash/크기 검증, 현재 mock binding 선택과 bounded shadow 근거 검색, HTTP 오류 변환을 라우터가 소유한다. binding/shadow 조회 두 메서드의 `MockPublicationEvidenceStore`와 기존 실제 repository를 주입한다. repository는 DB 참조만 보유하며 app에서 같은 store로 조립한다. immutable publication·READY 검증·문서 저장/transaction과 admission/주문/제어는 기존 경계에 유지한다. 게시가 주문을 시작하지 않는다. |
 | 모의 자동매매 제어 API | `central_server/mock_automation_routes.py`, `central_server/mock_automation_supervisor.py`, `central_server/app.py` | 상태·시작·중지·재개의 strict 요청 모델, 미설정 503, credential/supervisor 오류 변환과 인자 전달을 라우터가 소유한다. app이 구성 시 선택한 같은 supervisor를 직접 사용한다. 생성·시작/종료, admission·revision·복구·주문 차단·runner 및 DB 소유권은 기존 app/supervisor/실행 경계에 유지한다. 후보/spec 게시 API는 mock_publication_routes.py의 별도 책임이다. |
-| 연구 관측자료·후보 조회 API | `central_server/research_read_routes.py`, `central_server/database_research_export.py`, `central_server/database_shadow_state.py`, `central_server/app.py` | 고정 export 생성/페이지의 시간대·cursor·watermark 일치 검증과 후보 만료/quality HTTP 응답을 소유한다. 3개 메서드의 `ResearchReadStore` 계약을 쓰며 export membership 저장 트랜잭션은 기존 DB에 유지한다. 후보 생성기는 app이 시작/종료·운영 설정 교체를 소유하고, 라우터는 DB await 후 callback으로 현재 생성기를 한 번 읽어 초기 객체에 고정되지 않는다. |
+| 연구 관측자료·후보 조회 API | `central_server/research_read_routes.py`, `central_server/database_research_export.py`, `central_server/database_shadow_state.py`, `central_server/app.py` | 고정 export 생성/페이지의 시간대·cursor·watermark 일치 검증과 후보 만료/quality HTTP 응답을 소유한다. 4개 메서드의 `ResearchReadStore` 계약을 쓰며 export membership 저장 트랜잭션은 기존 DB에 유지한다. 후보 생성기는 app이 시작/종료·운영 설정 교체를 소유하고, 라우터는 DB await 후 callback으로 현재 생성기를 한 번 읽어 초기 객체에 고정되지 않는다. |
 | 콘텐츠 동기화·테마 이력 API | `central_server/content_routes.py`, `central_server/database_documents.py`, `central_server/app.py` | 문서 조회·부분 upsert·테마 전체 교체·테마 이력 조회의 HTTP 모델/허용 collection/인증/일지 계좌 scope·삭제 상태·뉴스 link key 검증을 라우터가 함께 소유한다. 5개 메서드의 `ContentStore` 계약으로 app이 선택한 같은 store를 사용하며 연결·트랜잭션/rollback·동일 문서 updated_at·뉴스/테마 revision·post-commit wake-up은 기존 DB에 유지한다. 요청 처리에 전달 전용 계층은 추가하지 않는다. |
 | 뉴스 검색·AI 분석 API | `central_server/news_service_routes.py`, `central_server/news_service.py`, `central_server/ai_service.py`, `central_server/app.py` | 검색·저장 페이지·AI 분석의 요청 모델/인증/오류 응답은 라우터가 소유한다. `CentralAIService`는 실제 호출하는 6개 저장 메서드의 `CentralAIStore` 계약만 참조하고, 검색과 분석 router를 각각 원래 위치에 등록해 archive 조회를 포함한 API 순서를 유지한다. 서비스 생성·자격증명·설정 갱신·시작/종료와 기존 저장/usage/revision 경계는 app과 실제 서비스에 유지한다. |
 | 뉴스 조회 API | `central_server/news_read_routes.py`, `central_server/app.py` | 인증된 history/sources/market-feed 요청 검증과 응답 조립. 4개 조회 메서드만 필요한 `NewsReadStore` Protocol을 쓰고 실제 SQLite/PostgreSQL store 수명은 app이 소유한다. |
@@ -81,7 +167,7 @@
 | 후보 기업행동 백필 | `scripts/collect_historical_market_context.py`, `scripts/daishin_market_context_backfill.ps1`, `scripts/classify_historical_stock_adjustments.py`, `scripts/collect_candidate_event_disclosures.py`, `scripts/collect_candidate_exchange_disclosures.py`, `infrastructure/dart_disclosures.py` | 주도후보에 한정한 CREON 누적 수정계수 경계와 상장·거래량 0·거래 재개 후보 날짜 수집, DART 사건 인접 및 전체 거래소 공시 목록 연결, 원응답·재개·NAS 게시 gate |
 | 거래소 공시 효력일 | `scripts/collect_candidate_exchange_effective_dates.py`, `infrastructure/exchange_effective_dates.py`, `scripts/reconcile_candidate_exchange_effective_dates.py`, `scripts/publish_historical_market_context_to_nas.py` | DART 접수일과 거래정지·재개·상폐 효력일/시각을 별도 보존하고 키움 일봉 거래량으로 대조. 원문 ZIP과 대조 원장을 시장 맥락 NAS 스냅샷에 게시 |
 | 뉴스 판단 | `application/news_rules.py`, `application/news_grouping.py`, `application/news_analysis.py` | 규칙·사건 묶음·분석 |
-| 단발성 과거뉴스 archive | `scripts/prepared_historical_archive_v2.py`, `scripts/capture_historical_archive_sources_v2.py`, `scripts/audit_prepared_historical_archive_v2.py`, `scripts/seal_prepared_historical_archive_v2.py`, `scripts/publish_historical_archive_file.py`, `central_server/historical_news_archive.py`, `central_server/historical_news_archive_routes.py`, `infrastructure/central_news_client.py`, `presentation/historical_news_archive_dialog.py` | PC가 검색/시황의 기사·본문·다중 대상 판정·사건·원본 이력·목록을 완료하고 기존 finalizer 정책을 재사용한다. OS 소유권 잠금·batch transaction·입력 hash·원본 대조·봉인 gate를 유지한다. NAS는 별도 인증 API에서 v1/v2 목록·정확한 ID를 읽는다. 불변 버전 복사는 재개/전체 hash 검증만 하며 활성화는 별도다. 전체 archive 생성·새 PG seed 검증·NAS 활성화는 남아 있다 |
+| 단발성 과거뉴스 archive | `scripts/prepared_historical_archive_v2.py`, `scripts/prepared_historical_archive_inputs.py`, `scripts/index_historical_archive_lookups.py`, `scripts/historical_archive_completion_gate.py`, `scripts/transition_historical_archive_execution.py`, `scripts/capture_historical_archive_sources_v2.py`, `scripts/audit_prepared_historical_archive_v2.py`, `scripts/seal_prepared_historical_archive_v2.py`, `scripts/publish_historical_archive_file.py`, `central_server/historical_news_archive.py`, `central_server/historical_news_archive_routes.py`, `infrastructure/central_news_client.py`, `presentation/historical_news_archive_dialog.py` | PC가 검색/시황의 기사·본문·다중 대상 판정·사건·원본 이력·목록을 완료하고 기존 finalizer 정책을 재사용한다. OS 소유권 잠금·batch transaction·입력 hash·원본 대조·봉인 gate를 유지한다. 입력 보강 helper는 명시적 construction 세대 전환·키별 component/복구 이력·원자료 제외와 실패 증거·최종화 전 rollback을 소유하며 base/raw/seed를 보존한다. 조회 인덱스 도구는 명시적 고정 코드/세대 검증과 같은 OS 잠금 안에서 비고유 인덱스만 원자적으로 추가한다. NAS는 별도 인증 API에서 v1/v2 목록·정확한 ID를 읽는다. 불변 버전 복사는 재개/전체 hash 검증만 하며 활성화는 별도다. 전체 archive 생성·새 PG seed 검증·NAS 활성화는 남아 있다 |
 | AI 공급자 | `infrastructure/news_ai.py` | 기존 외부 공급자 연동 |
 | 테마 | `infrastructure/persistence/theme_repository.py`, `application/theme_matching.py`, `application/theme_preview.py` | 프로필·종목연결·가져오기·미리보기, 프로필별 대표명/분리 결정 재적용 |
 | 테마 동기화 | `infrastructure/central_theme_sync.py` | 로컬 편집·pending·retry·NAS 스냅샷 |
@@ -89,10 +175,21 @@
 | Google Drive 백업·엄격 복원 | `infrastructure/persistence/google_drive_sync.py`, `infrastructure/persistence/strict_restore.py`, `infrastructure/persistence/settings_backup.py`, `infrastructure/persistence/theme_backup.py`, `infrastructure/persistence/news_ai_backup.py`, `presentation/google_drive_worker_controller.py`, `bootstrap.py` | v2 세대별 불변 구성요소를 manifest로 마지막 게시하고 ID/hash/크기를 검증하며 v1 별칭을 호환 갱신한다. 설정·테마는 같은 SQLite 읽기 snapshot에서 만든다. 명시 복원은 검증 자료를 보관해 다음 시작 전 공통 프로세스 잠금 아래 적용하며 중단 시 원상복구한다. 다른 DB 간 동시시점·Drive 동시 편집 병합은 보장하지 않는다 |
 | 테마 다건 가져오기 | `presentation/theme_dialogs.py`, `presentation/main_window.py`, `presentation/settings_request_worker.py`, `infrastructure/persistence/theme_repository.py` | Excel 파일 선택·검토·저장은 테마 관리창이 소유한다. 이미지 OCR 결과의 행 수정·종목명 확인·미리보기는 테마 대화상자 코드가 맡고, OCR 작업자 수명과 승인 뒤 비동기 저장은 메인창이 맡는다. 두 경로 모두 저장 성공 뒤 화면에 반영 |
 | 테마/시장 연구 | `application/theme_leadership.py`, `application/market_research_features.py`, `application/context_candidates.py` | 대장·시장 특징·맥락 가설 |
+| 시장/테마 Shadow 평가 | `application/market_theme_shadow.py`, `scripts/preview_market_theme_shadow.py` | 고정 cut/venue/window·근거·중복/신선도와 기존 H1/H2를 계산. stock-thesis-shadow/v1은 기존 진입 가설/명시 policy를 소비. batch는 공통 context와 동일 타입/전체 내용의 H1 부분을 회차 안에서 공유→독립 정책/결과 복사·요청별 실패 격리를 제공하며 기존 단일/CLI 결과와 ID를 유지. 순수 평가이며 DB/실시간 수명/수량/주문 owner 없음 |
+| 자동 목표 연구 자료 생성 | `scripts/run_research.py`, `application/research_execution.py`, `application/research_implementation.py` | optional typed 목표 계획은 준비된 independent 개발 KRX/기존 claim·단일 pending/next open·위험/취소·기존 writer/보고/manifest를 재사용. ADD 원가·REDUCE 잔여 비용·flat 평가/선행 청산과 고정 정책/계획 proof를 소유. 기본 실행/legacy 이벤트 보존, 실제 broker/자동 예약 없음 |
+| 연구 완결 행동 자료 명시 읽기 | `application/research_evaluation.py`, `infrastructure/persistence/research_repository.py`, `scripts/preview_market_theme_shadow.py`, `presentation/candidate_monitor_dialog.py` | readonly native run/report의 기존 development/final guard 뒤에 MARK/FILL 창을 한 snapshot으로 공유. 기존 HOLD/EXIT·표지된 자동 목표 run의 ADD/REDUCE/REENTER/flat HOLD 기간/수량/비용·원래 정책/ref를 기존 비교에 전달하고 gap/미확인/미래/role/final/중복/예산은 차단. 기존 시뮬레이터/연구 원장을 재사용하며 새 schema·server GET/tick 조회/주문 없음. PC 명시 DB/창/학습·검증 선택은 기존 worker에서 outcomes만 편집하고 저장/복구는 값만 사용. 늦은 결과/닫기·종료는 checkpoint·SQL 중단/실제 완료를 소유. 자동 목표 native 자료는 주문/FILL·분별 평가·원래 목표/정책 proof·실제 선행 청산을 검증. KST/UTC 원장 시간은 SQL 시각/정밀 cut·원래 문자열로 검사. 자동 행동 선택은 후속 |
+| 포지션 목표/행동 비교 Shadow 계산 | `application/position_target.py`, `application/research_evaluation.py`, `application/research_execution.py`, `scripts/preview_market_theme_shadow.py` | 명시 목표·optional bounded 원화 자동 정책·기존 AccountSnapshot/ExecutionRecord의 수량/잔량·예약·비용 계산을 재사용. 자동 수량은 명시 원화/보유 한도·남길 현금/가용 구간으로 생성하고 기존 행동/미확인 guard를 유지. 정책 내용 hash·계산 목표의 자체 자료만 비교하며 기존 정책 없는 ID는 보존. 완결된 동일 기간/모집단/정책/목표/비용·체결 모델 자료의 짝을 연구 계산부에서 비교하고 평균·표본·변동성·EV_UNAVAILABLE를 반환. 공통 계좌/주문 JSON은 한 번 변환하고 목표/결과는 행동별 독립. 고정 typed/JSON 소비이며 새 계좌 owner·조회/주문·가상 체결 생성·확률 보정/운영 승격 없음; optional 명시 순차이/표준오차 페널티·연구 위험 제약의 주문 없는 행동 권고. 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity의 후속 책임; 명시 native 입력은 기존 Risk 저장본/계좌 RAM과 R3 결과 ref·시점·quality를 한 번 검증. 운영 Risk 승인/주문 경로와 구분 |
+| 시장/테마 Shadow native 입력 | `central_server/market_theme_shadow_inputs.py`, `central_server/database_market_bars.py` | 기존 ranking/theme 이력과 bounded 1초봉 read를 공통 입력으로 변환. 최신 수락 테마/가용시각/예산·read별 별도 snapshot·연속성 미확인을 유지. 명시 연구 근거의 불변 검증/typed 요청 준비와 수동 native 테마·초봉 해시 대조를 소유. 대조는 별도 두 native read·과거 revision/연속성/lineage 미확인이며 실시간 경로/시장 원본 승인에 사용하지 않음. 새 task/네트워크/주문 owner 없음 |
+| 시장/테마 RAM Shadow 수명 | `central_server/market_theme_shadow_monitor.py` | 기존 monitor의 pending/coalescing·상태/결과·retry/drain을 사용. 불변 market frame과 회차별 RAM 승인/연속 구간·보존/gap·전달 누락 근거를 공유하며 H2 상태/결과·실패 slot의 이전 cut은 독립 유지. 공통 Runtime은 Hub 관측자/worker·Collector RAM 보존·공통 입력/계산·최종 cut/close와 근거의 현재 결과 연결을 소유. 기본 OFF의 선별 한 행/조회·명시 관찰 선택을 재사용하며 optional 근거는 기록 예산에서 생략 가능. 초봉 이력/원본 확정·운영 승인/보호 정책은 후속 |
+| 시장·테마 관찰 선택/표시 | `presentation/candidate_monitor_dialog.py`, `infrastructure/central_content_client.py`, `infrastructure/central_operational_settings.py`, `central_server/operational_settings_routes.py`, `central_server/app.py`, `central_server/market_theme_shadow_monitor.py` | 기존 Qt worker로 보이는 live 탭 5초 RAM 조회·명시 저장분 읽기/만료·독립 정책 표시. 별도 private config/revision·native 테마 검증·저장/적용/교체/취소/종료/재시작을 app이 기존 lock에서 소유. 기본 OFF·PC worker의 read-only 연구 가설/정책 명시 선택→검증 snapshot 전달. 저장된 선택 revision/1–60초 창의 수동 원본 대조·미확인/비승인 결과 표시·취소/종료/편집 보존도 기존 worker 사용. R4 고정 입력 JSON 명시 선택→기존 순수 계산 한 번→공통 Runtime의 결과 한 벌/기존 선별 한 행→수량·비용 평균/표본·미확인 표시도 재사용. 명시 live 선택은 기존 verified mock owner RAM/Collector 가격을 공유하며 account 알림만 있을 때 H1/H2를 다시 평가하지 않는다. 선택 계좌만 기존 recovery 전후 전체 run read를 공유하고 native 잔량/수동 주문을 순수 대사한다. 다른 run writer는 유지하며 미확인/변경/결손·예산 초과는 수량 차단. runtime RAM revision으로 mutation을 무효화하며 별도 DB lock 대기 없음. 고정 판단 시각/실시간 계좌 아님을 보존하고 기본 창에 스크롤 제공. 자동 대조/추가 수집/주문 권한 복원 없음 |
+| 공통 context source 갱신 | `central_server/autonomous_top20.py`, `central_server/content_routes.py`, `central_server/market_theme_shadow_inputs.py`, `central_server/market_theme_shadow_monitor.py`, `central_server/app.py` | 기존 TOP20 공개/테마 native 쓰기 완료 신호. 순위 RAM 변환/테마 단일 native 읽기·과거 lineage/미래 cut·삭제·읽기 retry/close·불확실한 ACK를 공통 수명에서 처리. 원본 writer/판단 규칙은 유지하며 기본 OFF의 선별 진단 기록/인증 조회 연결. 기본 OFF의 context 관찰 화면/명시 선택 연결. 확정 승인/보호 정책 선택은 후속 |
+| 공통 원본 RAM 관측 | `central_server/realtime_collector.py`, `central_server/minute_bars.py`, `central_server/market_theme_shadow_inputs.py` | 기존 canonical seconds의 bounded 읽기 전용 snapshot, clean 보존(기본 20초/상한 60초), generation/승인·연속성/보존/gap와 일시적 RAM refs. 같은 snapshot에 활성 Recorder epoch의 기존 수락 input high-water 조회 힌트를 고정·공유하며 저장/원본 승인으로 쓰지 않음. 동일 Collector owner·당일/거래소 최신 0g 참조 한 벌·삭제/reset/gap/가용시각 및 원본 dirty/write/late/dedup/native 경계 유지 |
 | 시점 근거 | `domain/snapshot_provenance.py`, `application/trade_snapshot_context.py` | 당시 관측과 사후 보완 구분 |
 | 일지 | `presentation/journal_workers.py`, `infrastructure/central_journal_sync.py` | 일지 조회/분석·계좌 scope 동기화 |
 
 ## 연구·타점
+
+Shadow는 공통 판단의 주문 없는 검증 실행이다. RAM 수명은 전략 엔진을 별도로 구현하는 확장점으로 사용하지 않는다. 기존 등록 evaluator·분석·입력/기록/복구를 재사용하며 전략별 상태/결과를 격리한다. Collector/공통 계산·app 수명·owner context/선별 진단 기록·조회는 연결했다. 기본 OFF의 context 관찰 선택/재시작·Qt live/기록 표시는 연결했다. 연구 가설/기존 정책의 명시 화면 선택·저장 snapshot 복구는 연결했다. 원본 확정 승인/운영 승격은 미완료다. [현행 계약](docs/AI_TRADING_SYSTEM_REDESIGN.md#29-shadow를-공통-판단의-검증-실행으로-통일).
 
 | 저장소 상대경로 | 책임 |
 |---|---|
@@ -125,16 +222,20 @@
 | `src/kiwoom_monitor/application/research_replay.py` | 시점별 입력 재생. 투영된 역사 입력은 별도 역사 후보군 종류를 명시해 재생하며 대상 봉·같은 종목/당일 이력을 돌파·눌림 Factor에 전달 |
 | `src/kiwoom_monitor/application/research_execution.py` | PaperExecutionEngine·봉 체결·현금/비용. 기존 정수 `fixed_bps/v1`과 소수 bp 문자열 `fixed_bps/v2` 구분. 선택 시간 정책에서 raw 진입·다음 실제 봉의 시간 예산을 검사하며 연속장 제외 경계 이후 체결과 경계 시각의 봉 내 위험 청산을 만들지 않음 |
 | `src/kiwoom_monitor/application/research_evaluation.py` | 연구 성과·품질·평가 |
-| `src/kiwoom_monitor/application/research_families.py` | 등록 Family·Factor·허용 파라미터 |
+| `src/kiwoom_monitor/application/research_families.py` | 등록 Family·Factor·허용 파라미터. 연구/모의 runner와 돌파·눌림 Shadow가 같은 `evaluate_bar` 함수 참조와 `StrategyEvaluation` 결과를 소비하며 상태·저장·수명 소유자는 유지 |
 | `src/kiwoom_monitor/application/breakout_strategy.py` | 완료봉 돌파 판단과 두 Family의 공통 진입/보유 판단. 선택 `krx_regular_before_auction/v1`의 신호 유효시간·보유·청산 여유 검사와 진입 거래일 기준 마감 청산을 기존 날짜별 시간표로 계산. 기존 설정 직렬화·기본 판단은 보존 |
 | `src/kiwoom_monitor/application/pullback_reacceleration_strategy.py` | 눌림 후 재가속 판단. 동일 선택 시간 정책 설정을 검증하고 공통 진입/청산 판단을 재사용 |
 | `src/kiwoom_monitor/application/research_search.py` | 제한 trial·개발 근거·후보 선택 |
 | `src/kiwoom_monitor/application/research_hypotheses.py` | 결정적 가설·후속 생성·부모 계보 |
-| `src/kiwoom_monitor/infrastructure/persistence/research_repository.py` | v24 run/campaign/lease/final/가설·순차 소유 원장. 판단 묶음은 한 SQLite 트랜잭션으로 불변성·순서를 검증 |
+| `src/kiwoom_monitor/infrastructure/persistence/research_repository.py` | v27 run/campaign/lease/final/가설·순차 소유 원장. 판단 묶음은 한 SQLite 트랜잭션으로 불변성·순서를 검증. 기존 테이블의 명시 진입 가설/연결 대장/run 상태를 단일 snapshot SELECT로 조회하며 승인/주문은 부여하지 않음 |
 | `src/kiwoom_monitor/presentation/research_dialog.py`, `presentation/historical_news_review_dialog.py` | 연구·campaign·가설·순차/final UI와 과거 뉴스 사람 검토·작업표 저장·불변 결과 동결·사건 분할 계획 실행 |
 | `src/kiwoom_monitor/application/research_resources.py` | RSS/preflight·CPU 양보 |
 | `src/kiwoom_monitor/application/forward_evaluation.py` | feedback evidence/review/제안·forward 평가 |
 | `src/kiwoom_monitor/application/feedback_strategy_revision.py` | 명시 채택 버전·재검증 spec/dispatch |
+
+복구/gate 저장 전 불변 근거의 좁은 read는 `database_execution.py::load_mock_automation_lineage`가 spec/admission/lease/(recovery)의 PK를 한 statement snapshot으로 읽는다. `ForwardEvaluationRepository`의 두 저장 검증 경로가 이를 소비하며 mutable control/binding/risk 재검사와 writer transaction은 이동하지 않는다. [첫 R2 구현/실측 범위](docs/AI_TRADING_SYSTEM_REDESIGN.md#23-r2-불변-승인-근거의-좁은-조회).
+
+`central_server/mock_automation_runner.py`는 checkpoint pending·같은 객체의 ACK 내용 비교와 retry 순서를 소유한다. native ACK 전 취소/종료와 bootstrap/FILL 입력 native 작업은 기존 `observation_frame_recovery.py::drain_thread_call`을 사용하며 최종 close 저장은 강제한다. DB 연결/transaction과 실제 주문 owner는 이동하지 않는다. [checkpoint 후속](docs/AI_TRADING_SYSTEM_REDESIGN.md#24-r2-checkpoint-저장-실패noop종료-순서).
 
 ## 계좌·인증·모의 실행
 
@@ -142,6 +243,9 @@
 
 모의 감시의 공개 시작 상태는 `central_server/mock_account_monitor.py::is_started`,
 공개 profile들의 감시 시작 여부는 `central_server/mock_runtime.py::has_started_monitor`가 소유한다.
+같은 owner의 `position_shadow_observation`은 검증된 단일 mock binding의 기존
+`MockAccountMonitor.latest_position_observation` 복사본만 전달한다. recovery RAM 게시/알림·무효화는
+기존 monitor가 소유하며 전체 계좌의 local intent coverage는 미확인/차단으로 유지한다.
 app과 키 교체/설정 rollback은 이 판단과 기존 `account_bindings()`를 사용한다.
 복구·주문 가능 판정과는 구분하며 기존 lease·저장·종료 경계는 유지한다.
 
@@ -150,13 +254,17 @@ app과 키 교체/설정 rollback은 이 판단과 기존 `account_bindings()`�
 | 계좌 신원 | `application/account_identity.py`, `infrastructure/kiwoom_rest/account_identity.py` | scope/binding; A4B 직접 연결 미완료 범위 별도 |
 | 인증 | `central_server/credential_store.py`, `central_server/credential_runtime.py` | 암호화 vault·prepare/apply·세대·drain |
 | 인증 UI | `infrastructure/central_credentials_client.py`, `presentation/nas_credentials_dialog.py` | HTTPS 요청·입력·worker |
-| 후보 감시 | `central_server/candidate_monitor.py`, `central_server/observation_frame_recovery.py` | 현재 shadow producer·후보 알림. 안전한 공통 bootstrap과 구형 C 이하 frames-only 복구를 수행한다. protocol과 frames는 기존 checkpoint에 원자 저장하고 과거 판단을 재실행하지 않는다. 독립 scratch 진행·trim 및 close 시 실제 native 작업 drain을 보존한다. |
+| 후보 감시 | `central_server/candidate_monitor.py`, `central_server/observation_frame_recovery.py` | 돌파·눌림의 공통 주문 없는 실행부. 등록 config/evaluator와 1분봉·순위 계약만 지원하고 각 monitor ID의 상태/결과·기존 저장을 분리한다. 기본 돌파/운영 선택은 유지하며 초 단위 계약은 거절한다. 안전한 공통 bootstrap과 구형 C 이하 frames-only 복구를 수행한다. protocol과 frames는 기존 checkpoint에 원자 저장하고 과거 판단을 재실행하지 않는다. 독립 scratch 진행·trim 및 close 시 실제 native 작업 drain을 보존한다. |
 | 운용 명세·입장 | `application/mock_automation_specification.py`, `application/mock_automation_admission.py` | 동결 spec·적격성·단일 계좌 lease |
 | 위험·복구·전달 | `application/mock_automation_risk.py`, `application/mock_automation_recovery.py`, `application/mock_automation_execution.py` | 실제 위험 근거·대사·Decision gate |
-| 주문 원장 | `application/order_lifecycle.py`, `central_server/execution_runtime.py` | intent·unknown·멱등·owner |
+| 주문 원장 | `application/order_lifecycle.py`, `central_server/execution_runtime.py` | intent·unknown·멱등·owner. 기존 lifecycle class는 유지하며 같은 파일의 명시 목적별 미체결 순수 정책은 ACK/UNKNOWN 대체 금지·원래 anchor/현재 목표·보호 우선을 고정 CLI로 검증한다. 실제 전송/취소·owner/영속 계획은 기존 실행 책임이며 새 자동 전송은 없음 |
 | 자동 모의 수명 | `central_server/mock_automation_runner.py`, `central_server/mock_automation_supervisor.py`, `central_server/observation_frame_recovery.py`, `application/mock_automation_session_clock.py`, `presentation/mock_automation_dialog.py` | runner·영속 제어·UI. 안전한 bootstrap/legacy 복구 중 fill 반영/control 검사와 기존 intent/binding을 유지한다. 구형 C 이하 frames만 복구하고 과거 주문을 실행하지 않는다. 선택 시간 정책의 독립 시계는 실제 체결 기준 보유 만료·마감·intent 유효시간과 가격 신선도를 판단하고 기존 O1 gate/gateway를 재사용한다. 별도 clock 문서가 Decision·취소 시도·영속 중지 복구를 보존한다. frames/protocol 원자 checkpoint와 시계 broker/native 작업의 drain 후 종료를 소유한다. |
 
 ## 다음 개발의 진입점
+
+동일 native 페이지의 공통 회차는 검증된 sequence/session profile의 불변 frame 변환만 재사용한다. 다음 페이지·새 revision·다른 session profile/복구에는 캐시를 넘기지 않고 각 전략 evaluator/저장/checkpoint를 유지한다. [공통 계산의 범위](docs/AI_TRADING_SYSTEM_REDESIGN.md#33-같은-관측의-frame-변환과-h1h2-계산-공유).
+
+CandidateMonitor의 `consume_observation_page`/`run_shadow_monitors_once`는 native safe-prefix page의 bounded RAM 다중 전달·독립 cursor·실패/pending·직렬화를 소유한다. 새 task/저장 owner는 없으며 기존 `drain_thread_call`을 사용한다. collector RAM 발행/app 공통 worker는 미연결이다. [현재 범위](docs/AI_TRADING_SYSTEM_REDESIGN.md#31-공통-관측-페이지의-ram-다중-전달).
 
 TRAIN 돌파 보유 경로 진단도 기존 `scripts/summarize_historical_baseline_results.py::inspect_training_breakout_paths`가 소유한다. 기존 native 손실 조회에 TRAIN 돌파 한정 선택을 사용하고 동결 입력/분할·완료봉 replay·돌파 Factor·비용 계산을 재사용한다. 새로운 저장소·판단 계층 없이 1/3/5/10분 관측·가격 회수·돌파 거리·다음 봉 시가/모델 슬리피지 기여를 투영한다. VALIDATION 성과와 위험 청산 봉·종료 뒤 가격을 사용하지 않으며 공백은 별도 상태로 남긴다. 개발 가설 실행은 기존 독립 개발 runner와 표준 요청을 사용하고 운영 전략·후보 판정 경로를 변경하지 않는다.
 

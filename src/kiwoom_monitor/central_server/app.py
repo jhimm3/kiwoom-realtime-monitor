@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 import hmac
 import json
 import logging
@@ -37,7 +38,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 )
 
 
-SERVER_BUILD = "2026.10.13-integrated-recorder-v1"
+SERVER_BUILD = "2026.10.15-action-context-gates-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +58,8 @@ def _verified_realtime_scope(
     return binding.scope if hmac.compare_digest(fingerprint, identity.identity_fingerprint) else None
 
 
-def create_app(settings: CentralServerSettings | None = None) -> Any:
+def create_app(settings: CentralServerSettings | None = None, *, market_theme_shadow_bindings=(),
+               market_theme_shadow_recording: bool = False) -> Any:
     """FastAPI 앱을 만든다. 서버 선택 의존성은 로컬 앱과 분리해 지연 로드한다."""
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -66,6 +68,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         raise RuntimeError("중앙 서버 의존성을 설치하세요: pip install -e .[server]") from error
 
     active = settings or CentralServerSettings.from_environment()
+    market_theme_shadow_bindings = tuple(market_theme_shadow_bindings)
+    if market_theme_shadow_recording and not market_theme_shadow_bindings:
+        raise ValueError("RAM shadow recording requires explicit monitor bindings")
     diagnostic_runs = None
     broker: CentralRestBroker | None = None
     account_broker: CentralRestBroker | None = None
@@ -84,6 +89,14 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     market_event_service: MarketEventService | None = None
     external_market_service: YahooDelayedMarketCollector | None = None
     candidate_monitor: CandidateMonitor | None = None
+    market_theme_shadow_runtime = None
+    position_order_observation_account = None
+    def context_changed(kind):
+        if market_theme_shadow_runtime is not None:
+            market_theme_shadow_runtime.context_changed(kind)
+    def account_position_changed(account_ref):
+        if account_ref == position_order_observation_account:
+            context_changed("account")
     news_service = None
     ai_service = None
     realtime_hub = RealtimeHub()
@@ -248,6 +261,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
                 broker, realtime_hub, store,
                 minute_backfill_enabled=active.autonomous_top20_minute_backfill_enabled,
                 outbox_path=Path(active.top20_outbox_path),
+                on_membership_changed=lambda: context_changed("ranking"),
             )
     if active.mock_account_monitor_enabled:
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomSettings
@@ -270,6 +284,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
 
         def publish_mock_bundle(profile_id, bundle):
             nonlocal mock_bundle, mock_account_monitor, mock_account_realtime, mock_order_gateway
+            if bundle is not None:
+                bundle.monitor.set_position_observation_listener(lambda: account_position_changed(bundle.account_ref))
+            account_position_changed(bundle.account_ref if bundle is not None else position_order_observation_account)
             if profile_id == "nas-mock-default":
                 mock_bundle = bundle
                 mock_account_monitor = bundle.monitor if bundle else None
@@ -391,18 +408,195 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             poll_seconds=float(operational["shadow_candidate_poll_seconds"]),
             universe_max_age_seconds=int(operational["shadow_candidate_universe_max_age_seconds"]),
         )
+    from .market_theme_shadow_monitor import (
+        MarketThemeShadowRuntime, SHADOW_SELECTION_COLLECTION,
+        validate_ram_shadow_selection, ram_shadow_bindings_from_snapshot, selected_position_comparison, selected_position_allocation,
+        position_comparison_requires_theme_context,
+    )
+    from .observation_frame_recovery import drain_thread_call
+    def theme_context_source(cutoff):
+        return store.load_theme_snapshots(available_at=cutoff, limit=1)
+    def position_account_source(account_ref):
+        observation=None
+        if mock_owner is not None:
+            observation=mock_owner.position_shadow_observation(account_ref)
+        elif mock_bundle is not None and mock_bundle.binding is not None and not mock_bundle._closing:
+            if mock_bundle.binding.scope.account_ref == account_ref and mock_bundle.binding.scope.environment.value == "mock":
+                observation=mock_bundle.monitor.latest_position_observation
+        return (mock_automation_supervisor.position_shadow_observation(observation)
+                if observation is not None and mock_automation_supervisor is not None else observation)
+    if mock_account_monitor is not None:
+        mock_account_monitor.set_position_observation_listener(
+            lambda account_ref=mock_account_monitor._runtime.account_ref: account_position_changed(account_ref))
+    def configure_position_order_observation(account_ref):
+        nonlocal position_order_observation_account
+        position_order_observation_account = account_ref
+        if mock_owner is not None:
+            mock_owner.set_position_order_observation_account(account_ref)
+        elif mock_bundle is not None:
+            mock_bundle.set_position_order_observation_account(account_ref)
+    if market_theme_shadow_bindings:
+        if collector is None:
+            store.close()
+            raise ValueError("RAM shadow bindings require the existing realtime collector")
+        market_theme_shadow_runtime = MarketThemeShadowRuntime(realtime_hub, collector, market_theme_shadow_bindings,
+            ranking_source=top20_service.latest_membership_snapshot if top20_service is not None else None,
+            theme_source=theme_context_source, record_store=store if market_theme_shadow_recording else None)
     from .operational_settings_routes import OperationalSettingsState, create_operational_settings_routers
     operational_state = OperationalSettingsState(
         operational, int(operational.get("revision", 0)), candidate_monitor)
+    ram_selection = {"version": "ram-shadow-selection/v1", "revision": 0, "enabled": False,
+                     "theme_ids": [], "leadership_venue": "KRX", "recording": False}
+    ram_selection_error = ""
+    saved_ram_selection = store.load_document(SHADOW_SELECTION_COLLECTION, "global", "current")
+    if saved_ram_selection is not None:
+        try:
+            ram_selection = validate_ram_shadow_selection(saved_ram_selection["document"])
+        except (KeyError, TypeError, ValueError):
+            ram_selection_error = "INVALID_SAVED_RAM_SHADOW_SELECTION"
+            logger.warning("invalid saved RAM shadow selection remains disabled", exc_info=True)
+    ram_applied_revision = -1 if ram_selection["enabled"] or ram_selection_error else ram_selection["revision"]
+    if ram_selection["enabled"] and (ram_selection.get("position_account_live") or ram_selection.get('position_allocation')):
+        try:
+            account_ref = (ram_selection['position_allocation']['policy']['account_ref'] if ram_selection.get('position_allocation')
+                           else ram_selection["position_comparison"]["requests"][0]["account_ref"])
+            if not isinstance(account_ref, str) or not account_ref.strip():
+                raise ValueError("invalid saved position account reference")
+            configure_position_order_observation(account_ref)
+        except (KeyError, IndexError, TypeError, ValueError):
+            ram_selection_error = "INVALID_SAVED_RAM_SHADOW_SELECTION"
+    ram_control_closing = False
+
+    def get_ram_shadow_selection():
+        return {**deepcopy(ram_selection), "theme_ids": list(ram_selection["theme_ids"]),
+                "applied_revision": ram_applied_revision,
+                "apply_status": "ACTIVE" if ram_applied_revision == ram_selection["revision"] and not ram_selection_error else "RECOVERY_REQUIRED",
+                "last_error": ram_selection_error, "runtime_supported": collector is not None and not market_theme_shadow_bindings,
+                "selection_supported": not market_theme_shadow_bindings,
+                "mode": "explicit_bindings" if market_theme_shadow_bindings else "research_thesis" if ram_selection.get("stock_thesis")
+                        else "position_context" if ram_selection.get("position_account_live") and not ram_selection["theme_ids"] else "theme_context",
+                "runtime": market_theme_shadow_runtime.status if market_theme_shadow_runtime is not None else {"state": "DISABLED"}}
+
+    async def check_stock_thesis_sources(expected_revision, lookback_seconds):
+        from .market_theme_shadow_inputs import read_stock_thesis_source_check
+        # Explicit diagnostic only. Existing owner lock fences selection changes
+        # and shutdown; cancellation drains the bounded read before releasing it.
+        async with operational_state.lock:
+            if ram_control_closing:
+                raise RuntimeError("RAM_SHADOW_SERVER_CLOSING")
+            if expected_revision != ram_selection["revision"]:
+                raise RuntimeError("RAM_SHADOW_SELECTION_REVISION_CONFLICT")
+            selected = deepcopy(ram_selection.get("stock_thesis"))
+            if market_theme_shadow_bindings or selected is None:
+                raise RuntimeError("RAM_SHADOW_RESEARCH_THESIS_REQUIRED")
+            report = await drain_thread_call(read_stock_thesis_source_check, store, selected["evidence"],
+                thesis_policy_version=selected["thesis_policy_version"],
+                leadership_venue=ram_selection["leadership_venue"], lookback_seconds=lookback_seconds)
+            return {**report, "selection_revision": expected_revision}
+
+    async def prepare_ram_bindings(selection):
+        comparison = selected_position_comparison(selection)
+        allocation = selected_position_allocation(selection)
+        if not selection["enabled"]:
+            return (), comparison
+        if collector is None:
+            raise ValueError("RAM shadow selection requires the existing realtime collector")
+        cut = collector._now_provider()
+        snapshots = (await drain_thread_call(store.load_theme_snapshots, available_at=cut.timestamp(), limit=1)
+                     if selection["theme_ids"] else ())
+        bindings = ram_shadow_bindings_from_snapshot(selection, snapshots[0] if snapshots else None, cut.isoformat())
+        if allocation is not None:
+            union=set(allocation['symbols'])|{code for _,context in bindings for code in context.theme_membership.member_codes}
+            if len(union)>200:raise ValueError('allocation/shared source union exceeds 200 codes')
+        if comparison is not None and position_comparison_requires_theme_context(selection["position_comparison"]) and not any(comparison["symbol"] in context.theme_membership.member_codes
+                                               for _, context in bindings):
+            raise ValueError("position comparison symbol must belong to an observed theme")
+        return (bindings, comparison, allocation) if allocation is not None else (bindings, comparison)
+
+    async def publish_allocation_models(document):
+        from .market_theme_shadow_inputs import decode_dynamic_allocation_model_publication
+        runtime=market_theme_shadow_runtime
+        if (ram_control_closing or runtime is None or not ram_selection['enabled']
+                or ram_applied_revision!=ram_selection['revision'] or runtime._allocation is None):
+            raise RuntimeError('ALLOCATION_RUNTIME_NOT_READY')
+        if document.get('expected_selection_revision')!=ram_selection['revision']:
+            raise ValueError('ALLOCATION_SELECTION_REVISION_CONFLICT')
+        duplicate=runtime.allocation_publication_duplicate(document)
+        if duplicate is not None:return duplicate
+        decoded=await drain_thread_call(decode_dynamic_allocation_model_publication,document,runtime._allocation,ram_selection['revision'])
+        if ram_control_closing or market_theme_shadow_runtime is not runtime:
+            raise RuntimeError('ALLOCATION_RUNTIME_NOT_READY')
+        return runtime.offer_allocation_models(document,decoded)
+
+    async def apply_ram_selection(selection, prepared):
+        nonlocal market_theme_shadow_runtime, ram_applied_revision, ram_selection_error
+        bindings, comparison = prepared[:2]
+        allocation=prepared[2] if len(prepared)>2 else None
+        try:
+            configure_position_order_observation(allocation['policy'].account_ref if selection['enabled'] and allocation is not None
+                else selection["position_comparison"]["requests"][0]["account_ref"]
+                if selection["enabled"] and selection.get("position_account_live") else None)
+            if market_theme_shadow_runtime is not None:
+                await market_theme_shadow_runtime.close()
+            market_theme_shadow_runtime = None
+            app.state.market_theme_shadow_runtime = None
+            if selection["enabled"]:
+                market_theme_shadow_runtime = MarketThemeShadowRuntime(realtime_hub, collector, bindings,
+                    ranking_source=top20_service.latest_membership_snapshot if top20_service is not None else None,
+                    theme_source=theme_context_source, record_store=store if selection["recording"] else None,
+                    position_comparison=comparison, position_document=selection.get("position_comparison"),
+                    position_account_source=position_account_source if selection.get("position_account_live") or allocation is not None else None,
+                    position_allocation=allocation)
+                app.state.market_theme_shadow_runtime = market_theme_shadow_runtime
+                await market_theme_shadow_runtime.start()
+            ram_applied_revision = selection["revision"]
+            ram_selection_error = ""
+        except Exception as error:
+            ram_selection_error = f"{type(error).__name__}: {error}"
+            raise RuntimeError("RAM_SHADOW_SELECTION_APPLY_PENDING") from error
+
+    async def update_ram_shadow_selection(changes):
+        nonlocal ram_selection_error
+        if ram_control_closing:
+            raise RuntimeError("RAM_SHADOW_SERVER_CLOSING")
+        if "position_comparison" in changes and changes["position_comparison"] is None and "position_account_live" not in changes:
+            changes = {**changes, "position_account_live": False}
+        proposed = validate_ram_shadow_selection({**ram_selection, **changes})
+        changed = proposed != ram_selection
+        if not changed and ram_applied_revision == ram_selection["revision"] and not ram_selection_error:
+            return
+        bindings = await prepare_ram_bindings(proposed)
+        repair_invalid = ram_selection_error == "INVALID_SAVED_RAM_SHADOW_SELECTION"
+        proposed["revision"] += int(changed or repair_invalid)
+        if changed or repair_invalid:
+            try:
+                await drain_thread_call(store.upsert_documents, SHADOW_SELECTION_COLLECTION,
+                    [{"owner": "global", "key": "current", "document": proposed}])
+            except Exception as error:
+                # A commit with a lost ACK must expose the actual saved revision,
+                # while retaining the old runtime and reporting pending application.
+                settled = await drain_thread_call(store.load_document, SHADOW_SELECTION_COLLECTION, "global", "current")
+                if settled is not None and settled["document"] == proposed:
+                    ram_selection.clear()
+                    ram_selection.update(proposed)
+                    ram_selection_error = "RAM_SHADOW_SELECTION_SAVE_ACK_LOST"
+                raise RuntimeError("RAM_SHADOW_SELECTION_SAVE_FAILED") from error
+            ram_selection.clear()
+            ram_selection.update(proposed)
+        await apply_ram_selection(proposed, bindings)
     if news_service is not None:
         news_service.set_ai_service(ai_service)
     if mock_owner is not None:
         from .mock_automation_supervisor import MockAutomationSupervisor
-        mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner)
+        mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner,
+            price_source=collector.automation_price_observation if collector is not None else None)
+        if collector is not None:
+            collector.set_automation_price_listener(mock_automation_supervisor.observe_automation_price)
 
     mock_bundle_close_error: BaseException | None = None
 
     async def start_services(_app: Any):
+        nonlocal ram_selection_error
         nonlocal account_broker, main_binding, main_identity, mock_bundle
         nonlocal mock_account_monitor, mock_account_realtime, mock_order_gateway
         nonlocal mock_bundle_close_error
@@ -466,6 +660,15 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             await top20_service.start()
         if market_event_service is not None:
             await market_event_service.start()
+        if not market_theme_shadow_bindings and ram_selection["enabled"]:
+            async with operational_state.lock:
+                try:
+                    await apply_ram_selection(ram_selection, await prepare_ram_bindings(ram_selection))
+                except Exception as error:
+                    ram_selection_error = f"{type(error).__name__}: {error}"
+                    logger.exception("saved RAM shadow selection requires recovery")
+        elif market_theme_shadow_runtime is not None:
+            await market_theme_shadow_runtime.start()
         if collector is not None:
             await collector.start()
         if news_service is not None:
@@ -475,6 +678,8 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
         if operational_state.candidate_monitor is not None:
             await operational_state.candidate_monitor.start()
     async def close_services(_app: Any):
+        nonlocal ram_control_closing
+        ram_control_closing = True
         status = _app.state.shutdown_status
         status["stage"] = "diagnostic_runs"
         if diagnostic_runs is not None:
@@ -500,9 +705,15 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
             await mock_bundle.close()
         status["stage"] = "candidate"
         async with operational_state.lock:
+            ram_control_closing = True
             if operational_state.candidate_monitor is not None:
                 await operational_state.candidate_monitor.close()
         status["stage"] = "external_market"
+        async with operational_state.lock:
+            if market_theme_shadow_runtime is not None:
+                status["stage"] = "ram_shadow"
+                await market_theme_shadow_runtime.close()
+                status["stage"] = "external_market"
         if external_market_service is not None:
             await external_market_service.close()
         status["stage"] = "news"
@@ -583,6 +794,7 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.state.credential_runtime = credential_runtime
     app.state.realtime_hub = realtime_hub
     app.state.realtime_collector = collector
+    app.state.market_theme_shadow_runtime = market_theme_shadow_runtime
     app.state.autonomous_top20_service = top20_service
     app.state.market_event_service = market_event_service
     app.state.external_market_collector = external_market_service
@@ -737,7 +949,10 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
 
     operational_read_router, operational_update_router = create_operational_settings_routers(
         store, authorize, operational_state, market_event_service, external_market_service,
-        ai_service, news_service, publish_candidate_monitor, logger)
+        ai_service, news_service, publish_candidate_monitor, logger,
+        get_ram_shadow_selection=get_ram_shadow_selection,
+        update_ram_shadow_selection=update_ram_shadow_selection,
+        publish_allocation_models=publish_allocation_models)
     app.include_router(operational_read_router)
 
     from .diagnostic_read_routes import create_diagnostic_read_router
@@ -823,7 +1038,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.include_router(create_market_archive_read_router(store, authorize))
 
     from .research_read_routes import create_research_read_router
-    app.include_router(create_research_read_router(store, authorize, lambda: operational_state.candidate_monitor))
+    app.include_router(create_research_read_router(store, authorize, lambda: operational_state.candidate_monitor,
+        get_market_theme_shadow_runtime=lambda: market_theme_shadow_runtime,
+        check_stock_thesis_sources=check_stock_thesis_sources))
 
     from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
     from .mock_publication_routes import create_mock_publication_router
@@ -836,7 +1053,9 @@ def create_app(settings: CentralServerSettings | None = None) -> Any:
     app.include_router(create_market_dataset_read_router(store, authorize, top20_service))
 
     from .content_routes import create_content_router
-    app.include_router(create_content_router(store, authorize))
+    app.include_router(create_content_router(store, authorize,
+        on_theme_changed=lambda: context_changed("theme"),
+        theme_notifications_enabled=lambda: market_theme_shadow_runtime is not None))
 
     from .realtime_routes import create_realtime_router
     app.include_router(create_realtime_router(realtime_hub, store, valid_token, collector))

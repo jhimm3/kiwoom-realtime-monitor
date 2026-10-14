@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
@@ -12,6 +12,7 @@ from kiwoom_monitor.domain.order_contract import (
     BrokerFill,
     BrokerOrderSnapshot,
     OrderState,
+    OrderSide,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import OrderExecution
 
@@ -61,9 +62,20 @@ class AccountQueryBroker(Protocol):
 
 
 @dataclass(frozen=True)
+class BrokerOrderDetails:
+    broker_order_id: str
+    ordered_quantity: int
+    side: OrderSide | None
+    limit_price: int | None
+    venue: str
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AccountRecovery:
     account: AccountSnapshot
     orders: tuple[BrokerOrderSnapshot, ...]
+    order_details: tuple[BrokerOrderDetails, ...] = field(default=(), compare=False)
 
 
 MockAccountRecovery = AccountRecovery  # Preserve the existing mock import contract.
@@ -123,15 +135,19 @@ class _KiwoomAccountReader:
                                 raise ValueError("real account broker order id conflicts across venues")
                             venues[order_id] = venue
 
+        details = []
+        default_venue = "KRX" if self._environment == "mock" else "UNKNOWN"
         open_orders = tuple(
             snapshot
             for payload in unfilled_pages
-            for snapshot in parse_unfilled_orders(payload, self._account_ref, unfilled_as_of)
+            for snapshot in parse_unfilled_orders(payload, self._account_ref, unfilled_as_of,
+                                                 _details=details, _default_venue=default_venue)
         )
         completed_orders = tuple(
             snapshot
             for payload in filled_pages
-            for snapshot in parse_filled_orders(payload, self._account_ref, filled_as_of)
+            for snapshot in parse_filled_orders(payload, self._account_ref, filled_as_of,
+                                               _details=details, _default_venue=default_venue)
         )
         orders = merge_order_snapshots(open_orders, completed_orders)
         account = parse_account_snapshot(
@@ -141,7 +157,7 @@ class _KiwoomAccountReader:
             account_ref=self._account_ref,
             as_of=deposit_as_of,
         )
-        return AccountRecovery(account, orders)
+        return AccountRecovery(account, orders, tuple(details))
 
     async def read_trade_cost_pages(
         self, start: date, end: date,
@@ -211,11 +227,13 @@ class KiwoomRealAccountReader(_KiwoomAccountReader):
 
 
 def parse_unfilled_orders(
-    payload: dict[str, Any], account_ref: str, as_of: datetime,
+    payload: dict[str, Any], account_ref: str, as_of: datetime, *, _details=None, _default_venue="UNKNOWN",
 ) -> tuple[BrokerOrderSnapshot, ...]:
     result: list[BrokerOrderSnapshot] = []
     for row in _rows(payload, "oso", UNFILLED_COLUMNS):
         ordered = _nonnegative(row.get("ord_qty"), "ord_qty")
+        if _details is not None:
+            _details.append(_broker_order_details(row, ordered, _default_venue))
         remaining = _nonnegative(row.get("oso_qty"), "oso_qty")
         if remaining > ordered:
             raise ValueError("unfilled quantity exceeds ordered quantity")
@@ -237,17 +255,36 @@ def parse_unfilled_orders(
 
 
 def parse_filled_orders(
-    payload: dict[str, Any], account_ref: str, as_of: datetime,
+    payload: dict[str, Any], account_ref: str, as_of: datetime, *, _details=None, _default_venue="UNKNOWN",
 ) -> tuple[BrokerOrderSnapshot, ...]:
     result: list[BrokerOrderSnapshot] = []
     for row in _rows(payload, "cntr", FILLED_COLUMNS):
         ordered = _nonnegative(row.get("ord_qty"), "ord_qty")
+        if _details is not None:
+            _details.append(_broker_order_details(row, ordered, _default_venue))
         reported = _nonnegative(row.get("cntr_qty"), "cntr_qty")
         remaining = _nonnegative(row.get("oso_qty"), "oso_qty", default=max(0, ordered - reported))
         if reported > ordered or remaining > ordered:
             raise ValueError("broker order quantities are inconsistent")
         result.append(_order_snapshot(row, account_ref, as_of, reported, remaining, ()))
     return tuple(result)
+
+
+def _broker_order_details(row, ordered, default_venue):
+    """Keep optional sizing evidence; incomplete metadata never breaks legacy recovery."""
+    raw_side = str(row.get("io_tp_nm") or "").strip().lstrip("+-")
+    side = {"매수": OrderSide.BUY, "매도": OrderSide.SELL, "BUY": OrderSide.BUY, "SELL": OrderSide.SELL}.get(raw_side)
+    reasons = [] if side is not None else ["broker_order_side_unknown"]
+    raw_price = row.get("ord_pric")
+    try:
+        price = _nonnegative(raw_price, "ord_pric")
+    except ValueError:
+        price = None
+        reasons.append("broker_order_price_unknown")
+    venue_value = str(row.get("stex_tp") or row.get("stex_tp_txt") or "").strip()
+    venue = {"1": "KRX", "KRX": "KRX", "2": "NXT", "NXT": "NXT"}.get(venue_value,
+                default_venue if not venue_value else "UNKNOWN")
+    return BrokerOrderDetails(str(row.get("ord_no") or "").strip(), ordered, side, price or None, venue, tuple(reasons))
 
 
 def merge_order_snapshots(

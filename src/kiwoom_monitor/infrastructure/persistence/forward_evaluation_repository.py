@@ -82,6 +82,10 @@ class ForwardEvaluationStore(Protocol):
     ) -> dict[str, Any] | None: ...
     def load_account_bindings(self) -> list[dict[str, Any]]: ...
     def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None: ...
+    def load_mock_automation_lineage(
+        self, account_ref: str, *, spec_id: str, admission_id: str,
+        lease_receipt_id: str, recovery_decision_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]: ...
     def save_mock_automation_control(
         self, value: dict[str, Any], *, expected_revision: int,
     ) -> bool: ...
@@ -474,19 +478,16 @@ class ForwardEvaluationRepository:
         self, value: MockAutomationRecoveryDecision,
     ) -> bool:
         value = mock_automation_recovery_decision_from_dict(value.to_dict())
-        spec = self.load_mock_automation_spec(value.account_ref, value.spec_id)
+        lineage = self._store.load_mock_automation_lineage(
+            value.account_ref, spec_id=value.spec_id, admission_id=value.admission_id,
+            lease_receipt_id=value.lease_receipt_id,
+        )
+        spec_document = lineage.get("spec")
+        spec = mock_automation_spec_from_dict(spec_document) if spec_document else None
         if spec is None:
             raise ValueError("mock automation recovery requires a stored operating spec")
-        admission_document = self._find(
-            self.MOCK_AUTOMATION_ADMISSION_COLLECTION,
-            value.account_ref,
-            value.admission_id,
-        )
-        receipt_document = self._find(
-            self.MOCK_AUTOMATION_LEASE_COLLECTION,
-            value.account_ref,
-            value.lease_receipt_id,
-        )
+        admission_document = lineage.get("admission")
+        receipt_document = lineage.get("lease")
         if admission_document is None or receipt_document is None:
             raise ValueError("mock automation recovery requires stored admission and lease receipt")
         admission = mock_automation_admission_from_dict(admission_document)
@@ -549,17 +550,21 @@ class ForwardEvaluationRepository:
         self, value: MockAutomationDecisionGate,
     ) -> bool:
         value = mock_automation_decision_gate_from_dict(value.to_dict())
-        spec = self.load_mock_automation_spec(value.account_ref, value.spec_id)
-        admission = self._find(
-            self.MOCK_AUTOMATION_ADMISSION_COLLECTION, value.account_ref, value.admission_id,
+        from kiwoom_monitor.application.mock_automation_execution import (
+            MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION, _fixed_replacement_binding,
         )
-        lease = self._find(
-            self.MOCK_AUTOMATION_LEASE_COLLECTION, value.account_ref, value.lease_receipt_id,
+        fixed = (self.load_mock_automation_approved_gate(value.account_ref, value.intent_id)
+                 if value.version == MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION else None)
+        if fixed is not None and (fixed.version != value.version
+                or _fixed_replacement_binding(fixed) != _fixed_replacement_binding(value)):
+            raise ValueError('replacement gate conflicts with immutable child approval')
+        lineage = self._store.load_mock_automation_lineage(
+            value.account_ref, spec_id=value.spec_id, admission_id=value.admission_id,
+            lease_receipt_id=value.lease_receipt_id, recovery_decision_id=value.recovery_decision_id,
         )
-        recovery = self._find(
-            self.MOCK_AUTOMATION_RECOVERY_COLLECTION, value.account_ref,
-            value.recovery_decision_id,
-        )
+        spec_document = lineage.get("spec")
+        spec = mock_automation_spec_from_dict(spec_document) if spec_document else None
+        admission, lease, recovery = (lineage.get(name) for name in ("admission", "lease", "recovery"))
         if spec is None or admission is None or lease is None or recovery is None:
             raise ValueError("mock automation decision gate requires complete stored lineage")
         admission_value = mock_automation_admission_from_dict(admission)
@@ -587,7 +592,7 @@ class ForwardEvaluationRepository:
             value.gate_id,
             value.to_dict(),
         )
-        if value.status is MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION:
+        if value.status is MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION and fixed is None:
             self._save_immutable(
                 self.MOCK_AUTOMATION_APPROVED_GATE_COLLECTION,
                 value.account_ref,
@@ -595,6 +600,10 @@ class ForwardEvaluationRepository:
                 value.to_dict(),
             )
         return saved
+
+    def load_mock_automation_decision_gate(self, account_ref: str, gate_id: str):
+        document = self._find(self.MOCK_AUTOMATION_GATE_COLLECTION, account_ref, gate_id)
+        return mock_automation_decision_gate_from_dict(document) if document else None
 
     def load_mock_automation_approved_gate(
         self, account_ref: str, intent_id: str,

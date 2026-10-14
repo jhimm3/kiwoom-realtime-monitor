@@ -169,6 +169,7 @@ class SecondTradeAccumulator:
 
     def __init__(self, max_late_seconds: int = 5) -> None:
         self._max_late = timedelta(seconds=max(0, int(max_late_seconds)))
+        self._ram_retention = self._max_late
         self._bars: dict[tuple[str, str, str, str], CentralSecondTradeBar] = {}
         self._dirty: set[tuple[str, str, str, str]] = set()
         self._latest_second: datetime | None = None
@@ -255,6 +256,27 @@ class SecondTradeAccumulator:
             if (key[1], key[2]) not in sources
         }
 
+    def set_ram_retention(self, seconds: int) -> None:
+        """Retain clean observations for RAM readers; lateness/dedup/write rules stay unchanged."""
+        if not isinstance(seconds, int) or not 0 <= seconds <= 60:
+            raise ValueError("RAM observation retention must be 0..60 seconds")
+        self._ram_retention = max(self._max_late, timedelta(seconds=seconds))
+
+    def observation_snapshot(self, codes: tuple[str, ...], *, at: datetime, seconds: int) -> tuple[dict, ...]:
+        """Copy canonical absolute observations without draining dirty/retry state."""
+        if at.tzinfo is None or not 1 <= seconds <= 60 or not 0 <= len(set(codes)) <= 200:
+            raise ValueError("RAM observation cut/scope exceeds the budget")
+        wanted = set(codes)
+        start = at - timedelta(seconds=seconds)
+        rows = []
+        for key, bar in self._bars.items():
+            observed = datetime.fromisoformat(f"{key[0]}T{key[1]}").replace(tzinfo=at.tzinfo)
+            if key[2] in wanted and start <= observed <= at and bar.available_at <= at.timestamp():
+                rows.append(bar.as_record())
+                if len(rows) > 10000:
+                    raise ValueError("RAM observation rows exceed the budget")
+        return tuple(sorted(rows, key=lambda row: (row["trading_date"], row["trade_second"], row["code"], row["market"])))
+
     def _volume_increment(
         self, tick: TradeTick, instrument_key: tuple[str, str, str],
     ) -> int:
@@ -290,11 +312,12 @@ class SecondTradeAccumulator:
         if self._latest_second is None:
             return
         cutoff = self._latest_second - self._max_late
+        ram_cutoff = self._latest_second - self._ram_retention
         self._bars = {
             key: bar for key, bar in self._bars.items()
             if key in self._dirty or datetime.fromisoformat(f"{key[0]}T{key[1]}").replace(
                 tzinfo=self._latest_second.tzinfo,
-            ) >= cutoff
+            ) >= ram_cutoff
         }
         self._seen = {
             signature: event_second

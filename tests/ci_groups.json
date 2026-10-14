@@ -25,6 +25,12 @@
     "main-observation-delivery-contracts"
   ],
   "required_windows_additions": [
+    "tests.unit.test_position_study_cohort",
+    "tests.unit.test_position_study_publication",
+    "tests.unit.test_position_runner_state",
+    "tests.unit.test_position_ev_lineage",
+    "tests.unit.test_position_historical_context",
+    "tests.unit.test_allocation_input_bundle",
     "tests.unit.test_central_operational_settings",
     "tests.unit.test_central_server_db_api_connection",
     "tests.unit.test_central_server_process",
@@ -56,6 +62,15 @@
     "tests.unit.test_research_staging_cleanup",
     "tests.unit.test_verify_prepared_historical_news_rules",
     "tests.unit.test_prepared_historical_archive_v2",
+    "tests.unit.test_historical_archive_audit_stream",
+      "tests.unit.test_historical_archive_batch_writes",
+      "tests.unit.test_historical_archive_batch_reads",
+      "tests.unit.test_historical_archive_completion_gate",
+      "tests.unit.test_historical_archive_execution_transition",
+      "tests.unit.test_index_historical_archive_lookups",
+      "tests.unit.test_prepared_historical_archive_inputs",
+      "tests.unit.test_historical_archive_prefix_transition",
+      "tests.unit.test_publish_historical_archive_file",
     "tests.unit.test_seed_news_jobs_from_nas_rankings"
   ],
   "long_windows_modules": [

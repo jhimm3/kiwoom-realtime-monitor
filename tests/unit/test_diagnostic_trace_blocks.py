@@ -54,6 +54,108 @@ def persist_now(expected='complete'):
 
 
 class TraceBlockTests(unittest.TestCase):
+    def test_small_block_inputs_share_one_durable_bundle_and_replay_independently(self):
+        with deferred_capture(large_inputs=True) as (identifier, _):
+            store = NativeStore()
+            with capture_owner('shadow', 'fixture', 'actor'):
+                for index in (0, 1, 2, 0):
+                    store.save_shadow_monitor_state('m:' + str(index), {'frames': [index]})
+            final = persist_now()
+            manifest, rows = trace.recorded_events(identifier)
+            starts = [row for row in rows if row['event_type'] == 'operation_start']
+            roots = [json.loads(row['payload'].descriptor) for row in starts]
+            self.assertEqual(4, len(starts))
+            self.assertEqual({'blocks/shared-v1'}, {root['format'] for root in roots})
+            self.assertEqual(1, len({root['parts'][0]['name'] for root in roots}))
+            self.assertEqual(1, final['payload_fsync_count'])
+            self.assertEqual(roots[0], roots[-1])
+            self.assertEqual((final['accepted'], 0, 0),
+                             (final['written'], final['charged_bytes'], final['pending_events']))
+            for unused in range(2):
+                restored = NativeStore()
+                result = asyncio.run(_execute_recorded_operations(
+                    restored, rows, started_mono_ns=manifest['started_mono_ns'],
+                    window_start_seconds=0, window_end_seconds=.2))
+                self.assertEqual(4, len(result['calls']))
+                self.assertEqual(store.calls, restored.calls)
+            path = trace._directory() / identifier / roots[1]['parts'][0]['name']
+            with path.open('r+b') as file:
+                file.seek(roots[1]['parts'][0]['offset'])
+                file.write(b'!')
+            with self.assertRaisesRegex(ValueError, 'checksum_mismatch'):
+                thaw_operation_arguments(starts[1])
+            self.assertEqual(0, thaw_operation_arguments(starts[0])['document']['frames'][0])
+
+    def test_shared_bundle_rollover_keeps_capacity_and_each_input(self):
+        with deferred_capture(large_inputs=True) as (identifier, _):
+            store = NativeStore()
+            with capture_owner('shadow', 'fixture', 'actor'):
+                for index in range(4):
+                    store.save_shadow_monitor_state('m:' + str(index), {'frames': [index, 'x' * 40]})
+            with patch.object(trace, '_MAX_PAYLOAD_BATCH_BYTES', 300):
+                final = persist_now()
+                manifest, rows = trace.recorded_events(identifier)
+                names = {root['parts'][0]['name'] for root in manifest['blobs'].values()}
+                self.assertGreater(len(names), 1)
+                self.assertEqual(len(names), final['payload_fsync_count'])
+                self.assertTrue(all((trace._directory() / identifier / name).stat().st_size <= 300
+                                    for name in names))
+                starts = [row for row in rows if row['event_type'] == 'operation_start']
+                self.assertEqual(4, len(starts))
+                self.assertEqual([0, 1, 2, 3],
+                    [thaw_operation_arguments(row)['document']['frames'][0] for row in starts])
+
+    def test_shared_bundle_sync_failure_keeps_all_unpublished_input(self):
+        with deferred_capture(large_inputs=True) as (identifier, _):
+            store = NativeStore()
+            with capture_owner('shadow', 'fixture', 'actor'):
+                for index in range(3):
+                    store.save_shadow_monitor_state('m:' + str(index), {'frames': [index]})
+            payload_fds = set()
+            native_write, native_sync = trace._write, trace.os.fsync
+
+            def write(file, content, session):
+                if str(file.name).endswith('.payloads.partial'):
+                    payload_fds.add(file.fileno())
+                return native_write(file, content, session)
+
+            def sync(fd):
+                if fd in payload_fds and trace._SESSION['state'] == 'persisting':
+                    raise OSError('injected shared payload sync failure')
+                return native_sync(fd)
+
+            with patch.object(trace, '_write', side_effect=write), patch.object(trace.os, 'fsync', side_effect=sync):
+                failed = persist_now('failed')
+            self.assertEqual(3, len(store.calls))
+            self.assertEqual((0, [], {}), (failed['written'], failed['chunks'], failed['blobs']))
+            self.assertEqual(failed['accepted'], failed['packed_events'])
+            self.assertGreater(failed['charged_bytes'], 0)
+            self.assertEqual(0, failed['pending_events'])
+
+    def test_shared_block_descriptor_rejects_unsafe_paths_offsets_and_expanded_scope(self):
+        with deferred_capture(large_inputs=True) as (identifier, _):
+            with capture_owner('shadow', 'fixture', 'actor'):
+                NativeStore().save_shadow_monitor_state('m', {'frames': [1, 2]})
+            persist_now()
+            manifest, rows = trace.recorded_events(identifier)
+            row = next(row for row in rows if row['event_type'] == 'operation_start')
+            root = json.loads(row['payload'].descriptor)
+            digest = row['payload'].digest
+            mutations = []
+            for field, value in (('name', '../outside'), ('offset', -1), ('offset', False),
+                                  ('bytes', 0), ('bytes', 1024**2 + 1), ('index', True),
+                                  ('sha256', '0' * 64)):
+                changed = copy.deepcopy(root)
+                changed['parts'][0][field] = value
+                mutations.append(changed)
+            mutations.extend(({**root, 'parts': root['parts'] * 2},
+                              {**root, 'bytes': 1024**2 + 1}, {**root, 'format': 'unknown'}))
+            for changed in mutations:
+                with self.subTest(changed=changed):
+                    with self.assertRaises((KeyError, ValueError)):
+                        trace._payload_blocks_from_manifest(identifier, digest,
+                            {'schema_version': 4, 'blobs': {digest: changed}})
+
     def test_large_copy_is_explicit_and_keeps_secret_and_type_guards(self):
         value = {'document': {'frames': ['가' * 3000 for _ in range(900)]}}
         with self.assertRaisesRegex(InputRejected, 'payload_budget_exceeded'):
@@ -389,7 +491,7 @@ class TraceBlockTests(unittest.TestCase):
                 store.save_shadow_monitor_state('m', {'frames': [1, 2]})
             trace.stop(timeout=.01)
             wait_state('awaiting_persistence')
-            with patch.object(trace, '_write_payload_blocks', side_effect=OSError('injected bundle failure')):
+            with patch.object(trace, '_write', side_effect=OSError('injected bundle failure')):
                 with trace._LOCK:
                     trace._SESSION['persist_at'] = time.time() - 1
                 trace._WAKE.set()

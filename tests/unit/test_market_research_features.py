@@ -186,5 +186,143 @@ class MarketResearchFeatureTests(unittest.TestCase):
         self.assertEqual(("반도체", "AI"), frames[0].members[0].themes)
 
 
+from dataclasses import asdict, replace
+import json
+import unittest
+
+from kiwoom_monitor.application.market_research_features import MarketMember, MarketResearchFrame, MatureBreakoutSummary
+from kiwoom_monitor.application.market_theme_shadow import (
+    MarketThemeShadowInputs, MatureBreakoutEvidence, SHADOW_CONTEXT_VERSION, evaluate_market_theme_shadow,
+)
+from kiwoom_monitor.application.research_factors import compute_market_regime
+from kiwoom_monitor.application.theme_leadership import evaluate_theme_leadership
+from scripts.preview_market_theme_shadow import evaluate_document
+from test_theme_leadership import DAY as SHADOW_DAY, PARAMETERS as SHADOW_PARAMETERS, initial_points as shadow_points, membership as shadow_membership, point as shadow_point
+
+
+def shadow_inputs():
+    frames = tuple(MarketResearchFrame(
+        revision_id=f"market-{second}", available_at=f"{SHADOW_DAY}T09:00:{second:02d}+09:00",
+        trading_date=SHADOW_DAY, session_minute="09:00", venue="KRX", window="cumulative_session",
+        members=(MarketMember("005930", 100, 200, ("반도체",)),
+                 MarketMember("000660", 50, 100, ("반도체",))), theme_revision_id="snapshot-r1",
+    ) for second in (0, 10, 20))
+    return MarketThemeShadowInputs(
+        decision_time=f"{SHADOW_DAY}T09:00:20+09:00", market_venue="KRX", market_window="cumulative_session",
+        leadership_venue="KRX", market_frames=frames, theme_membership=shadow_membership(),
+        second_points=shadow_points(), continuity_status="COMPLETE",
+        breakout_evidence=MatureBreakoutEvidence("outcomes-r1", f"{SHADOW_DAY}T09:00:10+09:00", MatureBreakoutSummary(4, 3, 1)),
+    )
+
+
+class MarketThemeShadowTests(unittest.TestCase):
+    def test_existing_factor_results_and_explicit_scope_are_preserved(self):
+        inputs = shadow_inputs()
+        result = evaluate_market_theme_shadow(inputs)
+        market = compute_market_regime(inputs.market_frames, inputs.breakout_evidence.summary)
+        leadership = evaluate_theme_leadership(shadow_membership(), shadow_points(), as_of=inputs.decision_time,
+            venue="KRX", continuity_status="COMPLETE", parameters=SHADOW_PARAMETERS)
+        self.assertEqual(market.value["features"], result["market"]["facts"])
+        self.assertEqual(leadership.raw_leader_id, result["leadership"]["inferences"]["raw_leader_id"])
+        self.assertEqual(asdict(leadership.state), result["next_leadership_state"])
+        self.assertEqual("TOP20", result["scope"]["market_universe"])
+        self.assertEqual("not_verified", result["scope"]["source_durability"])
+        self.assertFalse(result["order_authorized"])
+        self.assertEqual("COMPLETE", result["quality"]["status"])
+
+    def test_json_consumer_and_typed_consumer_have_identical_output(self):
+        inputs = shadow_inputs()
+        original = asdict(inputs)
+        document = json.loads(json.dumps({"schema": SHADOW_CONTEXT_VERSION, "inputs": original}))
+        self.assertEqual(evaluate_market_theme_shadow(inputs), evaluate_document(document))
+        self.assertEqual(original, asdict(inputs))
+
+    def test_future_and_other_venue_window_data_do_not_change_the_cut(self):
+        inputs = shadow_inputs()
+        extra = (replace(inputs.market_frames[-1], revision_id="future", available_at=f"{SHADOW_DAY}T09:00:21+09:00"),
+                 replace(inputs.market_frames[-1], revision_id="nxt", venue="NXT"),
+                 replace(inputs.market_frames[-1], revision_id="other-window", window="minute"))
+        changed = replace(inputs, market_frames=(*inputs.market_frames, *extra),
+                          second_points=(*inputs.second_points, shadow_point("005930", 21, 200, 9000),
+                                         replace(shadow_point("005930", 19, 200, 9000), market="NXT")))
+        self.assertEqual(evaluate_market_theme_shadow(inputs), evaluate_market_theme_shadow(changed))
+
+    def test_missing_or_future_breakout_evidence_remains_partial(self):
+        inputs = shadow_inputs()
+        for evidence in (None, replace(inputs.breakout_evidence, available_at=f"{SHADOW_DAY}T09:00:21+09:00")):
+            with self.subTest(evidence=evidence):
+                result = evaluate_market_theme_shadow(replace(inputs, breakout_evidence=evidence))
+                self.assertEqual("PARTIAL", result["market"]["quality"]["status"])
+                self.assertEqual("UNKNOWN", result["market"]["inferences"]["market_type"])
+                self.assertNotIn("outcomes-r1", result["evidence_refs"])
+
+    def test_stale_market_does_not_reuse_its_old_classification(self):
+        result = evaluate_market_theme_shadow(replace(shadow_inputs(), decision_time=f"{SHADOW_DAY}T09:02:00+09:00"))
+        self.assertEqual("STALE", result["market"]["quality"]["status"])
+        self.assertEqual("UNKNOWN", result["market"]["inferences"]["market_type"])
+
+    def test_missing_member_or_continuity_does_not_establish_a_leader(self):
+        inputs = shadow_inputs()
+        for changed in (replace(inputs, second_points=tuple(p for p in inputs.second_points if p.code == "005930")),
+                        replace(inputs, continuity_status="PARTIAL")):
+            result = evaluate_market_theme_shadow(changed)
+            self.assertEqual("PARTIAL", result["quality"]["status"])
+            self.assertEqual("", result["leadership"]["inferences"]["raw_leader_id"])
+
+    def test_unavailable_membership_and_market_return_explicit_missing(self):
+        inputs = shadow_inputs()
+        result = evaluate_market_theme_shadow(replace(inputs, market_frames=(),
+            theme_membership=replace(inputs.theme_membership, available_at=f"{SHADOW_DAY}T09:00:21+09:00")))
+        self.assertEqual((), result["evidence_refs"])
+        self.assertIsNone(result["next_leadership_state"])
+        self.assertFalse(result["order_authorized"])
+
+    def test_future_state_and_naive_clock_are_rejected(self):
+        inputs = shadow_inputs()
+        state = evaluate_market_theme_shadow(inputs)["next_leadership_state"]
+        from kiwoom_monitor.application.theme_leadership import ThemeLeadershipState
+        with self.assertRaisesRegex(ValueError, "ahead"):
+            evaluate_market_theme_shadow(replace(inputs, previous_leadership_state=ThemeLeadershipState(
+                **{**state, "last_observed_at": f"{SHADOW_DAY}T09:00:21+09:00"})))
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            replace(inputs, decision_time=f"{SHADOW_DAY}T09:00:20")
+
+    def test_upper_limit_and_parameter_changes_have_distinct_evidence_and_identity(self):
+        from kiwoom_monitor.application.theme_leadership import UpperLimitReference
+        inputs = shadow_inputs()
+        limit = UpperLimitReference("limit-r1", "005930", 105, f"{SHADOW_DAY}T09:00:10+09:00")
+        normal = evaluate_market_theme_shadow(inputs)
+        result = evaluate_market_theme_shadow(replace(inputs, upper_limits=(limit,)))
+        self.assertIn("limit-r1", result["evidence_refs"])
+        self.assertEqual("TOUCHED", result["leadership"]["inferences"]["limit_state"])
+        self.assertNotEqual(normal["revision_id"], result["revision_id"])
+        changed = evaluate_market_theme_shadow(inputs, leadership_parameters=replace(SHADOW_PARAMETERS, near_limit_bps=50))
+        self.assertNotEqual(normal["revision_id"], changed["revision_id"])
+
+    def test_unknown_schema_and_fields_are_rejected(self):
+        document = {"schema": SHADOW_CONTEXT_VERSION, "inputs": asdict(shadow_inputs())}
+        with self.assertRaises(ValueError):
+            evaluate_document({**document, "schema": "unknown"})
+        with self.assertRaises(ValueError):
+            evaluate_document({**document, "order_authorized": True})
+
+    def test_repeated_sources_do_not_add_rank_history_or_trade_value(self):
+        inputs = shadow_inputs()
+        repeated = replace(inputs, market_frames=inputs.market_frames * 2, second_points=inputs.second_points * 2)
+        self.assertEqual(evaluate_market_theme_shadow(inputs), evaluate_market_theme_shadow(repeated))
+        warmup = replace(inputs, market_frames=(inputs.market_frames[-1],) * 3)
+        result = evaluate_market_theme_shadow(warmup)
+        self.assertIn("rank_history_warmup", result["market"]["quality"]["reasons"])
+
+    def test_same_immutable_ref_with_conflicting_content_is_rejected(self):
+        inputs = shadow_inputs()
+        for changed in (
+            replace(inputs, market_frames=(*inputs.market_frames, replace(inputs.market_frames[-1], capture_quality="partial"))),
+            replace(inputs, second_points=(*inputs.second_points, replace(inputs.second_points[-1], trade_value_won=9000))),
+        ):
+            with self.assertRaisesRegex(ValueError, "conflicting immutable"):
+                evaluate_market_theme_shadow(changed)
+
+
 if __name__ == "__main__":
     unittest.main()

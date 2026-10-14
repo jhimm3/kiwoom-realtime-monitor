@@ -282,7 +282,7 @@ def verify_persisted_capture(trace, identifier, *, expected_large_calls=0, large
             reference = event.pop('payload_ref', None)
             if reference is not None:
                 root = manifest.get('blobs', {}).get(reference, {})
-                if root.get('format') == 'blocks/v1':
+                if root.get('format') in {'blocks/v1', 'blocks/shared-v1'}:
                     from kiwoom_monitor.central_server.diagnostic_trace_payload import block_reference
                     event['payload'] = block_reference(identifier, reference, root)
                     if event.get('method') == 'save_shadow_monitor_state':

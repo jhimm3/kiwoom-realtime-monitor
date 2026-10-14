@@ -114,6 +114,7 @@ class MockCredentialOwner:
         self._boot_tasks: list[asyncio.Task[None]] = []
         self._start_task = None
         self._closing = False
+        self._position_order_observation_account = None
         self._close_task = None
         self._on_change = on_change or (lambda *_: None)
 
@@ -134,6 +135,22 @@ class MockCredentialOwner:
     def account_bindings(self):
         """Snapshot admitted query contexts; dormant/history accounts stay outside."""
         return tuple(b.binding for b in self._bundles.values() if b.binding is not None and b.account_queries is not None)
+
+    def position_shadow_observation(self, account_ref):
+        """Use an admitted, verified mock owner; never boot or query an account."""
+        if self._closing:
+            return None
+        bundles = [b for b in self._bundles.values() if b.binding is not None
+                   and b.binding.scope.account_ref == account_ref
+                   and b.binding.scope.environment.value == "mock" and not b._closing]
+        if len(bundles) != 1:
+            return None
+        return bundles[0].monitor.latest_position_observation
+
+    def set_position_order_observation_account(self, account_ref):
+        self._position_order_observation_account = account_ref
+        for bundle in self._bundles.values():
+            bundle.set_position_order_observation_account(account_ref)
 
     def has_started_monitor(self) -> bool:
         """Published profiles with a started monitor; not permission to place orders."""
@@ -420,6 +437,7 @@ class MockCredentialOwner:
         self._contexts[profile_id] = bundle  # Retain failed committed transport for explicit recovery.
         try:
             if self._closing: raise RuntimeError("MOCK_OWNER_CLOSED")
+            bundle.set_position_order_observation_account(self._position_order_observation_account)
             if configuration["monitor_enabled"]: await bundle.start()
             latest = await asyncio.to_thread(self.store.load_account_settings, binding.scope.to_dict())
             if self._closing or latest["revision"] != configuration["revision"]:
@@ -460,6 +478,7 @@ class MockCredentialOwner:
                 require_initial_read=True, read_limiter=self._slots)
             try:
                 if plan.previous_monitor_enabled:
+                    restored.set_position_order_observation_account(self._position_order_observation_account)
                     await restored.start()
             except Exception:
                 await restored.close(close_broker=False)
@@ -578,6 +597,7 @@ class MockCredentialOwner:
                 order_transport_enabled=saved["mock_order_enabled"], client=old.client, broker=old.broker,
                 identity=old._identity, binding=old.binding, require_initial_read=True, read_limiter=self._slots)
             self._contexts[profile_id] = new
+            new.set_position_order_observation_account(self._position_order_observation_account)
             if saved["monitor_enabled"]: await new.start()
             latest = await asyncio.to_thread(self.store.load_account_settings, scope)
             if self._closing or latest["revision"] != saved["revision"]:
@@ -679,6 +699,7 @@ class MockCredentialOwner:
                 automation_context=automation_context,
             )
             self._contexts[profile_id] = new
+            new.set_position_order_observation_account(self._position_order_observation_account)
             await new.start()
             latest = await asyncio.to_thread(self.store.load_account_settings, scope)
             if latest["revision"] != expected_settings_revision:
@@ -749,6 +770,7 @@ class MockAccountBundle:
         self._binding = binding
         self._require_initial_read = require_initial_read
         self._closing = False
+        self._position_order_observation_account = None
         self._start_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
         self.client = client if client is not None else KiwoomRestClient(settings)
@@ -794,6 +816,12 @@ class MockAccountBundle:
     @property
     def account_ref(self) -> str:
         return self._account_ref
+
+    def set_position_order_observation_account(self, account_ref):
+        self._position_order_observation_account = account_ref
+        self.monitor.set_account_order_observation_enabled(
+            self._binding is not None and self._binding.scope.environment.value == "mock"
+            and account_ref == self.account_ref)
 
     @property
     def run_id(self) -> str:
@@ -855,6 +883,7 @@ class MockAccountBundle:
             self._identity = identity
         if self._closing:
             return
+        self.set_position_order_observation_account(self._position_order_observation_account)
         if self._require_initial_read:
             await self.monitor.start(initial_read=True)
         else:

@@ -119,6 +119,7 @@ class AutonomousTop20Service:
         catalog_loader: Callable[[], tuple[tuple[str, str, str], ...]] = fetch_krx_stock_catalog,
         outbox_path: Path | None = None,
         minute_backfill_enabled: bool = True,
+        on_membership_changed: Callable[[], None] | None = None,
     ) -> None:
         self._broker = broker
         self._hub = hub
@@ -126,6 +127,7 @@ class AutonomousTop20Service:
         self._now = now_provider or (lambda: datetime.now(KST))
         self._catalog_loader = catalog_loader
         self._minute_backfill_enabled = minute_backfill_enabled
+        self._on_membership_changed = on_membership_changed
         if not minute_backfill_enabled:
             logger.info("NAS TOP20 자동 분봉 백필 비활성화: ka10080 보완 조회를 건너뜁니다.")
         self._outbox = JsonRecordOutbox(outbox_path) if outbox_path is not None else None
@@ -326,6 +328,11 @@ class AutonomousTop20Service:
             "payload": membership,
             "persistence_state": "pending",
         }
+        if self._on_membership_changed is not None:
+            try:
+                self._on_membership_changed()
+            except Exception:
+                logger.exception("validated TOP20 projection notification failed")
         # The validated live projection and its KRX 0B subscription use the
         # same in-memory codes. Neither waits for membership/entrant/index DB
         # writes; the websocket still reports readiness only after REG ACK.

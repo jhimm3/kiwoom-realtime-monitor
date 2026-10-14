@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,11 +46,12 @@ class MockAutomationSupervisorError(RuntimeError):
 class MockAutomationSupervisor:
     """Serialize account mode changes and own one runner per mock account."""
 
-    def __init__(self, store: Any, credential_owner: Any, *, poll_seconds: float = 1.0) -> None:
+    def __init__(self, store: Any, credential_owner: Any, *, poll_seconds: float = 1.0, price_source=None) -> None:
         self._store = store
         self._owner = credential_owner
         self._repository = ForwardEvaluationRepository(store)
         self._poll_seconds = max(0.25, float(poll_seconds))
+        self._price_source = price_source
         self._runners: dict[str, MockAutomationRunner] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._restore_errors: dict[str, str] = {}
@@ -58,6 +60,26 @@ class MockAutomationSupervisor:
         self._close_task: asyncio.Task[None] | None = None
         self._restore_stop = asyncio.Event()
         self._closing = False
+
+    def observe_automation_price(self, symbol, price):
+        if self._closing:
+            return
+        for runner in tuple(self._runners.values()):
+            runner.observe_automation_price(symbol, price)
+
+    def position_shadow_observation(self,observation):
+        """Enrich one borrowed account cut using its current registered owner only."""
+        from dataclasses import fields
+        from kiwoom_monitor.application.position_target import PositionAccountObservation,PositionRunnerAccountObservation
+        if observation is None:return None
+        base=PositionAccountObservation(**{field.name:getattr(observation,field.name) for field in fields(PositionAccountObservation)})
+        runner=self._runners.get(base.account.account_ref)
+        if self._closing or runner is None:return base
+        matches=getattr(getattr(runner._bundle,'monitor',None),'position_observation_matches',None)
+        if not callable(matches) or not matches(base):return base
+        state=runner.position_study_state(base)
+        if self._closing or self._runners.get(base.account.account_ref) is not runner or state is None or not matches(base):return base
+        return PositionRunnerAccountObservation(**{field.name:getattr(base,field.name) for field in fields(PositionAccountObservation)},runner_state=state)
 
     async def start(self) -> None:
         if self._closing:
@@ -179,7 +201,7 @@ class MockAutomationSupervisor:
                     spec_id=spec_id,
                 )
                 runner = MockAutomationRunner(
-                    self._store, bundle, spec, poll_seconds=self._poll_seconds,
+                    self._store, bundle, spec, poll_seconds=self._poll_seconds, price_source=self._price_source,
                 )
                 await runner.start()
             except Exception:
@@ -302,7 +324,7 @@ class MockAutomationSupervisor:
             if account_ref not in self._runners:
                 try:
                     runner = MockAutomationRunner(
-                        self._store, bundle, spec, poll_seconds=self._poll_seconds,
+                        self._store, bundle, spec, poll_seconds=self._poll_seconds, price_source=self._price_source,
                     )
                     await runner.start()
                 except Exception:
@@ -326,6 +348,32 @@ class MockAutomationSupervisor:
             "runner": runner.status if runner is not None else None,
             "restore_error": self._restore_errors.get(account_ref, ""),
         }
+
+    async def publish_native_unfilled_population(self, document):
+        """Existing account lock/runner only; never activate or restore for a packet."""
+        from kiwoom_monitor.application.research_evaluation import unfilled_population_publication_from_dict
+        from .observation_frame_recovery import drain_thread_call
+        document=deepcopy(document)
+        # Pure bounded decoding outside the account control lock. No market/DB read.
+        await drain_thread_call(unfilled_population_publication_from_dict,document)
+        account_ref=document['account_ref']
+        lock=self._locks.setdefault(account_ref,asyncio.Lock())
+        async with lock:
+            if self._closing:raise MockAutomationSupervisorError('MOCK_AUTOMATION_SUPERVISOR_CLOSED',503)
+            bundle=self._require_automatic_bundle(document['credential_profile_id'],account_ref,document['spec_id'])
+            if bundle.automation_context.control_revision!=document['expected_control_revision']:
+                raise MockAutomationSupervisorError('MOCK_AUTOMATION_CONTROL_REVISION_CONFLICT')
+            runner=self._runners.get(account_ref)
+            if runner is None or bundle.run_id!=document['execution_run_id']:
+                raise MockAutomationSupervisorError('MOCK_AUTOMATION_RUNTIME_NOT_ACTIVE')
+            prior=runner.status.get('unfilled_population_source',{})
+            if prior.get('publication_ref')!=document['publication_ref']:
+                control=await drain_thread_call(self._repository.load_mock_automation_control,account_ref)
+                if (control is None or control.desired_state is not MockAutomationDesiredState.RUNNING
+                        or (control.active_spec_id,control.execution_run_id,control.control_revision)!=(
+                            document['spec_id'],document['execution_run_id'],document['expected_control_revision'])):
+                    raise MockAutomationSupervisorError('MOCK_AUTOMATION_CONTROL_REVISION_CONFLICT')
+            return await drain_thread_call(runner.offer_native_unfilled_publication,document)
 
     def _require_automatic_bundle(
         self, credential_profile_id: str, account_ref: str, spec_id: str,

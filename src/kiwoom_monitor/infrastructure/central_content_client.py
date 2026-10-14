@@ -150,6 +150,17 @@ class CentralContentClient:
         })
         return self._request("GET", f"/api/v1/research/candidates?{query}")
 
+    def load_ram_shadow(self, *, include_recorded: bool = False) -> dict[str, Any]:
+        query = urlencode({"include_recorded": "true" if include_recorded else "false"})
+        return self._request("GET", f"/api/v1/research/ram-shadow?{query}", timeout_seconds=10.0)
+
+    def check_ram_shadow_sources(self, *, expected_revision: int, lookback_seconds: int = 20) -> dict[str, Any]:
+        if (type(expected_revision) is not int or expected_revision < 0
+                or type(lookback_seconds) is not int or not 1 <= lookback_seconds <= 60):
+            raise ValueError("source check requires an explicit revision and 1-60 second window")
+        query = urlencode({"expected_revision": expected_revision, "lookback_seconds": lookback_seconds})
+        return self._request("GET", f"/api/v1/research/ram-shadow/source-check?{query}", timeout_seconds=10.0)
+
     def publish_mock_automation_candidate(
         self,
         *,
@@ -214,6 +225,38 @@ class CentralContentClient:
             "GET", f"/api/v1/mock-automation/accounts/{encoded_ref}?{query}",
         )
 
+    def prepare_native_unfilled_population(self, research_database, selections, *, decision_time,
+            horizon_seconds, population_ref, symbol, development_role, account_ref, credential_profile_id,
+            spec_id, execution_run_id, expected_control_revision, root_intent_id, managed_intent_id):
+        """Explicit PC worker read once; retain this packet for any HTTP retry."""
+        from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+        from kiwoom_monitor.application.research_evaluation import (
+            read_unfilled_action_outcomes,prepare_unfilled_population_publication)
+        outcomes,receipt=read_unfilled_action_outcomes(
+            ResearchRepository(research_database,read_only=True).load_position_action_evidence,selections,
+            decision_time=decision_time,horizon_seconds=horizon_seconds,population_ref=population_ref,
+            symbol=symbol,development_role=development_role)
+        return prepare_unfilled_population_publication(outcomes,receipt,account_ref=account_ref,
+            credential_profile_id=credential_profile_id,spec_id=spec_id,execution_run_id=execution_run_id,
+            expected_control_revision=expected_control_revision,root_intent_id=root_intent_id,managed_intent_id=managed_intent_id)
+
+    def publish_native_unfilled_population(self, document):
+        """Send a prepared bounded packet; no SQLite read or timestamp renewal."""
+        from kiwoom_monitor.application.research_evaluation import unfilled_population_publication_from_dict
+        unfilled_population_publication_from_dict(document)
+        return self._request('POST','/api/v1/mock-automation/unfilled-population',document)
+
+    def prepare_dynamic_allocation_models(self, selection_document, rows, *, expected_selection_revision,position_studies=None):
+        """Freeze prepared readonly receipts; no new source read or account change."""
+        from kiwoom_monitor.central_server.market_theme_shadow_inputs import prepare_dynamic_allocation_model_publication
+        kwargs={'position_studies':position_studies} if position_studies is not None else {}
+        return prepare_dynamic_allocation_model_publication(selection_document,rows,
+            expected_selection_revision=expected_selection_revision,**kwargs)
+
+    def publish_dynamic_allocation_models(self, document):
+        """Existing authenticated transport sends the fixed packet without renewal."""
+        return self._request('POST','/api/v1/research/ram-shadow/allocation-models',document)
+
     def start_mock_automation(
         self,
         *,
@@ -276,14 +319,16 @@ class CentralContentClient:
             raise RuntimeError("중앙 서버 capability 응답 형식이 올바르지 않습니다.")
         return {str(key): bool(value) for key, value in values.items()}
 
-    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None,
+                 *, timeout_seconds: float | None = None) -> dict[str, Any]:
         request = Request(
             f"{self._server_url}{path}", method=method,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None,
             headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json;charset=UTF-8"},
         )
         try:
-            with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
+            with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds,
+                              context=system_ssl_context()) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
             detail = ""

@@ -1,4 +1,4 @@
-"""Account/VI capture -> sealed v3 -> native PostgreSQL replay on a fresh job DB.
+"""Account/VI/clock v4 context -> sealed v3 -> PostgreSQL on a fresh job DB.
 
 Only the operator's disposable cluster is accepted. These are controlled inputs,
 not reconstructed October 8 account/VI data or an operational database snapshot.
@@ -93,12 +93,29 @@ class RecordedAccountPostgresTests(unittest.TestCase):
             self.assertTrue(store.save_execution_account_snapshot(dict(prior_snapshot,
                 snapshot_id='offline-prior-' + str(index), account_ref='offline-ledger-' + str(index))))
         store.save_real_account_recovery(binding, recovery, now, settings_revision=2)
+        # v4 must carry the pre-capture clock, including a stop and an unresolved
+        # intent. Capturing its later writes alone cannot reconstruct this state.
+        from tests.unit.test_diagnostic_display_capture import clock_document
+        clock_initial = dict(clock_document(), account_ref=ref)
+        clock_collection = context.CLOCK_COLLECTION
+        store.upsert_documents(clock_collection, [
+            {'owner': ref, 'key': 'current', 'document': clock_initial}])
+        clock_changed = dict(clock_initial,
+            cancel_attempted_intent_ids=['already-cancelled', 'next-cancel'])
         with baseline.ReplayDatabaseLease(url, token) as lease:
             with lease.connection.transaction(), lease.connection.cursor() as cursor:
                 cursor.execute('ALTER SEQUENCE public.central_execution_events_accepted_sequence_seq RESTART WITH 13')
         large_document = {'frames': [{'symbol': '005930', 'value': '가' * 3000} for _ in range(950)]}
         self.assertGreater(len(json.dumps(large_document, ensure_ascii=False).encode()), 8 * 1024**2)
         with deferred_capture(account_inputs=True, large_inputs=True, account_context_store=store) as (identifier, _):
+            with capture_owner('account', 'clock:fixture', 'clock-actor'):
+                self.assertEqual(clock_initial, store.load_documents(clock_collection, ref, 1)[0]['document'])
+                store.upsert_documents(clock_collection, [
+                    {'owner': ref, 'key': 'current', 'document': clock_changed}])
+                clock_after_write = store.load_documents(clock_collection, ref, 1)
+                store.upsert_documents(clock_collection, [
+                    {'owner': ref, 'key': 'current', 'document': clock_changed}])
+                self.assertEqual(clock_after_write, store.load_documents(clock_collection, ref, 1))
             with capture_owner('account', 'account:fixture', 'account-actor'), source_execution_owner('mock:' + ref, run):
                 store.save_real_account_recovery(binding, recovery, now, settings_revision=2)
                 with self.assertRaisesRegex(ValueError, 'ACCOUNT_CONTEXT_MISMATCH'):
@@ -131,6 +148,11 @@ class RecordedAccountPostgresTests(unittest.TestCase):
             self.assertEqual(large_document, store.load_shadow_monitor_state('large-monitor'))
             self.assertEqual((0, 0), (final['input_rejected'], final['known_dropped']))
             capsule = context.read_recorded_account_context(identifier)
+            self.assertEqual('account-context/v4', capsule['version'])
+            clock_seed = [row for row in capsule['tables']['central_documents']
+                          if row['collection'] == clock_collection]
+            self.assertEqual(1, len(clock_seed))
+            self.assertEqual(clock_initial, clock_seed[0]['document_json'])
             self.assertEqual(13, capsule['execution_event_next_sequence'])
             self.assertEqual(1, len(capsule['tables']['central_execution_intents']))
             self.assertEqual(1, len(capsule['tables']['central_execution_events']))
@@ -194,6 +216,11 @@ class RecordedAccountPostgresTests(unittest.TestCase):
         results = []
         original_comparison = collect_final_content_comparison
         def check_native_large_content(cursor, **options):
+            cursor.execute('SELECT document_json FROM public.central_documents '
+                           'WHERE collection=%s AND owner=%s AND document_key=%s',
+                           (clock_collection, ref, 'current'))
+            # Assert full content, not just row counts or a matching method outcome.
+            self.assertEqual(clock_changed, cursor.fetchone()[0])
             cursor.execute("SELECT document_json FROM public.central_shadow_monitor_state WHERE monitor_id='large-monitor'")
             self.assertEqual(large_document, cursor.fetchone()[0])
             cursor.execute("SELECT accepted_sequence FROM public.central_execution_events WHERE event_id='prior-followup'")
@@ -210,8 +237,18 @@ class RecordedAccountPostgresTests(unittest.TestCase):
             observed = result['db_calls']
             identifiers = {value['replay_operation_id'] for value in result['calls']}
             native_calls = [value for value in observed['calls'] if value.get('input_operation_id') in identifiers]
-            self.assertEqual(17, len(native_calls))
-            self.assertEqual(14, sum(value['commits'] for value in native_calls))
+            self.assertEqual(22, len(native_calls))
+            self.assertEqual(19, sum(value['commits'] for value in native_calls))
+            clock_calls = [row for row in result['calls']
+                           if row['method'] in {'load_documents', 'upsert_documents'}]
+            self.assertEqual(['load_documents', 'upsert_documents', 'load_documents',
+                              'upsert_documents', 'load_documents'],
+                             [row['method'] for row in clock_calls])
+            self.assertEqual(clock_calls[2]['result_digest'], clock_calls[4]['result_digest'])
+            clock_ids = {row['replay_operation_id'] for row in clock_calls}
+            clock_native = [row for row in native_calls if row['input_operation_id'] in clock_ids]
+            self.assertEqual(5, len(clock_native))
+            self.assertTrue(all((row['commits'], row['rollbacks']) == (1, 0) for row in clock_native))
             shadow_ids = {row['replay_operation_id'] for row in result['calls'] if row['method'] == 'save_shadow_monitor_state'}
             shadow_calls = [row for row in native_calls if row['input_operation_id'] in shadow_ids]
             self.assertEqual(1, len(shadow_calls))
@@ -223,7 +260,7 @@ class RecordedAccountPostgresTests(unittest.TestCase):
             self.assertEqual([], result['unobserved_replay_operations'])
             self.assertEqual('complete', result['state'], result['calls'])
             self.assertTrue(result['source_outcomes_match'])
-            self.assertEqual(17, len(result['calls']))
+            self.assertEqual(22, len(result['calls']))
             self.assertEqual(3, sum(row.get('expected_failure_matched', False) for row in result['calls']))
             self.assertTrue(result['cleanup']['baseline_restored'])
             self.assertEqual(2, result['final_tables']['central_execution_intents']['rows'])
@@ -249,10 +286,17 @@ class RecordedAccountPostgresTests(unittest.TestCase):
             with lease.connection.cursor() as cursor:
                 self.assertEqual(sealed['manifest']['tables'], lease._tables_digest(cursor, 'public'))
                 self.assertEqual(sealed['manifest']['sequences'], lease._sequences(cursor))
+                cursor.execute('SELECT document_json FROM public.central_documents '
+                               'WHERE collection=%s AND owner=%s AND document_key=%s',
+                               (clock_collection, ref, 'current'))
+                self.assertEqual(clock_initial, cursor.fetchone()[0])
         # Machine-readable evidence contains no source/test authority tokens.
         print(json.dumps({'account_vi_native_gate': {
-            'operations_per_replay': 17, 'replay_runs': 2, 'matched_native_failures_per_run': 3,
-            'commits_per_replay': 14, 'rollbacks_per_replay': 3, 'source_document_content_matches': True,
+            'operations_per_replay': 22, 'replay_runs': 2, 'matched_native_failures_per_run': 3,
+            'commits_per_replay': 19, 'rollbacks_per_replay': 3, 'source_document_content_matches': True,
+            'clock_v4_initial_stop_pending_and_cancel_history_preserved': True,
+            'clock_retry_keeps_document_timestamp': True,
+            'clock_native_operations_per_replay': 5,
             'preexisting_ledger_and_sequence_gap_preserved': True,
             'final_ledger_content_and_sequence_match_source': True,
             'large_input_blocks_one_native_call_one_commit': True,

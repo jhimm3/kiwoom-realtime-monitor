@@ -9,6 +9,8 @@
 | 실행 소스·배포 release·검증 결과 | [현재 상태](CURRENT_STATUS.md) |
 | 미완료·운영 확인·사용자 보류 | [남은 작업](OPEN_ITEMS.md) |
 | 제품 방향과 개발 순서 | [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md) |
+| 전체 목표 설계·재조립/신규 개발 비교 | [AI Trading Intelligence 전체 설계](AI_TRADING_SYSTEM_REDESIGN.md) — 선택을 위한 설계안, 현재 구현과 구분 |
+| 원래 종합 명세와 현재 개발 방향 대조 | [2026-10-14 종합 명세 대조 감사](AI_TRADING_INTEGRATION_ALIGNMENT_AUDIT_20261014.md) — 정책별 자료·가격·모델 지원·순자산·비상정지와 미완료 범위 |
 | 시스템 책임과 수정 진입점 | [현재 아키텍처](../ARCHITECTURE_CURRENT.md) · [모듈 지도](../MODULE_MAP.md) |
 | 작업 규칙 | 정본 [AGENTS](../AGENTS.md) · [개발 불변 규칙](../DEVELOPMENT_GUARDRAILS.md) · [모델 정책 요약](MODEL_HANDOFF_POLICY.md): GPT-6.1 Sol 기본, Luna는 네 조건을 모두 만족하는 저위험 작업만 허용, 실질적인 상위 판단에 Astra, Sol High 유지 선호 |
 

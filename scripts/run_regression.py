@@ -9,6 +9,7 @@ import importlib.metadata
 import platform
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -784,10 +785,6 @@ def _run_process(
     environment["PYTHONPATH"] = os.pathsep.join(pythonpath)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment["PYTHONUTF8"] = "1"
-    environment["TEMP"] = str(result_path.parent / "temp")
-    environment["TMP"] = environment["TEMP"]
-    environment["TMPDIR"] = environment["TEMP"]
-    Path(environment["TEMP"]).mkdir(parents=True, exist_ok=True)
 
     command = [sys.executable, "-u", str(Path(__file__).resolve()), "--_worker",
                "--_result-path", str(result_path), "--_modules", *modules]
@@ -803,9 +800,26 @@ def _run_process(
     leaked_descendants = False
     process_count = 0
     execution_error = None
+    temporary_directory = None
+    temporary_state = "not_created"
     try:
         if result_path.exists():
             raise FileExistsError(f"Refusing to reuse a worker result: {result_path}")
+        # Workspace observers briefly open new children. On Windows even a
+        # FILE_SHARE_DELETE reader pins the containing directory against rename.
+        # Keep fixture I/O outside the observed checkout; logs remain in --output.
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if not local_appdata or not Path(local_appdata).is_absolute():
+            raise ValueError("LOCALAPPDATA must identify an absolute Windows user directory")
+        temporary_root = (Path(local_appdata) / "Temp" / "kiwoom-regression").resolve()
+        if temporary_root.is_relative_to(ROOT.resolve()):
+            raise ValueError("Regression fixture temp must be outside the observed checkout")
+        temporary_directory = temporary_root / uuid.uuid4().hex
+        temporary_directory.mkdir(parents=True, exist_ok=False)
+        temporary_state = "retained"
+        environment["TEMP"] = str(temporary_directory)
+        environment["TMP"] = environment["TEMP"]
+        environment["TMPDIR"] = environment["TEMP"]
         job = _WindowsJob()
         with log_path.open("wb") as log:
             process = job.start(command, environment, log)
@@ -886,6 +900,16 @@ def _run_process(
     else:
         status = "passed"
 
+    if status == "passed" and temporary_directory is not None:
+        try:
+            if temporary_directory.is_symlink() or temporary_directory.resolve().parent != temporary_root:
+                raise ValueError("Regression fixture cleanup escaped its owned temp root")
+            shutil.rmtree(temporary_directory)
+            temporary_state = "removed"
+        except (OSError, ValueError) as error:
+            status = "failed"
+            execution_error = f"Fixture cleanup {type(error).__name__}: {error}"
+
     return {
         "status": status, "started_at": started_at, "finished_at": _utc_now(),
         "duration_seconds": time.monotonic() - started_clock,
@@ -896,6 +920,8 @@ def _run_process(
         "process_exit_evidence": getattr(job, "exit_evidence", []),
         "leaked_descendants": leaked_descendants, "execution_error": execution_error,
         "exit_code": exit_code,
+        "temporary_directory": str(temporary_directory) if temporary_directory else None,
+        "temporary_state": temporary_state,
         "log": str(log_path), "result": str(result_path), "result_error": result_error,
         "test_count": worker_result.get("test_count", 0) if worker_result else 0,
         "planned_test_count": worker_result.get("planned_test_count", 0) if worker_result else 0,

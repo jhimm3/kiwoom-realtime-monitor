@@ -128,7 +128,8 @@ class DeliveryRecordTests(unittest.TestCase):
             for stage in stages:
                 trace.emit_delivery(token, receipt, stage,
                     **({'outcome': 'failed'} if stage == 'consume_end' else {}))
-            with patch.object(trace, '_MAX_CHUNK_BYTES', 1100), patch.object(trace.time, 'sleep'):
+            with patch.object(trace, '_MAX_CHUNK_BYTES', 1100), \
+                    patch.object(trace, '_MAX_DEFERRED_CHUNK_BYTES', 1100), patch.object(trace.time, 'sleep'):
                 status = persist()
             self.assertGreater(len(status['chunks']), 1)
             rows = [json.loads(line) for chunk in status['chunks']

@@ -1,6 +1,63 @@
 # PC 완성 과거뉴스 DB 배치 검토
 
-> **현재 이관 판단(2026-10-13): v2 로컬 구현·관련 검사 완료, 전체 게시 준비는 미완료.** 두 scope·다중 target·원본/요청 실패 기록·봉인·읽기 API·중단 복사 재개의 구현과 작은 DB 검사를 마쳤다. 고정 준비본 생성에 착수했으며 최신 NAS seed 추출을 보완 중이다. 전체 archive 생성, NAS 파일 복사와 서버 활성화는 실행하지 않았다. [현재 실행 상태](#v2-구현과-실행-상태-2026-10-13)를 정본으로 보고 9월 기록은 당시 범위로 읽는다.
+> **현재 이관 판단(2026-10-14): 두 scope의 원자료 캡처 완료, source coverage에서 중단.** 약 117.8GB의 로컬 building DB에 캡처를 마쳤지만 준비 입력 누락·실패 검사가 막고 있다. 별도 PC 보강 준비가 진행 중이며, 아래의 입력 보강·세대 전환 결정은 **설계 확정 / 구현·실자료 적용 전**이다. 기사 최종화·event·projection·전체 감사·봉인·NAS 복사·활성화는 미완료다. 아래 10월 13일 및 9월 기록은 당시 범위로 읽는다.
+
+## 2026-10-14 입력 보강과 construction generation 전환 결정
+
+GPT-6 Astra High의 설계 판단이다. 현재 구현 완료를 뜻하지 않는다. 작업 폴더는 `data/historical_collection/archive-v2-20261013/`이며 근거는 `coverage-integration-handoff.json`, `coverage-missing-population-report.json`, `eligible-missing-reconciliation-report.json`, `coverage-failure-evidence-report.json`이다.
+
+Sol 후속 구현(2026-10-14): 입력 component·별도 준비본 재시도 복구의 hash 체인·원자료 근거를 가진 제외·본문/요약 부재 실패의 개별 review·원자 세대 전환/복구를 로컬 코드에 연결했다. 원본 실패 기록과 component별 원래 membership은 유지하며 현재 유효 binding만 바뀐다. 작은 SQLite fixture의 전체 감사·봉인·기존 readonly reader 수용을 확인했다. 실제 117.8GB DB의 전환 적용과 전체 게시는 아직 하지 않았다. 보강 준비 239,729키 중 오프라인 성공 239,644키/실패 85키이며, 사용자가 요청한 85키 단발 재접속에서 81키를 복구하고 4키의 추출 실패를 별도 로그에 남겼다. 원본/아카이브 파일은 이 재접속에서 변경하지 않았다.
+
+실자료 재개 상태(2026-10-14): 관련 SQLite/입력 전환/제외 index/제어/감사/봉인/readonly reader **36개 검사 통과**. 기존 HTTP TestClient 1개 검사는 이 환경에서 응답 대기가 지속되어 해당 검사 프로세스만 종료했고 이번 통과 범위에서 제외했다. 별도 생성 코드는 `code-v5-input-components`에 동결했으며 construction digest는 `0c174fa4cec2f402fa0ce6a89f7b4968460a982baf9c71f56ced079f3e9841de`다. 실제 원본에 없는 자료가 없는지 준비 사본 전체 9,499,721행과 scope 변환을 대조하고, 이전 building 파일의 복제 SHA/입력 등록/캡처 계보를 검증했다. 사용자는 불필요한 NAS 백업을 취소했으며 검증된 중간 사본 3개와 중단된 복사 파일·잔여 journal만 정리해 **110,763,144,192바이트**를 확보했다. 원본 DB·seed·현재 117.8GB 아카이브·코드와 증거 원장은 보존했고 NAS 백업은 만들지 않았다. PC 생성기를 숨김 창에서 재개하여 입력 세대 전환의 부모 보호 검사를 시작했다. 적용 완료·전체 감사·봉인·NAS 게시를 뜻하지 않으며 최신 단계는 작업 폴더 `run-state.json`을 따른다. 근거: `intermediate-cleanup-verification.json`, `intermediate-cleanup-actions.json`, `input-generation-test-report.json`, `input-generation-runner-receipt.json`. 생성기는 로컬 봉인까지만 진행하며 NAS 파일 복사/활성화는 실행하지 않는다.
+
+### 확인된 경계와 선택
+
+- 기존 `prepared_historical_archive_v2.py::_building`은 코드 digest 변경을 거절한다. `stage`와 `finalize_inputs`는 scope당 하나의 고정 파일·SHA·행 수를 계약으로 삼는다. `finish_coverage`와 `audit`은 모든 raw key를 그 입력 hash에 연결한다. 현재 차단은 이 계약에 없는 추가 입력과 이미 제외된 raw key에서 발생한다.
+- 누락 4,416,207키 중 4,176,478키는 원자료에 이미 `training_eligible=0`과 제외 사유가 있다. 나머지 239,729키만 보강 입력이다. 전자의 원자료와 실패 증거를 지우거나 후자의 준비를 생략하지 않는다.
+- 기존 실패 2,421키 중 DB 잠금 16키는 별도 준비 DB에서 복구했다. 나머지 2,405키와 보강 중 새로 발견되는 실패는 개별 근거 검토 대상이다. 제목만으로 본문을 만들거나 성공으로 변경하지 않는다.
+- **기존 물리 파일을 재사용하는 명시적 새 construction generation + 불변 입력 component + 키별 보강/복구/제외 원장**을 채택한다. 전체 117.8GB 복사나 완료된 raw 재캡처를 기본 절차로 요구하지 않는다. 파일 전체 복제가 없으므로 이전 파일의 바이트 단위 복원이나 디스크 손상 복구까지 보장한다고 말하지 않는다. 원본 raw/prepared/seed는 계속 보존한다.
+- 기존 public archive schema/projection v2와 NAS 읽기 계약은 유지한다. 새 `construction_contract`와 coverage 증거 버전은 별도 명시한다. 기존 검사 함수에서 단순히 digest나 count를 바꿔 통과시키지 않는다. 엄격한 명시적 전환 진입점만 구세대 digest를 받아들이며, 일반 writer는 계속 현재 세대 digest만 허용한다.
+
+### 입력 소유권과 개수 계약
+
+1. 두 기존 `archive_sources_v2` 행과 원본 SHA·expected/staged count·scope alias는 base component의 사실로 유지한다. scope 전체 유효 입력 수를 맞추기 위해 원본 행 수를 늘리지 않는다.
+2. 새로운 component 원장은 `component_id`, 종류(base/supplement/repair), scope, 파일 SHA, 스키마/alias, expected/staged count, 키 집합 digest, 준비 코드·규칙 버전과 완료 상태를 보유한다. 보강 DB는 작업 종료·standalone SQLite 전환·무결성·전체 SHA 확인 후에만 등록한다. 실행 중 WAL의 파일은 등록하지 않는다.
+3. base key는 기존 출처를 암묵적으로 사용한다. 새 239,729키와 복구 16키에만 희소 binding을 추가한다. binding은 component, 새 input_hash, 기존 key/hash/state(복구만), 근거 digest를 가진다. 같은 키의 우선순위를 단순한 '나중 파일 승리'로 결정하지 않는다. 보강은 base와 겹치면 거절, 복구는 승인된 기존 실패의 정확한 이전 hash와 일치할 때만 허용한다. 같은 값 재실행만 idempotent로 허용한다.
+4. 최종화에 쓰는 `archive_input_progress`는 유효 입력 작업 원장이다. 보강 키는 추가하고, 복구 16키는 이전 행 전체를 보존한 뒤 정확히 해당 행만 새 ready/pending/hash로 전환한다. `archive_failures_v2`의 원래 오류/입력 JSON은 지우지 않는다. 원본과 유효 입력을 연결하는 repair 이력을 감사한다.
+5. 유효 입력은 키 집합 기준 `base ∪ supplement`, repair는 교체이므로 건수 증가 0이다. component별 원본 행 수, 원본 key membership, 유효 key/hash, 중복/누락을 각각 검사한다. 총합만 같다는 이유로 통과시키지 않는다. market alias·기존 WORLD 제외와 중복 URL 때문에 raw 전체 건수와 prepared 전체 건수가 항상 같다고 가정하지 않는다.
+6. finalizer는 기존 scope 순서 및 `(stock_code, identity)` 정렬을 유지하며 유효 pending key를 선택하고 binding으로 검증된 source connection을 결정한다. component 파일별로 순서대로 최종화해 revision/event 순서를 바꾸지 않는다. 기존 `_complete_one`과 BODY/RULE/target 검증을 재사용한다. `_complete_one`에 넘기는 읽기 connection에도 기존 alias 정규화와 정확한 row/hash가 적용돼야 한다.
+
+### coverage와 제외·실패의 의미
+
+- 기존 `archive_source_history_v2` payload/hash와 `archive_source_coverage_v2`의 원래 metadata/hash를 그대로 둔다. 새 유효 binding으로 오래된 coverage hash와 새 입력 hash의 관계를 설명한다. 과거 캡처가 새 입력을 사용했던 것처럼 덮어쓰지 않는다.
+- raw key마다 정확히 하나의 결과를 요구한다: **유효 준비 입력 연결** 또는 **검증된 기존 제외 증거**. 둘 다 없거나 서로 충돌하면 차단한다. 기존 prepared 키에 대한 WORLD 제외는 기존 정책으로 별도 검증한다. 새로운 제외 원장은 준비 결과나 가짜 prepared hash로 계산하지 않는다.
+- 기존 제외 4,176,478키에는 `(scope, stock_code, identity)`, 캡처 metadata digest, 원자료 위치/행 식별자 또는 보존 evidence key와 payload digest, 당시 `training_eligible`, status/reason, 적용 정책 버전, generation을 기록한다. 설명 없는 `training_eligible=0`만으로 허용하지 않는다. 이번 전수 조사에서 확인한 status/reason 조합만 판정표에 넣고, 그 조합의 실제 원자료와 일치하는지 다시 검증한다. 새 key·새 사유·빈 사유는 차단한다.
+- 제외 원장은 제목·URL·요약·원문 접근 기록을 삭제하지 않는다. 검색/학습에 사용 가능한 기사 수, summary-only, fulltext, 수집 제외, 해결되지 않은 실패를 따로 보고한다. coverage complete는 '모든 기사 본문 확보'를 뜻하지 않는다.
+- 미복구 실패는 정확한 prepared input_hash와 원본 오류, raw/seed/cache 근거를 가진 개별 review로 설명한다. 제목만 있는 2,402건은 본문/요약 부재를 유지한다. 시황 identity 오류 3건은 일반 URL 불일치로 일괄 승인하지 말고 필수 필드·원자료 연결을 확인한다. 보강 실패도 원인별로 확인한다. 운영 오류나 사용 가능한 본문/요약이 남은 건은 복구 없이 제외할 수 없다.
+- 사용자의 수집 불가 자료 제외 지시는 입증된 수집 불가 범위에만 적용한다. 이전 `archive_failure_review_v2.reason`의 비어 있지 않음만으로 새 정책을 통과시키지 않는다. 기계 검증 가능한 evidence hash·정확한 reason class·정책 버전을 요구한다. 미검토 실패가 남으면 archive는 계속 blocked다.
+- seed BODY 재사용은 seed SHA·원본 article/BODY ID·내용 hash·실제 fetched_at·extractor version으로 증명한다. 현재 재처리 시각을 기사 관측/원문 획득 시각으로 만들지 않는다. seed 재사용을 raw snapshot으로 검증된 것처럼 표시하지 않는다. summary-only를 fulltext로 승격하지 않는다.
+
+### 전환·중단·복구 절차
+
+1. 구현과 실패 주입 검사를 작은 독립 SQLite fixture에서 먼저 완료한다. 새 코드 세대를 별도 디렉터리에 동결한다. `code-v4-rowid-range`는 수정하지 않는다. 관련 생성·검사·전환 코드와 정책 파일을 새 code digest에 포함한다.
+2. 한 writer의 OS lock을 잡고 대상 파일·현재 dataset/digest·building 상태를 검사한다. 두 raw capture와 base staging이 complete이며 입력 최종화/targets/context/events/projection이 아직 시작되지 않았음을 DB로 입증한다. seed 기존 행 이외에 파생 결과가 발견되면 이 전환을 거절한다. 사전 확인과 변경 사이에도 같은 잠금을 유지한다.
+3. parent report/manifest와 변경 대상의 before-image, 입력 등록/코드 digest, 스키마와 보호 대상 키/count/hash roots를 DB 내부와 원자적으로 작성한 외부 전환 receipt로 보존한다. payload가 이미 가진 SHA를 root로 묶는 것과 실제 payload를 재해시하는 것을 구분한다. 최종 감사에서는 payload 자체까지 검증한다. parent 원자료/seed/기존 base 입력의 보호 집합을 명시한다.
+4. 짧은 원자 transaction에서 새 generation ID, parent 연결, `adopting` 상태와 전환 원장을 만든다. 이 상태에서는 최종화·봉인·게시가 모두 거절된다. 오래된 writer도 상태/digest 불일치로 거절되어야 한다. digest만 바꾸는 임의 SQL이나 이전 runner 재실행은 금지한다.
+5. component 검증·새 key staging·16건 복구·제외/review 원장 생성은 제한된 batch와 durable cursor로 수행한다. 변경 행, before-image/전환 소유권, cursor를 같은 transaction에 commit한다. 재개는 receipt/state/digest/source identity가 모두 일치할 때만 허용하며 파일 존재나 PID만으로 성공을 추정하지 않는다. DDL도 암묵 commit 없는 명시 transaction으로 검증한다.
+6. 항목별 집합·hash·원자료 연결과 coverage를 검증한 뒤 전환 완료를 원자적으로 기록한다. 그 후 기존 BODY/RULE/targets → events → projection → 전체 audit → seal 순서를 진행한다. 새 generation ID는 parent와 달라야 하며 이전 receipt를 새 결과의 증명으로 재사용하지 않는다.
+7. **첫 입력 최종화 전까지만** 전환 rollback을 지원한다. 그 전에는 전환 소유의 추가 progress/원장만 제거하고 정확한 before-image와 parent manifests를 복구한다. 원본 raw/seed/core/base rows는 손대지 않는다. 이후에는 정상적인 batch rollback/resume을 사용하고, 파생 행이 생긴 DB의 manifest만 parent로 되돌리는 rollback은 거절한다. 전환 receipt 복원은 의미상 복원이며 동일 파일 SHA 복원은 아니다.
+8. 공간은 현재 실측 여유와 보강·원장·최종화·WAL·인덱스의 예상 증가량을 함께 계산한다. 기존 2GiB 중단 조건은 비상 하한일 뿐 충분한 작업 공간 증명이 아니다. 구 DB/원본 삭제로 자동 확보하지 않는다. checkpoint/commit 경계에서 부족하면 재개 가능한 상태로 멈춘다.
+
+### Sol 구현·검증 범위
+
+- 기존 archive 도구 책임 안에 component/전환 진입점과 공통 유효 입력·coverage 판정을 둔다. `finish_coverage`, full audit, seal이 같은 판정 계약을 사용하게 하고 범용 import framework는 만들지 않는다. NAS writer/운영 스키마나 BODY/RULE queue를 추가하지 않는다.
+- 테스트: base-only 호환, disjoint supplement, exact failed-key repair와 original failure 보존, 중복/잘못된 이전 hash/다른 scope 차단, unknown exclusion 차단, seed BODY provenance, summary/fulltext 구분, alias/WORLD 정책, component별 count와 집합 차이, 입력·코드·근거 변조 차단.
+- transaction 테스트: 각 전환 commit 전후 종료, 동일 작업 재실행, competing writer, DDL/DML 실패, cursor 동시 rollback, 첫 최종화 이전 정확한 복구, 이후 parent rollback 거절. finalizer는 base/보강 혼합 키의 정렬·revision chain·accepted_sequence·target/event 관계가 기존 의미를 유지하는지 확인한다.
+- 데이터 보존 테스트: parent의 seed IDs/값/role/sequence, raw history payload/키/count, 실패 증거, base source SHA/count가 변하지 않아야 한다. 부정 fixture를 넣어 검사가 실제 실패하는지도 확인한다.
+- 신규 단계 계측은 기존 PC runner 상태/진단 제어 경계에 등록한다. phase·시도/commit 행 수·cursor·단계 시간·오류·재시도·공간을 기록하며 네트워크/NAS 처리 없음이 확인 가능해야 한다. 별도 무관리 worker나 운영 NAS master를 켜지 않는다. 전환 pause는 commit 경계, 재개는 동일 generation 검증으로 제한한다.
+- 최종 산출물은 기존 NAS readonly reader로 독립 fixture 수용 검사를 한다. public v2 스키마를 유지해도 새 construction 증거를 실제 full audit/봉인 receipt에 포함해야 한다. 전체 실자료 audit·봉인·파일 복사·해시 검증·reader 검증·활성화는 각각 별도 완료 조건이다.
+
+**판단 완료:** 기존 117.8GB를 보존한 제한적 세대 전환 방식으로 Sol 구현을 진행한다. 여기서부터는 GPT-6.1 Sol High가 구현·테스트를 담당한다. 독립 테스트와 실자료 사전 검사 없이 현재 archive를 재개하거나 NAS에 복사하지 않는다.
 
 > 문서 역할 정리(2026-10-11): 현행 archive의 출처·ID·봉인·조회·기존 자료 보존 계약을 유지한다. 코드에는 `historical_news_archive.py`, `historical_news_archive_routes.py`, `historical_news_archive_dialog.py` 연결이 있다. 아래 단계별 ‘클라이언트 미연결’ 등은 작성 당시 상태로 읽는다. 전체 실자료 봉인/게시/검증 완료 여부는 [현재 상태](CURRENT_STATUS.md)와 [OPEN_ITEMS](OPEN_ITEMS.md)를 따르며 이번에 새로 확인하지 않았다.
 
@@ -308,3 +365,289 @@ NAS 파일 복사는 `publish_historical_archive_file.py`로 새 `historical-new
 운영 seed 재추출 완료: 전용 PG 2건(2.037초) 통과 후 repeatable-read snapshot `2026-10-12 16:42:14.005301+00`, owned 기사 55,053개/support 13,670개/총 311,488행/732,139,520바이트를 확보했다. NAS와 PC의 SHA-256 `dc58ccee8c0c289b5374fd147427caf0cd424bbf53b9b8870cc21366c3d8beca` 및 PC full integrity `ok`를 확인했다. [추출/복사 근거](../data/historical_collection/archive-v2-20261013/seed-copy.json)는 완성 뉴스 파일이 아니라 기존 ID 보존 입력이다. 과거 BODY/RULE job 84,000행도 당시 상태 근거로 보존하며 실행하지 않는다.
 
 부모 저장 함수·DB schema·staging/hash·seed/목록 helper까지 construction digest에 포함했다. 다른 채팅의 작업본 수정과 긴 생성 작업을 분리하기 위해 실제 실행에 필요한 src/scripts 536파일(8,331,864바이트)을 PC 세대 안에 고정했다. source HEAD는 main `941347e`, dirty 작업본이며 [파일별 hash](../data/historical_collection/archive-v2-20261013/code/code-files.json)와 construction digest `58cc80ab29d0569721f43c7435130d3d184c4b8c820c513775a2518d7a916a1d`를 기록했다. 실행 import 경로도 이 세대 안임을 확인했다. 이 고정본으로 PG seed의 SQLite 물질화를 시작했고 검색 준비본 27.16GB의 복사 뒤 무결성 검사는 진행 중이다. 최신 진도 시험의 연결 정리를 명시한 최종 로컬 27건은 26.483초에 통과했다. 완성 전체 archive/봉인/실자료 NAS 읽기 검증은 남아 있다.
+
+### 원본 캡처 조회 계획 보완 (2026-10-13)
+
+실제 raw DB의 `source_pages` batch 조회가 `(provider, request_key, ...)` UNIQUE 인덱스를 선택하고 `ORDER BY rowid`를 임시 B-tree로 정렬했다. 작은 batch마다 넓은 provider 범위를 다시 읽는 것이 확인됐다. 기존 `rowid > last AND rowid <= cutoff`, provider 필터, 정렬, LIMIT를 그대로 두고 `NOT INDEXED`로 rowid 범위 조회를 유지한다. 같은 실제 80행의 반환 내용과 hash가 일치했고, 단일 조회 시간은 3.2507초에서 0.0157초로 줄었다. 이는 조회 부분의 유한 표본이며 전체 빌드 처리율이나 NAS 성능 보장이 아니다. 회귀는 실제 실행 SQL의 query plan에 rowid 범위가 있고 임시 정렬이 없는지, provider가 섞인 입력·여러 batch·원본 byte 불변·재개가 보존되는지 검사한다.
+
+기존 construction digest 검사를 무시하거나 고정된 v3 코드를 덮어쓰지 않는다. target 최종화·사건/projection 시작 전의 v3 building 결과를 새 `historical-news-20261013-v4-rowid-range` 세대로 복사해 재사용한다. 부모의 OS builder 잠금 안에서 이미 COMMIT된 WAL을 정상 checkpoint하고 전체 파일 byte/SHA 및 완료 위치 일치를 확인한다. 새 복사본에만 dataset/digest와 `capture_sql_generation_fork_v1` 계보를 기록한다. 새 고정 코드는 원본 범위 SELECT 한 줄만 다르며 다른 파일은 byte로 대조한다. 부모 building DB는 복구용으로 보존하므로 추가 작업 공간이 필요하다. raw/준비 입력을 다시 수집·계산하거나 운영 NAS를 변경하지 않는다.
+
+캡처 종료의 `input_hash IS NULL` 건수 조회는 새 PC 결과물에 `archive_source_coverage_v2(scope) WHERE input_hash IS NULL` 비고유 부분 인덱스를 추가해 전체 메타데이터의 반복 lookup을 줄인다. NULL/준비됨·두 scope·반복 실행의 결과와 기존 행은 동일하게 검증한다. 실행 상태의 `archive` 필드를 현재 파일로 사용하며, v4는 `archive-rowid-range.building.sqlite3`와 `code-v4-rowid-range`를 사용한다. 복사/인덱스 준비 뒤 재개는 기존 완료 cursor를 유지하고 초기 물질화/staging을 반복하지 않는다. 전체 원본 대조·봉인·NAS 파일 게시/활성화는 계속 별도 완료 조건이다.
+
+
+### 현재 파일의 조회 인덱스 보완 (2026-10-14)
+
+현재 v5 DB의 EXPLAIN QUERY PLAN에서 사건 identity 조회의 membership 전체 스캔, event_key 조회의 사건 전체 스캔, membership 부모 조회의 기사 전체 스캔을 확인했다. 종목 최근 100건 및 최신 revision 조회는 기존 available_at 인덱스와 accepted_sequence 정렬이 맞지 않아 임시 정렬을 사용했다. 조사 근거는 `artifacts/archive-current-pipeline-review-20261014/query-plans.json`에 있다.
+
+`scripts/index_historical_archive_lookups.py`는 현재 고정 코드 경로와 dataset/digest를 명시적으로 검증하고 기존 OS builder 잠금 안에서 비고유 인덱스 8개를 한 transaction으로 추가한다. SQL 필터·정렬·사건 판단·저장 행·construction 지문은 변경하지 않는다. 다른 정의의 동명 인덱스는 거부하고 중간 실패는 전체 rollback한다. 조회 결과/행 보존·query plan·재실행·주입 실패 4개 검사가 통과했으며, 별도 17.9MB 표본 DB에서 실제 고정 v5 코드의 CLI 적용·재실행·sealed 거부도 확인했다. 이 표본은 실제 전체 처리율의 개선 증명이 아니다.
+
+04:28 KST에 현재 runner의 coverage 종료 후 finalize-search 시작 경계에서만 대기·적용·재개하는 일회성 로컬 도우미를 실행했다. 상태와 결과는 작업 폴더의 `index-maintenance-state.json` 및 `index-maintenance-receipt.json`으로 구분한다. 기존 worker를 terminate하지 않으며, control 소유권이 바뀌거나 설치 실패 시 자동으로 다른 작업을 재개하지 않는다. 이번 단계의 시작 시점에는 coverage가 실행 중이므로 실제 전체 DB 적용은 아직 대기 중이었다. 나머지 반복 검증/재정제 최적화는 이번 인덱스 보완에 포함되지 않으며 코드 지문 전환을 별도로 검증해야 한다.
+
+
+### 현재 실행의 저장 묶음·최종 검사 조정 (2026-10-14)
+
+실제 고정 v5 코드와 기존 1,024건 표본에 같은 조회 인덱스를 설치하고 A/B/A로 검사했다. 기사·본문·computed 판정·사건 ordinal/state/reason·목록·입력 상태의 정규 비교 hash가 모두 같았다. 입력/사건 batch 80→250, projection 250→1,000에서 COMMIT(수명 관리 포함)은 47→26회였다. A1/A2 합계 약 4.16/4.17초, B 약 4.05초로 전체 시간 차이는 약 3%다. 이를 대량 자료의 동일 속도 개선으로 주장하지 않는다. 별도 250번째 행 실패 주입으로 canonical/body/targets/provenance 전체 0건 rollback, 250+262건 재개, 재실행 0건도 확인했다. 근거는 `batch-check.json`과 `batch-rollback250.json`이다.
+
+작업 폴더의 runner는 향후 worker에 기존 API가 지원하는 batch_size만 전달하도록 조정했다. 현재 coverage worker와 고정 v5 source·construction digest는 바꾸지 않는다. 실행 중인 parent는 같은 runner 파일을 다음 worker의 진입점으로 사용하므로 parent를 재시작하지 않아도 이후 phase에 반영된다. 원래 runner byte 백업, 변경 후 SHA와 별도 orchestration helper SHA는 `current-runner-options-application.json`에 있다. 현재 세대 preflight 및 실제 worker options import를 통과했다.
+
+전체 audit와 sealer의 같은 full audit를 각각 수행하는 orchestration을 합쳤다. audit worker가 기존 sealer를 호출해 OS builder 잠금 안에서 변경하지 않은 full audit/integrity/seed/source/hash 검사와 봉인을 수행한다. 이후 seal worker는 DB의 실제 seal_gate·세대/digest·coverage/봉인 시각·standalone journal·외부 receipt 일치와 전체 파일 SHA를 읽기 전용으로 대조한다. receipt 미생성 상태의 recovery는 기존 full seal gate를 다시 사용한다. 외부 JSON만으로 완료를 인정하거나 final audit 판정 조건을 낮추지 않는다. 최종 runner 완료는 여전히 seal worker 검증 뒤 `local-sealed`이며 NAS 복사/활성화는 수행하지 않는다.
+
+이 orchestration helper의 실제 full gate 1회 호출·정상 checksum 재사용·검사 blocker 거부·위조 receipt/변경 bytes 거부·receipt 손실 recovery 4개 검사가 통과했다. 원본 준비자료 해시와 고정 construction 지문을 유지한다. 실제 전체 자료의 남은 단계 완료/종료시간, 행별 조회/정제의 중복 제거는 미검증·미구현이다.
+
+
+### 현재 파일 v6 실행 코드 전환 (2026-10-14)
+
+coverage는 04:48 KST 전에 완료됐고 비고유 조회 인덱스 8개를 실제 파일에 8.76초 동안 추가했다. seed 기사 68,723/body 41,789/event 5,258/membership 5,258행이 추가 전후 동일했다. 이후 첫 최종화 worker의 시작 경계에서 hold를 확인하고, 자식 writer가 없는 paused parent의 PID·생성시각·정확한 명령을 검증해 실행기만 교체했다. NAS/원본 DB에는 적용하지 않는다.
+
+`prepared_batch`는 원래 pending 순서와 component별 입력 소유권을 유지하며 250키 이하 묶음(최대 501 binds)으로 준비 행을 읽는다. `_complete_one`에 그 행을 전달하고 같은 input hash/상태/신원 검사를 한 번 수행한다. summary_only에는 사용하지 않는 raw BODY 조회를 생략한다. projection은 canonical 관계를 같은 쿼리에서 검증한 뒤 이미 존재하는 clean BODY를 재사용하고, 누락된 seed BODY에만 기존 정제를 수행한다. 제외 근거 검증도 같은 metadata/raw hash/정책/원본 존재/prepared 부재 조건을 JOIN된 한 조회에서 검사한다. 판정·사건·본문 정제 정책은 변경하지 않는다.
+
+49개 회귀(기존 HTTP TestClient hang 사례 제외), 251키/2조회·hash 변조 batch rollback·clean 재사용/누락 복원·본문 관계 오류·제외 근거 변조 검사를 통과했다. 같은 1,024건의 v5/v6 정규 결과 hash는 `3a3172694c23f4c68ae739a9b500daae7bcfd3f3ed38ce0d1d26ef0dbb19c70f`로 같았다. 유한 표본 단계 합계는 약 4.05→3.35초이며 전체 970만 건 처리율 개선의 보장이 아니다. 실제 시황 alias TEMP view의 두 branch 모두 scope/stock/identity 인덱스 key 조회임을 EXPLAIN으로 확인했다.
+
+`transition_historical_archive_execution.py`는 old/new 고정본 544파일을 검증하고 정확히 archive inputs, archive v2, article BODY finalizer 세 파일만 변경된 것을 허용한다. OS 잠금, 완료된 input generation/coverage, builder owner 부재, derived 부재 및 seed core count 경계를 확인한 뒤 report/input-generation 두 manifest와 전환 계보만 원자적으로 기록한다. 기존 보호 root·원본 input hash·source capture·seed·ID를 다시 라벨링하거나 버리지 않는다. 새 외부 plan은 원래 plan과 이전 manifest를 보존한다. 전환 전 rollback과 중간 SQL 실패 전체 rollback 및 실제 frozen CLI 재실행 복구를 검사했다.
+
+05:02 KST에 동일 파일을 `historical-news-20261014-v6-batch-finalization`으로 전환하고 원래 phase journal을 별도 보존해 완료된 8개 phase를 승계했다. 고정본 `code-v6-batch-finalization-checked`의 construction digest는 `02f6398856e70aa53e91342745f8a7103181ab61a34acd86585cf9ecf77ab877`이다. 이전 v5/v4 코드와 입력 계보를 유지한다. 새 preflight를 통과했고 05:04:19에 검색뉴스 최종화부터 같은 DB를 재개했다. 구현/검사 결과와 실제 대량 실행 완료는 구분한다. 대량 최종화·event/projection·full audit/seal 및 NAS 게시 완료는 아직 남아 있다.
+# 전체 검사 반복 조회 최적화 — 2026-10-14
+
+현재 v6 생성 작업의 constructor 지문과 기존 target fingerprint는 유지한다.
+최종 검사에서 대상 집합을 입력별 SELECT 대신 PK 순서의 단일 JOIN 스트림으로
+비교하고, seed 대조의 테이블 컬럼 목록은 테이블마다 한 번만 읽는다. 누락·추가
+대상, 이름 변경, seed payload/role/key/컬럼 검사와 원본 hash, 참조 검사,
+full integrity 검사는 유지한다. 스트림은 기사 한 건의 대상 집합만 메모리에
+두며 전체 입력을 정렬용 임시 테이블이나 Python 목록에 올리지 않는다.
+
+이미 최종화한 입력이 존재하므로 construction generation을 다시 쓰지 않는다.
+`historical_archive_completion_gate`에서 명시한 audit/seal 파일을 SHA 검증해
+별도 verifier로 로드하고, 기존 frozen constructor의 `_writer`/`code_digest`
+소유자를 확인한다. 실제 full audit 결과에 `verification_code`를 기록한 뒤
+기존 OS 잠금·봉인 transaction·외부 체크섬 경계를 사용한다. 재사용/receipt
+복구에서도 같은 verifier 지문과 전체 파일 hash를 확인한다. construction
+코드를 바꾼 것으로 주장하거나 기존 fingerprint를 다시 계산하지 않는다.
+
+현재 작업의 `verification-stream-v1/activation-receipt.json`은
+`configured_for_future_audit`다. 마지막 audit/seal 자식만 새 verifier를 사용하며
+진행 중 검색 최종화 프로세스는 중단/재시작하지 않았다. 32건 회귀와 기존 frozen
+v6 constructor + 새 verifier의 실제 runner audit/seal 호출을 disposable SQLite에서
+검증했다. HTTP TestClient 검사는 이 범위에서 실행하지 않았다. 5만 기사/10만 대상
+메모리 표본에서 대상 비교 SQL은 50,001회에서 1회로 줄었고 임시 정렬 없이
+기존 PK를 사용했다. 실제 전체 archive 감사 시간·전체 봉인·NAS 게시 완료를
+뜻하지 않는다. 다른 writer, 뉴스 정책, NAS 운영 코드/DB는 변경하지 않았다.
+
+## 완료된 v6 입력을 보존하는 현재 실행 최적화 결정 — 2026-10-14
+
+**상태: Astra High 설계 결정 완료, 구현·격리 검증·실행 전환은 미수행.**
+사용자가 요청한 SQLite cache 비교, canonical/BODY/metadata 실제 multi-row 저장,
+RULE 정제 재사용을 현재 building 파일의 남은 입력에 적용하기 위한 계약이다.
+원본 재수집, 전체 DB 복사, 완료한 입력 재계산, NAS 쓰기를 요구하지 않는다.
+
+### 생성 지문은 완료 범위별로 보존
+
+현재 v6 target fingerprint에는 v6 constructor digest가 들어 있다. report의
+digest만 바꾸거나 기존 fingerprint를 새 코드 기준으로 다시 계산하지 않는다.
+기존 최종화 전용 전환의 `_no_derived` 제한도 일반적으로 제거하지 않는다.
+
+현재 입력은 scope별 `(stock_code, identity)` BINARY 오름차순으로 확정된다.
+따라서 이번 한 번의 **최종화 중 전환**은 scope별 완료 prefix를 닫고 나머지
+suffix만 새 constructor가 소유하는 방식으로 한정한다. target 수백만 행에
+새 버전 컬럼을 채우거나 완료 키 사본을 대량 INSERT하지 않는다.
+
+- 정확한 부모는 dataset `historical-news-20261014-v6-batch-finalization`, digest
+  `02f6398856e70aa53e91342745f8a7103181ab61a34acd86585cf9ecf77ab877`다.
+  새 dataset/digest는 검증된 새 고정본의 실제 값으로 정한다.
+- 각 scope의 마지막 `assessment_done` 키, 완료 입력 수, target 수, 완료 입력
+  ID 연결 root와 target 불변 내용 root를 전환 계획에 기록한다. 완료 행이 없는
+  scope는 명시적으로 empty prefix이며 NULL을 임의의 최소 키로 비교하지 않는다.
+- 입력 root는 `(scope, stock_code, identity, input_hash, article_revision_id,
+  body_revision_id)`를 PK 순서로 길이 구분된 canonical JSON으로 해시한다.
+  target root는 PK와 input/article/body ID, target 이름, prepared/computed JSON,
+  기존 fingerprint, verification_state, computed_at을 같은 방식으로 해시한다.
+  향후 바뀌는 progress_state와 event 관련 컬럼은 root에 넣지 않는다.
+- 전환 때 `article_body_done` 등 부분 상태, 완료 prefix 안의 pending, 비정상
+  상태, prefix 밖 완료 행, 이미 시작된 events/projection/seal을 거절한다.
+  source_failed/source_excluded는 기존 근거를 가진 terminal 입력으로 보존하며
+  RULE 완료 건수에 합치지 않는다. 새 입력/component/repair 추가도 허용하지 않는다.
+- BINARY 정렬·PK 정의와 실제 prepared/source generation 고정을 검증한다.
+  조건이 성립하지 않으면 자동으로 per-row migration이나 전체 재빌드로 바꾸지 않는다.
+- 새 writer는 닫힌 prefix를 쓰거나 다시 최종화하지 못한다. 마지막 원자적 batch
+  이후의 pending만 처리한다. prefix 기준은 실행 중 계속 갱신하지 않는다.
+- 최종 audit는 scope/키에 따라 **명시적으로 등록된 부모 또는 현재 digest 하나**를
+  선택해 기존 식으로 fingerprint를 계산한다. 가능한 digest를 모두 시험하여
+  맞는 것을 수락하지 않는다. 부모 완료 입력·target root와 수가 그대로인지도
+  전체 검사 스트림에서 대조한다. 경계/계보/계획 파일 변조, 미등록 부모, 누락된
+  root, 옛 지문을 단 새 suffix는 봉인을 차단한다.
+
+07시대 읽기 전용 snapshot에서 검색의 last-done < first-pending, 시황 완료
+prefix 없음, 부분 입력 없음, events/projection manifest 없음이 확인됐다.
+이는 전환 적용의 승인이 아니라 방식의 적용 가능성 증거다. 실제 적용 시
+writer가 없는 OS 잠금 안에서 같은 조건과 정확한 경계를 다시 확정해야 한다.
+
+### 전환 transaction과 복구
+
+기존 `transition_historical_archive_execution.py`에 별도의 명시적 모드로 구현한다.
+최종화 이전 v5→v6 경로와 rollback 조건은 그대로 둔다. 새 모드는 부모·자식
+고정본의 전체 SHA 및 허용된 변경 파일 목록, 새 constructor 실제 import,
+완료 generation/coverage, seed/input 보호 계약을 확인한다.
+
+1. 후보 코드·회귀·동등성·성능 비교를 격리 DB에서 먼저 끝낸다. 그동안 v6는 계속 돈다.
+2. 적용 직전에 runner의 다음 phase 진입을 보류하고 기존 PC control로 현재
+   batch COMMIT 뒤 정상 반환을 요청한다. 정확한 PID/생성시각/명령과 자식 종료,
+   builder owner 해제, OS 잠금을 확인한다. SQLite writer를 강제 종료하지 않는다.
+3. 잠금을 유지한 채 실제 prefix/root와 원래 report/generation을 불변 외부 plan에
+   기록한다. source/raw/prepared/seed 파일을 복사하거나 전체 원본을 재해시하지 않는다.
+4. 한 transaction에서 전환 원장과 report/input-generation의 새 실행 식별 및
+   이전 plan 참조만 기록한다. 작성 가능한 테이블을 전환 원장과 build manifest로
+   제한하는 authorizer/SQL 검사를 둔다. canonical·BODY·targets·progress·원자료
+   테이블의 쓰기는 금지한다. target root 계산을 batch마다 반복하지 않는다.
+5. COMMIT 뒤 외부 receipt가 유실돼도 DB 원장과 동일 plan SHA로 복구한다.
+   새 runner/options/별도 verifier/helper는 새 digest 및 lineage 검증 경로와
+   일치시킨다. 기존 v6에 묶인 verification-stream-v1을 그대로 연결하지 않는다.
+6. 새 writer 실행 전 오류는 기존 제어 소유권과 전환 전 root가 일치할 때만
+   안전하게 원복한다. 새 코드가 한 batch라도 COMMIT한 후에는 v6로 단순 rollback
+   하지 않는다. 새 세대로 재개하거나 오류 상태를 보존하고 원인을 수정한다.
+
+### 저장 batch와 정제 재사용
+
+- 입력 batch 250과 transaction 1회를 유지한다. SQLite 실제 bind 제한과 보수적인
+  상한으로 SQL별 행 수를 정하며, multi-row VALUES/guarded batch UPDATE를 사용한다.
+  `executemany`를 multi-row 성능 개선으로 보고하지 않는다.
+- canonical 최신 revision 및 같은 content_hash 후보, BODY 재사용 후보, progress를
+  필요한 키만 묶어 읽는다. 같은 batch 안에서 생성한 후보도 순서대로 갱신하는
+  작업 집합에 반영해 뒤의 입력이 앞의 신규 행을 볼 수 있게 한다.
+- 기사와 BODY의 INSERT 순서는 각각 기존 pending 처리 순서를 유지한다.
+  기존 ID 재사용, `revision_of`, `accepted_sequence`, hash/payload 충돌 검사,
+  seed_exact_body 및 extractor provenance 의미를 보존한다. RETURNING의 반환
+  순서에 의존하지 않고 미리 정한 revision ID로 결과를 대응한다.
+- expected/context/clean/targets/provenance/market-source 저장과 두 progress 전환도
+  제한된 multi-row 묶음으로 줄인다. DO NOTHING의 최초 값 승계와 market-source의
+  마지막 값 승계를 각각 유지한다. pending/hash 조건에 맞은 키 집합·개수를
+  검증하며 하나라도 다르면 batch 전체를 rollback한다. 중간 COMMIT은 추가하지 않는다.
+- `_complete_one`과 새 batch 경로는 입력·BODY·provenance 검증을 공유한다.
+  검증을 복사하여 서로 다른 규칙이 생기게 하지 않으며 기존 단건 호출도 보존한다.
+- clean_article_text 결과는 입력 한 건당 한 번 만들고 그 입력의 여러 target이
+  재사용한다. RULE용 원래 cleaned 값과 표시용 `길이 40 미만 → 빈 문자열` 값을
+  구분한다. summary_only도 기존 RULE 분류용 정제와 description fallback을 유지하고,
+  assessment BODY 및 core_sentences가 비어 있는 기존 의미를 지킨다.
+  호출자가 보낸 임의의 cleaned 문자열을 신뢰하는 공개 API를 만들지 않는다.
+  기존 prepare_job의 RULE 계산 core를 분리해 기본 경로와 검증된 내부 경로가 공유한다.
+
+### cache 선택과 완료 조건
+
+cache는 archive writer 연결만 기본/64MiB/128MiB를 비교한다. 원본·component
+연결 각각에 같은 용량을 무조건 할당하지 않는다. journal_mode/synchronous,
+WAL checkpoint 정책, 임시 저장 위치, transaction 경계는 바꾸지 않는다.
+실제 사용 설정·메모리·SQL/commit 시간과 처리량을 기록하고 효과가 없으면
+기본값을 유지한다. cache 변경만으로 성능 개선을 주장하지 않는다.
+
+필수 검증은 다음과 같다.
+
+- 부모 v6와 후보를 **동일한 유한 입력·seed·인덱스·cache 조건**에서 비교한다.
+  신규/기존 동일/변경/동일 키 반복/seed 재사용/여러 target/두 scope/alias,
+  summary_only/짧은 BODY/정제 후 빈 BODY/description fallback을 포함한다.
+- 1/79/80/81/249/250/251/1,001 입력과 작은 bind 제한에서 실제 SQL 횟수 및
+  저장 순서·관계·판정이 같아야 한다. 고정 UUID/시계 fixture로 ID/sequence까지
+  대조하고 실제 UUID 실행은 ID 관계를 정규화한 동등성도 검사한다.
+- canonical/BODY/metadata/progress 각 SQL과 마지막 입력 실패를 주입해 기존 완료
+  prefix는 그대로, 신규 batch 전부 rollback, 재개·재실행 중복 0을 확인한다.
+- 부모 완료 prefix가 있는 혼합 archive를 사건·목록·실제 full audit·seal/checksum까지
+  실행한다. 빈 prefix, 다중 scope, 경계 키/한글/URL 순서, 미등록 지문, 옛 prefix
+  삭제/내용/이름/ID 변조, 새 suffix의 옛 digest 사용, plan/receipt 유실과 중간 SQL
+  실패를 검증한다. 운영 DB 또는 현재 생성 DB를 회귀 fixture로 쓰지 않는다.
+- batch INSERT/UPDATE 자체의 효과와 cache 효과를 분리한 A/B/A 및 warmed/cold
+  조건을 기록한다. 표본을 전체 완료시간으로 외삽하지 않는다. 현재 실행에 적용한
+  뒤에는 동일 scope/본문 크기·target 수를 함께 기록해 실제 처리율을 비교한다.
+
+구현 범위는 기존 archive writer/finalizer/input-contract/transition/audit/seal-gate와
+그에 직접 관련된 테스트 및 로컬 runner다. 뉴스 판단 정책, NAS 운영 writer,
+주문·실시간 경로와 무관한 누적 변경은 포함하지 않는다. 이 설계 단계에서는
+실행 파일·runner 옵션·현재 DB를 변경하거나 프로세스를 중단하지 않았다.
+
+
+### 위 설계의 구현·현재 파일 적용 결과 — 2026-10-14
+
+기존 `_complete_one`의 입력/hash/BODY/provenance 검증을 공유하며, 필요한 키의
+batch lookup과 transaction 안의 read-your-writes 작업 집합을 사용한다.
+canonical/BODY/provenance와 expected/context/clean/targets/market metadata를
+bind 제한이 있는 multi-row SQL로 묶고, guarded progress UPDATE의 반환 키 집합을
+대조한다. RULE은 같은 cleaned 본문을 private core에서 재사용한다. summary_only,
+짧은 BODY, description fallback, 표시용 clean 값과 기존 rule version을 유지한다.
+
+관련 **64건**(148.572초, failure/error/skip 0)이 통과했다. 기존 HTTP TestClient
+경로는 미실행이다. 고정 v7에서 신규 8건을 재실행해 통과했다(53.699초).
+중간 SQL 8곳의 실패/전체 rollback/재개, bind 제한, 1/79/80/81/249/250/261과
+합계 1,001개 입력, 최초 clean 값 승계, 입력당 정제 1회, prefix 변조 및 새로운
+suffix에 옛 digest를 사용하는 오류를 검사했다. 실제 고정 v6→v7 CLI를 격리 DB에서
+실행해 부모 ID 보존과 event/projection/full audit/seal/체크섬 확인까지 통과했다.
+후보 runner의 6개 worker 단계도 격리 DB에서 확인했다. 고정 UUID/시계의 1,024개
+입력에서 canonical/BODY 전체 컬럼·accepted_sequence·revision_of가 같았다.
+비교 SHA는 `205109a4e981a5477e4ac452f278bb7f46c4470a75b7a1410792b4ec9f9cadbf`다.
+
+1,024개 입력의 A/B/A에서 canonical INSERT는 1,024→18, BODY는 1,024→14,
+targets는 1,151→20회로 줄었다. 최종화 시간은 v6 3.853/3.715초, 같은 cache의
+v7 3.409초였다. cache 64MiB는 2.987초, 반복 비교 3.425초(앞뒤 default
+3.699/3.563초), 128MiB는 3.648초였다. 64MiB를 archive 최종화 연결에만 선택했다.
+OS cache를 강제 비운 cold 검사가 아니며, 본문·다중 target을 포함한 유한 표본이다.
+전체 종료시각이나 실제 대량 처리 속도 개선율의 보장으로 사용하지 않는다.
+근거는 `artifacts/archive-current-pipeline-review-20261014/v7-benchmark.json`,
+`v7-cache-repeat.json`, `v7-exact-id-proof.json`, `v7-frozen-transition-smoke.json`이다.
+
+현재 파일의 검색 완료 prefix **1,996,750건**(시황 0건)을 보존하고
+`historical-news-20261014-v7-multirow-finalization`으로 명시적으로 전환했다.
+constructor digest는 `7e6c4ba448d85136b01076fe205f9e7667738e14c6f1518defa7f90848972424`다.
+옛 prefix의 입력/target root, 옛 report/generation, 외부 plan과 고정 코드를 보존한다.
+새 audit는 경계에 따라 부모 또는 새 digest 하나를 선택한다. 옛 v6 전용
+verification-stream-v1을 새 constructor에 연결하지 않는다. 스트림 검사를 포함한
+새 고정 constructor의 audit를 기존 completion helper에서 호출한다.
+
+안전한 중단 요청 뒤 옛 parent가 상태 JSON 교체의 WinError 5로 종료됐다.
+worker stderr는 0, persistent owner는 None이고 완료 prefix는 COMMIT되어 보존됐다.
+후보 runner는 일회성 tmp 이름과 짧은 share-error 재시도를 사용한다. 진단 state만의
+지속 PermissionError는 stderr에도 기록하고 실행 중 worker를 잃지 않도록 처리한다.
+control/journal 실패를 성공으로 처리하지 않는다. 주입한 2회 실패→3회 성공을 확인했다.
+
+새 runner는 preflight 뒤 **2026-10-14 07:50:20 KST**에 같은 DB에서 재개했다.
+NAS 복사·운영 DB·원본 입력 변경이나 commit/push는 없다. 전체 archive 최종화,
+full audit/seal 완료는 별도 완료 조건이다. 작업 폴더의
+`v7-finalization-transition-receipt.json`, `v7-activation-receipt.json`에 실행 근거가 있다.
+
+
+### NAS 파일 전송의 중복 전체 읽기 제거 — 2026-10-14
+
+`scripts/publish_historical_archive_file.py`의 새 복사는 PC source 사전 전체 SHA와
+복사 중 읽기를 합친다. 복사하며 전체 SHA를 계산하고 receipt와 일치할 때만 게시한다.
+source inode/크기/수정시각/생성시각 및 WAL/journal 존재를 전후 대조하며, 동일 크기
+수정·중간 실패·손상 파일을 성공으로 처리하지 않는다. 한 reader future로 다음
+8MiB를 읽어 source 읽기와 SMB 쓰기를 겹치며 메모리는 최대 2개 block으로 제한한다.
+
+재개는 이미 저장된 partial 전체 SHA와 source prefix SHA를 먼저 대조한다.
+검증한 prefix의 hash 상태를 suffix 복사에 이어 붙여 PC source는 전체 1회만 읽는다.
+완성된 partial 복구는 source SHA와 저장 파일 SHA를 검사한 뒤 append 없이 승격한다.
+완성 버전 재사용에서도 source·저장 파일의 실제 전체 SHA를 확인한다. 다른 입력의
+transfer metadata나 기존 완성 버전을 덮어쓰지 않는다. 새 버전 내부 경로의 symlink/
+탈출도 거절한다. 파일 검증 뒤 overwrite 없는 rename/link와 receipt 경계를 유지한다.
+
+선택한 SSH 경로는 NAS의 sha256sum으로 실제 파일 bytes를 해시한다. SMB 공유와
+NAS 경로의 일치 여부를 일회성 nonce marker로 증명하고, 앞뒤 stat 크기/시각/inode를
+대조한다. marker 불일치는 거절하며 SSH 사용 불가 시 기존 SMB 전체 읽기 검증으로
+복구하고 그 사실을 진행 로그에 명시한다. sudo·PostgreSQL·SQLite 쓰기·뉴스 처리·
+서버 재빌드는 호출하지 않는다. 큰 cold 파일은 고정 시간 제한 때문에 전체 SMB
+검사를 다시 시작하지 않도록 파일 크기에 따른 해시 시간 예산을 둔다.
+
+SSH key 인증과 NAS의 sha256sum/stat/cat을 확인했다. NAS 공유
+`X:\kiwoom-monitor\deploy\synology\server-data\historical-news-archives`와
+host `/volume1/docker/kiwoom-monitor/deploy/synology/server-data/historical-news-archives`의
+별도 `transfer-check-*` 버전에 실제 full audit/seal을 마친 **34,353,152 bytes** 파일을
+전송했다. 전체 0.914초, NAS-local checksum 단계 0.500초였고 SMB 해시 fallback은
+0회였다. SSH/SMB 위치·전체 SHA·미활성 상태를 확인한 뒤 그 임시 버전 4개 파일만
+정리했다. 작은 warm 표본이므로 대용량 처리량이나 종료시간으로 외삽하지 않는다.
+근거는 `artifacts/archive-current-pipeline-review-20261014/nas-transfer-check.json`이다.
+
+전송 검사 8건과 기존 full seal/receipt/recovery 관련 검사를 실행한다. source 전체
+읽기 1회(신규·불완전 재개·완성 partial), 손상 prefix, read-ahead 중단/재개,
+같은 크기 원본 변조, NAS marker 오류, SSH fallback, 기존 target 손상을 확인한다.
+NAS 내부 해시가 없을 때도 검사를 생략하지 않는다.
+
+현재 생성 코드와 DB는 바꾸지 않는다. 고정 publication-tools-v2의 SHA는
+`69cf6445fc2dec422a22ad54c95b5408e4b26d393f088f3ebccc87e72661987c`다.
+작업 폴더 `publish-archive-to-nas.ps1`은 `local-sealed/complete`, 정확한 dataset/
+source receipt와 전송 도구 SHA를 확인한 뒤 이 도구를 사용한다. `-CheckOnly`는
+읽기 전용으로 readiness를 표시하며 미봉인 파일을 전송하지 않는다. 아직 실제 전체
+archive 전송이나 서버 활성화는 시작하지 않았다. NAS 게시와 활성화는 구분한다.

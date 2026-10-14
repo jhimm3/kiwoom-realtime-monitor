@@ -240,16 +240,22 @@ class DisplayCaptureTests(unittest.TestCase):
         with captured_rows() as (rows, rejected):
             source.load_documents(ACCOUNT_CLOCK_COLLECTION, REF, 1)
             source.upsert_documents(ACCOUNT_CLOCK_COLLECTION, [{'owner': REF, 'key': 'current', 'document': changed}])
+            after_write = source.load_documents(ACCOUNT_CLOCK_COLLECTION, REF, 1)
             source.upsert_documents(ACCOUNT_CLOCK_COLLECTION, [{'owner': REF, 'key': 'current', 'document': changed}])
+            self.assertEqual(after_write, source.load_documents(ACCOUNT_CLOCK_COLLECTION, REF, 1))
         self.assertEqual([], rejected)
         self.assertTrue(all(row['workload_id'] == 'account' for row in rows))
         for _ in range(2):
             target = self.store()
             with target._connection() as connection:
                 context._apply_account_context(SQLiteProjectionCursor(connection.cursor()), capsule, bindings={})
+            self.assertEqual(initial, target.load_document(ACCOUNT_CLOCK_COLLECTION, REF, 'current')['document'])
             target._lease = SimpleNamespace(baseline_version=3)
             target._execution_wall_now = lambda: NOW
-            self.assertEqual('complete', asyncio.run(execute(target, rows, account_context=capsule))['state'])
+            result = asyncio.run(execute(target, rows, account_context=capsule))
+            self.assertEqual('complete', result['state'])
+            self.assertEqual(5, len(result['calls']))
+            self.assertEqual(result['calls'][2]['result_digest'], result['calls'][4]['result_digest'])
             self.assertEqual(changed, target.load_document(ACCOUNT_CLOCK_COLLECTION, REF, 'current')['document'])
         old = deepcopy(capsule)
         old['version'] = 'account-context/v3'

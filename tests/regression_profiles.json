@@ -382,6 +382,15 @@
       "tests.unit.test_historical_news_archive_dialog",
       "tests.unit.test_historical_news_archive_reader",
       "tests.unit.test_prepared_historical_archive_v2",
+      "tests.unit.test_historical_archive_audit_stream",
+      "tests.unit.test_historical_archive_batch_writes",
+      "tests.unit.test_historical_archive_batch_reads",
+      "tests.unit.test_historical_archive_completion_gate",
+      "tests.unit.test_historical_archive_execution_transition",
+      "tests.unit.test_index_historical_archive_lookups",
+      "tests.unit.test_prepared_historical_archive_inputs",
+      "tests.unit.test_historical_archive_prefix_transition",
+      "tests.unit.test_publish_historical_archive_file",
       "tests.unit.test_seed_news_jobs_from_nas_rankings",
       "tests.unit.test_historical_news_blind_validation"
     ],
@@ -470,6 +479,12 @@
       "tests.unit.test_research_queue"
     ],
     "dependency-audit-batch-06-research-state-and-settings": [
+      "tests.unit.test_position_study_cohort",
+      "tests.unit.test_position_study_publication",
+      "tests.unit.test_position_runner_state",
+      "tests.unit.test_position_ev_lineage",
+      "tests.unit.test_position_historical_context",
+      "tests.unit.test_allocation_input_bundle",
       "tests.unit.test_research_final_exposure_cli",
       "tests.unit.test_research_final_holdout_ledger",
       "tests.unit.test_research_hypotheses",

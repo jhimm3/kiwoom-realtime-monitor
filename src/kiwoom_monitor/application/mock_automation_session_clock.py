@@ -21,11 +21,24 @@ def _aware(value: datetime) -> datetime:
     return value
 
 
-def session_clock_assessment(config, state, now: datetime, active=()) -> dict:
+def session_clock_assessment(config, state, now: datetime, active=(), *, management_preflight=None) -> dict:
     """실제 체결의 진입 거래일과 주문 유효시간을 사용한다. 체결 상태는 바꾸지 않는다."""
     _aware(now)
+    management = {}
+    if management_preflight is not None:
+        # This scheduling hint cannot authorize an EXIT or clear actual exposure.
+        # It remains urgent after restore until current native inputs verify it.
+        result = management_preflight['result']
+        check_at = _aware(datetime.fromisoformat(management_preflight['next_check_at']))
+        management = {
+            'unfilled_management_due': now >= check_at,
+            'unfilled_risk_path_required': bool(result['risk_path_required']),
+            'unfilled_next_check_at': check_at.isoformat(),
+            'unfilled_requires_revalidation': True,
+            'unfilled_order_authorized': False,
+        }
     if config.session_exit_policy != REGULAR_SESSION_EXIT_POLICY:
-        return {"reasons": [], "exit_required": False, "expired_intent_ids": []}
+        return {"reasons": [], "exit_required": False, "expired_intent_ids": [], **management}
     opened = _aware(datetime.fromisoformat(state.opened_at)) if state.status == "open" else now
     deadline = regular_session_fill_deadline(opened)
     due = deadline - timedelta(seconds=config.session_exit_buffer_seconds)
@@ -46,6 +59,7 @@ def session_clock_assessment(config, state, now: datetime, active=()) -> dict:
         "reasons": reasons, "exit_required": state.status == "open" and bool(reasons),
         "expired_intent_ids": expired, "deadline": deadline.isoformat(),
         "session_exit_due_at": due.isoformat(), "assessed_at": now.isoformat(),
+        **management,
     }
 
 

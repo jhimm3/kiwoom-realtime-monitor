@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -147,6 +148,58 @@ class ForwardEvaluationSpec:
 
 
 @dataclass(frozen=True)
+class MockUnfilledExecutionPolicy:
+    """Explicit frozen mock-only replacement limits; absent means execution OFF."""
+    maximum_reprices: int
+    maximum_adverse_slippage_bps: int
+    protective_slippage_bps: int
+    maximum_management_seconds: int
+    max_snapshot_age_seconds: int
+    minimum_net_advantage_won: int
+    uncertainty_multiplier: float
+    minimum_paired_samples: int
+    reprice_horizon_seconds: int
+    allow_supplied_paired_mock_evidence: bool = False
+    version: str = "mock-unfilled-execution-policy/v1"
+    maximum_protective_cancel_retries: int = 0
+    protective_cancel_retry_delay_seconds: int = 0
+
+    def __post_init__(self):
+        if self.version != "mock-unfilled-execution-policy/v1":
+            raise ValueError("unsupported mock unfilled execution policy")
+        for name, minimum, maximum in (
+            ("maximum_reprices", 0, 64), ("maximum_adverse_slippage_bps", 0, 10000),
+            ("protective_slippage_bps", 0, 10000), ("maximum_management_seconds", 1, 3600),
+            ("max_snapshot_age_seconds", 1, 3600), ("minimum_net_advantage_won", 0, 10**12),
+            ("minimum_paired_samples", 2, 10000), ("reprice_horizon_seconds", 1, 3600),
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError(f"invalid mock unfilled policy {name}")
+        if (type(self.uncertainty_multiplier) not in (int, float)
+                or not math.isfinite(self.uncertainty_multiplier) or self.uncertainty_multiplier < 0
+                or type(self.allow_supplied_paired_mock_evidence) is not bool):
+            raise ValueError("invalid mock unfilled evidence policy")
+        if (type(self.maximum_protective_cancel_retries) is not int
+                or not 0 <= self.maximum_protective_cancel_retries <= 3
+                or type(self.protective_cancel_retry_delay_seconds) is not int
+                or (self.maximum_protective_cancel_retries == 0 and self.protective_cancel_retry_delay_seconds != 0)
+                or (self.maximum_protective_cancel_retries > 0
+                    and not 1 <= self.protective_cancel_retry_delay_seconds <= self.maximum_management_seconds)):
+            raise ValueError('invalid protective cancel retry policy')
+
+    @property
+    def policy_id(self):
+        return _content_id("mock_unfilled_policy", self.to_dict())
+
+    def to_dict(self):
+        value=asdict(self)
+        if self.maximum_protective_cancel_retries == 0:
+            value.pop('maximum_protective_cancel_retries');value.pop('protective_cancel_retry_delay_seconds')
+        return value
+
+
+@dataclass(frozen=True)
 class MockAutomationOperatingSpec:
     """Frozen O2-M limits. A complete spec still does not enable order transport."""
 
@@ -177,8 +230,15 @@ class MockAutomationOperatingSpec:
     stop_policy: str | None = None
     recovery_policy: str | None = None
     version: str = MOCK_AUTOMATION_SPEC_VERSION
+    unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None
 
     def __post_init__(self) -> None:
+        if self.unfilled_execution_policy is not None:
+            if not isinstance(self.unfilled_execution_policy, MockUnfilledExecutionPolicy):
+                raise ValueError("mock unfilled execution policy must be typed")
+            if (self.maximum_data_gap_seconds is not None
+                    and self.unfilled_execution_policy.max_snapshot_age_seconds > self.maximum_data_gap_seconds):
+                raise ValueError("mock unfilled freshness exceeds operating limit")
         for name in (
             "strategy_ref", "final_batch_id", "final_run_id", "forward_profile_id",
             "credential_profile_id",
@@ -253,7 +313,7 @@ class MockAutomationOperatingSpec:
         return {"spec_id": self.spec_id, **self._identity_document()}
 
     def _identity_document(self) -> dict[str, Any]:
-        return {
+        document = {
             "version": self.version,
             "strategy_ref": self.strategy_ref,
             "candidate_package_hash": self.candidate_package_hash,
@@ -282,6 +342,9 @@ class MockAutomationOperatingSpec:
             "stop_policy": self.stop_policy,
             "recovery_policy": self.recovery_policy,
         }
+        if self.unfilled_execution_policy is not None:
+            document["unfilled_execution_policy"] = self.unfilled_execution_policy.to_dict()
+        return document
 
 
 @dataclass(frozen=True)
@@ -533,6 +596,8 @@ def mock_automation_spec_from_dict(value: Mapping[str, Any]) -> MockAutomationOp
         candidate_transition_policy=_optional_text(value.get("candidate_transition_policy")),
         stop_policy=_optional_text(value.get("stop_policy")),
         recovery_policy=_optional_text(value.get("recovery_policy")),
+        unfilled_execution_policy=(MockUnfilledExecutionPolicy(**value["unfilled_execution_policy"])
+                                   if value.get("unfilled_execution_policy") is not None else None),
     )
     expected = str(value.get("spec_id", spec.spec_id))
     if expected != spec.spec_id:

@@ -3044,6 +3044,33 @@ class ResearchRepository:
             ).fetchall()
         return tuple(json.loads(row[0]) for row in rows)
 
+    def load_entry_thesis_evidence(self, run_id: str, thesis_id: str) -> dict[str, Any] | None:
+        """One exact, consistent read of a saved research thesis and its evidence.
+
+        Persistence is not policy approval or order authority. Keep the stored
+        identity columns so the consumer can verify them against immutable JSON.
+        """
+        if not all(isinstance(value, str) and value for value in (run_id, thesis_id)):
+            raise ValueError("research run and thesis IDs must be explicit")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT t.thesis_id,t.run_id,t.leadership_revision_id,t.symbol,t.created_at,t.document_json,"
+                "l.revision_id,l.theme_id,l.available_at,l.document_json,r.status "
+                "FROM research_entry_theses t "
+                "LEFT JOIN research_theme_leadership_revisions l ON l.revision_id=t.leadership_revision_id "
+                "LEFT JOIN research_runs r ON r.run_id=t.run_id "
+                "WHERE t.run_id=? AND t.thesis_id=?", (run_id, thesis_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "thesis": json.loads(row[5]), "leadership": json.loads(row[9]) if row[9] is not None else None,
+            "run_status": row[10],
+            "stored_identity": {"thesis_id": row[0], "run_id": row[1], "leadership_revision_id": row[2],
+                                "symbol": row[3], "created_at": row[4], "leadership_id": row[6],
+                                "theme_id": row[7], "leadership_at": row[8]},
+        }
+
     def load_thesis_decisions(self, run_id: str) -> tuple[dict[str, Any], ...]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -3117,6 +3144,105 @@ class ResearchRepository:
                 "ORDER BY accepted_sequence", (run_id,),
             ).fetchall()
         return tuple(json.loads(row[0]) for row in rows)
+
+    def load_position_action_evidence(self, run_id: str, end_event_ids: tuple[str, ...], *,
+                                      decision_time: datetime, limit: int = 10_000, development_role='TRAIN', checkpoint=None,
+                                      include_source_record: bool = False):
+        """One bounded read-only snapshot; development guards precede event values."""
+        from kiwoom_monitor.application.research_evaluation import position_action_source_context, PositionOutcomeUnavailable
+        if (type(include_source_record) is not bool or not self._read_only or not isinstance(run_id, str) or not run_id.strip()
+                or not end_event_ids or len(end_event_ids) > 200
+                or any(not isinstance(value, str) or not value.strip() for value in end_event_ids)
+                or type(limit) is not int or not 1 <= limit <= 10_000 or development_role not in {'TRAIN', 'VALIDATION'}):
+            raise ValueError('bounded explicit read-only position source required')
+        cut = _normalized_timestamp(decision_time.isoformat())
+        if checkpoint is not None: checkpoint()
+        with closing(self._connect()) as connection:
+            connection.row_factory = sqlite3.Row
+            if checkpoint is not None:
+                def interrupted():
+                    try:
+                        checkpoint()
+                        return 0
+                    except RuntimeError:
+                        return 1
+                connection.set_progress_handler(interrupted, 1000)
+            connection.execute('BEGIN')
+            try:
+                if connection.execute('SELECT MAX(version) FROM research_schema_migrations').fetchone()[0] < 19:
+                    raise ValueError('position source requires migrated research v19+ final guards')
+                row = connection.execute(
+                    'SELECT r.*,p.document_json AS report_json,f.execution_id AS final_execution '
+                    'FROM research_runs r LEFT JOIN research_reports p ON p.run_id=r.run_id '
+                    'LEFT JOIN research_final_holdout_executions f ON f.run_id=r.run_id WHERE r.run_id=?', (run_id,)).fetchone()
+                if row is None or row['final_execution'] is not None:
+                    raise ValueError('unknown or final research source is forbidden')
+                record = dict(row)
+                record['spec'] = json.loads(record.pop('spec_json'))
+                record['input_manifest'] = json.loads(record.pop('input_manifest_json'))
+                record['report'] = json.loads(record.pop('report_json')) if record['report_json'] else None
+                context = position_action_source_context(record, decision_time)
+                if checkpoint is not None: checkpoint()
+                if context['role'] != development_role:
+                    raise PositionOutcomeUnavailable('native_development_role_mismatch')
+                if connection.execute('SELECT 1 FROM research_final_holdout_windows '
+                        'WHERE julianday(start)<julianday(?) AND julianday(end)>julianday(?) LIMIT 1',
+                        (context['end'], context['warmup_start'])).fetchone() is not None:
+                    raise ValueError('development source overlaps registered final window')
+                placeholders = ','.join('?' for _ in end_event_ids)
+                upper = (f'(SELECT MAX(accepted_sequence) FROM research_execution_events WHERE run_id=? '
+                         f'AND event_id IN ({placeholders}) AND julianday(received_at)<=julianday(?) AND julianday(occurred_at)<=julianday(?) '
+                         'AND julianday(occurred_at)>=julianday(?) AND julianday(occurred_at)<julianday(?) '
+                         'AND julianday(received_at)>=julianday(?) AND julianday(received_at)<julianday(?))')
+                lower, end = _normalized_timestamp(context['warmup_start']), _normalized_timestamp(context['end'])
+                bounds = (cut, cut, lower, end, lower, end)
+                rows = connection.execute(
+                    f'SELECT * FROM research_execution_events e WHERE e.run_id=? AND e.accepted_sequence<={upper} '
+                    'AND NOT EXISTS (SELECT 1 FROM research_execution_events p WHERE p.run_id=? '
+                    f'AND p.accepted_sequence<={upper} AND (julianday(p.received_at)>julianday(?) OR julianday(p.occurred_at)>julianday(?) '
+                    'OR julianday(p.occurred_at)<julianday(?) OR julianday(p.occurred_at)>=julianday(?) '
+                    'OR julianday(p.received_at)<julianday(?) OR julianday(p.received_at)>=julianday(?) '
+                    'OR julianday(p.received_at) IS NULL OR julianday(p.occurred_at) IS NULL)) '
+                    'ORDER BY e.accepted_sequence LIMIT ?',
+                    (run_id, run_id, *end_event_ids, *bounds, run_id, run_id, *end_event_ids, *bounds,
+                     *bounds, limit + 1)).fetchall()
+                if len(rows) > limit:
+                    raise ValueError('native execution source budget exceeded')
+                events = []
+                for row in rows:
+                    if checkpoint is not None: checkpoint()
+                    # SQLite date arithmetic rounds sub-millisecond instants. Keep the
+                    # exact aware cut check before publishing any native event values.
+                    occurred = datetime.fromisoformat(_normalized_timestamp(row['occurred_at']))
+                    received = datetime.fromisoformat(_normalized_timestamp(row['received_at']))
+                    if (max(occurred, received) > decision_time
+                            or not datetime.fromisoformat(lower) <= occurred < datetime.fromisoformat(end)
+                            or not datetime.fromisoformat(lower) <= received < datetime.fromisoformat(end)):
+                        raise PositionOutcomeUnavailable('native_event_outside_declared_window_or_cut')
+                    value = json.loads(row['document_json'])
+                    body = {key: item for key, item in value.items() if key != 'event_id'}
+                    digest = 'execution_' + hashlib.sha256(_canonical_json(body).encode()).hexdigest()
+                    if digest != row['event_id'] or any(value[key] != row[key] for key in (
+                            'event_id', 'run_id', 'intent_id', 'decision_id', 'event_type', 'symbol')):
+                        raise ValueError('native execution content or identity mismatch')
+                    _normalized_timestamp(value['occurred_at']); _normalized_timestamp(value['received_at'])
+                    if (value['occurred_at'] != row['occurred_at'] or value['received_at'] != row['received_at']):
+                        raise ValueError('native execution stored time mismatch')
+                    if (value['execution_environment'] != 'simulation'
+                            or value['account_ref'] != 'research-single-position'):
+                        raise ValueError('native position source scope mismatch')
+                    for key in ('quantity', 'price', 'cash_after_won', 'reserved_cash_after_won',
+                                'position_quantity_after', 'commission_won', 'tax_won', 'total_cost_won', 'notional_won'):
+                        if type(value[key]) is not int or value[key] < 0:
+                            raise ValueError('native position source quantity or value invalid')
+                    events.append(value)
+                if include_source_record:
+                    # Already borrowed in this transaction; no second header read.
+                    context['source_record'] = record
+                return context, tuple(events)
+            finally:
+                connection.set_progress_handler(None, 0)
+                connection.rollback()
 
     def load_outcome_labels(self, run_id: str) -> tuple[dict[str, Any], ...]:
         with closing(self._connect()) as connection:

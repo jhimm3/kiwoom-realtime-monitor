@@ -1,3 +1,191 @@
+## 2026-10-14 — allocation-input-bundle-v1 (로컬 미배포)
+
+- 개발 종료 범위를 세 묶음으로 고정하고 현재 입력·원본 참조 연결을 마무리한다. 현재 모델 적용/보호 검증과 주문 OFF 전체 통합이 다음 두 묶음이다.
+- 기존 v2 current facts/계좌·Risk·모델/EV·출구/study refs를 한 cut에 동결해 R4가 공유하고 만료 때 제거한다. v1 출력/수치/ID·기록 signature/transaction은 보존한다.
+- 신규6 포함17건·소비delta0·기존v1 예제동일·2/8 hot/중복100회 추가DB/build0·기존기록COMMIT1/반복0. 입력 결합은 모델/주문 승인이 아니며 R4 EV_UNAVAILABLE/orderOFF·로컬 미배포다. 기존catalog5 보류 유지.
+
+## 2026-10-14 — position-historical-context-v1 (로컬 미배포)
+
+- 기존 frozen D2/D5를 과거 case cut에 동결해 native 연구 명세/기존 metadata event에 연결한다. 미래·다른 실제 입력·변형 source/mixed HOLD·행동 맥락을 거절한다.
+- 첫 v2 게시에서 같은 맥락을 한 번 재생하고 hot에는 작은 관측 summary를 공유한다. H1/D5 dependency를 explicit KRX scientific hash에 포함하고 legacy None hash를 보존한다.
+- 신규8 포함 관련53건·소비delta0·supplied v1 예제/ID 동일, 명시 준비SELECT16/COMMIT0·기존packet163433→262097bytes 및2/8 hot/중복100회 추가DB·재생0. R4 현재지원 미확인·주문OFF, 실제 활성/주문/배포·전수회귀 없음, 기존catalog5 보류 유지.
+
+## 2026-10-14 — position-ev-lineage-v1 (로컬 미배포)
+
+- 명시 upper EV 준비/CLI에서 같은 readonly borrow의 원래 연구 명세·이벤트를 선택 전달하고 기존 v2 게시에서 원래 outcomes/source receipt로 재생한다. 기본 v1 ID/TTL/결과·SQL 횟수 동일.
+- 보고된 EV/R4 run·revision hash·warmup 기간·outcome 중복을 현재 goal에 연결한다. 두 진단 상태 모두 independence_verifiedFalse·R4 EV_UNAVAILABLE·주문 OFF다.
+- 신규7 포함 관련38건·소비 delta0·봉인 v1 예제 동일, 준비 SELECT16/COMMIT0 및 2/8 Shadow·중복100회 추가DB/재생0. 실제 활성/주문/배포·전수 회귀 없음, 기존 catalog5 보류 유지.
+
+## 2026-10-14 — native-position-state-v1 (로컬 미배포)
+
+- 기존 Runner의 체결 진입가·최초 보유 시각·등록 전략/보호 상태를 같은 계좌 RAM borrow에 연결한다. 체결/계좌 epoch/owner 변경 시 추가 상태를 버리고 v1 기본 DTO/ID를 보존한다.
+- 현재 사실 관측과 native 보호·실행 후속 모델 지원을 분리한다. 과거 context/EV lineage·정책 동등성은 미증명이므로 EV_UNAVAILABLE/주문 OFF다.
+- 신규11 포함 관련98건·소비 delta0·봉인 v1 예제 동일, native getter100회 및 2/8 Shadow 추가 원장/DB/COMMIT0. 실제 활성/주문/배포·전수 회귀 없음, 기존 catalog5 보류 유지.
+
+## 2026-10-14 — position-study-publication-v2 (로컬 미배포)
+
+- 원래 native source 명세/이벤트와 v2 cohort를 같은 read에서 준비해 기존 인증 endpoint/공통 RAM 슬롯에 게시한다. 기존 v1 source/packet/ID·SQL 예산을 보존한다.
+- 현재 상위→하위 goal/계좌·ACK Risk를 한 관측에 결합하고 만료한 현재 binding은 조회에서 제거한다. 과거 context/EV lineage·현재 보호/후속 상태가 미지원이므로 EV_UNAVAILABLE/주문 OFF다.
+- 신규8 포함 고유63건·선택 HTTP/ASGI/소비 delta0·봉인 v1 예제 동일, 네 run SELECT16/COMMIT0 및 2/8 Shadow·100회 중복 DB/추가계산0을 확인했다. 실제 활성/주문/배포·전수 회귀 없음, 기존 catalog5 보류 유지.
+
+## 2026-10-14 — position-study-cohort-v2 (로컬 미배포)
+
+- native run 시작 전에 전체 case/행동 모집단을 동결하고 실제 HOLD+ADD/REDUCE를 기존 짝 통계로 비교한다. 누락·미지원 case는 전체 cohort 미확인, 원본 ID/TTL과 v1 계약은 보존한다.
+- 신규 12건 포함 관련 고유 81건·소비 감사 delta 0·봉인 예제/ID 동일, 네 run 명시 read SELECT 16/COMMIT 0·원본 DB 동일이다. 신규 CI 등록 완료, 기존 미등록 catalog 5개 보류 유지.
+- 현재 context/상위 EV lineage/계좌 Risk·v2 RAM 게시는 후속이다. 주문 OFF/미배포·전수 회귀 미실행.
+
+## 2026-10-14 — position-study-native-v2 (로컬 미배포)
+
+- 안정적인 연구 규칙과 원래 순간별 목표 TTL을 분리하고 실제 native Paper case 증명을 기존 writer/readonly 경로로 생성·검증한다. 원래 outcome/정책 ID와 v1 계약을 보존한다.
+- 신규 10건 포함 관련 고유 149건·소비 감사 delta 0·봉인 예제/ID 동일, 명시 read SELECT 4/COMMIT 0·원본 DB 동일을 확인했다.
+- 자체 paired cohort/exact context 지원·공통 RAM v2 소비는 후속이다. 실제 주문/활성·배포·commit/push·전수 회귀 없음.
+
+## 2026-10-14 — allocation-model-publication-v1 (로컬 미배포)
+
+- 준비된 native EV·전체 출구/스트레스의 인증 게시·단일 공통 RAM 소비를 연결했다. 같은 입력을 재수집/재저장하지 않고 상위 자동 비중→기존 하위 목표 수량을 한 번 계산한다.
+- 선택/계좌/Risk scope·원래 TTL·inert 중복·세대 fence·취소 drain/close를 유지한다. 새 동적 목표의 R4 모집단 미확인·주문 OFF·실제 계좌 수락/운용 승인 별도다.
+- 신규 8건 포함 관련 고유 96건, 최종 영향 15건/2건·순수 게시/소비 부하·기존 예제/소비 계약을 확인했다. 전체 회귀·배포/활성/주문·commit/push 없음.
+
+## 2026-10-14 사용자 순서 ② 목적별 자동 취소/확정 대사 연결 (로컬)
+
+## 2026-10-14 — full-exit-stress-v1 (로컬 미배포)
+
+- 기존 Paper/native readonly 시장 창으로 전체 잠재 보유 출구·명시 스트레스 연구 근거를 만든다. 부분/불가/미확인 상황에 전체 청산을 합성하지 않고 크기·현재 adverse 보유·cost/horizon·원래 TTL을 상위 비중에 묶는다.
+- 고유 125건(신규 16건) 및 native EV/출구 근거의 주문 없는 통합·기존 v1 ID 보존을 검증했다. 공통 RAM 게시/실시간 통합·actual 모의 수락/운용 승인은 후속이다.
+
+## 2026-10-14 — allocation-native-ev-v1 (로컬 미배포)
+
+- 기존 native 연구/Paper/R4의 독립 BUY/HOLD 짝에서 크기·가격·비용·horizon·TTL을 묶은 배분 EV를 readonly 준비한다. EV 크기 외삽/부분 자금 재표지·ADD 불리함의 EXIT 변환을 차단한다. 기존 preview CLI/통계 재사용이며 새 HTTP/실시간 수집/주문 경로 없음.
+- 전체 출구 Capacity·스트레스/native RAM 게시·실제 모의 수락/운용 승인은 후속이다.
+
+## 2026-10-14 — dynamic-allocation-ram-v1 (로컬 미배포)
+
+- 기존 공통 RAM/native 계좌·Risk 사실을 동적 비중 입력에 연결하고 R4 read/market context를 공유한다. EV·출구 Capacity·스트레스 producer 미공급은 BLOCKED/목표 미생성이다.
+- 고유 133건(신규 14건), 기존 HTTP 72시나리오와 실제 lifespan/health pass. 2/8 Shadow의 공유 read·계산 1회, DB/COMMIT/추가 주문·구독 0을 확인한다.
+
+## 2026-10-14 — dynamic-allocation-shadow-v1 (로컬 미배포)
+
+- 실제 모의 수락 준비의 source 차이/MANUAL·계좌 OFF·원장 0을 확인하고 운영 수락을 별도 보류한다.
+- 계좌 운용 한도/시장·테마·종목·EV·Capacity/위험에 따른 주문 없는 상위 동적 비중 계산과 기존 하위 수량/preview CLI를 연결한다. 고유 103건(신규 21건)·기존 HTTP 72시나리오 pass. 실제 native 입력 binding·운용 승인은 후속이다.
+
+## 2026-10-14 — immediate-native-stop-v1 (로컬 미배포)
+
+- 기존 승인 KRX RAM/상세 FILL Risk로 즉시 종목 손절·기존 native 보호 EXIT를 연결한다. 최초 가격·기한/UNKNOWN·취소 확정 guard를 유지한다.
+- 관련 280건(신규 18건), 기존 ASGI HTTP 72시나리오 pass; 1,000틱 추가 SELECT/COMMIT 0, 첫 보호 native 경로 비용과 실제 계좌 수락을 분리한다.
+
+2026-10-14 로컬 미배포 build `2026.10.14-unfilled-source-publication-v1`: PC CentralContentClient의 명시 prepare_native_unfilled_population으로 기존 readonly 연구 원장/공통 재생을 한 번 검증하고, 같은 클라이언트의 publish_native_unfilled_population이 준비된 패킷을 기존 인증 POST 경계로 보낸다. 기존 mock 라우트·Supervisor·Runner의 계좌 lock/owned drain/단일 RAM 접수를 재사용한다. 서버에 DB 경로를 보내거나 계좌를 활성화하지 않는다. 원래 source 시각/동일 재전송·current native control·등록 경쟁/닫기/STOP·미지원 상태를 확인했다. 신규 15건 포함 고유 154건 및 기존 ASGI 계약 72시나리오·source/build/소비 감사 검증이며 미배포·미활성화/전체 회귀·CI·commit/push 없음. [72단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#72-pc-native-원장-결과의-인증-게시와-기존-runner-ram-접수).
+
+2026-10-14 로컬 미배포 build `2026.10.14-unfilled-native-population-v1`: 기존 PaperExecutionEngine에 명시 unfilled_action_plan의 SUBMIT→WAIT/REPRICE 지정가 연구 분기를 연결하고 같은 연구 원장 writer를 재사용했다. native readonly 개발 구간/최종평가·내용 hash/cut/예산 guard 뒤에 같은 실행기로 가격·현금·예약·비용·취소/재주문 순서를 재생해 UnfilledActionOutcome을 생성한다. 기본 next-open 실행과 기존 HOLD/EXIT/자동 목표 자료는 유지한다. 신규 19건 포함 관련 고유 266건·ASGI/source/build/소비 감사 확인이다. 실시간 원장 입력 게시 caller·CANCELLED/부분체결 모집단 생성은 후속이며, 실제 호가 순서·취소 지연·부분체결 확률·시장 원본 lineage는 미검증이다. source_durability=not_verified와 주문 승인 false를 유지한다. 실제 00/04/REST·종목별 즉시 native 손절 producer/수락·PG/NAS/장중 운용 승인도 남는다. 기존 실제 주문/목표/collector 정책과 상위 비중 후속 범위를 유지하며 활성화·배포·전체 회귀/CI·commit/push 없음. [71단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#71-기존-연구-실행기의-지정가-분기와-native-미체결-결과-읽기).
+
+2026-10-14 로컬 미배포 build `2026.10.14-unfilled-paired-inputs-v1`: WAIT/REPRICE typed 입력·공통 짝 비용 차감/표준오차·bounded RAM 접수/캐시와 기존 동결 비용·등록 전략의 실제 보유 판단을 연결했다. native Risk ACK 시각 정렬/보호 취소의 빠른 경로·취소 후 새 상태 모집단을 보존했다. native 자료 생성/출처 reader는 아직 없고 supplied mock 실험 자료는 not_verified다. 관련 458건의 2건 수정 뒤 영향 62건 통과(신규 26/고유 459), ASGI/source/build·소비 감사 pass. 전체 회귀/CI·계좌 활성화·commit/push/배포 없음. [70단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#70-waitreprice-짝-입력동결-비용익절-판단의-공통-연결).
+
+2026-10-14 로컬 미배포 build `2026.10.14-protective-cancel-recovery-v1`: 새 모의 동결 명세의 명시 횟수/지연에만 보호 취소 거절 재시도, 기존 UNKNOWN/취소 확인 대사·native 계보 예산/기한·transaction fence·운영자 확인을 연결했다. 기본 OFF/기존 ID·수동 취소/BUY/익절·취소 확정 전 새 주문 차단 유지. 최종 신규 21건 포함 관련 고유 351건 근거, ASGI/source/build·소비 감사 확인. 계좌 활성화·실제 주문/배포·전체 회귀/CI 없음. [69단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#69-취소-거절불확실-이후-bounded-보호-대응).
+
+## 2026-10-14 사용자 순서 ② 운영 Risk 첫 보호 EXIT (로컬)
+
+- 확인된 native 계좌 일손실 요청에서 Collector 가격/full account/owned 수량으로 고정 보호 결정을 먼저 checkpoint ACK하고 기존 EXIT 승인/원장으로 제출했다. 분봉/LLM/EV/비용 조회를 기다리지 않는다.
+- QUEUED transaction에 최신 Risk/요청/고정 payload·TTL/owner/control·계좌 전체 미종결 fence와 JSON proof를 연결했다. UNKNOWN·ACK 유실은 원래 root/목적만 복구하며 상세 FILL/신선한 잔고 0만 청산 확인, 매수 차단 및 재시작 재검증을 유지한다.
+- 관련 328건/202.974초 뒤 최종 신규 16건/3.695초 통과(고유 330건), 기존 Collector 34건 근거 재사용. 첫 EXIT SELECT 79/COMMIT 19, 실제 ACK cursor 한 번 2/1 이후 idle 20/0, Risk 알림 DB 0. 실제 계좌/PG/NAS/운용 수락은 별도다.
+- 취소 거절 후 bounded 대응·짝 EV/비용/익절 추세 및 종목별 즉시 손절 trigger는 후속. build `2026.10.14-first-protection-exit-v1` 미커밋·미배포/미활성화. [68단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#68-운영-risk-보호-요청의-첫-exit-생성과-native-claim-확인).
+
+## 2026-10-14 사용자 순서 ② 기존 입력 자동 공급/관리 등록 (로컬)
+
+- 승인 원주문의 원래 목표/가격·시간·기한과 BUY/익절/보호 목적을 같은 owned 작업/기존 checkpoint에 등록하고, 승인 KRX Collector RAM 가격과 Monitor ACK Risk/전체 계좌/broker 확인을 같은 Runner에 공급했다.
+- 건강한 REST revision/가격 틱에서 전체 gate를 반복하지 않으며 native thread recovery 요청은 Monitor loop에서 coalesce한다. 첫 flat 무체결 BUY는 Risk 승격 없이 확인된 주문 취소/ABANDON만 허용하고 보호 EXIT는 bootstrap/분봉 복구·EV/비용을 기다리지 않는다.
+- 선택 334건에서 OFF 준비 경계/import 실패 11건 수정 후 신규 15건 포함 50건/23.126초 재검증 통과·무관 285건 근거 재사용. 가짜 REST/broker의 실제 상세 부분체결/취소 확정 후 보호 잔여 2주만 제출 1회, idle 전후 SELECT 20/COMMIT 0 및 가격/Risk 알림 DB 0을 확인했다.
+- 짝 EV/비용·익절 추세 공급·취소 거절 후 bounded 보호 대응/신규 보호 EXIT 첫 생성 및 실제 00/04/REST 수락은 후속이다. build `2026.10.14-unfilled-native-source-v1`, 미커밋·미배포/미활성화. [67단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#67-기존-collector계좌-입력의-자동-공급과-원래-주문-관리-등록).
+
+- 같은 Runner에서 WAIT/CANCEL/ABANDON/REPRICE를 분기하고 기존 자동 취소 gateway/runtime/CANCEL_STARTED를 호출한다. 취소 확정/상세 체결 대사 전에는 child를 제출하지 않는다.
+- refresh 뒤 기존 owner RAM Risk/계좌와 실제 native broker confirmation을 읽어 runtime 잠금 안에서 재검증한다. 원래 타점/가격/짝 EV 시각은 보존하며 보호 pending BUY 취소·거절/UNKNOWN/close 경계를 유지한다.
+- 신규 20건 포함 관련 8모듈 286건·source/ASGI/build/소비 감사 pass. 같은 입력 idle 전후 10회 SELECT 20/COMMIT 0, 알림/중복 DB 0. 최초 취소 전체 경로 SELECT 71/COMMIT 15, 확정 후 대체 제출 104–106/15의 사건 처리 비용은 남는다.
+- 최초 입력 producer/관리 등록·거절 후 bounded 보호 재시도·실제 00/04/REST 수락은 후속. build `2026.10.14-unfilled-running-cancel-v1`, 미커밋·미배포/미활성화. [66단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#66-목적별-자동-취소와-취소-직전-native-계좌risk-재검증).
+
+## 2026-10-14 사용자 순서 ② running 입력 소비 연결 (로컬)
+
+- 같은 Runner의 단일 typed RAM 슬롯/wake/사건·기한 소비를 기존 고정 child native 승인·제출에 연결했다. 명시 idle API/기존 명세 OFF와 원래 주문 경계는 유지한다.
+- 건강한 REST revision/가격 시각은 전체 gate를 반복하지 않으며 중복/역행·신선도·ACK·STOP/UNKNOWN·close/drain을 검증했다. 입력 없는 보호 기한은 요청만 arming하고 독립 위험/session clock을 유지한다.
+- 신규 21건 포함 관련 8모듈 266건·source/health/build/소비 감사 pass. 같은 입력 idle 전후 SELECT 20/COMMIT 0(10회), 알림 101회/건강한 갱신/기한 RAM 처리 추가 DB 0. 실제 실행 SELECT 108–110/COMMIT 14는 사건당 남는다.
+- production 현재 입력 producer·목적별 자동 취소 caller·실제 00/04/REST 수락은 후속이다. build `2026.10.14-unfilled-running-dispatch-v1`, 미커밋·미배포/미활성화. [65단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#65-running-runner의-사건기한-소비와-고정-주문의-동일-native-실행).
+
+## 2026-10-14 사용자 순서 ② 고정 대체 주문 native 승인·제출 (로컬)
+
+- optional 동결 미체결 실행 정책/v3 고정 child 승인으로 ADD/REDUCE/보호 EXIT를 기존 submit/lifecycle에 연결했다. 기존 명세/hash/OFF·v1/v2 gate는 유지하며 연구용 공급 EV는 명시 모의 정책 허용이 필요하다.
+- QUEUED의 실제 gate/Risk 참조를 같은 intent JSON에 보존하고 부모/상세 체결·최신 Risk·계좌 전체 활성 원장·고정 내용/owner/control을 native transaction에서 검사한다. UNKNOWN/QUEUE/승인/receipt ACK 유실·재시작 중복 제출, child→root 예산 초기화, close 중 새 claim을 차단한다.
+- 신규 29건 포함 관련 372건·source/health/build/소비 감사 pass. 격리 explicit 실행 SELECT 106–108/COMMIT 14, 반복당 SELECT 10/lease COMMIT 1·추가 제출 0. running 자동 dispatcher/현재 입력 producer·실제 계좌/PG/NAS/장중·운용 승인 수락은 후속이다. build `2026.10.14-unfilled-native-dispatch-v1`, 미커밋·미배포/미활성화. [64단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출).
+
+## 2026-10-14 사용자 순서 ② native 자동 취소 실행 기반 (로컬)
+
+- 기존 gateway/runtime/lifecycle에 exact native 주문·계좌 갱신·CANCEL_STARTED transaction의 owner/control 검증을 추가했다. claim ACK 뒤 STOP에도 응답/대사는 이어가고 ACK 유실/거절/UNKNOWN·재시작 중복 취소를 차단한다. 수동 취소/명시 재시도는 유지한다.
+- 신규 18건 포함 관련 212건·source/health/build/consumer 검증 통과. 첫 native 경계 SELECT 11→14·COMMIT 3→3, 반복 요청의 추가 계좌 갱신/취소/Risk 무효화 0. 실제 REST/Risk 생산 비용·장중 성능은 별도다.
+- build `2026.10.14-automation-cancel-fence-v1`, 미커밋·미배포/미활성화. purpose dispatcher/고정 child 승인/제출·실제 00/04/REST 수락은 후속이다. [63단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#63-모의계좌-자동-취소의-native-실행-경계).
+
+## 2026-10-14 사용자 순서 ① 운영 Risk 자동 보호 요청 연결 (로컬)
+
+- 기존 계좌/Risk 저장 ACK 뒤 RAM cut을 같은 Runner에 자동 전달해 봉/Shadow 없이 우선 검토를 깨운다. 원래 Runtime/Position listener와 수집/REST/DB writer를 유지하고 전체 주문/체결 페이지를 복제하지 않는다.
+- 기존 승인 한도의 실제 손실은 EXIT_REQUIRED, UNKNOWN/대사·자료 위험은 RECONCILE_REQUIRED로 구분한다. 같은 위험/누적 mismatch만으로 요청을 늘리지 않고 실제 노출 변화에는 새 요청을 만든다. STOP/보호 latch를 자동 해제하지 않는다.
+- 신규 13건 포함 관련 234건 통과·callback DB/TR/COMMIT/추가 전송 0·native revision 6개→요청 1개. build `2026.10.14-native-risk-protection-v1`은 미커밋·미배포다. 다음은 ② 목적별 모의계좌 자동 취소/재주문·00/04/REST, 그 뒤 ③ 동적 비중·④ 모의 전체 통합과 운용 승인이다. 실제 제출은 아직 활성화하지 않았다. [62단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#62-운영-risk의-자동-보호-요청-연결과-개발-순서-개정).
+
+## 2026-10-14 주문 OFF 첫 연결 통합 수락·동적 비중조절로 개발 전환
+
+- 신규 통합 4건 포함 선택 38건 통과·실행 SHA/기존 테스트 class AST 일치로 앞선 근거를 재사용했다. idle polling 전후 SELECT 4/COMMIT 0·상태/기한/동일 cue 100회 DB 0·반복 보호 polling의 전체 gate 호출 0을 확인했다.
+- 현재 명시 OFF 검토의 자동 사건/기한 호출은 미구현이고 수동 반복의 비용은 유지한다. 실제 전송은 동일 사건/기한 합치기와 제출 직전 native 재검증이 후속 수락 조건이다.
+- OFF 첫 연결 범위를 종료하고 다음 큰 개발을 원래 Position·Risk·Capacity/Liquidity의 동적 비중조절로 정했다. 실제 모의계좌 취소/재주문·보호/청산과 운용 승인은 독립 후속이다. 실행 소스/build 유지·미커밋·미배포·주문 OFF. [61단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#61-주문-off-첫-연결의-통합-수락과-db-호출-범위).
+
+## 2026-10-14 목적별 고정 child·보호 요청 우선 검토 (로컬, OFF)
+
+- 원래 BUY 승인·취소/상세 체결·현재 Risk와 고정 child/payload·총 보유 자본/자금·native 예산을 결합했다. 익절 REDUCE와 보호 EXIT를 구분하고 legacy ADD/REDUCE 차단을 유지한다.
+- 기존 runner를 bounded RAM 보호 요청으로 깨우고 봉/일반 dispatch에 앞서 처리한다. 같은 checkpoint의 재시작/ACK·새 요청 경쟁·실제 native flat 해제/재검증을 연결했다. 운영 보호 producer·실제 주문 전송은 후속이다.
+- 신규 20건 포함 관련 155건·legacy gate 전후 360회 동일·별도 OS 복구/AST/ASGI/소비 감사 통과. BUY SELECT +1·COMMIT 3/2 유지·추가 전송/실행 원장 쓰기 0이다. idle 요청 6표본 처리 1.27–1.74ms는 격리 값이며 운영 보호 지연 수락이 아니다.
+- build `2026.10.14-unfilled-purpose-gate-v1`은 미커밋·미배포다. 주문 OFF 첫 연결 종료까지 통합 수락 한 묶음이 남았고, 상위 동적 비중·운영 EV·모의계좌/PG/NAS 수락은 후속으로 유지한다. [60단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#60-목적별-고정-대체-주문-검토와-보호-요청의-우선-처리).
+
+## 2026-10-14 Native 미체결 시도 투영과 닫힌 owner 검토 (로컬)
+
+- 기존 원장/checkpoint의 기대 parent-child 내용·QUEUED claim/SUBMISSION_STARTED·상세 보유/Risk cut으로 다회 예산을 복구한다. 원래 anchor/기한/결정적 ID·고정 예약 내용을 유지하고 UNKNOWN/manifest 손실·ACK/STOP/owner/느린 저장을 차단한다.
+- 기존 native Risk/복구 검증을 공유하고 전송 없는 기존 gate 평가를 연결했다. ADD/REDUCE를 ENTER/EXIT로 바꾸지 않으며 raw EXIT 평가도 child 승인으로 쓰지 않는다. adapter 전송·실행 원장 쓰기는 0이다.
+- 신규 14건 포함 관련 135건/65.245초·별도 OS 프로세스 복구·기존 class AST/ASGI/build/소비 감사 pass. native guard COMMIT changed/repeat 3/2 중 checkpoint는 1/0이다. 기존 catalog/recorder checkpoint 보류 유지. build `2026.10.14-unfilled-native-attempts-v1` 미커밋·미배포. [59단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#59-native-parent-child-시도-투영과-닫힌-owner-gate-검토).
+
+## 2026-10-14 미체결 영속 검토 계획과 기존 checkpoint 복구 (로컬)
+
+- 기존 idle runner/native parent reader·checkpoint writer에 첫 대체 preview 예약/현재 결과를 연결했다. ACK/COMMIT 실패·control/체결 변경·손상·중복 child·동시 native 작업을 차단하고 복구 뒤 현재 입력 재검증을 요구한다. 실제 주문 원장/전송 권한은 만들지 않는다.
+- 기존 시계에 보호 기한/미해결 위험 힌트를 전달했다. 실제 native retry 원장/다회 예산·보호 우선 wake-up/owner Risk 승인·자동 재주문은 후속이다.
+- 신규 13건 포함 관련 100건/42.650초, 별도 OS 프로세스 복구·추가 주문/취소 0·changed/repeat COMMIT 1/0·기존 class AST/ASGI/build/소비 감사 pass. 기존 catalog 보류 유지. build `2026.10.14-unfilled-preflight-v1` 미커밋·미배포. [58단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#58-미체결-검토-계획의-기존-checkpoint-복구와-실행-전-검증).
+
+## 2026-10-14 R4 후 목적별 미체결 정책의 고정 미리보기 (로컬)
+
+- 기존 lifecycle/취소·체결 정규화·목표/비용 계산으로 매수/익절/보호의 순수 WAIT/CANCEL/REPRICE/ABANDON을 연결하고 기존 CLI schema를 추가했다. ACK/UNKNOWN 대체 금지, 취소 중 부분/전량 체결과 최신 잔고/계좌 전체 pending을 반영한다. 원래 lifecycle/transport class AST는 유지한다.
+- 신규 24건 포함 최종 관련 191건·policy 추가 SQL/submit/cancel 0·typed/CLI/ASGI/감사 delta 0 확인. catalog는 별도 미등록 과거자료 모듈로 실패해 보류 유지. 공급된 미체결 paired 요약은 R4 HOLD 대비 평균이나 native 실행 승인이 아니다.
+- 다음은 기존 owner의 영속 parent-child 계획/재시도·취소 대사/보호 시계의 실행 전 연결, 전송 OFF다. 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity의 후속 범위로 유지한다. build 2026.10.14-unfilled-management-shadow-v1 미커밋·미배포, 전체 회귀/CI·실제 계좌/주문·NAS 수락은 미실행이다.
+
+## 2026-10-14 R4 기존 native Risk·타점 RAM 연결 (로컬)
+
+- 기존 계좌 모니터의 Risk 저장본을 같은 RAM 관측에 복사하고 명시 가설의 R3 결과를 공통 비교에서 소비한다. 원래 계좌/as_of·내용/시각·quality를 검증하며 새 조회/계산/저장/owner는 없다. HOLD는 증액 허가로 바꾸지 않고 보호 EXIT 필요와 실제 승인/주문을 구분한다.
+- 신규 15건 포함 최종 관련 173건·이전 고정 결과/ID·CLI/ASGI/Qt·DB 소비 delta 0 확인. catalog는 별도 미등록 과거자료 모듈로 실패했다. R4 주문 없는 첫 기능 범위 종료, 다음은 목적별 미체결 정책의 기존 취소/대사 계약 연결을 주문 없는 모의 검증으로 진행한다.
+- 최종 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity의 후속 범위이며 현재 금액/수량은 하위 기능이다. build 2026.10.14-position-native-inputs-v1 미커밋·미배포, 전체 회귀/CI·실제 계좌/주문·NAS 수락은 미실행이다.
+
+## 2026-10-14 R4 주문 없는 행동 권고 (로컬)
+
+- 기존 비교의 optional 명시 정책에 비용 차감 순차이·표준오차 페널티·연구 위험 제약을 연결하고 같은 CLI/공통 RAM/PC/선별 기록·저장 복구를 재사용한다. 결손/동률·미래/만료/다른 cut은 WAIT, 보호 EXIT는 EV보다 우선하며 주문 권한은 없다.
+- 최종 자동 목표 비중은 원래 Position·Risk·Capacity/Liquidity를 따른 후속 상위 동적 정책이다. 현재 목표 금액·수량 계산은 하위 기능으로 유지한다.
+- 신규 13건 포함 관련 164건·CLI/ASGI/Qt·DB 소비 감사 delta 0 확인. 별도 미등록 과거자료 test 모듈 때문에 catalog는 실패했다. 로컬 build 2026.10.14-position-action-selection-v1, 미커밋·미배포. 실제 계좌/주문·NAS·전체 회귀/CI는 미실행이다.
+
+## 2026-10-13 관찰 화면의 연구 가설/정책 명시 선택 (로컬)
+
+- 시장·테마 관찰에서 PC 연구 DB/run/가설 ID와 기존 행동 정책을 선택한다. 파일은 기존 worker에서 읽기 전용으로 확인하고 문서 snapshot만 서버로 전달한다. 선택 가설 사용·관찰 기본 OFF와 주문 없는 행동 제안을 유지한다.
+- 저장 snapshot 재사용/정책 변경·명시 해제·응답 유실/재시작·로컬 read 중 stop을 연결했다. tick DB 재조회·서버 PC 파일 접근·새 수집/주문/권한 복원은 없다.
+- 신규 10건 포함 관련 116건·offscreen 한글/배치 QA 통과. 로컬 build 2026.10.13-shadow-thesis-selection-v1이며 실제 앱/NAS·원본 확정/운영 승인·장중 수락과 활성화/배포는 미실행이다.
+
+## 2026-10-13 저장된 연구 진입 가설의 Shadow 명시 복구 (로컬)
+
+- 기존 미리보기 CLI에서 연구 DB/run/가설 ID/기존 정책을 명시해 불변 진입 근거를 읽기 전용으로 재사용한다. 저장 내용·거래소/시각·완전성·실패 run/RAM 근거를 검증하며 자동 최신 선택/새 DB 생성/쓰기/틱 재조회는 없다.
+- 신규 10건 포함 관련 103건 통과. 기존 네 정책의 결과·ID·주문 차단과 H1/H2 공통 계산을 유지한다. 연구 문서 저장과 운영 승인/시장 원본 확정은 구분한다.
+- 로컬 build 2026.10.13-shadow-persisted-thesis-v1. 운영 화면 선택·원본 승인/적격성·실제 PG/NAS/장중 수락은 후속이며 활성화/주문/배포는 미실행이다.
+
+## 2026-10-13 시장·테마 Shadow 상한가 원본 연결 (로컬)
+
+- 기존 Collector의 0g 종목정보를 공통 RAM 판단에 전달해 상한가 상태를 표시한다. 당일·거래소·가용시각·승인 source를 확인하며 참조가 없으면 미확인으로 유지한다.
+- 참조정보만 갱신돼도 기존 공통 worker에서 판단한다. 원본 수집·저장/COMMIT·테마별 상태/결과와 기본 OFF는 유지하며 새 조회·주문은 추가하지 않는다.
+- 신규 9건 포함 관련 152건과 별도 health/소스 release 계약 12건 통과. 로컬 build 표식은 2026.10.13-ram-shadow-upper-limit-v1이며 운영 활성화/배포·실제 PG/NAS/장중 성능 수락은 미실행이다.
+
 ## 2026-10-12 완료 연구 데이터 정리·모의 기능 검증 (로컬)
 
 - 완료/보류 연구 상세 DB·중복 입력 51.12GiB를 NAS 5.17GiB로 파일별 검증 보관한 뒤 PC 사본 제거. 124묶음·599파일·실패 0개, 확인 여유 93.35GiB. 뉴스·원본/운영·현재 기준 DB와 작은 완료 근거 보존.

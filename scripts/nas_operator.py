@@ -181,9 +181,31 @@ def decode(data):
 def trace_blob_files(manifest, incoming, limit):
     """Validate physical blocks as bounded data; never import candidate code."""
     files = {}
+    cached_name, cached_content = None, None
     for digest, root in manifest.get('blobs', {}).items():
         require(type(digest) is str and HEX.fullmatch(digest) and type(root) is dict,
                 'invalid_trace_blob')
+        if root.get('format') == 'blocks/shared-v1':
+            require(manifest.get('schema_version') == 4 and type(root.get('bytes')) is int
+                    and 0 < root['bytes'] <= 1024 ** 2 and type(root.get('parts')) is list
+                    and len(root['parts']) == 1, 'invalid_trace_blocks')
+            part = root['parts'][0]
+            require(type(part) is dict and type(part.get('index')) is int and part['index'] == 0
+                    and type(part.get('bytes')) is int and part['bytes'] == root['bytes']
+                    and part.get('sha256') == digest and type(part.get('name')) is str
+                    and re.fullmatch(r'[0-9]{6}\.payloads', part['name'])
+                    and type(part.get('offset')) is int and part['offset'] >= 0
+                    and part['offset'] + part['bytes'] <= 16 * 1024 ** 2,
+                    'invalid_trace_block_part')
+            if cached_name != part['name']:
+                cached_content = incoming.read(part['name'], min(limit, 16 * 1024 ** 2))
+                require(0 < len(cached_content) <= 16 * 1024 ** 2, 'invalid_trace_block_file')
+                cached_name = part['name']
+                files[cached_name] = hashlib.sha256(cached_content).hexdigest()
+            block = cached_content[part['offset']:part['offset'] + part['bytes']]
+            require(len(block) == part['bytes'] and hashlib.sha256(block).hexdigest() == digest,
+                    'trace_block_checksum_mismatch')
+            continue
         if root.get('format') != 'blocks/v1':
             require('format' not in root and 'parts' not in root, 'invalid_trace_blob')
             files.setdefault(root.get('name') or 'payload-' + digest + '.json', None)

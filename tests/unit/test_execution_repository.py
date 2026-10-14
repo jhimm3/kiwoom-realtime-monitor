@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +29,52 @@ def _scoped_intent(intent_id: str, run_id: str, account_ref: str) -> OrderIntent
 
 
 class ExecutionRepositoryTests(unittest.TestCase):
+    def test_account_active_view_includes_eventless_queued_and_other_runs_without_writes(self):
+        store = SQLiteQueryStore(Path(":memory:")); store.initialize(); self.addCleanup(store.close)
+        repository = ExecutionRepository(store)
+        for value in (_scoped_intent("queued", "run-current", "account-1"),
+                      _scoped_intent("old", "run-retired", "account-1"),
+                      _scoped_intent("other", "run-other", "account-2")):
+            repository.create(value)
+        self.assertEqual((), repository.account_events("mock", "account-1").events)
+        sql = []; connect = store._connect
+        def traced():
+            connection = connect(); connection.set_trace_callback(sql.append); return connection
+        with patch.object(store, "_connect", side_effect=traced) as reads:
+            records, complete = repository.account_active_intents("account-1")
+            self.assertEqual(1, reads.call_count)
+        self.assertTrue(complete)
+        self.assertEqual({"queued", "old"}, {r.intent.intent_id for r in records})
+        self.assertEqual(0, sum(statement == "COMMIT" for statement in sql))
+        self.assertEqual(1, len(repository.active_intents("mock", "account-1", "run-current")))
+
+    def test_account_active_view_budget_is_explicit_and_never_returns_confirmed_empty(self):
+        store = SQLiteQueryStore(Path(":memory:")); store.initialize(); self.addCleanup(store.close)
+        repository = ExecutionRepository(store)
+        for index in range(401):
+            repository.create(_scoped_intent(f"queued-{index:04}", f"run-{index}", "account-1"))
+        records, complete = repository.account_active_intents("account-1")
+        self.assertFalse(complete)
+        self.assertEqual(400, len(records))
+
+    def test_postgres_account_active_reader_has_account_scope_bound_and_native_error_cleanup(self):
+        from tests.unit.test_postgres_access import PostgresAccessTests, FakeCursor
+        from kiwoom_monitor.central_server.database import PostgresQueryStore
+        connection = PostgresAccessTests()._native_context_connection()
+        store = PostgresQueryStore("postgresql://unused")
+        captured = []; execute = FakeCursor.execute
+        def traced(cursor, sql, parameters=()):
+            captured.append((sql, parameters)); return execute(cursor, sql, parameters)
+        with patch.object(store, "_connect", return_value=connection), patch.object(FakeCursor, "execute", traced):
+            self.assertEqual([], store.load_account_active_execution_intents("mock", "account-1", 401))
+        self.assertNotIn("run_id=", captured[0][0])
+        self.assertEqual(("mock", "account-1", 401), captured[0][1])
+        self.assertEqual((1, 0, 1), (connection.commits, connection.rollbacks, connection.closes))
+        failing = PostgresAccessTests()._native_context_connection(); failing.fail_execute = 1
+        with patch.object(store, "_connect", return_value=failing):
+            with self.assertRaises(ValueError): store.load_account_active_execution_intents("mock", "account-1", 401)
+        self.assertEqual((0, 1, 1), (failing.commits, failing.rollbacks, failing.closes))
+
     def test_intent_and_events_survive_repository_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")

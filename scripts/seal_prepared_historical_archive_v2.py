@@ -20,7 +20,10 @@ from scripts.audit_prepared_historical_archive_v2 import audit
 from scripts.stage_prepared_historical_news_archive import _sha256
 
 
-def seal(path: Path,seed: Path,receipt: Path) -> dict:
+def seal(path: Path,seed: Path,receipt: Path, *, auditor=None) -> dict:
+    # Offline orchestration may select an independently fingerprinted verifier.
+    # The construction writer, identity, lock and all seal operations stay here.
+    selected_audit = audit if auditor is None else auditor
     path=path.resolve(strict=True); seed=seed.resolve(strict=True); receipt=receipt.resolve()
     if path==seed or receipt in (path,seed) or receipt.exists():
         raise ValueError('sealing inputs and new external receipt must be distinct')
@@ -32,14 +35,14 @@ def seal(path: Path,seed: Path,receipt: Path) -> dict:
         # Recover a receipt creation failure without reopening the sealed DB
         # for writes or trusting the sealed boolean as the entire proof.
         with _exclusive_lock(path):
-            gate=audit(path,seed=seed,full_integrity_check=True,allow_sealed=True)
+            gate=selected_audit(path,seed=seed,full_integrity_check=True,allow_sealed=True)
             if not gate['ready_for_seal']:
                 raise ValueError('archive receipt recovery blockers: '+', '.join(gate['blockers']))
             with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as db:
                 value=report(db)
     else:
         with _writer(path) as db:
-            gate=audit(path,seed=seed,full_integrity_check=True)
+            gate=selected_audit(path,seed=seed,full_integrity_check=True)
             if not gate['ready_for_seal']:
                 raise ValueError('archive publication blockers: '+', '.join(gate['blockers']))
             if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]!=0:

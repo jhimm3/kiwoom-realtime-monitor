@@ -22,6 +22,9 @@ import time
 from typing import Any, Iterator
 import uuid
 from urllib.parse import urlsplit
+from scripts.prepared_historical_archive_inputs import (
+    check_control, component_connections, generation, prepared_batch, select_source,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 for source in (ROOT, ROOT / "src"):
@@ -29,11 +32,11 @@ for source in (ROOT, ROOT / "src"):
         sys.path.insert(0, str(source))
 
 from scripts.stage_prepared_historical_news_archive import _input_hash, _sha256
-from scripts.finalize_prepared_historical_article_bodies import _complete_one
+from scripts.finalize_prepared_historical_article_bodies import _complete_one, _CompletionBatch, _insert_many, _chunks
 from scripts.finalize_prepared_historical_news_events import _resolve_event
 from scripts.build_prepared_historical_search_projection import _publication
 from scripts.verify_prepared_historical_news_rules import _code_digest as _rule_digest
-from scripts.preprocess_historical_news_to_nas import prepare_job
+from scripts.preprocess_historical_news_to_nas import prepare_job, _prepare_rule_job
 from kiwoom_monitor.application.news_rules import SUPPLY_CONTRACT_RULE_VERSION
 from kiwoom_monitor.infrastructure.article_text import clean_article_text
 
@@ -41,6 +44,7 @@ SEARCH = "historical_backfill"
 MARKET = "historical_market_backfill"
 SCOPES = (SEARCH, MARKET)
 POLICY = "historical-news-archive/v2"
+EVENT_DEPENDENCY_CACHE_LIMIT = 65536
 WORLD_EXCLUSION = 'world-service-before-2021-01-01'
 
 
@@ -73,6 +77,8 @@ def _json(value: Any) -> str:
 def code_digest() -> str:
     digest = hashlib.sha256(_rule_digest().encode())
     for name in ("scripts/prepared_historical_archive_v2.py",
+                 "scripts/transition_historical_archive_execution.py",
+                 "scripts/prepared_historical_archive_inputs.py",
                  "scripts/stage_prepared_historical_news_archive.py",
                  "scripts/materialize_historical_news_seed.py",
                  "scripts/export_historical_news_seed.py",
@@ -110,6 +116,10 @@ def _building(db: sqlite3.Connection) -> dict[str, Any]:
         raise ValueError("a building v2 archive is required")
     if value.get("builder_code_digest") != code_digest():
         raise ValueError("archive construction code changed; create a new generation")
+    if value.get('construction_contract'):
+        inputs = generation(db)
+        if not inputs or inputs.get('state') != 'complete' or inputs.get('dataset_id') != value.get('dataset_id'):
+            raise ValueError('input generation adoption unfinished')
     return value
 
 
@@ -117,6 +127,8 @@ def _building(db: sqlite3.Connection) -> dict[str, Any]:
 def _transaction(db: sqlite3.Connection, *, check_capacity: bool=True) -> Iterator[None]:
     if db.in_transaction:
         raise ValueError("nested archive transaction")
+    if check_capacity:
+        check_control(db)
     filename=db.execute('PRAGMA database_list').fetchone()[2]
     if check_capacity and filename and shutil.disk_usage(Path(filename).parent).free<2*1024**3:
         raise ValueError('archive build paused: less than 2GiB free; committed batches are resumable')
@@ -167,12 +179,18 @@ def _require_local(path: Path) -> None:
 
 
 @contextmanager
-def _writer(path: Path) -> Iterator[sqlite3.Connection]:
+def _writer(path: Path, *, cache_kib: int | None = None) -> Iterator[sqlite3.Connection]:
     path = path.resolve(strict=True)
     _require_local(path)
     with _exclusive_lock(path), closing(sqlite3.connect(path, timeout=5)) as db:
         db.execute("PRAGMA busy_timeout=5000")
+        if cache_kib is not None:
+            if type(cache_kib) is not int or not 2000 <= cache_kib <= 131072:
+                raise ValueError('invalid archive cache capacity')
+            db.execute('PRAGMA cache_size=-'+str(cache_kib))
         _building(db)
+        from scripts.transition_historical_archive_execution import finalization_lineage
+        finalization_lineage(db, check_file=True)
         owner = uuid.uuid4().hex
         with _transaction(db):
             # Holding the OS lock proves a stale persistent owner no longer
@@ -315,6 +333,8 @@ def stage(path: Path, prepared_path: Path, scope: str, expected_sha256: str,
         raise ValueError("archive cannot be its own input")
     with _frozen_source(prepared_path, expected_sha256, scope=scope,
                         scope_aliases=scope_aliases) as source, _writer(path) as db:
+        if generation(db):
+            raise ValueError('adopted inputs must use registered components')
         if db.execute("SELECT 1 FROM archive_build_manifest WHERE key='events_v2'").fetchone():
             raise ValueError("event inputs are frozen")
         states = dict(source.execute("SELECT state,COUNT(*) FROM prepared_news WHERE scope=? GROUP BY state", (scope,)))
@@ -441,7 +461,7 @@ def _evidence(raw: sqlite3.Connection | None, cutoff: int, article: dict[str, An
 def finalize_inputs(path: Path, prepared_path: Path, scope: str, expected_sha256: str,
                     *, raw_path: Path | None = None, raw_cutoff: int = 0,
                     max_rows: int = 0, batch_size: int = 80,
-                    scope_aliases: tuple[str, ...] = ()) -> dict[str, Any]:
+                    scope_aliases: tuple[str, ...] = (), cache_kib: int | None = None) -> dict[str, Any]:
     if scope not in SCOPES or max_rows < 0 or not 1 <= batch_size <= 250 or raw_cutoff < 0:
         raise ValueError("invalid finalization arguments")
     if path.resolve() == prepared_path.resolve() or (raw_path and path.resolve() == raw_path.resolve()):
@@ -455,7 +475,7 @@ def finalize_inputs(path: Path, prepared_path: Path, scope: str, expected_sha256
             if raw_cutoff > maximum:
                 raise ValueError("raw BODY cutoff outside source")
         with _frozen_source(prepared_path, expected_sha256, scope=scope,
-                            scope_aliases=scope_aliases) as source, _writer(path) as db:
+                             scope_aliases=scope_aliases) as source, _writer(path, cache_kib=cache_kib) as db, component_connections(db, scope) as components:
             if db.execute("SELECT 1 FROM archive_build_manifest WHERE key='events_v2'").fetchone():
                 raise ValueError("event inputs are frozen")
             staged = db.execute("SELECT source_path,source_sha256,state FROM archive_sources_v2 WHERE scope=?", (scope,)).fetchone()
@@ -475,12 +495,16 @@ def finalize_inputs(path: Path, prepared_path: Path, scope: str, expected_sha256
                 elif json.loads(saved[0])!=config:
                     raise ValueError('raw BODY evidence configuration changed within generation')
             digest = code_digest()
+            from scripts.transition_historical_archive_execution import finalization_lineage, fingerprint_digest
+            lineage = finalization_lineage(db, check_file=True)
             done = targets_done = 0
             while not max_rows or done < max_rows:
                 take = min(batch_size, max_rows-done) if max_rows else batch_size
                 pending = db.execute("SELECT stock_code,identity,input_hash FROM archive_input_progress WHERE scope=? AND progress_state='pending' ORDER BY stock_code,identity LIMIT ?", (scope, take)).fetchall()
                 if not pending:
                     break
+                if any(fingerprint_digest(lineage,scope,o,i,digest)!=digest for o,i,_ in pending):
+                    raise ValueError('pending input is inside a closed finalized prefix')
                 origins={}
                 for offset in range(0,len(pending),250):
                     chunk=pending[offset:offset+250]
@@ -488,18 +512,25 @@ def finalize_inputs(path: Path, prepared_path: Path, scope: str, expected_sha256
                     values=[scope]+[value for owner,identity,_ in chunk for value in (owner,identity)]
                     origins.update({(owner,identity):(original,hashed) for owner,identity,original,hashed in db.execute('SELECT stock_code,identity,original_scope,input_hash FROM archive_prepared_scope_origins_v2 WHERE scope=? AND (stock_code,identity) IN ('+placeholders+')',values)})
                 with _transaction(db):
+                    prepared_rows = prepared_batch(db, source, components, scope, pending)
+                    completion = _CompletionBatch(db, scope, pending, prepared_rows)
+                    metadata = {}
+                    def queue(sql, values):
+                        prefix, suffix = sql.split(' VALUES', 1)
+                        ending = suffix[suffix.index(')')+1:]
+                        metadata.setdefault((prefix, ending), []).append(tuple(values))
                     for owner, identity, input_hash in pending:
-                        row = source.execute("SELECT stock_code,identity,state,article_json,body_json,rules_json,error,updated_at FROM prepared_news WHERE scope=? AND stock_code=? AND identity=?", (scope, owner, identity)).fetchone()
-                        if not row or row[2] != "ready" or _input_hash(row) != input_hash:
+                        row = prepared_rows.get((owner, identity))
+                        if not row or row[2] != "ready":
                             raise ValueError("prepared row changed after staging")
                         article, body, rules = (json.loads(row[i]) for i in (3,4,5))
                         target_rules = validated_targets(article, rules, scope, owner)
-                        db.execute("INSERT INTO archive_expected_targets_v2 VALUES(?,?,?,?)",(scope,owner,identity,_json({key:value['stock_name'] for key,value in target_rules.items()})))
+                        queue("INSERT INTO archive_expected_targets_v2 VALUES(?,?,?,?)",(scope,owner,identity,_json({key:value['stock_name'] for key,value in target_rules.items()})))
                         provenance={}
                         _complete_one(db, source, scope, owner, identity, input_hash,
-                                      _evidence(raw, raw_cutoff, article), manage_transaction=False,
-                                      provenance_out=provenance)
-                        article_id, body_id = db.execute("SELECT article_revision_id,body_revision_id FROM archive_input_progress WHERE scope=? AND stock_code=? AND identity=?", (scope, owner, identity)).fetchone()
+                                      _evidence(raw, raw_cutoff, article) if body["body_status"] == "fulltext" else {}, manage_transaction=False,
+                                      provenance_out=provenance, prepared_row=row, batch_store=completion)
+                        article_id, body_id = completion.updates[-1][:2]
                         original_scope=scope
                         origin=origins.get((owner,identity))
                         if origin:
@@ -512,25 +543,42 @@ def finalize_inputs(path: Path, prepared_path: Path, scope: str, expected_sha256
                                  'prepared_rule_metadata':[{key:value for key,value in rule.items() if key not in ('assessment','core_sentences','rule_result')} for rule in rules],
                                  'body_provenance':provenance,
                                  'prepared_updated_at':row[7],'prepared_error':row[6]}
-                        db.execute('INSERT INTO archive_input_context_v2 VALUES(?,?,?,?,?,?)',(scope,owner,identity,article_id,body_id,_json(context)))
-                        clean = clean_article_text(body["body_text"]) if body["body_status"] == "fulltext" else ""
-                        db.execute("INSERT INTO archive_clean_bodies_v2 VALUES(?,?) ON CONFLICT(body_revision_id) DO NOTHING", (body_id, clean if len(clean) >= 40 else ""))
+                        queue('INSERT INTO archive_input_context_v2 VALUES(?,?,?,?,?,?)',(scope,owner,identity,article_id,body_id,_json(context)))
+                        cleaned = clean_article_text(body["body_text"])
+                        clean = cleaned if body["body_status"] == "fulltext" else ""
+                        queue("INSERT INTO archive_clean_bodies_v2 VALUES(?,?) ON CONFLICT(body_revision_id) DO NOTHING", (body_id, clean if len(clean) >= 40 else ""))
                         for target_id, prepared in sorted(target_rules.items()):
-                            computed = prepare_job({"job_key":"archive-v2", "attempts":1, "stage":"RULE", "target_id":target_id, "payload":{"stock_code":target_id,"stock_name":prepared["stock_name"]}}, article, {"body_text":body["body_text"],"status":body["body_status"]}, allow_network=False)
+                            computed = _prepare_rule_job({"job_key":"archive-v2", "attempts":1, "stage":"RULE", "target_id":target_id, "payload":{"stock_code":target_id,"stock_name":prepared["stock_name"]}}, article, {"body_text":body["body_text"],"status":body["body_status"]}, cleaned)
                             keys = ("assessment","core_sentences","rule_result")
                             original = {key: prepared[key] for key in keys}
                             result = {key: computed[key] for key in keys}
                             if result["rule_result"] is not None and result["rule_result"].get("rule_version") != SUPPLY_CONTRACT_RULE_VERSION:
                                 raise ValueError("computed RULE version invalid")
                             fingerprint = hashlib.sha256(_json((POLICY,input_hash,article_id,body_id,target_id,prepared["stock_name"],digest,result)).encode()).hexdigest()
-                            db.execute("INSERT INTO archive_targets_v2(scope,stock_code,identity,target_id,target_name,input_hash,article_revision_id,body_revision_id,fingerprint,prepared_json,computed_json,verification_state,computed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (scope,owner,identity,target_id,prepared["stock_name"],input_hash,article_id,body_id,fingerprint,_json(original),_json(result),"verified_equal" if _json(original)==_json(result) else "recomputed_posthoc",time.time()))
+                            queue("INSERT INTO archive_targets_v2(scope,stock_code,identity,target_id,target_name,input_hash,article_revision_id,body_revision_id,fingerprint,prepared_json,computed_json,verification_state,computed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (scope,owner,identity,target_id,prepared["stock_name"],input_hash,article_id,body_id,fingerprint,_json(original),_json(result),"verified_equal" if _json(original)==_json(result) else "recomputed_posthoc",time.time()))
                         if scope == MARKET:
                             channel = str(article.get("source") or "").lower()
                             if channel not in {"flash","world"}:
                                 raise ValueError("unknown prepared market source")
-                            db.execute("INSERT INTO archive_market_sources_v2 VALUES(?,?,?) ON CONFLICT(identity,source) DO UPDATE SET source_item_json=excluded.source_item_json", (identity,channel,_json(article.get("source_item",{}))))
-                        db.execute("UPDATE archive_input_progress SET progress_state='assessment_done' WHERE scope=? AND stock_code=? AND identity=? AND progress_state='article_body_done'", (scope,owner,identity))
+                            queue("INSERT INTO archive_market_sources_v2 VALUES(?,?,?) ON CONFLICT(identity,source) DO UPDATE SET source_item_json=excluded.source_item_json", (identity,channel,_json(article.get("source_item",{}))))
                         targets_done += len(target_rules)
+                    completion.flush()
+                    for (prefix, suffix), rows in metadata.items():
+                        # Preserve each table's first/last input semantics before merging rows.
+                        if prefix.startswith('INSERT INTO archive_clean_bodies_v2'):
+                            first = {}
+                            for row in rows:first.setdefault(row[0],row)
+                            rows = list(first.values())
+                        elif prefix.startswith('INSERT INTO archive_market_sources_v2'):
+                            rows = list({r[:2]: r for r in rows}.values())
+                        _insert_many(db,prefix,rows,suffix)
+                    for chunk in _chunks(db,[(scope,o,i,h) for o,i,h in pending],4):
+                        sql = ('WITH changes(scope,stock,identity,hash) AS (VALUES '+','.join('(?,?,?,?)' for _ in chunk)+') '
+                               "UPDATE archive_input_progress AS p SET progress_state='assessment_done' FROM changes c "
+                               "WHERE p.scope=c.scope AND p.stock_code=c.stock AND p.identity=c.identity AND p.input_hash=c.hash AND p.progress_state='article_body_done' RETURNING scope,stock_code,identity")
+                        changed = db.execute(sql,[v for r in chunk for v in r]).fetchall()
+                        if len(changed)!=len(chunk) or set(changed)!={r[:3] for r in chunk}:
+                            raise ValueError('assessment progress update lost its ownership')
                 done += len(pending)
             return {"scope":scope,"inputs_finalized_now":done,"targets_finalized_now":targets_done,"build_state":"building"}
     finally:
@@ -570,6 +618,14 @@ def finalize_events(path: Path, *, max_rows: int = 0, batch_size: int = 80) -> d
             raise ValueError("ambiguous event requires explicit resolution")
         done=0
         blocked=None
+        # Dependency checks used to query the targets table for every resolved
+        # target. Large prepared news inputs can have many targets per article
+        # and per input identity, so retain the pending counts for each active
+        # group and refresh them only on first use. The counters are derived
+        # from committed rows each time this function is entered, which keeps
+        # crash/restart and max_rows resume behavior unchanged.
+        pending_by_article: dict[str, int] = {}
+        pending_by_input: dict[tuple[str, str, str], int] = {}
         while not max_rows or done < max_rows:
             take=min(batch_size,max_rows-done) if max_rows else batch_size
             processed=0
@@ -580,6 +636,27 @@ def finalize_events(path: Path, *, max_rows: int = 0, batch_size: int = 80) -> d
                     if not row:
                         break
                     scope,owner,identity,target,article_id,body_id,computed,fingerprint=row
+                    input_key=(scope,owner,identity)
+                    if article_id not in pending_by_article:
+                        pending_count=db.execute(
+                            "SELECT COUNT(*) FROM archive_targets_v2 WHERE article_revision_id=? AND event_state IN ('pending','conflict')",
+                            (article_id,),
+                        ).fetchone()[0]
+                        if pending_count > 1:
+                            if len(pending_by_article) >= EVENT_DEPENDENCY_CACHE_LIMIT:
+                                pending_by_article.clear()
+                            pending_by_article[article_id]=pending_count
+                    if input_key not in pending_by_input:
+                        pending_input_count=db.execute(
+                            "SELECT COUNT(*) FROM archive_targets_v2 WHERE scope=? AND stock_code=? AND identity=? AND event_state IN ('pending','conflict')",
+                            input_key,
+                        ).fetchone()[0]
+                        if pending_input_count > 1:
+                            if len(pending_by_input) >= EVENT_DEPENDENCY_CACHE_LIMIT:
+                                pending_by_input.clear()
+                            pending_by_input[input_key]=pending_input_count
+                    if pending_by_article.get(article_id,1) < 1 or pending_by_input.get(input_key,1) < 1:
+                        raise ValueError('event dependency counters disagree with pending target')
                     resolution=_resolve_event(db,target,identity,article_id,body_id,json.loads(computed),SUPPLY_CONTRACT_RULE_VERSION)
                     outcome,reason,event_id,event_rev,member_id,_,_,candidates=resolution
                     ordinal=manifest["next_ordinal"]
@@ -590,9 +667,23 @@ def finalize_events(path: Path, *, max_rows: int = 0, batch_size: int = 80) -> d
                     if outcome == "conflict":
                         blocked={"scope":scope,"owner":owner,"identity":identity,"target_id":target,"reason":reason}
                         break
-                    if not db.execute("SELECT 1 FROM archive_targets_v2 WHERE article_revision_id=? AND event_state IN ('pending','conflict') LIMIT 1",(article_id,)).fetchone():
+                    if article_id in pending_by_article:
+                        pending_by_article[article_id]-=1
+                        article_complete=pending_by_article[article_id] == 0
+                        if article_complete:
+                            del pending_by_article[article_id]
+                    else:
+                        article_complete=True
+                    if article_complete:
                         db.execute("UPDATE archive_event_ready_v2 SET ready=1 WHERE parent_id=? AND state='pending'",(article_id,))
-                    if not db.execute("SELECT 1 FROM archive_targets_v2 WHERE scope=? AND stock_code=? AND identity=? AND event_state IN ('pending','conflict') LIMIT 1",(scope,owner,identity)).fetchone():
+                    if input_key in pending_by_input:
+                        pending_by_input[input_key]-=1
+                        input_complete=pending_by_input[input_key] == 0
+                        if input_complete:
+                            del pending_by_input[input_key]
+                    else:
+                        input_complete=True
+                    if input_complete:
                         db.execute("UPDATE archive_input_progress SET progress_state='event_done' WHERE scope=? AND stock_code=? AND identity=? AND progress_state='assessment_done'",(scope,owner,identity))
                 # Both counters advance with the same batch transaction; do
                 # not rescan millions of remaining targets after every batch.
@@ -633,11 +724,11 @@ def build_projection(path: Path, *, max_rows: int = 0, batch_size: int = 250) ->
         done=0
         while not max_rows or done<max_rows:
             take=min(batch_size,max_rows-done) if max_rows else batch_size
-            rows=db.execute("SELECT kind,owner,identity,article_revision_id,body_revision_id FROM archive_projection_sources_v2 WHERE state='pending' ORDER BY kind,owner,identity LIMIT ?",(take,)).fetchall()
+            rows=db.execute("SELECT s.kind,s.owner,s.identity,s.article_revision_id,s.body_revision_id,a.article_revision_id,a.published_at,a.document_json,b.article_revision_id,b.status,c.body_revision_id,CASE WHEN c.body_revision_id IS NULL THEN b.body_text END FROM archive_projection_sources_v2 s LEFT JOIN central_news_article_revisions a ON a.article_revision_id=s.article_revision_id LEFT JOIN central_news_body_revisions b ON b.body_revision_id=s.body_revision_id LEFT JOIN archive_clean_bodies_v2 c ON c.body_revision_id=s.body_revision_id WHERE s.state='pending' ORDER BY s.kind,s.owner,s.identity LIMIT ?",(take,)).fetchall()
             if not rows:
                 break
             with _transaction(db):
-                for kind,owner,identity,article_id,body_id in rows:
+                for kind,owner,identity,article_id,body_id,stored_article,published_at,encoded_article,body_article,body_status,clean_id,body_text in rows:
                     if article_id is None:
                         failed=db.execute('SELECT error,article_json FROM archive_failures_v2 WHERE scope=? AND stock_code=? AND identity=?',(MARKET if kind=='market' else SEARCH,owner,identity)).fetchone()
                         if not failed:
@@ -649,19 +740,17 @@ def build_projection(path: Path, *, max_rows: int = 0, batch_size: int = 250) ->
                         db.execute('INSERT INTO archive_projection_v2 VALUES(?,?,?,?,?,?,?,?)',(kind,owner,identity,None,None,missing,sort_us,_json(display)))
                         db.execute("UPDATE archive_projection_sources_v2 SET state='complete' WHERE kind=? AND owner=? AND identity=?",(kind,owner,identity))
                         continue
-                    article=db.execute('SELECT published_at,document_json FROM central_news_article_revisions WHERE article_revision_id=?',(article_id,)).fetchone()
-                    if not article:
+                    if stored_article is None:
                         raise ValueError('projection article missing')
-                    document=json.loads(article[1])
-                    body=db.execute('SELECT status,body_text FROM central_news_body_revisions WHERE body_revision_id=? AND article_revision_id=?',(body_id,article_id)).fetchone() if body_id else None
-                    if body_id and not body:
+                    document=json.loads(encoded_article)
+                    if body_id and body_article != article_id:
                         raise ValueError('projection body relation missing')
-                    clean=clean_article_text(body[1]) if body and body[0]=='fulltext' else ''
-                    if body_id:
+                    if body_id and clean_id is None:
+                        clean=clean_article_text(body_text) if body_status=='fulltext' else ''
                         db.execute('INSERT INTO archive_clean_bodies_v2 VALUES(?,?) ON CONFLICT(body_revision_id) DO NOTHING',(body_id,clean if len(clean)>=40 else ''))
-                    missing,sort_us=_publication(article[0])
+                    missing,sort_us=_publication(published_at)
                     display={key:str(document.get(key) or '') for key in ('title','description','link','original_link','publisher_name','publisher_domain')}
-                    display.update(published_at=article[0],body_status=body[0] if body else 'missing')
+                    display.update(published_at=published_at,body_status=body_status if body_article is not None else 'missing')
                     db.execute('INSERT INTO archive_projection_v2 VALUES(?,?,?,?,?,?,?,?)',(kind,owner,identity,article_id,body_id,missing,sort_us,_json(display)))
                     db.execute("UPDATE archive_projection_sources_v2 SET state='complete' WHERE kind=? AND owner=? AND identity=?",(kind,owner,identity))
             done+=len(rows)

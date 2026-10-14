@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Awaitable
 from datetime import datetime, timezone
 from typing import Any, Protocol, TYPE_CHECKING
 
@@ -23,13 +23,52 @@ class ResearchReadStore(Protocol):
 
     def load_shadow_candidates(self, after_sequence: int = 0, limit: int = 100) -> dict[str, Any]: ...
 
+    def load_document(self, collection: str, owner: str, key: str) -> dict[str, Any] | None: ...
+
 
 def create_research_read_router(
     store: ResearchReadStore, authorize: Callable[..., None],
     get_candidate_monitor: Callable[[], CandidateMonitor | None],
+    *, get_market_theme_shadow_runtime: Callable[[], Any] = lambda: None,
+    check_stock_thesis_sources: Callable[[int, int], Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     """Read the app-owned current monitor after the DB await, including runtime replacement."""
     router = APIRouter()
+
+    @router.get("/api/v1/research/ram-shadow/source-check", dependencies=[Depends(authorize)])
+    async def research_stock_thesis_source_check(
+        expected_revision: int = Query(ge=0), lookback_seconds: int = Query(default=20, ge=1, le=60),
+    ) -> dict[str, Any]:
+        if check_stock_thesis_sources is None:
+            raise HTTPException(status_code=409, detail="source check is unavailable")
+        try:
+            return await check_stock_thesis_sources(expected_revision, lookback_seconds)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @router.get("/api/v1/research/ram-shadow", dependencies=[Depends(authorize)])
+    async def research_ram_shadow(include_recorded: bool = Query(default=False)) -> dict[str, object]:
+        from .market_theme_shadow_monitor import SHADOW_RESULT_COLLECTION, SHADOW_RESULT_OWNER
+        recorded = None
+        if include_recorded:
+            recorded = await asyncio.to_thread(store.load_document,
+                SHADOW_RESULT_COLLECTION, SHADOW_RESULT_OWNER, "latest")
+        runtime = get_market_theme_shadow_runtime()
+        live = runtime.latest_results if runtime is not None else None
+        now = datetime.now(timezone.utc)
+        for envelope in (live, recorded.get("document") if recorded else None):
+            if envelope is None:
+                continue
+            for slot in envelope["results"]:
+                decision = slot["decision"]
+                cutoff = decision["valid_until"] if decision else envelope["contexts"][slot["context_ref"]]["expires_at"]
+                slot["display_state"] = "EXPIRED" if datetime.fromisoformat(cutoff) <= now else "CURRENT"
+        return {"runtime": runtime.status if runtime is not None else {"state": "DISABLED"},
+                "live": live,
+                "recorded": recorded, "recorded_is_live": False,
+                "replay_eligible": False, "order_authorized": False}
 
     @router.get("/api/v1/research/observations", dependencies=[Depends(authorize)])
     async def research_observations(

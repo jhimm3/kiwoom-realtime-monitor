@@ -1,5 +1,81 @@
 # NAS 진단 운영·API·제어 계약
 
+입력 묶음의 격리 측정은 data/diagnostics/20261014-allocation-input-bundle-v1/metrics.json이다. 2/8 각각 Collector/계좌/bundle/상위1·시장1·DB/COMMIT/주문0, bundle2236bytes·생성100회 평균0.1377/0.1795ms·cold frame10.647/9.301ms.100회 status/duplicate에서는 추가 account read/bundle build/evaluation0이다. 선택 기록 검사는 기존 upsert1/COMMIT1·반복0으로 새 DB 루프가 아니다. 실제 PG/NAS/장중·계좌/whole-app 성능 수락과 구분한다. [86단계](AI_TRADING_SYSTEM_REDESIGN.md#86-개발-마무리-범위-고정과-공통-입력원본-근거-묶음)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+85단계 격리 측정은 data/diagnostics/20261014-position-historical-context-v1/metrics.json이다. 두 case 동결1.439ms/DB·판단0, 기존/맥락 포함 네 native read 모두SELECT16/COMMIT0·borrow4·원본 bytes 동일, packet163433→262097bytes다. 같은 case HOLD/ADD에 두 metadata payload가 있으나 최초 decoder에서는 context2개를 각1회 계산한다. 2/8 cold hot frame10.722/13.636ms·처음 게시25.507/40.601ms, Collector/계좌 각1·현재시장1·상위1·DB/COMMIT0, 중복/status100회 추가조회/재생/상위계산0. source proof의 자체 감사 payload 비용이며 실제 NAS/PG/장중 처리 지연/현재 계좌 수락 증거로 일반화하지 않는다. [85단계](AI_TRADING_SYSTEM_REDESIGN.md#85-기존-연구-입력의-과거-순위테마-맥락-연결)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+84단계 실제 격리 측정은 data/diagnostics/20261014-position-ev-lineage-v1/metrics.json이다. 같은 네 EV run의 기본/원본 포함 준비 모두 borrow4/SELECT16/COMMIT0·원본 bytes 동일, 준비 12.379/16.245ms다. 2/8 최초 원본 포함 v2 게시 27.224/27.185ms이며 hot frame 3.425/3.731ms, Collector/계좌 각1·상위1·DB/COMMIT/주문0, status/중복100회 추가read/replay/evaluation0이다. cold 기본 frame과 같은 cache 원본 포함 frame을 실운영 개선 전후로 비교하지 않는다. 실제 NAS/PG/장중 또는 broker 수락 증거가 아니다. [84단계](AI_TRADING_SYSTEM_REDESIGN.md#84-상위-ev-원본-출처-재생과-r4-연구-중복-확인)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+이번 격리 측정은 data/diagnostics/20261014-native-position-state-v1/metrics.json이다. native getter100회 총11.274ms/평균0.1127ms·원장/DB/COMMIT0이며 상태/availability 동일. 2/8 Shadow 모두 Collector/계좌 각1·native getter1·상위1·원장/DB/COMMIT0, status100회 추가 조회/계산0이다. 같은 입력 cache frame3.737/3.814ms와 cold baseline11.244/9.499ms는 조건이 달라 실운영 전후 지연 개선 증거가 아니다. 실제 native Runner에 등록된 broker 계좌와 NAS/PG/장중 수락은 별도이며 이 측정은 controlled fake 계좌/Collector 및 기존 native fill 처리 fixture다. [83단계](AI_TRADING_SYSTEM_REDESIGN.md#83-native-runner-체결보호-상태의-동일-계좌-ram-관측)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+격리 v2 게시/현재 목표·Risk 결합의 실제 측정은 data/diagnostics/20261014-position-study-publication-v2/metrics.json에 있다. 같은 native read에 원래 record를 추가해 네 run SELECT 16/BEGIN·ROLLBACK 각4/COMMIT0·원본 bytes 동일이며 81→82 per-run SELECT4→4다. 2/8 Shadow 모두 Collector/계좌1·상위1·DB/주문0이며 100회 중복/status 추가조회/계산0다. v2 최초 decoder 약18ms, 동일 input cache 재사용 frame 약3.2–3.7ms다. v1 baseline은 cold cache라 frame 시각을 성능 개선 전후로 일반화하지 않는다. PC 연구 실행 생성·실제 NAS/PG/네트워크/장중/계좌 수락은 별도다. [82단계](AI_TRADING_SYSTEM_REDESIGN.md#82-v2-연구-근거의-공통-ram-게시와-현재-목표risk-결합)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+v2 cohort의 격리 actual Paper/SQLite 명시 준비 측정은 data/diagnostics/20261014-position-study-cohort-v2/metrics.json에 있다. 두 case·네 native run에서 borrow 4·SELECT 16·BEGIN/ROLLBACK 각 4·COMMIT 0·원본 DB bytes 동일이다. 전체 event budget 10,000은 여러 branch가 함께 사용한다. 실시간 hot path/여러 Shadow/status에 연구 read를 연결하지 않았다. 실제 NAS/PG/네트워크/계좌·연구 run 생성·시장 지연은 이 readonly 측정 밖이며 기존 80단계 단일 case SELECT 4/COMMIT 0과 같은 per-run 계약이다. [81단계](AI_TRADING_SYSTEM_REDESIGN.md#81-v2-native-짝-모집단-동결과-공통-통계)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+v2 연구 case 증명의 격리 actual runner/Paper/SQLite 측정은 data/diagnostics/20261014-position-study-native-v2/metrics.json에 있다. 명시 read당 native run borrow 1·SELECT 4·BEGIN/ROLLBACK 각 1·COMMIT 0/5.748ms·원본 DB bytes 동일이다. native event 11건 중 새 case proof 1건이며 실제 broker 주문/추가 구독 0이다. proof는 기존 연구 writer의 가상 실행 기록으로서 별도 실시간 writer가 아니다. 반복 explicit read도 원래 availability/TTL을 갱신하지 않는다. 전체 native run 생성/실제 NAS·네트워크/시장 지연은 이 read 측정 밖이다. 현재 v2 공통 RAM 소비·cohort/R4 통계는 미연결이다. [80단계](AI_TRADING_SYSTEM_REDESIGN.md#80-v2-연구-규칙순간별-case-계약과-native-증명-첫-구현)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+준비된 native 모델 공통 RAM 게시의 격리 측정은 data/diagnostics/20261014-allocation-model-publication/metrics.json에 남겼다. 2/8 Shadow 모두 최초 게시 native replay 약 2.5ms(계좌 read 0), 게시 후 공통 frame 3.169–4.262ms·Collector/계좌 RAM 각 1·상위 계산 1·DB/COMMIT/주문/구독 0이다. 동일 게시/status 100회 추가 조회/계산 0, 최초 H1은 기존 cache에 공유한다. 이 측정은 PC 원본 자료 준비의 EV SELECT 16/출구 SELECT 4·실제 네트워크/NAS·장중 수락을 제외한다. 기존 Collector flush의 DB 기록 비용을 0으로 보고하지 않는다. 실제 ASGI 인증·revision/해제·취소 drain과 느린 게시 replay 중 native 손절 pending 전달을 검증했다. source_durability=not_verified·주문 OFF다. [78단계](AI_TRADING_SYSTEM_REDESIGN.md#78-준비된-native-모델의-공통-ram-게시와-상위하위-목표-연결)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+전체 출구/스트레스의 controlled native 준비는 한 run·SELECT 4·BEGIN/ROLLBACK 각 1·COMMIT 0·원본 SQLite 동일이다. 같은 source 창으로 여러 시나리오를 계산하고 동일 cost/price의 native EV와 조합한 pure preview 101회 DB/주문 0을 확인했다. source 생성/실제 네트워크/NAS 지연은 이 측정 밖이다. 명시 준비 비용을 반복 실시간/status 비용으로 숨기지 않으며 native 보호 경로는 이 준비 완료를 기다리지 않는다. [77단계](AI_TRADING_SYSTEM_REDESIGN.md#77-전체-보유-출구-capacity와-명시-스트레스-연구-근거)
+
+배분 EV의 controlled readonly 준비는 4 native run·SELECT 16·BEGIN/ROLLBACK 각 4·COMMIT 0·원본 SQLite 동일이다. 준비된 EV와 supplied Capacity/스트레스를 쓰는 pure preview 101회 DB/주문 0이다. 이 준비 비용을 실시간 반복 판단 비용으로 숨기지 않으며 native RAM 게시/모델·NAS 지연/실제 계좌 수락은 미검증이다. [76단계](AI_TRADING_SYSTEM_REDESIGN.md#76-배분-ev의-native-연구-공급과-검증-크기-제한)
+
+native allocation은 기존 common runtime/Collector·계좌/Risk·선택 coalesced writer와 owned drain의 수명을 재사용한다. 새로운 수집·writer/table/task owner 없이 선택된 입력의 quality/Risk/missing 모델 요약을 같은 기록에 option으로 저장한다. status reads/계좌-only wake를 구분하고 source refs/원래 TTL을 보존한다. EV·출구/스트레스 미공급은 BLOCKED이며 native 보호를 기다리게 하지 않는다. [75단계](AI_TRADING_SYSTEM_REDESIGN.md#75-동적-비중의-공통-ram-사실과-native-계좌-risk-연결)
+
+즉시 손절은 기존 Collector RAM/Monitor Risk ACK/Runner wake/checkpoint·native execution 진단 소유자를 재사용한다. 새 task/writer/수집 owner 없음. controlled 신규 cue 0.395ms/DB 0, 첫 native EXIT 전체 SELECT 80·COMMIT 18/13.587ms와 이후 대기 10회 SELECT 20·COMMIT 0을 구분한다. 실제 계좌/REST/시장/NAS latency는 미검증이다. [73단계](AI_TRADING_SYSTEM_REDESIGN.md#73-승인된-collector-ram-가격의-즉시-종목-손절과-native-보호-exit)
+
+2026-10-14 격리 SQLite/ASGI에서 첫 새 게시 SELECT 1·COMMIT 0·7.143ms, 중복 HTTP 100회 SELECT 0·COMMIT 0·257.041ms이다. 추가 취소/제출 0·한 RAM 슬롯/가용시각·source generation 유지이고 실제 공통 실행 결과 두 짝을 기존 계산에 연결해 순 차이 -12원을 확인했다. PC 자료 생성/읽기·계좌 Risk 생산·실제 네트워크/시장 지연은 이 측정 밖이다. PC readonly source 준비는 명시 독립 연구 경계이고 HTTP는 준비된 고정 패킷만 재전송한다. 원장 생성/읽기 비용과 nativeControl 첫 SELECT 1을 실시간 반복 거래 검토 비용에 합치거나 0으로 숨기지 않는다. source decode는 기존 owned drain/request 수명에서 처리하며 보호 Runner는 decode 완료를 기다리지 않는다. 신규 writer/background child가 없고 같은 기존 control READ 계측을 사용한다. [72단계](AI_TRADING_SYSTEM_REDESIGN.md#72-pc-native-원장-결과의-인증-게시와-기존-runner-ram-접수).
+
+2026-10-14 격리 SQLite의 4개 source run/2개 짝 읽기는 SELECT 16·COMMIT 0·BEGIN/ROLLBACK 각 4회·12.657ms다. 이는 완료된 오프라인 연구 원장 읽기이며 실시간 사건/독립 계좌 producer/실제 시장 지연 측정이 아니다. Runner와 order_lifecycle 소스 SHA는 70단계와 동일하며 새 실시간 DB/TR/task는 없다. 오프라인 opt-in 분기별 UNFILLED_BAR/BASELINE proof는 같은 기존 연구 writer라 별도 background/writer switch나 운영 저장 owner를 만들지 않는다. 기록량·실제 COMMIT 증가를 숨기지 않으며 verification.json의 offline_generation에는 전체 run별 사건/lineage/SELECT/COMMIT/시간을 별도로 남겼다. source_durability=not_verified·실제 시장/PG/NAS 수락 분리를 유지한다. [71단계](AI_TRADING_SYSTEM_REDESIGN.md#71-기존-연구-실행기의-지정가-분기와-native-미체결-결과-읽기).
+
+2026-10-14 짝 모집단은 기존 Runner의 단일 RAM/cache와 native owned thread 계산을 사용한다. 합성 자료/가짜 REST·broker의 접수 101회 SELECT/COMMIT 0·21.141ms, 첫 비교 1회, idle 10회 20/0·7.836–8.403ms다. 자료 미선택의 첫 검토 39/7·12.473ms, 선택 후 취소 사건 72/16·22.977ms, 취소 확정 후 새 자료의 child 114/18·22.649ms다. 같은 최종 코드의 서로 다른 사건 측정이며 전후 개선/실제 PG·NAS·장중 수락 주장이 아니다. 독립 full account/Risk/cost producer 비용은 제외했다. [70단계](AI_TRADING_SYSTEM_REDESIGN.md#70-waitreprice-짝-입력동결-비용익절-판단의-공통-연결).
+
+2026-10-14 보호 취소 재시도는 기존 사건/기한·Monitor coalesced 큐를 사용하고 새 폴링/수집/task를 만들지 않는다. SQLite/가짜 REST·broker의 기본 OFF와 명시 1회 정책에서 첫 취소 거절은 모두 SELECT 74/COMMIT 17; 신선한 사건은 OFF 12/4(4.811ms), 실제 한 번 재시도 78/16(19.778ms)다. 각 idle 10회는 20/0이며 계좌 native ACK cursor 한 번은 2/1이다. 독립 계좌 producer 비용은 측정 밖, 실제 NAS/PG/장중 지연 수락은 없다. 반복 유휴와 실제 사건 비용을 구분한다. [69단계](AI_TRADING_SYSTEM_REDESIGN.md#69-취소-거절불확실-이후-bounded-보호-대응).
+
+2026-10-14 첫 보호 EXIT는 같은 Runner·native owned 작업/checkpoint/원장 writer를 사용한다. 최신 Collector 가격이 Risk 관측보다 새로우면 그 가격을 보존하고 기존 recovery queue를 요청당 한 번 coalesce한다. 첫 경로 SELECT 79/COMMIT 19, 실제 QUEUED/ACK cursor 한 번 2/1, 이후 idle 10회 20/0·같은 이미 ACK된 Risk 알림 100회 DB 0이다. 사건 자체 비용은 남고 가짜 REST/broker의 SQLite 측정이며 실제 REST/장중/NAS 지연 수락이 아니다. [68단계](AI_TRADING_SYSTEM_REDESIGN.md#68-운영-risk-보호-요청의-첫-exit-생성과-native-claim-확인).
+
+2026-10-14 자동 입력 공급은 기존 Collector trade RAM과 Monitor ACK/full account cut을 읽는다. 동일 입력 수집/초봉 저장·분석/독립 worker를 만들지 않고 실제 00 대사/관리 기한에서 기존 coalesced REST recovery를 요청한다. 원주문 등록·계획·취소/대체 제출은 기존 checkpoint/원장 writer이며 입력 cut은 재시작 replay하지 않는다. 유휴 전후 10회 각 SELECT 20/COMMIT 0, 가격/Risk 알림 각 100회 DB 0이지만 사건 처리 SELECT/COMMIT 및 owner REST recovery의 비용은 남는다. 실제 NAS/장중 성능과 계좌 수락으로 해석하지 않는다. [67단계](AI_TRADING_SYSTEM_REDESIGN.md#67-기존-collector계좌-입력의-자동-공급과-원래-주문-관리-등록).
+
+2026-10-14 자동 취소는 새 writer/task 대신 기존 gateway command drain·Runner 소유 작업 및 execution.event/document.collection 경로를 쓴다. 계좌 refresh 뒤 재검증은 before-claim runtime 잠금 안에서 실행되며 새 Risk가 원래 타점/가격/짝 EV TTL을 갱신하지 않는다. 최초 입력 슬롯의 1MiB/한 cut·기존 동결 명세 OFF/TTL와 보호 제어를 유지한다. 취소 결과/실제 Risk·broker 확인 참조는 기존 checkpoint에 기록하고 취소 ACK·거절·UNKNOWN과 청산 확정을 구분한다. [66단계](AI_TRADING_SYSTEM_REDESIGN.md#66-목적별-자동-취소와-취소-직전-native-계좌risk-재검증).
+
+2026-10-14 미체결 current cut은 Runner가 소유한 최대 1MiB/한 슬롯 RAM 상태다. 신선도는 동결 `unfilled_execution_policy.max_snapshot_age_seconds`로 수신/소비 때 검증하며 실행 검토는 사건/기한에만 수행한다. 독립 background task나 writer/table/collection을 추가하지 않았고 주문/receipt/checkpoint의 owned drain은 기존 Runner close에 합류한다. 기존 명세 미선택 OFF·원래 protected execution writer 종류/제어를 유지한다. 실행용 입력 자체는 DB/checkpoint에 복제하지 않고 재시작에 자동 replay하지 않는다. [65단계](AI_TRADING_SYSTEM_REDESIGN.md#65-running-runner의-사건기한-소비와-고정-주문의-동일-native-실행).
+
+2026-10-14 고정 child의 v3 승인·QUEUE/전송/receipt·claim metadata는 기존 `execution.intent`·`execution.event`·`execution.runtime_lease`·`document.collection` 측정/보호 writer를 재사용한다. claim 참조는 intent의 같은 JSON/transaction에 보존하고 event projection도 유지한다. native scope/metadata 읽기는 기존 execution reader이며 새 writer/collection/독립 task·진단 child/master/TTL 제어는 없다. idle 명시 실행 중 close는 같은 preflight lock을 join해 시작한 native 제출/원장/최종 checkpoint를 drain하고, 승인 중 close는 새 claim을 막는다. Recorder capture/Replay·실제 PG/NAS/장중 수락은 미실행이다. first 실행 SELECT 106–108/COMMIT 14를 실제 전송 없이 OFF 검토한 26–27/3과 혼동하지 않는다. [64단계](AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출).
+
+2026-10-14 자동 취소의 실행 기반은 기존 gateway의 `_command`/credential-change drain과 `execution.event`·`execution.runtime_lease` 측정/보호 writer를 재사용한다. 새 독립 task·writer·collection/진단 child는 없으며 master/TTL/캡처 제어를 변경하지 않는다. 취소 전송/응답 처리는 같은 owned command 안에서 끝나고 caller 취소에도 gateway close가 drain한다. 격리 native 경계의 첫 SELECT 11→14·COMMIT 3→3 및 명시 중복당 SELECT 4·owner lease COMMIT 1은 실제 계좌 REST/Risk 비용과 구분한다. 자동 polling에 연결하지 않았다. [63단계](AI_TRADING_SYSTEM_REDESIGN.md#63-모의계좌-자동-취소의-native-실행-경계).
+
+2026-10-14 운영 Risk 자동 전달은 기존 계좌 복구/Risk 생산 작업과 실행 lease·runner checkpoint의 document.collection/common observed kind를 재사용한다. RAM callback은 추가 REST/DB·독립 task/writer/collection이 없으므로 새 진단 child를 만들지 않는다. 기존 master/TTL/capture/보호 writer 제어·drain은 유지한다. 같은 위험을 합치고 실제 노출 변화만 checkpoint로 기록한다. callback 시간은 격리 전달 단계의 측정이며 Risk 생산 REST/DB 대기부터 실제 청산까지의 지연이 아니다. 기존 recorder의 runner checkpoint capture 미지원·실제 PG/NAS/장중 수락은 남는다. [원장](KIWOOM_STORAGE_WRITE_AUDIT.md#운영-risk-자동-전달-2026-10-14-로컬)·[62단계](AI_TRADING_SYSTEM_REDESIGN.md#62-운영-risk의-자동-보호-요청-연결과-개발-순서-개정).
+
+2026-10-14 목적별 gate/보호 요청은 기존 runner의 같은 loop/checkpoint·document.collection/실행 lease 측정을 재사용한다. 새 독립 task/writer/collection이나 진단 child는 없다. 보호 요청은 DB 없이 RAM 한 건으로 전달되며 이후 저장·중단은 기존 ACK/no-op/drain 계약을 따른다. 같은 owner/native 검토 COMMIT 3/2와 checkpoint 1/0, BUY 추가 승인 SELECT 1회를 분리한다. 실제 운영 보호 producer/주문은 연결하지 않았고 이미 진행 중 native 작업의 지연을 보장하지 않는다. master/TTL·보호 writer 제어와 recorder checkpoint capture/Replay 미지원은 유지한다. [저장 원장](KIWOOM_STORAGE_WRITE_AUDIT.md#목적별-gate보호-요청-2026-10-14-로컬)·[60단계](AI_TRADING_SYSTEM_REDESIGN.md#60-목적별-고정-대체-주문-검토와-보호-요청의-우선-처리).
+
+2026-10-14 native 미체결 검토는 같은 runner checkpoint/document.collection 및 기존 실행 lease 측정 경계를 재사용한다. 새 collection/writer/task/진단 child는 없다. 실제 owner guard의 두 lease 갱신 COMMIT은 checkpoint changed/repeat 1/0과 별도로 기록한다. 일반 polling이나 master/child 제어 의미를 바꾸지 않았다. native 파일 DB의 별도 프로세스 복구는 검증했지만 기존 recorder의 runner checkpoint capture/Replay 미지원은 유지한다. [원장](KIWOOM_STORAGE_WRITE_AUDIT.md#native-미체결-시도-검토-2026-10-14-로컬)·[59단계](AI_TRADING_SYSTEM_REDESIGN.md#59-native-parent-child-시도-투영과-닫힌-owner-gate-검토).
+
+2026-10-14 미체결 영속 검토는 기존 runner checkpoint/document.collection 저장·common 측정 경계를 재사용한다. 새 writer/collection/백그라운드 작업이나 진단 child를 추가하지 않았으며 기존 master·캡처·보호 writer 제어 의미를 유지한다. 저장/ACK 실패·별도 OS 프로세스 복구는 격리 SQLite에서 검증했다. 기존 recorder 허용 목록에는 runner checkpoint collection이 없으므로 이 검토 계획의 capture/Replay 지원은 완료로 보고하지 않는다. 계좌 시계 v4 복원 지원과도 구분한다. [저장 원장](KIWOOM_STORAGE_WRITE_AUDIT.md#미체결-영속-검토-계획-2026-10-14-로컬)·[58단계](AI_TRADING_SYSTEM_REDESIGN.md#58-미체결-검토-계획의-기존-checkpoint-복구와-실행-전-검증).
+
+### 2026-10-14 작은 블록의 공유 본문 후보
+
+지연 저장의 1MiB 이하 단일 block만 `blocks/shared-v1`로 기존 16MiB 본문 파일을 공유한다. 입력별 digest·offset·bytes와 불변 reference를 유지하며 원래 독립 native 호출·복원 메모리·블록 원문/전체 checksum·파일/경로 한도를 보존한다. 큰 입력과 구형 `blocks/v1`은 기존 파일/reader를 사용한다. 같은 묶음의 본문 fsync와 metadata fsync가 끝난 뒤에만 입력/RAM 소유권을 해제하고 공개한다. 새 공유 형식은 이전 helper에서 거부되며 **2026-10-14 Linux 등록/PG Replay 검증과 기존 설치 절차의 helper 갱신을 마친 릴리즈 `2026.10.14-recorder-shared-10m-v1-af0f8072f960415b`에 배포했다. 현재 지연 저장 기본 속도는 10MiB/s**다. 다음 예약을 만들 때 capabilities의 `write_bytes_per_second=10485760`과 일치시켜야 한다. 지난 1MiB/s 예약 기록은 보존했고 새 녹화를 시작하지 않았다. [배포 근거](../artifacts/recorder-shared-deployed-result-20261014.json).
+
+### 2026-10-13 지연 저장 묶음 한도 보완 후보
+
+로컬 수정본은 예약 시각 이후 RAM 입력을 디스크로 저장할 때만 metadata 파일 한도를 기존 reader 한도인 2,000,000바이트로 사용한다. 일반 파일 녹화·단일 입력 metadata/RAM segment의 1MiB, payload bundle 16MiB, pending 4,096행/metadata 8MiB, 1MiB/s와 모든 동기화·순번·checksum·완료 공개 계약은 유지한다. 파일 형식과 reader 한도를 변경하지 않는다. NAS 실행 릴리즈에 아직 반영하지 않았으며, 원본 저장 완료 후 같은 입력으로 NAS A/B와 운영 복구를 확인해야 수락한다. 로컬 비교·검사 근거는 `artifacts/recorder-batch-review-20261013.json`이다.
+
 통합일: **2026-10-11** · 제품 2.1.0. 기존 NAS 진단 운영, 진단 API 설계, 하위 스위치 설계를 한 문서로 통합했다. 실제 소스·배포 release·검증 결과는 [CURRENT_STATUS](CURRENT_STATUS.md#current-summary), 녹화·Replay·성능 잔여는 [OPEN_ITEMS O12](OPEN_ITEMS.md)를 따른다.
 
 ## 범위와 현재 책임

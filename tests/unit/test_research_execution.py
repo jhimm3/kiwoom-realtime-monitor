@@ -379,5 +379,211 @@ class ResearchExecutionTests(unittest.TestCase):
         self.assertNotEqual("FILL", event.event_type)
 
 
+class RestingLimitResearchTests(unittest.TestCase):
+    def setup_engine(self, *, slippage=0):
+        from kiwoom_monitor.application.research_execution import UnfilledResearchAction
+        execution=replace(_execution(commission=10),cost_model=SimulationCostModel('fixed_bps/v1',10,20,slippage,
+            'model_estimate','unit fixture','2026-09-01T00:00:00+00:00','2026-10-01T00:00:00+00:00'))
+        self.engine=PaperExecutionEngine('limit-run',execution,_strategy(),'krx-regular/v1')
+        self.source=self.bar(0)
+        self.engine.process_bar(self.source)
+        self.request=UnfilledResearchAction('SUBMIT','005930','BUY',10,990,1010,10,
+            datetime.fromisoformat(self.source.available_at),'case','population')
+        self.engine.process_unfilled_action(self.request,source_bar=self.source)
+        return self.engine
+
+    def bar(self, minute, **kwargs):
+        bar=_bar(minute,**kwargs)
+        return replace(bar,session_profile='krx-regular/v1',
+            bar_start=bar.bar_start.replace('2026-09-12','2026-09-14'),
+            bar_end=bar.bar_end.replace('2026-09-12','2026-09-14'),
+            available_at=bar.available_at.replace('2026-09-12','2026-09-14'),
+            research_session='2026-09-14:KRX_REGULAR',market_phase='CONTINUOUS')
+
+    def manage(self, action='WAIT'):
+        bar=self.bar(1)
+        self.engine.process_bar(bar)
+        request=replace(self.request,action=action,decision_time=datetime.fromisoformat(bar.available_at))
+        return self.engine.process_unfilled_action(request,source_bar=bar)
+
+    def test_intrabar_limit_touch_does_not_invent_fill_and_next_open_can_wait(self):
+        engine=self.setup_engine()
+        engine.process_bar(self.bar(1,low=900))
+        events=engine.process_bar(self.bar(2,low=900))
+        self.assertFalse(any(e.event_type=='FILL' for e in events))
+        self.assertIsNotNone(engine.portfolio.pending_order)
+        self.assertEqual(0,engine.portfolio.total_cost_won)
+        self.assertEqual('2026-09-14T00:03:00+00:00',engine.portfolio.pending_order.eligible_after)
+
+    def test_cancel_is_recorded_before_reprice_submit_and_common_fill_charges_once(self):
+        engine=self.setup_engine()
+        events=self.manage('REPRICE')
+        self.assertEqual(['UNFILLED_BASELINE','ORDER_CANCELLED','ORDER_SUBMITTED'],[e.event_type for e in events])
+        self.assertEqual(self.engine._last_processed_bar.available_at,events[-1].occurred_at)
+        self.assertEqual(events[-1].occurred_at,events[-2].occurred_at)
+        self.assertLess(events[0].occurred_at,events[-1].occurred_at)
+        engine.process_bar(self.bar(2))
+        fills=engine.process_bar(self.bar(3))
+        fill=next(e for e in fills if e.event_type=='FILL')
+        self.assertEqual((10,1000,10),(fill.quantity,fill.price,fill.commission_won))
+        self.assertEqual(89990,engine.portfolio.cash_won)
+        self.assertEqual(0,engine.portfolio.reserved_cash_won)
+
+    def test_slippage_cannot_cross_limit_even_when_raw_open_crosses(self):
+        engine=self.setup_engine(slippage=20)
+        self.manage('REPRICE')
+        engine.process_bar(self.bar(2,open_=1010,low=1000,high=1010))
+        events=engine.process_bar(self.bar(3,open_=1010,low=1000,high=1010))
+        self.assertFalse(any(e.event_type=='FILL' for e in events))
+        self.assertIsNotNone(engine.portfolio.pending_order)
+
+    def test_gap_incomplete_volume_or_expired_cost_are_censored_not_profitable_evidence(self):
+        for kind in ('gap','quality','volume','cost'):
+            with self.subTest(kind=kind):
+                engine=self.setup_engine()
+                engine.process_bar(self.bar(1))
+                bar=self.bar(3 if kind=='gap' else 2,open_=980,low=980,high=980)
+                if kind=='quality': bar=replace(bar,capture_quality='partial')
+                if kind=='volume': bar=replace(bar,volume=1)
+                if kind=='cost':
+                    engine.execution=replace(engine.execution,cost_model=replace(engine.execution.cost_model,valid_to=bar.available_at))
+                events=engine.process_bar(bar)
+                self.assertEqual('ORDER_CENSORED',events[0].event_type)
+                self.assertIsNone(engine.portfolio.pending_order)
+                self.assertEqual(0,engine.portfolio.total_cost_won)
+
+    def test_wrong_quantity_price_target_cost_or_cut_preserves_owned_state(self):
+        engine=self.setup_engine(); self.manage()
+        before=engine.portfolio; bar=engine._last_processed_bar
+        request=replace(self.request,action='WAIT',decision_time=datetime.fromisoformat(bar.available_at))
+        for kwargs in ({'quantity':9},{'existing_limit_price_won':991},{'target_quantity':11},
+                       {'decision_time':request.decision_time+timedelta(microseconds=1)}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(ValueError):
+                engine.process_unfilled_action(replace(request,**kwargs),source_bar=bar)
+            self.assertEqual(before,engine.portfolio)
+
+    def test_existing_nonlimit_pending_and_duplicate_submit_cannot_be_replaced(self):
+        from kiwoom_monitor.application.research_execution import PendingOrder
+        engine=self.setup_engine(); before=engine.portfolio
+        with self.assertRaisesRegex(ValueError,'already exists'):
+            engine.process_unfilled_action(self.request,source_bar=self.source)
+        engine.portfolio=replace(before,pending_order=replace(before.pending_order,limit_execution_version=''))
+        with self.assertRaisesRegex(ValueError,'native pending'):
+            engine.process_unfilled_action(replace(self.request,action='REPRICE'),source_bar=self.source)
+
+    def test_cash_reservation_and_missing_cost_fail_before_cancel(self):
+        engine=self.setup_engine(); bar=self.bar(1); engine.process_bar(bar)
+        before=engine.portfolio
+        for limit in (20000,100000):
+            request=replace(self.request,action='REPRICE',candidate_limit_price_won=limit,
+                decision_time=datetime.fromisoformat(bar.available_at))
+            with self.assertRaisesRegex(ValueError,'reservation'):
+                engine.process_unfilled_action(request,source_bar=bar)
+            self.assertEqual(before,engine.portfolio)
+        engine.execution=replace(engine.execution,cost_model=None)
+        with self.assertRaises(ValueError):
+            engine.process_unfilled_action(replace(self.request,action='WAIT',decision_time=datetime.fromisoformat(bar.available_at)),source_bar=bar)
+        self.assertEqual(before,engine.portfolio)
+
+    def test_model_type_validation_and_default_next_open_semantics_remain_separate(self):
+        from kiwoom_monitor.application.research_execution import UnfilledResearchAction
+        self.setup_engine()
+        for kwargs in ({'action':'CANCELLED'},{'quantity':True},{'symbol':'00593Ａ'},{'side':'UNKNOWN'}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(ValueError): replace(self.request,**kwargs)
+        ordinary=PaperExecutionEngine('ordinary',_execution(),_strategy())
+        ordinary.process_decision(_decision(),StrategyState(status='candidate',symbol='005930'))
+        events=ordinary.process_bar(_bar(4))
+        self.assertEqual('FILL',events[0].event_type)
+        self.assertEqual(0,ordinary.portfolio.reserved_cash_won)
+
+
+class FullExitStressTests(unittest.TestCase):
+    def setUp(self):
+        from kiwoom_monitor.application.research_execution import FullExitStressPolicy,FullExitStressScenario,simulate_full_exit_stress
+        from kiwoom_monitor.application.market_session_schedule import KRX_REGULAR_RESEARCH_PROFILE
+        def bar(minute):
+            b=_bar(minute)
+            return replace(b,bar_start=b.bar_start.replace('09-12','09-14'),bar_end=b.bar_end.replace('09-12','09-14'),
+                available_at=b.available_at.replace('09-12','09-14'),session_profile=KRX_REGULAR_RESEARCH_PROFILE,
+                research_session='2026-09-14:KRX_REGULAR',market_phase='CONTINUOUS')
+        self.source=bar(4);self.waiting_bars=(bar(5),);self.bars=(bar(6),bar(7));self.cut=datetime.fromisoformat(self.bars[-1].available_at)+timedelta(seconds=1)
+        self.execution=replace(_execution(),cost_model=SimulationCostModel('fixed_bps/v1',10,20,10,
+            'model_estimate','declared-test-cost','2026-09-14T00:00:00+00:00','2030-01-01T00:00:00+00:00'))
+        self.scenarios=(FullExitStressScenario('reference',2000,0,0,0,()),
+                        FullExitStressScenario('adverse',1000,0,100,200,()))
+        self.policy=FullExitStressPolicy('paper-full-exit-stress/v1','explicit-exit-policy','005930',20,1000,120,
+            self.scenarios,datetime.fromisoformat(self.source.bar_start),self.cut+timedelta(seconds=30))
+        self.simulate=simulate_full_exit_stress
+
+    def run_scenario(self,**changes):
+        return self.simulate(**{**dict(policy=self.policy,source_bar=self.source,bars=self.bars,
+            execution=self.execution,strategy=_strategy(),decision_time=self.cut,waiting_bars=self.waiting_bars),**changes})
+
+    def test_complete_whole_position_partial_chunks_reuse_paper_cost_basis(self):
+        from unittest.mock import patch
+        with patch('sqlite3.connect',side_effect=AssertionError('scenario DB read')):
+            result=self.run_scenario()
+        self.assertEqual(('CALCULATED',20000,350),(result['status'],result['conservative_exit_capacity_won'],result['stress_loss_bps']))
+        adverse=result['scenarios'][1]
+        self.assertEqual([10,10],[e['quantity'] for e in adverse['fills']])
+        self.assertEqual([10,0],[e['position_quantity_after'] for e in adverse['fills']])
+        self.assertEqual([969,969],[e['price'] for e in adverse['fills']])
+        self.assertEqual((19324,676),(adverse['net_proceeds_won'],adverse['realized_loss_won']))
+        self.assertEqual(35,adverse['conservative_unit_loss_won'])
+        self.assertFalse(result['order_authorized']);self.assertFalse(result['size_extrapolation_supported'])
+
+    def test_full_quantity_is_required_in_every_scenario_not_only_added_shares(self):
+        scenario=replace(self.scenarios[1],volume_haircut_bps=5000)
+        result=self.run_scenario(policy=replace(self.policy,scenarios=(self.scenarios[0],scenario)))
+        self.assertEqual('INCOMPLETE',result['status']);self.assertIsNone(result['conservative_exit_capacity_won'])
+        self.assertIsNone(result['stress_loss_bps']);self.assertEqual(10,result['scenarios'][1]['remaining_quantity'])
+        larger=self.run_scenario(policy=replace(self.policy,tested_position_quantity=21))
+        self.assertEqual('INCOMPLETE',larger['status']);self.assertEqual(1,larger['scenarios'][1]['remaining_quantity'])
+
+    def test_zero_volume_and_declared_halt_never_claim_liquidation(self):
+        for changes in (dict(bars=tuple(replace(b,volume=0) for b in self.bars)),
+                dict(policy=replace(self.policy,scenarios=(self.scenarios[0],replace(self.scenarios[1],blocked_minute_offsets=(1,2)))))):
+            result=self.run_scenario(**changes)
+            self.assertIsNone(result['stress_loss_bps']);self.assertIsNone(result['conservative_exit_capacity_won'])
+            self.assertEqual('UNFILLED',result['scenarios'][1]['status'])
+
+    def test_gap_future_partial_phase_duplicate_and_cost_expiry_are_unavailable(self):
+        cases=(dict(bars=self.bars[:1]),dict(bars=(self.bars[0],self.bars[0])),
+            dict(bars=(replace(self.bars[0],capture_quality='partial'),self.bars[1])),
+            dict(bars=(replace(self.bars[0],market_phase='HALT'),self.bars[1])),
+            dict(decision_time=self.cut-timedelta(seconds=2)),
+            dict(execution=replace(self.execution,cost_model=replace(self.execution.cost_model,valid_to=self.cut.isoformat()))))
+        for changes in cases:
+            with self.subTest(changes=changes):
+                result=self.run_scenario(**changes);self.assertEqual('UNAVAILABLE',result['status'])
+                self.assertEqual([],result['scenarios']);self.assertIsNone(result['stress_loss_bps'])
+
+    def test_historical_lows_are_loss_bounds_and_never_fill_prices(self):
+        bars=tuple(replace(b,low=500) for b in self.bars)
+        result=self.run_scenario(bars=bars)
+        self.assertEqual([969,969],[e['price'] for e in result['scenarios'][1]['fills']])
+        self.assertGreater(result['stress_loss_bps'],5000)
+
+    def test_waiting_window_loss_is_covered_without_a_pre_eligible_fill(self):
+        missing=self.run_scenario(waiting_bars=())
+        self.assertEqual('UNAVAILABLE',missing['status']);self.assertIsNone(missing['stress_loss_bps'])
+        shock=self.run_scenario(waiting_bars=(replace(self.waiting_bars[0],low=400),))
+        self.assertGreater(shock['stress_loss_bps'],6000)
+        self.assertEqual([969,969],[e['price'] for e in shock['scenarios'][1]['fills']])
+        self.assertTrue(all(datetime.fromisoformat(e['occurred_at'])>=datetime.fromisoformat(shock['eligible_at'])
+            for s in shock['scenarios'] for e in s['fills']))
+        self.assertFalse(shock['waiting_prices_used_for_fills'])
+
+    def test_policy_parameters_are_explicit_bounded_and_causal(self):
+        from kiwoom_monitor.application.research_execution import FullExitStressScenario
+        for changes in (dict(exit_window_seconds=1),dict(scenarios=self.scenarios[:1]),dict(tested_position_quantity=True),
+                dict(scenarios=(self.scenarios[0],replace(self.scenarios[1],blocked_minute_offsets=(3,))))):
+            with self.assertRaises(ValueError):replace(self.policy,**changes)
+        with self.assertRaises(ValueError):FullExitStressScenario('bad',10001,0,0,0,())
+        with self.assertRaises(ValueError):replace(self.policy,scenarios=(self.scenarios[0],replace(self.scenarios[0],scenario_ref='duplicate-assumptions')))
+        result=self.run_scenario(policy=replace(self.policy,available_at=self.cut))
+        self.assertEqual('UNAVAILABLE',result['status'])
+
+
 if __name__ == "__main__":
     unittest.main()

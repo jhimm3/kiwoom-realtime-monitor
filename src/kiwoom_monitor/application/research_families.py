@@ -12,6 +12,7 @@ from kiwoom_monitor.application.breakout_strategy import (
     STRATEGY_ID as BREAKOUT_STRATEGY_ID,
     STRATEGY_VERSION as BREAKOUT_STRATEGY_VERSION,
     BreakoutStrategyConfig,
+    StrategyEvaluation,
     evaluate_breakout_bar,
 )
 from kiwoom_monitor.application.pullback_reacceleration_strategy import (
@@ -29,7 +30,7 @@ BREAKOUT_FAMILY_ID = f"{BREAKOUT_STRATEGY_ID}/{BREAKOUT_STRATEGY_VERSION}"
 class ResearchFamilyDefinition:
     family_id: str
     config_type: type
-    evaluate_bar: Callable[..., Any]
+    evaluate_bar: Callable[..., StrategyEvaluation]
     factor_ids: tuple[str, ...]
     searchable_parameters: frozenset[str]
     contract: Mapping[str, Any]

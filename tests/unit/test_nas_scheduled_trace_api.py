@@ -57,11 +57,12 @@ class ScheduledTraceApiTests(unittest.TestCase):
                     persist_at=datetime.fromtimestamp(target + 3600, timezone.utc).isoformat(),
                     seconds=60, build=app_module.SERVER_BUILD, release='image_or_local',
                     memory_limit_bytes=8 * 1024**3, event_capacity=5_000_000,
-                    write_bytes_per_second=1024**2, maximum_lateness_seconds=30,
+                    write_bytes_per_second=10 * 1024**2, maximum_lateness_seconds=30,
                     capture_flags=list(scheduler.FLAGS + scheduler.EXTRA_FLAGS))
                 try:
                     started = scheduler.start(AsgiApi(), root, plan, scheduler.wait_until)
                     self.assertEqual(4, started['trace']['schema_version'])
+                    self.assertEqual(10 * 1024**2, started['trace']['write_bytes_per_second'])
                     self.assertTrue(all(started['trace']['payload_capture'][x] for x in plan['capture_flags']))
                     self.assertEqual(['PUT', 'POST'], [m for _, m, _ in calls if m != 'GET'])
                     self.assertTrue(all(trace.input_token(x) == started['trace_id'] for x in plan['capture_flags']))

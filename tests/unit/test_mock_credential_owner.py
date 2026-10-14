@@ -71,6 +71,86 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, self.owner.applied_settings_revision(bundle.binding.scope.to_dict()))
         self.assertIsNot(bundle.client._request_lock, self.owner._probe._client._request_lock)
 
+    async def test_position_ram_getter_only_uses_verified_admitted_owner_without_reads(self):
+        bundle = await self.active()
+        account_ref = bundle.binding.scope.account_ref
+        expected = bundle.monitor.latest_position_observation
+        self.assertIsNotNone(expected)
+        with patch.object(bundle.monitor._reader, "read", side_effect=AssertionError("RAM requested account")), \
+             patch.object(self.store, "_connect", side_effect=AssertionError("RAM accessed DB")):
+            observed = self.owner.position_shadow_observation(account_ref)
+            self.assertEqual(expected.input_ref, observed.input_ref)
+            self.assertEqual(account_ref, observed.account.account_ref)
+            self.assertIsNone(self.owner.position_shadow_observation(str(uuid.uuid4())))
+            bundle._closing = True
+            self.assertIsNone(self.owner.position_shadow_observation(account_ref))
+            bundle._closing = False
+            self.owner._closing = True
+            self.assertIsNone(self.owner.position_shadow_observation(account_ref))
+            self.owner._closing = False
+        self.assertFalse(observed.open_orders_complete)
+        self.assertIsNone(bundle.gateway)
+
+    async def test_selected_account_scope_survives_first_admission_replacement_and_disable(self):
+        operation = await self.ready()
+        account_ref = operation.candidate.account_ref
+        self.owner.set_position_order_observation_account(account_ref)
+        await self.apply(operation)
+        bundle = self.owner.bundle(self.profile)
+        self.assertTrue(bundle.monitor.latest_position_observation.open_orders_complete)
+        prior = bundle.monitor.latest_position_observation.input_ref
+        await self.apply(await self.ready("a2", revision=1))
+        replacement = self.owner.bundle(self.profile)
+        self.assertIsNot(bundle, replacement)
+        self.assertTrue(replacement.monitor.latest_position_observation.open_orders_complete)
+        self.assertNotEqual(prior, replacement.monitor.latest_position_observation.input_ref)
+        with patch.object(replacement.monitor._reader, "read", side_effect=AssertionError("selection polled broker")):
+            self.owner.set_position_order_observation_account(str(uuid.uuid4()))
+            self.assertIsNone(self.owner.position_shadow_observation(account_ref))
+            self.assertFalse(replacement.monitor._position_order_scope_requested)
+            self.owner.set_position_order_observation_account(None)
+        self.assertIsNone(replacement.gateway)
+
+    async def test_native_account_publication_wakes_common_shadow_without_new_account_reads(self):
+        from kiwoom_monitor.application.position_target import evaluate_position_action_comparison_document
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
+        from kiwoom_monitor.domain.order_contract import AccountSnapshot
+        from tests.unit.test_entry_thesis import PositionActionComparisonTests
+        from tests.unit.test_candidate_monitor import CollectorRamShadowRuntimeTests, MarketThemeShadowRuntime, shadow_inputs
+        bundle = await self.active()
+        helper = CollectorRamShadowRuntimeTests()
+        now, hub, collector, monitors, _ = helper.fixture(8, cleanup=False)
+        now[0] = bundle.binding.verified_at.astimezone(now[0].tzinfo).replace(second=0, microsecond=0) + timedelta(minutes=1)
+        collector._apply_trade_source_approval({("005930", "KRX"), ("000660", "KRX")}, now[0], reset_all=True)
+        fixture = PositionActionComparisonTests(); fixture.setUp()
+        document = fixture.document(); account_ref = bundle.binding.scope.account_ref
+        document["account"]["account_ref"] = account_ref
+        for request in document["requests"]: request["account_ref"] = account_ref
+        evaluate_position_action_comparison_document(document)  # Same validated policy contract used by app prepare.
+        runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
+            position_document=document, position_account_source=self.owner.position_shadow_observation)
+        bundle.monitor.set_position_observation_listener(lambda: runtime.context_changed("account"))
+        bundle.monitor._now = lambda: now[0]
+        try:
+            await runtime.start(); helper.trades(collector, now)
+            await helper.wait_for(lambda: runtime.status["position_observation_reads"] >= 1)
+            before = runtime.status["position_evaluations"]
+            recovery = MockAccountRecovery(AccountSnapshot(account_ref, 50_000, 0, {"005930": 10}, now[0]), ())
+            with patch.object(bundle.monitor._reader, "read", new=AsyncMock(return_value=recovery)) as reads:
+                await bundle.monitor.refresh_recovery()
+                await helper.wait_for(lambda: runtime.status["position_evaluations"] > before)
+                self.assertEqual(1, reads.call_count)
+            with patch.object(self.store, "_connect", side_effect=AssertionError("Shadow read account DB")):
+                value = runtime.latest_results["position_comparison"]
+                self.assertEqual(bundle.monitor.latest_position_observation.input_ref, value["account_input_ref"])
+                self.assertEqual(10, value["result"]["targets"]["HOLD"]["actual_quantity"])
+                self.assertIsNone(value["result"]["targets"]["HOLD"]["incremental_quantity"])
+                self.assertEqual(8, len(runtime.latest_results["results"]))
+            self.assertIsNone(bundle.gateway)
+        finally:
+            bundle.monitor.set_position_observation_listener(None)
+            await runtime.close()
+
     async def test_disable_preserves_binding_and_history_and_replacement_reuses_run(self):
         old = await self.active()
         before_bindings = self.store.load_account_bindings()

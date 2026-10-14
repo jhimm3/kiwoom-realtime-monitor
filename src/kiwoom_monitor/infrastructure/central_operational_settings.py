@@ -16,6 +16,7 @@ class CentralOperationalSettingsClient:
     def __init__(self, source: DataSourceSettings) -> None:
         self._source = source
         self._revision: int | None = None
+        self._ram_shadow_revision: int | None = None
 
     def load(self) -> dict[str, object]:
         return self._request("GET")
@@ -29,11 +30,23 @@ class CentralOperationalSettingsClient:
             body.setdefault("expected_revision", self._revision)
         return self._request("PUT", body)
 
-    def _request(self, method: str, body: dict[str, object] | None = None) -> dict[str, object]:
+    def load_ram_shadow_selection(self) -> dict[str, object]:
+        return self._request("GET", path="/api/v1/research/ram-shadow/selection")
+
+    def save_ram_shadow_selection(self, changes: dict[str, object]) -> dict[str, object]:
+        body = dict(changes)
+        if self._ram_shadow_revision is not None:
+            body.setdefault("expected_revision", self._ram_shadow_revision)
+        if "expected_revision" not in body:
+            raise ValueError("시장·테마 관찰 설정을 먼저 불러오세요.")
+        return self._request("PUT", body, path="/api/v1/research/ram-shadow/selection")
+
+    def _request(self, method: str, body: dict[str, object] | None = None,
+                 *, path: str = "/api/v1/settings/operations") -> dict[str, object]:
         if not self._source.server_url or not self._source.access_token:
             raise ValueError("NAS 주소와 접속 토큰을 입력하세요.")
         request = Request(
-            f"{self._source.server_url.rstrip('/')}/api/v1/settings/operations",
+            f"{self._source.server_url.rstrip('/')}{path}",
             method=method,
             data=json.dumps(body).encode("utf-8") if body is not None else None,
             headers={
@@ -53,7 +66,11 @@ class CentralOperationalSettingsClient:
         if not isinstance(result, dict):
             raise RuntimeError("NAS 운영 설정 응답 형식이 올바르지 않습니다.")
         revision = result.get("revision")
-        self._revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
+        revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
+        if path == "/api/v1/research/ram-shadow/selection":
+            self._ram_shadow_revision = revision
+        else:
+            self._revision = revision
         return result
 
 

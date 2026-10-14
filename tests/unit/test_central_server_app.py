@@ -55,6 +55,7 @@ DIAGNOSTIC_CONTROL_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/ap
 DIAGNOSTIC_RUN_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/diagnostic_runs_http_v1.json"
 REALTIME_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/realtime_asgi_v1.json"
 ADDITIVE_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/additive_contract_20261013.json"
+RAM_ADDITIVE_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/additive_contract_20261015.json"
 LIFESPAN_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/server_lifespan_v1.json"
 LIFESPAN_CASES = (
     [("legacy", ""), ("external-disabled", ""), ("vault", "")]
@@ -2278,6 +2279,12 @@ class CentralServerAppTests(unittest.TestCase):
                 "/api/v1/news/historical-archive/v2/search", "/api/v1/news/historical-archive/v2/market"]
             position = case["route_order"].index("/api/v1/market/top20-statistics")
             case["route_order"].insert(position, "/api/v1/market/top20-series")
+            ram_additions = json.loads(RAM_ADDITIVE_CONTRACT.read_text(encoding="utf-8"))
+            case["schema"]["paths"].update(ram_additions["reviewed_additive_paths"])
+            case["schema"]["components"]["schemas"].update(ram_additions["reviewed_additive_schemas"])
+            for insertion in ram_additions["route_insertions"]:
+                position = case["route_order"].index(insertion["before"])
+                case["route_order"][position:position] = insertion["paths"]
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -2338,6 +2345,8 @@ class CentralServerAppTests(unittest.TestCase):
                     changed = True
                 if isinstance(body, dict) and "trace_input_capture" in body:
                     body["trace_input_capture"].update(capabilities)
+                    # Reviewed recorder-only 10 MiB/s release; keep other limits exact.
+                    body["trace_input_capture"]["deferred_persistence"]["write_bytes_per_second"] = 10 * 1024 * 1024
                     body["trace_input_capture"]["causal_input_versions"].update({
                         "realtime_lifecycle":"top20-realtime-tape/v2",
                         "realtime_lifecycle_legacy":"top20-realtime-tape/v1",
@@ -3436,6 +3445,12 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/market/external-bars"),
             ("GET", "/api/v1/research/observations"),
             ("GET", "/api/v1/research/candidates"),
+            ("GET", "/api/v1/research/ram-shadow"),
+            ("GET", "/api/v1/research/ram-shadow/source-check"),
+            ("GET", "/api/v1/research/ram-shadow/selection"),
+            ("PUT", "/api/v1/research/ram-shadow/selection"),
+            ("POST", "/api/v1/research/ram-shadow/allocation-models"),
+            ("POST", "/api/v1/mock-automation/unfilled-population"),
             ("POST", "/api/v1/research/mock-automation-candidates"),
             ("GET", "/api/v1/research/mock-automation-candidates/{account_ref}"),
             ("POST", "/api/v1/research/mock-automation-specs"),

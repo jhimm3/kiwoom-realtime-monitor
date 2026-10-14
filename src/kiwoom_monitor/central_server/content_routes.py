@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -47,7 +48,8 @@ class DocumentSnapshot(BaseModel):
     documents: list[DocumentInput] = Field(default_factory=list, max_length=10000)
 
 
-def create_content_router(store: ContentStore, authorize: Callable[..., None]) -> APIRouter:
+def create_content_router(store: ContentStore, authorize: Callable[..., None], *, on_theme_changed=None,
+                          theme_notifications_enabled=lambda: True) -> APIRouter:
     """Keep collection policy, journal identity checks, and request models together."""
     router = APIRouter()
     content_collections = {
@@ -189,7 +191,7 @@ def create_content_router(store: ContentStore, authorize: Callable[..., None]) -
         values = [value.model_dump() for value in batch.documents]
         for value in values:
             validate_journal_document(collection, value)
-        await asyncio.to_thread(store.upsert_documents, collection, values)
+        await persist_content(collection, store.upsert_documents, collection, values)
         return {"collection": collection, "saved": len(values)}
 
     @router.put("/api/v1/content/{collection}", dependencies=[Depends(authorize)])
@@ -198,8 +200,32 @@ def create_content_router(store: ContentStore, authorize: Callable[..., None]) -
         if collection not in {"theme_profile", "theme_stock", "theme_metadata"}:
             raise HTTPException(status_code=405, detail="전체 교체를 지원하지 않는 중앙 자료 종류입니다.")
         values = [value.model_dump() for value in snapshot.documents]
-        await asyncio.to_thread(store.replace_documents, collection, values)
+        await persist_content(collection, store.replace_documents, collection, values)
         return {"collection": collection, "saved": len(values)}
+
+    async def persist_content(collection, write, *args):
+        if collection != "theme_metadata" or on_theme_changed is None or not theme_notifications_enabled():
+            await asyncio.to_thread(write, *args)
+            return
+        from .observation_frame_recovery import drain_thread_call
+        settled = False
+        def commit():
+            nonlocal settled
+            try:
+                write(*args)
+            finally:
+                settled = True
+        try:
+            await drain_thread_call(commit)
+        finally:
+            # A lost ACK cannot distinguish rollback from committed data. Refresh
+            # the native snapshot after the call settles; never publish request data.
+            # The original write error/cancellation still reaches the caller.
+            if settled:
+                try:
+                    on_theme_changed()
+                except Exception:
+                    logging.getLogger(__name__).exception("settled theme snapshot notification failed")
 
     @router.get("/api/v1/themes/history", dependencies=[Depends(authorize)])
     async def theme_history(

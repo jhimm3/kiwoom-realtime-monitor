@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from kiwoom_monitor.central_server.minute_bars import SecondTradeAccumulator
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
@@ -136,6 +136,44 @@ class SecondTradeAggregationTests(unittest.TestCase):
         [bar] = accumulator.drain_dirty()
         self.assertEqual(3, bar["volume"])
         self.assertEqual(330, bar["trade_value_won"])
+
+
+class RamSecondTradeSnapshotTests(unittest.TestCase):
+    def test_retention_preserves_writer_payload_and_late_tick_rules(self):
+        accumulators = (SecondTradeAccumulator(), SecondTradeAccumulator())
+        accumulators[1].set_ram_retention(20)
+        start = datetime(2026, 10, 6, 9, tzinfo=timezone(timedelta(hours=9)))
+        outputs = [[], []]
+        for second in range(31):
+            at = start + timedelta(seconds=second)
+            for index, accumulator in enumerate(accumulators):
+                accumulator.add(_tick(100 + second, 2, at.strftime("%H%M%S"), cumulative_volume=100 + second * 2),
+                                at, at.timestamp())
+                outputs[index].extend(accumulator.drain_dirty())
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual([6, 21], [len(a._bars) for a in accumulators])
+        at = start + timedelta(seconds=30)
+        retained = accumulators[1]
+        before = (set(retained._dirty), dict(retained._cumulative_volume), dict(retained._seen))
+        snapshot = retained.observation_snapshot(("005930",), at=at, seconds=20)
+        self.assertEqual(21, len(snapshot))
+        snapshot[0]["close"] = 999999
+        self.assertNotEqual(999999, retained.observation_snapshot(("005930",), at=at, seconds=20)[0]["close"])
+        retained.add(_tick(1, 100, "090010", cumulative_volume=9999), at, at.timestamp())
+        self.assertEqual(before, (set(retained._dirty), dict(retained._cumulative_volume), dict(retained._seen)))
+        retained.set_ram_retention(0)
+        retained.drain_dirty()
+        self.assertEqual(6, len(retained._bars))
+
+    def test_snapshot_rejects_budget_and_excludes_future_available_rows(self):
+        at = datetime(2026, 10, 6, 9, tzinfo=timezone(timedelta(hours=9)))
+        accumulator = SecondTradeAccumulator()
+        accumulator.add(_tick(100, 1, "090000", cumulative_volume=100), at, at.timestamp() + 1)
+        self.assertEqual((), accumulator.observation_snapshot(("005930",), at=at, seconds=20))
+        self.assertEqual((), accumulator.observation_snapshot((), at=at, seconds=20))
+        for seconds, codes in ((0, ("005930",)), (61, ("005930",)), (20, tuple(map(str, range(201))))):
+            with self.subTest(seconds=seconds, codes=codes), self.assertRaises(ValueError):
+                accumulator.observation_snapshot(codes, at=at, seconds=seconds)
 
 
 if __name__ == "__main__":

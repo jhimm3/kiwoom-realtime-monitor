@@ -1,10 +1,20 @@
 # DB 리팩터링 — 변경 전 연결 기준선
 
+2026-10-14 원장 결과 게시의 MockAutomationSupervisor.publish_native_unfilled_population에서 기존 self._repository(ForwardEvaluationRepository)의 load_mock_automation_control bound reference 1개를 추적·검토했다. 신규 QueryStore 호출/계약/writer가 아니며 current native control 기존 reader를 재사용한다. same-name 후보 36→37을 baseline에 반영했고 367 reviewed/107 계약/60 forwarding은 유지한다. consumer-first/final JSON과 같은 계좌 control 최초 SELECT 1/COMMIT 0·중복 100회 DB 0 증거는 data/diagnostics/20261014-unfilled-source-publication에 있다. [72단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#72-pc-native-원장-결과의-인증-게시와-기존-runner-ram-접수).
+
+2026-10-14 고정 child claim의 실제 gate/Risk 참조 복구를 위해 `ExecutionRepository.claim_approval`의 기존 `load_execution_intent` 소비 1개만 추가했다. `dispatch_mock_unfilled_replacement_from_risk.repository.load_mock_automation_control`은 기존 ForwardEvaluationRepository wrapper의 same-name 후보로 그대로 분류했다. 기존 107개 QueryStore 계약/signature·forwarding/기타 identity를 유지하며 두 identity만 대조·검토해 active baseline을 갱신했다. 직전 바이트는 `data/diagnostics/20261014-unfilled-native-dispatch/consumer-baseline-before.json`, 차이/최종 pass는 같은 폴더 consumer-review.json/consumer.json이다. actual PG/전체 런타임/Recorder 수락 근거와 구분한다. [64단계](../AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출).
+
 > 문서 역할 정리(2026-10-11): 첫 조사 이후의 도메인 물리 분리와 검증은 [도메인 기록](domain_decomposition.md)에 진행되어 있다. 아래 ‘첫 단계’와 연결 수는 당시 기준선이며 현재 미착수 지시가 아니다. baseline/after/approval JSON은 감사 도구의 입력과 비교 증거로 유지한다. 최신 책임은 [모듈 지도](../../MODULE_MAP.md), 운영 잔여는 [OPEN_ITEMS](../OPEN_ITEMS.md)를 따른다.
 
 2026-10-04 · 기준 commit `1ccaca1` · 첫 조사 단계
 
+2026-10-13 후속의 활성 **소비 계약** 기준선은 불변 승인 근거 read API 1개와 소비 지점 2개만 대조·검토해 갱신했다. [이전 기준선](../archive/2026-10-13/query-store-consumers-before-r2.json) 바이트를 보존했고 기존 계약 제거/변경·forwarding drift·parse error·stale binding은 없다. 아래 최초 driver/저장 경로 조사 기준선을 덮어쓴 작업이 아니다. [구현과 실제 검증 범위](../AI_TRADING_SYSTEM_REDESIGN.md#23-r2-불변-승인-근거의-좁은-조회).
+
+2026-10-13 R3 원본 대조 후속은 기존 native read 두 지점과 app 전달 edge 하나만 검토·추가했다. 기존 signature/identity를 유지하며 [직전 active 기준선](../archive/2026-10-13/query-store-consumers-before-source-check.json)을 보존했다. 감사 통과는 실제 PG/원본 완전성 승인이 아니다. [42단계](../AI_TRADING_SYSTEM_REDESIGN.md#42-연구-가설의-native-원본을-명시-대조).
+
 ## 범위와 완료 조건
+
+2026-10-13 R4 계좌 전체 대사 후속은 `load_account_active_execution_intents` read 계약 1개와 ExecutionRepository 소비 지점 1개만 추가했다. 직전 active 기준선은 `data/diagnostics/20261013-position-account-reconciliation/consumer-baseline-before.json`에 보존했고 기존 모든 signature와 forwarding identity를 대조했다. SQLite SELECT/COMMIT 0·PG native reader context의 COMMIT/rollback/close를 격리 검사했다. schema/기존 run-scoped writer·임대 계약 변경은 없다. 실제 PG 운영 검증은 별도다. [50단계](../AI_TRADING_SYSTEM_REDESIGN.md#50-r4-계좌-전체-대사와-브로커-확인-잔량-계산).
 
 첨부된 구조·운영 로드맵 중 DB 접근/관측, 데이터 중복·누락·재실행,
 DB 작업의 동시성·종료, migration, DB 재시도·오류, 저장·조회 통합검증을 적용한다.

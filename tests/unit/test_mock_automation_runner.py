@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
+import threading
 import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from contextlib import closing
 import unittest
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,7 +117,283 @@ class _Events:
         return ()
 
 
+CHECKPOINT_COLLECTION = "execution_mock_automation_runner_current"
+
+
+def inspect_unfilled_preflight_checkpoint(database_path, spec_path):
+    """Offline child-process restore: no gateway, transport or credentials."""
+    from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+    spec = mock_automation_spec_from_dict(json.loads(Path(spec_path).read_text(encoding='utf-8')))
+    store = SQLiteQueryStore(Path(database_path)); store.initialize()
+    try:
+        row = store.load_document(CHECKPOINT_COLLECTION, spec.account_scope.account_ref, 'current')['document']
+        run_id = row['execution_run_id']
+        bundle = SimpleNamespace(account_ref=spec.account_scope.account_ref, run_id=run_id,
+                                 repository=ExecutionRepository(store),
+                                 runtime=SimpleNamespace(server_now=lambda: NOW),
+                                 automation_context=SimpleNamespace(spec_id=spec.spec_id, execution_run_id=run_id))
+        runner = MockAutomationRunner(store, bundle, spec)
+        receipt = runner.status['unfilled_management_preflight']
+        return {'pid': os.getpid(), **receipt,
+                'child_exists': bundle.repository.load(receipt['receipt']['reserved_child_intent_id']) is not None}
+    finally:
+        store.close()
+
+
+class UnfilledManagementPreflightTests(unittest.TestCase):
+    def setUp(self):
+        from tests.unit.test_order_lifecycle import UnfilledOrderManagementTests
+        MockAutomationRunnerTests.setUp(self)
+        self.order = UnfilledOrderManagementTests()
+        self.order.setUp()
+        self.addCleanup(self.order.doCleanups)
+        self.order.setup_order(account_ref=ACCOUNT_REF, run_id=self.run_id)
+        # The actual lifecycle ledger and runner checkpoint share one native DB.
+        self.store = self.order.store
+        self.store.upsert_documents(
+            ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION,
+            [{"owner": self.package.strategy_ref, "key": self.package.package_hash,
+              "document": self.package.to_dict()}],
+        )
+        self.bundle.run_id = self.order.intent.run_id
+        self.bundle.repository = self.order.repository
+        self.bundle.runtime = SimpleNamespace(server_now=lambda: self.order.now[0])
+        self.bundle.automation_context = SimpleNamespace(
+            execution_run_id=self.bundle.run_id, spec_id=self.spec.spec_id,
+        )
+        self.control = SimpleNamespace(
+            desired_state=SimpleNamespace(value='RUNNING'), active_spec_id=self.spec.spec_id,
+            execution_run_id=self.bundle.run_id, control_revision=1,
+        )
+        self.runner = self.restart()
+
+    def restart(self):
+        runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        runner._repository.load_mock_automation_control = lambda _: self.control
+        return runner
+
+    def preview(self, **changes):
+        arguments = {key: getattr(self.order, key) for key in
+                     ('policy', 'target', 'observation', 'assessment')}
+        arguments['broker_snapshot'] = self.order.snapshot
+        arguments.update(changes)
+        return self.runner.preview_unfilled_management(**arguments)
+
+    def test_confirmed_cancel_partial_fill_checkpoint_restart_keeps_one_preview_slot(self):
+        first = self.preview()
+        self.assertEqual('CANCEL', first['result']['action'])
+        self.assertIsNone(first['child_preview'])
+        self.order.cancel_and_reconcile(filled=3)
+        second = self.preview()
+        self.assertEqual(7, second['child_preview']['quantity'])
+        self.assertEqual((0, 1, False), (second['native_reprices_used'], second['reserved_preview_slots'], second['order_authorized']))
+        self.assertIsNone(self.order.repository.load(second['reserved_child_intent_id']))
+        self.runner = self.restart()
+        self.assertTrue(self.runner.status['unfilled_management_preflight']['requires_revalidation'])
+        self.assertEqual(second, self.preview())
+        with patch.object(self.store, 'upsert_documents', wraps=self.store.upsert_documents) as write:
+            self.preview()
+            write.assert_not_called()
+        self.assertEqual((1, 1), (self.order.transport.submit_calls, self.order.transport.cancel_calls))
+
+    def test_ambiguous_checkpoint_commit_preserves_reservation_identity(self):
+        self.order.cancel_and_reconcile(filled=3)
+        native = self.store.upsert_documents
+        def lost_ack(collection, rows):
+            native(collection, rows)
+            raise OSError('controlled preflight ACK lost after COMMIT')
+        with patch.object(self.store, 'upsert_documents', side_effect=lost_ack):
+            with self.assertRaisesRegex(OSError, 'ACK lost'):
+                self.preview()
+        pending = self.runner._unfilled_preflight
+        self.assertTrue(self.runner._checkpoint_pending)
+        self.runner = self.restart()
+        self.assertEqual(pending, self.preview())
+        self.assertEqual(1, self.runner._unfilled_preflight['reserved_preview_slots'])
+
+    def test_native_commit_failure_returns_no_plan_and_retries_same_identity(self):
+        self.order.cancel_and_reconcile(filled=3)
+        write, evidence = _checkpoint_commit_failures(self.store, 1)
+        with patch.object(self.store, 'upsert_documents', side_effect=write):
+            with self.assertRaisesRegex(OSError, 'COMMIT failure'):
+                self.preview()
+            pending = self.runner._unfilled_preflight
+            self.assertEqual(pending, self.preview())
+        self.assertEqual(2, evidence['attempts'])
+
+    def test_anchor_deadline_retry_budget_and_control_cannot_be_reset_after_restart(self):
+        self.order.cancel_and_reconcile(filled=3)
+        self.preview()
+        self.runner = self.restart()
+        for changes in ({'maximum_reprices': 99}, {'wait_until': self.order.policy.wait_until + timedelta(seconds=1)},
+                        {'protection_deadline': self.order.policy.protection_deadline + timedelta(seconds=1)}):
+            with self.assertRaisesRegex(ValueError, 'anchor_or_control_changed'):
+                self.preview(policy=replace(self.order.policy, **changes))
+        with self.assertRaisesRegex(ValueError, 'native_child_attempt_projection_required'):
+            self.preview(assessment=replace(self.order.assessment, reprices_used=1))
+        self.control = SimpleNamespace(**{**vars(self.control), 'control_revision': 2})
+        with self.assertRaisesRegex(ValueError, 'anchor_or_control_changed'):
+            self.preview()
+
+    def test_native_change_during_save_returns_no_acknowledged_plan(self):
+        native = self.store.upsert_documents
+        def racing_fill(collection, rows):
+            native(collection, rows)
+            self.order.cancel_and_reconcile(filled=3)
+        with patch.object(self.store, 'upsert_documents', side_effect=racing_fill):
+            with self.assertRaisesRegex(ValueError, 'native_state_changed'):
+                self.preview()
+        receipt = self.preview()
+        self.assertEqual(7, receipt['child_preview']['quantity'])
+
+    def test_control_stop_during_commit_and_after_restart_never_returns_plan(self):
+        native = self.store.upsert_documents
+        def stop_during_save(collection, rows):
+            native(collection, rows)
+            self.control = SimpleNamespace(**{**vars(self.control), 'desired_state': SimpleNamespace(value='STOPPED')})
+        with patch.object(self.store, 'upsert_documents', side_effect=stop_during_save):
+            with self.assertRaisesRegex(ValueError, 'native_state_changed'):
+                self.preview()
+        self.runner = self.restart()
+        with self.assertRaisesRegex(ValueError, 'control_not_running'):
+            self.preview()
+        self.assertEqual((1, 0), (self.order.transport.submit_calls, self.order.transport.cancel_calls))
+
+    def test_separate_process_restores_native_checkpoint_without_creating_child_order(self):
+        self.order.cancel_and_reconcile(filled=3)
+        receipt = self.preview()
+        root = Path(__file__).resolve().parents[2]
+        command = (
+            'import json,sys; from tests.unit.test_mock_automation_runner import inspect_unfilled_preflight_checkpoint; '
+            'print(json.dumps(inspect_unfilled_preflight_checkpoint(sys.argv[1],sys.argv[2])))'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / 'preflight.sqlite3'
+            spec = Path(directory) / 'spec.json'
+            spec.write_text(json.dumps(self.spec.to_dict()), encoding='utf-8')
+            with self.store._connection() as source, closing(sqlite3.connect(database)) as target:
+                source.backup(target)
+            environment = {**os.environ, 'PYTHONPATH': os.pathsep.join((str(root), str(root / 'src'), str(root / 'tests/unit')))}
+            result = subprocess.run([sys.executable, '-c', command, str(database), str(spec)],
+                                    cwd=root, env=environment, capture_output=True, text=True,
+                                    encoding='utf-8', timeout=30)
+            self.assertEqual(0, result.returncode, result.stderr)
+            restored = json.loads(result.stdout)
+            self.assertNotEqual(os.getpid(), restored['pid'])
+            self.assertEqual(receipt, restored['receipt'])
+            self.assertTrue(restored['requires_revalidation'])
+            self.assertFalse(restored['child_exists'])
+            self.assertFalse(restored['order_authorized'])
+
+    def test_unknown_cancel_ack_and_child_collision_never_grant_replacement(self):
+        self.order.record = self.order.lifecycle.cancel(self.order.intent.intent_id)
+        receipt = self.preview()
+        self.assertEqual(('WAIT', None), (receipt['result']['action'], receipt['child_preview']))
+        self.order.cancel_and_reconcile(filled=3)
+        receipt = self.preview()
+        self.order.repository.create(replace(self.order.intent, intent_id=receipt['reserved_child_intent_id']))
+        self.runner = self.restart()
+        with self.assertRaisesRegex(ValueError, 'native_child_requires_reconciliation'):
+            self.preview()
+        self.assertEqual(1, self.order.transport.submit_calls)
+
+    def test_corrupt_persisted_receipt_fails_closed_without_bootstrap_budget_reset(self):
+        self.order.cancel_and_reconcile(filled=3)
+        self.preview()
+        row = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, 'current')
+        row['document']['unfilled_management_preflight']['reserved_preview_slots'] = 0
+        self.store.upsert_documents(CHECKPOINT_COLLECTION, [row])
+        with self.assertRaisesRegex(ValueError, 'integrity_mismatch'):
+            self.restart()
+
+    def test_preflight_input_budget_failure_preserves_previous_acknowledged_checkpoint(self):
+        first = self.preview()
+        with self.assertRaisesRegex(ValueError, 'receipt_budget_exceeded'):
+            self.preview(assessment=replace(self.order.assessment, thesis_input_ref='x' * (1024 * 1024)))
+        self.runner = self.restart()
+        self.assertEqual(first, self.runner._unfilled_preflight)
+
+    def test_protection_clock_hint_is_independent_of_prices_and_never_synthetic_exit(self):
+        self.order.setup_order(side='SELL', purpose='PROTECTIVE_EXIT', account_ref=ACCOUNT_REF, run_id=self.run_id)
+        self.bundle.repository = self.order.repository
+        self.store = self.order.store
+        self.store.upsert_documents(
+            ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION,
+            [{"owner": self.package.strategy_ref, "key": self.package.package_hash, "document": self.package.to_dict()}],
+        )
+        self.runner = self.restart()
+        self.preview(assessment=replace(self.order.assessment, reprice_evidence=None))
+        self.order.now[0] = self.order.policy.protection_deadline
+        self.runner._bars = {}
+        clock = self.runner.status['unfilled_management_clock']
+        self.assertTrue(clock['unfilled_management_due'])
+        self.assertTrue(clock['unfilled_risk_path_required'])
+        self.assertFalse(clock['exit_required'])
+        self.assertFalse(clock['unfilled_order_authorized'])
+        self.assertEqual((1, 0), (self.order.transport.submit_calls, self.order.transport.cancel_calls))
+
+    def test_running_closing_stale_and_concurrent_preview_are_rejected(self):
+        self.runner._task = object()
+        with self.assertRaisesRegex(RuntimeError, 'idle_ready_runner'):
+            self.preview()
+        self.runner._task = None
+        self.runner._unfilled_preflight_lock.acquire()
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'already_in_progress'):
+                self.preview()
+        finally:
+            self.runner._unfilled_preflight_lock.release()
+        self.order.now[0] += timedelta(seconds=21)
+        with self.assertRaisesRegex(ValueError, 'cut_stale_or_future'):
+            self.preview()
+
+
+class _FailedCheckpointCommit:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def commit(self):
+        raise OSError("controlled checkpoint COMMIT failure")
+
+
+def _checkpoint_commit_failures(store, count):
+    native_write, native_connect = store.upsert_documents, store._connect
+    evidence = {"remaining": count, "attempts": 0}
+
+    def write(collection, values):
+        if collection == CHECKPOINT_COLLECTION:
+            evidence["attempts"] += 1
+            if evidence["remaining"]:
+                evidence["remaining"] -= 1
+                with patch.object(store, "_connect", side_effect=lambda: _FailedCheckpointCommit(native_connect())):
+                    return native_write(collection, values)
+        return native_write(collection, values)
+    return write, evidence
+
+
 class MockAutomationRunnerTests(unittest.TestCase):
+    def test_checkpoint_noop_preserves_document_and_forced_close_boundary_can_write(self):
+        runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        before = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")
+        revision = runner._checkpoint_revision
+        with patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write:
+            runner._save_checkpoint()
+            write.assert_not_called()
+            self.assertEqual(before, self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current"))
+            self.assertEqual(revision, runner._checkpoint_revision)
+            runner._save_checkpoint(force=True)
+            self.assertEqual(1, write.call_count)
+            self.assertEqual(revision + 1, runner._checkpoint_revision)
+            runner._status["reason"] = "changed_same_owner_status"
+            runner._save_checkpoint()
+            self.assertEqual(2, write.call_count)
+        saved = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+        self.assertEqual("changed_same_owner_status", saved["status"]["reason"])
+
     def test_supervisor_propagates_native_checkpoint_failure_and_retains_failed_owner(self):
         import asyncio
         from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
@@ -270,6 +555,249 @@ class MockAutomationRunnerTests(unittest.TestCase):
 
 
 class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_iteration_excludes_preflight_until_native_work_is_drained(self):
+        case, runner = self.checkpoint_case()
+        entered, release = threading.Event(), threading.Event()
+        native = runner._apply_new_fills
+        def blocked_fill_read():
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError('controlled native read not drained')
+            return native()
+        runner._repository.load_mock_automation_control = lambda _: None
+        pending = None
+        try:
+            with patch.object(runner, '_apply_new_fills', side_effect=blocked_fill_read):
+                pending = asyncio.create_task(runner.run_once())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                with self.assertRaisesRegex(RuntimeError, 'already_in_progress'):
+                    runner.preview_unfilled_management(policy=None, broker_snapshot=None, target=None,
+                                                       observation=None, assessment=None)
+                release.set()
+                self.assertEqual(0, await asyncio.wait_for(pending, 2))
+        finally:
+            release.set()
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+        self.assertFalse(runner._unfilled_preflight_lock.locked())
+
+    def checkpoint_case(self):
+        case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        runner = MockAutomationRunner(case.store, case.bundle, case.spec)
+        runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+            active_spec_id=case.spec.spec_id, execution_run_id=case.run_id,
+            desired_state=SimpleNamespace(value="RUNNING"),
+        )
+        return case, runner
+
+    async def test_worker_retries_two_failed_native_commits_without_new_observations(self):
+        from tests.unit.test_candidate_monitor import _rank
+
+        case, runner = self.checkpoint_case()
+        rows = [_rank(1)]
+        case.store.load_observation_revisions_after = lambda cursor, *_args: [
+            row for row in rows if row["accepted_sequence"] > cursor]
+        native_poll, completed, polls = runner.run_once, asyncio.Event(), []
+
+        async def poll():
+            try:
+                return await native_poll()
+            finally:
+                polls.append(1)
+                if len(polls) >= 3:
+                    completed.set()
+
+        runner.run_once, runner._poll_seconds = poll, 0.01
+        write, evidence = _checkpoint_commit_failures(case.store, 2)
+        with patch.object(case.store, "upsert_documents", side_effect=write):
+            runner._task = asyncio.create_task(runner._run())
+            try:
+                await asyncio.wait_for(completed.wait(), 2)
+                document = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+                self.assertEqual(1, document["input_cursor"], evidence)
+                self.assertEqual(1, runner._cursor)
+                self.assertFalse(runner._checkpoint_pending)
+                self.assertEqual([], case.events.values)
+            finally:
+                await runner.close()
+
+    async def test_failed_stop_or_block_checkpoint_retries_even_when_status_is_unchanged(self):
+        for state in ("STOPPED", "BLOCKED"):
+            with self.subTest(state=state):
+                case, runner = self.checkpoint_case()
+                control = None if state == "BLOCKED" else SimpleNamespace(
+                    active_spec_id=case.spec.spec_id, execution_run_id=case.run_id,
+                    desired_state=SimpleNamespace(value="STOPPED"),
+                )
+                runner._repository.load_mock_automation_control = lambda _account: control
+                before = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")
+                write, evidence = _checkpoint_commit_failures(case.store, 1)
+                with patch.object(case.store, "upsert_documents", side_effect=write):
+                    with self.assertRaisesRegex(OSError, "checkpoint COMMIT failure"):
+                        await runner.run_once()
+                    self.assertEqual(before, case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current"))
+                    self.assertEqual(0, await runner.run_once())
+                document = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+                self.assertEqual(state, document["status"]["state"], evidence)
+                self.assertFalse(runner._checkpoint_pending)
+                self.assertEqual(0, runner._cursor)
+
+    async def test_commit_ack_loss_retries_prefix_without_consuming_the_input_again(self):
+        from tests.unit.test_candidate_monitor import _rank
+
+        case, runner = self.checkpoint_case()
+        case.store.load_observation_revisions_after = lambda cursor, *_args: [_rank(1)] if cursor == 0 else []
+        native_write, attempts = case.store.upsert_documents, []
+
+        def lose_first_ack(collection, values):
+            native_write(collection, values)
+            if collection == CHECKPOINT_COLLECTION:
+                attempts.append(1)
+                if len(attempts) == 1:
+                    raise OSError("controlled checkpoint ACK loss after COMMIT")
+
+        with patch.object(case.store, "upsert_documents", side_effect=lose_first_ack), patch.object(
+            runner, "_consume", wraps=runner._consume,
+        ) as consume:
+            with self.assertRaisesRegex(OSError, "ACK loss after COMMIT"):
+                await runner.run_once()
+            committed = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+            self.assertEqual(1, committed["input_cursor"])
+            self.assertTrue(runner._checkpoint_pending)
+            self.assertEqual(0, await runner.run_once())
+            self.assertEqual(1, consume.await_count)
+            self.assertEqual(2, len(attempts))
+        acknowledged = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+        self.assertGreater(acknowledged["checkpoint_revision"], committed["checkpoint_revision"])
+        self.assertEqual({k: v for k, v in committed.items() if k not in {"checkpoint_revision", "saved_at"}},
+                         {k: v for k, v in acknowledged.items() if k not in {"checkpoint_revision", "saved_at"}})
+        self.assertFalse(runner._checkpoint_pending)
+        restarted = MockAutomationRunner(case.store, case.bundle, case.spec)
+        self.assertEqual(1, restarted._cursor)
+        self.assertEqual(runner._state, restarted._state)
+
+    async def test_failed_prefix_retry_blocks_later_observations_until_ack(self):
+        from tests.unit.test_candidate_monitor import _rank
+
+        case, runner = self.checkpoint_case()
+        rows, loaded_after = [_rank(1)], []
+
+        def load(cursor, *_args):
+            loaded_after.append(cursor)
+            return [row for row in rows if row["accepted_sequence"] > cursor]
+
+        case.store.load_observation_revisions_after = load
+        write, evidence = _checkpoint_commit_failures(case.store, 2)
+        with patch.object(case.store, "upsert_documents", side_effect=write), patch.object(
+            runner, "_consume", wraps=runner._consume,
+        ) as consume:
+            with self.assertRaises(OSError):
+                await runner.run_once()
+            rows.append(_rank(2))
+            with self.assertRaises(OSError):
+                await runner.run_once()
+            self.assertEqual([0], loaded_after, evidence)
+            self.assertEqual(1, consume.await_count)
+            self.assertEqual(1, runner._cursor)
+            self.assertEqual(1, await runner.run_once())
+            self.assertEqual([0, 1], loaded_after)
+            self.assertEqual(2, consume.await_count)
+        self.assertEqual(2, case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]["input_cursor"])
+
+    async def test_close_joins_started_checkpoint_before_forced_final_write(self):
+        await self.exercise_close_during_checkpoint()
+
+    async def test_close_joins_bootstrap_checkpoint_before_forced_final_write(self):
+        await self.exercise_close_during_checkpoint(bootstrap=True)
+
+    async def test_close_joins_fill_state_read_before_final_checkpoint(self):
+        case, runner = self.checkpoint_case()
+        case.events.values.append(case.event(1, "close-fill", "BUY", 2, 10_000))
+        entered, release, read_returned = (threading.Event() for _ in range(3))
+        native_read = case.events.account_events
+
+        def blocked_read(*args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("controlled fill read not released")
+            result = native_read(*args, **kwargs)
+            read_returned.set()
+            return result
+
+        closing = None
+        try:
+            with patch.object(case.events, "account_events", side_effect=blocked_read):
+                runner._task = asyncio.create_task(runner._run())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                closing = asyncio.create_task(runner.close())
+                await asyncio.sleep(0.05)
+                self.assertFalse(closing.done(), "close completed while checkpoint fill-state input was still owned")
+                release.set()
+                await asyncio.wait_for(closing, 2)
+                saved = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+                self.assertEqual(1, saved["fill_cursor"])
+                self.assertEqual("open", saved["strategy_state"]["status"])
+                self.assertEqual(2, saved["strategy_state"]["position_quantity"])
+        finally:
+            release.set()
+            await asyncio.to_thread(read_returned.wait, 2)
+            if closing is not None:
+                await asyncio.gather(closing, return_exceptions=True)
+            await runner.close()
+
+    async def exercise_close_during_checkpoint(self, *, bootstrap=False):
+        from tests.unit.test_candidate_monitor import _rank
+
+        case, runner = self.checkpoint_case()
+        if bootstrap:
+            runner._bootstrap_pending = True
+            case.store.load_observation_bootstrap = lambda *_args, **_kwargs: ObservationRevisionPage(
+                rows=(_rank(1),), safe_through=1,
+            )
+        case.store.load_observation_revisions_after = lambda cursor, *_args: [_rank(1)] if cursor == 0 else []
+        entered, release, first_ack, second_started = (threading.Event() for _ in range(4))
+        native_write, calls, lock = case.store.upsert_documents, [], threading.Lock()
+
+        def write(collection, values):
+            with lock:
+                calls.append(1)
+                ordinal = len(calls)
+            if ordinal == 1:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("controlled checkpoint not released")
+                native_write(collection, values)
+                first_ack.set()
+            else:
+                second_started.set()
+                native_write(collection, values)
+
+        closing = None
+        try:
+            with patch.object(case.store, "upsert_documents", side_effect=write):
+                runner._task = asyncio.create_task(runner._run())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                closing = asyncio.create_task(runner.close())
+                self.assertFalse(await asyncio.to_thread(second_started.wait, 0.2),
+                                 "final checkpoint started while prefix write was owned: "
+                                 f"close_done={closing.done()}, first_ack={first_ack.is_set()}")
+                self.assertFalse(closing.done())
+                release.set()
+                await asyncio.wait_for(closing, 2)
+                self.assertTrue(first_ack.is_set())
+                self.assertTrue(second_started.is_set())
+                document = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+                self.assertEqual(runner._checkpoint_revision, document["checkpoint_revision"])
+                self.assertEqual(1, document["input_cursor"])
+        finally:
+            release.set()
+            await asyncio.to_thread(first_ack.wait, 2)
+            if closing is not None:
+                await asyncio.gather(closing, return_exceptions=True)
+            await runner.close()
+
     async def test_pending_bootstrap_preserves_fills_and_never_dispatches_history(self):
         from tests.unit.test_candidate_monitor import _rank, _bar
         case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")

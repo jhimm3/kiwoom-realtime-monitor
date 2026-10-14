@@ -23,6 +23,7 @@ from kiwoom_monitor.domain.execution_activation import (
     MOCK_RECOVERY_POLICY,
     MOCK_STOP_POLICY,
     MockAutomationOperatingSpec,
+    MockUnfilledExecutionPolicy,
     MockAutomationReadiness,
     MockAutomationReadinessStatus,
     StrategyLifecycleStage,
@@ -82,6 +83,7 @@ def build_mock_automation_publication_documents(
     credential_profile_id: str, shadow_event: Mapping[str, Any],
     evaluation_start: datetime, evaluation_end: datetime, frozen_at: datetime,
     criteria: ForwardCriteria, limits: Mapping[str, int],
+    unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None,
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
@@ -173,6 +175,7 @@ def build_mock_automation_publication_documents(
         supported_venue="KRX", session_profile=session_profile, data_path="nas",
         candidate_transition_policy=MOCK_CANDIDATE_TRANSITION_POLICY,
         stop_policy=MOCK_STOP_POLICY, recovery_policy=MOCK_RECOVERY_POLICY,
+        unfilled_execution_policy=unfilled_execution_policy,
         **{name: int(limits[name]) for name in MOCK_AUTOMATION_LIMIT_FIELDS},
     )
     return {

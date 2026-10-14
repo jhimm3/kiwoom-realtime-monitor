@@ -175,6 +175,7 @@ class CentralRealtimeCollector:
         self._market_events = market_events
         self._account_scope_resolver = account_scope_resolver
         self._account_event_handler = account_event_handler
+        self._automation_price_listener = None
         self._snapshot_sleep = snapshot_sleep or asyncio.sleep
         self._input_replay_only = False
         self._task: asyncio.Task[None] | None = None
@@ -193,6 +194,12 @@ class CentralRealtimeCollector:
         self._minute_bars = MinuteBarAccumulator()
         self._pending_second_retries: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._second_trades = SecondTradeAccumulator()
+        self._ram_source_id = uuid4().hex
+        self._ram_observation_generation = 0
+        self._ram_observation_gap_at = None
+        self._ram_retention_since = None
+        self._ram_observation_owner = None
+        self._ram_stock_references: dict[tuple[str, str], dict[str, Any]] = {}
         self._continuous_from: dict[tuple[str, str], datetime] = {}
         self._approved_trade_sources: set[tuple[str, str]] = set()
         self._abnormal_disconnects = 0
@@ -551,6 +558,10 @@ class CentralRealtimeCollector:
         added_sources = sources - self._approved_trade_sources
         removed_sources = self._approved_trade_sources - sources
         reset_sources = sources if reset_all else added_sources
+        for key in removed_sources | reset_sources:
+            self._ram_stock_references.pop(key, None)
+        if reset_all or added_sources or removed_sources:
+            self._ram_observation_generation += 1
         self._minute_bars.reset_cumulative_sources(reset_sources)
         self._second_trades.reset_cumulative_sources(reset_sources)
         for key in removed_sources:
@@ -863,6 +874,72 @@ class CentralRealtimeCollector:
         record_gap(self, clear_continuous)
         self._record_upstream("capture_gap", {"clear_continuous": clear_continuous})
         self._minute_bars.mark_capture_gap()
+        self._ram_observation_generation += 1
+        self._ram_observation_gap_at = self._now_provider()
+        self._ram_stock_references.clear()
+
+    def set_ram_observation_retention(self, seconds: int, *, owner=None) -> None:
+        if self._ram_observation_owner is not None and self._ram_observation_owner is not owner:
+            raise RuntimeError("Collector RAM observation lifetime already has an owner")
+        previous = self._second_trades._ram_retention.total_seconds()
+        self._second_trades.set_ram_retention(seconds)
+        if owner is not None:
+            self._ram_observation_owner = owner if seconds else None
+        if seconds == 0:
+            self._ram_retention_since = None
+        elif self._ram_retention_since is None or seconds > previous:
+            self._ram_retention_since = self._now_provider()
+
+    def ram_observation_snapshot(self, codes: tuple[str, ...] | None, *, seconds: int,
+                                 include_trade_references: bool = False) -> dict[str, Any]:
+        """One event-loop RAM cut; no store read, drain, registration or aggregation."""
+        at = self._now_provider()
+        if at.tzinfo is None:
+            raise ValueError("RAM observation clock must be timezone-aware")
+        capture_anchor = self._ram_capture_anchor()
+        if codes is None:
+            codes = tuple(sorted({code for code, _ in self._approved_trade_sources}))
+        rows = self._second_trades.observation_snapshot(codes, at=at, seconds=seconds)
+        day = at.astimezone(timezone(timedelta(hours=9))).date().isoformat()
+        self._ram_stock_references = {
+            key: reference for key, reference in self._ram_stock_references.items()
+            if key in self._approved_trade_sources and reference["trading_date"] == day
+        }
+        return {
+            **({'trade_references': tuple({**price, 'code':code, 'market':'KRX',
+                    'market_cap_eok': self._latest_snapshots[('trade',code)]['event']['payload'].get('market_cap_eok')}
+                for code in codes if (price := self.automation_price_observation(code)) is not None)}
+               if include_trade_references else {}),
+            "source_id": self._ram_source_id, "generation": self._ram_observation_generation,
+            "decision_time": at.isoformat(), "rows": rows,
+            "approved_sources": tuple(sorted(self._approved_trade_sources)),
+            "continuous_from": dict(self._continuous_from),
+            "retention_since": self._ram_retention_since, "gap_at": self._ram_observation_gap_at,
+            "stock_references": tuple(dict(value) for (code, _), value in sorted(self._ram_stock_references.items())
+                                      if code in codes and value["available_at"] <= at.timestamp()),
+            "durable": False,
+            "capture_anchor": capture_anchor,
+        }
+
+    def _ram_capture_anchor(self) -> dict[str, Any] | None:
+        """Reuse the recorder's accepted-input high water as an unverified hint.
+
+        This never starts recording, reads the manifest, or promises that the
+        current RAM values, excluded fields or earlier prefix were captured.
+        """
+        if self._input_replay_only:
+            return None
+        from .diagnostic_trace import input_token
+        trace_id = input_token("collector_inputs")
+        high_water = getattr(self, "_recorded_input_high_water", None)
+        if (not trace_id or getattr(self, "_recorded_capture_epoch", None) != trace_id
+                or type(high_water) is not tuple or len(high_water) != 2
+                or high_water[0] != trace_id or type(high_water[1]) is not str
+                or not 1 <= len(high_water[1]) <= 160):
+            return None
+        return {"trace_id": trace_id, "producer_component": f"realtime_collector:{id(self):x}",
+                "input_id": high_water[1], "collector_input_version": COLLECTOR_INPUT_VERSION,
+                "role": "last_accepted_collector_input", "verified": False}
 
     def _record_upstream(self, kind: str, payload: dict, *, excluded_types: dict | None = None) -> str | None:
         from . import diagnostic_trace as trace
@@ -1022,6 +1099,13 @@ class CentralRealtimeCollector:
                     self._pending_snapshots[(name, item_key)] = snapshot
                     self._latest_snapshots[(name, item_key)] = snapshot
                 if name == "trade":
+                    if self._automation_price_listener is not None:
+                        observation = self.automation_price_observation(code)
+                        if observation is not None:
+                            try:
+                                self._automation_price_listener(code, observation)
+                            except Exception:
+                                logger.exception('자동 모의운용 RAM 손절 가격 전달 실패')
                     self._observe_reconnect_trade()
                     now = self._now_provider()
                     received_at = now.timestamp()
@@ -1044,6 +1128,12 @@ class CentralRealtimeCollector:
                     )
                 elif name == "stock_reference" and code:
                     observed_at = self._now_provider()
+                    reference_key = (code, value.market)
+                    if reference_key in self._approved_trade_sources and observed_at.tzinfo is not None:
+                        day = observed_at.astimezone(timezone(timedelta(hours=9))).date().isoformat()
+                        self._ram_stock_references[reference_key] = {
+                            **payload, "trading_date": day, "available_at": observed_at.timestamp(),
+                        }
                     self._pending_stock_references[code] = {
                         "owner": code,
                         "key": "latest",
@@ -1067,6 +1157,27 @@ class CentralRealtimeCollector:
                 "owner": day, "key": code, "document": {
                     "code": code, "environment": self._environment,
                     "last_executed_at": observed_at.isoformat(timespec="seconds"), "source": "kiwoom-realtime-00"}}
+
+    def set_automation_price_listener(self, listener):
+        """One existing Supervisor, no subscriptions, queues, tasks or persistence."""
+        self._automation_price_listener = listener
+
+    def automation_price_observation(self, code: str):
+        """Borrow the latest approved KRX trade; no seconds/DB/subscription work."""
+        source = (code, 'KRX')
+        row = self._latest_snapshots.get(('trade', code))
+        if self._credential_paused or source not in self._approved_trade_sources or row is None:
+            return None
+        payload = row['event']['payload']
+        at = datetime.fromtimestamp(row['received_at'], timezone.utc)
+        since = self._continuous_from.get(source)
+        if (payload.get('market') != 'KRX' or type(payload.get('current_price')) is not int
+                or payload['current_price'] <= 0 or since is None or at < since
+                or self._ram_observation_gap_at is not None and at < self._ram_observation_gap_at):
+            return None
+        return {'price_won': payload['current_price'], 'available_at': at,
+                'input_ref': f'collector-trade:{self._ram_source_id}:{self._ram_observation_generation}:{code}:{row["received_at"]}',
+                'market_status': 'TRADABLE', 'durable': False}
 
     def initial_realtime_snapshots(
         self, persisted: list[dict[str, Any]], codes: list[str],

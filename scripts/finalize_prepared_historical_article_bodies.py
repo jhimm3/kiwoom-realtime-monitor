@@ -39,6 +39,132 @@ UNVERIFIED_VERSION = "prepared-body-version-unverified-v1"
 SUMMARY_VERSION = "prepared-summary-v1"
 
 
+def _chunks(db, rows, width, *, reserved=0):
+    limit = min(900, db.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)) - reserved
+    if limit < width:
+        raise ValueError('SQLite bind limit cannot hold one archive row')
+    size = limit // width
+    for offset in range(0, len(rows), size):
+        yield rows[offset:offset+size]
+
+
+def _insert_many(db, prefix, rows, suffix=''):
+    """True multi-row SQL, bounded by this connection's bind limit."""
+    if not rows:
+        return
+    width = len(rows[0])
+    for chunk in _chunks(db, rows, width):
+        db.execute(prefix+' VALUES '+','.join('('+','.join('?' for _ in range(width))+')' for _ in chunk)+suffix,
+                   [value for row in chunk for value in row])
+
+
+class _Result:
+    def __init__(self, row=None, rowcount=-1):
+        self.row, self.rowcount = row, rowcount
+
+    def fetchone(self):
+        return self.row
+
+
+class _CompletionBatch:
+    """Bounded read-your-writes state for the existing canonical validator.
+
+    Only its three lookups and four writes are accepted. Validation stays in
+    _complete_one; flushing article/BODY rows preserves each table's input order.
+    """
+    def __init__(self, db, scope, pending, prepared_rows):
+        if not db.in_transaction:
+            raise ValueError('caller transaction required')
+        self.db = db
+        self.previous, self.articles, self.bodies, self.progress = {}, {}, {}, {}
+        self.inserts = {}
+        self.updates = []
+        wanted = []
+        body_keys = []
+        from kiwoom_monitor.central_server.database_news_sources import _news_article_content_hash
+        for stock, identity, hashed in pending:
+            row = prepared_rows.get((stock, identity))
+            if row is None:
+                continue  # The shared validator reports the missing source.
+            article, body = json.loads(row[3]), json.loads(row[4])
+            document = article['document']
+            market = scope == 'historical_market_backfill'
+            if market:
+                document = {**document, 'stock_code': stock, 'identity': identity}
+            content = _news_article_content_hash(document) if market else stable_document_hash(document)
+            wanted.append((stock, identity, content))
+            body_keys.append((stock, identity, content, stable_document_hash({'body': body.get('body_text')}), str(body.get('body_status') or '')))
+        for chunk in _chunks(db, wanted, 3):
+            sql = ('WITH wanted(stock,identity,hash) AS (VALUES '+','.join('(?,?,?)' for _ in chunk)+') '
+                   'SELECT w.stock,w.identity,w.hash,'
+                   '(SELECT article_revision_id FROM central_news_article_revisions WHERE stock_code=w.stock AND identity=w.identity ORDER BY accepted_sequence DESC LIMIT 1),'
+                   'a.article_revision_id,a.document_json FROM wanted w LEFT JOIN central_news_article_revisions a '
+                   'ON a.article_revision_id=(SELECT article_revision_id FROM central_news_article_revisions WHERE stock_code=w.stock AND identity=w.identity AND content_hash=w.hash ORDER BY accepted_sequence DESC LIMIT 1)')
+            for stock, identity, content, previous, aid, encoded in db.execute(sql, [v for r in chunk for v in r]):
+                self.previous[(stock,identity)] = (previous,) if previous else None
+                self.articles[(stock,identity,content)] = (aid,encoded) if aid else None
+        existing_bodies = list(dict.fromkeys((self.articles[(s,i,h)][0],bh,status)
+                              for s,i,h,bh,status in body_keys if self.articles.get((s,i,h))))
+        for chunk in _chunks(db, existing_bodies, 3):
+            sql = ('WITH wanted(aid,hash,status) AS (VALUES '+','.join('(?,?,?)' for _ in chunk)+') '
+                   'SELECT w.aid,w.hash,w.status,b.body_revision_id,b.extractor_version,b.body_text '
+                   'FROM wanted w LEFT JOIN central_news_body_revisions b ON b.body_revision_id='
+                   '(SELECT body_revision_id FROM central_news_body_revisions WHERE article_revision_id=w.aid AND content_hash=w.hash AND status=w.status ORDER BY accepted_sequence DESC LIMIT 1)')
+            for aid,bh,status,bid,version,text in db.execute(sql,[v for r in chunk for v in r]):
+                self.bodies[(aid,bh,status)] = (bid,version,text) if bid else None
+        keys = [(scope,s,i) for s,i,_ in pending]
+        for chunk in _chunks(db, keys, 3):
+            sql = 'SELECT scope,stock_code,identity,progress_state,input_hash FROM archive_input_progress WHERE (scope,stock_code,identity) IN ('+','.join('(?,?,?)' for _ in chunk)+')'
+            for scope,s,i,state,hashed in db.execute(sql,[v for r in chunk for v in r]):
+                self.progress[(scope,s,i)] = (state,hashed)
+
+    def execute(self, sql, values):
+        if sql.startswith('SELECT progress_state,input_hash'):
+            return _Result(self.progress.get(tuple(values)))
+        if sql.startswith('SELECT article_revision_id FROM central_news_article_revisions'):
+            return _Result(self.previous.get(tuple(values)))
+        if sql.startswith('SELECT article_revision_id,document_json'):
+            return _Result(self.articles.get(tuple(values)))
+        if sql.startswith('SELECT body_revision_id,extractor_version,body_text'):
+            return _Result(self.bodies.get(tuple(values)))
+        if sql.startswith('INSERT INTO '):
+            prefix = sql[:sql.index(' VALUES')]
+            self.inserts.setdefault(prefix, []).append(tuple(values))
+            if sql.startswith('INSERT INTO central_news_article_revisions'):
+                aid,stock,identity,content = values[:4]
+                self.previous[(stock,identity)] = (aid,)
+                self.articles[(stock,identity,content)] = (aid,values[-1])
+            elif sql.startswith('INSERT INTO central_news_body_revisions'):
+                bid,aid,bh,version,_,_,status,text,_ = values
+                self.bodies[(aid,bh,status)] = (bid,version,text)
+            elif not sql.startswith('INSERT INTO archive_body_provenance'):
+                raise ValueError('unexpected canonical batch INSERT')
+            return _Result()
+        if sql.startswith("UPDATE archive_input_progress SET progress_state='article_body_done'"):
+            aid,bid,scope,stock,identity,hashed = values
+            key = (scope,stock,identity)
+            if self.progress.get(key) != ('pending',hashed):
+                return _Result(rowcount=0)
+            self.progress[key] = ('article_body_done',hashed)
+            self.updates.append(tuple(values))
+            return _Result(rowcount=1)
+        raise ValueError('unexpected canonical batch statement')
+
+    def flush(self):
+        # Foreign-key dependencies are explicit; no reliance on dictionary order.
+        for table in ('central_news_article_revisions','central_news_body_revisions','archive_body_provenance'):
+            for prefix, rows in self.inserts.items():
+                if prefix.startswith('INSERT INTO '+table+'('):
+                    _insert_many(self.db,prefix,rows)
+        for chunk in _chunks(self.db,self.updates,6):
+            sql = ('WITH changes(aid,bid,scope,stock,identity,hash) AS (VALUES '+','.join('(?,?,?,?,?,?)' for _ in chunk)+') '
+                   "UPDATE archive_input_progress AS p SET progress_state='article_body_done',article_revision_id=c.aid,body_revision_id=c.bid FROM changes c "
+                   "WHERE p.scope=c.scope AND p.stock_code=c.stock AND p.identity=c.identity AND p.progress_state='pending' AND p.input_hash=c.hash RETURNING scope,stock_code,identity")
+            changed = self.db.execute(sql,[v for r in chunk for v in r]).fetchall()
+            if len(changed) != len(chunk) or set(changed) != {r[2:5] for r in chunk}:
+                raise ValueError('article progress update lost its ownership')
+
+
 def _raw_evidence(raw_path: Path, cutoff: int) -> dict[tuple[str, str, str], set[tuple[str, str, float | None]]]:
     evidence: dict[tuple[str, str, str], set[tuple[str, str, float | None]]] = {}
     with closing(sqlite3.connect(f"file:{raw_path.as_posix()}?mode=ro", uri=True)) as raw:
@@ -94,8 +220,10 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
                   scope: str, stock: str, identity: str, expected_hash: str,
                   evidence: dict[tuple[str, str, str], set[tuple[str, str, float | None]]],
                   *, manage_transaction: bool = True,
-                  provenance_out: dict[str, Any] | None = None) -> str:
-    row = prepared.execute(
+                   provenance_out: dict[str, Any] | None = None,
+                   prepared_row: tuple[Any, ...] | None = None,
+                   batch_store=None) -> str:
+    row = prepared_row if prepared_row is not None else prepared.execute(
         "SELECT stock_code,identity,state,article_json,body_json,rules_json,error,updated_at "
         "FROM prepared_news WHERE scope=? AND stock_code=? AND identity=?",
         (scope, stock, identity),
@@ -139,19 +267,20 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
     elif not archive.in_transaction:
         raise ValueError("caller must own the archive transaction")
     try:
-        progress = archive.execute(
+        store = batch_store if batch_store is not None else archive
+        progress = store.execute(
             "SELECT progress_state,input_hash FROM archive_input_progress "
             "WHERE scope=? AND stock_code=? AND identity=?",
             (scope, stock, identity),
         ).fetchone()
         if progress != ("pending", expected_hash):
             raise ValueError("article progress changed before the transaction")
-        previous = archive.execute(
+        previous = store.execute(
             "SELECT article_revision_id FROM central_news_article_revisions "
             "WHERE stock_code=? AND identity=? ORDER BY accepted_sequence DESC LIMIT 1",
             (stock, identity),
         ).fetchone()
-        existing = archive.execute(
+        existing = store.execute(
             "SELECT article_revision_id,document_json FROM central_news_article_revisions "
             "WHERE stock_code=? AND identity=? AND content_hash=? "
             "ORDER BY accepted_sequence DESC LIMIT 1",
@@ -164,7 +293,7 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
                 raise ValueError("seed article hash/payload conflict")
         article_id = str(existing[0]) if existing else uuid.uuid4().hex
         if not existing:
-            archive.execute(
+            store.execute(
                 "INSERT INTO central_news_article_revisions("
                 "article_revision_id,stock_code,identity,content_hash,collector_id,"
                 "published_at,received_at,available_at,collection_scope,revision_of,document_json) "
@@ -175,7 +304,7 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
                  str(previous[0]) if previous else None,
                  json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
             )
-        existing_body = archive.execute(
+        existing_body = store.execute(
             "SELECT body_revision_id,extractor_version,body_text FROM central_news_body_revisions "
             "WHERE article_revision_id=? AND content_hash=? AND status=? "
             "ORDER BY accepted_sequence DESC LIMIT 1",
@@ -189,7 +318,7 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
             if provenance in ("version_unverified", "raw_hash_only"):
                 provenance = "seed_exact_body"
         else:
-            archive.execute(
+            store.execute(
                 "INSERT INTO central_news_body_revisions("
                 "body_revision_id,article_revision_id,content_hash,extractor_version,"
                 "fetched_at,available_at,status,body_text,error) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -198,7 +327,7 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
             )
         if provenance_out is not None:
             provenance_out['canonical_body_extractor_version']=source_version
-        archive.execute(
+        store.execute(
             "INSERT INTO archive_body_provenance("
             "scope,stock_code,identity,article_revision_id,body_revision_id,"
             "source_status,extractor_version,provider,office_id,source_article_id,"
@@ -208,7 +337,7 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
              source_version, provider, office, source_article, raw_hash,
              expected_hash, fetched_at, str(body.get("source_url") or "")),
         )
-        changed = archive.execute(
+        changed = store.execute(
             "UPDATE archive_input_progress SET progress_state='article_body_done',"
             "article_revision_id=?,body_revision_id=? "
             "WHERE scope=? AND stock_code=? AND identity=? "

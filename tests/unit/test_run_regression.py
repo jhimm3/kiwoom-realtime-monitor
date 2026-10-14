@@ -5,6 +5,7 @@ import copy
 import os
 import sys
 import subprocess
+import shutil
 import time
 import tempfile
 import unittest
@@ -156,7 +157,7 @@ class RunRegressionTests(unittest.TestCase):
         self.assertFalse(membership["nas-operator-owned"] & set().union(*(
             members for group, members in membership.items() if group != "nas-operator-owned"
         )))
-        self.assertEqual((295, 136, 2), tuple(len(membership[name]) for name in
+        self.assertEqual((310, 136, 2), tuple(len(membership[name]) for name in
                          run_regression.CI_WINDOWS_PROFILES))
         required = run_regression._planned_batches(manifest, "ci-required-windows")
         self.assertEqual(
@@ -394,6 +395,76 @@ class RunRegressionTests(unittest.TestCase):
             result["module_test_counts"],
         )
         self.assertTrue(result["source"]["verified"])
+
+    def test_real_worker_isolates_fixture_temp_from_workspace_and_other_workers(self) -> None:
+        first = self._run_fixture("temp-env")
+        second = self._run_fixture("temp-env")
+        self.assertEqual("passed", first["status"])
+        self.assertEqual("passed", second["status"])
+        self.assertNotEqual(first["temporary_directory"], second["temporary_directory"])
+        for index, result in enumerate((first, second), 1):
+            values = json.loads((self.directory / str(index) / "temp-env.json").read_text())
+            self.assertEqual({result["temporary_directory"]}, set(values.values()))
+            self.assertFalse(Path(result["temporary_directory"]).is_relative_to(run_regression.ROOT))
+            self.assertTrue(result["process_tree_exit_confirmed"])
+            self.assertTrue(result["source"]["verified"])
+            self.assertEqual("removed", result["temporary_state"])
+            self.assertFalse(Path(result["temporary_directory"]).exists())
+
+    def test_temp_isolation_does_not_turn_failed_worker_into_success(self) -> None:
+        result = self._run_fixture("fail")
+        self.assertEqual("failed", result["status"])
+        self.assertTrue(result["failures"])
+        self.assertEqual("retained", result["temporary_state"])
+        self.assertTrue(Path(result["temporary_directory"]).is_dir())
+        self.addCleanup(shutil.rmtree, result["temporary_directory"])
+
+    def test_observed_checkout_cannot_be_selected_as_fixture_temp(self) -> None:
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(run_regression.ROOT / "tmp")}):
+            result = self._run_fixture("pass")
+        self.assertEqual("failed", result["status"])
+        self.assertIn("outside the observed checkout", result["execution_error"])
+        self.assertIsNone(result["worker_pid"])
+
+    def test_windows_child_directory_reader_keeps_native_publication_fail_closed(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+        from scripts import nas_source_runtime
+        from tests.unit.test_nas_source_runtime import SourceRuntimeTests
+
+        fixture = SourceRuntimeTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        first = fixture.publish()
+        nas_source_runtime.atomic_json(fixture.store / "active.json", {
+            "format": 1, "release_id": first["release_id"],
+        })
+        (fixture.source / nas_source_runtime.BUILD_FILE).write_text(
+            'SERVER_BUILD = "2026.10.01-test-v2"\n', encoding="utf-8",
+        )
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        api.CreateFileW.restype = wintypes.HANDLE
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        rename = os.rename
+
+        def rename_while_reader_is_open(source, destination):
+            handle = api.CreateFileW(str(Path(source) / "tests"), 0x80, 7, None, 3, 0x02000000, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                return rename(source, destination)
+            finally:
+                api.CloseHandle(handle)
+
+        with patch.object(nas_source_runtime.os, "rename", side_effect=rename_while_reader_is_open) as observed:
+            with self.assertRaises(PermissionError) as failure:
+                fixture.publish()
+        self.assertEqual(5, failure.exception.winerror)
+        self.assertEqual(1, observed.call_count)  # No retry or relaxed publication contract.
+        self.assertEqual(first["release_id"], nas_source_runtime.release(fixture.store)[1]["release_id"])
+        self.assertEqual(1, len(list((fixture.store / "releases").iterdir())))
 
     def test_mixed_batch_with_empty_module_is_incomplete_in_either_order(self) -> None:
         empty = "regression_empty_fixture"

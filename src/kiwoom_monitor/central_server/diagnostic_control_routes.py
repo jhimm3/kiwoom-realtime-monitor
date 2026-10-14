@@ -114,7 +114,7 @@ def create_diagnostic_control_router(
                     "deferred_persistence": {
                         "supported": True, "request_field": "persist_at", "max_delay_seconds": 86400,
                         "memory_limit_bytes": 8 * 1024 * 1024 * 1024,
-                        "event_capacity": 5_000_000, "write_bytes_per_second": 1024 * 1024,
+                        "event_capacity": 5_000_000, "write_bytes_per_second": 10 * 1024 * 1024,
                     },
                 },
                 "trace_replay_writer_kinds": sorted(TRACE_SYNTHETIC_KINDS),

@@ -9,6 +9,7 @@ import argparse
 from contextlib import closing
 import hashlib
 import json
+from itertools import groupby
 from pathlib import Path
 import sqlite3
 import sys
@@ -19,11 +20,32 @@ for item in (ROOT,ROOT/'src'):
         sys.path.insert(0,str(item))
 
 from scripts.prepared_historical_archive_v2 import SCOPES,POLICY,MARKET,WORLD_EXCLUSION,world_service_excluded,code_digest,report,_json
+from scripts.prepared_historical_archive_inputs import generation, contract_blockers, input_counts, missing_coverage
 from scripts.materialize_historical_news_seed import _sqlite_value
 from scripts.export_historical_news_seed import TABLE_KEYS
 from scripts.stage_prepared_historical_news_archive import _sha256
 from kiwoom_monitor.central_server.database import stable_document_hash
 from kiwoom_monitor.central_server.database_news_sources import _news_article_content_hash
+
+
+def _target_sets(db):
+    """Compare complete target sets with one bounded-memory ordered stream."""
+    rows = db.execute(
+        'SELECT e.scope,e.stock_code,e.identity,e.targets_json,t.target_id,t.target_name '
+        'FROM archive_expected_targets_v2 e LEFT JOIN archive_targets_v2 t '
+        'ON t.scope=e.scope AND t.stock_code=e.stock_code AND t.identity=e.identity '
+        'ORDER BY e.scope,e.stock_code,e.identity'
+    )
+    count = 0
+    for _, members in groupby(rows, key=lambda row: row[:3]):
+        first = next(members)
+        expected = json.loads(first[3])
+        actual = {} if first[4] is None else {first[4]: first[5]}
+        actual.update((row[4], row[5]) for row in members if row[4] is not None)
+        count += len(expected)
+        if expected != actual:
+            return count, False
+    return count, True
 
 
 def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=False,
@@ -46,6 +68,9 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
         if {r[0] for r in sources}!=set(SCOPES):
             blockers.append('scope_input_missing')
         progress={}
+        blockers.extend(contract_blockers(db,check_files=full_integrity_check))
+        if generation(db) and generation(db).get('state')!='complete':
+            blockers.append('input_generation_adoption_unfinished')
         for scope,source_path,source_hash,expected,staged,state in sources:
             actual=dict(db.execute('SELECT progress_state,COUNT(*) FROM archive_input_progress WHERE scope=? GROUP BY progress_state',(scope,)))
             progress[scope]=actual
@@ -53,7 +78,8 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
             origin_count=db.execute('SELECT COUNT(*) FROM archive_prepared_scope_origins_v2 WHERE scope=?',(scope,)).fetchone()[0]
             if not origin_manifest or json.loads(origin_manifest[0]).get('expected_rows')!=origin_count:
                 blockers.append(f'{scope}_prepared_origin_count_mismatch')
-            if state!='complete' or expected!=staged or expected!=sum(actual.values()):
+            effective_expected,effective_staged=input_counts(db,scope)
+            if state!='complete' or expected!=staged or effective_expected!=effective_staged or effective_expected!=sum(actual.values()):
                 blockers.append(f'{scope}_input_count_mismatch')
             if set(actual)-{'event_done','source_failed','source_excluded'}:
                 blockers.append(f'{scope}_input_unfinished')
@@ -92,21 +118,43 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
                 blockers.append('canonical_article_or_body_hash_invalid'); break
         if db.execute("SELECT 1 FROM archive_projection_v2 p LEFT JOIN central_news_article_revisions a ON a.article_revision_id=p.article_revision_id LEFT JOIN central_news_body_revisions b ON b.body_revision_id=p.body_revision_id WHERE p.article_revision_id IS NOT NULL AND (a.article_revision_id IS NULL OR b.body_revision_id IS NULL OR b.article_revision_id<>a.article_revision_id) LIMIT 1").fetchone():
             blockers.append('projection_article_body_relation_invalid')
-        target_rows=0
-        for scope,owner,identity,targets_json in db.execute('SELECT scope,stock_code,identity,targets_json FROM archive_expected_targets_v2'):
-            expected=json.loads(targets_json)
-            actual=dict(db.execute('SELECT target_id,target_name FROM archive_targets_v2 WHERE scope=? AND stock_code=? AND identity=?',(scope,owner,identity)))
-            target_rows+=len(expected)
-            if expected!=actual:
-                blockers.append('target_set_mismatch'); break
+        target_rows, target_sets_match = _target_sets(db)
+        if not target_sets_match:
+            blockers.append('target_set_mismatch')
         if target_rows!=db.execute('SELECT COUNT(*) FROM archive_targets_v2').fetchone()[0]:
             blockers.append('target_count_mismatch')
-        for input_hash,article_id,body_id,target,name,computed_json,prepared_json,fingerprint,state in db.execute('SELECT input_hash,article_revision_id,body_revision_id,target_id,target_name,computed_json,prepared_json,fingerprint,verification_state FROM archive_targets_v2'):
+        from scripts.transition_historical_archive_execution import (
+            finalization_lineage, fingerprint_digest, _prefix_rows, INPUT_FIELDS, TARGET_FIELDS,
+        )
+        from scripts.prepared_historical_archive_inputs import _root
+        lineage = None
+        try:
+            lineage = finalization_lineage(db, check_file=True)
+            if lineage:
+                for scope, entry in lineage['scopes'].items():
+                    if _root(_prefix_rows(db,'archive_input_progress',INPUT_FIELDS,scope,entry['last']))!=entry['inputs']:
+                        blockers.append('finalized_prefix_inputs_changed')
+        except (ValueError,KeyError,OSError,TypeError,sqlite3.DatabaseError):
+            lineage = None
+            blockers.append('finalization_lineage_invalid')
+        prefix_hashes={scope:hashlib.sha256() for scope in SCOPES}
+        prefix_counts={scope:0 for scope in SCOPES}
+        for row in db.execute('SELECT '+TARGET_FIELDS+' FROM archive_targets_v2 ORDER BY scope,stock_code,identity,target_id'):
+            scope,owner,identity,target,name,input_hash,article_id,body_id,fingerprint,prepared_json,computed_json,state,_ = row
             computed=json.loads(computed_json)
-            expected_hash=hashlib.sha256(_json((POLICY,input_hash,article_id,body_id,target,name,value.get('builder_code_digest'),computed)).encode()).hexdigest()
+            digest=fingerprint_digest(lineage,scope,owner,identity,value.get('builder_code_digest'))
+            expected_hash=hashlib.sha256(_json((POLICY,input_hash,article_id,body_id,target,name,digest,computed)).encode()).hexdigest()
             equal=_json(json.loads(prepared_json))==_json(computed)
             if fingerprint!=expected_hash or (state=='verified_equal')!=equal:
                 blockers.append('target_verification_fingerprint_invalid'); break
+            if lineage and digest==lineage['parent_digest']:
+                encoded=_json(row).encode()
+                prefix_hashes[scope].update(len(encoded).to_bytes(8,'big'));prefix_hashes[scope].update(encoded)
+                prefix_counts[scope]+=1
+        if lineage:
+            for scope,entry in lineage['scopes'].items():
+                if {'rows':prefix_counts[scope],'sha256':prefix_hashes[scope].hexdigest()}!=entry['targets']:
+                    blockers.append('finalized_prefix_targets_changed')
         if db.execute("SELECT 1 FROM archive_targets_v2 t LEFT JOIN archive_input_progress p ON p.scope=t.scope AND p.stock_code=t.stock_code AND p.identity=t.identity LEFT JOIN central_news_body_revisions b ON b.body_revision_id=t.body_revision_id WHERE p.input_hash IS NULL OR t.input_hash<>p.input_hash OR t.article_revision_id<>p.article_revision_id OR t.body_revision_id<>p.body_revision_id OR b.article_revision_id<>t.article_revision_id OR b.article_revision_id IS NULL OR t.event_state IN ('pending','conflict') OR t.verification_state NOT IN ('verified_equal','recomputed_posthoc') LIMIT 1").fetchone():
             blockers.append('target_relation_or_resolution_invalid')
         if db.execute("SELECT 1 FROM archive_targets_v2 t LEFT JOIN central_news_event_revisions e ON e.event_revision_id=t.event_revision_id LEFT JOIN central_news_event_membership_revisions m ON m.membership_revision_id=t.membership_revision_id WHERE t.event_revision_id IS NOT NULL AND (e.event_revision_id IS NULL OR e.event_id<>t.event_id OR e.article_revision_id<>t.article_revision_id OR e.body_revision_id<>t.body_revision_id OR e.stock_code<>t.target_id OR m.membership_revision_id IS NULL OR m.event_revision_id<>t.event_revision_id OR m.article_revision_id<>t.article_revision_id OR m.body_revision_id<>t.body_revision_id) LIMIT 1").fetchone():
@@ -163,7 +211,7 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
                     actual=db.execute('SELECT COUNT(*) FROM archive_source_history_v2 WHERE scope=? AND source_table=?',(scope,table)).fetchone()[0]
                     if actual!=expected:
                         blockers.append(f'{scope}_raw_history_count_mismatch')
-            if db.execute("SELECT 1 FROM archive_source_coverage_v2 c LEFT JOIN archive_input_progress p ON p.scope=c.scope AND p.stock_code=c.stock_code AND p.identity=c.identity WHERE p.input_hash IS NULL OR p.input_hash<>c.input_hash LIMIT 1").fetchone():
+            if missing_coverage(db):
                 blockers.append('received_source_without_finalized_input')
             if db.execute("SELECT 1 FROM archive_input_progress p WHERE p.progress_state<>'source_excluded' AND NOT EXISTS(SELECT 1 FROM archive_source_coverage_v2 c WHERE c.scope=p.scope AND c.stock_code=p.stock_code AND c.identity=p.identity) LIMIT 1").fetchone():
                 blockers.append('prepared_input_without_raw_mapping')
@@ -182,11 +230,14 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
         else:
             with closing(sqlite3.connect(seed.resolve().as_uri()+'?mode=ro',uri=True)) as original:
                 original.execute('PRAGMA query_only=ON')
+                table_columns = {}
                 for table,key,payload_json,digest,role in original.execute('SELECT table_name,row_key,payload_json,payload_hash,role FROM seed_rows'):
                     if table not in TABLE_KEYS or hashlib.sha256(payload_json.encode()).hexdigest()!=digest:
                         blockers.append('seed_input_invalid'); break
                     payload=json.loads(payload_json)
-                    columns={row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+                    if table not in table_columns:
+                        table_columns[table] = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+                    columns=table_columns[table]
                     if set(payload)!=columns or key!=_json([payload[k] for k in TABLE_KEYS[table]]):
                         blockers.append('seed_columns_or_key_invalid'); break
                     names=sorted(payload)

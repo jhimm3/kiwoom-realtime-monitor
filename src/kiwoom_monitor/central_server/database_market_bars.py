@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,11 +17,12 @@ from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness, DataValueKind, MarketDataObservation, ObservationOrigin,
 )
 from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
+from kiwoom_monitor.domain.ranking import normalize_stock_code
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import (
     market_metadata_storage_values, market_metadata_document, market_metadata_from_storage_row,
 )
 from kiwoom_monitor.central_server.database_codec import (
-    BAR_KEY_COLUMNS, FIVE_MINUTE_BAR_COLUMNS, bar_columns, bar_result_rows,
+    BAR_KEY_COLUMNS, FIVE_MINUTE_BAR_COLUMNS, SECOND_TRADE_BAR_COLUMNS, bar_columns, bar_result_rows,
     bar_value_rows, bounded_limit, five_minute_bar_result_rows,
     five_minute_bar_value_rows, second_trade_bar_value_rows,
 )
@@ -43,6 +45,41 @@ SQLITE_MULTIROW_UPSERT_ROWS = 80
 POSTGRES_MULTIROW_UPSERT_ROWS = 1_000
 SQLITE_REVISION_BATCH_ROWS = 40
 SQLITE_REVISION_LOOKUP_ROWS = 80
+
+
+def _second_trade_read_query(codes, trading_date, market, start_second, end_second, available_at, limit, *, placeholder):
+    normalized = tuple(dict.fromkeys(normalize_stock_code(code) for code in codes))
+    if len(normalized) > 200 or any(len(code) != 6 or not code.isdigit() for code in normalized):
+        raise ValueError("second trade reader requires at most 200 valid stock codes")
+    datetime.strptime(trading_date, "%Y-%m-%d")
+    start = datetime.strptime(start_second, "%H:%M:%S")
+    end = datetime.strptime(end_second, "%H:%M:%S")
+    if start_second != start.strftime("%H:%M:%S") or end_second != end.strftime("%H:%M:%S"):
+        raise ValueError("second trade window must use HH:MM:SS")
+    if end < start or (end - start).total_seconds() > 600:
+        raise ValueError("second trade window must be ordered and at most 600 seconds")
+    if market not in {"KRX", "NXT"} or not math.isfinite(float(available_at)):
+        raise ValueError("second trade venue and availability cut must be explicit")
+    maximum = bounded_limit(limit, 10000)
+    time_bind = placeholder + ("::time" if placeholder == "%s" else "")
+    sql = (f"SELECT {','.join(SECOND_TRADE_BAR_COLUMNS)} FROM central_second_trade_bars "
+           f"WHERE code IN ({','.join(placeholder for _ in normalized)}) "
+           f"AND trading_date={placeholder} AND market={placeholder} "
+           f"AND trade_second>={time_bind} AND trade_second<={time_bind} "
+           f"AND available_at<={placeholder} ORDER BY trade_second,code LIMIT {placeholder}")
+    return sql, (*normalized, trading_date, market, start_second, end_second, float(available_at), maximum + 1), maximum
+
+
+def _second_trade_read_rows(rows, maximum):
+    if len(rows) > maximum:
+        raise ValueError("second trade reader row budget exceeded; incomplete windows are not returned")
+    result = [dict(zip(SECOND_TRADE_BAR_COLUMNS, row, strict=True)) for row in rows]
+    for row in result:
+        if not isinstance(row["trading_date"], str):
+            row["trading_date"] = row["trading_date"].isoformat()
+        if not isinstance(row["trade_second"], str):
+            row["trade_second"] = row["trade_second"].strftime("%H:%M:%S")
+    return result
 
 
 
@@ -726,6 +763,19 @@ def _save_postgres_metadata(
 
 class SQLiteMarketBarStoreMixin:
 
+    def load_second_trade_bars(
+        self, codes: tuple[str, ...], trading_date: str, market: str, *,
+        start_second: str, end_second: str, available_at: float, limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        sql, parameters, maximum = _second_trade_read_query(
+            codes, trading_date, market, start_second, end_second, available_at, limit, placeholder="?",
+        )
+        if not codes:
+            return []
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return _second_trade_read_rows(rows, maximum)
+
 
     def save_second_trade_bars(self, values: list[dict[str, Any]]) -> None:
         if not values:
@@ -1015,6 +1065,22 @@ class SQLiteMarketBarStoreMixin:
 
 
 class PostgresMarketBarStoreMixin:
+
+    def load_second_trade_bars(
+        self, codes: tuple[str, ...], trading_date: str, market: str, *,
+        start_second: str, end_second: str, available_at: float, limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        sql, parameters, maximum = _second_trade_read_query(
+            codes, trading_date, market, start_second, end_second, available_at, limit, placeholder="%s",
+        )
+        if not codes:
+            return []
+        reader = DBWriterContext(writer_family="read.market_bars", writer_kind="second_trade_bar",
+                                 operation="load_second_trade_bars", access_mode="read")
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+            cursor.execute(sql, parameters)
+            rows = cursor.fetchall()
+        return _second_trade_read_rows(rows, maximum)
 
 
     def save_second_trade_bars(self, values: list[dict[str, Any]]) -> None:

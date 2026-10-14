@@ -375,6 +375,33 @@ class ArchiveV2Tests(unittest.TestCase):
         with closing(original(self.archive)) as db:
             self.assertEqual(0,db.execute("SELECT COUNT(*) FROM archive_event_ready_v2 WHERE state='pending'").fetchone()[0])
 
+    def test_event_dependency_checks_are_cached_per_article_and_input(self):
+        targets=[['GLOBAL','시장']]+[[f'{n:06d}',f'stock-{n}'] for n in range(1,20)]
+        self.add(SEARCH,'search-scope')
+        self.add(MARKET,'many-targets',targets=targets)
+        digest=_sha256(self.prepared)
+        for scope in (SEARCH,MARKET):
+            stage(self.archive,self.prepared,scope,digest)
+            finalize_inputs(self.archive,self.prepared,scope,digest)
+
+        original=sqlite3.connect
+        queries=[]
+        def traced(*args,**kwargs):
+            db=original(*args,**kwargs); db.set_trace_callback(queries.append); return db
+        resolution=('no_event','no_event',None,None,None,None,None,())
+        with patch('scripts.prepared_historical_archive_v2.sqlite3.connect',side_effect=traced), \
+             patch('scripts.prepared_historical_archive_v2._resolve_event',return_value=resolution):
+            result=finalize_events(self.archive)
+
+        self.assertEqual(21,result['targets_resolved_now'])
+        article_counts=[q for q in queries if q.startswith('SELECT COUNT(*) FROM archive_targets_v2 WHERE article_revision_id=')]
+        input_counts=[q for q in queries if q.startswith('SELECT COUNT(*) FROM archive_targets_v2 WHERE scope=')]
+        self.assertEqual(2,len(article_counts))
+        self.assertEqual(2,len(input_counts))
+        with closing(original(self.archive)) as db:
+            self.assertEqual(21,db.execute("SELECT COUNT(*) FROM archive_targets_v2 WHERE event_state='no_event'").fetchone()[0])
+            self.assertEqual([('event_done',2)],db.execute('SELECT progress_state,COUNT(*) FROM archive_input_progress GROUP BY progress_state').fetchall())
+
     def test_capacity_sample_cannot_be_served_even_with_sealed_flag(self):
         reader=self.sealed_reader_fixture()
         del reader
@@ -426,6 +453,41 @@ class ArchiveV2Tests(unittest.TestCase):
                 db.execute('CREATE TABLE market_news_pages(source TEXT,target_date TEXT,page INTEGER,observed_at TEXT,endpoint TEXT,response_sha256 TEXT,payload_json TEXT,article_count INTEGER,invalid_count INTEGER)')
                 db.execute('INSERT INTO market_news_articles VALUES(?,?,?,?,?,?)',('flash','001','a',identity,'일반 시장 소식','기사 요약'))
         return path
+
+    def test_source_capture_uses_rowid_range_with_provider_index_and_preserves_rows(self):
+        from scripts.capture_historical_archive_sources_v2 import capture
+        raw=self.raw_fixture(SEARCH)
+        payload=json.dumps({'collection':[]})
+        with closing(sqlite3.connect(raw)) as db,db:
+            db.execute('CREATE UNIQUE INDEX provider_key ON source_pages(provider,request_key,observed_at)')
+            db.executemany('INSERT INTO source_pages VALUES(?,?,?,?,?,?)',[
+                ('other' if n%4==0 else 'naver_historical_search',
+                 f'code=005930&date=2026-09-01&query=test&start={n}',
+                 '2026-09-01T00:00:00+00:00',hashlib.sha256(payload.encode()).hexdigest(),payload,0)
+                for n in range(1,61)])
+            reference=db.execute("SELECT rowid FROM source_pages WHERE provider='naver_historical_search' ORDER BY rowid").fetchall()
+        before=_sha256(raw)
+        trace=[]
+        connect=sqlite3.connect
+        def traced_connect(*args,**kwargs):
+            db=connect(*args,**kwargs)
+            db.set_trace_callback(trace.append)
+            return db
+        with patch('sqlite3.connect',side_effect=traced_connect):
+            capture(self.archive,raw,SEARCH,batch_size=7)
+        queries=[sql for sql in trace if sql.startswith('SELECT rowid AS source_rowid,* FROM source_pages')]
+        self.assertGreater(len(queries),1)
+        with closing(connect(raw)) as db:
+            for sql in queries:
+                plan=' '.join(str(row[3]) for row in db.execute('EXPLAIN QUERY PLAN '+sql))
+                self.assertIn('INTEGER PRIMARY KEY',plan)
+                self.assertNotIn('TEMP B-TREE',plan)
+                self.assertEqual(db.execute(sql.replace(' NOT INDEXED','')).fetchall(),db.execute(sql).fetchall())
+        with closing(connect(self.archive)) as db:
+            actual=db.execute("SELECT CAST(source_row_key AS INTEGER) FROM archive_source_history_v2 WHERE source_table='source_pages' ORDER BY CAST(source_row_key AS INTEGER)").fetchall()
+            self.assertEqual(reference,actual)
+        self.assertEqual(before,_sha256(raw))
+        self.assertEqual(0,capture(self.archive,raw,SEARCH)['source_rows_captured_now'])
 
     def test_real_source_coverage_seals_readonly_and_recovers_receipt(self):
         from scripts.capture_historical_archive_sources_v2 import capture,finish_coverage

@@ -110,7 +110,7 @@ _METHOD_GROUPS = {
         "load_top20_statistics", "load_observation_revisions", "load_observation_revisions_after",
         "load_shadow_candidates", "load_shadow_monitor_state", "load_external_bars",
         "load_hot_cohort", "load_market_event_history", "load_theme_snapshots",
-        "load_mock_automation_control", "storage_size_bytes", "storage_breakdown",
+        "load_mock_automation_control", "load_mock_automation_lineage", "storage_size_bytes", "storage_breakdown",
     ),
     "top20": tuple(sorted(DISPLAY_METHODS)),
     "documents": ("upsert_documents", "replace_documents", "load_documents", "load_document"),

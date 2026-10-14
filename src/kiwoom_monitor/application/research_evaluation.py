@@ -7,11 +7,13 @@ import json
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from statistics import median
-from typing import Any, Iterable, Mapping
+from fractions import Fraction
+from math import sqrt, isqrt
+from typing import Any, Iterable, Mapping, ClassVar
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.application.breakout_strategy import CandidateEvent
-from kiwoom_monitor.application.research_execution import ExecutionEvent
+from kiwoom_monitor.application.research_execution import ExecutionEvent, SimulationCostModel, SimulationExecutionConfig
 from kiwoom_monitor.application.research_replay import KrxMinuteBarFrame
 from kiwoom_monitor.application.research_splits import (
     ResearchEvaluationSpec,
@@ -22,6 +24,1649 @@ from kiwoom_monitor.application.research_splits import (
 
 
 OUTCOME_HORIZONS_SECONDS = (1, 60, 180, 300, 600)
+
+
+def _position_context_time(value):
+    if isinstance(value,bool):raise ValueError('historical context time requires an aware timestamp')
+    if isinstance(value,(int,float)):return datetime.fromtimestamp(value,tz=timezone.utc)
+    return _aware_datetime(value)
+
+
+def prepare_position_study_historical_context(dataset,request):
+    """Freeze only existing, already available D2/D5 inputs; no reads or inference."""
+    cut=_aware_datetime(request.decision_time);rankings=[];themes=[]
+    for row in dataset.observations:
+        if row.get('kind')!='ranking' or _position_context_time(row['available_at'])>cut:continue
+        payload=row.get('payload')
+        if not isinstance(payload,dict):raise ValueError('historical ranking payload required')
+        if row.get('venue','COMBINED')=='COMBINED' and str(payload.get('query_type'))=='5':rankings.append(row)
+    for row in dataset.theme_snapshots:
+        if row.get('available_at') is not None and _position_context_time(row['available_at'])<=cut:themes.append(row)
+    body={'version':'position-study-historical-context/v1','dataset_id':dataset.manifest['dataset_id'],
+        'revision_ids_hash':dataset.manifest['revision_ids_hash'],'decision_time':cut.isoformat(),'symbol':request.symbol,
+        'market_venue':'COMBINED','ranking_window_truncated':len(rankings)>100,'theme_window_truncated':len(themes)>100,
+        'rankings':sorted(rankings,key=lambda r:(_position_context_time(r['available_at']),r['revision_id']))[-100:],
+        'theme_snapshots':sorted(themes,key=lambda r:(_position_context_time(r['available_at']),r['snapshot_id']))[-100:]}
+    body=json.loads(json.dumps(body,ensure_ascii=False,allow_nan=False))
+    body['context_ref']=_content_id('position-study-historical-context',body)
+    validate_position_study_historical_context(body,dataset.manifest,request)
+    return body
+
+
+def validate_position_study_historical_context(document,manifest,request,*,dataset=None):
+    """Verify the reported historical cut; dataset callers also verify actual values."""
+    from kiwoom_monitor.domain.news_observation import stable_document_hash
+    keys={'version','dataset_id','revision_ids_hash','decision_time','symbol','market_venue','rankings','theme_snapshots','context_ref',
+        'ranking_window_truncated','theme_window_truncated'}
+    if (not isinstance(document,dict) or set(document)!=keys
+            or document['version']!='position-study-historical-context/v1' or document['market_venue']!='COMBINED'
+            or any(type(document[key]) is not bool for key in ('ranking_window_truncated','theme_window_truncated'))
+            or len(json.dumps(document,ensure_ascii=False,allow_nan=False).encode())>128*1024
+            or any(not isinstance(document[key],list) or len(document[key])>100 for key in ('rankings','theme_snapshots'))):
+        raise ValueError('invalid bounded historical context')
+    if document['context_ref']!=_content_id('position-study-historical-context',{k:v for k,v in document.items() if k!='context_ref'}):
+        raise ValueError('historical context content mismatch')
+    cut=_aware_datetime(document['decision_time'])
+    if (document['dataset_id']!=manifest['dataset_id'] or document['revision_ids_hash']!=manifest['revision_ids_hash']
+            or document['symbol']!=request.symbol or cut!=request.decision_time
+            or manifest.get('runtime_input_version')!='independent_development_input/v1'):
+        raise ValueError('historical context original dataset/case cut mismatch')
+    rankings=document['rankings'];themes=document['theme_snapshots']
+    for rows,identity in ((rankings,'revision_id'),(themes,'snapshot_id')):
+        if any(not isinstance(row,dict) or type(row.get(identity)) is not str or not 0<len(row[identity])<=256 for row in rows):
+            raise ValueError('historical context requires original source identities')
+        if len({row[identity] for row in rows})!=len(rows):raise ValueError('duplicate historical context source')
+        if rows!=sorted(rows,key=lambda r:(_position_context_time(r['available_at']),r[identity])):
+            raise ValueError('historical context source order mismatch')
+        if any(_position_context_time(row['available_at'])>cut for row in rows):raise ValueError('historical context future source')
+    for row in rankings:
+        payload=row.get('payload')
+        if (row.get('kind')!='ranking' or row.get('venue','COMBINED')!='COMBINED' or not isinstance(payload,dict)
+                or str(payload.get('query_type'))!='5' or not isinstance(payload.get('items'),list) or len(payload['items'])>20):
+            raise ValueError('historical context ranking scope mismatch')
+        available=_position_context_time(row['available_at'])
+        descriptor=manifest['development_partition']
+        if (not _position_context_time(descriptor['warmup_start'])<=available< _position_context_time(descriptor['end'])
+                or row.get('effective_at') is not None and _position_context_time(row['effective_at'])>cut):
+            raise ValueError('historical ranking outside original cut/partition')
+    for row in themes:
+        if not isinstance(row.get('document'),dict):raise ValueError('historical context theme document required')
+        if 'content_hash' in row and row['content_hash']!=stable_document_hash(row['document']):
+            raise ValueError('historical context original theme content mismatch')
+    if dataset is not None and document!=prepare_position_study_historical_context(dataset,request):
+        raise ValueError('historical context differs from actual frozen dataset')
+    return document
+
+
+def replay_position_study_historical_context(document):
+    """Reuse H1 and D5 conversion once per distinct context at explicit publication."""
+    from kiwoom_monitor.application.market_research_features import market_frames_from_observations
+    from kiwoom_monitor.application.theme_leadership import theme_memberships_from_snapshot
+    from kiwoom_monitor.application.market_theme_shadow import MarketThemeShadowInputs,evaluate_market_theme_shadow
+    frames=market_frames_from_observations(document['rankings'],document['theme_snapshots'])
+    latest=document['theme_snapshots'][-1] if document['theme_snapshots'] else None
+    memberships=theme_memberships_from_snapshot(latest) if latest else ()
+    observed=tuple(m for m in memberships if document['symbol'] in m.member_codes)
+    inputs=MarketThemeShadowInputs(document['decision_time'],'COMBINED','cumulative_session','KRX',
+        frames,None,(),'UNAVAILABLE')
+    context=evaluate_market_theme_shadow(inputs)
+    return {'context_ref':document['context_ref'],'symbol':document['symbol'],'decision_time':document['decision_time'],
+        'source_window_truncated':document['ranking_window_truncated'] or document['theme_window_truncated'],
+        'ranking_refs':[row['revision_id'] for row in document['rankings']],
+        'theme_snapshot_refs':[row['snapshot_id'] for row in document['theme_snapshots']],
+        'observed_memberships':[asdict(m) for m in observed],'market':context['market'],
+        'missing':['historical_second_trade_leadership','historical_breakout_evidence','historical_market_cap',
+            'historical_allocation_ev_exit_stress_context','conditional_current_context_support'],
+        'source_durability':'not_verified','order_authorized':False}
+
+
+@dataclass(frozen=True)
+class PositionActionOutcome:
+    """Measured portfolio change over a fixed horizon, not an inferred trade label.
+
+    Gross change uses execution prices (slippage already reflected). Fee/tax is
+    subtracted once. HOLD requires its own terminal portfolio valuation too.
+    """
+    input_ref: str
+    case_ref: str
+    initial_state_ref: str
+    action: str
+    policy_version: str
+    environment: str
+    venue: str
+    source_kind: str
+    execution_model_ref: str
+    initial_quantity: int
+    pending_buy_quantity: int
+    pending_sell_quantity: int
+    target_quantity: int
+    horizon_seconds: int
+    population_ref: str
+    input_resolution: str
+    cost_model_ref: str | None
+    started_at: datetime
+    completed_at: datetime | None
+    available_at: datetime
+    status: str
+    data_gap_count: int
+    gross_change_won: int | None
+    fee_tax_won: int | None
+    value_basis: str = "portfolio_change_after_slippage_before_fees/v1"
+    _actions: ClassVar[frozenset[str]] = frozenset({'ADD','REDUCE','REENTER','EXIT','HOLD'})
+
+    def __post_init__(self) -> None:
+        for name in ("input_ref", "case_ref", "initial_state_ref", "policy_version", "population_ref", "execution_model_ref"):
+            if type(getattr(self, name)) is not str or not getattr(self, name).strip():
+                raise ValueError(f"action outcome {name} is required")
+        if self.action not in self._actions:
+            raise ValueError("unsupported measured position action")
+        if self.environment not in {"mock", "real", "simulation"} or self.venue not in {"KRX", "NXT"}:
+            raise ValueError("action outcome scope must be explicit")
+        if self.source_kind not in {"simulation", "broker", "shadow_valuation"}:
+            raise ValueError("action outcome source kind must be explicit")
+        if self.input_resolution not in {"minute", "second"}:
+            raise ValueError("action outcome input resolution must be explicit")
+        if self.status not in {"COMPLETE", "PARTIAL", "CENSORED", "UNAVAILABLE"}:
+            raise ValueError("action outcome completion status must be explicit")
+        if self.value_basis != "portfolio_change_after_slippage_before_fees/v1":
+            raise ValueError("unsupported action outcome value basis")
+        for name in ("initial_quantity", "pending_buy_quantity", "pending_sell_quantity",
+                     "target_quantity", "horizon_seconds", "data_gap_count"):
+            value = getattr(self, name)
+            if type(value) is not int or value < (1 if name == "horizon_seconds" else 0):
+                raise ValueError(f"action outcome {name} must be a nonnegative integer")
+        for name in ("gross_change_won", "fee_tax_won"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or abs(value) > 10**15):
+                raise ValueError(f"action outcome {name} must be integer won or unknown")
+        if self.fee_tax_won is not None and self.fee_tax_won < 0:
+            raise ValueError("action outcome fees/tax must not be negative")
+        if self.cost_model_ref is not None and (type(self.cost_model_ref) is not str or not self.cost_model_ref):
+            raise ValueError("action outcome cost model ref must be explicit or unknown")
+        for value in (self.started_at, self.available_at):
+            if not isinstance(value, datetime):
+                raise ValueError("action outcome observation times must be aware datetimes")
+        for value in (self.started_at, self.completed_at, self.available_at):
+            if value is not None:
+                if not isinstance(value, datetime):
+                    raise ValueError("action outcome observation times must be aware datetimes")
+                _aware_datetime(value)
+
+
+def position_action_cost_model_ref(cost_model: Mapping[str, Any] | None) -> str | None:
+    return _content_id("position-action-cost", cost_model) if cost_model is not None else None
+
+
+@dataclass(frozen=True, kw_only=True)
+class UnfilledActionOutcome(PositionActionOutcome):
+    """Separate measured pending-LIMIT branches; never relabel HOLD/EXIT."""
+    symbol: str
+    side: str
+    pending_quantity: int
+    existing_limit_price_won: int
+    candidate_limit_price_won: int
+    purpose: str
+    order_state: str
+    _actions: ClassVar[frozenset[str]] = frozenset({'WAIT','REPRICE'})
+
+    def __post_init__(self):
+        super().__post_init__()
+        if (self.policy_version != 'unfilled-order-management-shadow/v1'
+                or self.execution_model_ref != 'unfilled-paired-limit/v1'
+                or self.environment != 'simulation' or self.source_kind != 'simulation'
+                or self.venue != 'KRX' or not isinstance(self.symbol,str)
+                or len(self.symbol)!=6 or not self.symbol.isascii() or not self.symbol.isdigit()
+                or self.side not in {'BUY','SELL'}
+                or self.purpose not in {'BUY_OPPORTUNITY','TAKE_PROFIT'}
+                or self.order_state not in {'ACCEPTED','PARTIALLY_FILLED','CANCELLED'}
+                or self.input_resolution=='minute' and self.horizon_seconds%60!=0
+                or (self.side=='BUY') != (self.purpose=='BUY_OPPORTUNITY')):
+            raise ValueError('unfilled outcome scope/model must be explicit')
+        for name in ('pending_quantity','existing_limit_price_won','candidate_limit_price_won'):
+            if type(getattr(self,name)) is not int or getattr(self,name)<=0:
+                raise ValueError('unfilled outcome quantities/prices must be positive integers')
+        expected=0 if self.order_state=='CANCELLED' else self.pending_quantity
+        if (self.pending_buy_quantity if self.side=='BUY' else self.pending_sell_quantity)!=expected:
+            raise ValueError('unfilled outcome pending quantity mismatch')
+
+
+class PositionOutcomeUnavailable(ValueError):
+    """A selected native window cannot prove a measured action outcome."""
+
+
+def position_action_source_context(record: Mapping[str, Any], decision_time: datetime) -> dict[str, Any]:
+    """Reuse locked development acceptance before reading execution values."""
+    cut = _aware_datetime(decision_time)
+    source = _development_partition_result(record)
+    if source.status != "ELIGIBLE":
+        raise PositionOutcomeUnavailable(f"development_source_{source.status.lower()}")
+    spec, manifest = record['spec'], record['input_manifest']
+    if spec.get('execution_scope') != 'independent_development_validation/v1':
+        raise ValueError('position outcomes require independent development execution')
+    if record['run_id'] != _content_id('run', {'dataset_id': manifest['dataset_id'],
+            'revision_ids_hash': manifest['revision_ids_hash'], 'spec': spec}):
+        raise ValueError('native scientific run identity mismatch')
+    if spec.get('data_manifest_hash') != hashlib.sha256(json.dumps(manifest, ensure_ascii=False,
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest():
+        raise ValueError('native development manifest hash mismatch')
+    finished = _aware_datetime(record['finished_at'])
+    if finished > cut:
+        raise PositionOutcomeUnavailable('source_run_not_available_at_cut')
+    if spec.get('cost_model') != record['report'].get('cost_model'):
+        raise ValueError('native source cost model mismatch')
+    execution = spec['execution_model']
+    if (not isinstance(execution, dict) or execution.get('version') != 'next_tradable_bar_open/v1'
+            or execution.get('cost_model') != spec.get('cost_model')):
+        raise ValueError('unsupported native execution source')
+    SimulationExecutionConfig(**{**execution, 'cost_model':
+        SimulationCostModel(**spec['cost_model']) if spec.get('cost_model') is not None else None})
+    from kiwoom_monitor.application.market_session_schedule import (
+        KRX_REGULAR_RESEARCH_PROFILE, research_session_profile_document)
+    if spec['session_profile'] != research_session_profile_document(KRX_REGULAR_RESEARCH_PROFILE):
+        raise PositionOutcomeUnavailable('native_execution_session_not_supported_by_reader')
+    # Bind actual code, parameters, costs and execution semantics; never attach a caller's policy label.
+    policy = {key: spec[key] for key in ('code_hash', 'family', 'policy_version', 'parameters', 'execution_model', 'session_profile')}
+    position_execution = spec.get('position_action_execution')
+    target_policy = None
+    execution_identity = execution
+    if position_execution is not None:
+        from kiwoom_monitor.application.position_target import PositionTargetSizingPolicy
+        from kiwoom_monitor.application.research_execution import POSITION_TARGET_EXECUTION_VERSION
+        if (not isinstance(position_execution, dict)
+                or set(position_execution) != {'version','source_policy_version','target_policy'}
+                or position_execution['version'] != POSITION_TARGET_EXECUTION_VERSION
+                or type(position_execution['source_policy_version']) is not str
+                or not position_execution['source_policy_version'].strip()):
+            raise ValueError('invalid native position execution policy')
+        raw_policy = dict(position_execution['target_policy'])
+        for name in ('available_at','valid_until'): raw_policy[name] = _aware_datetime(raw_policy[name])
+        target_policy = PositionTargetSizingPolicy(**raw_policy)
+        policy['position_action_execution'] = position_execution
+        execution_identity = {'execution': execution,'position_action_execution_version':POSITION_TARGET_EXECUTION_VERSION,
+                              'code_hash':spec['code_hash']}
+    context = {'run_id': record['run_id'], 'finished_at': finished, 'evaluation': spec['evaluation_spec'], 'role': source.role,
+        'warmup_start': manifest['development_partition']['warmup_start'], 'end': source.end,
+        'dataset_id': source.input_dataset_id, 'revision_ids_hash': source.input_revision_ids_hash,
+        'policy_version': _content_id('native-position-policy', policy),
+        'execution_model_ref': _content_id('native-position-execution', execution_identity),
+        'cost_model_ref': position_action_cost_model_ref(spec.get('cost_model'))}
+    if target_policy is not None:
+        context.update(position_target_policy=target_policy, position_source_policy=position_execution['source_policy_version'],
+                       cost_model=SimulationCostModel(**spec['cost_model']) if spec.get('cost_model') else None)
+        if 'position_target_plan' in spec:
+            from kiwoom_monitor.application.position_target import _position_target_request_from_dict
+            plan=spec['position_target_plan']
+            if (not isinstance(plan,list) or not 1<=len(plan)<=200
+                    or len(json.dumps(plan,ensure_ascii=False).encode('utf-8'))>256*1024):
+                raise ValueError('invalid native locked target plan')
+            requests=tuple(_position_target_request_from_dict(r) for r in plan)
+            if (len({(r.decision_time,r.symbol) for r in requests})!=len(requests)
+                    or any(r.target_policy!=target_policy or r.policy_version!=context['position_source_policy']
+                           or r.cost_model!=context['cost_model'] or r.account_ref!='research-single-position' for r in requests)):
+                raise ValueError('native locked target plan scope mismatch')
+            context['position_target_plan']=requests
+    if 'position_action_study' in spec:
+        from kiwoom_monitor.application.position_target import (
+            PositionActionStudyPolicy,PositionActionStudyCase,position_action_study_spec)
+        raw=spec['position_action_study']
+        if not isinstance(raw,dict) or set(raw) != {'version','policy','case','study_policy_ref'}:
+            raise ValueError('invalid native position study declaration')
+        study=PositionActionStudyPolicy.from_dict(raw['policy']);case=PositionActionStudyCase.from_dict(raw['case'])
+        if (raw != position_action_study_spec(study,case,spec) or study.development_role != source.role
+                or (case.branch_action == 'HOLD' and target_policy is not None)
+                or (case.branch_action != 'HOLD' and context.get('position_target_plan') != (case.request,))):
+            raise ValueError('native position study/branch identity mismatch')
+        context.update(position_study_policy=study,position_study_case=case,
+                       position_study_ref=raw['study_policy_ref'])
+        if 'position_study_context' in spec:
+            context['position_study_context']=validate_position_study_historical_context(spec['position_study_context'],manifest,case.request)
+        if 'position_action_study_cohort' in spec:
+            from kiwoom_monitor.application.position_target import validate_position_action_study_cohort
+            context['position_study_cohort']=validate_position_action_study_cohort(
+                spec['position_action_study_cohort'],study,case,spec,manifest)
+    elif 'position_action_study_cohort' in spec or 'position_study_context' in spec:
+        raise ValueError('native cohort is missing its v2 study case declaration')
+    if 'unfilled_action_execution' in spec:
+        from kiwoom_monitor.application.research_execution import UnfilledResearchAction, UNFILLED_EXECUTION_VERSION
+        from kiwoom_monitor.application.research_families import parse_strategy_config
+        expected={'version':UNFILLED_EXECUTION_VERSION,
+            'fill_basis':'subsequent_minute_open_full_quantity_with_volume/v1',
+            'cancel_latency_seconds':0,'partial_fills_supported':False}
+        plan=spec.get('unfilled_action_plan')
+        if (spec['unfilled_action_execution']!=expected or target_policy is not None
+                or not isinstance(plan,list) or not 2<=len(plan)<=200
+                or len(json.dumps(plan,ensure_ascii=False).encode())>256*1024):
+            raise ValueError('invalid native unfilled execution plan')
+        requests=tuple(UnfilledResearchAction.from_dict(r) for r in plan)
+        if (len({(r.decision_time,r.symbol) for r in requests})!=len(requests)
+                or len({r.symbol for r in requests})!=1
+                or tuple(sorted(requests,key=lambda r:r.decision_time))!=requests):
+            raise ValueError('invalid native unfilled plan source cuts')
+        context.update(unfilled_action_plan=requests,
+            unfilled_strategy_family=spec['family'],
+            unfilled_source_code_hash=spec['code_hash'],
+            unfilled_execution=SimulationExecutionConfig(**{**execution,'cost_model':SimulationCostModel(**spec['cost_model'])}),
+            unfilled_strategy=parse_strategy_config(spec['family'],spec['parameters']))
+    return context
+
+
+def unfilled_action_outcome_from_events(context, events, *, start_event_id, end_event_id,
+                                        action, case_ref, population_ref, horizon_seconds, symbol):
+    """Replay the selected native LIMIT branch through the same paper engine.
+
+    Native read guards must precede this adapter. Queue priority, cancel latency,
+    broker acceptance and raw-market capture completeness remain unverified.
+    """
+    from kiwoom_monitor.application.research_execution import (
+        PaperExecutionEngine,PendingOrder,SimulationPosition,SimulationPortfolio,
+        UnfilledResearchAction,UNFILLED_EXECUTION_VERSION)
+    from kiwoom_monitor.application.breakout_strategy import StrategyState
+    if (action not in {'WAIT','REPRICE'} or type(horizon_seconds) is not int
+            or not 60<=horizon_seconds<=599_940 or horizon_seconds%60
+            or 'unfilled_action_plan' not in context):
+        raise PositionOutcomeUnavailable('native_unfilled_model_or_horizon_unavailable')
+    ids={e['event_id']:i for i,e in enumerate(events)}
+    if start_event_id not in ids or end_event_id not in ids or ids[start_event_id]>=ids[end_event_id]:
+        raise PositionOutcomeUnavailable('native_window_endpoints_missing_or_unordered')
+    left,right=ids[start_event_id],ids[end_event_id]
+    start,end=events[left],events[right]
+    if start['event_type']!='UNFILLED_BASELINE' or end['event_type']!='MARK' or start['symbol']!=symbol:
+        raise PositionOutcomeUnavailable('native_unfilled_window_valuation_missing')
+    proof=json.loads(start['reason'])
+    request=UnfilledResearchAction.from_dict(proof['request'])
+    if (proof.get('version')!=UNFILLED_EXECUTION_VERSION or request not in context['unfilled_action_plan']
+            or (request.action,request.case_ref,request.population_ref,request.symbol)!=(action,case_ref,population_ref,symbol)):
+        raise ValueError('native unfilled action differs from its locked plan')
+    source=KrxMinuteBarFrame(**proof['source_bar'])
+    started,completed=_aware_datetime(start['occurred_at']),_aware_datetime(end['occurred_at'])
+    if ((completed-started).total_seconds()!=horizon_seconds
+            or _aware_datetime(source.bar_end)!=started
+            or source.code!=symbol or source.capture_quality!='complete' or source.close<=0
+            or source.session_profile!='krx-regular/v1' or source.market_phase!='CONTINUOUS'
+            or (_aware_datetime(source.bar_end)-_aware_datetime(source.bar_start)).total_seconds()!=60
+            or assign_interval_to_fold(ResearchEvaluationSpec.from_dict(context['evaluation']),
+                    started.isoformat(),completed.isoformat()).status!='INCLUDED'):
+        raise PositionOutcomeUnavailable('native_unfilled_window_outside_development_or_horizon')
+    raw=dict(proof['initial_portfolio'])
+    pending=PendingOrder(**raw['pending_order']) if raw['pending_order'] else None
+    if pending is None or pending.limit_execution_version!=UNFILLED_EXECUTION_VERSION:
+        raise PositionOutcomeUnavailable('native_initial_pending_limit_unproven')
+    active={}
+    for event in events[:left]:
+        if event['event_type']=='ORDER_SUBMITTED': active[event['intent_id']]=event
+        elif event['event_type'] in {'FILL','ORDER_CANCELLED','ORDER_CENSORED','ORDER_UNSUPPORTED'}:
+            active.pop(event['intent_id'],None)
+    order=active.get(pending.intent_id)
+    if (len(active)!=1 or order is None or (order['quantity'],order['price'],order['side'],order['symbol'])!=(
+            pending.quantity,pending.limit_price_won,pending.side,pending.symbol)):
+        raise PositionOutcomeUnavailable('native_initial_pending_limit_unproven')
+    order_proof=json.loads(order['reason'])
+    origin=UnfilledResearchAction.from_dict(order_proof['request'])
+    if origin not in context['unfilled_action_plan'] or origin.action not in {'SUBMIT','REPRICE'}:
+        raise ValueError('native initial LIMIT origin differs from locked plan')
+    previous=events[left-1]
+    if any(previous[k]!=start[k] for k in ('cash_after_won','reserved_cash_after_won','position_quantity_after')):
+        raise ValueError('native initial LIMIT portfolio projection mismatch')
+    raw['pending_order']=pending
+    raw['position']=SimulationPosition(**raw['position']) if raw['position'] else None
+    engine=PaperExecutionEngine(context['run_id'],context['unfilled_execution'],context['unfilled_strategy'],'krx-regular/v1')
+    engine.portfolio=SimulationPortfolio(**raw)
+    engine.strategy_state=StrategyState(**proof['initial_strategy_state'])
+    engine._last_processed_bar=source
+    expected=list(engine.process_unfilled_action(request,source_bar=source))
+    offset=left
+    def match(batch):
+        nonlocal offset
+        if tuple(e.to_dict() for e in batch)!=tuple(events[offset:offset+len(batch)]):
+            raise ValueError('native unfilled execution replay mismatch')
+        offset+=len(batch)
+    match(expected)
+    times=[started]
+    revisions=[source.revision_id]
+    while offset<=right:
+        observation=events[offset]
+        if observation['event_type']!='UNFILLED_BAR':
+            raise PositionOutcomeUnavailable('native_unfilled_window_mixed_or_censored')
+        bar_proof=json.loads(observation['reason'])
+        if bar_proof.get('version')!=UNFILLED_EXECUTION_VERSION:
+            raise ValueError('native unfilled bar model mismatch')
+        bar=KrxMinuteBarFrame(**bar_proof['source_bar'])
+        if (bar.code!=symbol or bar.capture_quality!='complete' or bar.market_phase!='CONTINUOUS'
+                or bar.session_profile!='krx-regular/v1' or not bar.revision_id
+                or (_aware_datetime(bar.bar_end)-_aware_datetime(bar.bar_start)).total_seconds()!=60
+                or _aware_datetime(bar.bar_start)!=times[-1]
+                or bar.research_session!=source.research_session
+                or _aware_datetime(bar.available_at)<_aware_datetime(bar.bar_end)):
+            raise PositionOutcomeUnavailable('native_unfilled_minute_gap_or_session')
+        batch=[engine.observe_unfilled_bar(bar),*engine.process_bar(bar)]
+        if any(e.event_type in {'RISK_FILL','RISK_UNSUPPORTED','ORDER_CENSORED','ORDER_UNSUPPORTED','ORDER_CANCELLED'} for e in batch):
+            raise PositionOutcomeUnavailable('native_unfilled_window_mixed_or_censored')
+        if not any(e.event_type=='MARK' for e in batch): batch.append(engine.observe_position_value(bar))
+        if len(batch)>right-offset+1:
+            raise PositionOutcomeUnavailable('native_unfilled_terminal_valuation_missing')
+        match(batch)
+        times.append(_aware_datetime(bar.bar_end)); revisions.append(bar.revision_id)
+    if (times!=[started+timedelta(minutes=i) for i in range(horizon_seconds//60+1)]
+            or len(set(revisions))!=len(revisions)):
+        raise PositionOutcomeUnavailable('native_unfilled_minute_gap_or_duplicate')
+    window=events[left:right+1]
+    fees=sum(e['total_cost_won'] for e in window if e['event_type']=='FILL')
+    net=end['cash_after_won']+end['position_quantity_after']*end['price']-(
+        start['cash_after_won']+start['position_quantity_after']*start['price'])
+    state={'symbol':symbol,'side':pending.side,'quantity':pending.quantity,'limit':pending.limit_price_won,
+        'submitted_at':pending.submitted_at,'eligible_after':pending.eligible_after,
+        'cash':start['cash_after_won'],'reserved':start['reserved_cash_after_won'],
+        'held':start['position_quantity_after'],'price':start['price'],'started_at':start['occurred_at'],
+        'source_revision_id':start['source_revision_id'],'revision_ids_hash':context['revision_ids_hash'],
+        'position':{k:v for k,v in asdict(raw['position']).items() if k!='entry_intent_id'} if raw['position'] else None,
+        'strategy':context['unfilled_strategy'].to_dict(),'execution':context['unfilled_execution'].to_dict(),
+        'code_hash':context['unfilled_source_code_hash']}
+    identity={'run_id':context['run_id'],'start':start_event_id,'end':end_event_id,'revisions':revisions}
+    return UnfilledActionOutcome(input_ref=_content_id('native-unfilled-outcome',identity),case_ref=case_ref,
+        initial_state_ref=_content_id('native-unfilled-state',state),action=action,
+        policy_version='unfilled-order-management-shadow/v1',environment='simulation',venue='KRX',source_kind='simulation',
+        execution_model_ref=UNFILLED_EXECUTION_VERSION,initial_quantity=start['position_quantity_after'],
+        pending_buy_quantity=pending.quantity if pending.side=='BUY' else 0,
+        pending_sell_quantity=pending.quantity if pending.side=='SELL' else 0,target_quantity=request.target_quantity,
+        horizon_seconds=horizon_seconds,population_ref=population_ref,input_resolution='minute',
+        cost_model_ref=context['cost_model_ref'],started_at=started,completed_at=completed,
+        available_at=max(context['finished_at'],*(_aware_datetime(e['received_at']) for e in window)),
+        status='COMPLETE',data_gap_count=0,gross_change_won=net+fees,fee_tax_won=fees,
+        symbol=symbol,side=pending.side,pending_quantity=pending.quantity,
+        existing_limit_price_won=request.existing_limit_price_won,candidate_limit_price_won=request.candidate_limit_price_won,
+        purpose='BUY_OPPORTUNITY' if pending.side=='BUY' else 'TAKE_PROFIT',order_state='ACCEPTED')
+
+
+def position_action_outcome_from_events(context, events, *, start_event_id, end_event_id,
+                                       action, case_ref, population_ref, environment, horizon_seconds, symbol):
+    """Measured native windows; preserve legacy HOLD/EXIT and require target proofs."""
+    if context.get('position_target_policy') is not None and action in {'HOLD','ADD','REDUCE','REENTER'}:
+        return _position_target_outcome_from_events(context, events, start_event_id=start_event_id,
+            end_event_id=end_event_id, action=action, case_ref=case_ref, population_ref=population_ref,
+            environment=environment, horizon_seconds=horizon_seconds, symbol=symbol)
+    if action not in {'HOLD', 'EXIT'}:
+        raise PositionOutcomeUnavailable('native_action_not_supported_by_reader')
+    if (environment != 'mock' or type(horizon_seconds) is not int or not 60 <= horizon_seconds <= 599_940
+            or horizon_seconds % 60):
+        raise ValueError('native minute source requires explicit mock scenario and whole-minute horizon')
+    ids = {event['event_id']: index for index, event in enumerate(events)}
+    if start_event_id not in ids or end_event_id not in ids or ids[start_event_id] >= ids[end_event_id]:
+        raise PositionOutcomeUnavailable('native_window_endpoints_missing_or_unordered')
+    start_index, end_index = ids[start_event_id], ids[end_event_id]
+    start, end = events[start_index], events[end_index]
+    if start['symbol'] != symbol:
+        raise PositionOutcomeUnavailable('native_position_symbol_mismatch')
+    started, completed = _aware_datetime(start['occurred_at']), _aware_datetime(end['occurred_at'])
+    evaluation = ResearchEvaluationSpec.from_dict(context['evaluation'])
+    if assign_interval_to_fold(evaluation, started.isoformat(), completed.isoformat()).status != 'INCLUDED':
+        raise PositionOutcomeUnavailable('native_window_outside_development_or_purged')
+    if (completed - started).total_seconds() != horizon_seconds:
+        raise PositionOutcomeUnavailable('native_window_horizon_mismatch')
+    if start['event_type'] != 'MARK' or start['position_quantity_after'] <= 0:
+        raise PositionOutcomeUnavailable('native_initial_held_valuation_missing')
+    active = {}
+    for event in events[:start_index + 1]:
+        kind = event['event_type']
+        if kind == 'ORDER_SUBMITTED': active[event['intent_id']] = event
+        elif kind in {'FILL', 'ORDER_CANCELLED', 'ORDER_CENSORED', 'ORDER_UNSUPPORTED'}:
+            active.pop(event['intent_id'], None)
+    if active or start['reserved_cash_after_won']:
+        raise PositionOutcomeUnavailable('native_initial_open_order_unresolved')
+    window = events[start_index + 1:end_index + 1]
+    if any(event['symbol'] != start['symbol'] or event['execution_environment'] != 'simulation'
+           or event['event_type'] not in {'MARK', 'ORDER_SUBMITTED', 'FILL'} for event in window):
+        raise PositionOutcomeUnavailable('native_window_mixed_or_censored_execution')
+    initial = start['position_quantity_after']
+    fills = [event for event in window if event['event_type'] == 'FILL']
+    orders = [event for event in window if event['event_type'] == 'ORDER_SUBMITTED']
+    if action == 'HOLD':
+        if orders or fills or end['event_type'] != 'MARK' or any(
+                e['position_quantity_after'] != initial or e['cash_after_won'] != start['cash_after_won'] for e in window):
+            raise PositionOutcomeUnavailable('native_hold_not_proven')
+    else:
+        if (len(orders) != 1 or len(fills) != 1 or end is not fills[0] or fills[0]['side'] != 'SELL'
+                or orders[0]['side'] != 'SELL' or fills[0]['quantity'] != initial
+                or orders[0]['quantity'] != initial or orders[0]['intent_id'] != fills[0]['intent_id']
+                or end['position_quantity_after'] != 0):
+            raise PositionOutcomeUnavailable('native_exit_not_proven')
+        if end['cash_after_won'] != start['cash_after_won'] + end['notional_won'] - end['total_cost_won']:
+            raise ValueError('native exit cash projection mismatch')
+    marks = [start, *(event for event in window if event['event_type'] == 'MARK'), end]
+    expected_times = {started + timedelta(seconds=60 * index) for index in range(horizon_seconds // 60 + 1)}
+    if {_aware_datetime(e['occurred_at']) for e in marks} != expected_times:
+        raise PositionOutcomeUnavailable('native_minute_valuation_gap')
+    if any(e['reserved_cash_after_won'] for e in window) or any(
+            e['position_quantity_after'] != initial or e['cash_after_won'] != start['cash_after_won']
+            for e in window if e['event_type'] == 'MARK'):
+        raise PositionOutcomeUnavailable('native_portfolio_projection_incomplete')
+    for event in (start, *window):
+        if (event['event_type'] in {'MARK', 'FILL'} and (not event['source_revision_id']
+                or (event['position_quantity_after'] > 0 and event['price'] <= 0))):
+            raise PositionOutcomeUnavailable('native_valuation_price_or_source_missing')
+        if event['total_cost_won'] != event['commission_won'] + event['tax_won']:
+            raise ValueError('native execution cost mismatch')
+    costs = sum(event['total_cost_won'] for event in fills)
+    net = end['cash_after_won'] + end['position_quantity_after'] * end['price'] - (
+        start['cash_after_won'] + initial * start['price'])
+    state = {key: start[key] for key in ('symbol', 'occurred_at', 'price', 'cash_after_won',
+                                       'reserved_cash_after_won', 'position_quantity_after', 'source_revision_id')}
+    native = {'run_id': context['run_id'], 'start': start_event_id, 'end': end_event_id,
+              'dataset_id': context['dataset_id'], 'revision_ids_hash': context['revision_ids_hash']}
+    return PositionActionOutcome(_content_id('native-position-outcome', native), case_ref,
+        _content_id('native-position-state', state), action, context['policy_version'], environment, 'KRX',
+        'simulation', context['execution_model_ref'], initial, 0, 0, initial if action == 'HOLD' else 0,
+        horizon_seconds, population_ref, 'minute', context['cost_model_ref'], started, completed,
+        max(context['finished_at'], *(_aware_datetime(e['received_at']) for e in (start, *window))),
+        'COMPLETE', 0, net + costs, costs)
+
+
+def _position_target_prefix_state(events, start_index, symbol):
+    """Reuse native pending/full-close facts for target values and v2 case proofs."""
+    active={};closed_before_start=False
+    for event in events[:start_index+1]:
+        if event['event_type']=='ORDER_SUBMITTED':active[event['intent_id']]=event
+        elif event['event_type'] in {'FILL','ORDER_CANCELLED','ORDER_CENSORED','ORDER_UNSUPPORTED'}:
+            submitted=active.pop(event['intent_id'],None)
+            if (event['event_type']=='FILL' and event['side']=='SELL' and event['position_quantity_after']==0
+                    and event['symbol']==symbol and event['quantity']>0 and submitted is not None
+                    and submitted['side']=='SELL' and submitted['quantity']==event['quantity']):
+                closed_before_start=True
+    return active,closed_before_start
+
+
+def _position_target_outcome_from_events(context, events, *, start_event_id, end_event_id,
+                                         action, case_ref, population_ref, environment, horizon_seconds, symbol):
+    """Replay actual cash/share transitions and the original automatic target proof."""
+    from kiwoom_monitor.application.position_target import _position_target_request_from_dict, evaluate_position_target_shadow
+    from kiwoom_monitor.application.research_execution import POSITION_TARGET_EXECUTION_VERSION, _fee_won, estimate_buy_cash_won
+    from kiwoom_monitor.domain.order_contract import AccountSnapshot
+    if environment != 'mock' or type(horizon_seconds) is not int or not 60 <= horizon_seconds <= 599_940 or horizon_seconds % 60:
+        raise ValueError('native minute source requires explicit mock scenario and whole-minute horizon')
+    ids = {e['event_id']:i for i,e in enumerate(events)}
+    if start_event_id not in ids or end_event_id not in ids or ids[start_event_id] >= ids[end_event_id]:
+        raise PositionOutcomeUnavailable('native_window_endpoints_missing_or_unordered')
+    left,right = ids[start_event_id],ids[end_event_id]
+    start,end = events[left],events[right]
+    started,completed = _aware_datetime(start['occurred_at']),_aware_datetime(end['occurred_at'])
+    if (end['event_type'] != 'MARK' or start['event_type'] != 'MARK' or start['symbol'] != symbol
+            or (completed-started).total_seconds() != horizon_seconds):
+        raise PositionOutcomeUnavailable('native_target_window_valuation_or_horizon_missing')
+    if assign_interval_to_fold(ResearchEvaluationSpec.from_dict(context['evaluation']),started.isoformat(),completed.isoformat()).status != 'INCLUDED':
+        raise PositionOutcomeUnavailable('native_window_outside_development_or_purged')
+    active,closed_before_start=_position_target_prefix_state(events,left,symbol)
+    if active or start['reserved_cash_after_won']:
+        raise PositionOutcomeUnavailable('native_initial_open_order_unresolved')
+    initial=start['position_quantity_after']
+    if (action in {'ADD','REDUCE'} and initial<=0) or action=='REENTER' and (initial!=0 or not closed_before_start):
+        raise PositionOutcomeUnavailable('native_target_initial_state_not_proven')
+    window=events[left:right+1]
+    if any(e['symbol']!=symbol or e['execution_environment']!='simulation' or e['event_type'] not in {'MARK','ORDER_SUBMITTED','FILL'}
+           for e in window):
+        raise PositionOutcomeUnavailable('native_window_mixed_or_censored_execution')
+    marks=[e for e in window if e['event_type']=='MARK']
+    times=[_aware_datetime(e['occurred_at']) for e in marks]
+    expected=[started+timedelta(seconds=60*i) for i in range(horizon_seconds//60+1)]
+    if times!=expected:
+        raise PositionOutcomeUnavailable('native_minute_valuation_gap')
+    if any(e['event_type'] in {'MARK','FILL'} and (not e['source_revision_id'] or e['price']<=0) for e in window):
+        raise PositionOutcomeUnavailable('native_valuation_price_or_source_missing')
+    orders=[e for e in window if e['event_type']=='ORDER_SUBMITTED']
+    fills=[e for e in window if e['event_type']=='FILL']
+    if action=='HOLD' and (orders or fills) or action!='HOLD' and (len(orders)!=1 or len(fills)!=1):
+        raise PositionOutcomeUnavailable('native_target_order_or_fill_not_proven')
+    cash,quantity,reserved=start['cash_after_won'],initial,0
+    pending=None; quote=start; target=None; costs=0; policy_version=context['policy_version']
+    for event in window:
+        kind=event['event_type']
+        if _aware_datetime(event['received_at']) < _aware_datetime(event['occurred_at']):
+            raise ValueError('native target availability precedes occurrence')
+        if kind=='ORDER_SUBMITTED':
+            proof=json.loads(event['reason'])
+            if set(proof)!={'version','request'} or proof['version']!=POSITION_TARGET_EXECUTION_VERSION:
+                raise ValueError('native target execution proof missing')
+            request=_position_target_request_from_dict(proof['request'])
+            if 'position_target_plan' in context and request not in context['position_target_plan']:
+                raise ValueError('native target is absent from its locked plan')
+            at=_aware_datetime(quote['received_at'])
+            if (request.action!=action or request.target_policy!=context['position_target_policy']
+                    or request.policy_version!=context['position_source_policy'] or request.cost_model!=context['cost_model']
+                    or request.account_ref!='research-single-position' or request.symbol!=symbol
+                    or request.decision_time!=at or request.reference_price_available_at!=at
+                    or request.reference_price_won!=quote['price'] or event['source_revision_id']!=quote['source_revision_id']
+                    or _aware_datetime(event['occurred_at'])!=at or _aware_datetime(event['received_at'])!=at):
+                raise ValueError('native target source policy/cut mismatch')
+            account=AccountSnapshot('research-single-position',cash,0,{symbol:quantity} if quantity else {},at)
+            result=evaluate_position_target_shadow(request,account,())
+            if (result['quality']['status']!='CALCULATED' or not result['incremental_quantity']
+                    or event['decision_id']!=result['decision_id'] or event['side']!=result['incremental_side']
+                    or event['quantity']!=result['incremental_quantity'] or event['state']!='PENDING'
+                    or event['intent_id']!=_content_id('intent',{'run_id':context['run_id'],'decision_id':result['decision_id'],
+                                                             'side':event['side'],'quantity':event['quantity']})):
+                raise ValueError('native target calculated intent mismatch')
+            policy_version=result['target_policy_version']; target=result['target_quantity']; pending=event
+            reserved=estimate_buy_cash_won(quote['price'],event['quantity'],context['cost_model']) if event['side']=='BUY' else 0
+            if any(event[k] for k in ('price','notional_won','commission_won','tax_won','total_cost_won','realized_pnl_won')):
+                raise ValueError('native submitted target contains realized values')
+        elif kind=='FILL':
+            if pending is None or any(event[k]!=pending[k] for k in ('intent_id','decision_id','side','quantity')) or event['state']!='FILLED':
+                raise ValueError('native target fill has no matching intent')
+            submitted=_aware_datetime(pending['occurred_at'])
+            eligible=submitted.replace(second=0,microsecond=0)
+            if submitted>eligible: eligible+=timedelta(minutes=1)
+            if _aware_datetime(event['occurred_at'])!=eligible:
+                raise PositionOutcomeUnavailable('native_target_fill_not_next_open')
+            cost=context['cost_model']
+            if cost is None: raise PositionOutcomeUnavailable('native_target_cost_model_missing')
+            notional=event['price']*event['quantity']
+            commission=_fee_won(notional,cost.commission_bps)
+            tax=_fee_won(notional,cost.sell_tax_bps) if event['side']=='SELL' else 0
+            if (event['notional_won'],event['commission_won'],event['tax_won'],event['total_cost_won'])!=(notional,commission,tax,commission+tax):
+                raise ValueError('native target fill cost mismatch')
+            costs+=commission+tax
+            if event['side']=='BUY':
+                cash-=notional+commission; quantity+=event['quantity']
+                if cash<context['position_target_policy'].cash_buffer_won:
+                    raise PositionOutcomeUnavailable('native_target_cash_buffer_exceeded')
+            else:
+                cash+=notional-commission-tax; quantity-=event['quantity']
+            reserved=0; pending=None
+        else:
+            if (event['quantity']!=quantity or event['notional_won']!=quantity*event['price']
+                    or any(event[k] for k in ('commission_won','tax_won','total_cost_won','realized_pnl_won'))):
+                raise ValueError('native target valuation projection mismatch')
+            quote=event
+        if (event['cash_after_won'],event['position_quantity_after'],event['reserved_cash_after_won'])!=(cash,quantity,reserved) or quantity<0:
+            raise ValueError('native target cash/share projection mismatch')
+    if pending or reserved or action!='HOLD' and quantity!=target:
+        raise PositionOutcomeUnavailable('native_target_not_completely_filled')
+    state={k:start[k] for k in ('symbol','occurred_at','price','cash_after_won','reserved_cash_after_won','position_quantity_after','source_revision_id')}
+    native={'run_id':context['run_id'],'start':start_event_id,'end':end_event_id,
+            'dataset_id':context['dataset_id'],'revision_ids_hash':context['revision_ids_hash']}
+    net=cash+quantity*end['price']-(start['cash_after_won']+initial*start['price'])
+    return PositionActionOutcome(_content_id('native-position-outcome',native),case_ref,_content_id('native-position-state',state),
+        action,policy_version,environment,'KRX','simulation',context['execution_model_ref'],initial,0,0,quantity,
+        horizon_seconds,population_ref,'minute',context['cost_model_ref'],started,completed,
+        max(context['finished_at'],*(_aware_datetime(e['received_at']) for e in window)),'COMPLETE',0,net+costs,costs)
+
+
+def read_position_action_outcomes(load_evidence, selections, *, decision_time, horizon_seconds,
+                                 population_ref, environment, symbol, development_role='TRAIN', checkpoint=None):
+    return _read_action_outcomes(load_evidence,selections,decision_time=decision_time,horizon_seconds=horizon_seconds,
+        population_ref=population_ref,environment=environment,symbol=symbol,development_role=development_role,
+        checkpoint=checkpoint)
+
+
+def read_position_action_study_case(load_evidence, selection, *, decision_time, population_ref,
+                                    development_role='TRAIN', checkpoint=None):
+    """Read one declared v2 native case. Preserves the original v1 outcome ID.
+
+    A historical goal must be valid at its own cut, not at outcome completion.
+    This is a case proof, not a paired cohort or a current executable target.
+    """
+    from kiwoom_monitor.application.position_target import evaluate_position_target_shadow,_json_value
+    from kiwoom_monitor.domain.order_contract import AccountSnapshot
+    from kiwoom_monitor.application.research_execution import SimulationPortfolio,SimulationPosition
+    from kiwoom_monitor.application.breakout_strategy import StrategyState
+    keys={'run_id','start_event_id','end_event_id','action','case_ref'}
+    if (not isinstance(selection,dict) or set(selection) != keys
+            or any(type(v) is not str or not 0 < len(v) <= 256 for v in selection.values())
+            or development_role not in {'TRAIN','VALIDATION'}
+            or type(population_ref) is not str or not 0 < len(population_ref) <= 256):
+        raise ValueError('invalid explicit native study selection')
+    cut=_aware_datetime(decision_time)
+    if checkpoint is not None:checkpoint()
+    context,events=load_evidence(selection['run_id'],(selection['end_event_id'],),decision_time=cut,
+        limit=10000,development_role=development_role,**({'checkpoint':checkpoint} if checkpoint else {}))
+    if not isinstance(events,(tuple,list)) or not 1 <= len(events) <= 10000:
+        raise ValueError('native study execution source budget exceeded')
+    if context.get('position_study_policy') is None:
+        raise ValueError('native v2 study declaration required; v1 cannot be promoted')
+    study=context['position_study_policy'];case=context['position_study_case'];request=case.request
+    if (selection['case_ref'] != case.case_ref or selection['action'] != case.branch_action
+            or context['run_id'] != selection['run_id'] or context['role'] != development_role
+            or selection['action'] not in {'ADD','REDUCE','REENTER','HOLD'}):
+        raise PositionOutcomeUnavailable('native_study_branch_not_supported_or_mismatched')
+    proofs=[e for e in events if e['event_type']=='POSITION_STUDY_CASE']
+    if len(proofs) != 1:raise ValueError('native study requires exactly one case proof')
+    event=proofs[0]
+    if len(event['reason'].encode()) > 256*1024:raise ValueError('native study proof budget exceeded')
+    proof=json.loads(event['reason'])
+    proof_keys={'version','study_policy_ref','case','source_bar','portfolio','strategy_state','goal'}
+    if 'position_study_context' in context:proof_keys.add('historical_context')
+    if (not isinstance(proof,dict) or set(proof) != proof_keys
+            or proof['version'] != 'position-action-study-case/v2' or proof['case'] != case.to_dict()
+            or proof['study_policy_ref'] != context['position_study_ref']):
+        raise ValueError('native study case proof identity mismatch')
+    if 'historical_context' in proof and proof['historical_context']!=context['position_study_context']:
+        raise ValueError('native study historical context differs from original declaration')
+    source=KrxMinuteBarFrame(**proof['source_bar'])
+    at=_aware_datetime(source.available_at)
+    start=next((e for e in events if e['event_id']==selection['start_event_id']),None)
+    end=next((e for e in events if e['event_id']==selection['end_event_id']),None)
+    if (start is None or end is None or not events.index(start) < events.index(event) < events.index(end)
+            or any(e['event_type'] in {'ORDER_SUBMITTED','FILL','RISK_FILL'}
+                for e in events[events.index(start)+1:events.index(event)])):
+        raise ValueError('native study proof is not before its branch execution')
+    raw=dict(proof['portfolio']);position=SimulationPosition(**raw['position']) if raw['position'] is not None else None
+    if raw['pending_order'] is not None:raise PositionOutcomeUnavailable('native_study_pending_order_unsupported')
+    portfolio=SimulationPortfolio(**{**raw,'position':position})
+    state=StrategyState(**{**proof['strategy_state'],'emitted_candidate_keys':tuple(proof['strategy_state']['emitted_candidate_keys'])})
+    actual=position.quantity if position is not None else 0
+    if request.action=='REENTER':
+        state_invalid=(position is not None or actual!=0 or state.status!='cooldown' or state.symbol
+            or state.entry_price is not None or state.position_quantity is not None or state.opened_at or not state.cooldown_until)
+        if not state_invalid:_aware_datetime(state.cooldown_until)
+        active,closed=_position_target_prefix_state(events,events.index(start),request.symbol)
+        if active or not closed:raise PositionOutcomeUnavailable('native_study_reentry_prior_close_unverified')
+    else:
+        state_invalid=(actual<=0 or position.symbol!=request.symbol
+            or any(type(v) is not int or v<0 for v in (position.entry_notional,position.entry_commission))
+            or not 0<position.entry_price or _aware_datetime(position.opened_at)>at
+            or state.status!='open' or state.symbol!=request.symbol or state.position_quantity!=actual
+            or state.entry_price!=position.entry_price or state.opened_at!=position.opened_at)
+    if (start is None or start['event_type'] != 'MARK' or source.code != request.symbol
+            or at != request.decision_time or at != request.reference_price_available_at
+            or source.close != request.reference_price_won or source.market_phase != 'CONTINUOUS'
+            or source.capture_quality != 'complete' or source.session_profile != 'krx-regular/v1'
+            or not source.research_session or at < _aware_datetime(source.bar_end)
+            or (_aware_datetime(source.bar_end)-_aware_datetime(source.bar_start)).total_seconds() != 60
+            or _aware_datetime(start['occurred_at']) != _aware_datetime(source.bar_end)
+            or start['source_revision_id'] != source.revision_id or start['price'] != source.close
+            or portfolio.reserved_cash_won or state_invalid
+            or any(type(v) is not int or v < 0 for v in (portfolio.cash_won,actual))):
+        raise ValueError('native study actual state/source mismatch')
+    expected_event={'execution_environment':'simulation','account_ref':'research-single-position','intent_id':'',
+        'event_type':'POSITION_STUDY_CASE','state':'OBSERVED','symbol':source.code,'side':'','quantity':0,
+        'price':source.close,'source_revision_id':source.revision_id,'cash_after_won':portfolio.cash_won,
+        'reserved_cash_after_won':0,'position_quantity_after':actual,'optimistic_exit_price':None}
+    if (any(event[k] != v for k,v in expected_event.items())
+            or _aware_datetime(event['occurred_at']) != _aware_datetime(source.bar_end)
+            or _aware_datetime(event['received_at']) != at
+            or any(event[k] for k in ('notional_won','commission_won','tax_won','total_cost_won','realized_pnl_won'))
+            or (start['cash_after_won'],start['reserved_cash_after_won'],start['position_quantity_after']) != (portfolio.cash_won,0,actual)):
+        raise ValueError('native study event/initial valuation mismatch')
+    account=AccountSnapshot('research-single-position',portfolio.cash_won,0,{source.code:actual} if actual else {},at)
+    goal=evaluate_position_target_shadow(request,account,())
+    normalized=json.loads(json.dumps(goal,default=_json_value))
+    if (normalized != proof['goal'] or event['decision_id'] != goal['decision_id']
+            or goal['quality']['status'] != 'CALCULATED' or goal['funding_shortfall_quantity']):
+        raise ValueError('native study original goal replay mismatch')
+    # Only this fully validated metadata event is removed from the legacy value
+    # adapter's view. Original run, endpoints, policy/outcome IDs remain intact.
+    measured=[e for e in events if e is not event]
+    if checkpoint is not None:checkpoint()
+    # A validated flat v2 baseline uses the same cash/share value adapter as
+    # REENTER, without adding a target declaration or an order to HOLD.
+    adapter=(_position_target_outcome_from_events if request.action=='REENTER' and selection['action']=='HOLD'
+        else position_action_outcome_from_events)
+    outcome=adapter(context,measured,start_event_id=selection['start_event_id'],
+        end_event_id=selection['end_event_id'],action=selection['action'],case_ref=selection['case_ref'],
+        population_ref=population_ref,environment='mock',horizon_seconds=study.horizon_seconds,symbol=request.symbol)
+    if not outcome.completed_at <= outcome.available_at <= cut:
+        raise PositionOutcomeUnavailable('native_study_outcome_not_available_at_cut')
+    body={'version':'native-position-study-case/v2','study_policy_ref':context['position_study_ref'],
+        'selection':dict(selection),'outcome':json.loads(json.dumps(asdict(outcome),default=_json_value)),
+        'original_goal':normalized,'original_goal_valid_until':request.target_policy.valid_until.isoformat(),
+        'decision_proof':proof,'proof_event_ref':event['event_id'],
+        'available_at':outcome.available_at.isoformat(),
+        'completion_after_goal_expiry':outcome.available_at >= request.target_policy.valid_until,
+        'source_receipt':{'run_id':context['run_id'],'dataset_id':context['dataset_id'],
+            'revision_ids_hash':context['revision_ids_hash'],'event_count':len(events),'development_role':context['role']},
+        'quality':{'status':'NATIVE_CASE_PROOF','reasons':[]},
+        'r4_status':'EV_UNAVAILABLE','missing':['independent_paired_cohort','exact_context_support_binding'],
+        'source_durability':'not_verified','order_authorized':False}
+    body['evidence_ref']=_content_id('native-position-study-case',body)
+    return body
+
+
+def read_position_action_study_cohort(load_evidence,cohort,selections,*,decision_time,
+                                      development_role='TRAIN',checkpoint=None):
+    """Describe all frozen v2 native pairs; never approve a current RAM goal.
+
+    Each original outcome/policy/model ID is retained. Study and economic-state
+    proofs supply a separate v2 binding; only the existing paired math is reused.
+    """
+    from kiwoom_monitor.application.position_target import PositionActionStudyCase,_json_value
+    keys={'version','study_policy_ref','dataset_id','revision_ids_hash','development_role','cases',
+          'minimum_samples','max_evidence_age_seconds','model_valid_until','cohort_ref'}
+    if (not isinstance(cohort,dict) or set(cohort) != keys or cohort['version'] != 'position-action-study-cohort/v2'
+            or not isinstance(cohort['cases'],list) or not 2 <= len(cohort['cases']) <= 100
+            or not isinstance(selections,(tuple,list)) or len(selections) > 200
+            or type(cohort['minimum_samples']) is not int or not 2 <= cohort['minimum_samples'] <= len(cohort['cases'])
+            or type(cohort['max_evidence_age_seconds']) is not int or cohort['max_evidence_age_seconds'] < 1
+            or development_role not in {'TRAIN','VALIDATION'} or cohort['development_role'] != development_role
+            or len(json.dumps(cohort,allow_nan=False).encode()) > 256*1024):
+        raise ValueError('invalid bounded native study cohort')
+    canonical=json.dumps({k:v for k,v in cohort.items() if k!='cohort_ref'},sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+    if cohort['cohort_ref'] != 'position-action-study-cohort:'+hashlib.sha256(canonical.encode()).hexdigest():
+        raise ValueError('study cohort content mismatch')
+    cut=_aware_datetime(decision_time);model_until=_aware_datetime(cohort['model_valid_until'])
+    declared=tuple(PositionActionStudyCase.from_dict(row) for row in cohort['cases'])
+    if len({c.case_ref for c in declared}) != len(declared):raise ValueError('duplicate declared study case')
+    action=declared[0].request.action
+    wanted={(c.case_ref,a) for c in declared for a in ('HOLD',action)}
+    selection_keys={'run_id','start_event_id','end_event_id','action','case_ref'}
+    selected=[];physical=set();runs=set();seen=set()
+    for row in selections:
+        if (not isinstance(row,dict) or set(row) != selection_keys
+                or any(type(v) is not str or not 0 < len(v) <= 256 for v in row.values())):
+            raise ValueError('invalid study cohort endpoint selection')
+        key=(row['case_ref'],row['action']);identity=(row['run_id'],row['start_event_id'],row['end_event_id'])
+        if key in seen or identity in physical or row['run_id'] in runs or key not in wanted:
+            raise ValueError('duplicate, renamed, or undeclared native study branch')
+        seen.add(key);physical.add(identity);runs.add(row['run_id']);selected.append(dict(row))
+    # A declaration cannot shrink when an attempted branch fails or is absent.
+    missing=sorted(wanted-seen)
+    body={'version':'native-position-study-cohort-comparison/v2','cohort_ref':cohort['cohort_ref'],
+        'study_policy_ref':cohort['study_policy_ref'],'symbol':declared[0].request.symbol,'action':action,
+        'cases':[],'pairs':[],'excluded':[],'missing_branches':missing,'result':None,
+        'quality':{'status':'EV_UNAVAILABLE','reasons':[]},'r4_status':'EV_UNAVAILABLE',
+        'current_goal_status':'EV_UNAVAILABLE','usable_for_current_goal':False,
+        'missing_current_support':['exact_context_support_binding','allocation_input_lineage_independence','current_account_risk_binding'],
+        'source_durability':'not_verified','order_authorized':False,
+        'probability_calibration':'not_verified','independent_cases_assumption':'not_verified'}
+    remaining=10000;receipts={};total_bytes=0
+    def borrow(run_id,endpoints,**kwargs):
+        nonlocal remaining
+        if remaining < 1:raise ValueError('total native study event budget exceeded')
+        context,events=load_evidence(run_id,endpoints,**{**kwargs,'limit':remaining})
+        if not isinstance(events,(tuple,list)) or len(events) > remaining:
+            raise ValueError('total native study event budget exceeded')
+        remaining-=len(events)
+        if context.get('position_study_cohort') != cohort:
+            raise ValueError('native run lacks the same predeclared study cohort')
+        return context,events
+    for row in sorted(selected,key=lambda r:(r['case_ref'],r['action'])):
+        if checkpoint is not None:checkpoint()
+        try:
+            receipt=read_position_action_study_case(borrow,row,decision_time=cut,
+                population_ref=cohort['cohort_ref'],development_role=development_role,checkpoint=checkpoint)
+        except PositionOutcomeUnavailable as error:
+            body['excluded'].append({**row,'reason':str(error)});continue
+        total_bytes+=len(json.dumps(receipt,ensure_ascii=False).encode())
+        if total_bytes > 4*1024*1024:raise ValueError('native study aggregate case proof budget exceeded')
+        if receipt['study_policy_ref'] != cohort['study_policy_ref']:
+            raise ValueError('native study binding mismatch')
+        receipts[(row['case_ref'],row['action'])]=receipt;body['cases'].append(receipt)
+    reasons=body['quality']['reasons']
+    if missing:reasons.append('frozen_cohort_branch_missing')
+    if body['excluded']:reasons.append('frozen_cohort_branch_incomplete_or_unsupported')
+    initial_quantity=target_quantity=price=None
+    used_refs=set();pairs=[];available=[];expiry=[model_until];cost_ref=None
+    for case in declared:
+        if checkpoint is not None:checkpoint()
+        a=receipts.get((case.case_ref,action));b=receipts.get((case.case_ref,'HOLD'))
+        if a is None or b is None:continue
+        pa,pb=a['decision_proof'],b['decision_proof']
+        def economic_state(proof):
+            position=proof['portfolio']['position']
+            portfolio={**proof['portfolio'],'position':{k:v for k,v in position.items() if k!='entry_intent_id'} if position is not None else None}
+            return {'portfolio':portfolio,'strategy_state':proof['strategy_state'],'source_bar':proof['source_bar']}
+        oa,ob=a['outcome'],b['outcome']
+        if (economic_state(pa) != economic_state(pb) or pa['case']['request'] != pb['case']['request']
+                or pa.get('historical_context') != pb.get('historical_context')
+                or pa['goal'] != pb['goal']
+                or any(oa[k] != ob[k] for k in ('initial_state_ref','started_at','completed_at','initial_quantity',
+                    'pending_buy_quantity','pending_sell_quantity','cost_model_ref','horizon_seconds','value_basis'))
+                or oa['status'] != 'COMPLETE' or ob['status'] != 'COMPLETE'
+                or oa['target_quantity'] != a['original_goal']['target_quantity']
+                or ob['target_quantity'] != ob['initial_quantity']):
+            reasons.append('study_pair_initial_state_market_or_goal_mismatch');continue
+        scope=(oa['initial_quantity'],oa['target_quantity'],case.request.reference_price_won,oa['cost_model_ref'])
+        if initial_quantity is None:initial_quantity,target_quantity,price,cost_ref=scope
+        elif scope != (initial_quantity,target_quantity,price,cost_ref):
+            reasons.append('study_cohort_exact_quantity_price_or_cost_mismatch');continue
+        for sample in (oa,ob):
+            if sample['input_ref'] in used_refs:raise ValueError('duplicate effective native study outcome')
+            used_refs.add(sample['input_ref'])
+            at=_aware_datetime(sample['available_at']);available.append(at)
+            expiry.append(at+timedelta(seconds=cohort['max_evidence_age_seconds']))
+            cost=a['original_goal']['cost_model']
+            if not cost.get('valid_from') or not cost.get('valid_to'):
+                reasons.append('study_cost_validity_unknown')
+            else:
+                if not _aware_datetime(cost['valid_from']) <= _aware_datetime(sample['started_at']) < _aware_datetime(sample['completed_at']) <= _aware_datetime(cost['valid_to']):
+                    reasons.append('study_outcome_outside_cost_validity')
+                expiry.append(_aware_datetime(cost['valid_to']))
+        state_ref=_content_id('native-study-economic-state',economic_state(pa))
+        body['pairs'].append({'case_ref':case.case_ref,'economic_state_ref':state_ref,
+            'action_evidence_ref':a['evidence_ref'],'hold_evidence_ref':b['evidence_ref'],
+            'original_action_policy_ref':oa['policy_version'],'original_hold_policy_ref':ob['policy_version'],
+            'original_action_execution_ref':oa['execution_model_ref'],'original_hold_execution_ref':ob['execution_model_ref']})
+        pairs.append((oa,ob))
+    if len(pairs) != len(declared) or len(pairs) < cohort['minimum_samples']:
+        reasons.append('complete_frozen_study_pairs_required')
+    if available:
+        body['available_at']=max(available).isoformat();body['valid_until']=min(expiry).isoformat()
+        if not max(available) <= cut < min(expiry):reasons.append('study_cohort_evidence_expired_or_future')
+    if not reasons:
+        # This is the same Fraction/fee/empirical-error calculation used by R4 v1.
+        difference=tuple((a['gross_change_won']-b['gross_change_won'],a['fee_tax_won']-b['fee_tax_won']) for a,b in pairs)
+        denominator=abs(target_quantity-initial_quantity)*price
+        if not denominator:raise ValueError('study cohort has no target exposure change')
+        body['result']={'action':action,'baseline_action':'HOLD','paired_sample_count':len(pairs),
+            'initial_quantity':initial_quantity,'target_quantity':target_quantity,'reference_price_won':price,
+            'cost_model_ref':cost_ref,'horizon_seconds':pairs[0][0]['horizon_seconds'],
+            'estimate':_position_action_estimate(tuple((a['gross_change_won'],a['fee_tax_won']) for a,_ in pairs)),
+            'baseline_estimate':_position_action_estimate(tuple((b['gross_change_won'],b['fee_tax_won']) for _,b in pairs)),
+            'paired_delta':_position_action_estimate(difference,bps_notional_won=denominator),
+            'return_denominator':'changed_exposure_notional_won/v1','return_denominator_won':denominator,
+            'execution_support':'declared_native_minute_study_only','order_authorized':False}
+        body['quality']['status']='EMPIRICAL_ESTIMATE';body['r4_status']='COHORT_COMPARABLE'
+    body['quality']['reasons']=sorted(set(reasons))
+    body['evidence_ref']=_content_id('native-position-study-cohort',body)
+    return body
+
+
+def prepare_position_action_study_publication(load_evidence,cohort,selections,*,decision_time,
+        development_role='TRAIN',checkpoint=None):
+    """Borrow each native source once and retain its original replay record."""
+    sources=[]
+    def borrow(*args,**kwargs):
+        context,events=load_evidence(*args,**kwargs,include_source_record=True)
+        context=dict(context);record=context.pop('source_record',None)
+        if record is None:raise ValueError('native source record required for study publication')
+        sources.append({'record':record,'events':list(events)})
+        return context,events
+    comparison=read_position_action_study_cohort(borrow,cohort,selections,decision_time=decision_time,
+        development_role=development_role,checkpoint=checkpoint)
+    if comparison['r4_status']!='COHORT_COMPARABLE':raise ValueError('only a complete native study can be published')
+    body={'version':'native-position-study-publication/v2','cohort':cohort,'selections':list(selections),
+        'decision_time':_aware_datetime(decision_time).isoformat(),'comparison':comparison,
+        'sources':sorted(sources,key=lambda s:s['record']['run_id'])}
+    # Freeze a detached JSON snapshot before crossing the existing publication boundary.
+    body=json.loads(json.dumps(body,ensure_ascii=False,allow_nan=False))
+    body['publication_ref']=_content_id('native-position-study-publication',body)
+    if len(json.dumps(body,ensure_ascii=False,allow_nan=False).encode())>4*1024*1024:
+        raise ValueError('native study publication exceeds 4 MiB')
+    return body
+
+
+def _decode_native_position_sources(documents,cut,checkpoint=None):
+    """Shared bounded original record/event validation; no external reads."""
+    sources={};contexts={};event_count=0
+    for source in documents:
+        if checkpoint is not None:checkpoint()
+        if not isinstance(source,dict) or set(source)!={'record','events'}:
+            raise ValueError('invalid native study source record')
+        record,events=source['record'],source['events']
+        if not isinstance(record,dict) or 'final_execution' not in record or record['final_execution'] is not None:
+            raise ValueError('native study final source is forbidden')
+        context=position_action_source_context(record,cut);run_id=context['run_id']
+        if run_id in sources or not isinstance(events,list) or not events:
+            raise ValueError('duplicate or empty native study source')
+        event_count+=len(events)
+        if event_count>10000:raise ValueError('native study publication event budget exceeded')
+        identities=set()
+        for event in events:
+            if checkpoint is not None:checkpoint()
+            if (not isinstance(event,dict) or event.get('run_id')!=run_id
+                    or event.get('account_ref')!='research-single-position'
+                    or event.get('execution_environment')!='simulation'
+                    or event.get('event_id') in identities
+                    or event.get('event_id')!=_content_id('execution',{k:v for k,v in event.items() if k!='event_id'})
+                    or not _aware_datetime(context['warmup_start'])<=_aware_datetime(event['occurred_at'])< _aware_datetime(context['end'])
+                    or not _aware_datetime(context['warmup_start'])<=_aware_datetime(event['received_at'])< _aware_datetime(context['end'])
+                    or max(_aware_datetime(event['occurred_at']),_aware_datetime(event['received_at']))>cut):
+                raise ValueError('native study event identity/time mismatch')
+            if any(type(event.get(key)) is not int or event[key]<0 for key in (
+                    'quantity','price','cash_after_won','reserved_cash_after_won','position_quantity_after',
+                    'commission_won','tax_won','total_cost_won','notional_won')):
+                raise ValueError('native study event quantity/value invalid')
+            identities.add(event['event_id'])
+        sources[run_id]=events;contexts[run_id]=context
+    return sources,contexts
+
+
+def decode_position_action_study_publication(document,*,checkpoint=None):
+    """Replay a PC-reported native study; no database/capture or order approval."""
+    keys={'version','cohort','selections','decision_time','comparison','sources','publication_ref'}
+    if (not isinstance(document,dict) or set(document)!=keys
+            or document['version']!='native-position-study-publication/v2'
+            or len(json.dumps(document,ensure_ascii=False,allow_nan=False).encode())>4*1024*1024
+            or not isinstance(document['sources'],list) or not 4<=len(document['sources'])<=200):
+        raise ValueError('invalid bounded native study publication')
+    if document['publication_ref']!=_content_id('native-position-study-publication',
+            {k:v for k,v in document.items() if k!='publication_ref'}):
+        raise ValueError('native study publication content mismatch')
+    cut=_aware_datetime(document['decision_time'])
+    sources,contexts=_decode_native_position_sources(document['sources'],cut,checkpoint)
+    borrowed=set()
+    def borrow(run_id,endpoints,**kwargs):
+        if (run_id not in sources or run_id in borrowed or len(endpoints)!=1
+                or sources[run_id][-1]['event_id']!=endpoints[0] or len(sources[run_id])>kwargs['limit']):
+            raise ValueError('native study publication source/endpoints mismatch')
+        borrowed.add(run_id);return contexts[run_id],sources[run_id]
+    comparison=read_position_action_study_cohort(borrow,document['cohort'],document['selections'],
+        decision_time=cut,development_role=document['cohort']['development_role'],checkpoint=checkpoint)
+    if (borrowed!=set(sources) or comparison!=document['comparison']
+            or comparison['r4_status']!='COHORT_COMPARABLE' or comparison['usable_for_current_goal'] is not False):
+        raise ValueError('native study publication replay mismatch')
+    first=next(iter(contexts.values()))
+    historical={}
+    for context in contexts.values():
+        document_context=context.get('position_study_context')
+        if document_context is not None:
+            ref=document_context['context_ref']
+            if ref not in historical:
+                if checkpoint is not None:checkpoint()
+                historical[ref]={**replay_position_study_historical_context(document_context),'case_refs':[]}
+            case_ref=context['position_study_case'].case_ref
+            if case_ref not in historical[ref]['case_refs']:historical[ref]['case_refs'].append(case_ref)
+    return {'comparison':comparison,'study':first['position_study_policy'],
+        'source_continuation':{key:document['sources'][0]['record']['spec'][key] for key in
+            ('code_hash','family','policy_version','parameters','execution_model','session_profile')},
+        'source_counts':{run_id:len(events) for run_id,events in sources.items()},
+        'source_bar_counts':{run_id:sum(event['event_type']=='MARK' for event in events) for run_id,events in sources.items()},
+        'source_windows':[{'run_id':run_id,'dataset_id':context['dataset_id'],
+            'revision_ids_hash':context['revision_ids_hash'],'warmup_start':context['warmup_start'],'end':context['end']}
+            for run_id,context in sorted(contexts.items())],
+        **({'historical_contexts':list(historical.values())} if historical else {}),
+        'publication_ref':document['publication_ref']}
+
+
+def read_dynamic_allocation_ev_evidence(load_evidence, selections, *, request, account, open_orders,
+        horizon_seconds, population_ref, minimum_samples, max_evidence_age_seconds,
+        development_role='TRAIN', checkpoint=None, include_source_records=False):
+    """Reuse native replay and paired R4 comparison at exactly one BUY size.
+
+    This explicit read is outside the realtime loop. It supplies no exit Capacity,
+    stress bound, durable capture proof, external publication or order authority.
+    Explicit include_source_records borrows the original header in the same read.
+    """
+    from kiwoom_monitor.application.position_target import (
+        PositionTargetShadowRequest, PositionActionComparisonParameters,
+        DynamicAllocationEvEvidence, evaluate_position_action_comparison_shadow)
+    if (not isinstance(request,PositionTargetShadowRequest) or request.action not in {'ADD','REENTER'}
+            or request.environment!='mock' or request.venue!='KRX' or request.cost_model is None
+            or type(max_evidence_age_seconds) is not int or max_evidence_age_seconds<1
+            or type(minimum_samples) is not int or not 2<=minimum_samples<=100
+            or not isinstance(selections,(list,tuple)) or not 4<=len(selections)<=200
+            or any(not isinstance(r,dict) or r.get('action') not in {'HOLD',request.action} for r in selections)):
+        raise ValueError('explicit bounded native allocation BUY/HOLD scope required')
+    if type(include_source_records) is not bool:raise ValueError('explicit native source option requires bool')
+    cuts={};records=[]
+    def borrow(run_id, endpoints, **kwargs):
+        context,events=load_evidence(run_id,endpoints,**kwargs,**({'include_source_record':True} if include_source_records else {}))
+        if include_source_records:
+            context=dict(context);record=context.pop('source_record',None)
+            if record is None:raise ValueError('native EV original source record required')
+            records.append({'record':record,'events':list(events)})
+        cuts[run_id]=(context,{e['event_id']:e for e in events})
+        return context,events
+    outcomes,source=read_position_action_outcomes(borrow,selections,decision_time=request.decision_time,
+        horizon_seconds=horizon_seconds,population_ref=population_ref,environment='mock',symbol=request.symbol,
+        development_role=development_role,checkpoint=checkpoint)
+    receipt={'version':'dynamic-allocation-native-ev/v1','symbol':request.symbol,
+        'action':request.action,'evidence':None,'source_receipt':source,'quality':{'status':'EV_UNAVAILABLE','reasons':[]},
+        'source_durability':'not_verified','order_authorized':False,
+        'missing_producers':['conservative_full_exit_capacity','stress_loss_model']}
+    reasons=receipt['quality']['reasons']
+    if source['excluded'] or len(outcomes)!=len(selections):
+        reasons.append('native_allocation_selection_incomplete');return receipt
+    policies={o.policy_version for o in outcomes if o.action=='HOLD'}
+    models={o.execution_model_ref for o in outcomes}
+    if len(policies)!=1 or len(models)!=1:
+        reasons.append('native_allocation_model_or_baseline_mixed');return receipt
+    for selection in selections:
+        context,events=cuts[selection['run_id']]
+        if (context.get('position_target_policy') is None
+                or events[selection['start_event_id']]['price']!=request.reference_price_won):
+            reasons.append('native_allocation_price_or_target_model_mismatch');return receipt
+    initial=account.positions.get(request.symbol,0)
+    hold=replace(request,action='HOLD',target_quantity=initial,target_policy=None,policy_version=next(iter(policies)))
+    comparison=evaluate_position_action_comparison_shadow(
+        PositionActionComparisonParameters('HOLD',horizon_seconds,population_ref,'minute','simulation',
+            next(iter(models)),minimum_samples), (hold,request),account,open_orders,outcomes)
+    row=next(r for r in comparison['actions'] if r['action']==request.action)
+    if (comparison['status']!='COMPARABLE' or row['paired_sample_count']*2!=len(outcomes)
+            or row['excluded_counts'] or row['unpaired_sample_count'] or row['baseline_unpaired_sample_count']):
+        reasons.extend(row['reasons'] or ('native_allocation_complete_pairs_required',));return receipt
+    target=comparison['targets'][request.action]['target_quantity']
+    available=max(o.available_at for o in outcomes)
+    expiry=min(o.available_at+timedelta(seconds=max_evidence_age_seconds) for o in outcomes)
+    if request.cost_model.valid_to:expiry=min(expiry,_aware_datetime(request.cost_model.valid_to))
+    if request.target_policy is not None:expiry=min(expiry,request.target_policy.valid_until)
+    if not available<=request.decision_time<expiry:
+        reasons.append('native_allocation_evidence_expired_or_future');return receipt
+    denominator=(target-initial)*request.reference_price_won
+    # Conservative integer bps: floor signed mean, ceil empirical standard error.
+    # This is cohort variability, not calibrated probability or a confidence bound.
+    baseline={o.case_ref:o for o in outcomes if o.action=='HOLD'}
+    scaled=_position_action_estimate(tuple((o.gross_change_won-baseline[o.case_ref].gross_change_won,
+        o.fee_tax_won-baseline[o.case_ref].fee_tax_won) for o in outcomes if o.action==request.action),
+        bps_notional_won=denominator)
+    mean=scaled['mean_net_change_bps_floor'];uncertainty=scaled['net_standard_error_bps_ceil']
+    receipt['evidence']=DynamicAllocationEvEvidence(request.symbol,request.action,initial,target,
+        request.reference_price_won,mean,uncertainty,position_action_cost_model_ref(request.cost_model.to_dict()),
+        horizon_seconds,population_ref,comparison['decision_id'],tuple(ref for ref,_ in row['evidence_refs']),available,expiry)
+    receipt['quality']['status']='EMPIRICAL_ESTIMATE'
+    receipt['comparison']=comparison
+    receipt['outcomes']=json.loads(json.dumps([asdict(o) for o in outcomes],
+        default=lambda v:_aware_datetime(v).astimezone(timezone.utc).isoformat()))
+    receipt['max_evidence_age_seconds']=max_evidence_age_seconds
+    if include_source_records:
+        body={'version':'native-allocation-ev-source-publication/v1','decision_time':request.decision_time.isoformat(),
+            'selections':list(selections),'sources':sorted(records,key=lambda s:s['record']['run_id']),
+            'source_receipt':source,'outcomes':receipt['outcomes']}
+        body=json.loads(json.dumps(body,ensure_ascii=False,allow_nan=False))
+        body['publication_ref']=_content_id('native-allocation-ev-source-publication',body)
+        decode_dynamic_allocation_ev_source_publication(body)
+        receipt['native_source_publication']=body
+    return receipt
+
+
+def decode_dynamic_allocation_ev_source_publication(document,*,checkpoint=None):
+    """Replay original reported EV inputs, not independently attest their storage."""
+    keys={'version','decision_time','selections','sources','source_receipt','outcomes','publication_ref'}
+    if (not isinstance(document,dict) or set(document)!=keys
+            or document['version']!='native-allocation-ev-source-publication/v1'
+            or len(json.dumps(document,ensure_ascii=False,allow_nan=False).encode())>4*1024*1024
+            or not isinstance(document['sources'],list) or not 1<=len(document['sources'])<=200
+            or not isinstance(document['outcomes'],list) or not 4<=len(document['outcomes'])<=200):
+        raise ValueError('invalid bounded native EV source publication')
+    if document['publication_ref']!=_content_id('native-allocation-ev-source-publication',
+            {k:v for k,v in document.items() if k!='publication_ref'}):
+        raise ValueError('native EV source publication content mismatch')
+    cut=_aware_datetime(document['decision_time'])
+    sources,contexts=_decode_native_position_sources(document['sources'],cut,checkpoint)
+    original=document['source_receipt'];first=document['outcomes'][0];borrowed=set()
+    def borrow(run_id,endpoints,**kwargs):
+        if (run_id not in sources or run_id in borrowed or not endpoints
+                or sources[run_id][-1]['event_id'] not in endpoints or len(sources[run_id])>kwargs['limit']
+                or contexts[run_id]['role']!=kwargs['development_role']):
+            raise ValueError('native EV source publication source/endpoints mismatch')
+        borrowed.add(run_id);return contexts[run_id],sources[run_id]
+    outcomes,receipt=read_position_action_outcomes(borrow,document['selections'],decision_time=cut,
+        horizon_seconds=first['horizon_seconds'],population_ref=first['population_ref'],environment='mock',
+        symbol=original['target_symbol'],development_role=original['development_role'],checkpoint=checkpoint)
+    serialized=json.loads(json.dumps([asdict(o) for o in outcomes],default=lambda v:_aware_datetime(v).astimezone(timezone.utc).isoformat()))
+    if (borrowed!=set(sources) or receipt!=original or receipt['excluded'] or serialized!=document['outcomes']):
+        raise ValueError('native EV original source/outcome replay mismatch')
+    return {'publication_ref':document['publication_ref'],'outcomes':serialized,'source_receipt':receipt,
+        'source_counts':{run_id:len(events) for run_id,events in sources.items()},
+        'source_windows':[{'run_id':run_id,'dataset_id':context['dataset_id'],
+            'revision_ids_hash':context['revision_ids_hash'],'warmup_start':context['warmup_start'],'end':context['end']}
+            for run_id,context in sorted(contexts.items())],
+        'source_validation':'PC_READONLY_REPLAY_REPORTED','source_durability':'not_verified','order_authorized':False}
+
+
+def audit_position_study_ev_lineage(study,ev_source):
+    """Conservative overlap of revalidated reported inputs; no independence claim."""
+    left=study['source_windows'];right=ev_source['source_windows']
+    runs={r['run_id'] for r in left}&{r['run_id'] for r in right}
+    # Renaming a dataset does not hide an identical input revision hash.
+    revisions={r['revision_ids_hash'] for r in left}&{r['revision_ids_hash'] for r in right}
+    left_windows=[(_aware_datetime(r['warmup_start']),_aware_datetime(r['end'])) for r in left]
+    right_windows=[(_aware_datetime(r['warmup_start']),_aware_datetime(r['end'])) for r in right]
+    overlaps=sum(a[0]<=b[1] and b[0]<=a[1] for a in left_windows for b in right_windows)
+    shared={r['outcome']['input_ref'] for r in study['comparison']['cases']}&{r['input_ref'] for r in ev_source['outcomes']}
+    reasons=[]
+    for value,reason in ((runs,'shared_native_run'),(revisions,'shared_input_revision_hash'),
+            (overlaps,'overlapping_declared_source_windows'),(shared,'shared_native_outcomes')):
+        if value:reasons.append(reason)
+    return {'version':'position-study-allocation-lineage-audit/v1',
+        'study_publication_ref':study['publication_ref'],'ev_source_publication_ref':ev_source['publication_ref'],
+        'status':'REPORTED_OVERLAP' if reasons else 'REPORTED_DISJOINT',
+        'shared_run_count':len(runs),'shared_revision_hash_count':len(revisions),
+        'overlapping_window_pair_count':overlaps,'shared_outcome_count':len(shared),
+        'reasons':reasons,'independence_verified':False,'source_durability':'not_verified','order_authorized':False}
+
+
+def read_dynamic_allocation_ev_document(document, load_evidence, selections, *, development_role):
+    """Strict existing CLI boundary; native selections are read, never relabelled."""
+    from kiwoom_monitor.application.position_target import (
+        _position_target_request_from_dict, _position_account_orders_from_dict)
+    keys={'schema','request','account','open_orders','horizon_seconds','population_ref',
+        'minimum_samples','max_evidence_age_seconds'}
+    if (not isinstance(document,dict) or set(document) not in (keys,keys|{'include_source_records'})
+            or document['schema']!='dynamic-allocation-native-ev/v1'):
+        raise ValueError('unsupported native allocation EV document')
+    request=_position_target_request_from_dict(document['request'])
+    account,orders=_position_account_orders_from_dict(document['account'],document['open_orders'])
+    result=read_dynamic_allocation_ev_evidence(load_evidence,selections,request=request,account=account,open_orders=orders,
+        development_role=development_role,include_source_records=document.get('include_source_records',False),
+        **{k:document[k] for k in ('horizon_seconds','population_ref','minimum_samples','max_evidence_age_seconds')})
+    if result['evidence'] is not None:
+        result['evidence']=asdict(result['evidence'])
+        for name in ('available_at','valid_until'):result['evidence'][name]=result['evidence'][name].isoformat()
+    return result
+
+
+def read_full_exit_stress_evidence(load_evidence, selection, policy, *, decision_time,
+        max_evidence_age_seconds, development_role='TRAIN', checkpoint=None):
+    """Borrow market bar proofs from one guarded native run, not its trade EV.
+
+    The complete recorded bar window is the input to a new declared scenario
+    replay. Its old WAIT/REPRICE fills/outcomes supply no Capacity or stress.
+    """
+    from kiwoom_monitor.application.research_execution import (
+        FullExitStressPolicy, simulate_full_exit_stress, UNFILLED_EXECUTION_VERSION, UnfilledResearchAction)
+    from kiwoom_monitor.application.position_target import FullExitStressEvidence
+    if (not isinstance(policy,FullExitStressPolicy) or not isinstance(selection,dict)
+            or set(selection)!={'run_id','start_event_id','end_event_id'}
+            or any(type(v) is not str or not 0<len(v)<=256 for v in selection.values())
+            or type(max_evidence_age_seconds) is not int or max_evidence_age_seconds<1):
+        raise ValueError('explicit bounded native full-exit source required')
+    receipt={'version':'dynamic-allocation-native-exit/v1','evidence':None,'result':None,
+        'quality':{'status':'UNAVAILABLE','reasons':[]},'source_durability':'not_verified','order_authorized':False,
+        'input_basis':'native_market_bar_proofs_not_unfilled_trade_outcomes/v1'}
+    try:
+        context,events=load_evidence(selection['run_id'],(selection['end_event_id'],),decision_time=decision_time,
+            limit=10000,development_role=development_role,**({'checkpoint':checkpoint} if checkpoint else {}))
+    except PositionOutcomeUnavailable as error:
+        receipt['quality']['reasons'].append(str(error));return receipt
+    ids={e['event_id']:i for i,e in enumerate(events)}
+    if ('unfilled_action_plan' not in context or selection['start_event_id'] not in ids
+            or selection['end_event_id'] not in ids or ids[selection['start_event_id']]>=ids[selection['end_event_id']]):
+        receipt['quality']['reasons'].append('native_full_exit_market_bar_source_unavailable');return receipt
+    start,end=events[ids[selection['start_event_id']]],events[ids[selection['end_event_id']]]
+    if start['event_type']!='UNFILLED_BASELINE' or end['event_type']!='MARK' or end['symbol']!=policy.symbol:
+        receipt['quality']['reasons'].append('native_full_exit_window_endpoints_unavailable');return receipt
+    proof=json.loads(start['reason'])
+    source=KrxMinuteBarFrame(**proof['source_bar'])
+    request=UnfilledResearchAction.from_dict(proof['request'])
+    if (proof['version']!=UNFILLED_EXECUTION_VERSION or source.code!=policy.symbol
+            or request not in context['unfilled_action_plan'] or request.symbol!=source.code
+            or request.decision_time!=_aware_datetime(source.available_at)
+            or start['symbol']!=source.code or start['source_revision_id']!=source.revision_id
+            or _aware_datetime(start['received_at'])!=_aware_datetime(source.available_at)
+            or _aware_datetime(start['occurred_at'])!=_aware_datetime(source.bar_end) or start['price']!=source.close):
+        raise ValueError('native full-exit source bar binding mismatch')
+    first=_aware_datetime(source.available_at).replace(second=0,microsecond=0)
+    if first<_aware_datetime(source.available_at):first+=timedelta(minutes=1)
+    deadline=first+timedelta(seconds=policy.exit_window_seconds)
+    if _aware_datetime(end['occurred_at'])!=deadline:
+        receipt['quality']['reasons'].append('native_full_exit_horizon_mismatch');return receipt
+    assignment=assign_interval_to_fold(ResearchEvaluationSpec.from_dict(context['evaluation']),
+        source.available_at,deadline.isoformat())
+    if assignment.status!='INCLUDED':
+        receipt['quality']['reasons'].append('native_full_exit_window_outside_development');return receipt
+    bars=[];waiting_bars=[]
+    for event in events[ids[selection['start_event_id']]+1:ids[selection['end_event_id']]+1]:
+        if checkpoint is not None:checkpoint()
+        if event['event_type']!='UNFILLED_BAR':continue
+        raw=json.loads(event['reason'])
+        if set(raw)!={'version','source_bar'} or raw['version']!=UNFILLED_EXECUTION_VERSION:
+            raise ValueError('native full-exit market proof model mismatch')
+        bar=KrxMinuteBarFrame(**raw['source_bar'])
+        if (event['symbol']!=bar.code or event['source_revision_id']!=bar.revision_id or event['price']!=bar.close
+                or _aware_datetime(event['occurred_at'])!=_aware_datetime(bar.bar_end)
+                or _aware_datetime(event['received_at'])!=_aware_datetime(bar.available_at)):
+            raise ValueError('native full-exit market proof binding mismatch')
+        if _aware_datetime(bar.bar_start)>=first:bars.append(bar)
+        elif _aware_datetime(bar.bar_start)>=_aware_datetime(source.bar_end):waiting_bars.append(bar)
+    result=simulate_full_exit_stress(policy,source,tuple(bars),execution=context['unfilled_execution'],
+        strategy=context['unfilled_strategy'],decision_time=decision_time,waiting_bars=tuple(waiting_bars))
+    receipt['result']=result;receipt['quality']={'status':result['status'],'reasons':list(result['reasons'])}
+    receipt['source_receipt']={'run_id':selection['run_id'],'dataset_id':context['dataset_id'],
+        'revision_ids_hash':context['revision_ids_hash'],'development_role':development_role,
+        'start_event_id':selection['start_event_id'],'end_event_id':selection['end_event_id'],
+        'event_count':len(events),'bar_count':len(bars),'waiting_bar_count':len(waiting_bars),
+        'source_code_hash':context['unfilled_source_code_hash']}
+    if result['status']!='CALCULATED':return receipt
+    available=max(context['finished_at'],*(_aware_datetime(b.available_at) for b in (source,*waiting_bars,*bars)))
+    expiry=min(available+timedelta(seconds=max_evidence_age_seconds),policy.valid_until,
+        _aware_datetime(context['unfilled_execution'].cost_model.valid_to))
+    result['available_at']=available.isoformat();result['valid_until']=expiry.isoformat()
+    if not available<=_aware_datetime(decision_time)<expiry:
+        receipt['quality']={'status':'UNAVAILABLE','reasons':['native_full_exit_evidence_expired_or_future']};return receipt
+    identity={'selection':selection,'policy':asdict(policy),'source':receipt['source_receipt'],'result':result}
+    ref=_content_id('native-full-exit',json.loads(json.dumps(identity,
+        default=lambda v:_aware_datetime(v).astimezone(timezone.utc).isoformat())))
+    receipt['evidence']=FullExitStressEvidence(policy.symbol,policy.tested_position_quantity,policy.reference_price_won,
+        policy.exit_window_seconds,result['conservative_exit_capacity_won'],result['stress_loss_bps'],
+        position_action_cost_model_ref(context['unfilled_execution'].cost_model.to_dict()),ref,len(policy.scenarios),available,expiry)
+    receipt['replay_inputs']=json.loads(json.dumps({'policy':asdict(policy),
+        'execution':context['unfilled_execution'].to_dict(),'strategy_family':context['unfilled_strategy_family'],
+        'strategy':context['unfilled_strategy'].to_dict(),'source_bar':asdict(source),
+        'bars':[asdict(b) for b in bars],'waiting_bars':[asdict(b) for b in waiting_bars],
+        'finished_at':context['finished_at'],'decision_time':decision_time,'max_evidence_age_seconds':max_evidence_age_seconds},
+        default=lambda v:_aware_datetime(v).astimezone(timezone.utc).isoformat()))
+    return receipt
+
+
+def read_full_exit_stress_document(document, load_evidence, selection, *, development_role):
+    from kiwoom_monitor.application.research_execution import FullExitStressPolicy,FullExitStressScenario
+    if (not isinstance(document,dict) or set(document)!={'schema','policy','decision_time','max_evidence_age_seconds'}
+            or document['schema']!='dynamic-allocation-native-exit/v1'):
+        raise ValueError('unsupported native full-exit document')
+    raw=dict(document['policy'])
+    if not isinstance(raw.get('scenarios'),list):raise ValueError('exit scenarios require a JSON array')
+    scenarios=[]
+    for row in raw['scenarios']:
+        row=dict(row)
+        if not isinstance(row.get('blocked_minute_offsets'),list):raise ValueError('blocked minutes require a JSON array')
+        row['blocked_minute_offsets']=tuple(row['blocked_minute_offsets']);scenarios.append(FullExitStressScenario(**row))
+    raw['scenarios']=tuple(scenarios)
+    for name in ('available_at','valid_until'):raw[name]=_aware_datetime(raw[name])
+    result=read_full_exit_stress_evidence(load_evidence,selection,FullExitStressPolicy(**raw),
+        decision_time=_aware_datetime(document['decision_time']),max_evidence_age_seconds=document['max_evidence_age_seconds'],
+        development_role=development_role)
+    if result['evidence'] is not None:
+        result['evidence']=asdict(result['evidence'])
+        for name in ('available_at','valid_until'):result['evidence'][name]=result['evidence'][name].isoformat()
+    return result
+
+
+def read_unfilled_action_outcomes(load_evidence, selections, *, decision_time, horizon_seconds,
+                                 population_ref, symbol, development_role='TRAIN', checkpoint=None):
+    """The same bounded native development reader, with a separate LIMIT adapter."""
+    return _read_action_outcomes(load_evidence,selections,decision_time=decision_time,horizon_seconds=horizon_seconds,
+        population_ref=population_ref,environment='mock',symbol=symbol,development_role=development_role,
+        checkpoint=checkpoint,unfilled=True)
+
+
+UNFILLED_POPULATION_PUBLICATION_VERSION = 'mock-unfilled-native-population/v1'
+
+
+def prepare_unfilled_population_publication(outcomes, source_receipt, *, account_ref, credential_profile_id,
+        spec_id, execution_run_id, expected_control_revision, root_intent_id, managed_intent_id):
+    """Freeze the original native availability, never the HTTP send/retry time."""
+    if not isinstance(outcomes,tuple) or not outcomes:
+        raise ValueError('native_unfilled_population_unavailable')
+    rows=[]
+    for outcome in outcomes:
+        if not isinstance(outcome,UnfilledActionOutcome):
+            raise ValueError('native_unfilled_outcome_type_required')
+        row=asdict(outcome)
+        for name in ('started_at','completed_at','available_at'):
+            row[name]=getattr(outcome,name).astimezone(timezone.utc).isoformat() if getattr(outcome,name) else None
+        rows.append(row)
+    body={'version':UNFILLED_POPULATION_PUBLICATION_VERSION,'account_ref':account_ref,
+        'credential_profile_id':credential_profile_id,'spec_id':spec_id,'execution_run_id':execution_run_id,
+        'expected_control_revision':expected_control_revision,'root_intent_id':root_intent_id,
+        'managed_intent_id':managed_intent_id,'available_at':max(o.available_at for o in outcomes).astimezone(timezone.utc).isoformat(),
+        'outcomes':rows,'source_receipt':source_receipt}
+    # Stable input order for retry identity; the source row bindings remain intact.
+    body['outcomes'].sort(key=lambda r:(r['case_ref'],r['action'],r['input_ref']))
+    body=json.loads(json.dumps(body,ensure_ascii=False,sort_keys=True,allow_nan=False))
+    body['publication_ref']=_content_id('unfilled-native-publication',body)
+    unfilled_population_publication_from_dict(body)
+    return body
+
+
+def unfilled_population_publication_from_dict(document):
+    """Validate a PC-reported native packet; it never grants durable/market authority."""
+    import re
+    from uuid import UUID
+    keys={'version','account_ref','credential_profile_id','spec_id','execution_run_id','expected_control_revision',
+        'root_intent_id','managed_intent_id','available_at','outcomes','source_receipt','publication_ref'}
+    if not isinstance(document,dict) or set(document)!=keys:
+        raise ValueError('invalid_native_unfilled_publication_fields')
+    encoded=json.dumps(document,ensure_ascii=False,sort_keys=True,allow_nan=False).encode()
+    if len(encoded)>1024*1024:raise ValueError('native_unfilled_publication_budget_exceeded')
+    if (document['version']!=UNFILLED_POPULATION_PUBLICATION_VERSION
+            or type(document['expected_control_revision']) is not int or document['expected_control_revision']<1
+            or any(type(document[n]) is not str or not document[n].strip() or len(document[n])>256
+                   for n in ('account_ref','credential_profile_id','spec_id','execution_run_id','root_intent_id','managed_intent_id'))
+            or re.fullmatch(r'[A-Za-z0-9_-]{1,96}',document['credential_profile_id']) is None
+            or str(UUID(document['account_ref']))!=document['account_ref']
+            or document['publication_ref']!=_content_id('unfilled-native-publication',
+                    {k:v for k,v in document.items() if k!='publication_ref'})):
+        raise ValueError('native_unfilled_publication_scope_or_identity_mismatch')
+    raw=document['outcomes']; receipt=document['source_receipt']
+    if not isinstance(raw,list) or not 4<=len(raw)<=200:
+        raise ValueError('native_unfilled_publication_requires_complete_paired_selection')
+    rows=[]
+    for row in raw:
+        value=dict(row)
+        for name in ('started_at','completed_at','available_at'):
+            value[name]=_aware_datetime(value[name]) if value[name] is not None else None
+        rows.append(UnfilledActionOutcome(**value))
+    outcomes=tuple(rows); published=_aware_datetime(document['available_at'])
+    if (published!=max(o.available_at for o in outcomes)
+            or len({o.input_ref for o in outcomes})!=len(outcomes)
+            or any(o.order_state!='ACCEPTED' or o.input_resolution!='minute' or o.status!='COMPLETE'
+                or o.data_gap_count or o.completed_at is None or o.gross_change_won is None or o.fee_tax_won is None
+                or o.available_at<o.completed_at or (o.completed_at-o.started_at).total_seconds()!=o.horizon_seconds
+                or re.fullmatch(r'native-unfilled-outcome_[0-9a-f]{64}',o.input_ref) is None
+                or re.fullmatch(r'native-unfilled-state_[0-9a-f]{64}',o.initial_state_ref) is None for o in outcomes)):
+        raise ValueError('native_unfilled_publication_state_time_or_source_unavailable')
+    fields=('symbol','side','purpose','pending_quantity','existing_limit_price_won','candidate_limit_price_won',
+        'initial_quantity','pending_buy_quantity','pending_sell_quantity','target_quantity','horizon_seconds','population_ref','cost_model_ref')
+    if len({tuple(getattr(o,n) for n in fields) for o in outcomes})!=1 or outcomes[0].cost_model_ref is None:
+        raise ValueError('native_unfilled_publication_mixed_cohort')
+    pairs={}
+    for row in outcomes:
+        case=pairs.setdefault(row.case_ref,{})
+        if row.action in case:raise ValueError('duplicate_native_unfilled_action_case')
+        case[row.action]=row
+    for pair in pairs.values():
+        if (set(pair)!={'WAIT','REPRICE'} or (pair['WAIT'].initial_state_ref,pair['WAIT'].started_at,pair['WAIT'].completed_at)!=
+                (pair['REPRICE'].initial_state_ref,pair['REPRICE'].started_at,pair['REPRICE'].completed_at)):
+            raise ValueError('native_unfilled_publication_incomplete_pair')
+    expected_keys={'version','requested_count','accepted_count','sources','excluded','execution_environment',
+        'target_environment','target_symbol','development_role','source_durability','order_authorized'}
+    if (not isinstance(receipt,dict) or set(receipt)!=expected_keys
+            or receipt['version']!='native-unfilled-outcome-source/v1'
+            or type(receipt['accepted_count']) is not int or type(receipt['requested_count']) is not int
+            or receipt['accepted_count']!=len(outcomes) or receipt['requested_count']!=len(outcomes) or receipt['excluded']!=[]
+            or receipt['execution_environment']!='simulation' or receipt['target_environment']!='mock'
+            or receipt['target_symbol']!=outcomes[0].symbol or receipt['development_role'] not in {'TRAIN','VALIDATION'}
+            or receipt['source_durability']!='not_verified' or receipt['order_authorized'] is not False
+            or not isinstance(receipt['sources'],list) or not 2<=len(receipt['sources'])<=len(outcomes)):
+        raise ValueError('native_unfilled_publication_receipt_unavailable')
+    source_keys={'run_id','dataset_id','revision_ids_hash','event_count','policy_version','execution_model_ref'}
+    for source in receipt['sources']:
+        if (not isinstance(source,dict) or set(source)!=source_keys
+                or type(source['event_count']) is not int or not 1<=source['event_count']<=10000
+                or any(type(source[n]) is not str or not source[n].strip() or len(source[n])>256 for n in source_keys-{'event_count'})):
+            raise ValueError('invalid_native_unfilled_source_receipt')
+    if (len({s['run_id'] for s in receipt['sources']})!=len(receipt['sources'])
+            or sum(s['event_count'] for s in receipt['sources'])>10000
+            or len({s['policy_version'] for s in receipt['sources']})!=1
+            or len({s['execution_model_ref'] for s in receipt['sources']})!=1):
+        raise ValueError('native_unfilled_source_budget_or_duplicate')
+    return outcomes,published
+
+
+def _read_action_outcomes(load_evidence, selections, *, decision_time, horizon_seconds,
+                         population_ref, environment, symbol, development_role='TRAIN', checkpoint=None, unfilled=False):
+    """Explicit native windows, shared per-run reads, bounded evidence and exclusions."""
+    if not isinstance(selections, list) or not 1 <= len(selections) <= 200:
+        raise ValueError('position source selection requires 1 to 200 windows')
+    if development_role not in {'TRAIN', 'VALIDATION'}:
+        raise ValueError('native position source must select one development role')
+    if (environment != 'mock' or type(horizon_seconds) is not int or not 60 <= horizon_seconds <= 599_940
+            or horizon_seconds % 60 or type(symbol) is not str or len(symbol) != 6
+            or not symbol.isascii() or not symbol.isdigit() or type(population_ref) is not str
+            or not population_ref.strip() or len(population_ref) > 256):
+        raise ValueError('explicit bounded mock/KRX minute source scope required')
+    _aware_datetime(decision_time)
+    keys = {'run_id', 'start_event_id', 'end_event_id', 'action', 'case_ref'}
+    physical, cases, groups = set(), set(), {}
+    for row in selections:
+        if (not isinstance(row, dict) or set(row) != keys
+                or any(type(value) is not str or not value.strip() or len(value) > 256 for value in row.values())
+                or row['action'] not in ({'WAIT','REPRICE'} if unfilled else {'HOLD', 'EXIT', 'ADD', 'REDUCE', 'REENTER'})):
+            raise ValueError('invalid explicit native position window')
+        identity = (row['run_id'], row['start_event_id'], row['end_event_id'])
+        case = (row['case_ref'], row['action'])
+        if identity in physical or case in cases:
+            raise ValueError('duplicate native position window or action case')
+        physical.add(identity); cases.add(case)
+        groups.setdefault(row['run_id'], []).append(row)
+    outcomes, excluded, sources, fingerprints = [], [], [], set()
+    remaining = 10_000
+    for run_id, rows in sorted(groups.items()):
+        if checkpoint is not None: checkpoint()
+        try:
+            if remaining <= 0: raise ValueError('total native execution source budget exceeded')
+            context, events = load_evidence(run_id, tuple(sorted({r['end_event_id'] for r in rows})),
+                decision_time=decision_time, limit=remaining, development_role=development_role,
+                **({'checkpoint': checkpoint} if checkpoint is not None else {}))
+            remaining -= len(events)
+        except PositionOutcomeUnavailable as error:
+            excluded.extend({**row, 'reason': str(error)} for row in rows)
+            continue
+        sources.append({'run_id': run_id, 'dataset_id': context['dataset_id'],
+                        'revision_ids_hash': context['revision_ids_hash'], 'event_count': len(events),
+                        'policy_version': context['policy_version'], 'execution_model_ref': context['execution_model_ref']})
+        if context.get('position_target_policy') is not None:
+            sources[-1]['position_action_execution']={'version':'paper-position-target/v1',
+                'source_policy_version':context['position_source_policy'],
+                'target_policy':json.loads(json.dumps(asdict(context['position_target_policy']),default=lambda v:v.isoformat()))}
+        for row in sorted(rows, key=lambda value: (value['case_ref'], value['action'])):
+            if checkpoint is not None: checkpoint()
+            try:
+                adapter=unfilled_action_outcome_from_events if unfilled else position_action_outcome_from_events
+                outcome = adapter(context, events,
+                    **{key: row[key] for key in ('start_event_id', 'end_event_id', 'action', 'case_ref')},
+                    population_ref=population_ref, horizon_seconds=horizon_seconds, symbol=symbol,
+                    **({} if unfilled else {'environment':environment}))
+                fingerprint = (context['revision_ids_hash'], outcome.policy_version, outcome.action,
+                               outcome.initial_state_ref, outcome.started_at, outcome.completed_at)
+                if fingerprint in fingerprints:
+                    raise PositionOutcomeUnavailable('duplicate_effective_native_evidence')
+                fingerprints.add(fingerprint)
+                outcomes.append(outcome)
+            except PositionOutcomeUnavailable as error:
+                excluded.append({**row, 'reason': str(error)})
+    return tuple(outcomes), {'version': 'native-unfilled-outcome-source/v1' if unfilled else 'native-position-outcome-source/v1', 'requested_count': len(selections),
+        'accepted_count': len(outcomes), 'sources': sources, 'excluded': excluded,
+        'execution_environment': 'simulation', 'target_environment': environment, 'target_symbol': symbol,
+        'development_role': development_role,
+        'source_durability': 'not_verified', 'order_authorized': False}
+
+
+def compare_position_action_outcomes(
+    outcomes: tuple[PositionActionOutcome, ...], expected: Mapping[str, Mapping[str, Any]], *,
+    baseline_action: str, decision_time: datetime, horizon_seconds: int,
+    population_ref: str, input_resolution: str, minimum_samples: int,
+) -> tuple[dict[str, Any], ...]:
+    """Empirical paired comparison; never synthesizes missing counterfactuals.
+
+    Expected bindings are produced by the target calculator, including its blocked
+    or partially funded state. Means describe the supplied cohort, not a verified
+    future probability or execution permission. Variability is not a confidence interval.
+    """
+    if type(minimum_samples) is not int or not 2 <= minimum_samples <= 10_000 or baseline_action not in expected:
+        raise ValueError("action outcome comparison requires a baseline and at least two samples")
+    if type(horizon_seconds) is not int or horizon_seconds <= 0:
+        raise ValueError("action outcome horizon must be a positive integer")
+    if len(outcomes) > 10_000:
+        raise ValueError("position action comparison accepts at most 10000 outcomes")
+    cutoff = _aware_datetime(decision_time).astimezone(timezone.utc)
+    seen_refs: set[str] = set()
+    seen_cases: set[tuple[str, str]] = set()
+    accepted = {action: {} for action in expected}
+    excluded = {action: {} for action in expected}
+    for sample in outcomes:
+        key = (sample.action, sample.case_ref)
+        if sample.input_ref in seen_refs or key in seen_cases:
+            raise ValueError("duplicate action outcome input/case identity")
+        seen_refs.add(sample.input_ref)
+        seen_cases.add(key)
+        if sample.action not in expected:
+            raise ValueError("action outcome has no requested target")
+        binding = expected[sample.action]
+        reasons = []
+        if sample.status != "COMPLETE":
+            reasons.append("outcome_not_complete")
+        if sample.data_gap_count:
+            reasons.append("outcome_data_gap")
+        if sample.gross_change_won is None or sample.fee_tax_won is None:
+            reasons.append("outcome_value_or_cost_unavailable")
+        if sample.available_at > cutoff or sample.started_at > cutoff or (
+            sample.completed_at is not None and sample.completed_at > cutoff
+        ):
+            reasons.append("outcome_not_available_at_cut")
+        if sample.completed_at is None or (sample.completed_at - sample.started_at).total_seconds() != horizon_seconds or (
+            sample.completed_at is not None and sample.available_at < sample.completed_at
+        ):
+            reasons.append("outcome_time_interval_mismatch")
+        if sample.horizon_seconds != horizon_seconds or sample.population_ref != population_ref or sample.input_resolution != input_resolution:
+            reasons.append("outcome_cohort_mismatch")
+        for name in ("policy_version", "environment", "venue", "source_kind", "execution_model_ref", "initial_quantity", "pending_buy_quantity",
+                     "pending_sell_quantity", "target_quantity", "cost_model_ref", *binding.get('comparison_fields',())):
+            if getattr(sample, name) != binding[name]:
+                reasons.append("outcome_target_or_model_mismatch")
+                break
+        if sample.cost_model_ref is None:
+            reasons.append("outcome_cost_model_unavailable")
+        if binding.get("cost_valid_from") and sample.completed_at is not None and not (
+            _aware_datetime(binding["cost_valid_from"]) <= sample.started_at
+            and sample.completed_at <= _aware_datetime(binding["cost_valid_to"])
+        ):
+            reasons.append("outcome_cost_model_outside_validity")
+        if reasons:
+            for reason in sorted(set(reasons)):
+                excluded[sample.action][reason] = excluded[sample.action].get(reason, 0) + 1
+        else:
+            accepted[sample.action][sample.case_ref] = sample
+
+    baseline = accepted[baseline_action]
+    results = []
+    for action in sorted(expected):
+        binding = expected[action]
+        samples = accepted[action]
+        pairs = []
+        mismatched = 0
+        for case in sorted(samples.keys() & baseline.keys()):
+            candidate, reference = samples[case], baseline[case]
+            if (candidate.initial_state_ref, candidate.started_at, candidate.completed_at) != (
+                reference.initial_state_ref, reference.started_at, reference.completed_at
+            ):
+                mismatched += 1
+            else:
+                pairs.append((candidate, reference))
+        reasons = list(binding["reasons"])
+        if action != baseline_action:
+            reasons.extend(expected[baseline_action]["reasons"])
+        if len(pairs) < minimum_samples:
+            reasons.append("minimum_paired_samples_not_met")
+        if mismatched:
+            # Mismatched cases are excluded, not replaced by zero outcomes.
+            excluded[action]["paired_initial_state_or_time_mismatch"] = mismatched
+        estimate = baseline_estimate = difference = None
+        if not reasons:
+            estimate = _position_action_estimate(tuple((a.gross_change_won, a.fee_tax_won) for a, _ in pairs))
+            baseline_estimate = _position_action_estimate(tuple((b.gross_change_won, b.fee_tax_won) for _, b in pairs))
+            difference = _position_action_estimate(tuple((a.gross_change_won - b.gross_change_won,
+                                                        a.fee_tax_won - b.fee_tax_won) for a, b in pairs))
+        refs = []
+        for a, b in pairs:
+            for sample in (a, b):
+                document = asdict(sample)
+                for name in ("started_at", "completed_at", "available_at"):
+                    document[name] = getattr(sample, name).astimezone(timezone.utc).isoformat()
+                refs.append((sample.input_ref, _content_id("position-action-outcome", document)))
+        results.append({
+            "action": action, "baseline_action": baseline_action,
+            "ev_status": "EV_UNAVAILABLE" if reasons else "EMPIRICAL_ESTIMATE",
+            "reasons": tuple(sorted(set(reasons))), "sample_count": len(samples),
+            "paired_sample_count": len(pairs),
+            "unpaired_sample_count": len(samples) - len(pairs),
+            "baseline_unpaired_sample_count": len(baseline) - len(pairs),
+            "excluded_counts": dict(sorted(excluded[action].items())),
+            "estimate": estimate, "baseline_estimate": baseline_estimate, "paired_delta": difference,
+            "evidence_refs": tuple(sorted(set(refs))),
+        })
+    return tuple(results)
+
+
+def _position_action_estimate(values: tuple[tuple[int, int], ...], *, bps_notional_won=None) -> dict[str, Any]:
+    count = len(values)
+    gross, costs = tuple(a for a, _ in values), tuple(b for _, b in values)
+    net = tuple(a - b for a, b in values)
+    average = Fraction(sum(net), count)
+    variance = sum((Fraction(value) - average)**2 for value in net) / (count - 1)
+    deviation = sqrt(float(variance))
+    result={"sample_count": count, "mean_gross_change_won": float(Fraction(sum(gross), count)),
+            "mean_fee_tax_won": float(Fraction(sum(costs), count)), "mean_net_change_won": float(average),
+            "net_stddev_won": deviation, "net_standard_error_won": deviation / sqrt(count),
+            "minimum_net_change_won": min(net), "maximum_net_change_won": max(net),
+            "positive_sample_count": sum(value > 0 for value in net)}
+    if bps_notional_won is not None:
+        if type(bps_notional_won) is not int or bps_notional_won<1:
+            raise ValueError('positive explicit EV notional basis required')
+        scale=Fraction(10000,bps_notional_won)
+        squared=variance/count*scale**2
+        root=isqrt(squared.numerator//squared.denominator)
+        result['mean_net_change_bps_floor']=int(average*scale//1)
+        result['net_standard_error_bps_ceil']=root+int(root**2*squared.denominator<squared.numerator)
+    return result
 
 
 @dataclass(frozen=True)

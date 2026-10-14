@@ -54,6 +54,24 @@ class _Broker:
 
 
 class MockAccountTests(unittest.TestCase):
+    def test_optional_order_basis_reuses_existing_paged_responses_and_keeps_unknown_side_explicit(self):
+        from kiwoom_monitor.domain.order_contract import OrderSide
+        async def scenario():
+            broker = _Broker()
+            value = await KiwoomMockAccountReader(broker, environment="mock", account_ref="mock-account",
+                now_provider=lambda: NOW).read()
+            self.assertEqual(5, len(broker.calls))
+            details = next(d for d in value.order_details if d.broker_order_id == "0001")
+            self.assertEqual((3, OrderSide.BUY, 70000, "KRX"),
+                (details.ordered_quantity, details.side, details.limit_price, details.venue))
+            sink = []
+            snapshots = parse_unfilled_orders({"oso": [{"ord_no": "unknown", "stk_cd": "005930",
+                "ord_qty": "2", "oso_qty": "2", "io_tp_nm": "unregistered", "ord_pric": "invalid"}]},
+                "mock-account", NOW, _details=sink, _default_venue="KRX")
+            self.assertEqual(1, len(snapshots))
+            self.assertIsNone(sink[0].side)
+            self.assertIn("broker_order_price_unknown", sink[0].reasons)
+        asyncio.run(scenario())
     def test_reader_uses_four_read_only_queries_and_continuation(self) -> None:
         async def scenario() -> None:
             broker = _Broker()

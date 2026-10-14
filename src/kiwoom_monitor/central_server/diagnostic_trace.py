@@ -51,7 +51,7 @@ _COLLECTOR_COPY_GATE = threading.BoundedSemaphore(1)
 _COPY_RESERVATION = 8 * 1024 * 1024
 _MEMORY_LIMIT = 256 * 1024 * 1024
 _DEFERRED_MEMORY_LIMIT = 8 * 1024 * 1024 * 1024
-_DEFERRED_WRITE_BYTES_PER_SECOND = 1024 * 1024
+_DEFERRED_WRITE_BYTES_PER_SECOND = 10 * 1024 * 1024
 _DEFERRED_WRITE_BLOCK_BYTES = 64 * 1024
 _SCALAR_RESERVE = 8 * 1024 * 1024
 _MAX_BLOB_BYTES = 16 * 1024 * 1024
@@ -60,6 +60,7 @@ _FLUSH_HIGH_WATER_BYTES = 16 * 1024 * 1024
 _WORKER_RESERVE = 16 * 1024 * 1024  # Encoding, hashing, and chunk buffers stay off the caller.
 _MAX_CHUNK_BYTES = 1_048_576
 _MAX_DOWNLOAD_CHUNK_BYTES = 2_000_000  # Keep older, readable chunks compatible.
+_MAX_DEFERRED_CHUNK_BYTES = _MAX_DOWNLOAD_CHUNK_BYTES
 _MAX_WINDOW_PAYLOAD_BYTES = 32 * 1024 * 1024
 _MAX_COLLECTOR_PREFIX_SECONDS = 900
 _MAX_BYTES = 1_073_741_824
@@ -242,7 +243,7 @@ def start(*, seconds: int, store_inputs: bool = False, collector_inputs: bool = 
                     "persist_at": persist_at, "memory_preflight": memory_preflight,
                     "write_bytes_per_second": _DEFERRED_WRITE_BYTES_PER_SECOND if persist_at is not None else None,
                     "persistence_throttle_seconds": 0.0,
-                    "payload_storage": "blocks_v1_and_chunk_bundle_v1" if large_inputs else "chunk_bundle_v1",
+                    "payload_storage": "blocks_v1_shared_v1_and_chunk_bundle_v1" if large_inputs or account_inputs else "chunk_bundle_v1",
                     "payload_batch_limit_bytes": _MAX_PAYLOAD_BATCH_BYTES,
                     "payload_fsync_count": 0,
                     "worker_reserved_bytes": (_BLOCK_PACK_WORKER_RESERVE if large_inputs else
@@ -761,7 +762,7 @@ def payload_bytes(trace_id: str, digest: str) -> bytes:
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise KeyError("invalid_payload_hash")
     manifest = status(trace_id)
-    if manifest.get('blobs', {}).get(digest, {}).get('format') == 'blocks/v1':
+    if manifest.get('blobs', {}).get(digest, {}).get('format') in {'blocks/v1', 'blocks/shared-v1'}:
         raise KeyError('block_payload_requires_recorded_reader')
     return _payload_bytes_from_manifest(trace_id, digest, manifest)
 
@@ -770,7 +771,7 @@ def _load_window_payload(trace_id, digest, manifest, cache, loaded_bytes):
     if digest in cache:
         return loaded_bytes
     root = manifest.get('blobs', {}).get(digest)
-    if type(root) is dict and root.get('format') == 'blocks/v1':
+    if type(root) is dict and root.get('format') in {'blocks/v1', 'blocks/shared-v1'}:
         from .diagnostic_trace_payload import block_reference
         cache[digest] = block_reference(trace_id, digest, root)
         return loaded_bytes
@@ -798,7 +799,7 @@ def _payload_bytes_from_manifest(trace_id: str, digest: str, manifest: dict) -> 
     if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         raise KeyError("invalid_payload_hash")
     part = manifest.get("blobs", {}).get(digest)
-    if type(part) is dict and part.get('format') == 'blocks/v1':
+    if type(part) is dict and part.get('format') in {'blocks/v1', 'blocks/shared-v1'}:
         return b''.join(_payload_blocks_from_manifest(trace_id, digest, manifest))
     if not part or type(part.get("bytes")) is not int or not 0 < part["bytes"] <= _MAX_BLOB_BYTES:
         raise KeyError("payload_not_committed")
@@ -832,9 +833,12 @@ def _payload_blocks_from_manifest(trace_id, digest, manifest):
         raise KeyError('invalid_payload_hash')
     root = manifest.get('blobs', {}).get(digest)
     if (manifest.get('schema_version') != 4 or type(root) is not dict
-            or root.get('format') != 'blocks/v1' or type(root.get('bytes')) is not int
+            or root.get('format') not in {'blocks/v1', 'blocks/shared-v1'} or type(root.get('bytes')) is not int
             or not 0 < root['bytes'] <= MAX_BLOCK_PAYLOAD_BYTES
             or type(root.get('parts')) is not list or not 1 <= len(root['parts']) <= MAX_PAYLOAD_BLOCKS):
+        raise KeyError('invalid_payload_blocks')
+    shared = root['format'] == 'blocks/shared-v1'
+    if shared and (root['bytes'] > PAYLOAD_BLOCK_BYTES or len(root['parts']) != 1):
         raise KeyError('invalid_payload_blocks')
     blocks, total, whole = [], 0, hashlib.sha256()
     for index, part in enumerate(root['parts']):
@@ -843,7 +847,8 @@ def _payload_blocks_from_manifest(trace_id, digest, manifest):
                 or type(part.get('sha256')) is not str
                 or re.fullmatch(r'[0-9a-f]{64}', part['sha256']) is None
                 or type(part.get('name')) is not str
-                or re.fullmatch(r'block-' + digest + r'-[0-9]{3}\.payloads', part['name']) is None
+                or re.fullmatch(r'[0-9]{6}\.payloads' if shared else
+                                r'block-' + digest + r'-[0-9]{3}\.payloads', part['name']) is None
                 or type(part.get('offset')) is not int or part['offset'] < 0
                 or part['offset'] + part['bytes'] > _MAX_PAYLOAD_BATCH_BYTES):
             raise KeyError('invalid_payload_block_part')
@@ -1609,9 +1614,9 @@ def _write(file, content, session: dict) -> None:
             session['persistence_throttle_seconds'] += delay
 
 
-def _persistence_cooldown(flush_ms: float, write_pace_seconds: float) -> float:
-    """Back off for additional work/stalls; mandatory write pacing is already paid."""
-    return min(5.0, max(0.25, flush_ms / 1000 - write_pace_seconds))
+def _persistence_cooldown(flush_ms: float, write_pace_seconds: float, *, fsync_ms: float = 0.0) -> float:
+    """Back off for remaining work; pacing and completed synchronization already waited."""
+    return min(5.0, max(0.25, (flush_ms - fsync_ms) / 1000 - write_pace_seconds))
 
 
 def _release_credit(records):
@@ -1812,6 +1817,8 @@ def _drain(session: dict, run_lock) -> None:
             if pending:
                 flush_started = time.perf_counter()
                 flush_pace_started = session.get('persistence_throttle_seconds', 0.0)
+                flush_payload_fsync_started = session.get('payload_fsync_ms_total', 0.0)
+                chunk_limit = _MAX_DEFERRED_CHUNK_BYTES if session.get('persist_at') is not None else _MAX_CHUNK_BYTES
                 # Encoding stays in this worker. Keep the uncommitted suffix here
                 # so one periodic flush stays bounded without reordering the queue.
                 lines: list[bytes] = []
@@ -1849,13 +1856,17 @@ def _drain(session: dict, run_lock) -> None:
                                 whole.update(block)
                             digest = whole.hexdigest()
                             encoded['payload_ref'] = digest
+                        # Keep small block inputs lazy and individually checksummed,
+                        # but share this chunk's bounded physical payload bundle.
+                        shared_block = (session.get('persist_at') is not None and blocks is not None
+                                        and len(blocks) == 1 and len(blocks[0]) <= PAYLOAD_BLOCK_BYTES)
                         line = json.dumps(encoded, ensure_ascii=False, separators=(",", ":"),
                                           default=str).encode("utf-8") + b"\n"
                         new_blob = digest is not None and digest not in stored_blobs and digest not in chunk_blobs
                         added_bytes = (sum(len(block) for block in blocks) if blocks is not None
                                        else len(payload)) if new_blob else 0
-                        if (content_bytes + len(line) > _MAX_CHUNK_BYTES
-                                or blocks is None and batch_bytes + added_bytes > _MAX_PAYLOAD_BATCH_BYTES):
+                        if (content_bytes + len(line) > chunk_limit
+                                or (blocks is None or shared_block) and batch_bytes + added_bytes > _MAX_PAYLOAD_BATCH_BYTES):
                             if not lines:
                                 raise OSError("trace_event_too_large")
                             break
@@ -1863,16 +1874,23 @@ def _drain(session: dict, run_lock) -> None:
                                 + content_bytes + len(line) > session["storage_limit_bytes"]):
                             raise OSError("trace_file_limit")
                         if new_blob:
-                            if blocks is not None:
+                            if blocks is not None and not shared_block:
                                 chunk_blobs[digest] = _write_payload_blocks(directory, digest, blocks, session)
                                 block_bytes += added_bytes
                             else:
                                 if bundle_file is None:
                                     bundle_file = bundle_temporary.open("wb")
-                                _write(bundle_file, payload, session)
-                                chunk_blobs[digest] = {"bytes": len(payload), "name": bundle_name,
-                                                       "offset": batch_bytes}
-                                batch_bytes += len(payload)
+                                body = blocks[0] if shared_block else payload
+                                _write(bundle_file, body, session)
+                                if shared_block:
+                                    chunk_blobs[digest] = {'format': 'blocks/shared-v1', 'bytes': len(body),
+                                        'parts': [{'index': 0, 'bytes': len(body), 'sha256': digest,
+                                                   'name': bundle_name, 'offset': batch_bytes}]}
+                                else:
+                                    chunk_blobs[digest] = {"bytes": len(body), "name": bundle_name,
+                                                           "offset": batch_bytes}
+                                batch_bytes += len(body)
+                                del body
                         elif digest is not None and digest in stored_blobs:
                             chunk_blobs[digest] = stored_blobs[digest]
                         lines.append(line)
@@ -1938,9 +1956,10 @@ def _drain(session: dict, run_lock) -> None:
                     _manifest(directory, session)
                     next_manifest = time.monotonic() + 60
                 if session.get('persist_at') is not None:
-                    # Keep the per-block rate cap and backoff for slow durable
-                    # writes; do not charge the same mandatory pacing twice.
-                    cooldown = _persistence_cooldown(flush_ms, flush_write_pace_seconds)
+                    # Preserve per-block pacing and cooperative backoff without
+                    # adding another wait for synchronization already completed.
+                    flush_fsync_ms = fsync_ms + session.get('payload_fsync_ms_total', 0.0) - flush_payload_fsync_started
+                    cooldown = _persistence_cooldown(flush_ms, flush_write_pace_seconds, fsync_ms=flush_fsync_ms)
                     time.sleep(cooldown)
                     with _LOCK:
                         session['persistence_throttle_seconds'] += cooldown

@@ -25,6 +25,7 @@ class ExecutionStore(Protocol):
     def load_active_execution_intents(
         self, environment: str, account_ref: str, run_id: str,
     ) -> list[dict[str, Any]]: ...
+    def load_account_active_execution_intents(self, environment: str, account_ref: str, limit: int) -> list[dict[str, Any]]: ...
     def find_execution_intent_by_broker_order_id(
         self, environment: str, account_ref: str, run_id: str, broker_order_id: str,
     ) -> dict[str, Any] | None: ...
@@ -136,7 +137,9 @@ class ExecutionRepository:
             ownership.update(self._automation_control)
         return {"ownership": ownership}
 
-    def bind_automation_control(self, *, spec_id: str, control_revision: int) -> None:
+    def bind_automation_control(self, *, spec_id: str, control_revision: int,
+                                replacement_claim: dict | None = None, protection_claim: dict | None = None,
+                                cancel_retry_claim: dict | None = None) -> None:
         if self._ownership is None:
             raise RuntimeError("EXECUTION_REPOSITORY_OWNER_REQUIRED")
         if not spec_id.strip() or type(control_revision) is not int or control_revision <= 0:
@@ -145,6 +148,16 @@ class ExecutionRepository:
             "active_spec_id": spec_id,
             "control_revision": control_revision,
         }
+        if replacement_claim is not None:
+            self._automation_control['replacement_claim'] = dict(replacement_claim)
+        if protection_claim is not None:
+            if replacement_claim is not None:
+                raise ValueError('execution_claim_purposes_conflict')
+            self._automation_control['protection_claim'] = dict(protection_claim)
+        if cancel_retry_claim is not None:
+            if replacement_claim is not None or protection_claim is not None:
+                raise ValueError('execution_claim_purposes_conflict')
+            self._automation_control['cancel_retry_claim']=dict(cancel_retry_claim)
 
     def clear_automation_control(self) -> None:
         self._automation_control = None
@@ -204,8 +217,35 @@ class ExecutionRepository:
         )
         return _record_from_document(value) if value else None
 
+    def account_active_intents(self, account_ref: str) -> tuple[tuple[ExecutionRecord, ...], bool]:
+        """One bounded account-wide read, including QUEUED records with no events."""
+        values = self._store.load_account_active_execution_intents("mock", account_ref, 401)
+        records = tuple(_record_from_document(value) for value in values[:400])
+        if any(r.intent.account_ref != account_ref or r.intent.environment != "mock" for r in records):
+            raise ValueError("account-wide ledger crossed the requested scope")
+        return records, len(values) <= 400
+
     def events(self, intent_id: str) -> tuple[dict[str, Any], ...]:
         return tuple(self._store.load_execution_events(intent_id))
+
+    def claim_approval(self, intent_id: str) -> dict[str, Any] | None:
+        value = self._store.load_execution_intent(intent_id)
+        claim = value.get('mock_replacement_claim') if value else None
+        if claim is not None and (not isinstance(claim, dict)
+                or set(claim) != {'gate_id', 'risk_snapshot_id', 'risk_reconciliation_revision'}
+                or type(claim['risk_reconciliation_revision']) is not int
+                or claim['risk_reconciliation_revision'] <= 0):
+            raise ValueError('invalid native replacement claim proof')
+        return dict(claim) if claim is not None else None
+
+    def protection_claim(self, intent_id: str) -> dict[str, Any] | None:
+        value=self._store.load_execution_intent(intent_id)
+        claim=value.get('mock_protection_claim') if value else None
+        if claim is not None and (not isinstance(claim,dict)
+                or set(claim)!={'workflow_id','gate_id','risk_snapshot_id','risk_reconciliation_revision'}
+                or type(claim['risk_reconciliation_revision']) is not int or claim['risk_reconciliation_revision']<=0):
+            raise ValueError('invalid native protection claim proof')
+        return dict(claim) if claim is not None else None
 
     def account_events(
         self, environment: str, account_ref: str, *, after_sequence: int = 0, limit: int = 500,

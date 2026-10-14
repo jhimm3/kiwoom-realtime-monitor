@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import unittest
+import tempfile
 from pathlib import Path
 
 
@@ -31,6 +32,16 @@ if __name__ == "__main__" and len(sys.argv) == 2:
 if _MODE != "empty":
     class RegressionWorkerFixtureTests(unittest.TestCase):
         def test_selected_worker_outcome(self) -> None:
+            if _MODE == "temp-env":
+                (Path(os.environ["REGRESSION_FIXTURE_DIR"]) / "temp-env.json").write_text(json.dumps({
+                    "TEMP": os.environ["TEMP"], "TMP": os.environ["TMP"],
+                    "TMPDIR": os.environ["TMPDIR"], "default": tempfile.gettempdir(),
+                }), encoding="utf-8")
+                with tempfile.TemporaryDirectory() as directory:
+                    source = Path(directory) / "source"
+                    source.mkdir()
+                    (source / "child.txt").write_text("fixture")
+                    source.rename(Path(directory) / "published")
             if _MODE.startswith("tree-"):
                 if "REGRESSION_FIXTURE_RUNNER_PID" in os.environ:
                     (Path(os.environ["REGRESSION_FIXTURE_DIR"]) / "runner.json").write_text(

@@ -151,6 +151,51 @@ class ScopedOperatorTests(unittest.TestCase):
                 worker.replay({**request, 'trace': 'other'}, 'fixture-url')
             connect.assert_not_called()
 
+    def test_shared_block_registration_copies_bounded_bundle_and_checks_slices(self):
+        trace_id, manifest, files = scoped_trace_fixture()
+        name, bodies = '000001.payloads', (b'first', b'second')
+        content = b'prefix:' + b''.join(bodies) + b':suffix'
+        roots, offset = {}, 7
+        for body in bodies:
+            digest = hashlib.sha256(body).hexdigest()
+            roots[digest] = dict(format='blocks/shared-v1', bytes=len(body),
+                parts=[dict(index=0, bytes=len(body), sha256=digest, name=name, offset=offset)])
+            offset += len(body)
+        manifest.update(schema_version=4, blobs=roots)
+        files.update({'manifest.json': json.dumps(manifest).encode(), name: content})
+        incoming, private = MemoryTree(), MemoryTree()
+        incoming.documents.update(files)
+        operator = op.Operator({'trace_dir': '/incoming', 'allowed_uid': 1000,
+            'input_file_limit': 64 * 1024**2, 'input_total_limit': 1024**3}, private)
+        with patch.object(op, 'Tree', return_value=incoming):
+            result = operator.register('traces', trace_id, 'scoped-operations')
+            self.assertEqual(hashlib.sha256(content).hexdigest(), result['files'][name])
+            self.assertEqual(result, operator.registered_input('traces', trace_id))
+            private.documents['traces/' + trace_id + '/' + name] = b'changed'
+            with self.assertRaisesRegex(op.Rejected, 'registered_input_changed'):
+                operator.registered_input('traces', trace_id)
+
+    def test_shared_block_registration_rejects_bad_descriptor_or_corrupt_slice(self):
+        body, name = b'body', '000001.payloads'
+        digest = hashlib.sha256(body).hexdigest()
+        root = dict(format='blocks/shared-v1', bytes=len(body),
+            parts=[dict(index=0, bytes=len(body), sha256=digest, name=name, offset=3)])
+        incoming = MemoryTree()
+        incoming.documents[name] = b'pre' + body + b'post'
+        mutations = []
+        for field, value in (('name', '../outside'), ('offset', -1), ('offset', False),
+                              ('bytes', 1), ('index', True), ('sha256', '0' * 64)):
+            changed = copy.deepcopy(root)
+            changed['parts'][0][field] = value
+            mutations.append(changed)
+        mutations.extend(({**root, 'parts': root['parts'] * 2}, {**root, 'bytes': 1024**2+1}))
+        for changed in mutations:
+            with self.subTest(changed=changed), self.assertRaises(op.Rejected):
+                op.trace_blob_files({'schema_version':4, 'blobs':{digest:changed}}, incoming, 64*1024**2)
+        incoming.documents[name] = b'prechangedpost'
+        with self.assertRaisesRegex(op.Rejected, 'trace_block_checksum_mismatch'):
+            op.trace_blob_files({'schema_version':4, 'blobs':{digest:root}}, incoming, 64*1024**2)
+
     def block_fixture(self):
         trace_id, manifest, files = scoped_trace_fixture()
         blocks = [b'a' * 1024, b'b' * 1024]

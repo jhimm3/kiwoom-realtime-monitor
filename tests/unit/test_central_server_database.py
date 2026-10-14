@@ -67,6 +67,90 @@ from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
 
 
 class CentralServerDatabaseTests(unittest.TestCase):
+    def test_mock_lineage_statement_keeps_snapshot_during_concurrent_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lineage.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            self.addCleanup(store.close)
+            owner = "account-a"
+            store.upsert_documents("execution_mock_automation_specs", [
+                {"owner": owner, "key": "spec-1", "document": {"spec": True}},
+            ])
+            published = [("execution_mock_automation_admissions", owner, "admission-1", 0,
+                          json.dumps({"admission": True})),
+                         ("execution_mock_automation_lease_receipts", owner, "lease-1", 0,
+                          json.dumps({"lease": True}))]
+            native_connect = store._connect
+
+            class PublishDuringRead:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+                def execute(self, sql, parameters):
+                    # Native execute has stepped to the existing spec row;
+                    # the rest of the same statement must retain that snapshot.
+                    cursor = self.connection.execute(sql, parameters)
+                    with closing(sqlite3.connect(path)) as writer, writer:
+                        writer.executemany("INSERT INTO central_documents VALUES(?,?,?,?,?)", published)
+                    return cursor
+
+            arguments = dict(spec_id="spec-1", admission_id="admission-1", lease_receipt_id="lease-1")
+            with patch.object(store, "_connect", side_effect=lambda: PublishDuringRead(native_connect())):
+                first = store.load_mock_automation_lineage(owner, **arguments)
+            self.assertEqual({"spec": {"spec": True}}, first)
+            self.assertEqual({"spec": {"spec": True}, "admission": {"admission": True},
+                              "lease": {"lease": True}},
+                             store.load_mock_automation_lineage(owner, **arguments))
+            store.close()
+
+    def test_mock_lineage_read_uses_exact_account_keys_and_primary_key_lookups(self):
+        from kiwoom_monitor.central_server.database_execution import _mock_automation_lineage_query
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import (
+            freeze_payload, thaw_payload, validate_operation,
+        )
+
+        store = SQLiteQueryStore(Path(":memory:"))
+        store.initialize()
+        self.addCleanup(store.close)
+        owner, other = "account-a", "account-b"
+        keys = {
+            "spec": ("execution_mock_automation_specs", "spec-1"),
+            "admission": ("execution_mock_automation_admissions", "admission-1"),
+            "lease": ("execution_mock_automation_lease_receipts", "lease-1"),
+            "recovery": ("execution_mock_automation_recovery_decisions", "recovery-1"),
+        }
+        expected = {}
+        for role, (collection, key) in keys.items():
+            expected[role] = {"role": role, "owner": owner}
+            store.upsert_documents(collection, [
+                {"owner": owner, "key": key, "document": expected[role]},
+                {"owner": other, "key": key, "document": {"owner": other}},
+                {"owner": owner, "key": key + "-other", "document": {"wrong_key": True}},
+            ])
+        arguments = dict(spec_id="spec-1", admission_id="admission-1",
+                         lease_receipt_id="lease-1", recovery_decision_id="recovery-1")
+        captured_arguments = {"account_ref": owner, **arguments}
+        self.assertEqual("readers", validate_operation("load_mock_automation_lineage", captured_arguments))
+        self.assertEqual(captured_arguments, thaw_payload(freeze_payload(captured_arguments).value))
+        with patch.object(store, "_connect", wraps=store._connect) as connect:
+            self.assertEqual(expected, store.load_mock_automation_lineage(owner, **arguments))
+            self.assertEqual(1, connect.call_count)
+        self.assertEqual({}, store.load_mock_automation_lineage("missing-account", **arguments))
+        self.assertEqual(
+            {role: value for role, value in expected.items() if role != "recovery"},
+            store.load_mock_automation_lineage(owner, **{k: v for k, v in arguments.items()
+                                                       if k != "recovery_decision_id"}),
+        )
+        sql, parameters = _mock_automation_lineage_query(owner, *arguments.values(), "?")
+        with store._connection() as connection:
+            plans = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters)]
+        self.assertEqual(4, sum("SEARCH central_documents USING INDEX" in row for row in plans))
+        self.assertFalse(any("SCAN central_documents" in row for row in plans), plans)
+
     def test_multirow_upsert_uses_one_postgres_statement_and_bounded_sqlite_batches(self) -> None:
         class Executor:
             def __init__(self) -> None:
@@ -2195,6 +2279,110 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(25021.0, rows[-1]["close"])
         self.assertIsNone(rows[-1]["volume"])
         self.assertEqual(500.0, rows[-1]["updated_at"])
+
+
+class SecondTradeShadowReaderTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = SQLiteQueryStore(Path(directory.name) / "second-shadow.sqlite3")
+        self.store.initialize()
+        self.addCleanup(self.store.close)
+        self.cut = datetime(2026, 9, 14, 9, 0, 20, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    def bar(self, code="005930", second="09:00:19", market="KRX", available=None, day="2026-09-14"):
+        return {"trading_date": day, "trade_second": second, "code": code, "market": market,
+                "open": 100, "high": 105, "low": 100, "close": 105,
+                "volume": 10, "trade_value_won": 1050, "trade_count": 2,
+                "available_at": self.cut.timestamp() - 0.9 if available is None else available}
+
+    def read(self, **kwargs):
+        arguments = {"start_second": "09:00:00", "end_second": "09:00:20", "available_at": self.cut.timestamp()}
+        arguments.update(kwargs)
+        return self.store.load_second_trade_bars(("A005930", "005930", "000660"), "2026-09-14", "KRX", **arguments)
+
+    def test_native_second_reader_filters_code_date_venue_window_and_availability(self):
+        self.store.save_second_trade_bars([
+            self.bar(), self.bar(code="000660"), self.bar(market="NXT"),
+            self.bar(code="035420"), self.bar(second="09:00:21"),
+            self.bar(second="08:59:59"), self.bar(day="2026-09-13"),
+            self.bar(second="09:00:18", available=self.cut.timestamp() + 1),
+        ])
+        rows = self.read()
+        self.assertEqual(["000660", "005930"], [row["code"] for row in rows])
+        self.assertTrue(all(row["trade_second"] == "09:00:19" for row in rows))
+
+    def test_native_second_reader_does_not_reconstruct_overwritten_history(self):
+        self.store.save_second_trade_bars([self.bar()])
+        self.assertEqual(1, len(self.read()))
+        self.store.save_second_trade_bars([self.bar(available=self.cut.timestamp() + 1)])
+        self.assertEqual([], self.read())
+
+    def test_native_second_reader_rejects_truncation_and_invalid_window(self):
+        self.store.save_second_trade_bars([self.bar(), self.bar(code="000660")])
+        with self.assertRaisesRegex(ValueError, "row budget"):
+            self.read(limit=1)
+        for changes in ({"start_second": "09:00:21"}, {"start_second": "08:49:00"},
+                        {"available_at": float("nan")}, {"end_second": "9:00:20"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.read(**changes)
+        with patch.object(self.store, "_connect", side_effect=AssertionError("empty read opens DB")):
+            self.assertEqual([], self.store.load_second_trade_bars((), "2026-09-14", "KRX",
+                start_second="09:00:00", end_second="09:00:20", available_at=self.cut.timestamp()))
+
+    def test_native_second_reader_uses_index_and_one_read_only_connection(self):
+        from kiwoom_monitor.central_server.database_market_bars import _second_trade_read_query
+        self.store.save_second_trade_bars([self.bar()])
+        statements = []
+        native_connect = self.store._connect
+        def connect():
+            connection = native_connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+        with patch.object(self.store, "_connect", side_effect=connect) as opened:
+            self.read()
+        self.assertEqual(1, opened.call_count)
+        self.assertEqual(1, len(statements))
+        self.assertTrue(statements[0].startswith("SELECT "))
+        sql, parameters, _ = _second_trade_read_query(("005930",), "2026-09-14", "KRX",
+            "09:00:00", "09:00:20", self.cut.timestamp(), 10000, placeholder="?")
+        with self.store._connection() as connection:
+            plan = " ".join(str(row) for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters))
+        self.assertIn("SEARCH", plan)
+        self.assertNotIn("SCAN central_second_trade_bars", plan)
+
+    def test_native_shadow_bridge_uses_theme_history_and_never_infers_continuity(self):
+        from kiwoom_monitor.central_server.market_observations import ranking_observation
+        from kiwoom_monitor.central_server.market_theme_shadow_inputs import read_market_theme_shadow_inputs
+        from kiwoom_monitor.application.market_theme_shadow import evaluate_market_theme_shadow
+        from kiwoom_monitor.domain.research_contract import THEME_BACKUP_FORMAT, THEME_BACKUP_VERSION
+        document = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION,
+                    "active_profile": "default", "profiles": [{"name": "default", "stock_themes": [
+                        {"code": "005930", "theme": "반도체"}, {"code": "000660", "theme": "반도체"}]}]}
+        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=self.cut.timestamp() - 100):
+            self.store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": document}])
+        payload = {"query_type": "5", "items": [{"stk_cd": "005930", "trde_prica": "100", "flu_rt": "1.0"},
+                                                 {"stk_cd": "000660", "trde_prica": "50", "flu_rt": "0.5"}]}
+        at = self.cut - timedelta(seconds=10)
+        self.store.save_dataset_snapshot("ranking", "5", at.isoformat(), payload,
+            observation=ranking_observation("5", at.isoformat(), payload, at, source="fixture"))
+        self.store.save_second_trade_bars([self.bar(), self.bar(code="000660")])
+        values = read_market_theme_shadow_inputs(self.store, decision_time=self.cut.isoformat(),
+                                               theme_id="반도체", leadership_venue="KRX")
+        self.assertEqual(1, len(values.market_frames))
+        self.assertEqual(2, len(values.second_points))
+        self.assertEqual(("반도체",), values.market_frames[0].members[0].themes)
+        self.assertEqual("UNAVAILABLE", values.continuity_status)
+        result = evaluate_market_theme_shadow(values)
+        self.assertEqual("PARTIAL", result["leadership"]["quality"]["status"])
+        self.assertFalse(result["order_authorized"])
+        removed = {**document, "profiles": [{"name": "default", "stock_themes": []}]}
+        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=self.cut.timestamp() - 1):
+            self.store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": removed}])
+        values = read_market_theme_shadow_inputs(self.store, decision_time=self.cut.isoformat(),
+                                               theme_id="반도체", leadership_venue="KRX")
+        self.assertIsNone(values.theme_membership)
+        self.assertEqual((), values.second_points)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,863 @@
 # 현재 상태 요약
 
+## 2026-10-15 반복 검사 실패 원인과 Windows 임시 자료 격리
+
+**왜 필요했나:** 서로 다른 실패를 전체 재실행으로 처리해 완료가 지연됐다. 검사 목록 누락 5개, 추가된 RAM API/recorder 설정과 기존 API 기대값 불일치, 실제 시각을 사용하는 모의 주문 fixture, Windows 임시 디렉터리 rename 경합을 구분했다. 앞의 세 문제는 실제 변경/계보를 확인해 목록과 정확한 추가 API 기대값·고정 거래 시각만 수정했다. 기존 API와 운영 Risk·시간 검사는 보존한다.
+
+**무엇이 달라졌나:** Windows 검사 자료를 관찰되는 checkout 밖의 사용자 AppData Temp로 격리한다. 실패를 재시도로 감추지 않고 원래 코드의 즉시 오류·활성 버전 보존을 유지한다. 자동매매 동작을 새로 활성화하는 변경은 아니다.
+
+**연결과 직접 원인:** 기존 Runner가 현재 소스/Windows Job으로 실행하면서 TEMP/TMP/TMPDIR만 worker마다 분리한다. 로그·결과는 지정 output에 남고 통과·모든 자식 종료 확인 후 해당 임시 자료를 제거한다. 실패/중단 자료는 경로와 함께 보존한다. 원래 fixture의 Documents 300회 중 10회 실패/AppData 300회 무오류, 좁힌 실제 게시 160회 중 7회 실패를 확인했다. 마지막은 4회 중 첫 실패에서 추적을 종료했다. native rename의 1.887ms 호출 구간과 `ChatGPT.exe` PID4600의 같은 staging 하위 `tests` 디렉터리 핸들 2개가 겹쳤다. 핸들이 수십 마이크로초에 닫혀 사후 조회에서 사라졌다. 공유 권한7/읽기 속성0x80의 하위 디렉터리·파일 핸들을 유지한 통제 검사에서도 WinError5가 발생했고, 최상위 디렉터리 핸들만 유지하면 rename은 가능했다. [원인 대조](../data/diagnostics/20261015-windows-denial-evidence/failure-handle-correlation.json) · [핸들 조건 비교](../data/diagnostics/20261015-windows-denial-evidence/controlled-handle-matrix.json). Windows의 하위 열린 핸들 rename 제약은 [Microsoft 문서](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)와 대조했다. 첫 WPR 전체 profile은 부하·이벤트 유실로 직접 증명에 쓰지 않았고 마지막 제한 이벤트 추적은 유실0이다.
+
+**사용·검증 상태:** 관련 검사71건·누적 archive 실행 계보4건 통과. 수정한 실제 Runner의 원래 source-runtime 모듈200건이 동일 소스·계획/실행200·자식 종료·임시 제거까지 통과했다. 잠금 유지 검사는 native 게시가 1회 실패하고 기존 active를 보존함을 확인했다. 마지막 Windows all-local은 한 번 실행해 5,102건/305 worker 전부 통과했다(58.052분). 누락·실패·중단0, 모든 worker의 프로세스 종료 확인과 소유 임시 자료 제거305건을 확인했다. LF 소스 지문 `83ecb1c2fc3bf2da99d1c946cf7988268344df3481f8c91aa26541fb76cd7763`은 실행 전후/현재가 같고 required Windows local source gate도 통과했다. [전수 결과](../data/diagnostics/20261015-root-cause-final-all-local/run.json) · [동일 소스 검증](../data/diagnostics/20261015-root-cause-final-source-gate.log). 실제 키움 모의계좌 전송/부분체결·실계좌·NAS 배포·외부 CI 수락을 뜻하지 않는다.
+
+**아직 남은 것:** 관찰 프로그램 자체의 모든 파일 열기를 수정한 것은 아니다. 이번에 재현한 검사 directory rename 경합의 제거를 과거 연구 파일 교체·다른 경로의 ACL 접근 거부 해결로 확대하지 않는다. R4 native 모델 적용/최종 자동 주문 연결과 기존 모의계좌·운용 승인 잔여는 기존 순서를 유지한다.
+
+아래 단계의 미커밋·전체 검사 미실행 표현은 당시 기록이다. 이번 체크포인트는 누적 변경을 보존하고 로컬 Windows 전체 검증만 갱신하며, 외부 CI·배포·장중 운용 수락과 구분한다.
+
+## 2026-10-15 A01 행동별 요구자료와 A02 상위 맥락 분리
+
+사용자 지정에 따라 A01~A03을 우선하고 A04는 뒤로 옮겼다. A01의 현재 R4 v2 정책에 선택 `action_required_data_capabilities`를 연결했다. 공통 자료와 행동별 추가 자료를 구분하며 ADD만 뉴스가 필요하면 ADD만 제외하고 요건이 맞는 REDUCE를 비교할 수 있다. 기준 HOLD의 필수 자료 결측은 WAIT이고 공통 계좌/Risk/UNKNOWN/자금·비용 검사와 강제 보호는 우선한다. R3 판단을 특정 행동이 요구할 때는 그 행동에 HOLD/WAIT/REDUCE 제한과 TTL을 적용한다. 유효한 R3 EXIT는 기존 전체 보호 경로를 우선한다. 선택하지 않은 타점 자료의 짧은 TTL이 다른 행동의 lease를 줄이지 않으며 선택한 행동의 TTL은 전체 receipt에도 반영한다. 선택 필드 생략/None의 결과·ID는 동일하고 UI와 기존 선택 기록에 행동별 결측을 표시한다.
+
+A02의 가중치0 점수 소비자는 기존 owner의 typed ThemeMembership을 위험 소속으로 전달하고 사용 H1/H2 점수 구성요소의 시각·TTL·품질만 검사한다. 시장 점수만 쓰면 미사용 leadership 초 창이 전체 lease를 만료시키지 않는다. 미래 소속·결측·상이한 중복은 거절한다. 모두 양수인 기존 가중치와 독립 owner 자료를 명시하지 않은 직접 호출 계약은 유지한다. Runtime→기존 allocation adapter의 동일 호출에서 이미 보유한 소속을 전달하며 hot 호출 깊이·owner/collector/writer·공통 판단을 유지한다. 별도 수집/조회/Risk 계산/엔진/relay가 없다.
+
+신규10 포함 관련 고유168건 통과, 선택 필드 생략 호환성1건을 추가 확인했다. 2/8 공통 RAM·계좌/계산1회, 조회100회 추가 DB/계산0, leadership 결측 중 시장 점수 기반 상위 금액→하위 수량 계산, 필수 점수/위험 소속 차단, 보호·UNKNOWN·만료·원본 publication/계보·native owner·UI/선택/기록/drain을 검증했다. 기존 완전한 결과4개와 ID 동일, compile·QueryStore 소비 감사delta0다. [검증](../data/diagnostics/20261015-capability-context-support/verification.json). R4용 theme/news/turnover 추가 맥락 생산자는 계속 미연결이며 요구한 행동만 결측으로 남긴다. 미구현 전략 registry 전체나 새로운 뉴스 엔진을 구현한 것은 아니다.
+
+A03의 현재 native 모델 지원은 구현하지 않았다. 원본 Paper publication을 기존 reader로 재생하고 현재 native owner 계약과 대조했다. source_continuation은 code/family/parameters/비용·분봉 실행/session을 설명하며, 원본 case proof에는 native 위험 한도·보호 요청·session clock·목적별 미체결 후속 정책의 동등성을 검증할 기록이 없다. 현재 정상 Risk나 family 일치만으로 과거 모델의 미래 정책 지원을 인정할 수 없고 과거 REENTER의 명시 목표 적용은 native 쿨다운 해제 권한도 아니다. [계약 대조](../data/diagnostics/20261015-capability-context-support/source-contract-audit.json). 조건부 현재 상태 지원과 실제 native 실행 적용을 구분할 계약 판단이 필요하다. EV_UNAVAILABLE/result=None/orderfalse는 유지한다. [A03 설계 재검토](AI_TRADING_SYSTEM_REDESIGN.md#a03-설계-재검토).
+
+main/HEAD232737d·누적 로컬 미커밋·미배포·build `2026.10.15-action-context-gates-v1`. 168건 회귀 후 원본 맥락 외피의 미래 가용시각 거절을 한 줄 보완하고 해당 구성요소/공유 경계6건을 재검증했다. build 표시3파일은 별도 정적 일치를 확인했다. 원래 회귀 소스 지문과 마지막 좁은 보완 지문을 검증 기록에서 구분한다. explicit KRX scientific hash는 `6c694ec2ea9fa23a88ceeb17603c5bd141a5ebdaa2bd2595aa087eedfa0ab961`이며 legacy None hash는 유지한다. 기존 패키지의 hash/TTL/지원 범위를 자동 재표지하지 않는다. 전체 회귀·CI·원격 main·실제 PG/NAS·브로커/장중 수락은 이번 실행 범위가 아니다. 다음은 A03 지원 계약 판단/구현이고 A04·A05·실제 모의계좌 통합/별도 운용 승인은 잔여다.
+
+이하 설명은 해당 시점의 기록이다.
+
+## 2026-10-15 R4 정책별 필수 자료와 조건부 비중 점수 연결
+
+종합 대조 A01의 현재 R4 계약을 구현했다. 기존 `paired-net-action-selection/v1`과 `owner_ram_risk_and_thesis`는 그대로 유지하고, 명시적으로 선택하는 `paired-net-action-selection/v2`·`owner_ram_risk` 정책에 `required_data_capabilities`를 추가했다. 가격과 기존 R3 타점 판단 생산자를 연결하며, 선언하지 않은 테마·뉴스·거래대금 맥락을 공통 차단 조건으로 쓰지 않는다. 선언했지만 검증된 R4 생산자가 없는 `theme_context`·`news_context`·`turnover_delta`는 각각 결측으로 보고한다. 자료 결측을 0점이나 가짜 테마로 채우지 않는다. 계좌·미해결 주문·자금/비용·신선한 native Risk·scope·원래 TTL은 공통 필수이며, 신선한 하드 보호 조건은 자료 결측과 EV보다 먼저 기존 위험 경로 필요성을 반환한다. 주문 권한을 부여하지 않는다.
+
+테마/타점 판단을 요구하지 않는 v2와 native 계좌 관측을 명시한 경우에는 빈 테마 선택으로 시작·저장·재시작할 수 있다. 상위 allocation이나 테마/타점 요구 정책은 기존 테마 조건을 유지한다. 같은 Runtime·Collector·공통 판단·선택 기록을 재사용하고, R4만 실행하면 테마/순위 생산자를 조회하거나 계산하지 않는다. 가격은 기존 승인된 체결 RAM 참조이며 초봉 DB 읽기/쓰기 반복을 추가하지 않는다. 시작에 계좌가 없으면 UNAVAILABLE이며 과거 저장 결과를 현재 승인으로 복원하지 않는다.
+
+A02 상위 비중에서는 가중치가 0인 시장·테마·종목 점수의 결측을 `None`으로 보존하고 요구하지 않는다. 실제 사용하는 점수는 결측 시 차단한다. 테마 집중 위험 검사에 필요한 소속 정보는 계속 필수다. 현재 native 상위 입력이 사용하는 leadership/context 생산자의 품질 경계까지 완전히 분리한 것은 아니며, 현재 study 지원 판정(A03)도 여전히 EV_UNAVAILABLE다. 전체 전략/행동의 자료 registry와 새로운 맥락 생산자 구현 완료를 뜻하지 않는다.
+
+신규11 포함 관련 고유131건 통과: v2 계약/파서·조건부 점수·2/8 공통 RAM/Risk·보호/UNKNOWN/만료·UI·인증 ASGI·빈 테마 시작/저장/재시작·기존 선택 기록/취소 drain·원본 publication 재생을 검증했다. RAM 한 회차 관측/계좌/비교 각1, 조회100회 추가 계산/DB0, R4 단독 테마/순위 조회0을 확인했다. 완전한 기존 결과4개와 ID 동일, compile 및 QueryStore 소비 감사delta0다. 초기 시험 import 경로 누락과 기본 샌드박스 실행 정지는 성공으로 세지 않았고, 기존 사용자 Python과 workspace 임시 DB/가짜 계좌로 최종 검증했다. `httpx.AsyncClient/ASGITransport`를 사용하며 httpx2 설치/위장은 없다. [검증 기록](../data/diagnostics/20261015-r4-policy-capabilities/verification.json).
+
+기능 이해 경로는 기존 policy/판단→RAM adapter/Runtime→API/UI이며 새 owner·engine·Collector·DB writer·relay 계층이 없다. 불변 정책 DTO와 설정 시 의존성 판정만 추가했다. explicit KRX scientific hash는 `ad438956b2335d6f1c7517dc6e1932e8b0c27ab84f13345f2fcf96c4c3f8b617`로 변경되며 기존 패키지를 자동 재표지하지 않는다. legacy None hash는 유지된다. main/HEAD232737d·누적 로컬 미커밋·미배포·build `2026.10.15-r4-policy-capabilities-v1`. 전체 회귀·CI·원격 main·실제 PG/NAS·브로커/장중 수락은 이번 실행 범위가 아니다. 다음은 A04의 검증된 순자산 분모와 주문가능금액 분리이며, A03/A05 및 실제 모의계좌 통합/별도 운용 승인은 남아 있다. 사용자 지정 큰 개발 순서는 유지한다.
+
+이하 설명은 해당 시점의 기록이다.
+
+## 2026-10-15 R4 가격 입력의 테마 의존 제거
+
+종합 대조 A02의 가격 연결을 수정했다. 기존 Collector의 승인된 최신 KRX 체결 참조를 같은 RAM snapshot에 포함하고 R4가 직접 소비한다. R4 종목은 테마 관계가 없어도 기존 snapshot 조회 집합에 유지한다. 초봉 이력/테마 연속 창을 단일 가격의 필수 조건으로 쓰지 않으며, 구독 승인·source 시작·Collector/전달 gap 이후 관측·가용시각·원래 가격 TTL을 검사한다. 가격의 input_ref는 기존 collector-trade 참조이며 확정 저장/주문 승인이 아니다. 계좌 대사 품질과 가격/전략 맥락 품질을 구분한다.
+
+테마 제거와 빈 초 이력의 2/8 Shadow에서 순수 R4 비교가 가능하고 한 회차 RAM 읽기/계좌 관측/계산 각1·상태100회 추가 DB/계산0·원본 dirty 상태 동일을 확인했다. native risk-and-thesis 정책의 필수 판단 누락은 계속 BLOCKED다. 신규3 포함 관련26건 통과·[검증 기록](../data/diagnostics/20261015-r4-independent-price/verification.json). 기능 수정은 기존 Runtime 한 파일이며 새 Collector/engine/task/writer/DB 계약/네트워크/주문이 없다.
+
+A01 정책별 required_data_capabilities와 A02 상위 비중의 맥락 요구조건 분리는 아직 남는다. 현재 연구 모델의 양의 지원 판정·순자산/STOP 보호 계약·실제 모의 수락을 이 수정으로 승인하지 않는다. main HEAD232737d·누적 로컬 미커밋·미배포·build2026.10.15-r4-independent-price-v1. 전체 회귀/현재 CI·PG/NAS/장중 수락 미실행.
+
+## 2026-10-14 실제 연구 입력 접근 복구 확인과 v2 재진입 비교 지원
+
+사용자가 접근 복구를 알려준 뒤 두 실제 연구 패키지의 manifest와 TRAIN/VALIDATION4분할을 기존 load_research_input/partition/readiness 함수로 읽기 전용 검증했다. 접근 문제는 해결 확인했으며 로컬 디렉터리·manifest는 정상이다. package hash, 원본 observations/ordinal/revision hash·partition ID/경계를 확인했고 OOS 입력을 열지 않았다.
+
+| 패키지 | TRAIN 관측 | VALIDATION 관측 | 분봉 준비 상태 |
+|---|---:|---:|---|
+| monthly-2024-09-to-2026-01-clockfix-v2 | 181,708 | 63,218 | READY |
+| multi-period-2024-2026-stocks-pairs-v4 | 14,976 | 16,541 | READY |
+
+총276,443관측(분봉276,423·역사 후보 모집단20)이다. 실제 데이터는1분봉/후보 복원이며 당시 TOP20 관측이 아니고 theme snapshot은 모두0이다. 기존 historical-context 변환으로 첫 원래 bar cut을 확인했으며 D2/D5 context가 없는 상태를 그대로 보존했다. 파일 무결성/분봉 READY를 당시 공통 맥락·통계적 독립성·현재 R4 적용 승인으로 바꾸지 않는다. [실제 입력 감사](../data/diagnostics/20261014-real-r4-input-audit/real-input-audit.json).
+
+별도의 통제 연구 시험으로 기존 native v2 reader의 REENTER 지원을 연결했다. 기존 registered family/Paper/ResearchRepository가 실제 계산한 선행 매수·전량 SELL 체결과 pending0·빈 포지션·cooldown 상태를 요구한다. 기존 v1 target 가치 adapter의 prefix 읽기 코드를 같은 파일의 공통 helper로 추출해 재사용하고, 원래 빈 계좌 {}와 원래 goal/TTL을 정확히 재생한다. flat HOLD는 검증된 v2 안에서 같은 현금/수량 가치 adapter를 쓰되 HOLD에 target declaration/주문을 만들지 않는다. 짝 경제 상태의 position=None을 보존하며 기존 평균/표준오차·비용 계산·native writer/게시 경로를 사용한다.
+
+이것은 명시 재진입 가설의 과거 Paper 비교다. 통제 시험의 쿨다운 중 명시 목표 적용을 실제 native 재진입/쿨다운 해제 승인으로 해석하지 않는다. 원래 v1 DTO/공개 비교·held HOLD/ADD/REDUCE 의미와 현재 R4 차단을 유지한다. Native RISK_FILL 선행 청산, partial/pending 초기 상태 및 EXIT의 v2 확장은 승인하지 않았다. 새 engine/collector/table/writer/task/실시간 조회가 없다. 기존 과거 목표 TTL 뒤 완결한2case/4run의 REENTER19주 대 flat HOLD 비교는 COHORT_COMPARABLE·평균 순가치-29원이며 현재는 EV_UNAVAILABLE/usablefalse/orderfalse다. [통제 원본 게시](../data/diagnostics/20261014-real-r4-input-audit/controlled-reentry-publication.json).
+
+선행 완전 SELL 증명이 빠지면 HOLD/REENTER4branch 모두 제외하고 전체 cohort를 미확인으로 만든다. 공개 원본 준비는 기존4borrow/SELECT16/COMMIT0·원본 SQLite bytes 동일이며 최초 게시 재생은 DB0이다. 원래 outcome/정책/가용 시각/기한을 덮어쓰지 않는다. 실제276,443행을 이 통제 fixture의 모델 학습 자료였다고 주장하지 않는다. explicit KRX scientific source hash는 코드 변경으로 바뀌며 기존 패키지를 자동 재표지하지 않는다. legacy None hash와 supplied v1 전체 예제/decision ID는 보존한다.
+
+신규3 포함 관련 고유44건 통과, compile·소비 감사delta0·기존 required Windows route/core fingerprint 유지. [검증 기록](../data/diagnostics/20261014-real-r4-input-audit/verification.json). 다음은 현재 R4용 공통 맥락·상위 입력 독립 계보와 native 보호/미체결 후속 정책 근거를 실제 생산자에서 연결하는 작업이다. 없는 과거 테마/초 단위 입력이나 운영 승인을 합성하지 않는다. 사용자③ 전체·④ 실제 모의계좌00/04/REST·잔고·청산/운용 승인 및 현재 R4 적용은 미완료다. 원래00 상위 Position·Risk·Capacity/Liquidity 자동 비중을 유지한다. main/HEAD232737d·누적 로컬 미커밋·미배포·build2026.10.14-position-reentry-study-v2. 전체 회귀/HTTP 전체 묶음·CI·원격main·실제PG/NAS/장중 수락 미실행, catalog 무관 archive5개 보류 유지.
+
+이하 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 자동 목표 HOLD/EXIT 변환 오류 수정과 현재 R4 근거 확인
+
+현재 근거 확인 중, 근거 부족과 별개인 자동 목표 변환 오류를 재현해 수정했다. 계좌 운용 한도가 기존 보유 평가액과 같아 HOLD가 되거나 0으로 줄어 EXIT가 되는 경우, 상위 비중 계산은 정상이나 RAM 변환이 ADD/REDUCE/REENTER 전용 automatic sizing DTO에 HOLD/EXIT를 넣어 ValueError를 발생시켰다. 같은2/8 Shadow 입력에서 HOLD/EXIT4개 실패를 재현했고 REDUCE를 대조군으로 유지했다.
+
+기존 market_theme_shadow_inputs의 하위 요청 생성 한 곳에서 ADD/REDUCE/REENTER는 기존 sizing 요청을 그대로 사용하고, HOLD/EXIT는 기존 명시 수량 계약(actual/0)으로 전달한다. 상위 자동 목표/정책/ref·원래 receipt TTL은 유지하며 조회 만료 때 결과/하위 목표를 함께 제거한다. 사용자 종목별 수동 금액 정책을 추가한 것이 아니다. DTO 허용 범위·과거 study 계약·native Risk/보호/주문 경로를 넓히지 않는다. 새 함수/owner/collector/table/writer/task나 호출 단계를 추가하지 않았고 기능 이해 파일/호출 깊이는 기존과 같다.
+
+신규2 포함 관련 고유52건 통과: 2/8 HOLD·EXIT·REDUCE의 목표/수량/공통상위ref·매수0·계좌borrow1·hot SQLite접근0·만료 제거, v2 HOLD/EXIT에 ADD 연구 scope를 잘못 승인하지 않는 경계, 기존 ADD/비중/수량/게시·기록/취소 drain을 검증했다. 신선한 native 위험 우선, 만료 위험으로 새 보호를 만들지 않는 경계, 8개 Shadow 계산 정지 중 실제 기존 보호 처리(가짜 전송)3건도 통과했다. 현재 R4는 EV_UNAVAILABLE/result=None/orderfalse를 유지한다. 소비 감사delta0·compile·기존 supplied v1 전체 예제/decision ID 동일·자체 required Windows CI/core fingerprint 유지. [검증 기록](../data/diagnostics/20261014-allocation-hold-exit/verification.json).
+
+기존 controlled native 연구 publication을 같은 decoder로 재검증했다: 원래4run·2context의 COHORT_COMPARABLE과 원래 availability/expiry를 보존한다. D2/D5 맥락에는 초 단위 leadership·breakout·시총·상위 EV/출구/stress 현재 지원 근거가 없고, source spec에는 native 위험 한도/미체결 후속 정책이 없다. 현재 맥락/독립 source와 native 보호·후속 모델의 적합성을 승인할 수 없다. [원본 감사](../data/diagnostics/20261014-allocation-hold-exit/source-audit.json).
+
+실제 연구 입력 후보 두 디렉터리(`data/research/historical-development-inputs/monthly-2024-09-to-2026-01-clockfix-v2`, `multi-period-2024-2026-stocks-pairs-v4`)는 기본 샌드박스와 사용자 세션 읽기 전용 재확인 모두 Windows 접근 거부였다. 전체 역사 입력이 없다고 결론내리지 않으며 이 두 폴더 내용/적용 근거 존재 여부는 미검증이다. 읽기 ACL을 바꾸거나 자료를 현재 숫자로 합성하지 않았다. 확인된 DTO 오류와 이 자료 접근/모델 근거 문제를 별도로 유지한다.
+
+다음은 접근 가능한 실제 원본 또는 읽기 권한이 회복된 입력에서 사전 cohort·공통 맥락·상위 입력 계보·native 보호/후속 지원을 확인/생산하는 작업이다. 상위00 Position·Risk·Capacity/Liquidity 자동 비중을 유지하고, 현재 R4 적용 및 사용자③ 전체/④ 실제 모의계좌00/04/REST·잔고·청산/운용 승인은 미완료다. 무관 proof/ML 단계를 자동 추가하지 않는다. main/HEAD232737d·누적 로컬 미커밋·미배포·build2026.10.14-allocation-hold-exit-v1. 전체 회귀·HTTP 전체 묶음·CI·원격main·실제PG/NAS/장중 수락 미실행, catalog의 무관 archive5개 보류 유지.
+
+이하 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 마무리 묶음 3 — 주문 OFF 로컬 통합 검증 종료
+
+고정한 세 묶음의 로컬 검증을 마무리했다. 현재 입력→수량/주문 OFF 계획과 고정 연구 입력→합성 브로커 원장 전체 흐름을 구분한다. 현재 R4는 EV_UNAVAILABLE/result=None/orderfalse이며 양의 현재 R4를 native 주문으로 연결한 성공을 주장하지 않는다. 사용자 순서③ 전체 개발 완료 또는④ 실제 모의계좌 통합/운용 승인 완료는 아니다.
+
+| 로컬 묶음 | 종료 범위 |
+|---|---|
+| 1. 공통 입력 연결 | 기존 현재 관측과 원래 EV/출구/study 참조·cut·TTL 연결 검증 완료. |
+| 2. 모델·보호 경계 | 과거 지원 범위와 현재 미지원 차단, native 보호/목적별 미체결 우선 검증 완료. 현재 모델 적용 근거는 보류. |
+| 3. 주문 OFF 통합 | 고정 입력의 선택→상위 자동 비중→수량→단일 원장 미체결/청산, 현재 RAM 계획/차단·입력 소실·만료·종료 검증 완료. |
+
+기존 시험 모듈 두 개에 통합 시험3건만 추가했다. 관련 고유59건 통과, compile·소비 감사delta0·기존 required Windows CI route/core fingerprint 유지. 생산 코드·호출 깊이·owner/collector/task/table/writer·배포 build는 변경하지 않았다. 현재 RAM8개 Shadow는 같은 선정 범위/상위 goal ref/비중 금액/하위 수량으로 주문 OFF 계획을 대사하고 DB 접근0·계좌borrow1을 확인했다. 현재 R4 미지원, account source 예외 후 이전 계획 제거, 원래 sizing TTL 만료/조회 제거 및 종료 후 게시 거절을 확인했다. 기존 게시 취소 drain과 selected 기록 회귀도 실행했다.
+
+고정 입력 시나리오는 계좌 운용 한도10,000원과 EV/시장·테마·종목/유동성·위험 입력으로 목표를 자동 결정한다. 양의 EV 종목은10주, 음의 EV 종목은 신규0주로 선택되고 하위 수량 결과가 같은 시험 원장의 root quantity/decision ref로 전달된다. 종목별 투자금을 사용자가 직접 지정하는 최종 구조로 바꾸지 않았다. 이 경로는 supplied fixed-input 연구이며 현재 native 모델 적용 승인·성과 검증이 아니다.
+
+같은 원장의 BUY3주 부분체결/취소 후1,010원 재평가에서는10,000원 목표가9주가 되어 잔여6주다. 이전7주 WAIT/REPRICE 근거를 거절하고 별도 명시한 고정6주 근거만 계산한다. UNKNOWN 응답과 재시작은 중복 제출을 만들지 않는다. 이후 익절 WAIT와 보호 CANCEL/REPRICE를 구분하고, 보호 SELL4주 부분체결/취소 확정 후 잔여5주를 다시 계산한다. 완전 체결+신선한 flat/reconciled 계좌일 때만 liquidation_confirmed이며 불완전 대사/미체결은 청산 완료로 인정하지 않는다. 수량/현금은 원장 상세 FILL을 읽는 시험 계좌 producer에서 계산하고 기존 Paper fee ROUND_DOWN을 재사용한다. gross-110원/모의 수수료·세금34원/net-144원·최종현금99,856원·보유0을 손계산과 대사했다. 원장4intent·가짜 submit4/cancel2·실제 브로커 전송0이다. 합성 응답/모의 비용으로 실제 체결·수수료·잔고 수락을 대체하지 않는다.
+
+[검증 기록](../data/diagnostics/20261014-order-off-closeout/verification.json) · [원장 흐름/목표/최종 계좌](../data/diagnostics/20261014-order-off-closeout/offline-ledger-flow.json).
+
+다음 남은 항목은 현재 R4에 필요한 exact 과거 맥락·상위 입력 독립성/source custody·native 보호/후속 모델 지원 근거 확보와 실제 모의계좌00/04/REST·부분체결/잔고/청산 검증 및 별도 운용 승인이다. 없는 과거 사실이나 미지원 모델을 승인 자료로 합성하지 않는다. 원래00 Position·Risk·Capacity/Liquidity 상위 자동 비중 정책을 유지한다. 무관 기능/새 ML 프레임워크/새 proof 단계는 자동 추가하지 않는다. main/HEAD232737d·누적 로컬 미커밋·미배포·build2026.10.14-allocation-input-bundle-v1 유지. 전체 회귀·CI·원격main·실제PG·NAS·장중 수락 미실행, catalog 무관 archive5개 보류 유지.
+
+이하 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 마무리 묶음 2 — 지원·차단/보호 경계 검증, 현재 모델 적용은 보류
+
+고정한 둘째 묶음의 **로컬 지원·차단/보호 경계 검증**을 마쳤다. 현재 R4 모델 적용을 승인한 것은 아니다. 새 생산 코드·엔진·수집·조회·기록·주문 경로 없이 기존 시험 모듈에 동시 실행 회귀 한 건을 추가했다. 8개 Shadow의 실제 공통 allocation 계산을 멈춘 동안 별도 native 계좌 owner의 실제 Collector→Supervisor→Runner 손절 cue와 첫 보호 처리가 진행됐다. 두 시험 owner의 계좌 cut·모델 승인을 혼용하지 않는다.
+
+| 검증 대상 | 현재 판정 |
+|---|---|
+| 사전 동결한 native Paper HOLD·ADD/REDUCE 짝 | 과거 비교 COHORT_COMPARABLE. 음의 수수료 포함 결과도 유지. 관측된 범위의 경험 통계이며 현재 예측/자동 비중 전체 성능 승인이 아님. |
+| 현재 계좌의 R4 | 원래 exact context·상위 입력 독립성/source custody·native 보호/후속 모델 지원 미증명. EV_UNAVAILABLE/result=None/orderfalse 유지. 누락·변형·범위 충돌·만료와 후행 표본 선택 차단 검증. |
+| native Risk·손절·미체결 | Shadow/EV/다음 분봉 완료 전에 보호 cue·wake·첫 가짜 전송 확인. 취소 확정/체결 대사 전 재주문과 UNKNOWN 중복 제출 금지. 매수·익절·보호 정책 구분. |
+
+신규1 포함 관련 고유 **90건** 통과. 새 동시 시험은 R4를 풀기 전에 첫 보호 전송이 1회 진행되는지, 최초 stop quote/요청·수량을 보존하는지, 제출 상태를 청산 완료로 오인하지 않는지 확인했다. 즉시 cue의 connection/SELECT/COMMIT/전송0, 기존 status100회·기한/중복cue100회의 DB0 및 반복10회 COMMIT0 회귀도 통과했다. 이는 불필요한 전체 preflight 반복을 차단하는 경계 검증이며 Runner의 기존 체결/운영 control 주기 조회가 사라졌다는 뜻은 아니다. 소비 감사delta0·compile·기존 required Windows CI route/core fingerprint 유지. [검증 산출물](../data/diagnostics/20261014-model-protection-closeout/verification.json).
+
+다음은 셋째 **주문 OFF 전체 흐름 통합**이다. 현재 R4 미지원은 명시 차단 시나리오로 포함하며, 이를 지원된 현재 R4의 종목 선정/비중/성과 통합 성공으로 표시하지 않는다. 현재 모델 적용 근거 확보와 실제 모의계좌00/04/REST·잔고·청산/운용 승인은 보류 항목으로 유지한다. 원래00의 Position·Risk·Capacity/Liquidity 상위 자동 비중 정책과 수량 하위 기능 구분은 그대로다. bundle 2의 경계 검증 완료를 사용자 순서③ 전체 구현 완료로 표시하지 않는다.
+
+이번 묶음은 시험/문서만 변경했다. main/HEAD232737d·누적 로컬 미커밋, build2026.10.14-allocation-input-bundle-v1 유지, 미배포. 전체 회귀·CI·원격main·실제계좌·실제PG·NAS·장중 수락 미실행. catalog의 기존 무관 archive5개 보류 유지. 기본 샌드박스 비동기 시작은 중단했고 사용자 세션의 완료된 격리 SQLite/가짜 계좌 시험만 통과로 집계했다.
+
+이하 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 개발 마무리 — 입력 연결 묶음 완료·다음은 적용/보호 검증
+
+사용자가 종료 시점을 요청한 뒤 현재 사용자 순서③의 개발 마무리를 다음 세 묶음으로 고정했다. 입력 연결·원본 근거 참조의 구현과 모델 적합성/독립성 검증, 실제 운용 승인을 구분한다. 범위 밖의 새로운 기능·광범위 source 수집/ML/통계 보정 요구를 이 묶음에 자동 추가하지 않는다. 현재 쓰는 paired empirical EV는 학습 예측기가 아니며, 실제 학습/선택/검증 모델을 사용하는 경우의 계보와 기존 후보 모델 지원 검증을 생략한다는 뜻은 아니다.
+
+| 묶음 | 개발 상태 | 종료 기준 |
+|---|---|---|
+| 1. 현재 입력·원본 근거 연결 | **구현/관련 검증 완료** | 기존 현재가/시총·대금/변동성·시장/테마/종목·계좌Risk와 EV/출구/study 원래 참조를 동일 cut에 연결. 누락/불일치/만료는 현재 입력으로 인정하지 않고 공통 소비·기록 횟수를 보존. |
+| 2. 현재 적용·보호 정책 검증 | **지원·차단/보호 경계 검증 완료 · 현재 모델 적용 보류** | 명시된 지원 범위의 판단 결과, 범위 밖/충돌/만료의 EV_UNAVAILABLE, 원래 sampling·학습/선택/검증 계보 및 native Risk/보호/미체결 후속 우선 정책을 함께 검증. 입력 연결 완료를 모델 승인으로 사용하지 않음. |
+| 3. 주문 OFF 전체 흐름 통합 | **다음: 미지원 모델 차단 포함** | 종목 선정→상위 자동 비중→하위 수량→주문 계획→미체결/청산까지 공통 경로를 한 통합 시나리오로 대사하고 입력 부족/실패/종료를 검증. |
+
+실제 모의계좌 활성/전송·00/04/REST/잔고/청산, NAS/장중 수락과 별도 운용 승인은 위 로컬 개발 완료와 구분한다. unsupported 입력/모델이 실제 운용 가능한 자료로 준비됐다고 주장하지 않는다. 전체 종료 시간이나 다음 사용자 메시지 수를 보장하지 않는다.
+
+기존 current RAM allocation의 이미 계산된 facts/account·Risk refs와 typed EV/출구 모델 및 재검증한 native source/study refs를 dynamic-allocation-input-bundle/v1으로 한 번 동결했다. v2만 선택 field를 추가하고 v1 출력/수치/ID는 보존한다. R4 각 goal은 같은 bundle_ref를 공유한다. source refs는 원래 것 그대로이며 원래 account/quote/model availability와 expiry 최솟값을 갱신하지 않는다. 지원되지 않는 source/누락/차단된 cut은 INPUTS_UNAVAILABLE, 갖춰진 현재 cut/원래 보고 근거는 INPUTS_BOUND다. 두 경우 모두 model_application_verifiedFalse·orderfalse이며 R4 현재 적용은 계속 EV_UNAVAILABLE다.
+
+새 engine/collector/DB read/table/writer/task나 모델 재생·시장 계산은 없다. 현재 EV 추정 방법을 paired_empirical_incremental_portfolio_delta/v1/trained_predictor_usedFalse로 기록하고 학습 모델 계보를 만들어내지 않는다. Native raw/custody와 독립성·조건별 모델 지원은 다음 묶음의 미검증으로 유지한다. raw facts/EV outcome arrays를 재복사하지 않고 현재 facts의 hash와 원래 모델/입력 refs hash/count를 사용한다.256KiB budget 초과 시 작은 unavailable 사유만 제공하고 이미 계산한 비중/목표/quality/lease를 바꾸지 않는다. 조회 만료 때 현재 bundle과 goal을 함께 제거한다.
+
+신규6 포함 관련17건·기존 v1 전체 예제/decision ID 동일·소비 감사delta0·compile 및 자체 CI 등록/core fingerprint를 확인했다. 격리2/8 Shadow의 Collector/계좌/입력bundle/상위 계산 각1·현재시장1·DB/COMMIT/주문0, status/중복100회 추가 read/build/replay/evaluation0이다. bundle2236bytes·평균 생성0.1377/0.1795ms, cold frame10.647/9.301ms이며 운영 지연 수치가 아니다. 명시 선택 기록은 기존 upsert 한 번/COMMIT1·다른 입력변화 없는 반복0이며 새 저장 경로가 없다. 기록은 selected_latest_transition의 한 latest 진단이고 전체 역사 capture가 아니다. 전체회귀/새bundle HTTP/실계좌·PG/NAS·장중/CI/원격main은 미검증이다. catalog 기존 archive5 보류 유지. build2026.10.14-allocation-input-bundle-v1·main/HEAD232737d 로컬 미커밋·미배포다. [86단계](AI_TRADING_SYSTEM_REDESIGN.md#86-개발-마무리-범위-고정과-공통-입력원본-근거-묶음)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 사용자 순서 ③ — 과거 순위·테마 맥락의 native 연구 연결
+
+기존 FrozenResearchDataset의 D2 순위 관측과 D5 테마 스냅샷을 과거 case의 원래 decision cut에서 동결해 native Paper 연구 명세와 기존 POSITION_STUDY_CASE proof에 선택 연결했다. 현재 테마를 과거에 붙이지 않으며 future availability/effective time·다른 dataset/symbol/case·실제 입력과 다른 내용·변형된 theme hash를 거절한다. 기존 연구 실행·목표·체결·값 adapter·writer를 재사용하고 새 collector/TR/DB query/table/writer/task/Manager는 없다. 기본 None 연구 명세/7-key proof는 유지한다.
+
+같은 case의 HOLD/행동 branch는 같은 historical context를 가져야 완결 짝으로 인정한다. 최초 v2 게시에서 기존 H1 market 판단과 D5 membership 변환을 사용하고 동일 context_ref는 한 번만 재생한다. 이후 공통 RAM goal에는 작은 historical_context_summary(원래 refs/관측 테마/시장 quality/맥락·case coverage)를 공유한다. 기존 기본 v1 및 context 없는 v2 packet/goal 모양은 유지한다. 시장/테마 공통 모듈 두 개를 explicit KRX scientific implementation hash의 dependency에 추가했으며 legacy None hash는 유지한다. 기존 패키지를 새 지문으로 자동 재표지하지 않는다.
+
+이 연결은 기록 당시 관측된 순위·테마의 제한된 provenance다. 초 단위 테마 leadership·성숙 breakout·시총·상위 EV/출구/stress 조건, 학습·선택·검증 계보와 native 보호/실행 후속 정책의 모델 지원은 아직 없다. 현재 조건의 exact statistical support를 승인하지 않는다. current_context_support_verifiedFalse·R4 EV_UNAVAILABLE/result=None/order OFF이며 사용자 순서③ 전체 판단은 미완료다. 원본 DB/capture의 독립 인증과 historical theme/revision 완전성도 not_verified다.
+
+context는 최신100 ranking/100 theme snapshot 및128KiB, 기존 case proof256KiB/전체packet4MiB/event10000/outcome2000/bar2000 예산 안에 둔다. row count로 잘린 이력은 명시 flag를 남기고 bytes 초과는 실행 전 실패한다. 잘린 테마의 이전 seed나 빈 자료를 복원·추정하지 않는다. 새 현재 quote/status 조회가 과거 시각·quality/TTL을 갱신하지 않는다. 보호 Risk/Runner 경로는 이 준비/게시/Shadow 평가를 기다리지 않는다.
+
+신규8 포함 관련 고유53건·소비 감사delta0·기존 supplied v1 전체 예제/decision ID 동일을 확인했다. 과거 case2개의 동결은 DB/판단 계산0·1.439ms, 네 run 준비 전후 borrow4/SELECT16/COMMIT0·원본 bytes 동일이다. 명시 연구 packet163433→262097bytes로 커지고 source read21.380→26.437ms다. 기존 별도 case event 행/COMMIT을 추가하지 않고 기존 명세/metadata payload만 커진다. 격리2/8 최초 게시의 과거시장 계산은 각각2회(case별1회), hot Collector/계좌 각1·현재 시장1·상위1·DB/COMMIT/주문0, status/중복100회 추가read/replay/evaluation0이다. 전체회귀·새 context proof의 HTTP/실제계좌 활성·00/04/REST/잔고/청산·PG/NAS/장중/CI/원격main은 검증하지 않았다. 기존 catalog의 무관 archive 미등록5개는 보류다. build2026.10.14-position-historical-context-v1·main/HEAD232737d 로컬 미커밋·미배포다.
+
+다음은 이번에 없는 종목/타점·EV/Capacity/stress 조건과 모델 학습·선택·검증 계보를 기존 생산자에서 연결하고, 실제 현재 맥락에 대한 모델 지원 및 native 보호/실행 후속 정책의 적합성을 증명하는 것이다. 공통 시장/테마 관측이 붙었다는 이유만으로③ 전체 판단이나 모의계좌 운용 승인을 완료로 표시하지 않는다. 원래00 Position·Risk·Capacity/Liquidity의 상위 자동 비중과②/④ 수락·운용 승인 분리는 유지한다. [85단계](AI_TRADING_SYSTEM_REDESIGN.md#85-기존-연구-입력의-과거-순위테마-맥락-연결)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 사용자 순서 ③ — 상위 EV 원본 출처와 R4 중복 확인
+
+기존 readonly EV 준비에서 원래 연구 명세/report·이벤트를 같은 transaction/borrow로 함께 전달하는 선택 include_source_records=True 경로를 추가했다. 기본 False 결과/원래 outcome·비교·정책 ID와 availability/TTL은 동일하다. 기존 CLI 입력의 명시 옵션으로 native_source_publication을 준비하고 기존 v2 allocation 게시/공통 RAM 경로에서만 원래 결과와 재생 대조한다. 새 DB 읽기·writer/table/collector/계좌/TR/task/Manager 없음.
+
+같은 기존 native source 검증기를 EV와 R4 study가 재사용한다. run/input manifest hash·개발 role/범위·보고된 final 제외·이벤트 content/time/정수·원래 endpoints·outcome/source receipt 전체를 확인한다. 4MiB·전체 event10000/outcome2000/bar2000 예산은 유지한다. v2에서 원본 proof가 명시됐으면 null/변형/다른 receipt는 거절하고 기존 활성 슬롯/세대는 유지한다. proof가 없는 기존 v1/v2는 지원되지 않은 계보를 합성하지 않는다.
+
+재검증한 보고 출처끼리 run·입력 revision hash·warmup을 포함한 선언 기간·outcome 공유를 확인해 현재 goal에 선택 allocation_lineage를 연결한다. 격리 시험의 서로 다른 run/input hash도 선언 기간16쌍이 겹쳐 REPORTED_OVERLAP으로 표시했다. 기간 끝 경계는 보수적으로 포함한다. REPORTED_DISJOINT도 원시 revision 목록·상위 모델 학습/선택/검증 계보·독립 source custody가 없으므로 independence_verified=False다. 보고된 중복 진단을 실제 통계적 독립성 승인으로 바꾸지 않는다. 과거 exact 시장/테마 context와 native 보호·실행 후속 정책의 모델 지원은 아직 미증명이므로 R4 EV_UNAVAILABLE/result=None/order OFF, 사용자 순서③ 전체 판단은 미완료다.
+
+신규7 포함 관련 고유38건·소비 감사delta0·기존 supplied v1 전체 예제/decision ID 동일을 확인했다. 명시 네 run 준비는 변경 전후 SELECT16/COMMIT0·borrow4·원본DB bytes 동일이다. 격리2/8 Shadow는 Collector/계좌 각1·상위1·DB/COMMIT/주문0, status/중복100회 추가 read/replay/evaluation0이다. 재생은 최초 게시 때만 수행하고 실시간에서는 동결한 작은 계보 진단만 복사한다. 실제 CLI opt-in/default와 기존 v1 게시/해제/drain을 실행했다. 새로운 proof의 인증 HTTP→실제 broker 활성/전송·00/04/REST·잔고/청산·PG/NAS/장중/CI/원격main은 검증하지 않았다. 전수 회귀 없음, catalog의 기존 과거자료 미등록5개는 보류다. build2026.10.14-position-ev-lineage-v1·main/HEAD232737d 로컬 미커밋·미배포다.
+
+다음은 기존 source가 관측 당시 공통 시장/테마/종목 context와 상위 EV 모델의 학습·선택·검증 계보를 실제로 생산할 수 있는 경로를 확인·연결하고 native 보호/실행 정책 지원을 증명하는 것이다. 현재 숫자나 서로 다른 run 이름만으로 과거 상태/독립성을 인정하지 않는다. 원래00의 상위 Position·Risk·Capacity/Liquidity 자동 비중 정책과② 모의계좌 수락/④ 전체 통합·운용 승인 분리는 유지한다. [84단계](AI_TRADING_SYSTEM_REDESIGN.md#84-상위-ev-원본-출처-재생과-r4-연구-중복-확인)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 사용자 순서 ③ — native Runner 체결·보호 상태 RAM 연결
+
+기존 Runner가 실제 반영 체결로 유지하는 가중 진입가·잔여 수량·최초 보유 시각, 등록 family/parameters/session/implementation identity, 원래 보호 요청·session clock·native Risk 한도를 기존 계좌 RAM 관측 한 번에 연결했다. 별도 원장 조회·TR·DB/COMMIT·저장/계산 엔진이나 task를 추가하지 않았다. 기존 기본 PositionAccountObservation 모양은 보존하며 현재 등록 owner의 정합성이 확인된 경우에만 선택 subtype의 native-position-runner-state/v1을 제공한다. 주문 권한은 false다.
+
+82단계의 '원가·기간/전략 상태가 없다'는 표현을 바로잡는다. Risk의 owned_entry_prices와 Runner의 StrategyState/opened_at는 이미 존재했으며 당시 현재 비교 경로에 전달되지 않았던 것이다. 이번 연결은 그 사실의 관측을 해결한다. 보호·실행 후속 정책이 연구 모델과 동등하다는 증명, 과거 공통 시장 맥락과 상위 EV 독립 lineage는 아직 생산되지 않았다. 등록 family/parameters/session/implementation hash가 맞는지 확인하더라도 그 추가 정책 지원을 인정하지 않는다. 현재 R4는 계속 EV_UNAVAILABLE/result=None/order OFF이고 사용자 순서 ③ 전체 판단은 미완료다.
+
+원장 high-watermark·Risk 원가/수량·계좌 cut·run/revision/path와 owner registry/계좌 epoch를 확인한다. 체결 반영 중·오류/동시 writer·복사 중 상태/보호/session 변경·복구/종료 시에는 추가 사실을 버린다. writer metadata lock은 I/O 밖의 짧은 경계에만 두고 getter는 기다리지 않는 lock 검사로 종료한다. 기존 native Risk 보호 callback은 이 lock이나 Shadow/LLM/다음 봉을 기다리지 않는다. 최초 보호 시각·최초 quote·예산·자식 주문 ID를 다시 만들지 않는다. 관측 조회와 미변경 fill read로 state availability를 갱신하지 않는다.
+
+신규 11건 포함 관련 고유 98건·소비 감사 delta0·기존 supplied v1 전체 예제/decision ID 동일을 확인했다. 격리 native getter100회는 원장/DB/COMMIT/주문0, 평균0.1127ms이며 원래 상태/availability가 같다. 2/8 Shadow 모두 Collector/계좌 RAM 각1·native getter1·상위 계산1·원장/DB/COMMIT/주문0, status100회 추가 계좌 조회/계산0이다. 동일 시장 입력 cache 재사용 frame3.737/3.814ms이고 cold baseline11.244/9.499ms와 cache 조건이 다르므로 실운영 지연 개선으로 일반화하지 않는다. 실제 app 계좌 활성 HTTP→broker 전송, 실제 00/04/REST·부분체결/잔고/청산, PG/NAS/장중·CI/원격 main은 검증하지 않았다. 전체 회귀 없음, catalog의 기존 과거자료 미등록5개는 별도 보류다. build2026.10.14-native-position-state-v1·main/HEAD232737d 로컬 미커밋·미배포다.
+
+다음은 기존 연구 source에서 과거 공통 context/상위 EV 입력·검증 lineage와 native 보호/실행 후속 지원을 실제 증명할 수 있는 경로를 확인·연결하는 것이다. 없는 과거 사실을 현재 숫자로 채우지 않는다. 원래 00의 상위 Position·Risk·Capacity/Liquidity 동적 자동 비중과 ② 모의계좌 수락/④ 전체 통합·운용 승인 분리는 유지한다. [83단계](AI_TRADING_SYSTEM_REDESIGN.md#83-native-runner-체결보호-상태의-동일-계좌-ram-관측)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 사용자 순서 ③ — v2 공통 RAM 게시/현재 목표·Risk 결합
+
+81단계 native cohort의 원래 run 명세/report·이벤트를 동일 readonly transaction에서 함께 준비하고, 기존 PC client·인증 allocation-models endpoint·selection lock/세대 fence/owned drain/한 RAM 슬롯에 명시 v2로 게시한다. 최초 게시에서 같은 native source/case/cohort 검증기로 재생하고 원본 ID/availability/TTL을 보존한다. 기존 v1 EV/출구 receipt는 그대로 두며 혼합/부분 종목·변형 source/통계·다른 revision은 원자적으로 거절한다. 4MiB/전체 10,000 event·2,000 outcome/bar 예산은 늘리지 않았다.
+
+공통 RAM에서 기존 상위 자동 비중→하위 목표와 같은 계좌 관측/ACK Risk를 공유해 현재 goal/Risk binding을 추가했다. 계좌·run/revision/path·원래 신선도/기한과 정확한 수량·가격/비용·sizing 의미를 확인하고 native Risk가 우선한다. 만료한 하위 목표/현재 결합은 조회에서 제거하며 모델 원래 기한은 갱신하지 않는다. 현재 관측에는 원가·보유기간/등록 전략 보호 상태가 없고 81단계 source에는 과거 공통 context·상위 EV 독립 lineage 증명이 없으므로 EV_UNAVAILABLE/result=None/order OFF다. v2 게시 완료를 현재 R4 사용/③ 전체 완료로 보고하지 않는다.
+
+신규 8건 포함 관련 고유 63건·소비 감사 delta 0·기존 supplied v1 예제/ID 동일을 확인했다. 명시 PC 준비 네 run SELECT 16/COMMIT 0·원본 DB 동일로 81단계와 SQL 횟수가 같다. 격리 2/8 Shadow의 Collector/계좌 RAM 각 1회·상위 계산 1회·DB/COMMIT/주문 0, 100회 중복/status의 추가 조회/계산 0이다. 인증 HTTP/ASGI v2 최초/중복/revision/해제와 기존 v1 게시·취소 drain/보호 우선 회귀를 실행했다. 전체 HTTP 72묶음/전수 회귀·실제 계좌 활성/전송·PG/NAS/장중·CI/원격 main 검증은 하지 않았다. 신규 CI 등록과 core fingerprint를 유지했고 catalog의 기존 과거자료 미등록 5개는 별도 보류다. build 2026.10.14-position-study-publication-v2·main/HEAD 232737d 로컬 미커밋·미배포다.
+
+다음은 기존 native owner/연구 source에 필요한 보호·후속 상태 및 과거 공통 시장 맥락·상위 EV 입력/검증 lineage 증명을 연결하는 것이다. 없는 상태를 합성하거나 현재 숫자만 과거에 붙이지 않는다. 원래 00의 상위 Position·Risk·Capacity/Liquidity 자동 비중 정책과 ② actual 00/04/REST/잔고·청산 수락, ④ 전체 통합/운용 승인 분리는 유지한다. [82단계](AI_TRADING_SYSTEM_REDESIGN.md#82-v2-연구-근거의-공통-ram-게시와-현재-목표risk-결합)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 사용자 순서 ③ — v2 native 짝 모집단/통계 구현
+
+79단계의 두 번째 구현으로 사전 case/HOLD·행동 목록을 각 native run의 시작 명세에 고정하고, 실제 Paper의 HOLD+ADD/REDUCE 결과를 기존 readonly source guard·가치/수수료 adapter와 공통 짝 산술로 비교한다. 원래 outcome·정책/실행 ID와 당시 목표 TTL은 보존한다. 짝의 실제 포트폴리오/전략 상태·source bar/목표가 같아야 하며, case 창은 MARK 끝점을 공유하지 않는다. 선언한 case가 누락·미완료·미지원이면 성공 표본만으로 평균을 만들지 않고 전체 cohort EV를 미확인으로 반환한다.
+
+지원된 완결 모집단의 연구 상태는 COHORT_COMPARABLE다. 이는 역사적 목표 규칙의 조건부 경험 통계이며 상위 자동 비중 정책 전체의 성과나 현재 타점 지원 증명은 아니다. exact context·상위 EV/검증 lineage 독립성·현재 계좌/Risk binding이 아직 없으므로 current_goal_status=EV_UNAVAILABLE/usable_for_current_goal=false/order_authorized=false다. v2 EXIT/flat REENTER와 partial/보호 개입 창의 확대, 명시 v2 인증 게시/공통 RAM 연결은 후속이다. 최종 비중 정책은 기존 00의 Position·Risk·Capacity/Liquidity를 따르는 상위 자동 결정이며 연구 목표금액은 하위 sizing 기능이다.
+
+신규 12건 포함 관련 고유 81건·소비 감사 delta 0·기존 supplied v1 output/ID 동일을 확인했다. 명시 두 case/네 run 준비 SELECT 16·BEGIN/ROLLBACK 각 4·COMMIT 0·원본 SQLite bytes 동일이고 실시간 반복 호출을 추가하지 않았다. 신규 모듈은 기존 연구 profile/required Windows CI에 등록했으나 전체 catalog의 기존 과거자료 미등록 5개는 별도 보류로 남는다. 전수 회귀·HTTP 묶음·실제 주문/활성·PG/NAS/장중 수락·④ 통합/운용 승인·CI/원격 main 확인은 실행하지 않았다. build 2026.10.14-position-study-cohort-v2·main/HEAD 232737d 로컬 미커밋·미배포다. [81단계](AI_TRADING_SYSTEM_REDESIGN.md#81-v2-native-짝-모집단-동결과-공통-통계)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 사용자 순서 ③ — v2 연구 규칙/case native 증명 구현
+
+79단계 인계의 첫 구현을 완료했다. 기존 position_target.py의 typed v2 study/case 계약은 sizing 의미·등록 family/설정·실행/cost/session·실제 scientific hash를 안정적인 study ref에 묶고, 원래 순간별 요청/TTL은 별도로 유지한다. 기존 research_run_identity/execute_research의 명시 opt-in에서 같은 run spec에 study/case를 동결하고, 같은 Paper/원장 writer가 실제 source bar·포트폴리오/전략 상태·목표 계산의 POSITION_STUDY_CASE 증명 한 건을 기록한다. native readonly reader는 기존 source guard와 가치/비용 adapter를 재사용해 원래 outcome/정책 ID를 보존한다.
+
+실제 native 연구 run에서 30초 목표의 180초 완결 결과를 원래 TTL 연장 없이 읽고, 독립 HOLD에는 목표 주문이 없는 것을 검증했다. 이것은 NATIVE_CASE_PROOF이며 짝 모집단/현재 exact context 지원 증명이 아직 없으므로 R4는 EV_UNAVAILABLE/주문 OFF다. 현재 공통 RAM에 v2를 게시하지 않았다. 다음은 자체 독립 native cohort/같은 짝 통계, 이어 기존 인증 게시/공통 RAM 연결이다.
+
+관련 고유 149건(신규 10건)·기존 supplied v1 예제/ID 동일·소비 감사 delta 0을 확인했다. 기존 연구 101건/118.869초와 수량/R4/비중 호환 46건/0.110초, 최종 신규 경계 검증을 실행했고 전체 회귀/기존 HTTP 묶음은 반복하지 않았다. 단일 명시 native 준비는 run borrow 1·SELECT 4·BEGIN/ROLLBACK 각 1·COMMIT 0·원본 SQLite 동일이다. 이 비용은 실시간 반복 판단 비용이 아니다. source_durability=not_verified/order_authorized=false·실제 계좌/PG/NAS/장중 수락·④ 전체 모의 통합/운용 승인은 별도다. build 2026.10.14-position-study-native-v2·main/HEAD 232737d 로컬 미커밋·미배포다. [80단계](AI_TRADING_SYSTEM_REDESIGN.md#80-v2-연구-규칙순간별-case-계약과-native-증명-첫-구현)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+## 2026-10-14 사용자 순서 ③ — R4 연구 정책/판단 TTL 분리 설계 완료
+
+Astra High에서 78단계 다음 연결의 계약을 확정했다. 안정적인 연구 규칙 ID와 원래 순간별 목표/계좌·Risk 증명, 완결 근거 ID를 분리한다. 과거 목표가 당시 유효했다면 TTL 뒤 완결된 outcome을 연구할 수 있지만, 현재 사용에는 새 목표의 원래 짧은 TTL·freshness·정확한 study/수량·가격/비용·실행·후속 정책/지원 상태 검증이 필요하다. 기존 v1 ID/비교 조건을 바꾸거나 기존 표본의 정책을 재표지하지 않고 명시 v2로 추가한다.
+
+**설계만 완료했고 구현은 대기 중이다.** 현재 RAM의 새 동적 목표 R4는 계속 EV_UNAVAILABLE/주문 OFF다. 다음 Sol High 구현은 ① v2 식별·시간/native proof ② 독립 native cohort/공통 짝 비교 ③ 기존 인증 게시/공통 RAM 연결 순서다. 코드 경로와 고정 예제의 30초 TTL/180초 horizon 충돌을 재확인했으며 새 기능 테스트/전체 회귀는 실행하지 않았다. source build allocation-model-publication-v1·main/HEAD 232737d·누적 미커밋/미배포 상태는 유지한다. 실제 모의 수락·④ 전체 통합/운용 승인은 별도다. [79단계 설계·구현 인계](AI_TRADING_SYSTEM_REDESIGN.md#79-동적-목표의-연구-정책과-순간별-판단-유효기간-분리)
+
+## 2026-10-14 사용자 순서 ③ — native 모델 공통 RAM 게시·목표 수량 연결
+
+기존 PC readonly 연구 준비의 배분 EV·전체 출구 Capacity/스트레스 결과를 인증된 POST /api/v1/research/ram-shadow/allocation-models로 기존 공통 MarketThemeShadowRuntime의 RAM 슬롯 하나에 게시한다. 기존 선택 revision/계좌·run/binding/path·정책 내용/종목·가격/현재·검증 수량·동결 cost/horizon·원래 availability/expiry를 결합한다. native 짝 EV 통계와 같은 Paper 출구 시나리오를 최초 게시에서 재생 검증하고, 동일 패킷 재전송/status는 재생·계좌 조회·깨우기·TTL 갱신이 없다. 선택 교체/해제·재시작은 슬롯을 복구하지 않으며 이전 worker가 새 세대 결과를 덮어쓰지 못한다.
+
+기존 Collector/공통 시장·테마/ACK된 계좌 Risk 사실이 유효하면 상위 자동 비중→기존 하위 목표 수량을 공통 frame에서 한 번 계산한다. 가격·계좌/Risk binding·source TTL이 바뀌거나 근거가 부족하면 BLOCKED/미확인으로 남기며 만료한 목표 결과는 조회에 노출하지 않는다. 새 동적 목표 정책의 R4 행동 비교는 자체 완결 모집단이 필요하므로 EV_UNAVAILABLE다. 기존 정책의 EV를 새 정책으로 재표지하지 않는다. PC_READONLY_REPLAY_REPORTED·source_durability=not_verified·order_authorized=false이며 DB 원본/시장 확률·운영 Risk/주문 승인을 뜻하지 않는다.
+
+관련 고유 96건(신규 8건) 통과 후 최종 영향 15건 및 입력/종료 경계 2건을 확인했다. 격리 2/8 Shadow에서 게시 후 Collector/계좌 RAM 각 1회·상위 계산 1회, DB 연결/COMMIT/주문/구독 0이며 중복/status 100회 추가 계산/조회 0이다. 최초 시장 계산은 기존 cache에 공유하고 게시만으로 재계산하지 않는다. 원본 자료 준비의 SELECT 16(EV)/4(출구)·COMMIT 0은 앞 단계의 별도 비용이다. 전체 회귀/기존 HTTP 72시나리오는 반복하지 않았다. 소비 감사 delta 0·기존 supplied v1 예제/ID 동일, 관련 없는 과거자료 catalog 5개 보류 유지다. build 2026.10.14-allocation-model-publication-v1·main/HEAD 232737d 로컬 미커밋·미배포·실제 계좌 활성/주문 없음.
+
+다음 개발은 생성된 동적 목표 정책에 일치하는 독립 native 모집단과 R4 행동 비교의 주문 없는 통합이다. actual 모의 00/04/REST·부분체결/취소·잔고/청산 수락과 ④ 전체 모의 통합·별도 운용 승인은 남는다. ② 운용 수락 대기는 ③ 개발의 선행 조건이 아니다. 아래 단계별 설명은 각 시점의 기록이며 현재 미완료 범위는 이 절을 따른다. [78단계](AI_TRADING_SYSTEM_REDESIGN.md#78-준비된-native-모델의-공통-ram-게시와-상위하위-목표-연결)
+
+## 2026-10-14 사용자 순서 ③ — 전체 출구/스트레스 연구 근거
+
+기존 PaperExecutionEngine의 부분 SELL 원가/잔고/수수료 경로로 전체 잠재 보유의 출구 Capacity·스트레스 연구 시나리오를 구현했다. 참여율·volume haircut·가격 충격·추가 슬리피지·체결 불가 구간/기간은 전부 명시 정책이다. 기존 guarded native readonly reader에서 시장 bar proof 창을 한 번 읽어 재사용하며 WAIT/REPRICE 성과를 청산 근거로 재표지하지 않는다. 모든 서로 다른 시나리오에서 전체 수량이 완료된 경우만 검증 수량까지 근거를 만들고, 부분/불가/누락/미래/비용 만료는 미확인이다.
+
+상위 비중은 실제 보유+pending BUY 전체·가격·비용·출구 horizon·스트레스 값·원래 TTL을 묶으며 pending SELL로 위험 여유를 만들지 않는다. 기존 native EV와 두 출구 근거를 함께 소비하는 순수 주문 없는 계산도 검증했다. 이는 명시한 역사/충격 가정의 연구 결과이며 미래 유동성/확률·실제 청산 보장·Risk/주문 승인이 아니다. 세 producer의 공통 RAM 게시/실시간 계좌 상위→하위 통합은 다음 단계이며 현재 native RAM result=None/BLOCKED는 유지한다. actual 00/04/REST/잔고/청산 수락과 운용 승인은 별도다.
+
+관련 고유 125건(신규 16건) 및 기존 supplied v1 봉인 예제/ID·소비 감사 delta 0 pass. 명시 준비 SELECT 4·COMMIT 0/1 run·원본 DB 동일, 준비된 native EV/출구·스트레스의 pure preview 101회 DB/주문 0이다. 전체 회귀/기존 HTTP 72시나리오는 반복하지 않았다. 관련 없는 과거자료 catalog 5개 보류 유지. build 2026.10.14-full-exit-stress-v1·main/HEAD 232737d 로컬 미커밋·미배포·실제 계좌 활성/주문 없음. [77단계](AI_TRADING_SYSTEM_REDESIGN.md#77-전체-보유-출구-capacity와-명시-스트레스-연구-근거)
+
+## 2026-10-14 사용자 순서 ③ — 배분 EV native 연구 공급
+
+기존 native 연구 원장 reader/PaperExecutionEngine/R4 paired 비교를 재사용해 ADD·REENTER 대 독립 HOLD의 배분 EV를 명시 readonly 준비하는 경로와 기존 preview CLI를 연결했다. 현재가·보유/목표 수량·비용·horizon·완결 TRAIN/VALIDATION 짝·원래 availability/expiry를 묶는다. 순 차이는 추가 매수 대금 기준 Fraction 평균 내림/표준오차 올림이며 calibrated 확률/신뢰구간이 아니다. 상위 비중 계산은 검증된 정확한 BUY 수량만 허용하고 더 큰 비중·부분 현금/위험 수량에 외삽하지 않는다. 불리한 ADD EV를 기존 보유의 EXIT 근거로 바꾸지 않는다.
+
+이 producer는 실시간 루프 밖의 PC readonly 연구 준비다. 현재 공통 RAM에는 게시하지 않았고 전체 출구 Capacity·스트레스 모델도 미공급이므로 native 비중 결과는 계속 None/BLOCKED다. 순수 preview의 supplied Capacity/스트레스를 native 검증으로 보고하지 않는다. 다음은 기존 공통 실행 모델에 전체 청산/스트레스 연구 시나리오를 명시해 크기·시간·유동성·비용 범위를 검증하고, 세 근거의 RAM 게시와 계좌 상위→하위 통합을 연결하는 것이다. 실제 모의 00/04/REST 수락·운용 승인은 별도다.
+
+관련 고유 118건(신규 12건)·최종 통계 영향 49건·기존 RAM/API 14건 및 봉인된 supplied v1 예제/decision ID 대조·소비 감사 delta 0 pass다. readonly 부하는 76단계 및 data/diagnostics/20261014-allocation-native-ev에 기록한다. SELECT 16·COMMIT 0/4 run을 명시 준비에서만 수행했고 pure preview 101회 DB/주문 0·원본 DB 동일이다. 전수 회귀·실제 주문·계좌 활성·배포·commit/push 없음. build 2026.10.14-allocation-native-ev-v1·main/HEAD 232737d 로컬 미커밋이다. [76단계](AI_TRADING_SYSTEM_REDESIGN.md#76-배분-ev의-native-연구-공급과-검증-크기-제한)
+
+## 2026-10-14 사용자 순서 ③ — 공통 RAM 사실/native Risk 연결
+
+2026-10-14 동적 비중의 실제 사실 입력을 기존 공통 Shadow runtime에 연결했다. 명시 position_allocation 선택에서 승인 KRX RAM 현재가/0B 시총·기존 창 대금/관측 종가 RMS·공통 TOP20/테마/종목 맥락과 ACK된 native 계좌/Risk를 한 번 빌린다. 기존 R4 비교와 같은 계좌 read를 공유하고 변환은 같은 owned drain에서 수행해 native 손절을 기다리게 하지 않는다. 조회/재시작으로 원래 source TTL을 갱신하지 않는다.
+
+현재 배분용 독립 EV·전체 출구 Capacity·스트레스 모델 producer는 없으므로 result=None/BLOCKED다. 미체결 EV/leadership 점수·관측 대금을 필요한 근거로 재표지하지 않으며 목표 0을 합성하거나 새 주문을 승인하지 않는다. stage74의 native 전체 목표 계산이 완료된 것으로 보고하지 않는다. source_durability=not_verified/order_authorized=false 유지다.
+
+기존 119건/최종 신규 14건=고유 133건·기존 HTTP 72시나리오/실제 lifespan·health/build·소비 감사 delta 0 pass. 2/8 Shadow 모두 Collector RAM 1·계좌 RAM 1·시장 계산 1·입력 변환 1, DB/COMMIT/추가 주문·구독 0; 조회 100회 추가 계산 0이다. 기존 전체 회귀는 반복하지 않았으며 과거자료 catalog 5개 보류 유지다. 다음은 세 모델의 크기/시점/비용/horizon 결합과 계좌 전체 상위→하위/R4 주문 없는 통합이다. 실제 모의 수락/운용 승인은 별도다. build dynamic-allocation-ram-v1·HEAD 232737d 미커밋, 이번 작업에서 배포/계좌 활성/실제 주문은 하지 않았다. [75단계](AI_TRADING_SYSTEM_REDESIGN.md#75-동적-비중의-공통-ram-사실과-native-계좌-risk-연결)
+
+## 2026-10-14 사용자 순서 ③ — 동적 비중 계산 시작
+
+2026-10-14 실제 모의 수락 준비를 인증 GET/선택 NAS 릴리즈 지문으로 확인했다. NAS recorder-shared-10m-v1은 관련 5파일이 개발 소스와 다르고 mock 계좌는 MANUAL·automatic control/Runner 없음·계좌별 주문 OFF·native 원장 0건이다. 실제 주문/취소·활성/설정·배포 변경은 하지 않았다. ② actual 00/04/REST·부분체결/잔고/청산 수락은 남긴다.
+
+사용자 지시대로 운영 수락 대기와 개발을 분리해 ③ 동적 비중의 첫 주문 없는 계산을 구현했다. 기존 position_target.py에서 계좌 운용 한도/현재 현금·보유·미체결을 바탕으로 시장·테마·종목 강도/순 EV·불확실성·시총·거래대금·출구 수용량·변동성·스트레스 위험으로 자동 목표 비중/금액을 결정하고 기존 하위 수량/비용 정책과 preview CLI를 재사용한다. 미체결 매도에 현금/위험 여유를 주지 않고 겹치는 테마·현재/제안 포트폴리오를 모두 검사한다. 수동 종목 투자금 입력·임의 운용 계수/한도·신용 활성 없음. supplied 실험용 정책으로 native 입력/운영 승인은 아니다.
+
+관련 고유 103건(신규 21건)·기존 HTTP 72시나리오/실제 lifespan·health/build·CLI 동일 결과·소비 감사 delta 0 pass. 200종목 controlled 계산 33.337ms·DB/COMMIT/주문 0, source TTL 갱신 없음. 전체 회귀/직전 보호 묶음은 반복하지 않았다. 다음은 실제 공통 RAM의 시장/테마·EV·Capacity·native Risk 입력 연결과 R4 계좌 전체 목표/행동 비교의 주문 없는 통합이다. ② 수락 준비 대기는 ③ 개발의 선행 조건이 아니다. build dynamic-allocation-shadow-v1·HEAD 232737d 미커밋·미배포다. [74단계](AI_TRADING_SYSTEM_REDESIGN.md#74-실제-모의계좌-수락-준비-확인과-상위-동적-비중-계산-시작)
+
+## 2026-10-14 사용자 순서 ① 보완 — 즉시 종목 손절
+
+2026-10-14 기존 동결 unfilled execution 정책을 선택한 자동 모의 Runner에 즉시 종목 손절 producer를 연결했다. 상세 FILL 기반 owned_entry_prices·기존 정수 이동평균과 승인 후보 stop_loss_bps를 사용하고, Collector 승인 KRX RAM→기존 Supervisor→Runner의 가격 비교/한 번 wake로 봉·Shadow·LLM/EV를 기다리지 않는다. 최초 손절 가격·시점은 고정하고 현재 계좌 ACK/상세 체결·owner/control/native QUEUED에서 원가·수량·candidate/hash/정규 한도를 재검사한다. 일반 cue는 review 전용, UNKNOWN/취소 미확정의 중복 제출 금지는 유지한다. 오래된 계좌는 기존 recovery queue로 대사하고 가격 만료는 BLOCKED/운영자 주의다.
+
+관련 280건(신규 18건)/101.808초와 기존 HTTP 72시나리오·실제 ASGI lifespan/health/build pass. 정상/손절 중복 1,000틱 각각 SELECT·COMMIT·전송 0, 최초 RAM cue 0.395ms이다. 현재 계좌 ACK 후 첫 보호 승인/원장/가짜 전송 전체는 SELECT 80·COMMIT 18·13.587ms이며 보호 대기 10회 SELECT 20·COMMIT 0이다. 실제 REST/시장/NAS 지연은 별도다. 전체 회귀는 반복하지 않았고 소비 감사 delta 0, 과거자료 catalog 5개 보류 유지다.
+
+실제 계좌 활성/전송·00/04/REST·PG/NAS/장중 수락과 운용 승인은 남는다. 다음은 실제 모의 부분체결/미체결/잔고 수락, 이어 원래 Position·Risk·Capacity/Liquidity의 상위 동적 비중·전체 통합 순서다. 운용 승인 대기는 동적 비중 개발을 막지 않는다. build 2026.10.14-immediate-native-stop-v1·main/HEAD 232737d 미커밋·미배포다. [73단계](AI_TRADING_SYSTEM_REDESIGN.md#73-승인된-collector-ram-가격의-즉시-종목-손절과-native-보호-exit)
+
+## 2026-10-14 사용자 순서 ② — PC native 원장 결과의 인증 게시
+
+PC CentralContentClient의 명시 prepare_native_unfilled_population으로 기존 readonly 연구 원장/공통 재생을 한 번 검증하고, 같은 클라이언트의 publish_native_unfilled_population이 준비된 패킷을 기존 인증 POST 경계로 보낸다. 기존 mock 라우트·Supervisor·Runner의 계좌 lock/owned drain/단일 RAM 접수를 재사용한다. 서버에 DB 경로를 보내거나 계좌를 활성화하지 않는다.
+
+원래 native 결과의 최대 available_at과 내용 hash를 고정하며 HTTP 재전송/계좌 ACK/재시작으로 갱신하지 않는다. 계좌·profile/spec/run/control·원주문/known child·동결 비용/horizon/표본·같은 native 정책/모델·완결 짝/가치·1MiB/200창/10,000 event budget을 검사한다. 새 패킷에는 현재 native RUNNING control 한 번을 확인하고 같은 패킷의 inert 중복은 새 조회/깨우기/슬롯 교체가 없다. 등록 전환과 RAM 교체는 기존 input lock 안에서 검사한다. 실제 주문/취소는 계속 기존 현재 계좌/Risk/브로커·native owner/control transaction 검사를 통과해야 한다. 보호 요청은 source decode를 기다리지 않고 STOP 직후 아직 Runner poll 전인 새 패킷도 차단한다. 상태에는 원래 출처 요약만 optional 노출하며 raw outcomes/출처를 checkpoint로 복구하지 않는다.
+
+관련 153건/145.093초 통과 후 최종 변경 영향 신규 15건/28.666초를 확인했다(고유 154건). 기존 start/stop/resume/status HTTP 72시나리오를 지원되는 httpx ASGITransport와 실제 lifespan에서 원래 baseline과 대조했고 health/build도 확인했다. 전수 회귀/기존 통과 묶음을 반복하지 않았고 httpx2를 설치하거나 import를 위장하지 않았다. 격리 SQLite/ASGI에서 첫 새 게시 SELECT 1·COMMIT 0·7.143ms, 중복 HTTP 100회 SELECT 0·COMMIT 0·257.041ms이다. 추가 취소/제출 0·한 RAM 슬롯/가용시각·source generation 유지이고 실제 공통 실행 결과 두 짝을 기존 계산에 연결해 순 차이 -12원을 확인했다. PC 자료 생성/읽기·계좌 Risk 생산·실제 네트워크/시장 지연은 이 측정 밖이다. 소비 감사는 367 reviewed/37 후보/107 계약/60 forwarding pass이며 기존 repository의 native control bound reference 1개만 검토·baseline에 추가했다. 별도 과거자료 catalog 5개 보류 유지다. [72단계](AI_TRADING_SYSTEM_REDESIGN.md#72-pc-native-원장-결과의-인증-게시와-기존-runner-ram-접수).
+
+PC의 readonly/replay 검증 보고이며 서버의 시장 원본/호가/체결 확률/취소 지연 승인이 아니다. PC_READONLY_REPLAY_REPORTED·source_durability=not_verified·order_authorized=false를 유지한다. native v1은 ACCEPTED 분봉 자료만 지원하고 현재 PARTIALLY_FILLED/CANCELLED/UNKNOWN에서는 EV 미확인(native_unfilled_model_state_unsupported)이며 이전 cohort를 재표지하지 않는다. 실제 00/04/REST·PG/NAS/장중 수락·부분체결/CANCELLED 모집단/취소 지연 보정은 남는다. 프로그램 호출 경로를 구현했으며 UI 버튼/자동 연구 예약·게시 스케줄러는 추가하지 않았다. 새 writer/table/collector/Manager/독립 background task 없이 기존 입력/제어 소유자를 사용한다.
+
+build `2026.10.14-unfilled-source-publication-v1`, main/HEAD `232737d` 미커밋·미배포/계좌 미활성이다. 다음 우선 보완은 종목별 즉시 native 손절 producer이며 기존 Risk→Runner 보호 경로를 재사용한다. 이후 실제 모의 00/04/REST 수락을 별도 다루고 ③ 원래 Position·Risk·Capacity/Liquidity 상위 동적 비중 → ④ 모의 통합/별도 운용 승인 순서를 유지한다. 운용 승인을 동적 비중 개발의 선행 조건으로 두지 않는다. 아래 71단계 이하의 publisher 미연결은 당시 상태다.
+
+## 2026-10-14 사용자 순서 ② — 공통 지정가 연구 실행·native 결과 읽기
+
+기존 PaperExecutionEngine에 명시 unfilled_action_plan의 SUBMIT→WAIT/REPRICE 지정가 연구 분기를 연결하고 같은 연구 원장 writer를 재사용했다. native readonly 개발 구간/최종평가·내용 hash/cut/예산 guard 뒤에 같은 실행기로 가격·현금·예약·비용·취소/재주문 순서를 재생해 UnfilledActionOutcome을 생성한다. 기본 next-open 실행과 기존 HOLD/EXIT/자동 목표 자료는 유지한다.
+
+현재 v1은 KRX 완결 분봉의 이후 시가·슬리피지·전체 수량/거래량 조건만 사용하는 연구 모델이다. SUBMIT으로 실제 paper pending owner를 만들고 두 분기는 같은 초기 상태/기한·원래 가격·목표·입력/비용/코드 출처에 결합한다. 가격 접촉만으로 체결하지 않고 취소 확정 사건을 새 paper 주문 앞에 기록한다. 초기 평가는 분봉 종료시각, 취소/제출은 실제 입력 가용시각이므로 판단 시각을 소급하지 않는다. 매수·익절 매도 ACCEPTED 시나리오만 native 결과로 생성한다. 취소 지연 0/전체 체결은 명시 연구 가정이며 실제 broker 확인을 대체하지 않는다.
+
+관련 6모듈 고유 266건의 근거를 대조했다. 초기 제한 실행의 성공 99건 뒤 중단하여 잔여 묶음 120건/135.554초와 미실행 64건/24.719초만 완료하고, 최종 변경 영향 신규 19건/43.142초를 확인했다. 중복은 고유 건수에서 제외하며 전체 회귀는 반복하지 않았다. 초기 신규 fixture는 폐쇄 거래/평일 요건을 충족하도록 수정했고 운영 guard를 완화하지 않았다. 격리 SQLite의 4개 source run/2개 짝 읽기는 SELECT 16·COMMIT 0·BEGIN/ROLLBACK 각 4회·12.657ms다. 이는 완료된 오프라인 연구 원장 읽기이며 실시간 사건/독립 계좌 producer/실제 시장 지연 측정이 아니다. Runner와 order_lifecycle 소스 SHA는 70단계와 동일하며 새 실시간 DB/TR/task는 없다. ASGI health/build·소비 감사 pass(367/36/107/60, delta 0). [71단계](AI_TRADING_SYSTEM_REDESIGN.md#71-기존-연구-실행기의-지정가-분기와-native-미체결-결과-읽기).
+
+실시간 원장 입력 게시 caller·CANCELLED/부분체결 모집단 생성은 후속이며, 실제 호가 순서·취소 지연·부분체결 확률·시장 원본 lineage는 미검증이다. source_durability=not_verified와 주문 승인 false를 유지한다. 실제 00/04/REST·종목별 즉시 native 손절 producer/수락·PG/NAS/장중 운용 승인도 남는다. 프로그램 API의 opt-in 계획/명시 원장 선택이며 자동 연구 예약/실시간 공급은 없다. 모델 근거는 controlled 분봉을 기존 Runtime/SQLite에 실제 실행한 결과이고 실제 시장 모집단 수락은 아니다. 새 schema/table/writer/Manager/수집기 없이 오프라인 분기별 재생 proof를 기존 execution event JSON에 저장하므로 연구 기록 건수/저장량은 증가한다. 시장자료 수집을 재사용하며 오프라인 branch별 모델 입력 proof의 저장량 증가는 별도로 기록한다.
+
+build `2026.10.14-unfilled-native-population-v1`, main/HEAD `232737d` 미커밋·미배포/계좌 미활성. 별도 과거자료 catalog 5개 보류는 유지한다. 다음은 검증한 원장 결과를 기존 bounded RAM 접수에 한 번 게시하는 연결과 미지원 상태의 명시 처리다. 이후 ③ 원래 Position·Risk·Capacity/Liquidity 동적 비중 → ④ 전체 모의 통합/별도 운용 승인 순서를 유지하며, 운용 승인을 비중 개발의 선행 조건으로 두지 않는다. 아래 70단계 이하의 생성기/reader 없음은 당시 상태다.
+
+## 2026-10-14 사용자 순서 ② — WAIT/REPRICE 입력·비용·익절 판단 연결
+
+기존 공통 짝 비교에 별도 UnfilledActionOutcome(WAIT/REPRICE) 입력 계약을 연결했다. HOLD/EXIT를 변환하지 않고 같은 초기 상태/시각·주문 상태·수량/가격/원래 목표·비용 모델·기간의 완결 자료만 비교한다. 비용 차이를 한 번만 차감한 평균/짝 표준오차를 기존 UnfilledRepriceEvidence로 전달한다. 선택된 동결 명세의 allow_supplied_paired_mock_evidence가 true인 경우만 하나의 bounded RAM 모집단을 받으며 1MiB/10,000행 상한·내용/순서/범위를 검사한다. **실제 모집단 생성기·native 출처 검증 reader는 아직 없고, 현재 명시 공급된 실험 자료는 source_durability=not_verified다.** 자료가 없으면 EV 미확인, 실제 미래 기대수익/운용 승인이 아니다.
+
+현재 비용은 기존 동결 후보 execution_model의 유효기간/출처가 있는 모델을 재사용하며 실제 비용 완결 여부는 현재 계좌 Risk에서 계속 검증한다. 익절의 대기는 원래 승인 EXIT와 기존 등록 전략의 실제 새 bar HOLD/EXIT 판단을 사용한다. 별도 추세 엔진이나 틱별 재분석은 없고 실제 FILL 상태를 변경하지 않는다. 전략이 알려진 손절/기한 EXIT를 내면 기존 보호 요청으로 먼저 처리하며 계좌 native Risk의 빠른 경로는 분봉/EV를 기다리지 않는다. 모든 종목별 즉시 손절 trigger를 완성했다는 뜻은 아니다.
+
+새 주문의 판단 cut은 실제 ACK Risk 관측에 맞추고 EV/가격/판단 발표가 뒤면 원래 입력/가격을 보존해 기존 복구 큐를 한 번 요청한다. 같은 업무 내용인 건강한 ACK도 이 대기만 깨운다. 보호 취소는 원래 현재 가격/REST 직전 재검증을 유지해 새 EV 정렬을 기다리지 않는다. 취소 전 모집단은 CANCELLED 이후 판단에 쓰지 않으며 현재 상태의 새 짝 입력이 필요하다. 원래 목표/기한/예산·UNKNOWN/취소 확정 전 중복 제출 금지를 유지한다.
+
+관련 7모듈 458건/270.028초 중 456건 통과·기존 미확인 표시/보호 가격 준비의 회귀 2건을 수정한 뒤 영향 경계 62건/50.298초 통과(신규 26건·최종 고유 459건). 전수 회귀는 반복하지 않았다. 격리 SQLite·합성 짝 자료/가짜 REST·broker로 익절 WAIT, 취소 한 번, 취소 확정 후 별도 새 자료로 3주/990원 child 한 번과 보호 우선·ACK/wake/복구를 확인했다. 접수 101회 DB 0·첫 사건 짝 계산 1회/유휴 10회 SELECT 20·COMMIT 0이다. 사건 자체 취소 72/16(22.977ms), child 114/18(22.649ms)의 비용은 남는다. 독립 계좌 producer 비용/실제 시장 지연과는 다른 측정이다. [70단계](AI_TRADING_SYSTEM_REDESIGN.md#70-waitreprice-짝-입력동결-비용익절-판단의-공통-연결).
+
+build `2026.10.14-unfilled-paired-inputs-v1`, main/HEAD `232737d` 미커밋·미배포/계좌 미활성. source/ASGI health/build·소비 감사 pass(367 reviewed/36 후보/107 계약/60 forwarding, 변화 0). DB schema/collection/writer/collector·별도 task/Manager 추가 없음. 별도 과거자료 5개 catalog 보류는 유지한다. 실제 계좌 00/04/REST·PG/NAS/장중·전체 회귀/CI·commit/push·활성화는 하지 않았다.
+
+다음 ② 보완은 **실제 WAIT/REPRICE 모집단의 기존 연구 Runtime/원장 기반 생성·native 출처/개발 구간 검증**이다. 종목별 즉시 native 손절과 실제 계좌 수락도 남는다. 이후 ③ 원래 Position·Risk·Capacity/Liquidity 상위 동적 비중 → ④ 모의 통합·별도 운용 승인 순서를 유지하며 운용 승인을 동적 비중 개발의 선행 조건으로 두지 않는다. 아래 기록의 입력 미연결/다음은 당시 상태다.
+
+## 2026-10-14 사용자 순서 ② — 취소 거절 이후 제한된 보호 대응
+
+보호 매도만 마지막 native 취소 응답이 **CANCEL_REJECTED**이고 이후 실제 브로커 확인·전체 계좌/Risk·현재 가격/슬리피지가 검증되면 기존 취소 경로로 다시 요청한다. 새 모의 운용 명세의 maximum_protective_cancel_retries(0–3)·protective_cancel_retry_delay_seconds에 명시한 경우만 허용하며 **기본 0/OFF**와 기존 명세/정책 ID는 유지한다. 취소 응답 불명·승인/확인 대기·응답 유실은 재전송하지 않는다. 취소 확정 전 새 주문과 UNKNOWN 중복 제출도 금지한다.
+
+원주문 계보 전체의 실제 CANCEL_STARTED가 재시도 예산이며 자식 주문·재시작·ACK 유실로 초기화하지 않는다. 같은 native transaction이 현재 거절 ID/시도·계보/동결 정책·현재 Risk/브로커 cut·owner/control을 검증하고 증거를 기존 event JSON에 저장한다. 원래 보호/관리 기한이나 한도 도달은 ESCALATE/운영자 확인이다. BUY/익절은 기존 정책이며 보호 판단은 EV/LLM/분봉을 기다리지 않는다. 기한의 복구 요청은 기존 Monitor 큐에 한 번 합친다.
+
+관련 10모듈 348건/202.691초 중 347건 통과·신규 경합 fixture 입력 오류 1건을 수정한 뒤 신규 19건/17.685초와 마지막 실제 큐 ACK 경계 1건/1.014초, 최종 보호 기한 변조/정상 커서 2건/1.597초 통과(신규 고유 21건). 최종 고유 범위 351건이며 전수 회귀를 반복하지 않았다. default OFF 대비 명시 1회 정책의 첫 취소 거절은 SELECT 74/COMMIT 17로 같고, 이후 실제 재시도 사건은 78/16(19.778ms), idle 10회는 20/0이다. 격리 SQLite/가짜 REST·broker 값이며 독립 계좌 producer 비용과 실제 시장 지연은 별도다. [69단계](AI_TRADING_SYSTEM_REDESIGN.md#69-취소-거절불확실-이후-bounded-보호-대응).
+
+build `2026.10.14-protective-cancel-recovery-v1`, main/HEAD `232737d` 미커밋·미배포/계좌 미활성. source/ASGI health/build·소비 감사 pass(367 reviewed/36 후보/107 계약/60 forwarding, 변경 0). PG는 격리 동일 cursor/row-lock 경로만 확인했으며 실제 PG·모의계좌 00/04/REST·NAS/장중·전체 회귀/CI·commit/push·주문 활성화는 하지 않았다. 별도 과거자료 catalog 미등록 5모듈은 유지한다.
+
+다음 ② 개발은 WAIT-vs-REPRICE 짝 EV/현재 비용·익절 추세 입력이다. 종목별 즉시 손절 native Risk trigger와 실제 계좌 부분체결/잔고/운용 수락도 남는다. 이후 ③ 원래 Position·Risk·Capacity/Liquidity 상위 동적 비중 → ④ 전체 모의 통합·별도 운용 승인 순서이며 실제 운용 승인을 동적 비중 개발의 선행 조건으로 두지 않는다. 아래 68단계 이하의 다음/미연결은 당시 기록이다.
+
+## 2026-10-14 사용자 순서 ② — 운영 Risk 보호 요청의 첫 EXIT 연결
+
+ACK된 native Risk의 **일손실 한도 초과 EXIT_REQUIRED 요청**에서 최신 계좌 전체/상세 체결·run 보유 수량과 승인 KRX Collector 가격으로 첫 보호 EXIT를 생성한다. 일반 caller cue·UNKNOWN/불일치의 RECONCILE_REQUIRED는 검토/대사를 유지한다. 새 native 결정/원래 가격·수량·시각/만료를 기존 checkpoint에 먼저 ACK한 뒤 기존 ENTER/EXIT 승인→runtime→lifecycle→원장 경로로 한 번 제출한다. 비용 조회가 이후 실패해도 확인된 보유 청산은 EV/분봉/LLM/복구 bootstrap을 기다리지 않는다. 가격이 계좌 관측보다 새로우면 그 가격을 보존하고 기존 복구 queue를 한 번 요청한다.
+
+실제 QUEUED transaction에서 고정 workflow/승인·현재 Risk/요청·owner/control·계좌 전체 미종결/UNKNOWN·TTL을 검사한다. proof는 기존 intent JSON의 optional mock_protection_claim에 원자 저장하며 이후 event에서도 유지한다. QUEUED/receipt ACK 유실은 같은 native root와 원래 보호 목적을 복구하고 새 제출을 하지 않는다. 청산 성공은 ACK가 아니라 실제 상세 FILL와 신선한 full account 잔고 0이며 재시작 후 재검증한다. 보호 latch/새 매수 차단은 유지한다.
+
+관련 10모듈 **328건/202.974초** 통과 후 최종 native TTL/청산 신선도·close 경계 포함 신규 **16건/3.695초** 재검증 통과(고유 330건 범위). 코드가 동일한 Collector 34건 근거는 재사용했다. SQLite/가짜 REST·broker의 첫 보호 EXIT 1주 제출 1회와 UNKNOWN/ACK 유실·재시작/STOP·청산을 확인했다. 첫 보호 EXIT 전체 경로 SELECT 79/COMMIT 19(13.776ms), QUEUED/ACK 사건 cursor 처리 2/1, 이후 idle 10회 20/0, 동일 Risk 알림 100회 DB 0이다. 실제 REST/시장 지연 측정은 아니다. [68단계](AI_TRADING_SYSTEM_REDESIGN.md#68-운영-risk-보호-요청의-첫-exit-생성과-native-claim-확인).
+
+build `2026.10.14-first-protection-exit-v1`·main/HEAD `232737d` 미커밋·미배포/미활성화. source/격리 httpx ASGI health/3개 build 표식·소비 감사 pass이며 보호 proof reader 1개와 같은 이름의 repository control 후보 1개만 검토해 baseline에 반영했다(367 reviewed/36 후보/107 계약/60 forwarding). 별도 과거자료 5모듈 catalog 보류다. 실제 PG는 미실행(placeholder/row-lock은 격리 cursor), 실제 계좌 00/04/REST·NAS/장중·전체 회귀/CI·commit/push/활성화는 하지 않았다. NAS recorder 배포는 아래 별도 기록이다.
+
+다음 ② 개발은 취소 거절 후 bounded 보호 대응과 WAIT-vs-REPRICE 짝 EV/비용·익절 추세 공급이다. 이번 첫 EXIT의 자동 trigger는 계좌 일손실 한도이며 종목별 손절의 즉시 native Risk producer는 별도 남는다. 실제 모의계좌 부분체결/잔고/지연·운용 수락과 ③ 원래 Position·Risk·Capacity/Liquidity 동적 비중 → ④ 전체 모의 통합/별도 운용 승인 순서를 유지한다. 아래 67단계 이하의 미연결/다음 표현은 완료 당시 기록이다.
+
+## 2026-10-14 사용자 순서 ② — 기존 입력 자동 공급/원래 주문 관리 등록
+
+기존 승인 ENTER/EXIT의 제출 뒤 같은 owned 작업에서 원래 수량·가격·시각·기한과 목적을 기존 Runner checkpoint에 등록한다. Collector의 이미 승인된 KRX trade RAM 가격과 Monitor의 ACK된 Risk/계좌 전체 주문 관측·실제 broker confirmation을 같은 Runner에 공급한다. `offer_unfilled_execution_inputs` production caller는 0→1개다. BUY의 타점 유효기간은 원래 ENTER 결정에서 가져오며 갱신하지 않는다. WAIT-vs-REPRICE 짝 EV 공급자는 없으므로 일반 BUY/익절 재주문은 계속 차단한다.
+
+첫 미체결 BUY의 native Risk가 상세 체결 원장 부재로 미완료인 경우 신규 위험/재주문 승인 조건을 유지한다. 전체 계좌가 flat이고 모든 미체결이 확인된 무체결 BUY이며 UNKNOWN/잔고 불일치/현재 상세 체결 누락이 없을 때만 취소 후 ABANDON을 허용한다. 보호 EXIT는 EV/비용/다음 분봉·bootstrap 복구를 기다리지 않고, 실제 CANCELLED/상세 부분체결 확인 뒤 남은 수량만 기존 fixed child 승인 경로로 제출한다. 취소 ACK/UNKNOWN/거절은 중복 제출 권한이 아니다.
+
+선택 9모듈 **334건**의 첫 검사에서 기존 정책 OFF의 Monitor 없는 준비 경계 10건과 새 테스트 import 1건이 실패했다. OFF 가드/optional Monitor 및 테스트 import를 수정하고 입력 준비 중 ACK 경합 검사 1건을 추가한 뒤 신규 15건 포함 관련 **50건/23.126초**를 다시 통과했다. 직접 무관한 나머지 285건의 통과 근거는 재사용했다. 실제 로컬 Collector/Monitor/Runner·SQLite와 가짜 REST/broker로 보호 취소 1회→확정 전 새 주문 0→부분체결 1주 확인→잔여 2주 제출 1회를 확인했다. 유휴 전후 10회 각 SELECT 20/COMMIT 0, Collector 가격 읽기·정상 Risk 알림 각 100회 DB 0이다. 최초 등록/WAIT 41/8, 매수 기한 취소 68/15, 보호 취소 72/16, 보호 대체 제출 114/18(각 SELECT/COMMIT)이므로 사건 자체 비용은 남는다. [67단계](AI_TRADING_SYSTEM_REDESIGN.md#67-기존-collector계좌-입력의-자동-공급과-원래-주문-관리-등록).
+
+build `2026.10.14-unfilled-native-source-v1`·main/HEAD `232737d` 미커밋·미배포/미활성화다. 실제 모의계좌 00/04/REST·부분체결/잔고/지연·PG/NAS/운용 수락은 하지 않았다. 기존 소비 감사/격리 httpx ASGI health/3개 build 표식은 통과했고 별도 과거자료 5모듈 catalog 미등록은 유지한다. 전체 회귀/CI·commit/push·NAS 배포·계좌 활성화는 없다. NAS의 recorder 배포 상태는 아래 별도 기록을 따른다.
+
+남은 ② 개발은 WAIT-vs-REPRICE 짝 EV/비용·익절 추세 공급, 취소 거절 후 bounded 보호 대응과 기존 보호 요청으로 새 보호 EXIT를 처음 생성하는 연결이다. 원래 승인 EXIT가 복구됐지만 목적 등록이 유실된 경우 목적을 추측하지 않고 차단한다. 실제 운용 수락과 후속 ③ 원래 Position·Risk·Capacity/Liquidity 동적 비중 → ④ 전체 모의 통합/별도 운용 승인 순서를 유지한다. 아래 66단계 이하의 다음/미연결 표현은 각 단계 완료 당시 기록이다.
+
+## 2026-10-14 사용자 순서 ② — 목적별 자동 취소/확정 대사 연결
+
+같은 Runner의 입력 소비에서 WAIT/CANCEL/ABANDON/REPRICE를 분기하고 기존 gateway의 계좌 갱신→runtime CANCEL_STARTED→취소/대사를 자동 호출하도록 연결했다. WAIT/ABANDON을 fixed-child 제출로 넘기던 빈틈을 보완했으며 매수 위험 무효화는 취소 후 포기, 익절은 허용된 짝 EV/추세, 보호 EXIT는 EV/비용 미확인보다 위험 정책을 우선한다. 취소 ACK/UNKNOWN/거절은 새 제출·같은 취소 재시도 권한이 아니다.
+
+취소 직전 기존 Monitor의 ACK된 계좌/Risk·계좌 전체 RAM 관측을 읽고, 실제 native broker confirmation/보유·현재 Risk/원래 타점·가격·EV 신선도를 runtime 잠금 안에서 재평가한다. REST로 새 Risk가 생겨도 원래 타점/가격/EV 시각을 갱신하지 않는다. 현재 선택과 달라지거나 입력이 만료되면 CANCEL_STARTED 전에 차단한다. 기존 취소 owner/control 및 exact native state/fill transaction 경계와 수동 API/명시 재시도는 유지한다. 보호 pending에서도 기존 BUY 위험을 취소할 수 있지만 새로운 BUY 제출은 차단한다.
+
+신규 **20건 포함 관련 8모듈 286건(137.129초)** 통과. 가짜 broker에서 취소 1회→CANCEL_PENDING 재주문 0→상세 부분체결/취소 확정→BUY ADD 8주·익절 REDUCE 1주·보호 EXIT 2주를 연결했다. 실제 Monitor 코드/가짜 REST reader의 보호 취소, 타점/가격 만료·추가 체결/STOP·동결 EV 미허용·거절/close 전후 drain을 검증했다. 같은 격리 입력 idle 전후 10회는 각 SELECT 20/COMMIT 0, 알림 101회/중복 100회는 DB 0이다. 최초 취소 전체 경로 SELECT 71/COMMIT 15(14.461–16.151ms), 취소 ACK 사건 검토 25/3, 확정 후 대체 제출 104–106/15(16.864–18.123ms)로 사건 처리 자체의 비용은 남는다. 최초 취소 측정은 첫 anchor/계획 및 fixture-native Risk/recovery 쓰기를 포함하며 실제 REST 지연/장중 수락은 아니다. [66단계](AI_TRADING_SYSTEM_REDESIGN.md#66-목적별-자동-취소와-취소-직전-native-계좌risk-재검증).
+
+**최초 가격/타점/짝 EV/target을 묶는 production 공급자와 원래 주문의 자동 관리 등록은 아직 미연결**이다. 취소 직전 계좌/Risk 공급은 기존 Monitor RAM으로 연결됐지만 최초 `offer_unfilled_execution_inputs` production caller는 0개다. 취소 거절 후 보호 검토/attention은 표시하되 자동 재시도/우회는 추가하지 않았다. 다음은 이 최초 공급/등록 연결이며 실제 모의계좌 00/04/REST 부분체결·잔고·지연 및 운용 승인 수락은 남는다. 이후 ③ 원래 Position·Risk·Capacity/Liquidity 동적 비중 → ④ 전체 모의 통합/별도 운용 승인 순서를 유지한다.
+
+build `2026.10.14-unfilled-running-cancel-v1`, main/HEAD `232737d` 미커밋·미배포/미활성화다. source/격리 ASGI/build 3표식·소비 감사 pass(기존 baseline/366 reviewed/35 후보/107 계약/60 forwarding 변화 0). catalog 별도 과거자료 5모듈 미등록 유지. 실제 계좌/PG/NAS/장중·Recorder capture/Replay 수락, 전체 회귀/CI·commit/push·배포/주문 활성화 없음.
+
+## 2026-10-14 사용자 순서 ② — running Runner 입력 소비 연결
+
+기존 Runner의 단일 RAM 입력 슬롯→같은 loop wake→고정 child native 승인/제출을 연결했다. 명시 idle API는 계속 running 호출을 거절하며 같은 잠금 core를 재사용한다. 현재 typed 입력 한 건만 유지하고 시점/revision 역행·같은 cut의 다른 내용·1MiB 초과·계좌/run 불일치·오래된 입력을 차단한다. 가격 시각/정상 REST revision 갱신은 신선도 갱신이며, 주문 상태/상세 체결·위험·타점 조건/EV 허용 여부 변화 또는 관리 기한만 전체 검토한다. 누락 입력으로 기한이 도래하면 새 가격/EV를 만들지 않고 보호 기한은 기존 보호 요청을 한 번 arming한다. 독립 session/risk clock을 막지 않는다.
+
+신규 **21건 포함 관련 8모듈 266건(122.762초)** 통과. 가짜 broker에서 running BUY ADD 7주·익절 REDUCE 1주·보호 EXIT 2주, 봉 없는 wake·UNKNOWN/STOP·신선도/ACK·close 전후 claim/drain을 검증했다. 같은 격리 입력 전후 idle 10회는 각각 SELECT 20/COMMIT 0, 동일 알림 101회·건강한 갱신 6회·입력 없는 보호 기한 100회는 추가 DB 0이다. 실제 제출 한 번은 SELECT 108–110/COMMIT 14·17.926–21.764ms로 native 승인/원장/기록 비용을 없앤 것은 아니다. 실제 제출 후 pending-sell 변화는 별도 사건(SELECT 10/lease COMMIT 1)이고 건강한 REST revision과 구분한다. 보호 요청 첫 poll은 COMMIT 1/반복 10회 0이다. [65단계](AI_TRADING_SYSTEM_REDESIGN.md#65-running-runner의-사건기한-소비와-고정-주문의-동일-native-실행).
+
+**현재 완료는 running 소비 경계이며 production 현재 입력 producer·목적별 자동 취소 호출은 아직 없다.** Collector RAM 가격 원천/기존 계좌 관측은 존재하지만 타점·짝 EV·현재 broker confirmation을 묶는 실행용 공급자 연결이 남는다. 현재 artifact는 supplied mock typed input이며 예측/운용 수락이 아니다. 다음은 이 공급자와 기존 취소 primitive를 실제 사건/기한에 연결하고 실제 모의계좌 00/04·REST 부분체결/잔고를 대조하는 것이다. 이후 ③ 원래 Position·Risk·Capacity/Liquidity 동적 비중 → ④ 전체 모의 통합/별도 운용 승인 순서를 유지한다.
+
+build `2026.10.14-unfilled-running-dispatch-v1`, main/HEAD `232737d` 미커밋·미배포/미활성화다. source/ASGI health/build 3표식·소비 감사 pass(두 기존 wrapper 후보의 잠금 core 이동만 검토, 실제 store 호출/계약/forwarding 변화 0). catalog의 별도 과거자료 5모듈 미등록은 남는다. 실제 계좌·PG/NAS/장중·Recorder capture/Replay 수락, 전체 회귀/CI·commit/push·주문 활성화·배포는 하지 않았다.
+
+## 2026-10-14 사용자 순서 ② — 목적별 고정 대체 주문의 native 승인·제출
+
+동결 운용 명세의 optional `unfilled_execution_policy`와 별도 v3 고정 child 승인을 추가했다. 기존 명세는 필드를 생략하고 기존 hash/실행 OFF를 유지한다. BUY/익절의 공급된 짝 EV 입력은 정책에서 모의용으로 명시 허용해야 하며 예측 검증/운용 승격으로 쓰지 않는다. 보호 EXIT는 일반 EV/비용 미확인보다 기존 보호 경로를 우선한다. ADD/REDUCE를 ENTER/EXIT로 바꾸지 않고 기존 native submit/lifecycle를 사용한다.
+
+신규 **29건 포함 관련 12모듈 372건(167.737초)** 통과. SQLite 실제 spec/admission/Risk/승인·원장과 가짜 broker에서 BUY ADD 7주, 익절 REDUCE 1주, 보호 EXIT 2주를 제출했다. 부분체결 후 7→5주·QUEUE/승인/receipt ACK 유실·UNKNOWN/재시작·STOP/부모/Risk/고정 내용 경합·close/drain을 검증했다. QUEUED transaction에 실제 검사한 gate/Risk 참조를 같은 intent JSON에 저장하고 이후 대사에도 보존한다. native metadata로 복구하며 관리 child를 새 root로 삼아 예산을 초기화하지 않는다. 실제 PostgreSQL은 실행하지 않았으며 placeholder/row-lock 구조 검사는 격리 cursor다.
+
+현재 연결은 **idle Runner의 명시 실행 dispatcher**다. running loop의 사건/기한 자동 호출·최신 가격/타점/짝 EV producer·목적별 자동 취소와 취소 거절 후 bounded 보호 대응은 다음 연결 범위다. 반복 polling으로 전체 검토하지 않으며 실제 계좌 `00`·`04`/REST·장중/PG/NAS 및 운영 승인 수락은 남는다. native 실행 한 번의 SELECT 106–108/COMMIT 14는 예약 재검증·최신 승인·실제 QUEUE/전송/receipt/checkpoint를 포함한다. 동일 명시 요청 5회는 각 SELECT 10/lease COMMIT 1·추가 제출 0이다. 실제 REST/Risk 생산 비용·장중 지연은 제외했고 개선을 주장하지 않는다. [64단계](AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출).
+
+build `2026.10.14-unfilled-native-dispatch-v1`, main/HEAD `232737d` 미커밋·미배포/미활성화 작업본이다. 소비 감사는 신규 native claim read 1개/기존 repository wrapper 후보 1개만 검토 후 pass이며 이전 baseline을 보존했다. catalog의 별도 과거자료 5모듈 미등록은 남는다. 전체 회귀/CI·commit/push·계좌/주문 활성화·NAS 배포는 하지 않았다. 다음 큰 개발 순서 ③ 원래 Position·Risk·Capacity/Liquidity 동적 비중·④ 전체 모의 통합/별도 운용 승인을 유지한다.
+
+## 2026-10-14 사용자 순서 ② 시작 — native 자동 취소 실행 경계
+
+기존 gateway/runtime/lifecycle에 명시 `cancel_automation_intent` 경로를 추가했다. 검토한 native 주문과 계좌 갱신 후의 주문·체결 상태가 같아야 하며, 상태 변화 없이 REST 확인 시각만 앞으로 갱신된 경우는 허용한다. CANCEL_STARTED 저장 transaction에서 owner·RUNNING/spec/run/control revision을 검사한다. 취소 시작 기록 뒤 STOP은 기존 응답/늦은 체결 대사를 막지 않는다. ACK 유실/UNKNOWN/거절·재시작 후 같은 주문의 자동 취소 재전송을 막고 수동 취소의 명시 재시도는 유지한다. 취소 ACK는 CANCEL_PENDING이며 대체 주문을 만들지 않는다.
+
+신규 18건 포함 관련 6모듈 **212건(124.253초)**·소스 지문/로컬 ASGI health/build·소비 감사 delta 0 통과. 격리 SQLite 경계만 비교해 첫 취소 SELECT 11→14·COMMIT 3→3, 중복 요청당 SELECT 4·COMMIT 1(owner lease), 추가 계좌 갱신/취소 전송/Risk 무효화 0을 확인했다. 실제 REST/Risk 생산 비용과 장중 지연은 포함하지 않는다. build `2026.10.14-automation-cancel-fence-v1`, main/HEAD `232737d` 미커밋·미배포 작업본이다. **② 완료가 아니라 취소 기반 구현이며 production caller는 아직 없다.** 다음은 목적별 사건/기한 dispatcher와 고정 child의 native 실행 승인·제출 연결, 이후 실제 00/04/REST 수락이다. 계좌 활성화/주문·전체 회귀/CI·commit/push/NAS 배포는 하지 않았다. [63단계](AI_TRADING_SYSTEM_REDESIGN.md#63-모의계좌-자동-취소의-native-실행-경계).
+
+## 2026-10-14 사용자 순서 ① 운영 Risk 자동 보호 요청 — 로컬 연결 완료
+
+개발 순서를 **① 운영 Risk 자동 보호 요청 → ② BUY/익절/보호의 모의계좌 자동 취소·재주문·00/04/REST 대사 → ③ 동적 비중조절 → ④ 선정부터 청산까지 모의 통합 검증·별도 운용 승인**으로 변경했다. 기존 monitor의 ACK된 Risk/계좌만 RAM 전달하고 같은 Runner를 깨워 보호 우선 검토/일반 판단 차단을 시작한다. 새 수집/전체 주문 페이지 복제·TR/DB writer/독립 task는 없다. 동일 위험/누적 mismatch는 합치며 실제 노출 변화에 새 요청을 만든다. 현재 자동 요청/검토까지이며 실제 취소/재주문/보호 제출은 다음 ②다. [62단계](AI_TRADING_SYSTEM_REDESIGN.md#62-운영-risk의-자동-보호-요청-연결과-개발-순서-개정).
+
+신규 **13건 포함 관련 9모듈 234건(108.710초)** 통과. 실제 기존 Risk/FIFO parser/writer·monitor/Runner와 격리 native SQLite/가짜 broker에서 당일 -360,000원·한도 -300,000원·보유 1주를 자동 요청으로 연결했고 봉 없이 idle loop를 깨웠다. ACK/STOP/UNKNOWN·scope/listener/초기 cut·반복/캐시/복구를 검사했다. recovery revision 6개→요청 1개·callback 추가 DB/TR/COMMIT/전송 0·반복 5회 checkpoint 0, ASGI/build/source·소비 감사 pass다. 실제 장중 청산 지연/모의계좌·PG/NAS 수락은 아니다.
+
+build `2026.10.14-native-risk-protection-v1`, main/HEAD `232737d` 작업본·미커밋·미배포다. 별도 배포된 recorder-only 릴리즈와 구분한다. catalog의 별도 과거자료 신규 2모듈 미등록·recorder checkpoint 미지원은 보류 유지한다. 다음 ②에서 기존 취소/체결 대사·owner/control/현재 Risk와 목적별 자동 실행을 연결하고, 취소 확정 전 재주문/UNKNOWN 중복은 계속 금지한다. ③은 원래 Position·Risk·Capacity/Liquidity 자동 비중 정책으로 유지한다. 전체 회귀/CI·commit/push·계좌/주문 활성화·배포는 하지 않았다.
+
+## 2026-10-14 주문 OFF 첫 연결 통합 수락 — 다음은 동적 비중조절
+
+명시 native 미체결 검토·목적별 고정 child·caller의 OFF 보호 요청·기존 checkpoint 첫 연결 범위를 종료했다. 신규 통합 4건 포함 선택 **38건(10.994초)** 통과. 실행 소스 4개 SHA/기존 테스트 class AST 동일을 확인해 앞선 155건 근거를 재사용했고 전수검사를 반복하지 않았다. [61단계](AI_TRADING_SYSTEM_REDESIGN.md#61-주문-off-첫-연결의-통합-수락과-db-호출-범위).
+
+실제 SQLite observation reader의 격리 idle polling 전후 각 5회는 회당 SELECT 4/COMMIT 0으로 같았다. 상태 100회·기한 표시/동일 보호 요청 100회는 DB 0, 첫 보호 처리 SELECT 2/COMMIT 1·이후 10회 FILL/control SELECT 20/COMMIT 0·전체 gate/Risk 조회 0이다. 현재 전체 검토는 명시 OFF 호출뿐이며 running runner에서는 I/O 전에 거부한다. 수동 반복의 SELECT 25/27·COMMIT 3/2 비용은 남고, 사건/기한 자동 dispatcher·운영 보호 producer는 아직 미구현이다. 미래 실행은 동일 사건 합치기/기한 한 번 깨우기·실제 제출 직전 native 재검증을 수락 조건으로 둔다.
+
+**다음 큰 개발은 원래 00 통합 명세의 Position·Risk·Capacity/Liquidity 기반 상위 동적 비중조절이다.** 현재 순자산/출처·시장/테마/종목·시총/대금/유동성/변동성·EV/Risk의 입력 계약과 결측 차단부터 시작하고, 목표 금액/수량 계산은 하위 기능으로 유지한다. 실제 모의계좌 취소/재주문·청산/잔고/지연 수락과 운용 승격을 개발의 선행 조건으로 두지 않는다. 실행 소스/build `2026.10.14-unfilled-purpose-gate-v1`·main/HEAD `232737d` 작업본 유지, 미커밋·미배포·주문 OFF다. PG/NAS/장중·recorder checkpoint 미지원·catalog 보류는 별도이며 CI/전체 회귀·commit/push·활성화/배포는 하지 않았다.
+
+## 2026-10-14 NAS 녹화 저장 최적화·10MiB/s 배포 완료
+
+활성 NAS 릴리즈는 **`2026.10.14-recorder-shared-10m-v1-af0f8072f960415b`**, build `2026.10.14-recorder-shared-10m-v1`이다. 관리자 배포 결과 뒤 무비밀번호 status로 health ok·같은 build/소스 경로·diagnostics idle·trace off를 재확인했다. 실제 녹화 코드 SHA `9df9d3fe…`와 설치 helper SHA `c2846caf…`도 통과한 검증본과 같다. 공유 본문·완료 대기/metadata 묶음 개선과 **10MiB/s(10,485,760 bytes/s)** 기본 속도가 적용됐다. helper는 기존 설치 절차로 갱신했고 DB 컨테이너·runtime image·원본 녹화·sudoers·원래 revoke 백업·지난 예약 기록은 보존했다. 검증을 다시 실행하거나 새 녹화를 시작하지 않았다. [배포·직접 확인 근거](../artifacts/recorder-shared-deployed-result-20261014.json).
+
+이 릴리즈는 base `232737d`의 NAS 소스에 검증한 녹화 파일만 적용한 **미커밋 recorder-only 수정본**이다. 아래 다른 개발 단계의 main 작업본·원격과 전체가 같다는 뜻이 아니다. 새 녹화 예약/장중 수신 무손실·전체 앱/Replay 성능 수락은 확인하지 않았고, 운영 DB 동시 I/O 영향 및 실제 10~20초 COMMIT P1은 계속 미해결이다. 다음은 이 P1의 WAL/I/O/잠금/Writer 경합 판별과 안전한 공통 저장 비용 개선이며, 새 입력을 임의로 복원하지 않는다.
+
+## 2026-10-14 목적별 대체 주문·보호 우선 검토 — 전송 OFF
+
+기존 owner/control·Risk gate를 공유해 원래 BUY 승인 계보·취소 확정·실제 체결/보유와 고정 child ID/payload·자본/자금·예산을 결합했다. 익절 REDUCE와 보호 EXIT를 구분하며 legacy ADD/REDUCE 차단은 유지한다. OFF 검토 결과는 실제 approved-gate/주문으로 저장하지 않는다. 기존 runner의 bounded RAM 보호 요청이 같은 loop를 깨우고 봉 조회/일반 평가·dispatch에 앞서 처리된다. 새 수집/초봉/LLM/Shadow·collection/writer/독립 task는 없다. [60단계](AI_TRADING_SYSTEM_REDESIGN.md#60-목적별-고정-대체-주문-검토와-보호-요청의-우선-처리).
+
+신규 **20건 포함 관련 155건(60.004초)**·legacy gate 전후 360회 동일·기존 lifecycle/transport AST·별도 OS 복구·ASGI health/build·소비 감사 pass. SQLite BUY 원래 승인 조회로 SELECT 변경 24→25/반복 26→27이며 COMMIT 3/2·checkpoint 1/0·추가 전송/실행 원장 쓰기 0이다. 60초 idle poll의 요청 6회는 RAM 약 0.35–0.52ms/처리 약 1.27–1.74ms·요청 자체 DB 0이다. 실제 broker/PG/NAS/장중 지연 수락이 아니다. 기존 catalog 미등록·recorder checkpoint capture 미지원은 보류 유지한다.
+
+build `2026.10.14-unfilled-purpose-gate-v1`, main/HEAD `232737d` 작업본·미커밋·미배포다. **주문 OFF 첫 실행 연결 종료까지 통합 수락 한 묶음이 남았다.** 실제 보호 Risk producer 자동 연결·이미 실행 중 native 작업의 지연/실제 청산·자동 취소/재주문·모의계좌/PG/NAS 수락은 후속이다. EV 운영 검증·상위 자동 비중조절은 원래 Position·Risk·Capacity/Liquidity 설계로 유지한다. 전체 회귀/CI·커밋/push·계좌/주문 활성화·배포는 하지 않았다.
+
+## 2026-10-14 Native 미체결 시도·예산/owner gate 검토 — 전송 OFF
+
+기존 idle runner/checkpoint에 native parent-child 기대 내용·계보·QUEUED claim/실제 SUBMISSION_STARTED 횟수를 연결했다. caller 횟수로 초기화하지 않고 원래 anchor/가격/기한과 결정적 root+ordinal ID를 유지한다. 기존 상세 체결 reader의 실제 보유·native Risk cut을 맞추고 실제 owner/control/binding/복구/Risk와 ACK 후 상태/시간을 재검증한다. [59단계](AI_TRADING_SYSTEM_REDESIGN.md#59-native-parent-child-시도-투영과-닫힌-owner-gate-검토).
+
+신규 **14건 포함 관련 5모듈 135건(65.245초)** 통과. 10주 BUY의 3→2→1주 부분 체결 후 대체 검토량 7→5→4주·예산 소진 ABANDON·QUEUED/UNKNOWN 중복 금지·manifest/원장 손실·ACK/STOP/owner/느린 저장 경계를 확인했다. 실제 별도 OS 프로세스에서 시도 2회·보유 6주·원장에 없는 마지막 예약을 복구했다. adapter 추가 주문/취소·실행 원장 쓰기 0, 기존 class AST/ASGI health/build·소비 감사 pass다. catalog의 기존 미등록 과거자료 모듈 보류 유지. 근거 `data/diagnostics/20261014-unfilled-native-attempts/`.
+
+기존 gate의 ADD/REDUCE는 NON_ACTION_DECISION으로 차단하며 ENTER/EXIT로 바꾸지 않는다. 보호 EXIT는 기존 native 평가를 사용하지만 raw gate 평가를 고정 child 승인으로 쓰지 않고 outer order_authorized=false/transport_state=OFF다. approved-gate/dispatch receipt/실제 주문 행은 저장하지 않는다. native guard의 owner lease 갱신 때문에 변경 검토 COMMIT 3/동일 cut 반복 2회이며 기존 checkpoint 자체는 1/0이다. 일반 Shadow/runner polling·새 수집/초봉/독립 writer/task에는 연결하지 않았다. 실제 운영 부하/지연 표본이 아니다.
+
+build `2026.10.14-unfilled-native-attempts-v1`, main/HEAD `232737d` 작업본·미커밋·미배포다. 다음은 기존 gate의 미체결 대체 주문 목적별 승인 계약·고정 child 결합과 보호 우선 wake-up을 주문 OFF로 연결 검증한다. 실제 자동 취소/재주문·EV 운영 승격·모의계좌/PG/NAS/장중/지연/체결/잔고·recorder checkpoint capture 수락은 남는다. 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity의 후속 정책으로 유지한다. 전체 회귀/CI·커밋/push·계좌/주문 활성화·배포는 하지 않았다.
+
+## 2026-10-14 미체결 검토 계획의 영속 복구 — 전송 OFF
+
+기존 idle runner의 명시 검토·native parent reader·checkpoint writer·보호 시계 힌트를 연결했다. 취소 확정/현재 계좌 대사 후 첫 대체 preview 슬롯을 저장하며 실제 주문 원장 행을 만들지 않는다. 복구 뒤 항상 현재 입력 재검증이 필요하고 원래 anchor/기한/예산/control을 초기화하지 못한다. ACK/COMMIT 실패·취소 경쟁·STOP/중복 child·손상/크기 제한·실제 별도 OS 프로세스 복구와 수동 run_once 중 native 작업 대기를 검사했다. [58단계](AI_TRADING_SYSTEM_REDESIGN.md#58-미체결-검토-계획의-기존-checkpoint-복구와-실행-전-검증).
+
+신규 **13건 포함 관련 4모듈 100건(42.650초)** 통과. 기존 lifecycle/transport class AST 동일, 검토의 추가 submit/cancel·실행 원장 쓰기 0회, 변경 checkpoint COMMIT 1회·동일 owner/입력 반복 0회, source SHA/AST·ASGI health/build 3곳·소비 감사 pass를 확인했다. native control은 공급 fixture, Risk는 연구 제약이며 owner lease/native 실행 승인·실제 보호 wake-up 수락은 아니다. sandbox socketpair 초기화 정체를 추적으로 확인한 뒤 사용자 환경에서 관련 검사를 통과했다. 초기 실패/중단·중복 묶음은 최종 통과 수에 합산하지 않았다. catalog는 기존 미등록 `tests.unit.test_prepared_historical_archive_inputs`로 실패 상태다. 근거 `data/diagnostics/20261014-unfilled-preflight/`.
+
+로컬 build `2026.10.14-unfilled-preflight-v1`, main 작업본/HEAD `232737d`·미커밋·미배포다. 단일 root의 첫 preview 예약과 실제 전송 횟수를 구분하며 native child 존재/공급 횟수 증가에는 재시도 투영이 필요하다고 차단한다. 다음은 기존 owner/control fence의 native parent-child 전송 시도·다회 예산과 guarded adapter를 주문 OFF로 연결 검증한다. 실제 자동 재주문/보호 우선 wake-up·모의계좌/지연/체결/잔고·PG/NAS/장중 수락은 남는다. recorder의 runner checkpoint collection은 기존 미지원이며 capture/Replay 완료로 보고하지 않는다. 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity 후속 정책으로 유지한다. 전체 회귀/CI·커밋/push·계좌/주문 활성화·NAS 배포는 하지 않았다.
+
+## 2026-10-14 녹화 저장 속도 선택 — 10MiB/s
+
+**Linux 등록·실제 PostgreSQL 검사 통과/배포 준비 완료:** NAS jobs `f4faa9e3096ba59f94efe2af65ba6b9d`·`d2122e5ae81ee73f6602a1519d34a4e4`가 통과했다. 등록 복사본의 controlled 계좌/lease/VI/작은·큰 본문 Replay 두 번에서 19 native 호출·16 COMMIT·3 예상 rollback, 최종 원장·내용·순번 및 초기 상태 복원을 확인했다. 기존 실제 계좌 입력 첫 60초도 동일 초기 DB로 두 번(각 4호출) 재생했다. 운영 앱 복구·DB/원본/예약 보존과 실제 health ok/idle을 재확인했다. 기존 Linux 8개는 정확한 hash/통과 로그로 재사용했다. [NAS 근거](../artifacts/recorder-shared-linux-pg-nas-result-20261014.json).
+
+검증한 파일만 기존 배포 기준에 얹은 `2026.10.14-recorder-shared-10m-v1-af0f8072f960415b`를 준비했다(1,072파일·11개 변경, base `232737d`·미커밋 recorder-only 수정본). 배포·rollback 12건과 실제 배포본의 ASGI 포장 검사가 통과했다. NAS helper와 후보의 실제 차이는 공유 본문 검증과 기존 account-context/v4의 동일 frontier 검증을 포함하는 승인 호환 두 함수이며 필요한 Linux helper 61건도 통과했다. 나머지 installer/worker·의존성·스키마는 동일하고 Dockerfile 계약은 build 표식만 바뀐다. NAS 파일 해시·지난 예약 12개 파일과 보이는 live waiter 없음도 확인했다. 관리자 실행은 아직 없으며 현재 운영 release/1MiB/s는 그대로다. 배포 후 capabilities의 10MiB/s·8GiB·500만 이벤트와 health/build/path를 확인하며 실패 시 기존 운영 소스로 복구한다. 과거 예약을 재실행하거나 새 녹화를 시작하지 않는다. [배포 준비](../artifacts/recorder-shared-deployment-preparation-20261014.json).
+
+NAS job `82404f5dd4aa83cddd73bb364b5c9e84`는 Linux 선택 검사 이후 PG fixture의 “공유 root 두 개 이상” 전제에서 실패했다. 계좌 입력 대부분은 기존 일반 본문 경로이므로 fixture에 작은 large-profile 입력 두 건을 명시적으로 추가했다. PG의 독립 native 호출/COMMIT 기대값은 17/14→19/16, 세 Shadow 호출의 각각 COMMIT 1회·작은/큰 최종 내용과 원장/revision/sequence·초기 상태 복원 검사는 유지/보강했다. 운영 소스는 변경하지 않았고 실제 앱 복구·임시 자원 정리·health ok/idle을 확인했다. 정리된 worker 폴더를 읽던 진단 오류도 보존 보고서/로그만 읽도록 수정했다. 관련 진단 2건·fixture/실패 요약 3건 통과. v2는 이전 Linux 8개의 정확한 소스 hash/로그 통과 ID를 일시정지 전에 확인해 재사용하고, 변경 PG fixture와 별도 새 DB의 기존 실제 계좌 Replay만 실행한다. NAS SHA/문법/설치 인자는 확인했으며 v2 실행·배포·운영 10MiB/s 적용은 아직 없다. [실패·수정 근거](../artifacts/recorder-shared-linux-pg-fixture-fix-20261014.json).
+
+10MiB/s를 실제 시작 상태·공개 capabilities·검사 계약에 반영한 로컬 수정본의 API/예약/지연 저장 회귀 **44건(16.155초)**이 통과했다. 현재 배포 기준 `232737d`에 녹화 수정만 적용한 불변 검증본에서도 필요한 **8건(6.318초)**이 통과했다(44건과 중복하므로 합산하지 않는다). NAS의 9개 파일 SHA·기준 소스·설치 인자를 읽기 전용으로 확인했다. 다음 고정 관리자 검사는 실제 Linux 등록 후 등록 복사본의 PostgreSQL 계좌/lease/VI/대형 입력 Replay 두 번과, 별도 새 DB에서 기존 실제 녹화본의 첫 60초 계좌 Replay 두 번이다. 아직 실행·helper 갱신·배포하지 않았으며 두 검사 후 운영 앱/기존 예약을 보존한다. [준비 근거](../artifacts/recorder-shared-linux-pg-preparation-20261014.json).
+
+사용자 요청으로 다음 운영 적용 속도를 **10MiB/s(10,485,760 bytes/s)**로 정했다. 무제한은 성능 판별용 격리 시험 결과로만 남긴다. 공유 파일 수정의 Linux 등록·실제 PostgreSQL/account Replay와 기존 API·예약 계약 검증을 마친 뒤 배포 및 저장 예약의 `write_bytes_per_second`에 이 값을 반영한다. 현재 운영은 기존 1MiB/s이며 이번 선택만으로 릴리즈·예약을 변경하지 않았다. [결정 기록](../artifacts/recorder-operating-rate-choice-20261014.json).
+
+## 2026-10-14 작은 본문 파일 공유 — NAS 저장 개선 확인·배포 전 검증 대기
+
+1MiB 이하 단일 block만 명시적인 `blocks/shared-v1` root로 기존 16MiB 본문 묶음에 저장하는 최소 수정을 구현했다. 기존 logical digest/metadata/입력 profile·불변 reference·입력별 원래 native 호출·blocks/v1 읽기/큰 입력·메모리/큐/스토리지 한도를 유지한다. reader와 관리자 등록기는 숫자 파일명/offset/한 블록/root 및 물리 파일 checksum·크기를 함께 검증한다. 같은 본문/metadata sync가 완료되기 전 입력을 공개하거나 RAM 소유권을 해제하지 않는다. 등록기는 최대 한 공유 묶음만 cache하며 candidate 코드를 import하지 않는다. 새 모듈이나 native SQL/트랜잭션 변경은 없다.
+
+관련 **81건+52건=133개 독립 검사**가 통과했다. 공유 입력의 native Replay 두 번·동일 arguments의 별도 호출·큰/구형 블록·shared corruption/다른 입력의 독립 읽기·경로/offset/bool/한도·bundle rollover·sync 실패 suffix·등록 후 재검증을 확인했다. 같은 실제 입력 16,384건/빈 PC 디렉터리/동일 무제한 속도에서 본문 sync **45→9**, 본문+metadata **51→15**, 저장/drain 시간 **2.837→2.370초(16.47%)**다. 49,944,996바이트·원문 metadata hash/checksum/순번·pending 4,096행·종료 charge/pending/drop/reject 0은 동일했다. payload sync p95/최대는 23.8/34.4→131.6/131.6ms로 증가해 큰 파일의 지연도 확인해야 한다. 검사 도구의 검증 포함 wall 시간은 3.914→5.124초로 증가했으므로 전체 검증/Replay 개선으로 보고하지 않는다.
+
+NAS의 같은 실제 입력 16,384건·빈 출력 디렉터리·무제한 격리 A/B 두 순서에서 **10.455→6.912초(33.88%)**, **10.859→6.376초(41.28%)**로 줄었다. 본문 파일/sync 45→9·본문+metadata sync 51→15, bytes/내용/checksum/순번과 종료 pending/charge/drop/reject 0을 유지했다. 개별 본문 sync p95는 338/348→582/500ms로 커졌지만 총 본문 sync는 6.547/7.128→2.776/2.532초로 줄었다. RSS는 약 6.6~12.5MB 늘었다. 이 파일 저장 개선은 유지한다. 사용자 결과의 운영 앱 복구·기존 release/DB/원본/계획/helper/sudoers 보존을 확인했으며 후보는 미배포다. 현재 NAS helper는 새 형식을 모르는 이전 버전이므로 Linux 등록/reader·실제 PostgreSQL/account Replay와 승인된 helper 갱신이 남는다. 다음 운영 속도는 사용자 선택 **10MiB/s**이며 아직 기존 1MiB/s다. 운영 동시 I/O·COMMIT P1·전체 앱/Replay 수락은 미해결이다. [NAS 근거](../artifacts/recorder-shared-blocks-nas-result-20261014.json).
+
+## 2026-10-14 본문 동기화 순서 후보 기각·코드 철회 완료
+
+NAS 두 순서 비교는 9.669→9.196초(4.89% 개선), 9.453→9.936초(5.11% 악화)로 일관되지 않았다. 평균은 9.561→9.566초로 사실상 같고 51회 파일 fsync도 그대로다. byte/hash/checksum·메모리/순번/복원은 보존됐지만 성능 개선 조건을 충족하지 못해 이 가설의 반복을 종료했다.
+
+이번 순서 변경만 SHA를 확인해 철회하고 기존 휴식·metadata 묶음 확대 수정본 **4db756a1…**로 되돌렸다. 후보 원본은 artifact에 보존하고 후보 전용 2개 검사만 제거했다. 나머지 테스트 파일은 Git 변경이 없으며 철회 후 블록·지연 회귀 **29건(19.326초)**이 통과했다. job `b24d92d1b479803430e8dfaa1d87a883`의 실제 NAS health ok·idle·운영 복구를 재확인했고 후보는 배포하지 않았다. 기존 release/DB/원본/계획/helper/sudoers와 운영 1MiB/s는 유지한다.
+
+다음 수정은 실제 파일 수를 줄이는 작은 block 본문 공유다. 1MiB 이하 단일 block 입력만 기존 16MiB 본문 묶음에 함께 저장하는 명시적 새 descriptor를 검토하고, blocks/v1 구형 읽기·원문/입력별 checksum/offset·불변 reference/복원 메모리·실패 prefix를 유지한다. reader와 관리자 등록 검증을 함께 맞춰야 하며 파일/동기화 감소·같은 입력의 실제 개선을 확인해야 수락한다. 이번 단계에서 이 공유 형식의 구현/검증/배포를 했다고 주장하지 않는다. COMMIT P1과 파일 저장 병목 자체는 미해결이며 동기화 순서 가설만 기각했다. [결과/철회 근거](../artifacts/recorder-group-sync-nas-result-20261014.json).
+
+## 2026-10-14 R4 후 미체결 목적별 정책 — 주문 없는 첫 연결
+
+기존 lifecycle에 독립 상태 없는 목적별 정책을 두고 기존 preview CLI의 고정 입력으로 연결했다. 매수/익절/보호의 WAIT/CANCEL/REPRICE/ABANDON을 구분하고 취소 ACK/UNKNOWN에는 대체 수량을 만들지 않는다. 원래 상태 정규화·취소/체결 대사·현재 계좌 전체 pending/예약/기존 목표 계산을 재사용한다. 보호는 일반 EV/타점 분석을 기다리지 않으며 실제 청산/기한·미해결 위험을 분리한다. [57단계](AI_TRADING_SYSTEM_REDESIGN.md#57-r4-후-미체결-목적별-정책의-주문-없는-첫-검증).
+
+신규 24건 포함 최종 관련 **191건(80.121초)** 통과. 기존 lifecycle/transport AST 동일·native SQLite/fake transport의 취소 중 부분/전량 체결·거절/ACK UNKNOWN/재시작/다른 run·수동 주문/중복·슬리피지/EV/시점/세션·보호 시계를 검사했다. 10주 원래 BUY 중 취소 경쟁 3주 체결 이후 7주, 보호 SELL 4주 체결 이후 잔여 6주를 같은 목표/비용 계산으로 제안했다. 정책 추가 SQL/submit/cancel 0·typed/JSON/CLI 결과/ID·source SHA/AST·ASGI health/build 3곳과 DB 소비 delta 0 확인. catalog는 별도 미등록 `tests.unit.test_prepared_historical_archive_inputs`로 실패했다. 근거 `data/diagnostics/20261014-unfilled-management/`.
+
+로컬 build `2026.10.14-unfilled-management-shadow-v1`은 미커밋·미배포다. 현재 paired EV/횟수/기한·Risk/타점은 공급된 고정 연구 입력이며 native 실행 승인이 아니다. 다음은 기존 owner의 영속 결정/parent-child 계획·재시도 예산·취소 대사·보호 시계 연결의 실행 전 검증, 전송 OFF다. 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity의 후속 범위이며 현재 금액/수량은 하위 기능이다. 실제 모의계좌/재주문/보호 지연·PG/NAS/장중 수락·전체 회귀/CI·push/활성화/배포는 미실행이다.
+
+## 2026-10-14 본문 쓰기·동기화 순서 최소 수정 — PC 개선 없음·NAS 판별 대기
+
+입력별 파일을 합치려면 blocks/v1 reader와 관리자 등록 계약이 바뀌므로 먼저 파일 형식을 유지하는 작은 후보를 구현했다. 지연 저장의 같은 metadata chunk에 속한 block 파일을 먼저 쓰고 close/rename한 뒤 각 파일을 다시 열어 모두 fsync한다. 일반 본문도 먼저 flush하며 block/일반 본문 sync가 전부 끝난 뒤에만 metadata sync·공개·RAM 해제를 수행한다. streaming/단독 block 쓰기는 기존 즉시 sync를 유지하고 하나의 payload sync 함수로 기존 중복 계측을 공통화했다. 파일별 동기화 횟수·구형 reader·입력/native 호출/순번/hash·메모리/스토리지 한도는 변경하지 않는다. 동기화 호출 깊이는 같은 파일의 계측 함수 한 단계이며 새 모듈/프로세스/저장 포맷은 없다.
+
+기존 68건에 새 순서/공개 전 sync·실패 suffix 보존/native Replay 2건을 추가해 **31건+39건=70개 독립 검사**가 통과했다. 같은 보존 입력 16,384건/빈 PC 출력 디렉터리/동일 무제한 속도의 실제 비교에서 3.215→3.649초로 **13.49% 느려졌다**. 49,944,996바이트·내용/metadata hash/checksum·51회 파일 sync·pending 상한/종료 상태는 동일했다. PC 개선으로 처리하지 않으며 PC 반복은 추가하지 않는다.
+
+대상 NAS 파일시스템에서 함께 쓴 파일의 동기화 비용이 줄어드는지를 판별할 두 순서 A/B를 준비했고 origin→이전 수정본→새 후보 SHA·인자·보호 조건을 확인했다. 아직 NAS 비교/배포/운영 속도 변경은 없다. NAS에서도 효과가 없으면 이 순서 변경과 전용 검사를 철회하고 이전 두 개선을 유지한다. 물리적 파일 공유는 별도 writer/reader 계약 검증이 필요하며 현재 코드가 실제 파일 수를 줄였다고 주장하지 않는다. [근거](../artifacts/recorder-group-sync-review-20261014.json).
+
+## 2026-10-14 속도 제한 계산과 남은 본문 파일 비용 확인
+
+현재 `_write`는 64KiB마다 먼저 `len(block)/rate`만큼 sleep한 뒤 쓰며 파일 flush/fsync는 별도다. 디스크/동기화 대기로 전체 처리량이 5MiB/s 미만이어도 설정별 선불 휴식이 추가된다. 무제한에서는 기존 직접 write 경로로 분할/블록별 sleep 호출도 빠진다. 따라서 평균 전체 저장 처리량 4.60MiB/s가 장치나 개별 쓰기 구간의 속도 상한을 뜻하지 않는다. 실제 기록된 pacing/cooldown은 5/7/10MiB/s 평균 약 11.0/8.2/6.1초, 무제한 1.25초다. 100MiB/s는 실측하지 않았다.
+
+같은 보존 16,384건의 metadata/descriptor만 읽어 unique payload 1,775개, block root/file 39개·31,887,342바이트를 확인했다. 그중 **36개는 1MiB 이하**, 39개 모두 8MiB 이하이고 일반 payload는 1,736개·7,701,063바이트다. 본문 45회 sync 중 block 전용 파일 39개가 큰 비중이며 기존 digest 기반 중복 제거는 이미 적용돼 있다. 현재 blocks/v1 reader가 digest별 파일명을 요구하므로 16MiB 상한만 올려서는 합쳐지지 않는다.
+
+우선 검토는 작은 block 본문을 공유 저장 파일에 묶되 논리 입력/체크섬·구형 reader 호환·bounded 복원·실패 prefix를 보존하는 writer/reader 계약이다. 이후 봉인된 큐의 최소 휴식(이번 무제한 1.25초)과 직렬화/hash CPU(약 2초)를 검토한다. 이 단계는 원본을 읽기 전용으로 확인했으며 새 코드 수정·회귀 실행·배포·운영 속도 변경은 없다. [근거](../artifacts/recorder-remaining-costs-20261014.json).
+
+## 2026-10-14 속도 범위 NAS 비교 완료 — 무제한이 격리 저장에서 가장 빠름
+
+실제 보존 입력 16,384건·출력 49,944,996바이트·동일 Writer/빈 출력 디렉터리를 3·5·7·10MiB/s·byte pacing 없음 각 두 번 정순/역순으로 비교했다. 평균 전체 저장 시간은 **31.034 / 24.047 / 21.487 / 19.942 / 10.363초**다. 무제한의 두 실행은 10.219/10.506초, 전체 저장 기준 실제 처리량 4.66/4.53MiB/s였다. 이는 이번 약 47.6MiB 저장 사례의 처리량으로 NAS 장치의 최대 대역폭이나 전체 녹화 지속 처리량은 아니다. 모든 조건의 metadata 6개·본문/metadata fsync 51회·내용/순번/hash/checksum·pending 상한 4,096행·종료 charge/pending/drop/reject 0은 동일하다. CPU는 3MiB/s 약 2.84→무제한 약 2.00초, RSS는 약 305~312MB다.
+
+속도 상한은 쓰기 구간의 pacing에만 적용되므로 전체 저장 속도와 비례하지 않는다. 3→10MiB/s는 설정 3.33배지만 전체 처리속도는 약 1.56배다. 무제한에서도 metadata/payload 동기화에 평균 **7.333초(전체 10.363초의 약 71%)**가 걸리고 직렬화/hash·최소 휴식도 남는다. 또한 기존 `_write`에서 제한 없음은 본문을 직접 쓰고, 제한 있음은 64KiB 블록별 write/sleep을 수행하므로 비교에는 블록 호출 비용 차이도 포함된다. 동기화 시간이 일부 줄어든 내부 원인이나 원래 장중/전체 녹화의 긴 대기는 이 결과로 확정하지 않는다.
+
+job `b24d5610cae132a256b1aff033bf5734` 완료 뒤 운영 health ok·idle·기존 통합 release/복구를 확인했다. 원본·운영 DB·runtime/helper/sudoers·기존 계획은 유지하고 운영 속도는 **1MiB/s**, 수정/상향은 미배포다. 이번 속도 범위 비교는 완료하고 추가 속도 sweep을 반복하지 않는다. 무제한을 격리 파일 저장의 최선 후보로 두며 다음은 실제 native DB/동시 I/O 영향 확인과 기존 API/예약 계약을 보존하는 적용 준비다. 장중 COMMIT P1·전체 앱/Replay 수락은 여전히 미해결이다. [실측 근거](../artifacts/recorder-rate-range-nas-result-20261014.json).
+
+## 2026-10-14 R4 native Risk·타점 입력 연결 — 주문 없는 첫 범위 종료
+
+기존 Risk 저장본을 같은 계좌 RAM에 복사하고, 명시 선택 가설의 기존 R3 결과와 함께 공통 비교 한 벌에 전달한다. 원래 내용/계좌/as_of·가용/만료·타점 ref/quality를 검증한다. HOLD를 증액 허가로 바꾸지 않고 WAIT/모호함은 차단, 유효 EXIT는 EV/Risk 결손보다 보호 경로 필요를 우선 표시한다. 실제 Risk 승인·주문 권한은 없다. [56단계](AI_TRADING_SYSTEM_REDESIGN.md#56-r4-기존-타점과-native-risk의-공통-ram-입력-연결).
+
+신규 15건 포함 최종 관련 **173건(61.455초)** 통과. 8개 getter/소비의 추가 SQL/계좌 조회 0·회차당 source/비교 각 1회·계좌 이벤트 H1/H2 추가 계산 0을 확인했다. native UNKNOWN/시점/범위/내용·기존 부분체결/예약·타점/복구와 이전 고정 결과/ID·CLI/ASGI/Qt·source SHA/AST/build를 검증했다. DB 소비 감사 delta 0, catalog는 별도 미등록 `tests.unit.test_prepared_historical_archive_inputs`로 실패했다. 최초 fixture/복구 검사 실패와 최종 성공은 `data/diagnostics/20261014-position-native-inputs/`에 구분 보존했다.
+
+로컬 build `2026.10.14-position-native-inputs-v1`은 미커밋·미배포다. R4 주문 없는 첫 기능 범위를 종료하고 다음은 R4 후 미체결 실행 정책의 기존 취소/대사 계약 연결을 주문 없는 모의 검증으로 진행한다. 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity를 따라 후속 구현하며 현재 금액/수량은 하위 기능이다. 실제 계좌/운영 Risk·재주문/보호 지연·PG/NAS/장중 수락·전체 회귀/CI·push·활성화/배포는 미실행이다.
+
+## 2026-10-14 3MiB/s NAS 효과 확인·요청한 속도 범위 시험 준비
+
+동일 Writer/실제 입력 16,384건/빈 출력 디렉터리의 2→3MiB/s 비교는 **39.200→30.403초(22.44%)**, **39.218→29.527초(24.71%)**로 두 순서 모두 개선됐다. 49,944,996바이트·metadata 6개·본문/metadata fsync 51회·checksum/순번·pending 4,096행/종료 charge/pending/drop/reject 0은 유지한다. CPU 3.048/3.057→2.802/2.798초, RSS 약 304~309MB로 급증이 없었다. payload fsync p95는 582.5/553.6→411.5/383.8ms, 최대는 635.2/832.8→537.2/620.9ms로 이번 두 쌍에서 악화되지 않았다. 큐 p95는 36.755/36.139→27.746/27.201초, 최대는 39.040/39.045→30.278/29.403초다.
+
+job `69078d394423ae966a44d8676aaf64f3` 완료 뒤 실제 NAS health ok·idle·기존 release·복구를 확인했다. 운영 속도 1MiB/s와 원본/DB/기존 계획/runtime/helper/sudoers는 유지하며 미배포다. 3MiB/s의 격리 저장 효과를 확인한 것이고 운영 DB 동시 I/O·native SQL/COMMIT P1·전체 앱 수락은 별도다.
+
+사용자가 5·7·10MiB/s와 최대속도까지 요청해 **3·5·7·10MiB/s·쓰기 속도 제한 없음**을 각 두 번, 정순/역순으로 한 고정 시험에 묶었다. 무제한은 byte pacing만 해제하고 fsync·완료 공개·checksum·메모리/입력 상한은 유지한다. 최대 15분·기존 운영 일시정지/격리/복구 방식이며 원본/운영 제어는 변경하지 않는다. 같은 검증된 Worker/입력 결합·다섯 속도·인자·보호 조건을 NAS 읽기 전용으로 확인했고 실제 범위 시험은 아직 미실행이다. 속도별 처리량/동기화 p95·최대/큐/CPU/RSS를 보고 포화 지점과 적용 후보를 판단한다. [근거](../artifacts/recorder-rate3-nas-result-20261014.json).
+
+## 2026-10-14 R4 주문 없는 행동 권고 연결
+
+같은 HOLD 짝의 비용 차감 순차이·명시 표준오차 페널티·연구 위험 제약을 기존 비교 함수/CLI·공통 Runtime/PC 표에 연결했다. 제약의 계좌/종목/input cut·시각 guard, 증액 금지, 결손/동률 WAIT와 보호 EXIT 우선을 적용하되 실제 Risk 승인·주문 권한은 없다. 최종 목표 비중은 원래 Position·Risk·Capacity/Liquidity 설계에 따른 상위 동적 정책이 결정하며 현재 목표 금액·수량은 하위 계산으로 유지한다. [55단계](AI_TRADING_SYSTEM_REDESIGN.md#55-r4-비용불확실성위험-제약의-주문-없는-행동-권고).
+
+신규 13건과 native 소비 검사 보완 포함 관련 **164건(58.152초)** 통과. 8개 소비의 회차당 source/비교 각 1회·GET 추가 계산/SQL 0회, 같은 권고의 추가 기록 0회·정책 만료/ACK 유실/재시작·legacy 결과/ID를 확인했다. CLI/ASGI health/선택·source/SHA/AST·한글 Qt 표시/build 3곳과 DB 소비 감사 delta 0을 확인했다. catalog는 별도 미등록 `tests.unit.test_prepared_historical_archive_inputs`로 실패했다. 근거 `data/diagnostics/20261014-position-action-selection/`.
+
+현재 로컬 build `2026.10.14-position-action-selection-v1`은 미커밋·미배포다. 다음은 기존 타점·native Risk 관측의 좁은 입력/제약 연결 검증이다. 동적 비중조절·운영 승격·미체결 실행·실제 앱/계좌/PG/NAS/장중 수락은 후속이며 전체 회귀/CI·push·주문 활성화·배포는 수행하지 않았다.
+
+## 2026-10-14 1/2MiB/s NAS 비교 완료 — 3MiB/s 추가 후보
+
+같은 묶음/휴식 수정본과 실제 입력 16,384건의 두 순서 비교에서 1→2MiB/s는 **62.399→37.752초(39.50%)**, **61.318→37.314초(39.15%)** 단축했다. 49,944,996바이트·metadata 6개·본문/metadata fsync 51회·순번/내용/checksum·reader 한도·pending 4,096행/종료 charge/pending/drop/reject 0은 동일하다. CPU 3.67/3.647→3.062/3.007초, RSS 약 305~309MB로 급증이 없고 큐 p95는 59.153/57.715→35.319/35.414초, 최대는 62.123/61.041→37.592/37.144초다. payload fsync p95는 558.4/419.9→456.3/440.0ms, 최대는 678.1/456.2→664.3/615.1ms로 일부 증가했으므로 동기화 자체를 해결한 결과로 해석하지 않는다.
+
+job `3a27cf3817faee7e13cd03970df202ef` 완료 뒤 운영 health ok·idle·기존 통합 release/복구를 재확인했다. 두 코드 수정과 속도 후보의 격리 NAS 비교는 여기까지 완료했으며 운영 속도는 1MiB/s, 미배포다. 운영 앱을 일시정지한 시험이므로 native SQL/COMMIT·동시 운영 DB I/O 영향·전체 앱 수락은 미검증이다. 기존 시작 capabilities와 예약기는 현재 1MiB/s에 묶여 있어 운영 상향 시 기존 계획을 보존하는 계약 검증도 필요하다.
+
+사용자의 3MiB/s 질문에 따라 같은 입력/수정본에서 **2→3MiB/s**로 포화/동기화 비용을 구분하는 고정 두 순서 시험을 준비했다. 기존 1/2 시험의 검증된 worker를 기준으로 격리 session 속도만 바꿨고 NAS에서 코드 hash·동일 Writer·인자·저장 중 거부 조건을 확인했다. 3MiB/s 성능은 아직 미측정이며 기존 도구·원본·운영 제어를 바꾸지 않았다. 반복 1/2 재측정이나 3MiB/s 운영 설정 변경은 수행하지 않는다. [실측 근거](../artifacts/recorder-rate-nas-result-20261014.json).
+
+## 2026-10-14 저장 묶음 확대 — NAS 실제 개선 확인
+
+휴식 수정본 대비 지연 저장 metadata 한도 확대를 같은 실제 입력 16,384건/빈 출력 디렉터리/1MiB/s에서 비교해 **66.112→64.879초(1.86%)**, **64.335→61.577초(4.29%)** 단축했다. metadata 파일 10→6개, metadata/payload fsync 59→51회이며 49,944,996바이트와 원문 metadata hash·본문 checksum·순번이 동일하다. 새 최대 chunk 1,999,825바이트는 기존 reader 2,000,000바이트 안이고 pending 상한 4,096행, 종료 charge/pending/drop/reject 0을 유지했다. CPU 3.717/3.691→3.726/3.617초, RSS 약 304~308MB로 급증은 없었다.
+
+큐 대기 p95는 65.778/64.002→60.502/58.286초, 최대는 65.795/64.021→64.584/61.288초로 줄었다. 다만 **평균은 34.766/33.872→36.365/34.300초(4.60%/1.27% 증가)**다. 모두 저장 시작 전 준비한 입력에서 큰 묶음의 공개 시점이 달라지는 교환관계로 기록하며 모든 지연이 개선됐다고 주장하지 않는다. 이 단계는 지연 파일 저장에만 적용되고 일반 녹화의 1MiB 한도·순서·본문 16MiB·동기화·완료 공개 계약은 유지한다. 동일 내용/감소한 동기화/두 쌍의 처리시간 개선과 메모리 상한 근거로 코드를 유지하고 이 prefix 범위 검증을 완료한다.
+
+job `41a60351aac9e85f07505bf3e9efb55f` 완료 뒤 NAS health ok·idle·기존 통합 release와 운영 복구를 재확인했다. 원본·운영 DB·runtime/helper/sudoers·계획을 유지했으며 두 수정은 아직 미배포다. 장시간 fsync의 원인·장중 COMMIT P1·전체 앱 성능은 별도 미해결이다. 다음 같은 수정본의 1/2MiB/s 비교 실행기 hash·인자·보호 조건을 확인했다. [실측 근거](../artifacts/recorder-batch-nas-result-20261014.json).
+
+## 2026-10-14 동기화 후 추가 휴식 제거 — NAS 실제 개선 확인
+
+같은 실제 보존 입력 16,384건/빈 출력 디렉터리/1MiB/s의 두 순서 비교에서 **68.179→62.793초(7.90%)**, **70.120→63.788초(9.03%)** 단축했다. 완료된 fsync를 추가 휴식에 다시 포함하던 최소 수정은 유지한다. 각 실행의 49,944,996바이트, metadata 10개·payload 49회/합계 59회 fsync, 순번·metadata hash·본문 checksum이 동일하며 pending 상한 4,096행·종료 charge/pending/drop/reject 0이다. CPU 3.74/3.81→3.667/3.66초, RSS 약 304~311MB로 급증이 없었다. 큐 대기 p95는 67.887/69.303→62.282/63.486초로 줄었다. payload fsync p95는 357.0/399.8→510.1/477.6ms, 최대는 376.2/543.4→516.8/652.0ms이므로 동기화 자체나 전체 녹화의 17초 동기화 지연이 해결됐다는 결과는 아니다.
+
+검사 job `ded92d8865afb8802b73c963cf34d8c2`는 완료됐고 이후 읽기 전용 조회에서 운영 health ok·idle·기존 통합 release와 운영 일시정지 복구를 재확인했다. 원본·운영 DB·runtime/helper/sudoers·기존 계획은 유지하고 배포하지 않았다. 이 수정의 저장 prefix 범위 성능 검증은 완료이며 코드 유지/배포 대기다. native SQL/COMMIT·revision·전체 앱 수락은 미검증이고 COMMIT P1은 계속 미해결이다. 다음 묶음 확대 NAS A/B의 hash·인자·보호 조건도 확인했다. [실측 근거](../artifacts/recorder-sync-wait-nas-result-20261014.json).
+
+## 2026-10-14 R4 native ADD·REDUCE·REENTER 자료 연결
+
+기존 연구 함수의 명시 typed 목표 계획→같은 PaperExecutionEngine/기존 writer·보고/manifest→readonly native proof→공통 비교/CLI·PC 선택을 연결했다. ADD 원가 누적·REDUCE 잔여 원가·REENTER 선행 청산/flat HOLD와 위험/전략 EXIT의 target 선점 취소를 검증했다. 기본 연구 event/state와 실제 broker 경로를 유지한다. KST 원장을 UTC 문자열로 거절하던 reader 원인은 실제 runner 왕복으로 확정해 저장 변경 없이 SQL 시각 비교·정밀 cut 검사를 보완했다. [54단계](AI_TRADING_SYSTEM_REDESIGN.md#54-r4-자동-목표의-native-addreducereenter-실행-자료-연결).
+
+신규 13건 포함 관련 214건 뒤 최종 표시/경계 50건·native 29건 각각 통과·실패/오류/skip 0. 중복 묶음을 전수검사로 합산하지 않는다. 실제 준비된 격리 개발 입력의 runner/ELIGIBLE 보고/원장·reader 왕복, legacy event/state·typed/CLI/Qt 6/6창·3행 한글·현재 source/import/SHA/AST·감사 delta 0/catalog/build를 확인했다. 6 run native SELECT 24회/COMMIT 0회와 생성 schema SELECT 1회이며 GET/tick 새 SQL/TR은 없다. 근거 `data/diagnostics/20261013-position-action-native/`.
+
+현재 로컬 build `2026.10.14-position-action-native-v1`은 미커밋·미배포다. 다음은 비용·불확실성·위험을 반영하는 R4 행동 선택의 주문 없는 연결이다. 계획 생성 폼/자동 예약·예측 보정/운영 승격·미체결 실행·실제 앱/운용 연구 데이터·broker/PG/NAS/장중 수락은 남는다. 전체 회귀/CI·push·계좌/주문 활성화·배포는 미실행이다.
+
+## 2026-10-14 원본 녹화 저장 종료 확인 — NAS A/B 관리자 실행 대기
+
+10/13 장중 원본 `20261012T235950Z-fb98b0ddcee9`의 **accepted=written=2,485,437**, 파일 쓰기 3,560,130,242바이트, metadata 1,557개·payload fsync 3,249회를 읽기 전용으로 확인했다. queued/pending/packed/packing/charge/copy reserve는 모두 0이다. NAS `health=ok`, 원래 통합 release 유지, operator의 `diagnostics_idle=true`도 확인했다. 최종 상태는 기존 입력 거부 4건(`unsupported_document_collection`) 때문에 `incomplete`이며 known_dropped는 0이다. 수락 입력의 durable drain과 전체 캡처/Replay 수락을 구분한다. 이번 확인에서 전체 파일 checksum 순회는 실행하지 않았다.
+
+현재 소스·installed helper·고정 비교 worker hash와 selected 인자·persisting 중 거부 조건을 재확인했다. 첫 동기화 후 추가 휴식 제거 NAS A/B를 `sudo -n`으로 시도했지만 비밀번호 요구로 시작되지 않았다. 사용자에게 준비된 고정 명령의 관리자 실행을 요청했다. 시험 job 생성·운영 앱 일시정지·배포·예약·속도 변경은 없다. 동기화/묶음/1·2MiB/s NAS 실측과 운영 복구 확인은 아직 남는다. [근거](../artifacts/recorder-storage-finished-20261014.json).
+
+## 2026-10-13 R4 자동 목표 수량 정책의 공통 계산 연결
+
+명시한 원화 목표·보유 원화/주식 한도·남길 현금·가용/만료 구간의 bounded 정책에서 ADD/REDUCE/REENTER 목표를 생성한다. 기존 부분체결/예약·native 확인 잔량·비용 반올림/자금·상충/미확인 주문 차단을 재사용하고 행동을 자동 변경하지 않는다. 기존 HOLD/EXIT와 정책 없는 결과/ID 전체는 유지했다. 자체 정책 자료가 없으면 EV_UNAVAILABLE이며 주문 권한은 false다. 기존 JSON/CLI·선택 저장/복구·공통 RAM/관찰 표 연결이며 새 DB/API/수집 owner는 없다. [53단계](AI_TRADING_SYSTEM_REDESIGN.md#53-r4-자동-목표-수량-정책의-공통-shadow-계산-연결).
+
+신규 13건 포함 최종 관련 **115건(27.457초)** 통과·실패/오류/skip 0. 8개 소비의 회차당 source read/비교 각 1회, 반복 GET 추가 계산/SQL 0회·legacy 결과 전체/ID·저장/ACK 유실·재시작·현재 import/SHA/AST·감사 delta 0/catalog·CLI/build/한글 offscreen 화면을 확인했다. 최초 실패는 테스트 fixture/시각 표기/QA 예제 생성에서 수정하고 기록을 보존했다. 근거 `data/diagnostics/20261013-position-sizing-policy/`.
+
+당시 로컬 build는 `2026.10.13-position-sizing-policy-v1`이며 미배포였다. 자체 자료의 첫 native 연결은 위 54단계에서 로컬 검증했다. 자동 행동/정책 선택·비중/손절 기반 sizing·예측 검증/운영 승격·미체결 실행과 실제 운영 수락은 남는다.
+
+## 2026-10-13 R4 완결 행동 자료의 PC 선택 연결
+
+기존 관찰 탭에서 연구 DB·자료 창 JSON·TRAIN/VALIDATION을 명시 선택해 공통 readonly reader의 HOLD/EXIT 결과를 비교 입력에 전달했다. 기존 목표/정책/계좌/cut을 유지하고 outcomes만 변경한다. 가져오기는 편집 입력이며 저장/적용은 별도다. 저장/재시작/GET/tick은 원장을 재조회하지 않고 PC 파일 경로를 서버에 보내지 않는다. 선택 변경/닫기/종료의 늦은 결과를 차단하고 실제 SQLite 중단/worker 완료까지 기존 수명이 소유한다. [52단계](AI_TRADING_SYSTEM_REDESIGN.md#52-r4-완결-행동-자료의-기존-pc-관찰-선택-연결).
+
+신규 6건 포함 관련 **122건(35.175초)** 통과·실패/오류/skip 0, 현재 import/SHA/AST·소비 감사 delta 0·catalog 438 unit/26 integration·build 3곳/diff 확인. 격리 native SQLite/Qt fixture와 820×850 offscreen 한글 화면 수락이며 실제 운용 연구 run/PC 앱·broker/PG/NAS·장중 성능 수락은 남는다. 4 run 가져오기에서 native SELECT 16회/COMMIT 0회, 별도 생성 schema SELECT 1회이며 새 서버 GET/tick SQL/TR은 없다. 근거 `data/diagnostics/20261013-position-outcome-selection/`.
+
+당시 로컬 build는 `2026.10.13-position-outcome-selection-v1`이며 미배포였다. 아래 51단계의 PC 연결을 완료했고 자동 bounded 목표 정책은 위 53단계에서 연결했다. 다른 행동의 자체 자료·예측 검증/운영 승격·미체결 정책 실행은 남는다.
+
+## 2026-10-13 R4 기존 연구 원장의 HOLD/EXIT 완결 자료 reader
+
+기존 ResearchRepository와 시뮬레이션 MARK/FILL 기록으로 고정 기간의 실제 포트폴리오 변화·비용을 한 번씩 계산해 기존 비교 CLI에 연결했다. 새 DB/시뮬레이터·서버 실시간 조회는 없다. source의 원래 정책/실행/비용/시각·초기 상태를 유지하며 미지원 ADD/REDUCE/REENTER·gap/미확인 주문/미래·다른 role·final/OOS/등록 final overlap·중복/예산은 차단한다. 완결 원장의 선택은 아직 자동 실행 승인이나 미래 EV 보정이 아니다. [51단계](AI_TRADING_SYSTEM_REDESIGN.md#51-r4-기존-연구-원장의-완결-행동-자료-reader-연결).
+
+신규 10건·관련 79건(18.898초) 뒤 추가 경계/최종 build/health 33건(10.456초) 각각 통과, 실패/오류/skip 0이다. 묶음을 독립 112건으로 합산하지 않는다. 같은 run의 여러 창은 native 연결 1회/SELECT 4회/COMMIT 0회이며 기존 GET/tick 추가 SQL/TR은 없다. 실제 import/SHA/AST·소비 감사 delta 0/catalog·diff 확인. 근거 `data/diagnostics/20261013-position-outcome-reader/`. 첫 검사의 테스트 연결 정리/sys import 오류는 수정하고 최초 실패 로그를 보존했다.
+
+당시 로컬 build는 `2026.10.13-position-outcome-reader-v1`이며 미배포였다. 수락은 기존 엔진의 격리 SQLite 시뮬레이션 fixture이며 실제 연구 run/모의 broker·PG/NAS/장중 성능 수락은 남는다. 자료의 기존 PC 관찰 선택은 위 52단계에서 연결했다. 다른 행동의 자체 자료·자동 목표/예측 검증·R4 이후 미체결 정책 실행과 실제 운영 승격은 별도로 남는다.
+
+## 2026-10-13 R4 이후 미체결 주문 관리 정책 설계
+
+매수·일반 익절 매도·손절/위험 청산을 같은 실행 owner 안의 목적별 정책으로 구분했다. WAIT/CANCEL/REPRICE·REENTER/ABANDON을 현재 타점·슬리피지·관측 EV/미확인·위험/기한으로 판단하며, 강제 위험 제한은 R4 EV 추천보다 우선한다. 보호는 PC LLM·다음 1분봉·Shadow 완료를 기다리지 않는다. 기존 취소 ACK의 CANCEL_PENDING·broker 대사·실제 FILL/잔고 확인과 멱등/권한 경계를 재사용하고 취소 확정 전 재주문·UNKNOWN 중복 제출을 금지한다. [정본 7.6절](AI_TRADING_SYSTEM_REDESIGN.md#76-미체결-주문-관리-정책).
+
+이번 변경은 설계/로드맵/잔여 범위 명시다. 실행 코드·API/DB·build·주문/운영 설정은 변경하지 않았고 자동 선택/재주문·보호 우선 깨우기/지연·실제 모의계좌 수락은 아직 미구현이다. 현재 지원 지정가/세션과 사용자 STOP 의미를 유지한다. 시장가/공격적 지정가도 체결을 보장하지 않으며 미지원 주문 유형은 별도 검증 전 차단한다. 문서 링크/현재 코드 계약 대조를 확인하며 실행 회귀는 이 문서 변경 때문에 반복하지 않는다.
+
+## 2026-10-13 저장 속도 1/2MiB/s 비교 — PC 실측 통과, NAS 대기
+
+휴식·묶음 수정본의 동일 Writer 소스에서 격리 session의 속도만 1/2MiB/s로 바꿔 실제 보존 입력 16,384건을 각 두 번 저장했다. 같은 빈 출력 디렉터리 조건의 순서 교차 비교에서 **52.912→29.361초(44.5%)**, **52.644→28.846초(45.2%)** 단축했다. 가상 시간 없이 PC 디스크의 실제 쓰기/fsync를 실행한 결과이며 NAS 성능 수락은 아니다. 두 쌍 모두 49,944,996바이트, metadata 6개·본문/metadata fsync 51회, 순번·metadata hash·본문 checksum이 동일하고 최대 pending 4,096행, 종료 charge/pending/drop/reject 0이었다. CPU는 0.938~1.016→0.703~0.797초, RSS는 약 288~290MB 범위다. 본문 fsync p95는 77.7/98.2→94.2/109.0ms, 최대는 103.8/122.9→149.3/152.2ms로 증가했다. 큐 대기 p95는 49.854/49.588→27.435/26.985초다. 이 큐 대기는 모든 선택 입력을 저장 시작 전에 준비한 조건이다.
+
+고정 NAS 속도 비교 실행기의 동일 소스·입력 결합, selected 인자, 원본 persisting 중 시험 생성 전 거부를 읽기 전용으로 확인했다. 원본이 아직 저장 중이어서 NAS 시험/일시정지/속도 변경/배포는 수행하지 않았다. 21:43 KST 마지막 조회는 1,275,234/2,485,437건(51.3%) 저장, 확인된 drop 0·기존 입력 거부 4건 유지다. 다음은 durable idle 후 준비된 NAS 수정·속도 A/B와 운영 복구 확인이다. 운영 앱을 일시정지하는 격리 파일 시험만으로 운영 PostgreSQL과 동시 I/O 영향을 수락하지 않는다. 운영 속도는 1MiB/s이며 장중 COMMIT P1은 미해결이다. [근거](../artifacts/recorder-rate-review-20261013.json).
+
+## 2026-10-13 지연 저장의 메타데이터 묶음 확대
+
+동기화 대기 제외 수정본을 기준으로 지연 저장의 메타데이터 묶음만 기존 reader 한도인 **2,000,000바이트**로 확대했다. 일반 녹화·단일 metadata/RAM segment의 1MiB, 본문 묶음 16MiB, 1MiB/s, pending 4,096행/metadata 8MiB, 순서·checksum·파일별 fsync·최종 manifest 동기화 계약은 유지한다. 관련 7모듈 67건과 기본 큰 묶음의 두 번째 쓰기 실패/prefix·RAM suffix 보존 1건이 통과했다.
+
+같은 실제 보존 입력 16,384건의 두 순서 비교에서 메타데이터 파일 **10→6**, 본문·메타데이터 fsync **59→51(13.6% 감소)**, 전체 49,944,996바이트와 내용/순번/체크섬은 동일하다. 가장 큰 새 metadata 파일은 1,999,825바이트로 기존 읽기 한도 안이다. **가상 2초 동기화 조건의 시간은 약 174.5→157.6초(추가 9.7% 감소)이며 NAS 실측 개선이 아니다.** 최대 pending은 4,096행, 비교 종료 후 pending/charge/drop/reject는 0이었다.
+
+NAS 고정 A/B 실행기의 소스 hash 결합·selected 인자·저장 중 거부 조건은 확인했지만 현재 원본이 persisting이므로 시험/운영 일시정지/배포는 수행하지 않았다. NAS 실행 소스는 아래 통합 커밋이며 두 수정은 미커밋·미배포다. NAS 실제 큐/fsync p95·최대/CPU/RSS·운영 복구와 부하 영향을 확인해야 완료 판정한다. 다음 후보는 같은 입력의 1/2MiB/s 비교이며 운영 속도를 상향하지 않았다. 근거: `artifacts/recorder-batch-review-20261013.json`.
+
+## 2026-10-13 녹화 저장의 동기화 대기 중복 산정 보완
+
+운영 파일 저장에서 완료된 동기화 시간을 추가 휴식에 다시 포함하는 비용을 확인해 기존 `diagnostic_trace` 한 파일을 최소 수정했다. 관련 회귀 42건과 실제 보존 입력 16,384건의 순서 교차 비교 두 번이 통과했다. **가상 2초 동기화 조건에서 약 19.4% 감소이며 NAS 실제 성능 수락은 아니다.** 파일/본문 체크섬·출력 49,944,996바이트·payload/metadata fsync 59회·pending 4,096행 상한은 동일하다. 첫 비교기의 가상 시간 연결 누락 결과는 제외했고 연결 실행 검사를 보강했다. 아래 이미 배포된 통합 커밋과 별개의 미커밋 수정이며 NAS에 반영하지 않았다.
+
+20:44 KST 읽기 확인에서 오늘 원본은 `persisting`, 280,267/2,485,437건(약 11.3%) 저장이고 확인된 드롭 0·입력 거부 4건을 유지했다. 따라서 기존 `trace_not_durably_idle` 조건을 지키며 NAS A/B를 아직 실행하지 않았다. 고정 검사 실행기와 입력/코드 hash 결합·selected 인자·저장 중 거부 확인은 준비 완료다. 원본 저장 완료 뒤 같은 보존 입력/빈 출력 디렉터리로 NAS 두 쌍을 비교하고 운영 앱 복구·실제 지연/처리량/큐·CPU/RSS를 확인해야 완료 판단할 수 있다. 파일 동기화가 느린 장치/RAID/다른 I/O 원인과 장중 10~20초 COMMIT P1은 미해결이다. 근거: `artifacts/recorder-sync-wait-review-20261013.json`.
+
+## 2026-10-13 녹화 전 NAS 통합 커밋 배포 완료
+
+08:42 KST에 검증한 커밋 `232737d33b3c1ac438a3e7dc3e3123817d19a868`을 NAS 릴리즈 `2026.10.13-integrated-recorder-v1-cfad9375c0c06f81`로 배포했다. 전체 4,241건 검사는 재실행하지 않고 기존 결과를 사용했으며, 같은 소스의 전용 PostgreSQL에서 TOP20 표시 녹화 native Replay 두 번·계좌 초기 상태 복원/봉인 rollback/native Replay 검사를 **2건 통과, skip 0**으로 확인했다(job `8efc113038cd9885857caab552a4ebc5`). 게시 소스 1,072개는 해당 커밋과 일치한다. 이 커밋 이후 다른 작업의 미커밋 R1/R2 변경은 배포에 포함하지 않았다.
+
+배포 후 실제 `health=ok`, 새 build/source path, 운영 일시정지 복구·검사 정리를 확인했다. 예약 PID **5425**의 실행 인자와 새 릴리즈 계획이 일치하고, 읽기 전용 사전 검사가 통과했다. **오늘 10/13 08:59:50~09:59:50 녹화·20:10 저장**, 다섯 입력 옵션·8GiB·500만 이벤트·1MiB/s를 유지한다. 실제 계획은 `artifacts/nas-integrated-20261013/today.plan.json`이다. 확인 시 녹화 시작 전이며 NAS 재부팅 후 예약 생존은 지원하지 않는다. 운영 DB 컨테이너·런타임 이미지·sudoers는 유지했고 관리자 배포 계약의 빌드 표식만 갱신했다. 설치 helper 코드는 이번에 교체하지 않았다. 실제 장중 녹화/저장 결과와 전체 앱 성능 수락은 별도다.
+
+## 2026-10-13 R4 계좌 전체 대사와 확인된 잔량 계산
+
+명시 live 선택 계좌만 기존 recovery 전후에 전체 실행의 미종결 원장을 각각 한 번 읽는다. 기존 브로커 응답의 수동 주문·원래 수량/방향/가격과 확인된 잔량을 공통 RAM으로 전달한다. 다른 실행의 원장/체결은 쓰지 않는다. QUEUED/전송 미확인·취소 대기·누락/모호한 근거·예산/조회 실패·조회 중 실행 변경은 추가 수량을 차단한다. 완전한 근거만 주문 없이 목표 수량을 계산하고 원래 고정 입력 계약을 유지한다. [50단계](AI_TRADING_SYSTEM_REDESIGN.md#50-r4-계좌-전체-대사와-브로커-확인-잔량-계산).
+
+신규 22건 포함 최종 관련 **188건(74.372초)**·정적 DB 계약 검사 **5건** 통과, 실패/오류/skip 0이다. native SQLite 고정 빈 주문의 24쌍 ON/OFF 비교는 연결/SELECT 각 1→3, COMMIT 1→1·기존 broker recovery 1→1이다. owner 회복 중앙값 2.288→6.700ms로 추가 확인 비용이 있으며 실제 장중 판단 지연 측정은 아니다. 8개 Shadow의 source read/비교 계산 각 1회·RAM/화면 getter DB 0회다. 현재 import/SHA·AST·추가 read 메서드/소비 각 1개와 기존 계약 보존·catalog 438 unit/26 integration을 확인했다. 근거 `data/diagnostics/20261013-position-account-reconciliation/`.
+
+로컬 미커밋 build는 `2026.10.13-position-account-reconciliation-v1`이다. 실제 PG/NAS/모의계좌·장중 수락·주문/배포는 미실행이다. 조회는 원자적 브로커 계좌 cut이나 외부 프로세스의 연속 변경 검증이 아니며 주문 권한은 false다. 다음 기능은 행동별 실제 완결 자료의 기존 reader 연결이다. 자동 목표 정책·예측 검증·운영 승격은 별도로 남는다. 이전 49단계의 실행별 차단 설명은 당시 범위 기록이다.
+
+## 2026-10-13 R4 기존 모의계좌 RAM 관측 전달
+
+기존 계좌 owner가 이미 완료한 recovery의 account/주문·자동모드 위험 자료를 RAM에 게시하고 검증된 현재 mock binding으로 공통 Shadow에 전달한다. 명시 live 선택에서 계좌 수량·기준가격을 같은 Collector RAM cut으로 갱신하고 고정 목표·비용/행동 정책은 유지한다. 새 계좌 TR/DB 조회·owner 활성화·1초봉 저장은 없다. source 부재/알림·조회 실패·종료/임대 실패는 자료를 무효화하며 고정 입력으로 fallback하지 않는다.
+
+현재 로컬 원장은 실행별 범위이므로 계좌 전체 미체결 완전성은 false다. 실제 보유/확인된 주문은 표시하지만 추가 수량·EV는 기존 규칙이 차단한다. 계좌 자료 시각/만료와 미확인 근거를 표시하고 주문/Replay 승인으로 승격하지 않는다. [49단계](AI_TRADING_SYSTEM_REDESIGN.md#49-기존-모의계좌-owner의-ram-관측을-공통-r4-입력으로-전달).
+
+신규 총 11건·관련 **160건(93.093초)** 통과 뒤 최종 해제/종료·임대/선별 기록/표시 보완은 직접 관련 **18건**으로 재검증했다. 두 단계 각각 실패/오류/skip 0이며 최종 SHA/import/AST·소비 감사 delta 0/catalog·격리 Qt 픽셀/스크롤을 확인했다. 두 묶음을 178개 독립 검사 또는 최종 소스의 160건 단일 재실행으로 합산하지 않는다. 8개 관찰에서 RAM 계좌 read/R4 평가/Collector read 각 1회, 계좌 알림만 바뀔 때 H1/H2 추가 평가 0회·조회 추가 DB/read/계산 0회다. 첫 선별 COMMIT 1회·동일 상태의 관측 ref 갱신 추가 COMMIT 0회를 확인했다. 근거 `data/diagnostics/20261013-position-account-ram/`.
+
+로컬 미배포 build는 `2026.10.13-position-account-ram-v1`다. 다음은 모든 실행·수동/QUEUED/전송 미확인 주문을 포함한 계좌 전체 대사 근거 연결이다. 실제 행동 자료 reader·자동 목표/예측 검증·실제 NAS/PG/모의계좌/장중 수락과 운영 승격은 남는다. 이번 단계의 커밋/push·배포·전체 회귀/CI·실제 주문/계좌 활성화는 없다.
+
+## 2026-10-13 R4 목표·행동 비교의 공통 관찰 연결
+
+기존 관찰 탭에서 고정 행동 비교 입력 JSON을 명시 가져와 같은 선택 API/Runtime·선별 기록/인증 조회로 전달한다. 입력 적용 때 기존 계산 한 번, 여러 테마/틱·조회는 공통 결과를 재사용한다. 수량/미체결·비용 차감 평균·HOLD 대비 차이·표본/표준오차·미확인을 표시하며 고정 자료의 원래 시각/ID와 실시간 계좌 자료 아님·주문 없음 표시를 유지한다. 입력/결과 각각 256 KiB·mock/KRX·관찰 테마 구성원 범위를 검증한다.
+
+신규 6건 포함 관련 **105건 통과(32.300초), 실패/오류/skip 0**·현재 source SHA/AST·DB 소비 감사 delta 0·catalog·diff 확인. 8개 관찰에서 RAM 읽기 1회/R4 계산 1회/기존 기록 COMMIT 1회, 같은 상태 다음 cut의 R4 계산/추가 COMMIT 0회·반복 live 조회 DB 연결 0회를 확인했다. 기본 820×850 창의 한글 폰트 격리 Qt 픽셀/스크롤도 확인했다. 최초 검사 코드의 import/JSON·KST/UTC 문자열 비교 실패는 수정 후 최종 묶음으로 재검증했고 최초 로그를 보존했다. [48단계](AI_TRADING_SYSTEM_REDESIGN.md#48-r4-목표행동-비교의-기존-공통-shadow관찰-소비-연결) · 근거 `data/diagnostics/20261013-position-comparison-view/`.
+
+로컬 미배포 build는 `2026.10.13-position-comparison-view-v1`다. 실제 계좌 owner 관측 자동 전달·행동별 실제 자료 reader·자동 목표/예측 검증과 운영 승격은 남는다. 현재 execution 원장은 실행별 범위이므로 계좌 전체 미체결로 간주하지 않는다. 다음은 기존 owner의 계좌·주문 관측 연결이다. 실제 NAS/PG/계좌·장중 수락·지연 개선·전체 회귀/CI·커밋/push·배포는 이번 단계에서 실행하지 않았다.
+
+## 2026-10-13 R4 행동별 비용 차감 관측 EV/불확실성
+
+명시 목표 계산을 재사용하고 연구 계산부에 같은 초기 상태·기간의 완결 행동 자료 비교를 연결했다. HOLD 대비 짝이 맞는 사례의 비용 차감 평균/차이·표본 수·표준편차/표준오차를 함께 반환한다. 관측 집단의 통계이며 보정된 미래 확률/운영 승격으로 쓰지 않는다. ADD 자료가 없어도 다른 행동의 비교는 유지하고, 부족한 행동·미래/불완전/비용 미확인·현재 차단/자금 부족 목표는 수치를 만들지 않는다.
+
+신규 15건 포함 관련 **100건 통과(969.926초), 실패/오류/skip 0**·실제 다섯 import/SHA·AST/catalog/diff 확인. 고정 입력 typed/CLI 연결 범위다. 새 데이터 조회/원장/Collector·체결 시뮬레이터/주문·계좌 owner는 없다. 실제 행동별 자료 준비/reader·실시간 계좌/관찰 화면 소비·예측 검증/운영 승격·NAS/PG/장중 수락은 남는다. [계약/검증](AI_TRADING_SYSTEM_REDESIGN.md#47-r4-행동별-비용-차감-관측-기대값과-불확실성-비교).
+
+## 2026-10-13 R4 첫 목표 수량 계산
+
+R3의 운용 진단/실제 승격과 분리해 R4 개발을 시작했다. 명시 목표량·기존 AccountSnapshot/ExecutionRecord를 같은 순수 계산에 전달해 실제 수량 + 확인된 미체결 매수 - 확인된 미체결 매도를 목표와 비교한다. 부분체결은 잔량만 사용하고 예약 자금은 한 번 차감하며 기존 연구 비용/반올림을 공유해 추가 가능 수량을 계산한다. 미정 목표를 0으로 바꾸지 않으며 UNKNOWN·취소 대기/불완전 대사·미확인 비용은 새 수량 계산을 차단한다.
+
+신규 15건 포함 관련 **114건 통과(29.324초), 실패/오류/skip 0**·현재 소스 네 SHA/import 경로·catalog/diff 확인. 고정 typed/CLI 입력 연결과 로컬 검증 범위다. 새 DB 조회/원장/Collector·계좌 owner·주문/체결은 없고 build/배포는 기존 상태다. 목표량 자동 정책·비용 차감 EV 비교·실시간 계좌/화면 소비와 운용 승인·NAS/PG/장중 수락은 남는다. [계약/검증](AI_TRADING_SYSTEM_REDESIGN.md#46-r4-명시-목표-수량과-기존-계좌주문-입력-연결).
+
+## 2026-10-13 R3 RAM 출처의 녹화 입력 조회 힌트
+
+기존 Collector Recorder high-water를 활성 trace/epoch와 대조해 같은 RAM snapshot의 capture_anchor로 고정하고 공통 출처·선별 한 행으로 전달했다. OFF/타 세션/재생·잘못된 ID는 새 snapshot에서 null, 거절된 최신 입력을 수락 ID로 만들지 않는다. 이전 판단은 당시 힌트를 유지한다. 힌트는 조회 위치이며 capture/native/운영 승인으로 쓰지 않는다. 현재 Recorder의 0g 제외도 미확인이다.
+
+신규 **5건 포함 관련 108건 통과(39.902초), 실패/오류/skip 0**·아홉 import/SHA·소비 감사/catalog 통과. 실제 격리 Recorder의 봉인 reader row/input ID·component/time와 기존 SQLite 선택 행을 대조했다. RAM 조회 세 번은 녹화 payload를 늘리지 않았고 8 소비자는 token RAM 확인 1회·원본 writer/COMMIT 각 4회/동일 H1·H2 공유를 유지했다. [계약/검증](AI_TRADING_SYSTEM_REDESIGN.md#45-ram-출처의-기존-녹화-입력-조회-힌트) · 근거 data/diagnostics/20261013-shadow-capture-anchor/.
+
+로컬 미배포 build는 `2026.10.13-shadow-capture-anchor-v1`다. 0g capture/전체 원본 값·lineage 대조·적격성/운영 승인과 실제 앱/PG/NAS/장중 수락은 남는다. 실제 녹화/활성화·계좌/주문·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 RAM 판단의 공통 출처/연속성 근거
+
+기존 Collector RAM snapshot 한 번의 source/generation·승인/연속 시작·보존/gap·전달 누락을 회차 한 벌로 묶고 실제 context_ref/cut에 연결했다. 실패 slot은 이전 근거, 취소 publish도 실제 cut을 유지하고 이후 delivery 상태를 이전 입력에 섞지 않는다. optional map은 기존 live/선별 한 행에만 포함하며 기존 판단의 기록 예산을 넘으면 생략한다. raw 초봉 저장·틱 추가 read/COMMIT·원본 확정/Replay/운영 승인은 없다.
+
+신규 **6건 포함 관련 142건 통과(91.717초), 실패/오류/skip 0**·현재 import/일곱 SHA·소비 감사/catalog 통과. 소비자 0/2/8의 원본 writer/COMMIT 각 4회·8테마 H1 1회/H2 8개와 기존 첫 선별 기록 1회가 유지됐다. 작은 8테마 입력 중앙값 7.070→7.174ms, 600 frame×20 종목의 8테마 입력 84.154→88.269ms. 이는 저장/장중 수락이 아니며 판단 ID는 전부 일치했다. [현재 계약/검증](AI_TRADING_SYSTEM_REDESIGN.md#44-ram-판단의-공통-출처와-연속성-근거-연결) · 근거 data/diagnostics/20261013-shadow-source-coverage/.
+
+로컬 미배포 build는 `2026.10.13-shadow-source-coverage-v1`다. 실제 capture lineage/원본 값의 확정·적격성·운영 승인과 앱/PG/NAS·장시간/장중 수락은 남는다. 계좌/주문·활성화·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 관찰 화면의 수동 원본 대조
+
+관찰 탭에서 저장된 연구 가설/revision과 1–60초 범위를 기존 Qt worker의 수동 source-check로 대조하고 일치·미확인·조회 비용/비승인 상태를 표시한다. 편집값 저장/PC DB 읽기·기본 live polling/틱 대조는 없다. 선택 reload/save에서 이전 결과 초기화, stale/승인 범위가 다른 응답 거절·실패/live 분리·중복/종료 join/늦은 결과 미표시를 확인했다.
+
+신규 **5건 포함 관련 50건 통과(31.236초), 실패/오류/skip 0**·실제 import/SHA 여덟 파일·소비 감사/catalog·격리 native 8/8 대조 결과의 offscreen 픽셀 QA 통과. 서버/API/transaction/build 표식은 기존 `2026.10.13-shadow-source-check-v1` 그대로다. [현재 범위](AI_TRADING_SYSTEM_REDESIGN.md#43-관찰-화면의-수동-원본-대조와-결과-표시) · 근거 data/diagnostics/20261013-shadow-source-check-ui/.
+
+원본 수집 연속성/이전 revision·lineage/적격성/운영 승인과 실제 앱/PG/NAS/장중 수락·판단 지연 전후 측정은 남는다. 실행 앱 조작·활성화/주문·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 연구 가설의 명시 native 원본 대조
+
+인증 source-check의 expected_revision/1–60초 명시 창→기존 app lock/drain→native 테마 이력·최신 초봉 두 읽기를 연결했다. 정확 theme ID/내용 hash/구성원과 초봉 전체 값 hash를 대조하고 창 밖/이전 revision/연속성·factor/hypothesis lineage는 미확인으로 남긴다. 보고서 저장·tick 추가 read·운영/Replay 승인은 없다. 화면 버튼은 후속이다.
+
+신규 10건 통과, 관련 최초 110건 중 109건 통과·기존 staging rename의 WinError 5 한 건만 새 임시 경로 재실행 통과. 제품 수정 없이 아홉 SHA 일치·소비 감사/catalog 통과. SQLite 명시 대조 SELECT 2회/COMMIT 0회·DB 바이트 무변경, live GET 추가 source read 0회. 소비자 0/2/8의 기존 원본 writer/COMMIT 각 4회, 8테마 H1 1회/H2 8개를 유지했다. [계약/검증](AI_TRADING_SYSTEM_REDESIGN.md#42-연구-가설의-native-원본을-명시-대조) · 근거 data/diagnostics/20261013-shadow-source-check/.
+
+로컬 미배포 build는 `2026.10.13-shadow-source-check-v1`다. 실제 초봉 이력/수집 연속성·lineage/적격성/운영 승인·PG/NAS/장중 수락과 판단 지연 전후 실측은 남는다. 명시 대조 표시가 다음 연결 범위이며 계좌/주문·활성화·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 연구 가설·정책의 관찰 화면/명시 설정 연결
+
+기존 관찰 탭에서 PC 연구 DB/run/가설 ID·네 정책을 명시 선택해 기존 Qt worker에서 read-only 조회하고 검증된 불변 문서 snapshot만 인증 selection API로 전달한다. 선택 가설은 한 테마의 행동 제안에 연결하며 다른 테마는 독립 context 관찰이다. private v1 설정의 optional stock_thesis/null 해제·revision/save/apply/ACK 유실·새 앱 재시작을 기존 owner/문서 한 행으로 처리한다. PC 경로/파일을 서버에서 열지 않으며 연구 문서를 시장 원본 확정/운영 승인으로 취급하지 않는다.
+
+신규 **10건 포함 관련 116건 통과(74.115초), 실패/오류/skip 0**·현재 import/SHA 아홉 파일·소비 감사 delta 0/catalog·offscreen 픽셀 QA 통과. 새 PC 선택은 schema+근거 SELECT 각 1회/COMMIT 0회, 저장 snapshot 재사용·tick 가설 read 0회다. 기존 원본 writer/COMMIT·H1/H2 공유·source_durability=not_verified/order_authorized=false를 유지한다. [계약/검증](AI_TRADING_SYSTEM_REDESIGN.md#41-저장된-연구-가설정책의-관찰-화면과-명시-설정-연결) · 근거 `data/diagnostics/20261013-shadow-thesis-selection/`.
+
+로컬 미배포 build는 `2026.10.13-shadow-thesis-selection-v1`다. 다음은 실제 앱/NAS 통합·원본 입력의 확정 provenance/적격성·운영 승인 및 PG/장시간/장중 수락이다. 이번 작업의 계좌/주문·운영 활성화·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 저장된 연구 진입 가설의 명시 복구/Shadow 전달
+
+기존 ResearchRepository에서 지정 run/thesis ID·연결된 대장 근거를 단일 SELECT로 읽어 기존 typed stock-thesis 요청에 연결했다. 기존 CLI에 연구 DB/ID/정책 명시 옵션을 추가하고 read-only mode=ro로 열어 재시작 후 같은 저장 가설을 공통 Shadow에 전달한다. 불변 ID/본문·scope/거래소·COMPLETE/가용시각을 검증하며 실패 run·PARTIAL·RAM 임시 참조는 거절한다. 저장 연구 문서를 운영 승인이나 시장 원본 확정 수락으로 표시하지 않는다.
+
+신규 **10건 포함 관련 103건 통과(30.274초), 실패/오류/skip 0**·actual CLI·DB 바이트 무변경·두 새 RAM binding·실제 import/SHA 일곱 파일·소비 감사 delta 0/catalog 통과. 정확한 가설 조회는 SELECT 1회/COMMIT 0회, CLI schema 확인은 별도 1회이며 틱마다 재조회하지 않는다. 네 정책의 기존 결과/ID와 주문 차단·현재 source_durability=not_verified를 유지하고 이전 H2 상태는 복원하지 않는다. [계약/사용/검증](AI_TRADING_SYSTEM_REDESIGN.md#40-기존-연구-db의-불변-진입-가설을-명시-복구해-shadow에-전달) · 근거 `data/diagnostics/20261013-shadow-persisted-thesis/`.
+
+로컬 미배포 build는 `2026.10.13-shadow-persisted-thesis-v1`다. 실제 화면/운영 설정의 가설·정책 선택, 원본 확정 승인·적격성 및 PG/NAS/장중 수락은 남는다. 이번 단계의 계좌/주문·운영 활성화·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 기존 0g 상한가 참조의 RAM 전달
+
+기존 Collector가 받는 종목정보 0g의 당일/거래소별 상한가 가격과 수신 가용시각을 공통 RAM 입력→기존 H2에 연결했다. 승인 source마다 최신 한 벌만 보존하며 삭제/reset/gap·전일/미래/거래소 혼합을 제외한다. 참조만 도착해도 갱신하고 미확인은 UNKNOWN으로 남긴다. 새 TR/REG·DB reader/writer·주문/전략 엔진은 없다. RAM 참조를 durable 승인으로 쓰지 않는다.
+
+신규 **9건 포함 관련 152건 통과(33.699초), 실패/오류/skip 0**·현재 import/SHA·소비 감사 delta 0/catalog 통과. 수정 전후 80체결+0g 1건의 원본 봉/참조 원문 hash·연결/COMMIT은 같고 8개 테마도 RAM 읽기 1회/H1 1회/H2 8회다. 원본 5 COMMIT·기록 ON 첫 진단 포함 6 COMMIT은 전후 유지된다. 단독 합성 RAM 21쌍 도착→결과 중앙값 20.742→21.395ms로 지연 개선은 확인되지 않았다. [계약/검증](AI_TRADING_SYSTEM_REDESIGN.md#39-기존-0g-상한가-참조정보의-ram-shadow-전달) · 근거 `data/diagnostics/20261013-shadow-upper-limit/`.
+
+로컬 build 표식은 `2026.10.13-ram-shadow-upper-limit-v1`로 갱신했고 health/소스 release 계약 별도 12건이 통과했다. 이 표식은 위 NAS 배포 기록과 별개인 미배포 로컬 소스다. 확정 승인/보호 정책/재시작 근거·실제 PG/NAS/장시간/장중 수락은 남는다. 이번 작업의 운영 활성화·주문·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 서로 다른 테마의 H1 공유·입력 복사 부하 개선
+
+같은 H1 scope의 시장 판단을 테마 간 공유하고 검증된 불변 market frame 참조만 재사용한다. 테마별 H2 상태/결과·정책과 가변 snapshot 복사·결과 인코딩을 보존한다. H1만 줄인 중간 측정은 지연 개선이 없었으며 입력 deepcopy 계측 후 최소 수정했다. 8개 테마 H1 8→1/H2 8회 유지, 600 frame×20 시장 구성원의 로컬 합성 21쌍에서 준비→결과 중앙값 **677.394→88.058ms**, process CPU 671.875→93.750ms, 별도 추가 Python allocation peak 23,052,780→217,788 bytes다. 장중/RSS 측정으로 확대하지 않는다.
+
+신규 **12건 포함 관련 184건 통과(63.626초), 실패/오류/skip 0**·현재 source/test SHA·소비 감사 delta 0/catalog 통과. Collector RAM/native SQLite 0/8 OFF의 원본 writer/COMMIT 4회·봉 내용은 같고 8개 RAM 읽기 1회/H1 1회/H2 8회다. 첫 선택 recording ON은 진단 COMMIT 1회를 더해 총 5회다. [계약/측정](AI_TRADING_SYSTEM_REDESIGN.md#38-서로-다른-테마의-h1-공유와-불변-시장-입력-재사용) · 근거 `data/diagnostics/20261013-shadow-h1-sharing/`. 확정 승인/보호 정책/상한가 원본·실제 PG/NAS/장시간/장중 수락은 남는다. 이번 단계의 활성화·주문·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 시장·테마 관찰 화면·명시 선택
+
+기존 Shadow 후보 창에 시장·테마 관찰 탭을 연결했다. 테마 ID/KRX·NXT/기록 여부를 명시 선택하며 기본 OFF, 기존 Collector의 passive 공통 Runtime만 사용한다. 실시간 판단과 최근 저장 결과/만료·독립 정책 행동 제안을 표시한다. 보이는 live 탭에서만 5초 RAM 조회(DB 0), 저장분은 명시 요청만 읽고 편집 중 선택/후보 알림을 보존한다.
+
+별도 인증 selection GET/PUT에서 필수 revision·native 테마 검증·저장/적용/복구·현재 Runtime 교체와 shutdown fence를 소유한다. config 재시작은 새 session/빈 상태이며 진단/thesis/주문 승인은 복원하지 않는다. 새 선택에 늦은 owner notification도 연결한다. 기동 실패의 두 번째 start 분기를 고장 주입으로 재현하고 최소 수정했다.
+
+신규 **15건 포함 관련 166건 통과(69.706초), 실패/오류/skip 0**·현재 소스/테스트 11개 SHA·소비 감사/catalog·synthetic offscreen 픽셀 QA 완료. [계약/범위](AI_TRADING_SYSTEM_REDESIGN.md#37-시장테마-관찰-화면과-명시-실행-선택) · 근거 `data/diagnostics/20261013-shadow-selection-ui/`. 실제 여러 테마의 공통 H1 최적화/종단 부하, 확정 승인/보호 정책/상한가 원본 연결·PG/NAS/장중 수락은 후속이다. 운영 활성화·주문·커밋/push·배포·전체 회귀/CI는 없다.
+
+## 2026-10-13 R3 RAM 결과 선별 저장·인증 조회
+
+명시 recording ON에서 첫 결과/범주 판단 변화만 기존 문서 저장으로 기록한다. 최신 한 행·공통 context 한 번·정책별 결과를 보존하며 기본 30초 간격/최신 pending coalescing·독립 writer·종료 drain/실패를 소유한다. 기본 OFF/빈 binding은 유지한다. 인증 `/api/v1/research/ram-shadow`는 기본 RAM만 읽고 저장분은 명시 요청 때 고정 key 한 번 조회한다. 저장 결과는 현재 판단/Replay/주문 승인으로 복원하지 않는다.
+
+8개 소비자의 첫 기록은 context 1개/result 8개·COMMIT 1회, 같은 판단 상태의 다음 cut은 추가 쓰기 0회였다. 신규 **7건(3.554초)**과 기존 관련 **156건**을 검증했다. 관련 실행의 신규 앱 검사 두 subcase는 기존 404 기대값을 잘못 적어 실패했고 assert 한 줄만 수정해 신규 묶음을 재검증했다. 동일 제품 소스·native DB/API 계약과 소비 감사/catalog를 확인했다. 163건 단일 clean run/전체 회귀로 보고하지 않는다. [계약·검증](AI_TRADING_SYSTEM_REDESIGN.md#36-ram-shadow-결과의-선별-저장과-인증-조회) · 근거 `data/diagnostics/20261013-shadow-selected-records/`.
+
+실제 데스크톱 표시/명시 운영 선택·재시작 승인 근거, PG/NAS·장중·성능·전체 gate는 남는다. 운영 활성화·커밋/push·배포는 없다.
+
+## 2026-10-13 R3 TOP20·테마 context 자동 갱신
+
+기존 TOP20의 검증된 RAM 공개 알림과 Content 테마 쓰기 완료 신호를 공통 Runtime에 연결했다. 순위는 RAM으로 공유하고 테마는 startup/변경·불확실한 쓰기 완료 때 native snapshot을 한 번 확인한다. 8개 소비자도 최초 순위 읽기/변환·테마 읽기 각각 1회이며 중복 pending→persisted 알림은 추가 변환/평가가 없다. 과거 frame의 테마 근거·future cut·테마 삭제/빈 scope·실패 retry와 갱신 중 close를 보존한다.
+
+COMMIT 뒤 ACK 유실 때 새 테마 알림이 빠지는 것을 실제 SQLite로 재현·최소 수정했다. HTTP 실패는 유지하고 실제 native snapshot만 반영한다. 새 6건 포함 관련 **255건 통과(71.291초), 실패/오류/skip 0건**·현재 소스 10개 해시 대조·소비 감사/catalog 통과. 기존 원본 writer/COMMIT·API/DB 계약은 유지한다. [범위/근거](AI_TRADING_SYSTEM_REDESIGN.md#35-top20테마-owner의-공통-context-자동-갱신) · 근거 `data/diagnostics/20261013-shadow-context-updates/`.
+
+다음은 선별 기록/표시·재시작 근거와 명시 운영 선택이다. 현재 기본 binding은 비어 있으며 실제 PG/NAS·장중·새 pipeline 성능·전체 회귀/CI·커밋/push·배포는 미실행이다.
+
+## 2026-10-13 R3 Collector RAM·앱 공통 수명 연결
+
+기존 Hub 관측자 한 개가 Collector의 canonical 초 집계를 한 번 읽어 공통 typed 입력/계산으로 전달한다. 명시 Shadow binding에만 공통 Runtime을 조립했고 source generation/승인·연속 구간·RAM 보존·gap/소비 drop을 품질로 전달한다. H2에 필요한 clean RAM 구간만 기본 20초/상한 60초로 보존하며 late/dedup/dirty/원본 writer·native Candidate 기록/복구는 유지한다. 동일 Collector의 중복 수명 owner를 거절한다. 입력 없는 주기적 read/계산·새 종목 요청/TR/REG·매매법 엔진·원본 writer는 없다.
+
+0/2/8개 소비자·80체결에서 집계 각각 80회, 네 writer 각각 1회/연결·COMMIT 각각 4회·봉 내용이 같았다. 8개 동일 입력의 RAM read/변환/H1/H2는 각각 1회·DB 0회다. 실제 app lifespan의 시작/상류 실패/취소·종료와 frozen 최종 cut, queue 포화/context·실패 retry/수명 소유권을 포함해 새 12건 포함 **183건 통과(42.017초), 실패/오류/skip 0건**. 새 오류 cleanup store.close 한 site만 검토·기준선 보존 후 소비 감사/catalog 통과다. [범위/검증/제약](AI_TRADING_SYSTEM_REDESIGN.md#34-기존-collector-ram-관측과-앱의-공통-수명-연결) · 근거 `data/diagnostics/20261013-shadow-ram-runtime/`.
+
+현재 운영 기본 binding은 비어 있으며 NAS 활성화·배포는 없다. 시장/테마 context는 기존 owner가 공급·갱신하는 명시 입력이고 TOP20/theme의 자동 갱신 연결·운영 선택·선별 기록/표시·재시작 근거는 후속이다. RAM의 COMPLETE는 durable 승인 근거가 아니다. 실제 PG/NAS·장중 부하·종단 지연·전체 회귀/CI·커밋/push는 미실행이다.
+
+## 2026-10-13 R3 공통 frame·H1/H2 계산 연결
+
+같은 native safe-prefix 페이지의 불변 분봉/순위 변환을 회차 안에서 공유하고 동일 입력 전체/cut/venue/window/parameters/이전 상태의 H1/H2를 한 번 계산해 독립 정책에 전달한다. 별도 엔진/수집기/task/writer는 추가하지 않았다. 전략별 상태·판단/ID·평가 저장/checkpoint와 저장 ACK 이후 상태 공개를 유지한다. 실패한 요청만 재시도하며 취소/close는 기존 owned 계산과 최신 pending drain을 보존한다.
+
+실제 이전 공통 페이지 소스와 native SQLite 31쌍 비교에서 분봉 변환 8→4회, read 1회/SELECT 2회/연결 11회·독립 evaluator/평가 저장 8회·COMMIT 10회는 유지됐다. 동일 H1/H2 두 context는 각각 2→1회, 네 정책+context는 각각 5→1회로 감소했다. RAM 결과 준비 중앙값은 1.81→1.22ms/4.83→2.29ms지만 SQLite 포함 판단 준비는 321.3→349.8ms로 개선되지 않았다. 고정 입력의 결과/ID는 동일하며 실제 장중 성능으로 확대하지 않는다.
+
+새 9건 포함 관련 10모듈+RAM/DB 경계 2사례 **160건 통과(42.878초), 실패/오류/skip 0건**. 소비 감사 delta 0·catalog·실제 사용자 환경 소스 해시 전후 대조를 통과했다. [범위/측정/후속](AI_TRADING_SYSTEM_REDESIGN.md#33-같은-관측의-frame-변환과-h1h2-계산-공유) · 근거 `data/diagnostics/20261013-shadow-common-calculation/`. 다음은 Collector RAM 읽기 전용 발행/generation·gap과 app 공통 호출의 수명/선별 기록 연결이다. 운영 app/설정·계좌·NAS 배포·전체 회귀/CI·커밋/push는 수행하지 않았다.
+
+## 2026-10-13 R3 Collector RAM·중복·지연 네 항목 점검
+
+현재 소스와 격리된 Collector/Hub/native SQLite로 사용자의 네 항목을 확인했다. 구독자 0/2/8개·40체결에서 원래 Collector 1개/1분·1초 집계 각각 40회/원본 writer 네 호출 각각 1회/COMMIT 4회·봉 payload를 보존했다. 기존 Hub와 RAM peek를 재사용할 수 있지만 live-minute read는 DB+RAM이고 현재 Shadow의 safe-prefix 기록/복구는 확정 revision이 필요하다.
+
+두 Family의 31쌍 비교는 read 2→1/관측 SELECT 4→2/연결 12→11이며 전략별 evaluator/저장 8회·COMMIT 10회는 유지한다. 공통 분봉 변환은 8→8회이고 동일 H1/H2 RAM monitor 두 개는 각각 2회 계산해 **공통 계산 중복 제거는 미완료**다. 최신 로컬 표본의 전체 판단 준비 중앙값 350.3→358.8ms/p95 643.0→573.0ms로 일관된 지연 개선은 확인하지 못했다. 봉 종료·source COMMIT/운영 PG 지연은 제외한 8판단 묶음이다. [네 항목 상세/제약](AI_TRADING_SYSTEM_REDESIGN.md#32-collector-ram-공유입력-권한중복지연의-네-항목-점검) · 근거 `data/diagnostics/20261013-shadow-collector-audit/`.
+
+현재 평가 저장 실패 두 검사 네 subcase가 실패해 이전 111건 보고를 현재 소스 보증으로 쓰지 않는다. 실제 사용자 환경 소스에서 평가 저장 ACK 뒤에만 RAM 상태를 공개하는 3줄을 수정했고 기존 7모듈+RAM/DB 경계 2사례 **113건 통과(44.568초), 실패/오류/skip 0건**·수정 후 해시를 확인했다. 초기 실패/표본도 보존했다. 공통 frame/H1/H2 계산·Collector RAM 직접 발행·app 수명 연결은 남는다. 전체 회귀/CI·운영 설정·계좌·NAS 배포는 이번 단계에서 변경/수행하지 않았다.
+
+## 2026-10-13 R3 공통 관측 페이지의 RAM 다중 전달
+
+기존 native safe-prefix page를 한 번 읽어 돌파·눌림 Shadow의 각 cursor 이후 입력으로 전달하는 공통 호출을 구현했다. 같은 store/독립 ID·bounded page·안전 prefix와 per-monitor 직렬화를 검사하며 기존 기록/checkpoint/frames-only 복구와 owned drain을 유지한다. 개별 worker가 실행 중이면 공통 전달은 거절한다. 새 task/수집기/writer/DB API/주문 owner는 없다. 평가 저장 실패/ACK 유실 때 RAM 상태가 먼저 바뀌어 후보를 잃는 기존 경로도 재현해 해당 행의 상태 rollback/동일 문서 재시도로 최소 수정했다.
+
+새 13건 포함 관련 7모듈 **111건 통과(42.556초), 실패/오류/skip 0건**. 같은 native SQLite fixture의 source read 2→1, 관측 SELECT 4→2, 연결 12→11, 쓰기 COMMIT 10→10이며 판단/후보/최종 상태는 같다. 실패/동시/취소·복구와 실제 SQLite 평가 저장 재시도를 확인했다. 추가 read site 1개 검토·이전 기준선 archive 후 소비 감사 통과다. 전체 회귀는 반복하지 않았다. [납품/제약](AI_TRADING_SYSTEM_REDESIGN.md#31-공통-관측-페이지의-ram-다중-전달) · 근거 `data/diagnostics/20261013-shadow-shared-page/`.
+
+source read 자체는 남으며 collector RAM 직접 발행·H1/H2 공통 맥락·app 공통 worker/수명·장중/PG/NAS 수락은 미완료다. 운영/app 선택·NAS/배포는 변경하지 않았다. 이번 미커밋 소스는 위 NAS 배포와 구분하며 커밋/push 전 all-local·지문 gate·새 CI는 별도다.
+
+## 2026-10-13 R3 전략별 입력과 공통 Shadow 실행부
+
+기존 CandidateMonitor의 돌파 고정 선택을 등록 config/Family 선택으로 바꿔 돌파·눌림이 동일 실행부의 1분봉·순위 reader/저장/checkpoint/복구를 재사용한다. 각 전략의 규칙·monitor ID·상태·결과를 유지하고 1초봉을 필수 입력에 추가하지 않았다. 명시 `family_id`로 코드에서 눌림을 선택할 수 있으며 기존 JSON/기본 돌파·app/운영 설정은 유지한다. 다른 해상도 계약은 초기 저장 접근 전에 거절한다.
+
+새 6건 포함 관련 7모듈 **98건 통과(38.233초), 실패/오류/skip 0건**. 두 전략의 직접 evaluator와 판단/상태 동등성, 실제 SQLite checkpoint/후보 저장과 독립 재시작·중복 방지, 1초 read/기존 주문 dispatch 0회를 확인했다. 관측 reader는 고정 fixture이며 실제 PG/NAS·장중 부하는 미실행이다. 기존 소비 감사의 delta 0·catalog·diff를 통과했다. [범위/제약/후속](AI_TRADING_SYSTEM_REDESIGN.md#30-전략-입력-해상도와-기존-shadow-실행부-재사용) · 근거 `data/diagnostics/20261013-shadow-family-inputs/`.
+
+RAM 단일 발행/다중 소비·H1/H2 공통 맥락/선별 기록·app 수명/운영 선택은 남는다. 전체 회귀를 반복하지 않았고 이번 단계는 로컬 미커밋·미배포다. 위 NAS 배포와 구분하며 커밋/push 전 all-local·지문 gate/새 CI는 별도다.
+
+## 2026-10-13 R3 RAM 입력 수명과 반복 DB 조회 제거
+
+사용자의 후속 지시에 따라 Shadow는 공통 판단 엔진의 주문 없는 검증 실행으로 통일한다. 전략별 규칙·상태·결과를 보존하고 기존 수집·시장 분석·기록·복구를 재사용한다. 직전 준비하던 전용 ranking/1초봉 listener·peek API·publisher scope는 제거해 producer 세 파일의 변경을 원복했다. 기존 공유 evaluator·H1/H2/진입 가설 계산과 검증된 RAM 수명은 보존했다. 기록/복구/조립까지의 공통 실행 연결은 아직 완료되지 않았다. [현행 계약/다음 범위](AI_TRADING_SYSTEM_REDESIGN.md#29-shadow를-공통-판단의-검증-실행으로-통일).
+
+계약 반영/전용 hooks 제거 후 관련 6모듈 **77건 통과(28.622초), 실패/오류/skip 0건**. producer 세 파일의 HEAD 대조와 diff 검사도 통과했다. 근거 `data/diagnostics/20261013-shadow-common-contract/`. 전체 회귀·CI·NAS 배포는 이번 단계에서 실행하지 않았다.
+
+사용자의 Shadow 역할/부하 지적에 따라 준비하던 2초 DB 재조회·app/settings/compose 연결을 제거했다. 대신 store/네트워크 없이 RAM snapshot 도착 때만 계산하는 실행부를 구현했다. 중복 입력은 생략하고 대기 snapshot은 1개로 제한하며 coalesced 횟수와 최신값 관찰 범위·durable=false를 명시한다. 실패/취소/종료에서 마지막 상태 보존·진행 계산 join·최종 대기 snapshot drain을 확인했다.
+
+새 6건 포함 관련 8모듈 **91건 통과(29.643초), 실패/오류/skip 0건**. 같은 입력 100회에서 평가 1회·SQLite/PG 연결 0회이며 기존 소비 계약·catalog·AST·diff도 통과했다. 전체 회귀는 반복하지 않았다. [역할/수명/부하 범위](AI_TRADING_SYSTEM_REDESIGN.md#28-r3-ram-입력-shadow-수명과-부하-경계) · 근거 `data/diagnostics/20261013-r3-ram-shadow/`.
+
+producer RAM 발행·app 연결·source generation/continuity·실제 장중 CPU/메모리/부하·결과 저장/표시는 남는다. 기존 돌파 CandidateMonitor의 조회/저장은 그대로이며 이번 신규 실행부의 I/O 0회를 전체 앱 부하 0으로 확대하지 않는다. 이번 변경은 로컬 미커밋/미배포이며 운영 설정/NAS는 변경하지 않았다.
+
+## 2026-10-13 R3 native 입력 reader 연결
+
+기존 순위/테마 이력과 새 bounded `load_second_trade_bars`를 같은 native backend에서 읽어 공통 Shadow 입력으로 변환했다. 날짜·KRX/NXT·종목·최대 600초/10,000행·가용시각을 제한하고 예산 초과를 거절한다. writer/스키마/HTTP/주문 owner는 유지했다. mutable 행의 이전 버전과 연속성을 복원/확정하지 않으며 UNAVAILABLE/H2 PARTIAL로 남긴다. read별 snapshot은 별도다.
+
+새 6건 포함 관련 10모듈 **200건 통과(38.079초), 실패/오류/skip 0건**. SQLite index·연결/SELECT 1회·조건/예산/덮인 과거 행 제외·native fixture→실제 CLI 동등성을 확인했다. PG는 가짜 연결+실제 psycopg exit 수명 검증이며 실제 SQL/plan/부하는 미실행이다. API 1개/소비 3지점의 정확한 delta 검토·기존 기준선 아카이브 후 감사·catalog·AST·diff를 통과했다. 전체 회귀는 반복하지 않았다. [범위/제약](AI_TRADING_SYSTEM_REDESIGN.md#27-r3-native-입력-조회-연결) · 근거 `data/diagnostics/20261013-r3-native-inputs/`.
+
+실제 source cut/continuity·live task/종료 수명·저장/표시·새 reader 녹화/Replay·신규 진입/수량·PG/NAS/운영 수락은 남는다. 이번 R3 소스는 미커밋/미배포이며 위 NAS의 기존 커밋 배포와 구분한다. 운영 DB/계좌/NAS는 이 작업에서 변경하지 않았다. 커밋·push 전 all-local/지문 gate·새 CI는 별도다.
+
+## 2026-10-13 R3 종목 행동/무효화 Shadow 연결
+
+기존 진입 근거 `EntryThesis`와 명시한 thesis policy를 H1/H2 공통 평가에 연결했다. VALID/AT_RISK/INVALIDATED와 기존 HOLD/WAIT/REDUCE/EXIT 제안·근거·무효화 조건·원본 결정/내용 ID·H2 유효기간을 반환한다. H1 누락은 기존 H2 보호 제안을 막지 않고 H2 누락은 UNKNOWN/NO_TRADE·HOLD이다. 정책 자동 선택/새 임계값·주문 권한·수량·실행 경로는 추가하지 않았다. 기존 맥락 v1 출력/revision을 보존하고 CLI에 별도 `stock-thesis-shadow/v1` 입력을 연결했다.
+
+새 8건 포함 관련 6모듈 **64건 통과(10.558초), 실패/오류/skip 0건**. 실제 CLI 다섯 사례와 typed 결과, 기존 맥락 출력이 일치하며 catalog·AST·diff도 통과했다. 전체 회귀는 반복하지 않았다. [연결 계약/납품 범위/후속](AI_TRADING_SYSTEM_REDESIGN.md#26-r3-진입-근거의-종목-행동무효화-shadow-연결) · 실행 근거 `data/diagnostics/20261013-r3-stock-thesis/`.
+
+신규 ENTER/ADD/REENTER·목표 수량/EV·시장 유형별 새 진입 규칙·실시간 source reader/수명·저장/표시·운영 수락은 남는다. 현재 로컬 미커밋/미배포이며 운영 DB/계좌/NAS 변경은 없다. 커밋·push 전 all-local/지문 gate와 새 CI는 별도다.
+
+## 2026-10-13 R3 첫 시장/테마 Shadow 평가
+
+같은 입력 시각의 기존 H1 시장/H2 대장 공통 평가와 JSON 미리보기 CLI를 구현했다. 미래/타 venue·window 제외, 품질·근거·유효기간·내용 revision/다음 H2 상태를 반환하며 중복 입력·참조 충돌·미래 상태를 검사한다. 주문 권한은 false이고 기존 매매/주문/live 감시 경로는 유지했다. 새 12건 포함 관련 5모듈 **52건 통과(9.459초), 실패/오류/skip 0건**과 실제 CLI·AST·catalog·diff를 확인했다. [첫 기능/입력 계약/후속](AI_TRADING_SYSTEM_REDESIGN.md#25-r3-시장테마-shadow-입력-연결) · 근거 `data/diagnostics/20261013-r3-market-theme/`.
+
+앞서 R1/R2 all-local은 소스 반영 전에 중단했고 완료 33 worker/1,830건·미실행 257 worker와 전용 프로세스 종료를 기록했다. 전체/현재 지문 통과가 아니다. 실제 source cut/실시간 소비·종목 행동/무효화·운영 수락·커밋/push 전 전체 검사·CI는 남는다. 현재 로컬 미커밋/미배포이며 NAS/운영 DB 변경은 없다.
+
+## 2026-10-13 R2 checkpoint 실패 재시도·no-op·종료 순서
+
+현재 main `232737d` 위 미커밋에서 native SQLite COMMIT 두 번 실패 후 idle worker가 저장을 재시도하지 않아 RAM cursor 1/DB cursor 0이 남는 결함과, 저장 ACK 전 close가 끝나는 경로를 재현했다. 같은 ACK 내용의 저장도 revision/saved_at 때문에 두 번 COMMIT했다. 기존 runner에 pending/ACK 내용 비교를 두고 ACK 이후에만 해제하며, fills/control 확인 후 후속 입력 전에 retry하고 기존 owned drain으로 저장·종료 순서를 보존했다. 필수 최종 저장은 강제하고 bootstrap/부분 recovery guard·v1 JSON·attempt generation·DB transaction·중지/주문 권한은 유지했다.
+
+수정 전 4검사/5 assertion 실패→같은 수정 후 4건 통과. ACK 유실·후속 입력 차단·주문 제출 후 실패, 간접 bootstrap 저장·FILL 상태 읽기 drain까지 새 9건 포함 관련 15모듈 **278건 통과(78.119초), 실패/오류/skip 0건**이다. 동일 내용 두 저장의 native COMMIT은 **2→0**, 필수 최종 COMMIT은 **1→1**이며 정상 매매의 결과 hash·연결 153/SELECT 161/쓰기 COMMIT 44/변경 행 54는 이전 R2와 동일하다. 소스 소비 감사/catalog/구문/diff도 통과했다. [변경·재현·완료 범위](AI_TRADING_SYSTEM_REDESIGN.md#24-r2-checkpoint-저장-실패noop종료-순서) · [실행 원장](../data/diagnostics/20261013-r2-checkpoint/verification.json).
+
+실제 PG/NAS 장애·취소/부하·broker 전체 재시작·전체 R2/P1 지연 수락·all-local/새 CI는 미실행이며 커밋/push/배포하지 않았다. 이번 NAS 조회나 운영 DB/계좌 변경은 없다.
+
+## 2026-10-13 R2 첫 불변 승인 근거 조회 최적화
+
+main HEAD `232737d` 위 미커밋으로 복구/gate 저장 전 불변 spec·admission·lease·recovery의 좁은 `load_mock_automation_lineage` 조회를 SQLite/PostgreSQL 기존 실행 DB 모듈에 추가했다. 고정 가짜 broker 매매 한 사이클의 중앙 native SQLite 연결/SELECT는 **163→153 / 171→161**, 실제 쓰기 COMMIT **44→44**, 변경 행 **54→54**, fetch 행 **149→149**다. 같은 매매·체결·현금·비용·수량·cursor 결과와 일지 검사를 보존했고 control/binding/최신 risk 재검사·writer transaction을 합치지 않았다.
+
+관련 15모듈 **268건 통과(71.939초), 실패/오류/skip 0건**과 후속 새 SQLite 동시 게시/snapshot **1건 별도 통과**다. PostgreSQL은 가짜 연결+실제 psycopg native exit의 수명/계측 검증이며 실제 PG SQL·planner·동시성·부하는 미실행이다. 소비 계약 감사는 새 API/2개 소비 지점만 검토해 이전 기준선을 아카이브하고 통과했으며 catalog도 통과했다. 전체 R2 성능·P1 COMMIT 원인/개선·NAS·실제 broker·all-local/새 CI·커밋/push/배포는 남는다. 이번 NAS 재조회/운영 변경은 없다. [범위와 실측](AI_TRADING_SYSTEM_REDESIGN.md#23-r2-불변-승인-근거의-좁은-조회) · [실행 원장](../data/diagnostics/20261013-r2-breakout/verification.json).
+
+## 2026-10-13 R1 첫 돌파 판단 소비 연결
+
+main HEAD `232737d` 위 로컬 미커밋 작업으로 Shadow의 돌파 직접 호출을 기존 Family 등록 evaluator에 연결하고 결과 타입을 기존 `StrategyEvaluation`으로 명시했다. 기존 미커밋 문서/검사와 원본 자료를 보존했다. 동일 입력의 두 소비자 판단과 FILL 소유 경계의 새 1건 포함 관련 8모듈 **95건 통과(46.412초), 실패/오류/skip 0건**이다. Shadow 6사례와 가짜 broker 매매/체결/재시작/일지의 고정 결과 묶음은 전후 JSON·SHA-256·45,919바이트 크기가 일치했고 FakeStore 호출 수가 유지됐다. 실제 DB COMMIT/성능 개선 실측은 아니다.
+
+전체 R1 목표 구조, 좁은 업무 저장 API·native SQL/COMMIT 검토, R2/R3와 실제 운영 수락은 남는다. 새 all-local·CI·NAS/PG·실제 broker 검사는 미실행이며 커밋/push/배포하지 않았다. 이 작업에서 NAS 상태를 재조회하지 않았으므로 아래 NAS 기록은 해당 시점의 근거로 유지한다. [변경·계약·검증 범위](AI_TRADING_SYSTEM_REDESIGN.md#22-r1-첫-돌파-판단-소비-연결) · [실행 원장](../data/diagnostics/20261013-r1-breakout/verification.json).
+
+## 2026-10-13 전체 설계·재조립/신규 개발 비교
+
+| 구분 | 이번 결과 |
+| --- | --- |
+| 사용자 요청·소스 | 전체 설계를 다시 구성해 재조립과 전체 신규 개발을 판단할 근거 작성. 로컬 main HEAD `232737d33b3c1ac438a3e7dc3e3123817d19a868`, 통합 소스 `3180f04`. 이전 검사 2파일·문서 3파일의 미커밋 변경을 보존했다. |
+| 실제 조사 | 로컬 Python 380파일 정적 AST·지문 목록, 핵심 26모듈의 import/정의, 연구/Shadow/모의/수집/주문/자료 소유권의 대표 경로와 원래 명세 대조. 동작/성능 전수 감사나 NAS 재조회가 아니다. |
+| 설계·권고 | [전체 설계와 선택 근거](AI_TRADING_SYSTEM_REDESIGN.md)를 작성했다. 기존 기반의 선택적 재조립을 우선하며 필요한 기능과 연결을 남긴다. 작은 신규 구조는 사용자 참고안이며 새 프로젝트를 결정하지 않았다. DB/메인 결합 근거, 목적별 저장·좁은 소비 계약, NAS/독립 PC 모드, DB Replay의 별도 진단 도구 분리, 기능 추가의 변경 국소화와 전환/복귀를 명시했다. |
+| 개발 순서 | R0 코드 수정 없는 설계 → R1 기존 핵심 경로 하나의 유지/정리/교체 → R2 해당 저장 경로 최적화 → R3 새 판단 기능 → R4 포지션/EV → R5 학습/운용 확장으로 정리했다. 구조 정리와 새 기능은 분리하며 전체 표를 자동 실행하지 않는다. 이전 로드맵 전문은 [아카이브](archive/2026-10-13/README.md)에 보존했다. |
+| 검증·미실행 | 새 설계는 문서/정적 연결 검토이며 새 정책·prototype·성능 측정·실제 주문·NAS 변경/배포는 미실행이다. 과거 회귀 통과를 새 설계의 구현 합격으로 사용하지 않는다. 방식 선택과 실제 코드 재구성은 남는다. |
+
+정적 근거는 `artifacts/architecture-review-20261013/source-inventory.json`이다. 실제 모델 기록은 GPT-6.1 Sol High이며 전환하지 않았다. 아래 예약/검사 기록은 과거 확인 시점으로 유지하고 해당 차단을 전체 설계·정책 개발의 선행 조건으로 확대하지 않는다.
+
+## 2026-10-13 모의운용 NAS 차단 확인·시계 복원 검사 보완
+
+| 구분 | 현재 확인 결과 |
+| --- | --- |
+| 작업 소스 | 로컬 main HEAD `232737d33b3c1ac438a3e7dc3e3123817d19a868`, 통합 소스 커밋 `3180f04`. 이번 변경은 기존 SQLite·PostgreSQL 검사 보완과 문서이며 미커밋·미배포다. 아래 4,241건은 커밋 전 고정 소스의 기존 결과로 보존한다. |
+| 운영 NAS | 05:32~05:37 KST 읽기 확인: health=ok·trace=off·diagnostics_idle=true, 활성 release `2026.10.12-recorder-account-index-v3-875421f5e5e3fb26`. 서비스·예약·계좌·주문 설정 변경과 operational pause는 요청하지 않았다. |
+| 격리 검사 차단 | 어제 고정 후보 `2026.10.12-mock-session-clock-v1-3442fec908ef9878`의 133건 요청 1회가 `operation_busy`로 실행 전 거부됐다. 새 job·실행 시험 0건이다. 오늘 녹화 예약 PID 31632의 fd 3에서 예약 `.status.json.lock` inode 829529의 WRITE FLOCK을 확인했다. 이는 operator fence를 통과할 수 없게 하는 충분한 차단 조건이다. private operator.lock의 다른 소유자 여부는 미확인이다. |
+| 로컬 검증 | 시계·계좌 입력·초기 복원·모의 세션 관련 4모듈 66건 통과, 실패/오류/skip 0건(45.804초). 동일 초기 상태에서 두 번 Replay하고 중복 저장 전후 문서·updated_at과 결과 digest가 같은지 확인했다. PostgreSQL 함수 1건 로딩·문법, 기존 CI catalog(unit 438/integration 26) 연결 확인은 실행 합격과 구분한다. |
+| PostgreSQL 준비 | 기존 전용 account/VI 검사에 account-context/v4의 초기 STOPPED·미확인 주문·취소 이력, 시계 읽기/저장/재시도 5호출, 두 번 Replay의 최종 내용·중복 저장·각 native transaction 및 초기 상태 복원을 추가했다. 총 22호출·19 commit·3 rollback/회는 검사 요구 조건이며 실제 PostgreSQL 검증은 미실행이다. |
+| 다음 조건 | 녹화 예약 실행기의 종료와 trace durable idle·operator 잠금 사용 가능을 모두 확인한다. 기존 133건은 어제 후보의 검증으로 유지하며, v4 검사와 최신 통합 소스의 검증에는 해당 소스를 담은 별도 후보·gate가 필요하다. 운영 배포·실제 모의계좌 운용·앱 전체 인과 Replay 수락은 남는다. |
+
+근거는 `data/diagnostics/20261013-053236-mock-nas-isolation/`의 `attempt.json`, `reservation-process.json`, `clock-v4-verification.json`이다. `/proc/locks`만으로 소유자를 확인하지 못했던 관측과 실제 프로세스의 fdinfo 잠금 확인을 구분한다. 예약(08:59:50~09:59:50 녹화·20:10 저장)은 유지했다. 모델은 현재 실행 기록의 GPT-6.1 Sol High이며 전환하지 않았다.
+
 ## 2026-10-13 통합 소스 커밋·녹화 범위 보완
 
 | 구분 | 현재 확인 결과 |

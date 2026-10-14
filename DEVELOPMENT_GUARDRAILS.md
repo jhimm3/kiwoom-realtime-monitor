@@ -8,6 +8,8 @@ AI와 사람이 이 저장소를 수정할 때 아래 규칙을 기본 계약으
 
 커밋·push 전에는 기존 Windows `all-local` 전수검사를 통과하고 `python -m scripts.check_required_ci_results --windows-only --local --windows <run.json>`으로 현재 실행 코드·검사·배포 도구의 LF 지문과 보고서를 대조한다. 이후 실행 소스를 수정하면 이전 보고서를 현재 통과로 재사용하지 않는다. `all-local`은 catalog·lock 버전 검사를 포함하며 Linux·실제 PostgreSQL·봉인 replay·operator의 외부 검증은 별도 Actions 결과로 보고한다. CI 전용 실패는 실제 실패 단계의 로그·artifact를 먼저 감사하고 기존 검사를 중복 추가하거나 판정 조건을 낮추지 않는다.
 
+Windows 회귀의 fixture 임시 자료는 기존 Runner가 `%LOCALAPPDATA%/Temp/kiwoom-regression/<고유 worker ID>`에 격리한다. 관찰되는 checkout 아래의 임시 자식 핸들과 directory rename이 경합하므로 `--output/temp`나 상속된 workspace TEMP를 사용하지 않는다. 실행 소스는 현재 checkout, 로그·결과는 지정 output에 유지하며 TEMP/TMP/TMPDIR는 같은 worker 경로다. 통과 및 전체 프로세스 종료 확인 후에만 소유한 임시 경로를 제거한다. 실패·중단 자료는 보고서의 `temporary_directory`에 보존하며 접근 거부 재시도나 성공 판정 완화로 대체하지 않는다.
+
 1. NAS 모드의 모든 Kiwoom REST 조회는 `CentralRestBroker`를 통과한다. 새 직접 HTTP 호출로 중앙 큐를 우회하지 않는다.
 2. `ka00198` 실시간 종목조회순위가 대기 중인 분봉·일봉·역사 백필보다 항상 높은 우선순위를 갖게 한다.
 20:05 이후 장후 보완은 30초 순위 schedule loop에서 직접 기다리지 않고 별도 owned task로 실행한다. 장후 분봉·일봉·수급 보완이 오래 걸려도 다음 `ka00198` 회차를 막지 않는다.
@@ -115,6 +117,10 @@ Kiwoom TR·주문 transport를 호출하지 않는다.
 새 로컬 SQLite 저장소는 특별한 읽기 전용 URI·초단기 timeout 요구가 없다면 `persistence/sqlite_connections.py`의 읽기 연결 또는 쓰기 트랜잭션 경계를 사용한다. 예외가 발생해도 연결 종료와 쓰기 롤백이 보장돼야 하며, 여러 저장소를 한 번에 일괄 교체하지 않고 관련 회귀가 있는 기능부터 순차 적용한다.
 
 ## 분석과 주문
+
+Shadow는 공통 판단 엔진을 주문 없이 실행·검증하는 방식이다. 매매법마다 별도 Shadow 엔진·수집기·시장 분석·writer·복구 경로를 만들지 않는다. 전략별 규칙·버전·설정·상태·결과는 독립적으로 유지하고, 기존 등록 evaluator와 공통 입력/분석·기록·복구 기능을 재사용한다. 같은 입력 cut·설정·상태의 판단은 연구/Shadow/실행에서 같아야 한다. Shadow 결과가 주문 제출·가상 체결·실제 포지션 갱신으로 이어지지 않게 실행 경계를 유지한다. 공통 사용은 기존 계좌 owner·transaction·checkpoint·실패 복구 경계를 합친다는 뜻이 아니다. [계약과 남은 연결](docs/AI_TRADING_SYSTEM_REDESIGN.md#29-shadow를-공통-판단의-검증-실행으로-통일)을 따른다.
+
+입력 해상도는 해당 판단 규칙의 계약으로 정한다. 기존 돌파·눌림은 확정 KRX 1분봉·순위 입력을 유지하고, 초 단위 대장 판단의 입력을 모든 전략에 강제하지 않는다. 공통 reader가 지원하지 않는 입력 계약은 명시적으로 거절하며 1분봉을 1초 자료로 늘리거나 수집 누락을 0으로 채워 통과시키지 않는다.
 
 21. 분석·분류·복기 코드는 실제 주문 실행과 분리한다. 분석 결과가 자동 주문을 발생시키지 않는다.
 21-1. 수동 모의주문은 명시적 기능 플래그와 인증 요청을 모두 요구한다. run별 멱등키를 저장하고 응답 유실·중복 요청을 자동 재전송하지 않으며, 후보·전략 생성기가 수동 주문 API를 호출하지 않는다.

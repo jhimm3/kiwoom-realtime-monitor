@@ -1,0 +1,433 @@
+{
+  "version": 1,
+  "reviewed_additive_paths": {
+    "/api/v1/research/ram-shadow/selection": {
+      "get": {
+        "summary": "Get Ram Shadow Settings",
+        "operationId": "get_ram_shadow_settings_api_v1_research_ram_shadow_selection_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Ram Shadow Settings",
+        "operationId": "put_ram_shadow_settings_api_v1_research_ram_shadow_selection_put",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RamShadowSelectionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/research/ram-shadow/allocation-models": {
+      "post": {
+        "summary": "Post Allocation Models",
+        "operationId": "post_allocation_models_api_v1_research_ram_shadow_allocation_models_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Document"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/research/ram-shadow/source-check": {
+      "get": {
+        "summary": "Research Stock Thesis Source Check",
+        "operationId": "research_stock_thesis_source_check_api_v1_research_ram_shadow_source_check_get",
+        "parameters": [
+          {
+            "name": "expected_revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Expected Revision"
+            }
+          },
+          {
+            "name": "lookback_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 60,
+              "minimum": 1,
+              "default": 20,
+              "title": "Lookback Seconds"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Research Stock Thesis Source Check Api V1 Research Ram Shadow Source Check Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/research/ram-shadow": {
+      "get": {
+        "summary": "Research Ram Shadow",
+        "operationId": "research_ram_shadow_api_v1_research_ram_shadow_get",
+        "parameters": [
+          {
+            "name": "include_recorded",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Recorded"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Research Ram Shadow Api V1 Research Ram Shadow Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mock-automation/unfilled-population": {
+      "post": {
+        "summary": "Publish Native Unfilled Population",
+        "operationId": "publish_native_unfilled_population_api_v1_mock_automation_unfilled_population_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "reviewed_additive_schemas": {
+    "RamShadowSelectionUpdate": {
+      "properties": {
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Expected Revision"
+        },
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Enabled"
+        },
+        "theme_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "maxItems": 32
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Theme Ids"
+        },
+        "leadership_venue": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(KRX|NXT)$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Leadership Venue"
+        },
+        "recording": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Recording"
+        },
+        "stock_thesis": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Stock Thesis"
+        },
+        "position_comparison": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Position Comparison"
+        },
+        "position_account_live": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Position Account Live"
+        },
+        "position_allocation": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Position Allocation"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "expected_revision"
+      ],
+      "title": "RamShadowSelectionUpdate"
+    }
+  },
+  "route_insertions": [
+    {
+      "before": "/api/v1/settings/operations",
+      "paths": [
+        "/api/v1/research/ram-shadow/selection"
+      ]
+    },
+    {
+      "before": "/api/v1/kiwoom/query",
+      "paths": [
+        "/api/v1/research/ram-shadow/allocation-models"
+      ]
+    },
+    {
+      "before": "/api/v1/research/observations",
+      "paths": [
+        "/api/v1/research/ram-shadow/source-check",
+        "/api/v1/research/ram-shadow"
+      ]
+    },
+    {
+      "before": "/api/v1/market/snapshots/{kind}",
+      "paths": [
+        "/api/v1/mock-automation/unfilled-population"
+      ]
+    }
+  ]
+}

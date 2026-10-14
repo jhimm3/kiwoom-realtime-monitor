@@ -771,9 +771,11 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store.save_dataset_snapshot = blocked_save  # type: ignore[method-assign]
             store.upsert_documents = lambda *args, **kwargs: None  # type: ignore[method-assign]
             hub = RealtimeHub()
+            notification = MagicMock(side_effect=RuntimeError("optional context sink failed"))
             service = AutonomousTop20Service(
                 _Broker(), hub, store, catalog_loader=lambda: (),
                 now_provider=lambda: datetime.fromisoformat("2026-09-10T09:00:00+09:00"),
+                on_membership_changed=notification,
             )
             service._subscriber = hub.connect()
             service._entrants_day = "2026-09-10"
@@ -794,6 +796,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 requested, _nxt = hub.requested_codes()
                 self.assertEqual(set(latest["payload"]["codes"]), set(requested))
                 self.assertFalse(refresh.done())
+                notification.assert_called_once_with()
             finally:
                 release.set()
             await refresh

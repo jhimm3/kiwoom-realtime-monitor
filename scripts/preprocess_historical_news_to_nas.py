@@ -89,10 +89,19 @@ def prepare_job(job: dict, article: dict, body: dict | None = None,
 
     if job["stage"] != "RULE" or body is None:
         raise ValueError("규칙 작업에 본문 리비전이 없습니다.")
+    cleaned = clean_article_text(str(body.get("body_text") or ""))
+    return _prepare_rule_job(job, article, body, cleaned)
+
+
+def _prepare_rule_job(job: dict, article: dict, body: dict, cleaned: str) -> dict:
+    """Private RULE core; callers compute cleaned text with the same extractor."""
+    if job["stage"] != "RULE":
+        raise ValueError("RULE core requires a RULE job")
+    result = {"job_key": job["job_key"], "attempts": job["attempts"], "stage": job["stage"]}
+    document = dict(article["document"])
     target_code = str(job["payload"].get("stock_code") or job.get("target_id") or article["stock_code"])
     target_name = str(job["payload"].get("stock_name") or document.get("stock_name") or target_code)
     document.update(identity=article["identity"], stock_code=target_code, stock_name=target_name)
-    cleaned = clean_article_text(str(body.get("body_text") or ""))
     if not cleaned:
         cleaned = str(document.get("description") or "")
     assessment = assess_stock_news(target_name, str(document.get("title") or ""),

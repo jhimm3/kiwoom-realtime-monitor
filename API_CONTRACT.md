@@ -1,5 +1,197 @@
 # NAS API 계약
 
+`paired-net-action-selection/v2`의 선택 `action_required_data_capabilities`는 JSON `[["ADD", ["news_context"]]]`처럼 행동과 정렬된 추가 자료 배열의 쌍이며 DTO는 불변 tuple이다. 행동 키는 HOLD/ADD/REDUCE/REENTER/EXIT 중 중복 없이 정렬된 1~5개이며 비교 요청에 존재해야 한다. 추가 자료는 아래 v2 허용값을 사용하고 공통 required_data_capabilities와 합친다. 생략/None은 기존 결과·ID와 출력 모양을 유지한다. 선택 action_inputs는 행동별 required/missing_data_capabilities·reasons·원래 valid_until을 제공하고 action_selection.action_input_rejections는 제외된 후보의 사유다. 후보 결측이 다른 후보를 차단하지 않으나 HOLD 기준선의 필수 자료 결측은 WAIT다. 타점 제약/TTL은 요구한 행동에 적용하며 유효한 R3 EXIT와 공통 하드 Risk는 전체 보호 우선이다. 선택한 행동의 TTL을 receipt에도 반영한다. **현재 thesis_ref 조건은 공통 또는 행동별 stock_thesis 요구가 있을 때 필수, 그 외 빈 값이다.** 테마 없는 시작 조건은 공통 자료 요구에 적용하고 행동별 추가 자료 결측은 해당 후보를 제외한다. 별도 선택 stock_thesis/상위 allocation의 테마 시작 요건은 유지한다.
+
+상위 native 비중의 가중치0 소비자는 기존 Runtime의 typed ThemeMembership을 위험 소속으로 받아 사용 H1/H2 점수 구성요소의 시각/TTL을 검사한다. 미사용 leadership 창의 결측이 시장 점수의 lease를 줄이지 않는다. 미래 소속·상이한 중복·선택 종목 소속 결측은 차단한다. 모두 양수인 기존 가중치와 독립 owner 자료를 명시하지 않은 직접 호출 계약은 유지한다. 현재 A03 지원 계약/실제 실행 승인과 구분한다.
+
+이하 정책별 계약 설명은 행동별 추가 필드 도입 전의 기록이며 현재 thesis_ref/행동별 조건은 위 계약을 따른다.
+
+R4의 기존 `position-action-comparison-shadow/v1` 외피·endpoint/auth/revision을 유지한다. `parameters.selection_policy`의 기존 `paired-net-action-selection/v1` 필드·모드는 unchanged이며 별도 v2 `paired-net-action-selection/v2`는 `input_mode="owner_ram_risk"`와 명시적 `required_data_capabilities` JSON 배열을 요구한다. 배열은 중복 없는 정렬된 0~5개 값이며 허용값은 `sampled_price`, `stock_thesis`, `theme_context`, `news_context`, `turnover_delta`다. `thesis_ref`는 stock_thesis 요구 시에만 필수이며 미요구 시 빈 값이어야 한다. v2 선택 근거의 required/available/missing_data_capabilities는 JSON 배열로 제공한다. 현재 검증된 R4 생산자는 sampled_price와 기존 stock_thesis이며 나머지 자료를 요구하면 `required_data_capability_unavailable:<name>`로 차단한다. 미요구 자료는 공통 차단 조건이 아니다. 계좌/주문·native Risk·자금/비용·가용시각/TTL·scope는 생략할 수 없고 신선한 하드 보호가 우선한다. 모든 receipt는 실행 승인이 아니다.
+
+`ram-shadow-selection/v1`의 enabled와 빈 theme_ids 조합은 native 계좌 관측을 명시한 v2 R4가 stock_thesis/theme_context를 요구하지 않고 상위 allocation/별도 stock_thesis 선택이 없을 때만 허용한다. 이 경우 mode는 `position_context`이고 기존 선택 저장·owner 수명·기록을 재사용한다. 계좌·현재 가격·Risk를 과거 저장 문서에서 복원하지 않는다. 테마 전략/v1과 상위 allocation의 시작 조건은 유지한다. 상위 비중 후보의 시장/테마/종목 점수는 null을 보존할 수 있으나 해당 context_weights가 양수이면 결측 차단이며, theme_ids는 테마 집중 위험 정보로 계속 필수다. [현재 설계](docs/AI_TRADING_SYSTEM_REDESIGN.md#현재-r4의-정책별-자료-요구조건).
+
+기존 dynamic-allocation-native-models/v2 소비 receipt에 선택 input_bundle(dynamic-allocation-input-bundle/v1)을 추가하고 current-goal-binding/v2 goal에는 input_bundle_ref를 붙인다. 기존 v1에는 붙이지 않는다. 입력7그룹 checks, 원래 current_cut_ref/selection/model refs, original available_at/valid_until, model source/study/EV comparison/population/exit refs 및 EV outcome ref count/hash를 제공한다. status INPUTS_BOUND 또는 INPUTS_UNAVAILABLE이며 model_application_verifiedFalse/source_durabilitynot_verified/orderfalse다. 현재 EV estimator의 trained_predictor_usedFalse는 학습 모델 승인/평가를 완료했다는 뜻이 아니다.256KiB 초과 sentinel에는 bundle_ref/lease가 없고 이유만 제공한다. expired current 조회에서는 bundle/goals를 제거하며 기록된 원래 selected latest의 과거 lease는 재발행하지 않는다. endpoint/auth/revision 및 기존 amount/policy/model IDs는 unchanged다. [86단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#86-개발-마무리-범위-고정과-공통-입력원본-근거-묶음)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+execute_research/research_run_identity의 선택 position_study_context는 prepared original position-study-historical-context/v1 document다. 정확12-key(version/dataset_id/revision_ids_hash/decision_time/symbol/market_venue/ranking_window_truncated/theme_window_truncated/rankings/theme_snapshots/context_ref), COMBINED TOP20/cumulative source 범위·100/100·128KiB를 검사한다. None 기본 run spec/proof는 unchanged이고 명시 source spec에 position_study_context, 기존 POSITION_STUDY_CASE proof에 historical_context를 추가한다. source spec이 없이 event만 값을 붙이면 거절한다. v2 allocation 외피/endpoint/선택 revision/기한은 그대로이며 current-goal-binding/v2에 선택 historical_context_summary를 추가한다. refs/case coverage/시장 quality/관측 테마/truncated를 나타내고 current_context_support_verifiedFalse·source_durabilitynot_verified·orderfalse다. 기본 v1/미포함v2는 새 필드를 만들지 않는다. [85단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#85-기존-연구-입력의-과거-순위테마-맥락-연결)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+기존 dynamic-allocation-native-ev/v1 CLI 입력은 기본8-key를 유지하고 선택 include_source_records(bool)만 허용한다. 기본 False 결과는 동일하고 True의 성공 receipt에 native_source_publication을 추가한다. 이는 native-allocation-ev-source-publication/v1의 정확7-key(version/decision_time/selections/sources/source_receipt/outcomes/publication_ref)이며 원래 record/events를 포함한다. 별도 publish endpoint나 자동 호출은 없다. 기존 v2 row의 네 key를 유지하고 ev_receipt 내부 선택 proof만 재검증한다. 원래 receipt의 outcomes/source_receipt/decision cut과 같아야 한다. current-goal-binding/v2의 선택 allocation_lineage는 position-study-allocation-lineage-audit/v1, REPORTED_OVERLAP 또는 REPORTED_DISJOINT이며 independence_verifiedFalse/source_durabilitynot_verified/orderfalse다. 미포함 기존 v1/v2 외피/TTL/기본 출력은 유지하고 직접 실행 승인이나 R4 행동 EV를 반환하지 않는다. [84단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#84-상위-ev-원본-출처-재생과-r4-연구-중복-확인)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+현재 계좌 내부 기본 PositionAccountObservation의 필드/기본 serialization은 그대로다. 현재 등록 native owner가 정합한 경우에만 PositionRunnerAccountObservation.runner_state를 붙인다. 기존 v2 current-goal-binding에 선택 native_owner_facts(entry_price_won/owned_quantity/opened_at/holding_age_seconds/family/family_scope_matches/protection_pending/session_clock_pending/state_ref/fill_cursor/state_available_at)를 추가한다. 기존 공개 인증 endpoint/packet/revision 계약은 바꾸지 않는다. owner_state는 native-position-runner-state/v1·owner_ram/not_verified/orderfalse이며 64KiB 한도/정확 key/content hash/cut/원가·수량을 검사한다. source_continuation의 원래 code/family/parameters/session은 decoder 내부 정보이며 기존 게시 외피/ID를 바꾸지 않는다. family match를 실행·보호 모델 admission으로 사용하지 않는다. 상태/status 조회로 원래 관측 시각/TTL을 갱신하지 않는다. [83단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#83-native-runner-체결보호-상태의-동일-계좌-ram-관측)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+기존 POST /api/v1/research/ram-shadow/allocation-models의 인증/lock/revision은 유지한다. 명시 dynamic-allocation-native-models/v2도 기존 10-key 외피를 사용하며 모든 row가 symbol/ev_receipt/exit_receipt/position_study의 정확한 네 key를 가져야 한다. 기존 v1 row/10-key 계약은 변하지 않는다. prepare_dynamic_allocation_models의 선택 position_studies는 종목별 native-position-study-publication/v2를 묶는다. native 준비 helper는 source_record를 동일 read에서 요청하며 기본 loader 결과에는 붙이지 않는다. 게시 proof의 정확한 7-key는 version/cohort/selections/decision_time/comparison/sources/publication_ref다. 각 source는 원래 record/events이고 최초 native 재생/예산·원본 TTL을 확인한다. 보고된 PC source일 뿐 원본 DB/capture 인증이 아니며 PC_READONLY_REPLAY_REPORTED/not_verified/order false다. 현재 결합의 version은 position-study-current-goal-binding/v2, status EV_UNAVAILABLE이며 양의 행동/실행 승인을 반환하지 않는다. [82단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#82-v2-연구-근거의-공통-ram-게시와-현재-목표risk-결합)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+programmatic freeze_position_action_study_cohort는 typed goal cases 2..100, 명시 minimum_samples/evidence age/model_valid_until과 실제 source spec/manifest로 position-action-study-cohort/v2를 동결한다. execute_research/research_run_identity의 선택 position_study_cohort는 같은 사전 선언을 run spec에 고정한다. read_position_action_study_cohort는 원래 5-key endpoints와 같은 loader를 받아 native-position-study-cohort-comparison/v2를 반환한다. 빈/누락 selections는 EV_UNAVAILABLE이고 중복 run/endpoint/이름 바꾸기·다른 source 선언은 거절한다. 선언 256KiB·전체 10,000 events/4MiB case proof 상한과 완결 짝 전수/기한을 검사한다. COHORT_COMPARABLE의 결과도 current_goal_status EV_UNAVAILABLE/usable false/order false다. 기존 v1 endpoint/10-key packet에 v2를 섞지 않는다. HTTP/CLI v2 packet 및 현재 binding은 후속이다. [81단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#81-v2-native-짝-모집단-동결과-공통-통계)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+이번 v2는 기존 programmatic research API의 명시 opt-in 계약이다. execute_research/research_run_identity의 position_action_study/position_study_case는 typed PositionActionStudyPolicy/Case를 받아 한 TRAIN 또는 VALIDATION KRX 독립 native branch의 spec에 고정한다. 기존 position_target_plan/unfilled_action_plan과 혼합하지 않는다. read_position_action_study_case는 기존 readonly loader에서 한 run/endpoints를 빌려 native-position-study-case/v2를 반환한다. 실제 TTL/source/전략 상태·원래 goal/value replay·원본 ID 및 NATIVE_CASE_PROOF/R4 EV_UNAVAILABLE·주문 false를 포함한다. 64KiB study 의미/256KiB case proof/10,000 event 상한이다. 현재 reader는 held ADD/REDUCE/HOLD의 기존 지원 범위이며 EXIT/flat REENTER·현재 exact context와 cohort/HTTP v2 packet 게시·UI/예약 caller는 후속이다. 기존 dynamic-allocation-native-models/v1 endpoint/10-key shape는 그대로다. [80단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#80-v2-연구-규칙순간별-case-계약과-native-증명-첫-구현)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+인증 POST /api/v1/research/ram-shadow/allocation-models는 dynamic-allocation-native-models/v1의 exact 10-key JSON을 받는다. CentralContentClient.prepare_dynamic_allocation_models(selection_document, rows, expected_selection_revision=...)는 이미 준비된 native receipts에서 고정 패킷을 만들고 publish_dynamic_allocation_models(document)는 그대로 보낸다. applied 선택 revision·전체 selection hash/종목 coverage·cost/horizon/q/price·원래 TTL을 검사하며 4MiB/200종목/2,000 outcomes/2,000 실행·대기 bars/10,000 native event budget이다. 새 패킷은 최초 EV 짝/출구 replay를 검증하고 publication_ref/generation/duplicate·source_durability=not_verified/order_authorized=false를 응답한다. 원래 available_at/valid_until·source_validation은 기존 RAM 결과의 position_allocation_models 메타데이터에 있다. 동일 유효 패킷은 inert ACK, 만료/잘못된 내용·revision은 422, 비활성/미준비/close는 503, 미인증은 401이다. 기존 selection PUT의 409 계약은 그대로다. DB 경로/원본 증명·활성·주문 승인을 받지 않고 재시작으로 모델 슬롯을 복구하지 않는다. [78단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#78-준비된-native-모델의-공통-ram-게시와-상위하위-목표-연결)
+
+이하 단계 설명은 해당 시점의 기록이다.
+
+기존 preview CLI의 research DB/native selection/명시 TRAIN·VALIDATION flag에서 dynamic-allocation-native-exit/v1 문서(policy/decision_time/max_evidence_age_seconds)와 단일 run/start_event/end_event 선택을 읽는다. caller Capacity/stress/추가 필드·잘못된 배열을 거절한다. full_exit_evidence와 allocation_exit_horizon_seconds는 기존 고정 비중 preview의 optional 연구 계약이며 기존 supplied v1의 ID/shape를 보존한다. 새 HTTP route/실시간 근거 게시/활성·주문 승인 없음. [77단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#77-전체-보유-출구-capacity와-명시-스트레스-연구-근거)
+
+기존 preview CLI의 --research-db/--position-outcome-selection/--position-outcome-role로 dynamic-allocation-native-ev/v1 문서(request/account/open_orders/horizon_seconds/population_ref/minimum_samples/max_evidence_age_seconds)를 명시 읽는다. caller EV/추가 필드는 거절한다. dynamic-position-allocation-shadow/v1 candidate의 optional ev_evidence와 policy의 allocation_ev_horizon_seconds는 가격·현재/검증 수량·cost/horizon·원래 TTL을 강제한다. 미선택 기존 v1 shape/scientific ID는 유지한다. 새 HTTP route/selection EV 게시/운영 승인 없음. [76단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#76-배분-ev의-native-연구-공급과-검증-크기-제한)
+
+기존 RAM selection PUT/GET에 optional position_allocation(dynamic-position-allocation-ram/v1)을 추가한다. 64KiB/200종목·연구 policy/expected account run/binding/path/명시 손실 한도/비용만 받으며 EV/Capacity facts를 caller가 채울 수 없다. null로 해제하고 기존 research/ram-shadow GET은 선택한 경우에만 native 사실/unknown producer/만료 receipt를 노출한다. 읽기에서 DB/재계산·활성/주문을 수행하지 않는다. 새 HTTP route 없음. [75단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#75-동적-비중의-공통-ram-사실과-native-계좌-risk-연결)
+
+기존 고정 preview CLI에 dynamic-position-allocation-shadow/v1 문서를 추가한다. 계좌 운용 정책/candidates/PositionAccountObservation/decision_time/비용/명시 연구 Risk disposition/ref를 받아 weight/notional·기존 bounded-notional-sizing/v1을 반환한다. source_durability=not_verified·shadow_only·order_authorized=false이고 새 HTTP route는 없다. native Risk JSON 승인은 현재 adapter가 받지 않는다. [74단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#74-실제-모의계좌-수락-준비-확인과-상위-동적-비중-계산-시작)
+
+2026-10-14 POST `/api/v1/mock-automation/unfilled-population`은 기존 bearer 인증·Supervisor에만 연결된다. request.stream의 실제 1MiB 상한(413), JSON/typed 구조·추가 필드·bool revision/모델/시간 오류(400), 활성 profile/spec/run/control/STOP conflict(409/503)를 검사한다. 패킷은 mock-unfilled-native-population/v1, canonical UUID account_ref·credential_profile_id/spec_id/execution_run_id/expected_control_revision/root_intent_id/managed_intent_id, 원래 available_at, 4–200 typed outcomes, 같은 native 정책/모델의 완결 source_receipt, 내용 hash publication_ref다. DB 경로를 받을 수 없고 native source_durability/주문 승인 승격을 거부한다. 새 패킷은 현재 native RUNNING control 한 번을 확인한다. 동일 수신은 unchanged/inert이며 TTL은 그대로다. 현재 계좌/실행을 만들거나 resume하지 않는다. 기존 status에는 optional unfilled_population_source와 paired_unavailable_reason이 있다. PC의 readonly/replay 검증 보고이며 서버의 시장 원본/호가/체결 확률/취소 지연 승인이 아니다. PC_READONLY_REPLAY_REPORTED·source_durability=not_verified·order_authorized=false를 유지한다. native v1은 ACCEPTED 분봉 자료만 지원하고 현재 PARTIALLY_FILLED/CANCELLED/UNKNOWN에서는 EV 미확인(native_unfilled_model_state_unsupported)이며 이전 cohort를 재표지하지 않는다. 실제 00/04/REST·PG/NAS/장중 수락·부분체결/CANCELLED 모집단/취소 지연 보정은 남는다. [72단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#72-pc-native-원장-결과의-인증-게시와-기존-runner-ram-접수).
+
+2026-10-14 execute_research/research_run_identity의 optional unfilled_action_plan은 2–200개 typed UnfilledResearchAction(SUBMIT/WAIT/REPRICE)을 받는다. 독립 개발 KRX 단일 종목/순서·유일 cut·256KiB/기존 claim을 요구하고 자동 목표 계획과 혼합하거나 final 실행에 쓸 수 없다. read_unfilled_action_outcomes는 기존 load_position_action_evidence의 readonly bounded snapshot/role/final guard와 공통 selection budget을 재사용하며 native baseline→terminal MARK를 같은 실행기로 재생한다. 결과는 simulation/minute/ACCEPTED 상태의 별도 WAIT/REPRICE DTO이고 기존 RAM API에 호환되지만 자동 게시 caller는 후속이다. HTTP/API 인증·계좌/원래 목표/UNKNOWN·취소 확정 전 새 주문 금지는 유지한다. 실시간 원장 입력 게시 caller·CANCELLED/부분체결 모집단 생성은 후속이며, 실제 호가 순서·취소 지연·부분체결 확률·시장 원본 lineage는 미검증이다. source_durability=not_verified와 주문 승인 false를 유지한다. 실제 00/04/REST·종목별 즉시 native 손절 producer/수락·PG/NAS/장중 운용 승인도 남는다. [71단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#71-기존-연구-실행기의-지정가-분기와-native-미체결-결과-읽기).
+
+2026-10-14 내부 Runner의 offer_unfilled_reprice_outcomes는 root/managed ID·population ref·원래 available_at·typed WAIT/REPRICE tuple을 명시 접수한다. 기존 동결 명세가 supplied paired mock 자료를 선택한 경우만 가능하며 1MiB/10,000행·중복/범위/순서를 검사한다. 동일 접수는 no-op, DB/주문 권한은 없고 재시작 시 복구하지 않는다. 기존 status paired_ev의 UNAVAILABLE를 보존하며 새 비교의 EMPIRICAL_ESTIMATE, paired_input_ref/cost_model_available/judgment_input_ref를 optional 표시한다. EMPIRICAL은 미래 예측/운용 승인이나 native 출처 검증을 뜻하지 않는다. HTTP/인증/계좌 활성화/동결 명세 identity와 기존 주문 유형은 유지한다. [70단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#70-waitreprice-짝-입력동결-비용익절-판단의-공통-연결).
+
+2026-10-14 기존 모의 운용 명세의 unfilled_execution_policy에 optional maximum_protective_cancel_retries(정수 0–3, 기본 0)·protective_cancel_retry_delay_seconds(OFF는 0, 활성은 1..maximum_management_seconds)를 추가했다. OFF 직렬화는 두 키를 생략해 기존 정책/명세 ID를 유지하며 활성은 새 명세/승인이 필요하다. 기존 Runner status의 optional protective_cancel_recovery는 WATCH/RETRY_READY/WAIT_RECONCILIATION/RESOLVED/ESCALATE·원주문/관리 주문/정책 ID·native 취소 수/계보 재시도 수·다음 시각/이유를 노출한다. order_authorized는 false이고 ESCALATE는 requires_operator_attention이다. HTTP/인증·원래 주문 유형·운용 활성화 계약은 유지한다. [69단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#69-취소-거절불확실-이후-bounded-보호-대응).
+
+2026-10-14 기존 Runner status의 optional protection_exit는 원래 요청/가격/Risk ref와 고정 결정/workflow ID다. first_protection_exit_state는 PREPARED/BLOCKED/ORDER_SUBMITTED/NATIVE_RESTORED/LIQUIDATION_CONFIRMED/REVALIDATION_REQUIRED이며 first_protection_exit_reason/pending_intent_id 및 protection_flat_risk_snapshot_id를 표시한다. 제출 ACK/목적 복구는 청산 성공이 아니다. HTTP/인증·계좌 활성화/원래 주문 유형은 유지하며 protection claim은 내부 Python/native 저장 계약이다. [68단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#68-운영-risk-보호-요청의-첫-exit-생성과-native-claim-확인).
+
+2026-10-14 기존 Runner status에 optional `unfilled_registration`(원주문·목적·원래 목표/기한·동결 정책/내용 ID)과 `unfilled_native_source`(DELIVERED/BLOCKED·실제 Risk/가격 ref·paired_ev UNAVAILABLE·registration ID)를 추가한다. 등록과 DELIVERED는 승인/취소 확정/체결 성공을 뜻하지 않는다. 기존 HTTP 경로·인증·계좌 활성화/주문 유형은 유지하며 Collector/Monitor getter 및 price callback은 내부 Python 계약이다. [67단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#67-기존-collector계좌-입력의-자동-공급과-원래-주문-관리-등록).
+
+2026-10-14 기존 Runner의 `unfilled_input_delivery.state`에 WAITING/ABANDONED/CANCEL_REQUESTED/CANCEL_UNCONFIRMED/CANCEL_RESOLVED를 사용한다. CANCEL_REQUESTED는 보통 취소 ACK이며 실제 취소/청산 확정이 아니다. Runner 상태의 optional `cancel_confirmation_required`, `requires_operator_attention`, `after_cancel`, `cancel_assessment_ref`, `cancel_risk_snapshot_id`, `cancel_broker_as_of`는 실제 처리/재검증 참조다. 보호 latch 표시가 이 참조를 지우지 않는다. HTTP 경로/인증·주문 지원/계좌 활성화 정책은 유지하며 before-claim callback은 내부 Python seam이다. [66단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#66-목적별-자동-취소와-취소-직전-native-계좌risk-재검증).
+
+2026-10-14 Runner 상태에 optional `unfilled_input_delivery` 진단을 추가했다. 상태는 PENDING/PROCESSED/BLOCKED/ERROR/CURRENT_INPUT_REQUIRED, pending은 RAM cut 존재 여부이며 `order_authorized=false`는 전달 진단이 실행 승인이라는 뜻이 아님을 나타낸다. PROCESSED는 입력 소비이며 체결/청산 성공이 아니다. 내부 typed 입력 ingress는 새 HTTP 주문/제어 API가 아니고 계좌 활성화·기존 인증/제어 계약을 바꾸지 않는다. 실제 authority는 기존 v3 gate/QUEUED 원장이다. [65단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#65-running-runner의-사건기한-소비와-고정-주문의-동일-native-실행).
+
+2026-10-14 기존 모의 운용 명세 JSON/v1의 optional `unfilled_execution_policy`와 gate 조회의 병행 `mock_automation_replacement_gate/v3`를 추가했다. policy는 기존 동결 spec hash/새 admission에 포함하며 미선택 시 원래 JSON/hash와 OFF를 유지한다. v3는 root/parent/attempt·목적/정책 ID·고정 child/해시·실제 평가/짝 입력 참조를 포함한다. 기존 ENTER/EXIT v1/v2 승인과 공개 API 경로/인증·전송 지원을 바꾸지 않는다. 실제 제출 연결은 내부 idle 명시 dispatcher이며 새 주문 API/자동 활성화는 없다. [64단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출).
+
+2026-10-14 자동 모의계좌의 기존 ACK된 Risk를 Runner의 보호 요청으로 자동 전달한다. 상태의 optional `native_risk_delivery`는 최근 전달 snapshot/reconciliation revision·전달 시각/trigger 여부이며, `protection_review.risk_trigger`는 원래 위험의 scope·source·판정/사유·signature다. Risk/계좌 원문이나 새로운 command API를 공개하지 않는다. EXIT_REQUIRED/RECONCILE_REQUIRED는 보호 검토 판정이며 실제 제출 승인이 아니고 order_authorized=false/transport_state=OFF다. 실제 취소/재주문은 사용자 순서 ②의 후속이다. [62단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#62-운영-risk의-자동-보호-요청-연결과-개발-순서-개정).
+
+## 목적별 대체 주문·보호 요청의 내부 계약 (2026-10-14)
+
+기존 runner 상태에 optional `protection_review`·`protection_review_required`를 제공한다. 새 HTTP command/자동 주문 API는 없다. 내부 명시 OFF 검토의 `unfilled_execution_preflight.receipt.replacement_gate`는 `mock-unfilled-replacement-gate/v1`의 목적/action·원래 승인 계보·고정 child ID/payload/hash·현재 Risk/control·차단 사유를 담는다. `VALIDATED_FOR_OFFLINE_REPLACEMENT`도 order_authorized=false/transport_state=OFF이며 실제 native 제출 승인이 아니다. 보호 요청은 bounded RAM 한 건과 기존 checkpoint로 전달되고 STOP을 재개하지 않는다. 명시 flat 해제도 재시작 후 새 native 검증을 요구한다. 운영 Risk producer 자동 전달·실제 취소/재주문·보호 주문/지연 수락은 후속이다. [60단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#60-목적별-고정-대체-주문-검토와-보호-요청의-우선-처리).
+
+## Native 미체결 시도 검토의 내부 계약 (2026-10-14)
+
+명시 idle `MockAutomationRunner.preview_unfilled_execution`은 기존 runtime의 닫힌 owner guard에서 native parent/child·QUEUED claim/SUBMISSION_STARTED·상세 보유·control/복구/현재 저장된 Risk를 검증한다. 기존 checkpoint의 optional `unfilled_execution_preflight`, version=`unfilled-native-attempt-plan/v1`로 복구하며 status는 항상 requires_revalidation=true/order_authorized=false다. 최대 64개 슬롯/child 이벤트 400개/계획 1MiB, 결정적 root+ordinal ID와 원래 anchor/기한·고정 child 내용·소모 예산을 보존한다. native_gate는 현재 assessment에 대한 기존 gate 결과이며 child submission 승인/ID 결합이 아니다. ADD/REDUCE를 ENTER/EXIT로 재표지하지 않는다. transport_state=OFF, 새 endpoint/CLI schema·approved gate/전송은 없다. [59단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#59-native-parent-child-시도-투영과-닫힌-owner-gate-검토).
+
+## 미체결 영속 검토 계획의 내부 계약 (2026-10-14)
+
+기존 idle/ready `MockAutomationRunner.preview_unfilled_management`는 native parent와 control을 확인하고 기존 checkpoint에 `unfilled-order-management-preflight/v1`을 저장·재검증한다. endpoint·CLI schema·실제 전송 권한은 추가하지 않는다. runner status의 optional `unfilled_management_preflight={receipt,requires_revalidation:true,order_authorized:false}`와 `unfilled_management_clock`는 복구/보호 기한 검토용이다. receipt는 1MiB 이하이며 단일 root의 첫 preview 예약만 담는다. 예약 슬롯과 실제 전송 횟수는 별개이고, native child 존재/공급 횟수 증가·control/anchor 변경은 차단한다. 현재 owner lease/Risk 실행 승인·다회 재시도·보호 자동 wake-up은 후속이다. [현재 경계](docs/AI_TRADING_SYSTEM_REDESIGN.md#58-미체결-검토-계획의-기존-checkpoint-복구와-실행-전-검증).
+
+## R4 후 미체결 목적별 정책의 고정 입력 미리보기
+
+기존 `scripts.preview_market_theme_shadow --input`은 추가 schema `unfilled-order-management-shadow/v1`을 지원한다. top-level 필드는 `schema/policy/record/broker_snapshot/target/account/open_orders/assessment`만 허용한다. 기존 목표/계좌/ExecutionRecord parser와 BrokerOrderSnapshot/BrokerFill 계약을 재사용하며 lifecycle/repository/transport를 생성하지 않는다. open_orders는 관리 record와 합쳐 최대 400건, broker fills는 최대 400건이다. 고정 입력의 공급된 연구 제약이며 native Risk 승인/운영 실행 허가가 아니다.
+
+policy는 `version=unfilled-purpose-policy/v1`, `purpose=BUY_OPPORTUNITY|TAKE_PROFIT|PROTECTIVE_EXIT`, 원래 `anchor_intent_id/anchor_price_won/anchor_price_input_ref/anchor_available_at`, `valid_until/wait_until/protection_deadline`, 목적별 `maximum_adverse_slippage_bps/protective_slippage_bps`, `maximum_reprices/max_snapshot_age_seconds/minimum_net_advantage_won/uncertainty_multiplier/minimum_paired_samples/reprice_horizon_seconds`를 모두 명시한다. 현재 첫 범위는 기존 KRX mock LIMIT intent이며 기준 가격은 원래 intent.limit_price와 같고 anchor 가용시각은 intent 생성 이전이어야 한다. 시각은 timezone-aware, 수량·한도·횟수는 엄격한 정수, 점수/페널티는 유한 값이다. 기본 위험 임계값을 만들지 않는다.
+
+assessment는 현재 타점 유효성·익절 추세 대기·신규 위험 허용의 bool/null, 보호 필요 bool, 타점/Risk ref·가용/만료, `market_status=TRADABLE|HALTED|NO_LIQUIDITY|UNKNOWN`, 후보 지정가·가격 ref/가용 시각·사용 재가격 횟수와 optional `reprice_evidence`를 받는다. 관리 target은 같은 계좌/주문 observation ref에 묶고 BUY는 기존 ADD/REENTER 목표, SELL은 REDUCE/EXIT 목표 계산을 재사용한다. 보호 전환에는 현재 EXIT 목표가 필요하며 익절의 일부 REDUCE 목표를 전량 보호 목표로 재표지하지 않는다.
+
+reprice_evidence는 `version=unfilled-WAIT-vs-REPRICE/v1`, 원래 intent·현재 비교 잔량·후보 가격·고정 horizon·가용 시각·현재 비용 model ref·짝 표본 수·모집단/input ref와 비용 차감 순차이/표준오차를 명시한다. 별도 미체결 WAIT 대 REPRICE 요약이며 기존 R4 HOLD 대비 평균을 받지 않는다. 현재 비용 유효 구간·수량/가격/기간/cut·최소 표본을 확인하고 명시 페널티 차감 점수가 최소 개선액을 엄격히 넘을 때만 일반 REPRICE를 제안한다. 상태는 `SUPPLIED_PAIRED_UNFILLED_ESTIMATE`이며 native 자체 성과 검증·독립성/확률 보정·미래 체결 확률을 뜻하지 않는다. 자료가 없으면 `EV_UNAVAILABLE`다.
+
+결과 action은 WAIT/CANCEL/REPRICE/ABANDON이며 CANCEL의 `after_cancel=REPRICE|ABANDON`은 실행 명령이 아니다. QUEUED/SUBMISSION_UNKNOWN/CANCEL_PENDING에서는 WAIT와 기존 대사 필요를 반환하고 대체 수량을 만들지 않는다. 원래 lifecycle의 snapshot 정규화와 filled/last_broker_as_of·동일 broker identity·최신 계좌 cut을 확인한 CANCELLED/remaining 0에서만 체결 세부 대사·계좌 전체 pending/예약·현재 목표를 재계산한다. 대체 BUY는 원래 미체결 예산을 늘리지 않고 SELL은 현재 실제 잔여 보유를 넘지 않는다. 취소 중 전량 FILLED면 원래 주문 계획을 종료하고 현재 포지션으로 돌아간다. 취소 거절/ACK 유실·빈 미체결 조회·로컬 expires_at을 취소 확정으로 취급하지 않는다.
+
+매수 기회/위험/기한·가격/재시도 한도 위반은 살아 있는 주문의 CANCEL→ABANDON 또는 확정 취소 후 ABANDON이다. 이미 체결된 보유는 보존한다. 일반 익절은 추세/위험 여유의 제한된 WAIT와 확인된 개선의 REPRICE를 사용한다. 보호 매도는 일반 EV 대기를 적용하지 않고 별도 슬리피지 한도·명시 기한으로 처리하며 거래 중단/유동성·가격/상태 미확인·재시도 한도는 미해결 위험/운영 개입 필요를 표시하고 ABANDON하지 않는다. 현재 기존 세션 규칙을 사용하며 수동 장후 broker probe 허용을 자동 REPRICE 허가로 사용하지 않는다. 기존 취소/대사는 장 외에서도 기존 계약대로 유지된다.
+
+출력에는 원래 lineage/cut/policy/입력과 action/사유·추가 확인 시각·target ref·대체 수량/가격·risk_path_required/운영 개입 필요·liquidation_confirmed를 포함한다. `order_authorized=false`, `execution_support=shadow_only`, `risk_authority=supplied_research_constraint_only`다. FILLED도 실제 계좌 0주·완전한 대사/전체 pending 소멸을 확인한 입력에서만 보호 해소로 표시한다. 새 API endpoint/DB/writer·브로커 취소/주문 전송·운영 timer 연결은 없다. 현재 금액/수량은 하위 기능이며 상위 동적 비중은 원래 Position·Risk·Capacity/Liquidity의 후속 범위다.
+
+## R4 기존 타점·native Risk RAM 입력 (optional)
+
+`parameters.selection_policy.input_mode=owner_ram_risk_and_thesis`와 명시 `thesis_ref`를 선택하면 같은 공통 Runtime의 기존 계좌 관측에 포함된 `MockAutomationRiskSnapshot`과 기존 R3 타점 결과를 사용한다. 기본/생략 `supplied_fixed`·빈 thesis_ref는 기존 결과/ID를 보존하며 native 모드는 새 계좌 조회·Risk DB read·위험 계산을 만들지 않는다. JSON에는 native Risk snapshot 본문을 받지 않고 런타임 owner RAM만 공급한다. 고정 입력 CLI/저장 복구는 정책을 검증하지만 실제 native 관측을 복원하거나 승인하지 않으므로 WAIT다.
+
+기존 모니터가 Risk 저장 완료 후 동일 recovery의 계좌 RAM에 복사한다. 기존 generation/runtime revision·연결 해제·미확인 주문 무효화가 함께 적용된다. native Risk의 원래 내용 hash·계좌 ref/as_of·관측 가용 시각/최대 age를 확인하고 관측 이전보다 미래인 계좌 cut은 차단한다. 타점은 선택 thesis ref·종목/KRX·order_authorized=false·COMPLETE quality·가용/판단 시각/만료를 확인하며 여러 소비자의 동일 decision ID는 공유하고 서로 다른 현재 결과면 모호함으로 차단한다.
+
+native 입력 receipt `selection_inputs`는 원래 Risk snapshot/account revision/reconciliation revision·관측 시각과 타점 decision ref/action·만료·사유를 기록한다. 권고의 `risk_authority=native_observation_not_execution_approval`이며 주문 권한은 false다. HOLD는 증액/재진입 허가로 변환하지 않고 NO_NEW_RISK, REDUCE는 REDUCE_ONLY, WAIT는 차단, 유효 EXIT는 보호 경로 필요를 우선 표시한다. native Risk의 미확인 주문/잔고·대사 불완전은 WAIT, 비용/일별 순손익 미확인은 증액 금지다. 임의 일손실/Capacity 한도나 자동 비중은 새로 만들지 않는다. 실제 승인된 운영 Risk gate·일손실·STOP·owner/control은 기존 실행 경로의 책임이다.
+
+유효 타점 EXIT는 Risk/EV 결손에도 보호 경로 필요를 표시하되 새 수량/취소/주문을 만들지 않는다. 유효 native Risk에 연결된 명시 EXIT_REQUIRED 제약도 타점 WAIT보다 우선한다. 보호 표시와 실제 주문 허용·체결은 구분한다. live receipt는 기존 계좌/가격/정책 만료와 native Risk age·타점 만료 중 가장 이른 시각까지다. 계좌 이벤트는 기존 타점 결과를 재사용하고 H1/H2를 추가 계산하지 않는다. 현재 금액/수량 하위 기능과 원래 Position·Risk·Capacity/Liquidity의 후속 상위 동적 비중 정책을 유지한다.
+
+## R4 주문 없는 행동 권고 (optional)
+
+기존 비교 문서의 `parameters.selection_policy`를 생략하거나 null로 두면 기존 v1 결과/ID를 유지한다. 명시할 때는 `version=paired-net-action-selection/v1`, 음수가 아닌 정수 `minimum_net_advantage_won`, 유한한 음수가 아닌 `uncertainty_multiplier`, `risk_constraint=ALLOW|NO_NEW_RISK|REDUCE_ONLY|EXIT_REQUIRED|HALT_NEW_ORDERS`, 비어 있지 않은 `risk_input_ref/account_ref/symbol/account_input_ref/orders_input_ref`, timezone-aware `available_at/valid_until`을 모두 제공한다. CAP 수량 정책은 이 첫 범위에 없다. 계좌·종목·계좌/주문 input ref는 실제 비교 cut과 같아야 하고 미래/만료 제약은 WAIT/BLOCKED다. 공급된 연구 위험 제약이며 기존 native Risk 승인으로 취급하지 않는다.
+
+optional `action_selection`은 `action/status/reasons/scores/risk_constraint/risk_input_ref/risk_path_required/target_decision_ref`와 `order_authorized=false`를 반환한다. 점수는 같은 HOLD 짝의 비용 차감 평균 차이에서 명시 multiplier×표준오차를 뺀 값이다. 신뢰구간·확률 보정·미래 예측값이 아니다. 후보별 짝 HOLD 근거 집합이 다르거나 허용 후보 자료가 부족하면 WAIT, 동일 최상 점수면 WAIT, 최소 개선값을 엄격히 넘는 행동이 없으면 HOLD다. NO_NEW_RISK/REDUCE_ONLY는 ADD·REENTER를 제외하고 HALT_NEW_ORDERS는 WAIT다. EXIT_REQUIRED는 EV 유무와 무관하게 EXIT/RISK_REQUIRED와 기존 보호 경로 필요를 표시한다. EXIT 목표가 없거나 수량 차단 상태면 target_decision_ref는 null이며 주문량·체결을 만들지 않는다.
+
+정책/제약은 UTC 정규화한 비교 identity에 포함한다. 같은 parser·CLI·PC 선택/저장/복구·공통 Runtime/기존 선별 기록으로 소비하며 계좌/가격 갱신은 위험 ref를 새 cut으로 다시 붙이지 않는다. live receipt는 위험 제약 만료도 포함하고 화면은 만료 권고 사용 불가를 표시한다. 새 endpoint/DB/writer/주문 권한은 없다. 목표 금액·수량은 하위 계산 계약이며 상위 자동 비중조절은 원래 Position·Risk·Capacity/Liquidity 설계에 따른 후속 범위다.
+
+## R4 optional 자동 목표 수량 정책
+
+기존 position-target-shadow/v1·position-action-comparison-shadow/v1 요청에 optional target_policy를 허용한다. 없거나 null이면 기존 결과/ID를 유지한다. 정책이 있으면 target_quantity는 null이며 행동은 ADD/REDUCE/REENTER로 명시한다. version=bounded-notional-sizing/v1·target_notional_won·max_position_notional_won·max_position_quantity·cash_buffer_won·timezone-aware available_at/valid_until을 모두 제공하고 미지원 필드는 거절한다. 원화/수량은 음수가 아닌 정수이며 bool/실수는 허용하지 않는다.
+
+결과의 optional target_sizing은 정책 ref/원래 정책 version·정규화된 parameters·희망 수량·제한 사유/상태다. target_policy_version은 정책 내용 전체의 고유 ref이고 target_quantity는 현재 수량 계산 결과다. 과거 자료의 policy/target을 이 계산 결과와 비교하며 기존 자료를 새 정책 성과로 바꾸지 않는다. 명시 목표·HOLD/EXIT/주문 권한 false는 유지한다. 기존 관찰 선택 API/revision·저장/복구와 공통 RAM 결과를 사용하고 live valid_until은 정책 만료도 포함한다. 새 endpoint·DB schema·주문/운영 권한 변경은 없다. [53단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#53-r4-자동-목표-수량-정책의-공통-shadow-계산-연결).
+
+## R4 native 연구 행동 자료의 명시 CLI/PC 선택
+
+명시 paper-position-target/v1 native 연구에는 ADD/REDUCE/REENTER와 flat HOLD를 추가로 지원한다. 원래 자동 목표 정책·원장 주문/FILL/분별 평가·현금/수량/비용·선행 청산을 검증하며 미표지 run의 기존 HOLD/EXIT 계약은 유지한다. sources의 optional position_action_execution은 원래 실행 version/source_policy_version/target_policy이며 입력 정책을 자동 변경하지 않는다. source 실행 모델 ref는 원래 code_hash도 포함한다. 기존 CLI/PC의 선택 형식/role/예산·HTTP endpoint/저장 계약은 유지한다. [54단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#54-r4-자동-목표의-native-addreducereenter-실행-자료-연결).
+
+`preview_market_theme_shadow.py --input <비교 입력> --research-db <기존 원장> --position-outcome-selection <창 JSON> --position-outcome-role TRAIN|VALIDATION`이 기존 비교 v1에 저장된 HOLD/EXIT 창을 읽기 전용으로 전달한다. 입력 outcomes는 빈 배열이며 기존 thesis selector와 혼합하지 않는다. selection은 256 KiB·1–200창, 각 필드는 run_id/start_event_id/end_event_id/action/case_ref다. native v19+의 기존 development/final/원본 identity guard 뒤에 실행 원장을 모든 run 합계 10,000행 이내로 읽는다. 선택한 role의 실제 완결·가용 자료만 사용하며 미지원/미확인 창은 제외 사유를 남긴다.
+
+기존 결과/ID는 유지하고 native 선택에서만 optional `position_outcome_source`에 원래 source ref/정책/모델·선택 role/종목·요청/수락 수/제외 사유·simulation 실행 종류와 mock 시나리오 scope를 제공한다. 정책/목표를 자동 수정하지 않으며 binding mismatch는 기존 EV_UNAVAILABLE다. 실제 broker 체결/원본 내구성/운영 승인은 아니다. 이번 단계는 CLI이며 HTTP API·기존 live/선별 기록 envelope와 주문 권한을 변경하지 않는다. [51단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#51-r4-기존-연구-원장의-완결-행동-자료-reader-연결).
+
+PC 관찰 탭도 명시 DB/창/role로 같은 reader를 기존 worker에서 호출한다. 원래 비교 문서의 outcomes만 변경한 편집 입력이며 저장/적용은 기존 선택 API/revision을 사용한다. DB/선택 JSON 파일 경로는 서버에 보내지 않고 복구/GET/tick 때 원장을 재조회하지 않는다. 편집 상태의 source receipt는 HTTP 응답 필드를 추가하지 않으며 저장 값의 native source ref를 유지한다. 선택 변경/닫기/종료의 늦은 결과는 무시하고 실제 SQL 중단/worker 완료를 소유한다. 새 HTTP endpoint·주문 권한 변경은 없다. [52단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#52-r4-완결-행동-자료의-기존-pc-관찰-선택-연결).
+
+## R4 기존 모의계좌 RAM 입력 선택
+
+계좌 전체 대사 후속에서는 live 선택 계좌에만 기존 recovery 전후 bounded 원장 읽기를 연결한다(각 401행 조회, 400행 사용; 초과는 불완전). 새로운 broker TR/계좌 활성화·GET DB 조회는 없다. 현재 실행의 기존 reconcile 쓰기는 유지하고 다른 실행은 읽기 전용이다. 수동 주문은 브로커 원래 수량/방향/가격/venue의 확인된 잔량으로 전달하며 intent/체결을 합성하지 않는다. 확인된 native 경로의 목표 scope에는 `pending_quantity_basis=broker_remaining_quantity/v1`이 붙고 legacy 고정 입력은 기존 필드/ID를 유지한다.
+
+RAM receipt의 optional `account_orders_complete`, `account_reconciliation_complete`는 조회 근거의 완전성이다. QUEUED/전송 미확인·취소 대기·누락/모호한 메타데이터·예산/조회 실패·실행 변경 때 false이며 수량 계산을 차단한다. true도 주문·원자적 broker snapshot·원본 내구성 승인은 아니다. `valid_until`은 계좌/가격/브로커 주문의 freshness와 비용 모델 유효기간 중 가장 이른 만료다. 계좌/실행 변경·scope 선택 변경·종료는 캐시를 무효화한다. 여러 테마는 한 source read/평가를 공유하고 GET은 복사만 한다. [대사 계약](docs/AI_TRADING_SYSTEM_REDESIGN.md#50-r4-계좌-전체-대사와-브로커-확인-잔량-계산).
+
+기존 인증 selection PUT의 optional strict boolean `position_account_live`는 기본 false/OFF다. true는 기존 position_comparison 입력 문서가 필요하며 같은 목표·비용/행동 정책에 등록된 기존 mock owner의 RAM 계좌·Collector KRX 가격을 전달한다. 계좌를 boot/조회/활성화하지 않는다. false는 필드를 생략하고 기존 고정 입력 모드로 돌아간다. position_comparison null은 live flag도 해제하며 null+explicit true는 422다. 기존 private 선택 문서/revision·save/apply/재시작·기본 OFF를 유지한다.
+
+RAM envelope의 optional position_comparison은 live 선택에서 `input_mode=owner_ram_snapshot, is_live_account=true, result=<비교 v1 또는 null>, quality={status, reasons}`다. result가 있으면 account_input_ref·price_input_ref·account_as_of·valid_until·unmapped_broker_order_ids를 제공한다. is_live_account는 owner RAM 경로 표시이며 신선도·계좌 전체 원장/대사·운영 승인 근거가 아니다. source 부재/무효화는 null/UNAVAILABLE, 잘못된 scope/미래 관측은 ERROR다. 고정 계좌/가격으로 fallback하지 않는다. 최초 읽기와 account 알림은 공통 Runtime 수명에서 수행하며 GET은 자료를 재조회/재계산하지 않는다.
+
+현재 owner의 로컬 주문 원장은 실행별 범위이므로 open_orders_complete=false를 유지한다. 따라서 현재 전체 미체결·대사 근거가 없는 live 목표는 추가 수량과 EV가 차단된다. 계좌 보유/확인된 주문·원래 목표는 표시하며 None을 0으로 바꾸지 않는다. 저장 결과는 과거 cut이고 replay_eligible/order_authorized=false다. 새 DB 스키마·1초봉/계좌 polling·주문 API는 없다.
+
+
+## R4 고정 포지션 비교의 공통 관찰 연결
+
+인증 `GET/PUT /api/v1/research/ram-shadow/selection`의 optional nullable `position_comparison`은 기존 `position-action-comparison-shadow/v1` **입력 문서**를 받는다. 서버 파일 경로·계산 완료 결과는 받지 않는다. 생략은 유지, null은 해제이며 기존 expected_revision·save-before-apply·ACK 유실/재시작 계약을 사용한다. UTF-8 JSON 입력/계산 결과 각각 256 KiB 이하, mock/KRX만 지원한다. 활성화 시 비교 종목은 관찰 테마 중 하나에 포함돼야 한다. 기존 순수 계산의 계좌/cut·비용/목표·표본 검증을 저장 전에 실행하고 오류 시 422·기존 선택/Runtime 유지다.
+
+공통 Runtime의 `ram-shadow-diagnostics/v1` envelope는 optional `position_comparison={input_mode: supplied_fixed_snapshot, is_live_account: false, result: <기존 비교 v1 결과>}`를 한 번 포함한다. 기존 contexts/results 및 목표/비교 ID를 덮지 않는다. 기본 인증 RAM 조회는 DB를 읽지 않으며 저장분은 기존 include_recorded 명시 조회를 사용한다. 결과는 선택 적용/재시작 준비에서 한 번 계산하고 틱·여러 테마·조회에서는 복사만 한다. 원래 decision_time을 보존하고 현재 계좌/실시간 판단으로 갱신하지 않는다. 기록 ON은 기존 선별 한 행/transaction에 같은 결과를 포함하며 R4 때문에 별도 주기·쓰기를 추가하지 않는다. 미선택 envelope는 기존 형식 그대로다.
+
+고정 결과의 live envelope 포함은 실시간 계좌 연결·원본 확정·Replay 적격·주문 승인 근거가 아니다. source_durability/probability_calibration은 not_verified, execution_support=shadow_only, order_authorized=false다. 실제 행동 자료 reader·실시간 계좌 owner 입력 연결은 후속이다.
+
+
+## 2026-10-13 RAM 출처의 녹화 입력 조회 힌트 (로컬 구현)
+
+기존 `source_coverage[coverage_ref]`의 optional `capture_anchor`는 현재 입력 snapshot 시점에 수락돼 있던 Recorder high-water를 재사용한다. 현재 collector_inputs 녹화가 running이고 Collector capture epoch와 high-water trace ID가 모두 일치할 때만 `{trace_id, producer_component, input_id, collector_input_version, role=last_accepted_collector_input, verified=false}`를 담는다. 녹화 OFF/다른 epoch/없는 ID/입력 재생에서는 null이다. 구형 기록의 필드 부재도 미확인으로 처리한다.
+
+snapshot에 고정한 힌트를 공유 결과/기존 선별 한 행으로 전달하고 반환 문서는 복사한다. 이후 Recorder 정지/세션 교체는 새 snapshot에 적용되며 이전 판단에는 당시 힌트가 남는다. 힌트는 마지막 수락 입력의 위치이고 최신 RAM 값·원본 전체·prefix·제외/거절된 입력의 완전성이나 내구 저장 완료를 뜻하지 않는다. 현 collector-input/v2는 0g를 포함하지 않으므로 상한가 참조까지 확인됐다고 해석하지 않는다. capture_lineage/source_durability·Replay/운영 승인 플래그는 여전히 미확인/false이며 별도 manifest/checksum/원본 대조가 필요하다. 녹화 시작·payload 재기록·manifest/DB 조회와 수집 요청은 추가하지 않는다. [45단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#45-ram-출처의-기존-녹화-입력-조회-힌트).
+
+## 2026-10-13 RAM 판단의 공통 출처 근거 (로컬 구현)
+
+기존 인증 `GET /api/v1/research/ram-shadow`의 live/recorded `ram-shadow-diagnostics/v1` envelope에 optional `source_coverage`와 `input_provenance` map을 추가했다. source_coverage는 회차별 `ram-coverage:<id>`를 키로 `ram-source-coverage/v1`의 Collector source_id/generation·입력 cut·승인 종목/거래소와 continuous_from·retention_since·Collector/effective/delivery gap·dropped_events를 공유한다. input_provenance는 기존 context_ref를 키로 coverage_ref·입력 연속성 상태·H2 창·테마 revision/구성원·입력 행 수·제공된 시장 frame/상한가 refs를 연결한다. 제공 refs는 최종 판단에 사용됐거나 원본 확정됐다는 뜻이 아니다.
+
+실패한 binding의 이전 결과는 이전 근거를 유지한다. 취소 중 publish된 성공 결과에도 같은 cut의 근거를 연결하며, 직접 다른 경로에서 갱신된 결과/확인할 수 없는 입력에는 근거를 부여하지 않는다. 반환 map은 복사본이고 같은 결과/회차는 한 번만 나타난다. 기본 조회는 여전히 DB 0회, include_recorded만 기존 한 행을 명시 조회한다.
+
+선별 기록은 기존 categorical transition·coalescing/interval·한 행·1MiB 예산을 유지한다. 새 근거가 기록 예산을 넘으면 두 optional map을 생략하고 기존 판단이 예산 내라면 저장한다. 이전 기록/생략된 map의 부재는 근거 미확인이며 복구/Replay 승인으로 사용하지 않는다. coverage_ref는 진단 상관 ID이고 native immutable revision 또는 체크섬 검증된 capture 영수증이 아니다. `raw_values_recorded=false`, `capture_lineage=unverified`, `source_durability=not_verified`, `replay_eligible=false`, `order_authorized=false`를 유지한다. [44단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#44-ram-판단의-공통-출처와-연속성-근거-연결).
+
+## 2026-10-13 연구 가설 원본 대조 (로컬 구현)
+
+인증 `GET /api/v1/research/ram-shadow/source-check`은 현재 선택의 `expected_revision`(필수, 0 이상)과 `lookback_seconds`(기본 20, 1–60)를 받는다. 명시 저장 연구 가설이 있어야 하며 관찰 활성화는 요구하지 않는다. 현재 선택 snapshot을 기존 owner lock에서 검증·대조하고 취소 시 native read를 drain한 뒤 잠금을 해제한다. 요청 중 선택 변경과 shutdown은 이 잠금을 기다린다. 기본 RAM 조회/틱에서는 호출하지 않는다.
+
+`stock-thesis-source-check/v1`은 가설/대장 참조·selection_revision·과거 대장 as_of·요청 창·테마 status/조회 예산·canonical 초봉 expected/matched/unmatched refs·미확인 factor/hypothesis/기타 refs·조회 시간/행 수를 반환한다. 테마는 최대 100개 native snapshot에서 정확 ID/내용 hash/구성원을 비교하고, 초봉은 해당 거래일·거래소·구성원·as_of 가용시각의 최신 저장 값 최대 10,000행을 재해시한다. 창은 자정에서 절단하며 예산 초과 창을 일부 결과로 승인하지 않는다. 별도 두 읽기를 단일 DB snapshot으로 주장하지 않는다.
+
+테마 `MATCHED`와 초봉 matched 수는 현재 보존 값의 대조 결과다. 초봉 이전 revision·수집 연속성·factor/hypothesis lineage·운영 승인은 미확인이며 `source_durability=not_verified`, `replay_eligible=false`, `order_authorized=false`를 항상 유지한다. 불일치를 저장 누락/수정/보존 만료 중 한 원인으로 단정하지 않는다. 보고서는 저장하거나 설정에 승인 상태로 반영하지 않는다.
+
+미인증 401, 필수 query/창 범위 오류 422, 선택 없음·revision 충돌·직접 binding·종료 중 409, 불변 근거/대조 예산 오류 400을 반환한다. native DB 장애는 정상 보고서로 삼키지 않는다. PC client의 명시 `check_ram_shadow_sources`를 사용한다. 후속 관찰 화면은 수동 버튼으로만 이 호출을 실행하며 자동 polling은 대조를 호출하지 않는다. [원본 대조 범위](docs/AI_TRADING_SYSTEM_REDESIGN.md#42-연구-가설의-native-원본을-명시-대조) · [화면 연결](docs/AI_TRADING_SYSTEM_REDESIGN.md#43-관찰-화면의-수동-원본-대조와-결과-표시).
+
+## 2026-10-14 작은 블록 본문의 공유 저장 (로컬 후보)
+
+지연 저장에서 1MiB 이하 단일 블록 본문은 명시적 `blocks/shared-v1` descriptor로 기존 16MiB `.payloads` 묶음을 공유한다. schema 4·입력 codec/profile/논리 digest는 유지하며 한 root는 `bytes`와 하나의 `parts` 항목(index=0, bytes, sha256, 6자리 숫자 `.payloads` 이름, offset)을 갖는다. root/part checksum과 파일/offset/논리 크기 한도를 모두 검사한다. 복원은 기존 불변 `BlockPayloadReference`로 입력마다 독립 수행하고 원래 native 호출을 합치지 않는다. 구형 `blocks/v1` 읽기와 큰 입력의 분할 기록을 유지한다.
+
+새 선택의 `payload_storage`는 `blocks_v1_shared_v1_and_chunk_bundle_v1`이며 새 descriptor를 모르는 구형 reader/등록기는 거부한다. 공개 block payload 다운로드의 기존 제한은 유지한다. NAS 설치 helper는 아직 갱신하지 않았고 운영 배포 전 새 등록·reader/Replay 검증과 승인된 helper 갱신이 필요하다. 실제 검증/배포 범위는 CURRENT_STATUS와 OPEN_ITEMS를 따른다.
+
+## 2026-10-13 RAM Shadow 연구 가설 선택 확장 (로컬 구현)
+
+인증 `GET/PUT /api/v1/research/ram-shadow/selection`은 기존 context 선택/expected_revision·saved/applied revision·lock/취소/종료 계약을 사용한다. PUT은 optional nullable `stock_thesis`를 추가로 받는다. 생략하면 현재 선택을 유지하고 null이면 명시 해제한다. GET은 선택이 없으면 필드를 생략한다. 기존 가설 없는 v1 설정/응답의 의미는 그대로다.
+
+`stock_thesis`의 정확한 필드는 `evidence`와 `thesis_policy_version`이며 evidence는 기존 연구 조회의 `thesis`, `leadership`, `run_status`, `stored_identity` 네 키다. 한 가설/기존 정책 하나, UTF-8 JSON payload 1MiB 이하로 제한한다. PC 파일 경로 인자는 허용하지 않는다. 선택 가설의 theme는 theme_ids에 포함되고 venue·COMPLETE/불변 ID/시각·사용 가능한 연구 상태를 검증해야 한다. mode는 선택이 있으면 research_thesis, 없으면 기존 theme_context, 생성자 직접 binding이면 explicit_bindings다.
+
+미인증 401·revision 충돌 409, 근거/가용시각/거래소/path/예산 오류 422, native 저장/적용 pending 503을 구분한다. ACK 유실은 실제 저장 revision만 공개하며 재시도는 적용만 진행한다. 재시작은 저장된 제공 연구 snapshot과 새 H2 상태를 사용하고 원본 확정/운영 승인/주문 권한은 복원하지 않는다. 자세한 현재 범위는 [41단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#41-저장된-연구-가설정책의-관찰-화면과-명시-설정-연결)를 따른다.
+
 > 정리 기준(2026-10-11): API·필드·오류 계약을 다룬다. 날짜가 붙은 확장·검증 문단은 그 단계 당시의 구현·검증 범위이며, 당시의 배포 대기 표현을 현재 배포 상태로 해석하지 않는다. 최신 실행 소스와 배포 기록은 [현재 상태](docs/CURRENT_STATUS.md), 실제 잔여는 [남은 작업](docs/OPEN_ITEMS.md), 진단 운영·제어의 통합 계약은 [NAS 진단 운영](docs/NAS_RUNTIME_DIAGNOSTICS.md)을 따른다.
 
 2026-10-10 로컬 블록 수집 후보: `POST /api/v1/diagnostics/trace`에 엄격한 불리언 `large_inputs`(기본값 false)를 추가했다. `store_inputs=true`와 지연 저장 시각 `persist_at`가 필요하다. 타입 오류는 422, 선행 조건 누락은 409이며 자식 제어를 되돌리고 master를 보존한다.

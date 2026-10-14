@@ -83,6 +83,71 @@ class FakeConnection:
 
 
 class PostgresAccessTests(unittest.TestCase):
+    def test_second_trade_reader_preserves_native_read_commit_rollback_and_close(self):
+        from datetime import date, time as clock_time
+        for failure in ("", "execute", "commit"):
+            with self.subTest(failure=failure):
+                raw = self._native_context_connection(fail_commit=failure == "commit")
+                raw.fail_execute = 1 if failure == "execute" else 0
+                raw.rows = [(date(2026, 9, 14), clock_time(9, 0, 19), "005930", "KRX",
+                             100, 105, 100, 105, 10, 1050, 2, 100.0)]
+                store = PostgresQueryStore("unused")
+                with patch.object(store, "_connect", return_value=raw) as connect:
+                    if failure:
+                        with self.assertRaises(ValueError if failure == "execute" else ConnectionError):
+                            store.load_second_trade_bars(("005930",), "2026-09-14", "KRX",
+                                start_second="09:00:00", end_second="09:00:20", available_at=101.0)
+                    else:
+                        rows = store.load_second_trade_bars(("005930",), "2026-09-14", "KRX",
+                            start_second="09:00:00", end_second="09:00:20", available_at=101.0)
+                        self.assertEqual("2026-09-14", rows[0]["trading_date"])
+                        self.assertEqual("09:00:19", rows[0]["trade_second"])
+                self.assertEqual(1, connect.call_count)
+                self.assertEqual(["SELECT"], [statement[0] for statement in raw.statements])
+                self.assertEqual((0, 1, 1) if failure == "execute" else
+                                 (1, 0, 0) if failure == "commit" else (1, 0, 1),
+                                 (raw.commits, raw.rollbacks, raw.closes))
+                call = self._calls()[-1]
+                self.assertEqual(("read.market_bars", "second_trade_bar", "read"),
+                                 (call["writer_family"], call["writer_kind"], call["access_mode"]))
+
+    def test_mock_lineage_reader_preserves_native_commit_rollback_and_close(self):
+        for failure in ("", "execute", "commit"):
+            with self.subTest(failure=failure):
+                raw = self._native_context_connection(fail_commit=failure == "commit")
+                raw.fail_execute = 1 if failure == "execute" else 0
+                raw.rows = [("spec", {"spec_id": "spec-1"}),
+                            ("lease", json.dumps({"receipt_id": "lease-1"}))]
+                store = PostgresQueryStore("unused")
+                with patch.object(store, "_connect", return_value=raw) as connect:
+                    if failure:
+                        with self.assertRaises(ValueError if failure == "execute" else ConnectionError):
+                            store.load_mock_automation_lineage(
+                                "account-a", spec_id="spec-1", admission_id="admission-1",
+                                lease_receipt_id="lease-1", recovery_decision_id="recovery-1",
+                            )
+                    else:
+                        self.assertEqual(
+                            {"spec": {"spec_id": "spec-1"}, "lease": {"receipt_id": "lease-1"}},
+                            store.load_mock_automation_lineage(
+                                "account-a", spec_id="spec-1", admission_id="admission-1",
+                                lease_receipt_id="lease-1", recovery_decision_id="recovery-1",
+                            ),
+                        )
+                self.assertEqual(1, connect.call_count)
+                self.assertEqual(["SELECT"], [statement[0] for statement in raw.statements])
+                self.assertEqual(4, tuple(raw.statements[0][1]).count("account-a"))
+                # Preserve psycopg's existing lifetime: a failed commit raises
+                # before native __exit__ calls rollback or close.
+                self.assertEqual((0, 1, 1) if failure == "execute" else
+                                 (1, 0, 0) if failure == "commit" else (1, 0, 1),
+                                 (raw.commits, raw.rollbacks, raw.closes))
+                call = self._calls()[-1]
+                self.assertEqual(("read.mock_automation", "immutable_lineage", "read"),
+                                 (call["writer_family"], call["writer_kind"], call["access_mode"]))
+                self.assertEqual("rolled_back" if failure == "execute" else
+                                 "unknown" if failure == "commit" else "committed", call["outcome"])
+
     @staticmethod
     def _second_trade_values(count: int = 1) -> list[dict[str, object]]:
         return [{
