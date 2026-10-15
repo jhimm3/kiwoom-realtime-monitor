@@ -1,0 +1,12 @@
+{
+  "baseline_head": "50a70c9ce6cdf20915fde27f2d1f47becb82eadf",
+  "cases": {
+    "snapshot": 66,
+    "protection": 396,
+    "stop": 396
+  },
+  "all_equal": true,
+  "database_reads": 0,
+  "broker_calls": 0,
+  "source_hash": "c3b0b4635c7997b2595055c0a3b7f707ca0abcfe8285973ba23bf3f59f8bd866"
+}

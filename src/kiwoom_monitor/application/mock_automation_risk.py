@@ -25,6 +25,11 @@ KST = ZoneInfo("Asia/Seoul")
 PROTECTION_EXIT_VERSION = 'mock-protection-exit/v1'
 
 
+def gross_price_stop_reached(price, entry, stop_loss_bps):
+    """Shared gross-price threshold; provenance is checked by each caller."""
+    return price * 10000 <= entry * (10000 - stop_loss_bps)
+
+
 def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None):
     """Bind a sticky gross-price stop to the admitted policy and native fill basis."""
     if (not isinstance(proof, Mapping) or set(proof) != {
@@ -36,7 +41,7 @@ def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None)
             or stop_loss_bps is not None and proof['stop_loss_bps'] != stop_loss_bps
             or not isinstance(proof['input_ref'], str) or not proof['input_ref'].startswith('collector-trade:')
             or len(proof['input_ref']) > 512
-            or proof['price_won'] * 10000 > proof['entry_price_won'] * (10000-proof['stop_loss_bps'])
+            or not gross_price_stop_reached(proof['price_won'], proof['entry_price_won'], proof['stop_loss_bps'])
             or datetime.fromisoformat(proof['available_at']).tzinfo is None):
         raise ValueError('mock_stop_loss_proof_invalid')
     if risk is not None and (
@@ -56,7 +61,7 @@ def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, pric
             or type(price.get('price_won')) is not int or price['price_won'] <= 0
             or not isinstance(price.get('available_at'), datetime) or price['available_at'].tzinfo is None
             or not 0 <= (now-price['available_at']).total_seconds() <= age
-            or price['price_won'] * 10000 > basis[symbol] * (10000-stop_loss_bps)):
+            or not gross_price_stop_reached(price['price_won'], basis[symbol], stop_loss_bps)):
         return None
     proof = {'symbol': symbol, 'quantity': owned[symbol], 'entry_price_won': basis[symbol],
         'stop_loss_bps': stop_loss_bps, 'price_won': price['price_won'],
@@ -156,16 +161,8 @@ def validate_mock_protection_exit(value, spec, run_id):
     return StrategyDecision(**raw)
 
 
-def mock_automation_protection_trigger(spec, risk, *, execution_run_id, now, account_positions=None):
-    """Classify ACKed native Risk using admitted limits, without order authority.
-
-    Unknown execution/balance is reconciled first. A verified daily loss breach
-    requests protection independently of EV; missing costs alone cannot block EXIT.
-    """
-    if (now.tzinfo is None or risk.account_ref != spec.account_scope.account_ref
-            or risk.execution_run_id != execution_run_id
-            or risk.binding_revision != spec.binding_revision or risk.data_path != spec.data_path):
-        raise ValueError("mock_protection_native_risk_scope_mismatch")
+def protection_limit_assessment(spec, risk, now, *, daily_loss_verified):
+    """Shared arithmetic only; callers retain origin and account authority."""
     reasons = []
     gap = spec.maximum_data_gap_seconds
     if gap is None or any(not 0 <= (now - at).total_seconds() <= gap
@@ -182,12 +179,28 @@ def mock_automation_protection_trigger(spec, risk, *, execution_run_id, now, acc
     if spec.maximum_reconnect_count is not None and risk.reconnect_count > spec.maximum_reconnect_count:
         reasons.append("RECONNECT_LIMIT_REACHED")
     if (spec.maximum_daily_loss_won is not None and risk.daily_net_pnl_won is not None
-            and risk.daily_net_pnl_source == VERIFIED_DAILY_PNL_SOURCE
+            and daily_loss_verified
             and risk.daily_net_pnl_won <= -spec.maximum_daily_loss_won):
         reasons.append("DAILY_LOSS_LIMIT_REACHED")
+    disposition = "EXIT_REQUIRED" if reasons == ["DAILY_LOSS_LIMIT_REACHED"] else "RECONCILE_REQUIRED"
+    return {"reasons": reasons, "disposition": disposition if reasons else None}
+
+
+def mock_automation_protection_trigger(spec, risk, *, execution_run_id, now, account_positions=None):
+    """Classify ACKed native Risk using admitted limits, without order authority.
+
+    Unknown execution/balance is reconciled first. A verified daily loss breach
+    requests protection independently of EV; missing costs alone cannot block EXIT.
+    """
+    if (now.tzinfo is None or risk.account_ref != spec.account_scope.account_ref
+            or risk.execution_run_id != execution_run_id
+            or risk.binding_revision != spec.binding_revision or risk.data_path != spec.data_path):
+        raise ValueError("mock_protection_native_risk_scope_mismatch")
+    assessment = protection_limit_assessment(spec, risk, now,
+        daily_loss_verified=risk.daily_net_pnl_source == VERIFIED_DAILY_PNL_SOURCE)
+    reasons, disposition = assessment["reasons"], assessment["disposition"]
     if not reasons:
         return None
-    disposition = "EXIT_REQUIRED" if reasons == ["DAILY_LOSS_LIMIT_REACHED"] else "RECONCILE_REQUIRED"
     cause = {"reasons": reasons, "disposition": disposition,
              "owned": risk.owned_position_quantities, "pending_sell": risk.pending_sell_quantities,
              "unknown": risk.submission_unknown_count, "balance_mismatch": bool(risk.balance_mismatch_count),
@@ -305,33 +318,8 @@ class MockAutomationRiskSnapshot:
         }
 
 
-def build_mock_automation_risk_snapshot(
-    recovery: MockAccountRecovery,
-    events: Sequence[AccountExecutionEvent],
-    costs: Sequence[DailyTradeCost],
-    active_intents: Sequence[ExecutionRecord],
-    *,
-    execution_run_id: str,
-    binding_revision: int,
-    reconciliation_revision: int,
-    observed_at: datetime,
-    broker_query_started_at: datetime,
-    broker_query_completed_at: datetime,
-    reconnect_count: int = 0,
-    balance_mismatch_count: int = 0,
-    data_path: str = "nas",
-    cost_query_complete: bool = True,
-) -> MockAutomationRiskSnapshot:
-    """Project immutable risk evidence without estimating missing broker costs."""
-    account = recovery.account
-    for value in (observed_at, broker_query_started_at, broker_query_completed_at, account.as_of):
-        _require_aware(value, "risk timestamp")
-    if any(event.account_ref != account.account_ref or event.environment != "mock" for event in events):
-        raise ValueError("execution events crossed the risk account scope")
-    if any(record.intent.account_ref != account.account_ref for record in active_intents):
-        raise ValueError("active intents crossed the risk account scope")
-    trading_date = observed_at.astimezone(KST).date()
-    exact_fills = _exact_fills(events)
+def position_cost_fifo(exact_fills, costs, trading_date, *, cost_query_complete=True):
+    """Origin-neutral FIFO/cost arithmetic over already validated fill facts."""
     lots: dict[str, list[list[Any]]] = {}
     realized = Fraction(0)
     # A failed query is not an empty, confirmed broker-cost response, even when
@@ -395,6 +383,39 @@ def build_mock_automation_risk_snapshot(
             missing_costs.append(f"FIFO_BUY_MISSING:{event.symbol}")
         if fill_day == trading_date:
             realized += matched_proceeds - matched_basis - sale_cost
+
+    return lots, realized, missing_costs, unmatched_sell
+
+
+def build_mock_automation_risk_snapshot(
+    recovery: MockAccountRecovery,
+    events: Sequence[AccountExecutionEvent],
+    costs: Sequence[DailyTradeCost],
+    active_intents: Sequence[ExecutionRecord],
+    *,
+    execution_run_id: str,
+    binding_revision: int,
+    reconciliation_revision: int,
+    observed_at: datetime,
+    broker_query_started_at: datetime,
+    broker_query_completed_at: datetime,
+    reconnect_count: int = 0,
+    balance_mismatch_count: int = 0,
+    data_path: str = "nas",
+    cost_query_complete: bool = True,
+) -> MockAutomationRiskSnapshot:
+    """Project immutable risk evidence without estimating missing broker costs."""
+    account = recovery.account
+    for value in (observed_at, broker_query_started_at, broker_query_completed_at, account.as_of):
+        _require_aware(value, "risk timestamp")
+    if any(event.account_ref != account.account_ref or event.environment != "mock" for event in events):
+        raise ValueError("execution events crossed the risk account scope")
+    if any(record.intent.account_ref != account.account_ref for record in active_intents):
+        raise ValueError("active intents crossed the risk account scope")
+    trading_date = observed_at.astimezone(KST).date()
+    exact_fills = _exact_fills(events)
+    lots, realized, missing_costs, unmatched_sell = position_cost_fifo(
+        exact_fills, costs, trading_date, cost_query_complete=cost_query_complete)
 
     net_positions = {
         symbol: sum(int(lot[0]) for lot in values)

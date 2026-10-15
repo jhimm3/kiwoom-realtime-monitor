@@ -245,6 +245,9 @@ def execute_research(
             if target_partition is not None and not target_partition.allows(evaluation_bar.code):
                 continue
             latest_codes = universe[-1].codes if universe else ()
+            if (position_action_study is not None and position_action_study.version=='position-action-study/v4'
+                    and evaluation_bar.research_session!=spec['native_study_episode_session']):
+                continue  # Other sessions supply frozen warmup inputs, never prior account trades.
             execution_key = (evaluation_bar.code, evaluation_bar.observation_key)
             if execution_key not in processed_execution_bars:
                 lineage=((engine.observe_unfilled_bar(evaluation_bar),) if unfilled_action_plan is not None else ())
@@ -298,7 +301,11 @@ def execute_research(
                 append_logical({'execution':proof.to_dict()});used_study=True
             target_request=target_plan.get(target_key)
             unfilled_request=unfilled_plan.get(target_key)
-            if study_key == target_key and position_study_case.branch_action == 'HOLD':
+            if engine.native_study_active:
+                decision_events=engine.process_native_family(evaluation.decision,evaluation.state,source_bar=evaluation_bar,
+                    bar_history=bars,universe_frames=universe)
+                if target_request is not None:used_targets.add(target_key)
+            elif study_key == target_key and position_study_case.branch_action == 'HOLD':
                 # An independent HOLD branch observes the same goal/pre-state;
                 # it submits no target and follows the registered family.
                 decision_events=engine.process_decision(evaluation.decision,evaluation.state,source_bar=evaluation_bar)
@@ -543,6 +550,15 @@ def research_run_identity(dataset, config, execution_config, evaluation_spec, *,
                 or not isinstance(position_study_case,PositionActionStudyCase)
                 or role != position_action_study.development_role):
             raise ValueError('position study requires its own independent native branch')
+        if position_action_study.version=='position-action-study/v4':
+            inputs=json.loads(json.dumps(list(dataset.observations),ensure_ascii=False,allow_nan=False))
+            encoded=_canonical_json(inputs)
+            if len(encoded.encode())>256*1024:raise ValueError('native study frozen inputs exceed 256 KiB')
+            spec['native_study_inputs']=inputs
+            spec['native_study_inputs_ref']='native-study-inputs:'+hashlib.sha256(encoded.encode()).hexdigest()
+            from zoneinfo import ZoneInfo
+            spec['native_study_episode_session']=position_study_case.request.decision_time.astimezone(
+                ZoneInfo('Asia/Seoul')).date().isoformat()+':KRX_REGULAR'
         spec['position_action_study']=position_action_study_spec(position_action_study,position_study_case,spec)
         if position_study_context is not None:
             from kiwoom_monitor.application.research_evaluation import validate_position_study_historical_context

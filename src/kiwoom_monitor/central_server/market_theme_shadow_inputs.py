@@ -302,7 +302,7 @@ def _decode_dynamic_allocation_model_publication_v2(document,selection,expected_
         'version':'dynamic-allocation-native-models/v2'}
 
 
-def position_study_current_goal_binding(model,request,target,observation,receipt,selection):
+def position_study_current_goal_binding(model,request,target,observation,receipt,selection,*,current_support_observation=None):
     """Bind an existing RAM goal/Risk cut; unsupported native states stay missing."""
     from kiwoom_monitor.application.position_target import PositionAccountObservation,PositionTargetShadowRequest
     from kiwoom_monitor.application.mock_automation_risk import (
@@ -377,7 +377,7 @@ def position_study_current_goal_binding(model,request,target,observation,receipt
     if not account_bound:reasons.append('current_account_risk_binding_unverified')
     if receipt['risk_disposition']!='ALLOW' or receipt.get('protection_required'):
         reasons.append('native_risk_preempts_position_study')
-    owner_facts=None
+    owner_facts=None;validated_state=None;family_match=None
     raw_state=getattr(observation,'runner_state',None)
     if raw_state is not None:
         from kiwoom_monitor.application.position_target import validate_position_runner_state
@@ -406,9 +406,95 @@ def position_study_current_goal_binding(model,request,target,observation,receipt
             reasons.extend(('native_protection_model_support_unverified','native_execution_continuation_support_unverified'))
             if not family_match:reasons.append('current_registered_family_model_mismatch')
             if pending or clock_pending:reasons.append('native_protection_preempts_position_study')
-        except (ValueError,TypeError,KeyError):reasons.append('native_runner_state_invalid_or_cut_mismatch')
+            validated_state=state
+        except (ValueError,TypeError,KeyError):
+            family_match=None
+            reasons.append('native_runner_state_invalid_or_cut_mismatch')
     if not max(available)<=cut<min(expiry):
         reasons.append('current_goal_input_expired_or_future');account_bound=False
+    # These are support dimensions, not an approval inferred from matching
+    # prices, a normal current Risk snapshot, or a replayable historical mean.
+    # Exact means the complete recorded state, including absolute state times;
+    # no age/price/quantity interpolation or new equivalence rule is introduced.
+    case_states=[];matched_cases=[]
+    for case in comparison['cases']:
+        if case['selection']['action']!=comparison['action']:continue
+        proof=case['decision_proof'];source_state=proof['strategy_state']
+        case_states.append({'case_ref':case['selection']['case_ref'],
+            'case_evidence_ref':case['evidence_ref'],'proof_event_ref':case['proof_event_ref'],
+            'status':source_state['status']})
+        if validated_state is not None and _model_json(validated_state.to_dict())==source_state:
+            matched_cases.append(case['selection']['case_ref'])
+    if validated_state is not None and not matched_cases:
+        reasons.append('current_state_outside_exact_observed_cases')
+    source=model.get('source_continuation',{})
+    support={'version':'position-study-model-support/v1',
+        'historical_comparison':{'status':'SUPPORTED' if comparison['r4_status']=='COHORT_COMPARABLE' else 'UNAVAILABLE',
+            'evidence_ref':comparison['evidence_ref'],'scope':'declared_paired_minute_study_only',
+            'usable_for_current_goal':False},
+        'declared_scope':{'study_policy_ref':comparison['study_policy_ref'],
+            'source_policy_version':study.source_policy_version,'actions':list(study.actions),
+            'horizon_seconds':study.horizon_seconds,'context_support_rule':study.context_support_rule,
+            'continuation_rule':study.continuation_rule,
+            'goal_scope':{key:expected[key] for key in ('initial_quantity','target_quantity',
+                'reference_price_won','cost_model_ref','horizon_seconds')},
+            'input_resolutions':sorted({case['outcome']['input_resolution'] for case in comparison['cases']}),
+            'execution_model':_model_json(source.get('execution_model')),
+            'observed_case_states':_model_json(case_states)},
+        'current_state':{'status':'UNAVAILABLE' if validated_state is None else
+            'EXACT_OBSERVED_CASE' if matched_cases else 'OUTSIDE_OBSERVED_CASES',
+            'matched_case_refs':sorted(matched_cases),'registered_family_matches':family_match,
+            'equivalence_verified':False},
+        'current_goal':{'status':'BLOCKED','usable':False,
+            'checks':{'account_risk_bound':bool(account_bound),
+                'goal_policy_scope_matches':'current_study_sizing_or_action_mismatch' not in reasons,
+                'quantity_price_cost_pending_match':'current_goal_quantity_price_cost_or_pending_mismatch' not in reasons,
+                'input_lease_current':max(available)<=cut<min(expiry)},
+            'reasons':sorted(set(reasons))},
+        'native_execution':{'status':'UNVERIFIED',
+            'reasons':['native_protection_model_support_unverified','native_execution_continuation_support_unverified'],
+            'reentry_admission_verified':False},
+        'order_authorized':False}
+    if study.version in {'position-action-study/v3','position-action-study/v4'}:
+        from kiwoom_monitor.application.research_evaluation import evaluate_position_study_conditional_shadow
+        if study.version=='position-action-study/v4':support['native_execution']['equivalence_verified']=False
+        support['version']='position-study-model-support/v2'
+        conditional={'status':'UNAVAILABLE','result':None,
+            'reasons':['current_closed_minute_support_observation_unavailable'],
+            'usable_for_native_selection':False,'order_authorized':False}
+        if current_support_observation is not None:
+            current_checks=support['current_goal']['checks']
+            raw=current_support_observation
+            if (not all(current_checks.values()) or not family_match or validated_state is None
+                    or owner_facts['protection_pending'] or owner_facts['session_clock_pending']
+                    or receipt.get('protection_required')):
+                conditional['reasons']=['conditional_current_native_binding_or_protection_invalid']
+            elif (not isinstance(raw,dict) or set(raw)!={'source_bar','strategy_state','portfolio','source_continuation'}
+                    or not isinstance(raw['portfolio'],dict)
+                    or _model_json(validated_state.to_dict())!=raw['strategy_state']
+                    or raw['portfolio'].get('cash_won')!=observation.account.available_cash_won
+                    or raw['portfolio'].get('reserved_cash_won')!=observation.account.reserved_open_buy_won):
+                conditional['reasons']=['conditional_current_owner_observation_mismatch']
+            else:
+                native_policy=None
+                if study.version=='position-action-study/v4':
+                    from kiwoom_monitor.application.mock_automation_risk import _sha256
+                    copied=getattr(observation,'native_study_policy',None)
+                    keys={'version','source_kind','account_input_ref','risk_snapshot_ref','state_ref','policy',
+                        'order_authorized','policy_observation_ref'}
+                    if (isinstance(copied,dict) and set(copied)==keys and isinstance(copied['policy'],dict)
+                            and copied['version']=='native-position-study-policy/v1' and copied['source_kind']=='owner_ram'
+                            and copied['account_input_ref']==observation.input_ref
+                            and copied['risk_snapshot_ref']==risk_ref and copied['state_ref']==raw_state['state_ref']
+                            and copied['order_authorized'] is False
+                            and copied['policy_observation_ref']=='native-position-study-policy:'+_sha256(
+                                {k:v for k,v in copied.items() if k!='policy_observation_ref'})
+                            and all(copied['policy'].get(k)==v for k,v in raw_state['native_risk_limits'].items())):
+                        native_policy=copied['policy']
+                conditional=evaluate_position_study_conditional_shadow(model,request,target,**raw,
+                    account_snapshot=observation.account,broker_open_orders=observation.broker_open_orders,
+                    **({'native_policy':native_policy} if study.version=='position-action-study/v4' else {}))
+        support['conditional_shadow']=_model_json(conditional)
     return {'version':'position-study-current-goal-binding/v2','symbol':request.symbol,'action':request.action,
         'study_policy_ref':comparison['study_policy_ref'],'model_evidence_ref':comparison['evidence_ref'],
         'goal_decision_ref':target['decision_id'],'goal_policy_ref':target['target_policy_version'],
@@ -417,6 +503,7 @@ def position_study_current_goal_binding(model,request,target,observation,receipt
         **({'native_owner_facts':owner_facts} if owner_facts is not None else {}),
         **({'allocation_lineage':_model_json(lineage)} if lineage is not None else {}),
         **({'historical_context_summary':historical_summary} if historical_summary is not None else {}),
+        'model_support':support,
         'available_at':max(available).isoformat(),'valid_until':min(expiry).isoformat(),
         'status':'EV_UNAVAILABLE','result':None,'reasons':sorted(set(reasons)),
         'source_durability':'not_verified','order_authorized':False}
@@ -479,6 +566,50 @@ def freeze_dynamic_allocation_input_bundle(receipt,models,selection):
         return {'version':body['version'],'status':'INPUTS_UNAVAILABLE','reasons':['input_bundle_budget_exceeded'],
             'model_application_verified':False,'source_durability':'not_verified','order_authorized':False}
     return body
+
+
+def _position_study_observation_from_ram(model,request,observation,snapshot):
+    """Join the Collector's completed bar to the already borrowed owner basis."""
+    from kiwoom_monitor.application.mock_automation_risk import _sha256
+    from kiwoom_monitor.application.research_replay import replay_krx_minute_bars
+    basis=getattr(observation,'study_portfolio',None);state=getattr(observation,'runner_state',None)
+    if not isinstance(basis,dict) or not isinstance(state,dict):
+        return None,['current_account_study_basis_unavailable'],[]
+    risk=observation.risk_snapshot
+    if (basis.get('version')!='native-position-study-portfolio/v1' or basis.get('order_authorized') is not False
+            or basis.get('portfolio_ref')!='native-position-study-portfolio:'+_sha256({k:v for k,v in basis.items() if k!='portfolio_ref'})
+            or risk is None or basis.get('risk_snapshot_ref')!=risk.snapshot_id
+            or basis.get('account_input_ref')!=observation.input_ref
+            or basis.get('cost_evidence_revision')!=risk.cost_evidence_revision
+            or basis.get('fill_cursor')!=state['fill_cursor']
+            or basis.get('available_at')!=observation.observed_at.isoformat()):
+        return None,['current_account_study_basis_cut_mismatch'],[]
+    rows=[r for r in snapshot.get('closed_minute_observations',()) if r.get('code')==request.symbol and r.get('market')=='KRX']
+    if len(rows)!=1:return None,['current_closed_minute_support_observation_unavailable'],[]
+    row=rows[0];cut=request.decision_time
+    start=datetime.fromisoformat(row['trading_date']+'T'+row['minute']).replace(tzinfo=ZoneInfo('Asia/Seoul'))
+    at=datetime.fromtimestamp(row['available_at'],tz=ZoneInfo('Asia/Seoul'))
+    since=snapshot['continuous_from'].get((request.symbol,'KRX'));gap=snapshot.get('gap_at')
+    if (row.get('durable') is not False or row.get('capture_quality')!='complete'
+            or (request.symbol,'KRX') not in snapshot['approved_sources'] or since is None or since>start
+            or gap is not None and gap>start or not start+timedelta(minutes=1)<=at<=cut
+            or not 0<=(cut-at).total_seconds()<request.max_snapshot_age_seconds):
+        return None,['current_closed_minute_support_quality_or_continuity_invalid'],[]
+    if cut.microsecond or at.microsecond:
+        return None,['current_study_timestamp_precision_outside_declared_profile'],[]
+    if row['close']!=request.reference_price_won or at!=request.reference_price_available_at:
+        return None,['current_closed_minute_quote_cut_mismatch'],[]
+    ref=f"collector-minute:{snapshot['source_id']}:{row['operation_id']}"
+    payload={key:row[key] for key in ('code','open','high','low','close','volume','trade_value_million_won','capture_quality','finalization_source')}
+    payload.update(market='KRX',bar_start=start.isoformat(),bar_end=(start+timedelta(minutes=1)).isoformat(),window_closed=True)
+    source={'kind':'minute_bar','venue':'KRX','subject':request.symbol+':KRX','revision_id':ref,
+        'observation_key':start.isoformat(),'available_at':at.isoformat(),'value_kind':'actual','completeness':'complete',
+        'payload':payload}
+    frames=replay_krx_minute_bars((source,),as_of=cut,session_profile='krx-regular/v1')
+    if len(frames)!=1:return None,['current_closed_minute_session_unsupported'],[]
+    raw={'source_bar':_model_json(asdict(frames[0])),'strategy_state':_model_json(state['strategy_state']),
+        'portfolio':_model_json(basis['portfolio']),'source_continuation':_model_json(model['source_continuation'])}
+    return raw,[],[ref,basis['portfolio_ref'],state['state_ref']]
 
 
 def dynamic_allocation_inputs_from_ram(selection, snapshot, contexts, observation, models=None, *, theme_memberships=None):
@@ -708,8 +839,21 @@ def dynamic_allocation_inputs_from_ram(selection, snapshot, contexts, observatio
                     lower.append(evaluate_position_target_shadow(request,observation.account,observation.open_orders,
                         broker_open_orders=observation.broker_open_orders))
                     if 'position_study' in models['rows'][c.symbol]:
-                        study_bindings.append(position_study_current_goal_binding(models['rows'][c.symbol]['position_study'],
-                            request,lower[-1],observation,receipt,selection))
+                        study=models['rows'][c.symbol]['position_study'];current=None;missing=[];refs=[]
+                        if study['study'].version in {'position-action-study/v3','position-action-study/v4'}:
+                            current,missing,refs=_position_study_observation_from_ram(study,request,observation,snapshot)
+                        binding=position_study_current_goal_binding(study,request,lower[-1],observation,receipt,selection,
+                            current_support_observation=current)
+                        if study['study'].version in {'position-action-study/v3','position-action-study/v4'}:
+                            conditional=binding['model_support']['conditional_shadow']
+                            if missing:conditional['reasons']=sorted(set(conditional['reasons']+missing))
+                            conditional['input_refs']=sorted(set(conditional.get('input_refs',[])+refs))
+                            if conditional.get('result') is not None:
+                                binding['valid_until']=min(datetime.fromisoformat(binding['valid_until']),
+                                    datetime.fromisoformat(conditional['valid_until'])).isoformat()
+                                receipt['valid_until']=min(datetime.fromisoformat(receipt['valid_until']),
+                                    datetime.fromisoformat(binding['valid_until'])).isoformat()
+                        study_bindings.append(binding)
                 receipt['lower_targets']=lower
                 receipt['r4_action_comparison']={'result':None,'status':'EV_UNAVAILABLE',
                     'reasons':['generated_dynamic_target_policy_requires_its_own_action_population'],'order_authorized':False}

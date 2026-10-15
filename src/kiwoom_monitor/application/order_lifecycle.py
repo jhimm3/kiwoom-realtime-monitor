@@ -367,6 +367,17 @@ class UnfilledOrderManagementPolicy:
             raise ValueError('unfilled deadlines exceed policy validity')
 
 
+def anchored_unfilled_policy(intent, frozen, purpose):
+    """Same anchored deadlines for native registration and explicit Paper facts."""
+    end=intent.created_at+timedelta(seconds=frozen.maximum_management_seconds)
+    return UnfilledOrderManagementPolicy('unfilled-purpose-policy/v1',purpose,intent.intent_id,
+        intent.limit_price,'original-decision:'+intent.decision_id,intent.created_at,end,
+        min(end,intent.expires_at),min(end,intent.created_at+timedelta(seconds=frozen.max_snapshot_age_seconds)),
+        frozen.maximum_adverse_slippage_bps,frozen.protective_slippage_bps,frozen.maximum_reprices,
+        frozen.max_snapshot_age_seconds,frozen.minimum_net_advantage_won,frozen.uncertainty_multiplier,
+        frozen.minimum_paired_samples,frozen.reprice_horizon_seconds)
+
+
 @dataclass(frozen=True)
 class UnfilledRepriceEvidence:
     """Supplied paired WAIT-vs-REPRICE summary, distinct from R4 HOLD/action EV."""

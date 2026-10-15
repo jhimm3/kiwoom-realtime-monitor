@@ -891,7 +891,7 @@ class CentralRealtimeCollector:
             self._ram_retention_since = self._now_provider()
 
     def ram_observation_snapshot(self, codes: tuple[str, ...] | None, *, seconds: int,
-                                 include_trade_references: bool = False) -> dict[str, Any]:
+                                 include_trade_references: bool = False, include_closed_minutes: bool = False) -> dict[str, Any]:
         """One event-loop RAM cut; no store read, drain, registration or aggregation."""
         at = self._now_provider()
         if at.tzinfo is None:
@@ -906,6 +906,8 @@ class CentralRealtimeCollector:
             if key in self._approved_trade_sources and reference["trading_date"] == day
         }
         return {
+            **({'closed_minute_observations':self._minute_bars.closed_observation_snapshot(codes,at=at,
+                approved_sources=self._approved_trade_sources)} if include_closed_minutes else {}),
             **({'trade_references': tuple({**price, 'code':code, 'market':'KRX',
                     'market_cap_eok': self._latest_snapshots[('trade',code)]['event']['payload'].get('market_cap_eok')}
                 for code in codes if (price := self.automation_price_observation(code)) is not None)}

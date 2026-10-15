@@ -200,9 +200,49 @@ class RunnerStateRamTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('current_position_protection_state_unavailable',goal['reasons'])
             self.assertIn('native_protection_model_support_unverified',goal['reasons'])
             self.assertEqual('EV_UNAVAILABLE',goal['status']);self.assertFalse(goal['order_authorized'])
+            support=goal['model_support']
+            self.assertEqual('SUPPORTED',support['historical_comparison']['status'])
+            self.assertEqual('OUTSIDE_OBSERVED_CASES',support['current_state']['status'])
+            self.assertEqual([],support['current_state']['matched_case_refs'])
+            self.assertIn('current_state_outside_exact_observed_cases',support['current_goal']['reasons'])
+            self.assertEqual('UNVERIFIED',support['native_execution']['status'])
             before=deepcopy(receipt)
             for _ in range(100):runtime.latest_results
             self.assertEqual(before,runtime.latest_results['position_allocation']);self.assertEqual(1,source.call_count)
+
+    async def test_exact_recorded_state_is_only_a_match_and_cannot_approve_native_future_policy(self):
+        from kiwoom_monitor.application.breakout_strategy import StrategyState
+        from kiwoom_monitor.central_server.market_theme_shadow_inputs import decode_dynamic_allocation_model_publication
+        runtime,_,_,source,packet,state,owner=self.prepare(2)
+        decoded=decode_dynamic_allocation_model_publication(packet,runtime._allocation,1)
+        original=decoded['rows']['005930']['position_study']['comparison']['cases'][0]['decision_proof']['strategy_state']
+        current=state.latest_observation;old_risk=current.risk_snapshot
+        event=replace(state.base.events.values[0],price=original['entry_price'])
+        state.base.events.values=[event]
+        daily=replace(cost(state.now.date(),'매수',event.quantity*event.price,0),origin_scope=state.base.spec.account_scope)
+        risk=build_mock_automation_risk_snapshot(MockAccountRecovery(current.account,()),(event,),(daily,),(),
+            execution_run_id=old_risk.execution_run_id,binding_revision=old_risk.binding_revision,
+            reconciliation_revision=old_risk.reconciliation_revision,observed_at=current.observed_at,
+            broker_query_started_at=current.observed_at,broker_query_completed_at=current.observed_at,
+            data_path=old_risk.data_path,cost_query_complete=True)
+        current=replace(current,risk_snapshot=risk);state.latest_observation=current
+        source.side_effect=lambda account_ref:owner.position_shadow_observation(current)
+        # Controlled owner fixture: even an exact copied historical state cannot
+        # manufacture source evidence for native protection or continuation.
+        state.runner._replace_strategy_state(StrategyState(**{**original,
+            'emitted_candidate_keys':tuple(original['emitted_candidate_keys'])}))
+        runtime.offer_allocation_models(packet,decoded)
+        with patch('sqlite3.connect',side_effect=AssertionError('support hot path DB')):
+            await runtime._dispatch(runtime._snapshot())
+        goal=runtime.latest_results['position_allocation']['r4_action_comparison']['goals'][0]
+        support=goal['model_support']
+        self.assertEqual('EXACT_OBSERVED_CASE',support['current_state']['status'])
+        self.assertTrue(support['current_state']['matched_case_refs'])
+        self.assertFalse(support['current_state']['equivalence_verified'])
+        self.assertEqual('BLOCKED',support['current_goal']['status'])
+        self.assertEqual('UNVERIFIED',support['native_execution']['status'])
+        self.assertIsNone(goal['result']);self.assertFalse(goal['order_authorized'])
+        self.assertEqual(1,source.call_count)
 
     async def test_native_pending_protection_and_owner_loss_never_become_supported_goals(self):
         from kiwoom_monitor.central_server.market_theme_shadow_inputs import decode_dynamic_allocation_model_publication

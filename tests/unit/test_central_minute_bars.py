@@ -8,6 +8,32 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
 
 class MinuteBarAccumulatorTests(unittest.TestCase):
+    def test_closed_ram_copy_is_bounded_detached_survives_drain_and_never_renews_time(self):
+        accumulator=MinuteBarAccumulator();kst=timezone(timedelta(hours=9))
+        at=datetime(2026,9,14,9,4,59,tzinfo=kst)
+        accumulator.add(TradeTick('005930',1000,None,10,2,None,'090459'),at,at.timestamp())
+        cut=at.replace(minute=5,second=2);before=accumulator.pending_bars('005930','2026-09-14','KRX')
+        self.assertEqual((),accumulator.closed_observation_snapshot(('005930',),at=cut-timedelta(seconds=1),approved_sources={('005930','KRX')}))
+        first=accumulator.closed_observation_snapshot(('005930',),at=cut,approved_sources={('005930','KRX')})[0]
+        self.assertEqual('complete',first['capture_quality']);self.assertEqual(before,accumulator.pending_bars('005930','2026-09-14','KRX'))
+        first['close']=1;accumulator.drain_dirty(closed_before=cut-timedelta(seconds=2))
+        second=accumulator.closed_observation_snapshot(('005930',),at=cut+timedelta(seconds=10),approved_sources={('005930','KRX')})[0]
+        self.assertEqual(1000,second['close']);self.assertEqual(cut.timestamp(),second['available_at'])
+        self.assertEqual((),accumulator.closed_observation_snapshot(('005930',),at=cut,approved_sources=set()))
+
+    def test_late_tick_invalidates_only_ram_support_and_gap_removes_old_copy(self):
+        accumulator=MinuteBarAccumulator();kst=timezone(timedelta(hours=9))
+        at=datetime(2026,9,14,9,4,59,tzinfo=kst);tick=TradeTick('005930',1000,None,10,2,None,'090459')
+        accumulator.add(tick,at,at.timestamp());cut=at.replace(minute=5,second=2)
+        accumulator.closed_observation_snapshot(('005930',),at=cut,approved_sources={('005930','KRX')})
+        self.assertFalse(accumulator._open_windows[('2026-09-14','09:04','005930','KRX')])
+        accumulator.add(tick,cut,cut.timestamp())
+        copy=accumulator.closed_observation_snapshot(('005930',),at=cut,approved_sources={('005930','KRX')})[0]
+        self.assertEqual('partial',copy['capture_quality'])
+        self.assertFalse(accumulator._open_windows[('2026-09-14','09:04','005930','KRX')])
+        accumulator.reset_cumulative_sources({('005930','KRX')});self.assertFalse(accumulator._ram_closed)
+        accumulator.mark_capture_gap();self.assertFalse(accumulator._ram_closed)
+
     def test_live_copy_preserves_operation_id_without_consuming_pending_ticks(self) -> None:
         accumulator = MinuteBarAccumulator()
         now = datetime(2026, 10, 6, 10, 4, 40)

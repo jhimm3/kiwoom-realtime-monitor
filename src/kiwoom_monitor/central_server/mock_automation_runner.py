@@ -97,6 +97,9 @@ class MockAutomationRunner:
             raise ValueError("MOCK_AUTOMATION_CANDIDATE_MISSING")
         candidate = package.candidate_spec
         self._position_registered_implementation = package.scientific_implementation_hash
+        from kiwoom_monitor.application.position_target import native_study_policy_implementation_ref
+        try:self._position_policy_implementation = native_study_policy_implementation_ref()
+        except (OSError,ValueError):self._position_policy_implementation = None
         family_id = str(candidate.get("family", ""))
         self._family = get_research_family(family_id)
         self._config = parse_strategy_config(family_id, candidate.get("parameters", {}))
@@ -271,6 +274,22 @@ class MockAutomationRunner:
                 value["orders_enabled"] = False
                 value["protection_review_required"] = True
         return value
+
+    def position_study_policy(self, observation, runner_state):
+        """Copy frozen policy in the same borrowed epoch; no credentials or IO."""
+        from kiwoom_monitor.application.mock_automation_risk import _sha256
+        if (self._position_policy_implementation is None or self._spec.unfilled_execution_policy is None
+                or self.position_study_state(observation)!=runner_state):return None
+        policy={'version':'native-policy-paper/v1',
+            **{key:getattr(self._spec,key) for key in ('maximum_daily_loss_won','maximum_data_gap_seconds',
+                'maximum_submission_unknown_count','maximum_reconnect_count','maximum_balance_mismatch_count')},
+            'unfilled_policy':self._spec.unfilled_execution_policy.to_dict(),
+            'implementation_ref':self._position_policy_implementation}
+        body={'version':'native-position-study-policy/v1','source_kind':'owner_ram',
+            'account_input_ref':observation.input_ref,'risk_snapshot_ref':observation.risk_snapshot.snapshot_id,
+            'state_ref':runner_state['state_ref'],'policy':policy,'order_authorized':False}
+        body['policy_observation_ref']='native-position-study-policy:'+_sha256(body)
+        return body if self.position_study_state(observation)==runner_state else None
 
     def position_study_state(self, observation):
         """Copy existing state without waiting for fills, locks, DB or protection."""
@@ -1004,13 +1023,8 @@ class MockAutomationRunner:
         intent, frozen = record.intent, self._spec.unfilled_execution_policy
         purpose = ('BUY_OPPORTUNITY' if gate.action == 'ENTER' else
                    'TAKE_PROFIT' if tuple(decision.reasons) == ('target_reached',) else 'PROTECTIVE_EXIT')
-        end = intent.created_at + timedelta(seconds=frozen.maximum_management_seconds)
-        policy = UnfilledOrderManagementPolicy('unfilled-purpose-policy/v1', purpose, intent.intent_id,
-            intent.limit_price, 'original-decision:' + intent.decision_id, intent.created_at, end,
-            min(end, intent.expires_at), min(end, intent.created_at + timedelta(seconds=frozen.max_snapshot_age_seconds)),
-            frozen.maximum_adverse_slippage_bps, frozen.protective_slippage_bps, frozen.maximum_reprices,
-            frozen.max_snapshot_age_seconds, frozen.minimum_net_advantage_won, frozen.uncertainty_multiplier,
-            frozen.minimum_paired_samples, frozen.reprice_horizon_seconds)
+        from kiwoom_monitor.application.order_lifecycle import anchored_unfilled_policy
+        policy = anchored_unfilled_policy(intent, frozen, purpose)
         body = {'version': 'mock-unfilled-registration/v1', 'spec_id': self._spec.spec_id,
                 'account_ref': self._bundle.account_ref, 'execution_run_id': self._bundle.run_id,
                 'control_revision': gate.control_revision, 'operating_policy_id': frozen.policy_id,

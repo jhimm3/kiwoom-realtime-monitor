@@ -418,6 +418,7 @@ class PaperExecutionEngine:
         self.strategy = strategy
         self.session_profile = session_profile
         self._last_processed_bar = None
+        self._native_study = None
         self.strategy_state = StrategyState()
         self.portfolio = SimulationPortfolio(
             cash_won=execution.initial_cash_won,
@@ -429,6 +430,15 @@ class PaperExecutionEngine:
         )
 
     def process_bar(self, bar: KrxMinuteBarFrame) -> tuple[ExecutionEvent, ...]:
+        if self.native_study_active:
+            return self._native_bar(bar)
+        return self._process_legacy_bar(bar)
+
+    @property
+    def native_study_active(self):
+        return self._native_study is not None and not self._native_study['ended']
+
+    def _process_legacy_bar(self, bar: KrxMinuteBarFrame) -> tuple[ExecutionEvent, ...]:
         self._last_processed_bar = bar
         events: list[ExecutionEvent] = []
         pending = self.portfolio.pending_order
@@ -733,13 +743,245 @@ class PaperExecutionEngine:
         proof={'version':'position-action-study-case/v2','study_policy_ref':study_ref,'case':case.to_dict(),
             'source_bar':asdict(source_bar),'portfolio':asdict(self.portfolio),'strategy_state':asdict(self.strategy_state),
             'goal':goal}
+        if study.version in {'position-action-study/v3','position-action-study/v4'}:
+            from kiwoom_monitor.application.position_target import position_study_support_observation
+            proof['version']='position-action-study-case/'+study.version.rsplit('/',1)[1]
+            proof['support_observation']=position_study_support_observation(study,request,goal,
+                proof['source_bar'],proof['strategy_state'],proof['portfolio'])
         if historical_context is not None:proof['historical_context']=historical_context
+        if study.version=='position-action-study/v4':
+            position=self.portfolio.position
+            if (position is None or self.portfolio.realized_pnl_won or self.portfolio.total_cost_won!=position.entry_commission
+                    or position.entry_notional!=position.entry_price*position.quantity):
+                raise ValueError('native policy study requires its exact first-entry basis')
+            self._native_study={'study':study,'case':case,'goal':goal,'bar':source_bar,'cut':at,
+                'end':_aware_datetime(source_bar.bar_end)+timedelta(seconds=study.horizon_seconds),
+                'managed':None,'error':None,'ended':False,'intervened':False,
+                'fills':[{'source_event_id':position.entry_intent_id,'symbol':position.symbol,'side':'BUY',
+                    'quantity':position.quantity,'price':position.entry_price,'cost':position.entry_commission,
+                    'occurred_at':position.opened_at,'accepted_sequence':0,'run_id':self.run_id}]}
         encoded=json.dumps(proof,default=_json_value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
         if len(encoded.encode()) > 256*1024:raise ValueError('native study proof exceeds 256 KiB')
         return self._event(intent_id='',decision_id=goal['decision_id'],event_type='POSITION_STUDY_CASE',state='OBSERVED',
             symbol=source_bar.code,side='',occurred_at=source_bar.bar_end,received_at=source_bar.available_at,
             quantity=0,price=source_bar.close,notional=0,commission=0,tax=0,realized=0,
             source_revision_id=source_bar.revision_id,optimistic_exit_price=None,reason=encoded)
+
+    def _native_proof(self,kind,at,document):
+        """One simulated event on the existing writer, never a native receipt."""
+        from kiwoom_monitor.application.position_target import _json_value
+        n=self._native_study;bar=n['bar']
+        document={'version':'native-policy-paper-proof/v1','source_kind':'simulation',
+            'policy_ref':n['study'].native_policy.implementation_ref,**document}
+        reason=json.dumps(document,default=_json_value,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+        if len(reason.encode())>256*1024:raise ValueError('native policy event exceeds proof budget')
+        return self._event(intent_id='',decision_id='',event_type=kind,state='OBSERVED',symbol=bar.code,
+            side='',occurred_at=at.isoformat(),received_at=at.isoformat(),quantity=0,price=bar.close,
+            notional=0,commission=0,tax=0,realized=0,source_revision_id=bar.revision_id,
+            optimistic_exit_price=None,reason=reason)
+
+    def _native_fail(self,at,reason):
+        self._native_study['error']=reason
+        return self._native_proof('NATIVE_POLICY_UNSUPPORTED',at,{'reason':reason,
+            'portfolio':asdict(self.portfolio),'strategy_state':self.strategy_state.to_dict()})
+
+    def _native_risk(self,at):
+        from types import SimpleNamespace
+        from zoneinfo import ZoneInfo
+        from kiwoom_monitor.application.mock_automation_risk import position_cost_fifo,protection_limit_assessment
+        n=self._native_study;facts=n['fills'];groups={}
+        for row in facts:
+            day=_aware_datetime(row['occurred_at']).astimezone(ZoneInfo('Asia/Seoul')).date()
+            key=(day,row['symbol'],'매수' if row['side']=='BUY' else '매도')
+            gross,fee=groups.get(key,(0,0));groups[key]=(gross+row['quantity']*row['price'],fee+row['cost'])
+        costs=[SimpleNamespace(fill_date=k[0],stock_code=k[1],side=k[2],gross_amount=v[0],total_cost=v[1]) for k,v in groups.items()]
+        fills=[SimpleNamespace(**{**r,'occurred_at':_aware_datetime(r['occurred_at'])}) for r in facts]
+        lots,realized,missing,unmatched=position_cost_fifo(fills,costs,at.astimezone(ZoneInfo('Asia/Seoul')).date())
+        position=self.portfolio.position
+        expected={position.symbol:position.quantity} if position else {}
+        actual={s:sum(l[0] for l in rows) for s,rows in lots.items() if rows}
+        risk=SimpleNamespace(observed_at=at,account_as_of=at,reconciliation_complete=not unmatched and actual==expected,
+            submission_unknown_count=0,balance_mismatch_count=0,reconnect_count=0,data_gap_seconds=0,
+            daily_net_pnl_won=round(realized) if not missing else None)
+        return risk,protection_limit_assessment(n['study'].native_policy,risk,at,daily_loss_verified=not missing)
+
+    def _native_submit(self,at,quantity,target,purpose,reason):
+        from kiwoom_monitor.domain.order_contract import OrderIntent,OrderSide,OrderType
+        from kiwoom_monitor.application.order_lifecycle import anchored_unfilled_policy
+        n=self._native_study;profile=n['study'].native_policy;bar=n['bar']
+        decision=_content_id('paper-native-decision',{'run':self.run_id,'cut':at.isoformat(),'quantity':quantity,
+            'target':target,'reason':reason,'price_ref':bar.revision_id})
+        intent_id=_content_id('paper-native-intent',{'decision':decision})
+        intent=OrderIntent(intent_id,self.run_id,decision,'research-single-position','mock',bar.code,'KRX',
+            OrderSide.SELL,quantity,OrderType.LIMIT,bar.close,at,at+timedelta(seconds=profile.maximum_data_gap_seconds),
+            'native-policy-paper/v1')
+        policy=anchored_unfilled_policy(intent,profile.unfilled_policy,purpose)
+        n['managed']={'intent':intent,'policy':policy,'target':target,'purpose':purpose,'judgment':None}
+        self.portfolio=replace(self.portfolio,pending_order=PendingOrder(intent_id,decision,bar.code,'SELL',quantity,
+            at.isoformat(),at.isoformat(),0,self.session_profile,bar.research_session,
+            limit_price_won=bar.close,limit_execution_version='native-policy-limit/v1'))
+        return self._event(intent_id=intent_id,decision_id=decision,event_type='ORDER_SUBMITTED',state='PENDING',
+            symbol=bar.code,side='SELL',occurred_at=at.isoformat(),received_at=at.isoformat(),quantity=quantity,
+            price=bar.close,notional=0,commission=0,tax=0,realized=0,source_revision_id=bar.revision_id,
+            optimistic_exit_price=None,reason=json.dumps({'version':'native-policy-limit/v1','source_kind':'simulation',
+                'origin':'position_target_intervention' if reason=='REDUCE' else 'shared_policy_continuation',
+                'purpose':purpose,'target_quantity':target,'native_action_mapping_verified':False,
+                'reason':reason},sort_keys=True))
+
+    def _native_assess(self,at):
+        from kiwoom_monitor.application.mock_automation_risk import gross_price_stop_reached
+        from kiwoom_monitor.application.mock_automation_session_clock import session_clock_assessment,clock_exit_decision
+        n=self._native_study;profile=n['study'].native_policy;bar=n['bar'];managed=n['managed']
+        risk,assessment=self._native_risk(at)
+        active=()
+        if self.portfolio.pending_order:
+            from types import SimpleNamespace
+            active=(SimpleNamespace(intent=managed['intent']),)
+        clock=session_clock_assessment(self.strategy,self.strategy_state,at,active)
+        position=self.portfolio.position
+        stop=position is not None and gross_price_stop_reached(bar.close,position.entry_price,self.strategy.stop_loss_bps)
+        reasons=[]
+        age=(at-_aware_datetime(bar.available_at)).total_seconds()
+        if not 0<=age<=min(profile.maximum_data_gap_seconds,profile.unfilled_policy.max_snapshot_age_seconds):
+            reasons.append('native_policy_sampled_price_not_fresh')
+        if assessment['disposition']=='RECONCILE_REQUIRED':reasons.extend(assessment['reasons'])
+        if any(r in clock['reasons'] for r in ('session_deadline_passed','order_validity_expired','position_time_from_future')):
+            reasons.extend(clock['reasons'])
+        protection=assessment['disposition']=='EXIT_REQUIRED' or stop or clock['exit_required']
+        proof=self._native_proof('NATIVE_POLICY_ASSESSMENT',at,{'risk':{**vars(risk),'source':'paper-simulated-policy/v1'},
+            'protection':assessment,'sampled_stop':stop,'clock':clock})
+        events=[proof]
+        if reasons:return (*events,self._native_fail(at,';'.join(reasons)))
+        if protection and self.portfolio.pending_order and managed['purpose']!='PROTECTIVE_EXIT':
+            return (*events,self._native_fail(at,'native_pending_protection_requires_cancel_ack'))
+        if protection and position and not self.portfolio.pending_order:
+            if clock['exit_required']:
+                try:clock_exit_decision(spec_id='paper-native-study',run_id=self.run_id,state=self.strategy_state,
+                    assessment=clock,bar=bar,now=at,maximum_age_seconds=profile.unfilled_policy.max_snapshot_age_seconds)
+                except ValueError as error:return (*events,self._native_fail(at,str(error)))
+            reason=';'.join([*assessment['reasons'],*(['SYMBOL_STOP_LOSS_REACHED'] if stop else []),*clock['reasons']])
+            events.append(self._native_submit(at,position.quantity,0,'PROTECTIVE_EXIT',reason))
+        if self.portfolio.pending_order:
+            events.extend(self._native_unfilled(at))
+        return tuple(events)
+
+    def _native_unfilled(self,at):
+        from kiwoom_monitor.application.order_lifecycle import UnfilledOrderAssessment,evaluate_unfilled_order_management_shadow
+        from kiwoom_monitor.application.position_target import PositionTargetShadowRequest,PositionAccountObservation,PositionBrokerOrderExposure
+        from kiwoom_monitor.domain.order_contract import AccountSnapshot,BrokerOrderSnapshot,OrderState
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord
+        n=self._native_study;m=n['managed'];bar=n['bar'];intent=m['intent'];policy=m['policy'];position=self.portfolio.position
+        held=position.quantity if position else 0
+        account=AccountSnapshot('research-single-position',self.portfolio.cash_won,0,{bar.code:held} if held else {},at)
+        record=ExecutionRecord(intent,OrderState.ACCEPTED,'paper:'+intent.intent_id,0,(),at,at)
+        broker=BrokerOrderSnapshot(record.broker_order_id,account.account_ref,bar.code,OrderState.ACCEPTED,0,intent.quantity,at)
+        ref='paper-policy-account:'+at.isoformat()
+        observation=PositionAccountObservation(account,(record,),ref,at,True,True,(),
+            broker_open_orders=(PositionBrokerOrderExposure(record.broker_order_id,account.account_ref,bar.code,
+                intent.side,intent.quantity,0,intent.quantity,OrderState.ACCEPTED,intent.limit_price,at,intent.intent_id),))
+        target=PositionTargetShadowRequest(account.account_ref,'mock','KRX',bar.code,
+            'EXIT' if m['purpose']=='PROTECTIVE_EXIT' else 'REDUCE',m['target'],bar.close,_aware_datetime(bar.available_at),at,
+            'native-policy-paper/v1',intent.decision_id,ref,ref,policy.max_snapshot_age_seconds,True,True,self.execution.cost_model)
+        judgment=m['judgment'];stamp=judgment[1] if judgment else intent.created_at
+        thesis=judgment[0] if judgment else True
+        assessment=UnfilledOrderAssessment(judgment is not None,thesis,True,m['purpose']=='PROTECTIVE_EXIT',
+            'paper-family:'+intent.decision_id,stamp,min(policy.wait_until,stamp+timedelta(seconds=policy.max_snapshot_age_seconds)),
+            'paper-risk:'+at.isoformat(),at,at+timedelta(seconds=policy.max_snapshot_age_seconds),'TRADABLE',bar.close,
+            'paper-price:'+bar.revision_id,_aware_datetime(bar.available_at),0,None)
+        result=evaluate_unfilled_order_management_shadow(policy,record,broker,target,observation,assessment)
+        events=[self._native_proof('NATIVE_POLICY_UNFILLED',at,{'assessment':result})]
+        if result['status'] not in {'PROPOSED','COMPLETED'} or result['action']!='WAIT':
+            events.append(self._native_fail(at,'native_unfilled_'+result['status']+'_'+result['action']+':'+','.join(result['reasons'])))
+        return tuple(events)
+
+    def _native_clock_times(self,until):
+        from kiwoom_monitor.application.mock_automation_session_clock import session_clock_assessment
+        n=self._native_study;times=set();state=self.strategy_state;m=n['managed'];profile=n['study'].native_policy
+        if state.status=='open':
+            times.add(_aware_datetime(state.opened_at)+timedelta(minutes=self.strategy.max_hold_minutes))
+            clock=session_clock_assessment(self.strategy,state,n['cut'])
+            for key in ('deadline','session_exit_due_at'):
+                if key in clock:times.add(_aware_datetime(clock[key]))
+        if state.status=='cooldown' and state.cooldown_until:times.add(_aware_datetime(state.cooldown_until))
+        if self.portfolio.pending_order:
+            times.update((m['intent'].expires_at,m['policy'].wait_until,m['policy'].valid_until,m['policy'].protection_deadline))
+        if state.status=='open' or self.portfolio.pending_order:
+            times.add(_aware_datetime(n['bar'].available_at)+timedelta(seconds=min(profile.maximum_data_gap_seconds,
+                profile.unfilled_policy.max_snapshot_age_seconds)+1))
+        return sorted(t for t in times if n['cut']<t<until and t<=n['end'])
+
+    def _native_bar(self,bar):
+        n=self._native_study;at=_aware_datetime(bar.available_at);previous=n['bar'];events=[]
+        events.append(self._native_proof('NATIVE_POLICY_BAR',at,{'source_bar':asdict(bar)}))
+        for cut in self._native_clock_times(at):
+            if n['error']:break
+            events.append(self._native_proof('NATIVE_POLICY_CLOCK',cut,{'cut':cut.isoformat()}))
+            events.extend(self._native_assess(cut));n['cut']=cut
+        if (bar.code!=previous.code or bar.capture_quality!='complete' or bar.market_phase!='CONTINUOUS'
+                or bar.session_profile!=self.session_profile or bar.research_session!=previous.research_session
+                or _aware_datetime(bar.bar_start)!=_aware_datetime(previous.bar_end)
+                or at<=n['cut'] or at<_aware_datetime(bar.bar_end)
+                or at.microsecond or (_aware_datetime(bar.bar_end)-_aware_datetime(bar.bar_start)).total_seconds()!=60
+                or any(type(v) is not int or v<0 for v in (bar.open,bar.high,bar.low,bar.close,bar.volume,bar.trade_value_million_won))
+                or min(bar.open,bar.high,bar.low,bar.close)<=0
+                or not bar.low<=min(bar.open,bar.close)<=max(bar.open,bar.close)<=bar.high
+                or _aware_datetime(bar.bar_end)>n['end']):
+            if not n['error']:events.append(self._native_fail(at,'native_policy_bar_gap_session_or_cut'))
+        self._last_processed_bar=bar;n['bar']=bar
+        pending=self.portfolio.pending_order
+        if not n['error'] and pending and _aware_datetime(bar.bar_start)>=_aware_datetime(pending.eligible_after):
+            if (bar.volume<pending.quantity or self.execution.cost_model is None
+                    or not _aware_datetime(self.execution.cost_model.valid_from)<=at<_aware_datetime(self.execution.cost_model.valid_to)):
+                events.append(self._native_fail(at,'native_limit_liquidity_or_cost_unproven'))
+            elif self._limit_open_crosses(pending,bar):
+                events.append(self._fill_pending(pending,bar));n['managed']=None
+            else:self.portfolio=replace(self.portfolio,pending_order=replace(pending,eligible_after=bar.bar_end))
+        if not n['error'] and _aware_datetime(bar.bar_end)<n['end']:
+            events.extend(self._native_assess(at))
+        if _aware_datetime(bar.bar_end)==n['end']:
+            # Complete incoming fills only. No commands after the market-time endpoint.
+            if not n['error'] and self.portfolio.pending_order:
+                events.extend(self._native_unfilled(at))
+            events.append(self._native_proof('NATIVE_POLICY_TERMINAL',at,{'error':n['error'],
+                'portfolio':asdict(self.portfolio),'strategy_state':self.strategy_state.to_dict(),
+                'terminal_orders_complete':not bool(n['error'])}))
+            n['ended']=True
+        n['cut']=at
+        if not n['error']:events.append(self.observe_position_value(bar))
+        return tuple(events)
+
+    def process_native_family(self,decision,resulting_state,*,source_bar,bar_history,universe_frames):
+        """Apply a registered Family result; replay records all its available inputs."""
+        n=self._native_study
+        if n is None or n['ended'] or n['error']:return ()
+        if self.portfolio.pending_order and n['managed']['purpose']=='PROTECTIVE_EXIT':return ()
+        at=_aware_datetime(source_bar.available_at);events=[]
+        events.append(self._native_proof('NATIVE_POLICY_FAMILY',at,{'source_bar':asdict(source_bar),
+            'bar_history':[asdict(b) for b in bar_history],'universe_frames':[asdict(f) for f in universe_frames],
+            'decision':decision.to_dict(),'resulting_state':resulting_state.to_dict()}))
+        if not n['intervened']:
+            events.extend(self._native_assess(at));n['intervened']=True
+            if not n['error'] and not self.portfolio.pending_order and decision.final_action!='EXIT' and n['case'].branch_action=='REDUCE':
+                events.append(self._native_submit(at,n['goal']['incremental_quantity'],n['goal']['target_quantity'],'TAKE_PROFIT','REDUCE'))
+        if n['error']:return tuple(events)
+        if self.portfolio.pending_order and n['managed']['purpose']=='PROTECTIVE_EXIT':return tuple(events)
+        if decision.final_action=='ENTER':
+            events.append(self._native_fail(at,'native_reentry_owner_admission_unverified'))
+        elif decision.final_action=='EXIT':
+            if self.portfolio.pending_order:
+                if tuple(decision.reasons)!=('target_reached',):
+                    events.append(self._native_fail(at,'native_family_exit_requires_cancel_ack'))
+                else:
+                    n['managed']['judgment']=(False,at)
+                    events.extend(self._native_unfilled(at))
+            elif self.portfolio.position:
+                purpose='TAKE_PROFIT' if tuple(decision.reasons)==('target_reached',) else 'PROTECTIVE_EXIT'
+                events.append(self._native_submit(at,self.portfolio.position.quantity,0,purpose,','.join(decision.reasons)))
+        elif self.portfolio.pending_order:
+            n['managed']['judgment']=(decision.final_action=='HOLD',at)
+            events.extend(self._native_unfilled(at))
+        if not self.portfolio.position and not self.portfolio.pending_order:self.strategy_state=resulting_state
+        return tuple(events)
 
     def observe_unfilled_bar(self, bar: KrxMinuteBarFrame):
         """Offline plan lineage on the existing event writer, never a live collector."""
@@ -1047,7 +1289,12 @@ class PaperExecutionEngine:
             "source_revision_id": source_revision_id,
             "optimistic_exit_price": optimistic_exit_price, "reason": reason,
         }
-        return ExecutionEvent(event_id=_content_id("execution", body), **body)
+        event=ExecutionEvent(event_id=_content_id("execution", body), **body)
+        if self.native_study_active and event_type=='FILL':
+            self._native_study['fills'].append({'source_event_id':event.event_id,'symbol':event.symbol,'side':side,
+                'quantity':quantity,'price':price,'cost':commission+tax,'occurred_at':occurred_at,
+                'accepted_sequence':len(self._native_study['fills']),'run_id':self.run_id})
+        return event
 
 
 def estimate_buy_cash_won(

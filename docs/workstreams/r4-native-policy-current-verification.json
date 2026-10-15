@@ -1,0 +1,62 @@
+{
+  "scope": "final_policy_identity_prefix_causality_and_v3_v4_current_support",
+  "tests": 21,
+  "duration_seconds": 84.95,
+  "failures": 0,
+  "errors": 0,
+  "skips": 0,
+  "successful": true,
+  "source_hashes_before": {
+    "scripts/run_research.py": "3ff28d701b79539f6a3d7700e2eed717999ffc81caae17ee29d2931450c55d5c",
+    "src/kiwoom_monitor/application/mock_automation_risk.py": "c3b0b4635c7997b2595055c0a3b7f707ca0abcfe8285973ba23bf3f59f8bd866",
+    "src/kiwoom_monitor/application/order_lifecycle.py": "a60da2b563557a12cb8269f711cc3beb701f41199b4e017271b7ea80319c23ab",
+    "src/kiwoom_monitor/application/position_target.py": "ad852e6a8b1489e903e7f2e645f5c3a0d5b36caaecaeb841d93717838f2b4ba9",
+    "src/kiwoom_monitor/application/research_evaluation.py": "b1375312e59d56d7d296ab70bd3b67a0c11d73d72d3f7b8ccde85e46e29a55bb",
+    "src/kiwoom_monitor/application/research_execution.py": "c190dc05667a55af793d963b94bb008f2b5aa34f0ca2ad9b4e9cb81f155bee10",
+    "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py": "dbca4b0a57769db8368b5d24ad560031aaccc50342668c1e4b40c4b4ab5ad89f",
+    "src/kiwoom_monitor/central_server/market_theme_shadow_monitor.py": "1a36aa85100adf8f7e5e58ade4f854ae0016e13f4f4df64d9520de681ced9adc",
+    "src/kiwoom_monitor/central_server/minute_bars.py": "c8d60fe9b18f4adb62e92e143091d428144f75d42a6aee4275f8f04b2e05686f",
+    "src/kiwoom_monitor/central_server/mock_account_monitor.py": "434622d0841b5a84af9750d538c89a2e571986598106f3b5dcdbe6b5e28ed922",
+    "src/kiwoom_monitor/central_server/mock_automation_runner.py": "13f8f2106d931d4bceb19be8937c0fa5da0c637e77f330d3be6ea6c2eee4ff8b",
+    "src/kiwoom_monitor/central_server/mock_automation_supervisor.py": "74849f50de52eb300753112fed70ece0bf59336dcd5856002ec1bc5301cffa0c",
+    "src/kiwoom_monitor/central_server/realtime_collector.py": "bb9b8adaccaa90a3f380bc8589590411e7d8cf239da007198b1e41b3d5fbdaa2",
+    "tests/unit/test_central_minute_bars.py": "4cdb9f343fc39c79229f223b0e086107cc3d0740ef7e31f94a32ef031f58decb",
+    "tests/unit/test_position_runner_state.py": "8312c0fd037e20597c85b6420d590b8ee0152dcd74336e6e4cdc3e22aaf3a27b",
+    "tests/unit/test_position_study_publication.py": "514d4de2a37677a606015570467f56340ce09da9403f6d7f098dfec5411edda8"
+  },
+  "source_hashes_after": {
+    "scripts/run_research.py": "3ff28d701b79539f6a3d7700e2eed717999ffc81caae17ee29d2931450c55d5c",
+    "src/kiwoom_monitor/application/mock_automation_risk.py": "c3b0b4635c7997b2595055c0a3b7f707ca0abcfe8285973ba23bf3f59f8bd866",
+    "src/kiwoom_monitor/application/order_lifecycle.py": "a60da2b563557a12cb8269f711cc3beb701f41199b4e017271b7ea80319c23ab",
+    "src/kiwoom_monitor/application/position_target.py": "ad852e6a8b1489e903e7f2e645f5c3a0d5b36caaecaeb841d93717838f2b4ba9",
+    "src/kiwoom_monitor/application/research_evaluation.py": "b1375312e59d56d7d296ab70bd3b67a0c11d73d72d3f7b8ccde85e46e29a55bb",
+    "src/kiwoom_monitor/application/research_execution.py": "c190dc05667a55af793d963b94bb008f2b5aa34f0ca2ad9b4e9cb81f155bee10",
+    "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py": "dbca4b0a57769db8368b5d24ad560031aaccc50342668c1e4b40c4b4ab5ad89f",
+    "src/kiwoom_monitor/central_server/market_theme_shadow_monitor.py": "1a36aa85100adf8f7e5e58ade4f854ae0016e13f4f4df64d9520de681ced9adc",
+    "src/kiwoom_monitor/central_server/minute_bars.py": "c8d60fe9b18f4adb62e92e143091d428144f75d42a6aee4275f8f04b2e05686f",
+    "src/kiwoom_monitor/central_server/mock_account_monitor.py": "434622d0841b5a84af9750d538c89a2e571986598106f3b5dcdbe6b5e28ed922",
+    "src/kiwoom_monitor/central_server/mock_automation_runner.py": "13f8f2106d931d4bceb19be8937c0fa5da0c637e77f330d3be6ea6c2eee4ff8b",
+    "src/kiwoom_monitor/central_server/mock_automation_supervisor.py": "74849f50de52eb300753112fed70ece0bf59336dcd5856002ec1bc5301cffa0c",
+    "src/kiwoom_monitor/central_server/realtime_collector.py": "bb9b8adaccaa90a3f380bc8589590411e7d8cf239da007198b1e41b3d5fbdaa2",
+    "tests/unit/test_central_minute_bars.py": "4cdb9f343fc39c79229f223b0e086107cc3d0740ef7e31f94a32ef031f58decb",
+    "tests/unit/test_position_runner_state.py": "8312c0fd037e20597c85b6420d590b8ee0152dcd74336e6e4cdc3e22aaf3a27b",
+    "tests/unit/test_position_study_publication.py": "514d4de2a37677a606015570467f56340ce09da9403f6d7f098dfec5411edda8"
+  },
+  "source_unchanged": true,
+  "ast_compile_files": 16,
+  "test_names": [
+    "tests.unit.test_position_study_publication.NativePolicyStudyTests",
+    "tests.unit.test_position_study_publication.CurrentStudyRamTests",
+    "tests.unit.test_position_study_publication.ConditionalStudyPublicationTests"
+  ],
+  "changed_since_broad_gate": [
+    "src/kiwoom_monitor/application/research_evaluation.py",
+    "tests/unit/test_position_study_publication.py"
+  ],
+  "prior_broad_gate": "r4-native-policy-verification.json",
+  "prior_broad_tests": 313,
+  "temporary_directory": "C:/Users/pc-1/AppData/Local/Temp/kiwoom-regression/r4-b-acceptance-final-20261015",
+  "failure_details": [],
+  "order_authorized": false,
+  "live_broker_or_deployment_verified": false
+}

@@ -70,7 +70,8 @@ class MockAutomationSupervisor:
     def position_shadow_observation(self,observation):
         """Enrich one borrowed account cut using its current registered owner only."""
         from dataclasses import fields
-        from kiwoom_monitor.application.position_target import PositionAccountObservation,PositionRunnerAccountObservation
+        from kiwoom_monitor.application.position_target import (
+            PositionAccountObservation,PositionRunnerAccountObservation,PositionStudyRunnerAccountObservation)
         if observation is None:return None
         base=PositionAccountObservation(**{field.name:getattr(observation,field.name) for field in fields(PositionAccountObservation)})
         runner=self._runners.get(base.account.account_ref)
@@ -79,6 +80,15 @@ class MockAutomationSupervisor:
         if not callable(matches) or not matches(base):return base
         state=runner.position_study_state(base)
         if self._closing or self._runners.get(base.account.account_ref) is not runner or state is None or not matches(base):return base
+        getter=getattr(runner._bundle.monitor,'position_study_portfolio',None)
+        portfolio=getter(base) if callable(getter) else None
+        if self._closing or self._runners.get(base.account.account_ref) is not runner or not matches(base):return base
+        if isinstance(portfolio,dict) and portfolio.get('version')=='native-position-study-portfolio/v1':
+            policy_getter=getattr(runner,'position_study_policy',None)
+            policy=policy_getter(base,state) if callable(policy_getter) else None
+            if self._closing or self._runners.get(base.account.account_ref) is not runner or not matches(base):return base
+            return PositionStudyRunnerAccountObservation(**{field.name:getattr(base,field.name) for field in fields(PositionAccountObservation)},
+                runner_state=state,study_portfolio=portfolio,native_study_policy=policy)
         return PositionRunnerAccountObservation(**{field.name:getattr(base,field.name) for field in fields(PositionAccountObservation)},runner_state=state)
 
     async def start(self) -> None:

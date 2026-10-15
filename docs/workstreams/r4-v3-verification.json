@@ -1,0 +1,30 @@
+{
+  "version": "r4-v3-focused-verification/v1",
+  "tests": [
+    "tests.unit.test_position_study_publication",
+    "tests.unit.test_position_runner_state",
+    "tests.unit.test_position_study_cohort",
+    "tests.unit.test_entry_thesis.NativePositionStudyCaseTests",
+    "tests.unit.test_entry_thesis.NativePositionSelectionInputsTests.test_action_news_requirement_excludes_only_add_and_keeps_supported_reduce",
+    "tests.unit.test_entry_thesis.NativePositionSelectionInputsTests.test_valid_protection_thesis_precedes_missing_ev_and_risk_without_order_quantity"
+  ],
+  "tests_run": 55,
+  "elapsed_seconds": 295.514,
+  "successful": true,
+  "failures": [],
+  "errors": [],
+  "skipped": [],
+  "source_lf_sha256": {
+    "src/kiwoom_monitor/application/position_target.py": "a7bc231b91c4d42fc6e955ca2e6266a2e5b7d2133c378435897de22a32c8d653",
+    "src/kiwoom_monitor/application/research_evaluation.py": "4a54425e892dfb9916be6362d81c0d78d3b3544c4794569d4d339ab1c820be00",
+    "src/kiwoom_monitor/application/research_execution.py": "cf7cd84b99ed18cf3c7a121d1aba3d7749215a4a7436b7bdff6a186c0cd6afe4",
+    "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py": "ffb531a1b3097332457978b01e7ed2d7a44c9bcb83d0a3692814905271a45f6f",
+    "tests/unit/test_position_study_publication.py": "a3ed5bdbaf90638b902dda0e05ff3669281e7879d5dcc78b0fd51ee3d14dd41d",
+    "tests/unit/test_position_runner_state.py": "8312c0fd037e20597c85b6420d590b8ee0152dcd74336e6e4cdc3e22aaf3a27b"
+  },
+  "source_unchanged_during_tests": true,
+  "ast_compile": "passed",
+  "import_source": "C:\\Users\\pc-1\\.codex\\worktrees\\e2a0\\kiwoom-realtime-monitor\\src\\kiwoom_monitor\\application\\position_target.py",
+  "temporary_directory": "C:/Users/pc-1/AppData/Local/Temp/kiwoom-regression/r4-v3-e2a0-20261015-final",
+  "scope": "isolated Paper/read-only replay/RAM/native fake owner; no real account or deployment"
+}

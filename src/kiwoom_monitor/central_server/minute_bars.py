@@ -54,6 +54,7 @@ class MinuteBarAccumulator:
         self._dirty: set[tuple[str, str, str, str]] = set()
         self._open_windows: dict[tuple[str, str, str, str], bool] = {}
         self._trading_date = ""
+        self._ram_closed: dict[tuple[str,str], dict[str,object]] = {}
 
     def add(
         self, tick: TradeTick, now: datetime, received_at: float, *, capture_complete: bool = True,
@@ -67,6 +68,9 @@ class MinuteBarAccumulator:
         minute = f"{tick.trade_time[:2]}:{tick.trade_time[2:4]}"
         market = tick.market or "KRX"
         key = (trading_date, minute, tick.code, market)
+        closed=self._ram_closed.get((tick.code,market))
+        late_closed=closed is not None and (closed['trading_date'],closed['minute'])==(trading_date,minute)
+        if late_closed:self._ram_closed[(tick.code,market)]={**closed,'capture_quality':'partial'}
         price = abs(int(tick.current_price))
         volume = abs(int(tick.trade_volume or 0))
         trade_value = self._trade_value_increment(tick, trading_date, market)
@@ -89,6 +93,23 @@ class MinuteBarAccumulator:
         self._open_windows.setdefault(key, not capture_complete)
         if not capture_complete:
             self._open_windows[key] = True
+
+    def closed_observation_snapshot(self,codes,*,at,approved_sources):
+        """Retain one completed owner bar per approved source; never drain/reaggregate."""
+        allowed={(code,market) for code,market in approved_sources if code in codes and market=='KRX'}
+        self._ram_closed={key:value for key,value in self._ram_closed.items()
+            if key in allowed and value['trading_date']==at.date().isoformat()}
+        for key,bar in self._bars.items():
+            day,minute,code,market=key
+            if (code,market) not in allowed or day!=at.date().isoformat():continue
+            start=datetime.fromisoformat(f'{day}T{minute}').replace(tzinfo=at.tzinfo)
+            if at<start+timedelta(minutes=1,seconds=2):continue
+            old=self._ram_closed.get((code,market))
+            if old is not None and old['minute']>=minute:continue
+            self._ram_closed[(code,market)]={**bar.as_record(),'operation_id':self._operation_ids[key],
+                'available_at':at.timestamp(),'capture_quality':'partial' if self._open_windows.get(key,True) else 'complete',
+                'finalization_source':'timer','durable':False}
+        return tuple(dict(value) for _,value in sorted(self._ram_closed.items()))
 
     def drain_dirty(self, *, closed_before: datetime | None = None) -> list[dict[str, object]]:
         values = []
@@ -117,6 +138,7 @@ class MinuteBarAccumulator:
         """현재 열린 모든 분 구간에 구독 연속성 공백을 표시한다."""
         for key in self._open_windows:
             self._open_windows[key] = True
+        self._ram_closed.clear()
 
     def reset_cumulative_sources(self, sources: set[tuple[str, str]]) -> None:
         """재등록된 source의 첫 누적값을 새 기준점으로 사용한다."""
@@ -124,6 +146,7 @@ class MinuteBarAccumulator:
             key: value for key, value in self._cumulative.items()
             if (key[1], key[2]) not in sources
         }
+        for key in sources:self._ram_closed.pop(key,None)
 
     def drain_closed(self, now: datetime, *, delay_seconds: int = 2) -> list[dict[str, object]]:
         """실제 시계가 종료+지연을 지난, 체결을 한 번 이상 본 구간만 마감한다."""

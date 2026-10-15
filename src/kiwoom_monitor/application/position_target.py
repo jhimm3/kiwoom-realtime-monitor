@@ -453,6 +453,50 @@ class PositionRunnerAccountObservation(PositionAccountObservation):
     runner_state: dict | None = None
 
 
+@dataclass(frozen=True)
+class PositionStudyRunnerAccountObservation(PositionRunnerAccountObservation):
+    study_portfolio: dict | None = None
+    native_study_policy: dict | None = None
+
+
+def position_study_portfolio_from_account_cut(observation,events,costs):
+    """Exact first-entry ledger projection; unsupported histories remain absent."""
+    from kiwoom_monitor.application.mock_automation_risk import _exact_fills,_sha256
+    from zoneinfo import ZoneInfo
+    risk=observation.risk_snapshot
+    if (risk is None or not risk.cost_complete or not risk.reconciliation_complete
+            or observation.reasons or not observation.reconciliation_complete or not observation.open_orders_complete
+            or observation.open_orders or observation.broker_open_orders or observation.account.reserved_open_buy_won
+            or not 1<=len(events)<=2000 or len(costs)!=1
+            or max(e.accepted_sequence for e in events)!=risk.execution_event_high_watermark):return None
+    fills=_exact_fills(events)
+    if len(fills)!=1:return None
+    fill=fills[0];cost=costs[0];account=observation.account
+    document=[{'fill_date':cost.fill_date.isoformat(),'stock_code':cost.stock_code,
+        'side':cost.side,'gross_amount':cost.gross_amount,'total_cost':cost.total_cost}]
+    if (fill.side!='BUY' or fill.venue!='KRX' or fill.account_ref!=account.account_ref
+            or fill.run_id!=risk.execution_run_id or fill.environment!='mock'
+            or account.positions!={fill.symbol:fill.quantity}
+            or dict(risk.owned_position_quantities)!={fill.symbol:fill.quantity}
+            or dict(risk.owned_entry_prices).get(fill.symbol)!=fill.price
+            or cost.fill_date!=fill.occurred_at.astimezone(ZoneInfo('Asia/Seoul')).date()
+            or cost.stock_code!=fill.symbol or cost.side!='매수' or cost.tax
+            or cost.origin_scope.account_ref!=account.account_ref
+            or cost.gross_amount!=fill.quantity*fill.price or cost.total_cost!=cost.commission
+            or _sha256(document)!=risk.cost_evidence_revision or risk.daily_net_pnl_won!=0):return None
+    portfolio={'cash_won':account.available_cash_won,'reserved_cash_won':0,'pending_order':None,
+        'realized_pnl_won':0,'total_cost_won':cost.total_cost,
+        'position':{'symbol':fill.symbol,'quantity':fill.quantity,'entry_price':fill.price,
+            'entry_notional':cost.gross_amount,'entry_commission':cost.commission,
+            'opened_at':fill.occurred_at.isoformat(),'entry_intent_id':fill.intent_id}}
+    body={'version':'native-position-study-portfolio/v1','source_kind':'owner_ram_first_entry',
+        'account_input_ref':observation.input_ref,'risk_snapshot_ref':risk.snapshot_id,
+        'cost_evidence_revision':risk.cost_evidence_revision,'fill_cursor':risk.execution_event_high_watermark,
+        'available_at':observation.observed_at.isoformat(),'portfolio':portfolio,'order_authorized':False}
+    body['portfolio_ref']='native-position-study-portfolio:'+_sha256(body)
+    return body
+
+
 def validate_position_runner_state(document,observation):
     """Validate copied native state provenance, not its simulation equivalence."""
     from kiwoom_monitor.application.breakout_strategy import StrategyState
@@ -724,15 +768,18 @@ class PositionActionStudyPolicy:
     value_basis: str = 'portfolio_change_after_slippage_before_fees/v1'
 
     def __post_init__(self):
-        if (self.version != 'position-action-study/v2' or self.sizing_version != 'bounded-notional-sizing/v1'
+        conditional=isinstance(self,PositionActionConditionalStudyPolicy)
+        native=isinstance(self,PositionActionNativePolicyStudyPolicy)
+        if (self.version != ('position-action-study/v4' if native else 'position-action-study/v3' if conditional else 'position-action-study/v2')
+                or self.sizing_version != 'bounded-notional-sizing/v1'
                 or type(self.source_policy_version) is not str or not 0 < len(self.source_policy_version) <= 256
                 or type(self.actions) is not tuple or len(self.actions) != 2
                 or tuple(sorted(set(self.actions))) != self.actions or 'HOLD' not in self.actions
                 or not set(self.actions) <= {'ADD', 'REDUCE', 'REENTER', 'EXIT', 'HOLD'}
                 or self.development_role not in {'TRAIN', 'VALIDATION'}
                 or self.population_rule != 'frozen-independent-paired-windows/v1'
-                or self.context_support_rule != 'exact-observed-context/v1'
-                or self.continuation_rule != 'single-target-then-registered-family/v1'
+                or self.context_support_rule != ('held-minute-relative-state/v1' if conditional else 'exact-observed-context/v1')
+                or self.continuation_rule != ('single-limit-intervention-then-native-policy/v1' if native else 'single-target-then-registered-family/v1')
                 or self.value_basis != 'portfolio_change_after_slippage_before_fees/v1'):
             raise ValueError('invalid explicit position study policy')
         for name in ('target_notional_won','max_position_notional_won','max_position_quantity','cash_buffer_won'):
@@ -749,7 +796,189 @@ class PositionActionStudyPolicy:
     def from_dict(cls, value):
         if not isinstance(value,dict) or not isinstance(value.get('actions'),list):
             raise ValueError('position study policy requires an actions array')
+        if value.get('version') in {'position-action-study/v3','position-action-study/v4'}:
+            try:
+                raw={**value,'actions':tuple(value['actions']),
+                    'support_spec':PositionStudySupportSpec.from_dict(value['support_spec'])}
+                if value['version']=='position-action-study/v4':
+                    raw['native_policy']=NativePositionStudyPolicy.from_dict(value['native_policy'])
+                    return PositionActionNativePolicyStudyPolicy(**raw)
+                return PositionActionConditionalStudyPolicy(**raw)
+            except (KeyError,TypeError) as error:
+                raise ValueError('invalid conditional study fields') from error
         return cls(**{**value,'actions':tuple(value['actions'])})
+
+
+@dataclass(frozen=True)
+class PositionStudySupportSpec:
+    """One bounded experimental Paper model; no native execution claim."""
+    version: str
+    state_representation: str
+    required_data_capabilities: tuple[str,...]
+    minimum_pairs: int
+    minimum_trading_days: int
+    uncertainty_method: str
+
+    def __post_init__(self):
+        if (self.version!='conditional-paper-support/v1'
+                or self.state_representation!='held-minute-relative-state/v1'
+                or self.required_data_capabilities!=('sampled_price',)
+                or type(self.required_data_capabilities) is not tuple
+                or type(self.minimum_pairs) is not int or not 2<=self.minimum_pairs<=100
+                or type(self.minimum_trading_days) is not int or not 2<=self.minimum_trading_days<=self.minimum_pairs
+                or self.uncertainty_method!='paired-trading-day-cluster-standard-error/v1'):
+            raise ValueError('invalid explicit conditional Paper support spec')
+
+    def to_dict(self):
+        return {**asdict(self),'required_data_capabilities':list(self.required_data_capabilities)}
+
+    @classmethod
+    def from_dict(cls,value):
+        if not isinstance(value,dict) or not isinstance(value.get('required_data_capabilities'),list):
+            raise ValueError('conditional support requires a capabilities array')
+        return cls(**{**value,'required_data_capabilities':tuple(value['required_data_capabilities'])})
+
+
+@dataclass(frozen=True)
+class PositionActionConditionalStudyPolicy(PositionActionStudyPolicy):
+    support_spec: PositionStudySupportSpec | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.actions!=('HOLD','REDUCE') or not isinstance(self.support_spec,PositionStudySupportSpec):
+            raise ValueError('conditional Paper study supports explicit HOLD/REDUCE only')
+
+    def to_dict(self):
+        return {**super().to_dict(),'support_spec':self.support_spec.to_dict()}
+
+
+def native_study_policy_implementation_ref():
+    """Offline/registration identity; never read policy files on a live tick."""
+    from pathlib import Path
+    from kiwoom_monitor.application.research_implementation import research_implementation_hash
+    root=Path(__file__).resolve().parents[3]
+    paths=('application/mock_automation_risk.py','application/order_lifecycle.py',
+        'application/mock_automation_session_clock.py','domain/order_contract.py','domain/execution_activation.py')
+    digest=hashlib.sha256(research_implementation_hash('krx-regular/v1').encode())
+    for name in paths:
+        digest.update(name.encode());digest.update(b'\0')
+        digest.update((root/'src/kiwoom_monitor'/name).read_text(encoding='utf-8').replace('\r\n','\n').encode())
+        digest.update(b'\0')
+    return 'native-study-policy-implementation:'+digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class NativePositionStudyPolicy:
+    version: str
+    maximum_daily_loss_won: int
+    maximum_data_gap_seconds: int
+    maximum_submission_unknown_count: int
+    maximum_reconnect_count: int
+    maximum_balance_mismatch_count: int
+    unfilled_policy: Any
+    implementation_ref: str
+
+    def __post_init__(self):
+        from kiwoom_monitor.domain.execution_activation import MockUnfilledExecutionPolicy
+        for name in ('maximum_daily_loss_won','maximum_data_gap_seconds'):_integer(getattr(self,name),name,1)
+        for name in ('maximum_submission_unknown_count','maximum_reconnect_count','maximum_balance_mismatch_count'):
+            _integer(getattr(self,name),name)
+        if (self.version!='native-policy-paper/v1' or not isinstance(self.unfilled_policy,MockUnfilledExecutionPolicy)
+                or self.unfilled_policy.allow_supplied_paired_mock_evidence
+                or self.unfilled_policy.maximum_protective_cancel_retries
+                or self.implementation_ref!=native_study_policy_implementation_ref()):
+            raise ValueError('unsupported native policy Paper profile or implementation')
+
+    def to_dict(self):
+        return {**asdict(self),'unfilled_policy':self.unfilled_policy.to_dict()}
+
+    @classmethod
+    def from_dict(cls,value):
+        from kiwoom_monitor.domain.execution_activation import MockUnfilledExecutionPolicy
+        try:return cls(**{**value,'unfilled_policy':MockUnfilledExecutionPolicy(**value['unfilled_policy'])})
+        except (TypeError,KeyError) as error:raise ValueError('invalid native study profile') from error
+
+
+@dataclass(frozen=True)
+class PositionActionNativePolicyStudyPolicy(PositionActionConditionalStudyPolicy):
+    native_policy: NativePositionStudyPolicy | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if not isinstance(self.native_policy,NativePositionStudyPolicy) or self.horizon_seconds>3600:
+            raise ValueError('native study requires an explicit bounded policy')
+
+    def to_dict(self):
+        return {**super().to_dict(),'native_policy':self.native_policy.to_dict()}
+
+
+def position_study_support_observation(study,request,goal,source_bar,strategy_state,portfolio):
+    """Recompute the fixed cell from available initial state, never outcomes."""
+    from zoneinfo import ZoneInfo
+    from kiwoom_monitor.application.breakout_strategy import StrategyState
+    from kiwoom_monitor.application.research_replay import KrxMinuteBarFrame
+    from kiwoom_monitor.application.research_execution import SimulationPortfolio,SimulationPosition
+    if not isinstance(study,PositionActionConditionalStudyPolicy):
+        raise ValueError('conditional support requires a v3 study')
+    state=StrategyState(**{**strategy_state,'emitted_candidate_keys':tuple(strategy_state['emitted_candidate_keys'])})
+    bar=KrxMinuteBarFrame(**source_bar)
+    position=SimulationPosition(**portfolio['position']) if portfolio.get('position') is not None else None
+    owned=SimulationPortfolio(**{**portfolio,'position':position})
+    def aware(value):return _time(datetime.fromisoformat(value) if isinstance(value,str) else value)
+    cut=aware(request.decision_time);start=aware(bar.bar_start);end=aware(bar.bar_end);at=aware(bar.available_at)
+    if (state.status!='open' or position is None or portfolio['pending_order'] is not None
+            or owned.reserved_cash_won or position.symbol!=request.symbol or state.symbol!=request.symbol
+            or state.position_quantity!=position.quantity or state.entry_price!=position.entry_price
+            or state.opened_at!=position.opened_at or aware(state.opened_at)>cut
+            or request.action!='REDUCE' or goal.get('quality',{}).get('status')!='CALCULATED'
+            or goal.get('actual_quantity')!=position.quantity or goal.get('funding_shortfall_quantity')
+            or goal.get('pending_buy_quantity') or goal.get('pending_sell_quantity')
+            or not 0<goal['target_quantity']<position.quantity
+            or bar.code!=request.symbol or bar.close!=request.reference_price_won
+            or at!=aware(request.reference_price_available_at) or not end<=at<=cut
+            or not 0<=(cut-at).total_seconds()<study.max_snapshot_age_seconds
+            or (end-start).total_seconds()!=60 or bar.capture_quality!='complete'
+            or bar.session_profile!='krx-regular/v1' or bar.market_phase!='CONTINUOUS'
+            or not bar.research_session or not bar.revision_id
+            or cut.microsecond or start.second or start.microsecond or end.second or end.microsecond
+            or not (at-end).total_seconds().is_integer() or not (cut-at).total_seconds().is_integer()
+            or any(type(v) is not int or v<0 for v in (owned.cash_won,owned.total_cost_won,
+                position.quantity,position.entry_price,position.entry_notional,position.entry_commission,
+                bar.open,bar.high,bar.low,bar.close,bar.volume,bar.trade_value_million_won))
+            or min(bar.open,bar.high,bar.low,bar.close)<=0
+            or not bar.low<=min(bar.open,bar.close)<=max(bar.open,bar.close)<=bar.high):
+        raise ValueError('conditional support initial state or closed-minute observation invalid')
+    local=cut.astimezone(ZoneInfo('Asia/Seoul'))
+    if bar.research_session!=local.date().isoformat()+':KRX_REGULAR':
+        raise ValueError('conditional support research session mismatch')
+    relative=state.to_dict()
+    for name in ('opened_at','cooldown_until','candidate_expires_at'):
+        value=relative[name]
+        if value not in (None,''):
+            seconds=(aware(value)-cut).total_seconds()
+            if not seconds.is_integer():raise ValueError('conditional state requires whole-second offsets')
+            relative[name]=int(seconds)
+    economic_position={k:v for k,v in portfolio['position'].items() if k not in {'opened_at','entry_intent_id'}}
+    cell={'state_representation':study.support_spec.state_representation,'strategy_state':relative,
+        'symbol':request.symbol,'venue':request.venue,'source_policy_version':study.source_policy_version,
+        'horizon_seconds':study.horizon_seconds,'initial_quantity':position.quantity,
+        'target_quantity':goal['target_quantity'],'reference_price_won':request.reference_price_won,
+        'cost_model':request.cost_model.to_dict(),'session_profile':bar.session_profile,
+        'session_cut_seconds':local.hour*3600+local.minute*60+local.second,
+        'observation_age_seconds':int((cut-at).total_seconds()),
+        'bar_availability_lag_seconds':int((at-end).total_seconds()),
+        'market_session':bar.market_session,'market_phase':bar.market_phase,'schedule_version':bar.schedule_version,
+        'observed_values':{key:getattr(bar,key) for key in ('open','high','low','close','volume','trade_value_million_won')},
+        'portfolio':{**{k:v for k,v in portfolio.items() if k not in {'position','pending_order'}},'position':economic_position}}
+    if isinstance(study,PositionActionNativePolicyStudyPolicy):cell['native_policy']=study.native_policy.to_dict()
+    cell=json.loads(json.dumps(cell,default=_json_value,allow_nan=False))
+    encoded=json.dumps(cell,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+    return {'version':'position-study-support-observation/v1','cell':cell,
+        'cell_ref':'position-study-support-cell:'+hashlib.sha256(encoded.encode()).hexdigest(),
+        'source_revision_id':bar.revision_id,'source_available_at':bar.available_at,
+        'decision_time':cut.isoformat(),'trading_date':local.date().isoformat(),
+        'absolute_strategy_state':json.loads(json.dumps(strategy_state,default=_json_value)),
+        'input_resolution':'minute','source_venue':'KRX','source_durability':'not_verified'}
 
 
 @dataclass(frozen=True)
@@ -804,6 +1033,7 @@ def position_action_study_spec(study, case, source_spec):
     from kiwoom_monitor.application.research_execution import SimulationExecutionConfig
     from kiwoom_monitor.application.market_session_schedule import research_session_profile_document,KRX_REGULAR_RESEARCH_PROFILE
     required=('code_hash','family','policy_version','parameters','execution_model','session_profile')
+    if study.version=='position-action-study/v4':required+=('native_study_inputs_ref',)
     if (any(k not in source_spec for k in required) or type(source_spec['code_hash']) is not str
             or len(source_spec['code_hash']) != 64
             or any(c not in '0123456789abcdef' for c in source_spec['code_hash'])
@@ -860,7 +1090,9 @@ def freeze_position_action_study_cohort(study,cases,source_spec,manifest,*,minim
                 or end >= expires or (previous_end is not None and start <= previous_end)):
             raise ValueError('study cases must be ordered nonoverlapping development windows')
         previous_end=end;rows.append(case.to_dict())
-    body={'version':'position-action-study-cohort/v2','study_policy_ref':shared_ref,
+    if isinstance(study,PositionActionConditionalStudyPolicy) and minimum_samples!=study.support_spec.minimum_pairs:
+        raise ValueError('cohort minimum must match declared conditional support')
+    body={'version':'position-action-study-cohort/'+study.version.rsplit('/',1)[1],'study_policy_ref':shared_ref,
         'dataset_id':manifest['dataset_id'],'revision_ids_hash':manifest['revision_ids_hash'],
         'development_role':study.development_role,'cases':rows,'minimum_samples':minimum_samples,
         'max_evidence_age_seconds':max_evidence_age_seconds,'model_valid_until':expires.isoformat()}

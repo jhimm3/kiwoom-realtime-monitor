@@ -1,0 +1,43 @@
+{
+  "version": "r4-current-input-verification/v1",
+  "tests": [
+    "tests.unit.test_position_study_publication",
+    "tests.unit.test_position_runner_state",
+    "tests.unit.test_position_study_cohort",
+    "tests.unit.test_entry_thesis.NativePositionStudyCaseTests",
+    "tests.unit.test_entry_thesis.NativePositionSelectionInputsTests.test_action_news_requirement_excludes_only_add_and_keeps_supported_reduce",
+    "tests.unit.test_entry_thesis.NativePositionSelectionInputsTests.test_valid_protection_thesis_precedes_missing_ev_and_risk_without_order_quantity",
+    "tests.unit.test_central_minute_bars",
+    "tests.unit.test_central_realtime_collector",
+    "tests.unit.test_mock_account_monitor",
+    "tests.unit.test_mock_automation_supervisor",
+    "tests.unit.test_candidate_monitor.CollectorRamShadowRuntimeTests",
+    "tests.unit.test_candidate_monitor.DynamicAllocationRamTests",
+    "tests.unit.test_candidate_monitor.AllocationModelPublicationTests"
+  ],
+  "tests_run": 161,
+  "elapsed_seconds": 386.712,
+  "successful": true,
+  "failures": [],
+  "errors": [],
+  "skipped": [],
+  "source_lf_sha256": {
+    "src/kiwoom_monitor/application/position_target.py": "8c1ee8ead78432cfda31dc51f0451e22a96ad0d9a027bb45ebcd231dea4dfb7f",
+    "src/kiwoom_monitor/application/research_evaluation.py": "4a1b3b2a46060f00c4b969876d060c59d1d0effabff8acb294da1b564c113a3f",
+    "src/kiwoom_monitor/application/research_execution.py": "cf7cd84b99ed18cf3c7a121d1aba3d7749215a4a7436b7bdff6a186c0cd6afe4",
+    "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py": "5a621b49405e90ca2d85be16461fc0688dbd065477d3fd1ed799943c0638f5b9",
+    "src/kiwoom_monitor/central_server/market_theme_shadow_monitor.py": "fec76adac5c176e21646258094481dea30af987786a0592a78cfc223be494937",
+    "src/kiwoom_monitor/central_server/minute_bars.py": "c8d60fe9b18f4adb62e92e143091d428144f75d42a6aee4275f8f04b2e05686f",
+    "src/kiwoom_monitor/central_server/realtime_collector.py": "bb9b8adaccaa90a3f380bc8589590411e7d8cf239da007198b1e41b3d5fbdaa2",
+    "src/kiwoom_monitor/central_server/mock_account_monitor.py": "434622d0841b5a84af9750d538c89a2e571986598106f3b5dcdbe6b5e28ed922",
+    "src/kiwoom_monitor/central_server/mock_automation_supervisor.py": "8c3a1185603cb41d5a318785ea46483ae7847b708594fe3bdb421fa0604cd82a",
+    "tests/unit/test_position_study_publication.py": "b4edd3b1a6c181eec7f2446e290345303e4b57611dca1402981010047745e69c",
+    "tests/unit/test_position_runner_state.py": "8312c0fd037e20597c85b6420d590b8ee0152dcd74336e6e4cdc3e22aaf3a27b",
+    "tests/unit/test_central_minute_bars.py": "4cdb9f343fc39c79229f223b0e086107cc3d0740ef7e31f94a32ef031f58decb"
+  },
+  "source_unchanged_during_tests": true,
+  "ast_compile": "passed",
+  "import_source": "C:\\Users\\pc-1\\.codex\\worktrees\\e2a0\\kiwoom-realtime-monitor\\src\\kiwoom_monitor\\application\\position_target.py",
+  "temporary_directory": "C:/Users/pc-1/AppData/Local/Temp/kiwoom-regression/r4-current-e2a0-20261015-final",
+  "scope": "isolated running Shadow/real Collector and owner classes with fake ledger/admission; no broker/account connection or deployment"
+}

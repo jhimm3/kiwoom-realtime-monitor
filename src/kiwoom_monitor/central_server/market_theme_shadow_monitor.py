@@ -868,6 +868,10 @@ class MarketThemeShadowRuntime:
 
     def _snapshot(self, *, all_sources=False):
         kwargs={'include_trade_references':True} if self._allocation is not None or self._position_account_source is not None else {}
+        if self._allocation_models is not None and any(row.get('position_study',{}).get('study') is not None
+                and row['position_study']['study'].version in {'position-action-study/v3','position-action-study/v4'}
+                for row in self._allocation_models['rows'].values()):
+            kwargs['include_closed_minutes']=True
         snapshot = self._collector.ram_observation_snapshot(None if all_sources else self._codes(), seconds=self._retention,**kwargs)
         self._snapshot_reads += 1
         dropped = self._subscriber.dropped_events if self._subscriber else self._dropped

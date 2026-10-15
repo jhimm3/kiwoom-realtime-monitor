@@ -320,6 +320,16 @@ class MockAccountMonitor:
             self._position_order_scope_requested = enabled
             self._invalidate_position_observation()
 
+    def position_study_portfolio(self,observation):
+        """Borrow existing verified cost/fill caches, without TR or ledger reads."""
+        from kiwoom_monitor.application.position_target import position_study_portfolio_from_account_cut
+        if not self.position_observation_matches(observation):return None
+        if len(self._risk_events)>2000 or len(self._risk_costs)!=1:return None
+        try:
+            result=position_study_portfolio_from_account_cut(observation,tuple(self._risk_events),tuple(self._risk_costs.values()))
+        except (ValueError,TypeError,KeyError,RuntimeError):return None
+        return result if self.position_observation_matches(observation) else None
+
     def position_observation_matches(self,observation):
         """Validate a borrowed cut's epoch without copying, TR, DB or refresh."""
         if not self._accepting or self._runtime.observation_in_progress:return False
