@@ -10,6 +10,7 @@ import asyncio
 import copy
 import math
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from threading import Event
 
@@ -126,8 +127,8 @@ def _require_fresh_collector(collector):
     """Explicit cold inventory; never copy a previous collector's RAM state."""
     _empty(collector, {name: dict for name in (
         "_pending_snapshots", "_latest_snapshots", "_pending_account_entry_symbols",
-        "_pending_stock_references", "_pending_market_history", "_pending_minute_retries",
-        "_pending_minute_finalizations", "_pending_second_retries", "_continuous_from")})
+        "_pending_stock_references", "_ram_stock_references", "_pending_market_history", "_pending_minute_retries",
+        "_pending_minute_finalizations", "_continuous_from")})
     _empty(collector, {"_inflight_minute_bars": list, "_approved_trade_sources": set,
         "_regular_close_notified": set, "_full_day_close_notified": set,
         "_token_tasks": set, "_flush_tasks": set, "_credential_drain_task": None,
@@ -140,9 +141,8 @@ def _require_fresh_collector(collector):
     _empty(collector._minute_bars, {"_bars": dict, "_operation_ids": dict, "_cumulative": dict,
                                  "_dirty": set, "_open_windows": dict})
     _scalars(collector._minute_bars, {"_trading_date": ""})
-    _empty(collector._second_trades, {"_bars": dict, "_dirty": set,
-                                    "_cumulative_volume": dict, "_seen": dict})
-    _scalars(collector._second_trades, {"_latest_second": None, "_cumulative_date": ""})
+    _empty(collector, {'_ram_trades': deque, '_ram_trade_baselines': dict})
+    _scalars(collector, {'_ram_trade_sequence':0, '_ram_trade_retention_seconds':0, '_ram_retention_since':None})
     if collector._flush_lock.locked():
         raise ValueError("top20_session_collector_flush_in_progress")
 

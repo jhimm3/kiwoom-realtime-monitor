@@ -323,11 +323,18 @@ def validate_publication_size(package: Mapping[str, Any], policy: Mapping[str, A
 
 def _validate_candidate_spec(value: Mapping[str, Any], expected_hash: str) -> None:
     required = {"version", "family", "parameters", "execution_model", "session_profile", "implementation_hash"}
-    if set(value) != required or value.get("version") != "final_candidate/v1":
-        raise ValueError("candidate_spec must be the canonical final_candidate/v1 document")
+    if set(value) != required or value.get("version") not in {"final_candidate/v1", "final_candidate/v2"}:
+        raise ValueError("candidate_spec must be a canonical versioned final_candidate document")
     family = str(value.get("family", ""))
     parameters = _mapping(value.get("parameters"), "candidate parameters")
-    if parse_strategy_config(family, parameters).to_dict() != dict(parameters):
+    config = parse_strategy_config(family, parameters)
+    from .leader_breakout import LeaderBreakoutConfig
+    if isinstance(config, LeaderBreakoutConfig):
+        if value["version"] != "final_candidate/v2" or config.contexts or config.execution_missing("0B", require_contexts=False):
+            raise ValueError("leader publication requires explicit v2 execution terms and separate live evidence")
+    elif value["version"] != "final_candidate/v1":
+        raise ValueError("legacy Family requires final_candidate/v1")
+    if config.to_dict() != dict(parameters):
         raise ValueError("candidate parameters are not canonical")
     execution = _mapping(value.get("execution_model"), "execution_model")
     cost = _mapping(execution.get("cost_model"), "cost_model")

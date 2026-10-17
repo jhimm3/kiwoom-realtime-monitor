@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today
+
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Protocol
@@ -61,7 +63,7 @@ class DailyHighTargets:
         cached_high_250_price: int | None = None,
         source_exhausted: bool = False,
     ) -> "DailyHighTargets":
-        today_date = as_of or date.today()
+        today_date = as_of or kst_today()
         by_date = {}
         conflicting = set()
         for bar in bars:
@@ -78,7 +80,7 @@ class DailyHighTargets:
         prices = [bar.high_price for bar in ordered]
         # 장중에는 오늘 일봉 다음의 전일 봉을, 장전·주말·장 종료 뒤에는
         # 가장 최신 완료 일봉을 직전 1일로 사용한다.
-        today = (as_of or date.today()).strftime("%Y%m%d")
+        today = (as_of or kst_today()).strftime("%Y%m%d")
         previous_index = 1 if ordered and ordered[0].trade_date == today else 0
         previous_bar = ordered[previous_index] if len(ordered) > previous_index else None
         previous_value = previous_bar.trade_value_eok if previous_bar is not None else None

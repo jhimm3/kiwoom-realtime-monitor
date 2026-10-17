@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from time import monotonic
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
+from kiwoom_monitor.domain.time_basis import aware_iso_kst, kst_now
 
 
 class CentralContentHttpError(RuntimeError):
@@ -42,6 +44,21 @@ class CentralContentClient:
         self._token = access_token
         self._opener = opener
         self._timeout = timeout_seconds
+        self._server_clock: tuple[datetime, float] | None = None
+
+    def server_now(self) -> datetime:
+        clock = self._server_clock
+        return clock[0] + timedelta(seconds=monotonic() - clock[1]) if clock else kst_now()
+
+    def _capture_server_clock(self, response) -> None:
+        headers = getattr(response, "headers", None)
+        raw = headers.get("X-Kiwoom-Server-Time") if headers is not None else None
+        if not isinstance(raw, str):
+            return
+        try:
+            self._server_clock = (aware_iso_kst(raw), monotonic())
+        except (ValueError, OverflowError):
+            return
 
     def load_health(self) -> dict[str, Any]:
         return self._request("GET", "/health")
@@ -160,6 +177,13 @@ class CentralContentClient:
             raise ValueError("source check requires an explicit revision and 1-60 second window")
         query = urlencode({"expected_revision": expected_revision, "lookback_seconds": lookback_seconds})
         return self._request("GET", f"/api/v1/research/ram-shadow/source-check?{query}", timeout_seconds=10.0)
+
+    def check_ram_shadow_minute_sources(self, *, expected_revision: int, lookback_minutes: int) -> dict[str, Any]:
+        if (type(expected_revision) is not int or expected_revision < 0
+                or type(lookback_minutes) is not int or not 1 <= lookback_minutes <= 60):
+            raise ValueError('source check requires a revision and 1-60 minute read budget')
+        query = urlencode({'expected_revision':expected_revision, 'lookback_minutes':lookback_minutes})
+        return self._request('GET', f'/api/v2/research/ram-shadow/source-check?{query}', timeout_seconds=10.0)
 
     def publish_mock_automation_candidate(
         self,
@@ -324,12 +348,14 @@ class CentralContentClient:
         request = Request(
             f"{self._server_url}{path}", method=method,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None,
-            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json;charset=UTF-8"},
+            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json;charset=UTF-8",
+                     "X-Kiwoom-Clock": "1"},
         )
         try:
             with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds,
                               context=system_ssl_context()) as response:
                 result = json.loads(response.read().decode("utf-8"))
+                self._capture_server_clock(response)
         except HTTPError as error:
             detail = ""
             try:

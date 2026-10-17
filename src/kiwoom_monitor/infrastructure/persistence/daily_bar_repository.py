@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today, kst_wall_now
+
 import sqlite3
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from kiwoom_monitor.domain.market_data_contract import DataCompleteness
@@ -43,13 +46,16 @@ class DailyBarRepository:
         grouped: dict[str, list[DailyBar]] = {}
         for code, trade_date, high_price, trade_value, close_price, open_price, low_price, volume in rows:
             grouped.setdefault(str(code), []).append(DailyBar(str(trade_date).replace("-", ""), int(high_price), float(trade_value) if trade_value is not None else None, int(close_price) if close_price else None, int(open_price) if open_price else None, int(low_price) if low_price else None, int(volume) if volume is not None else None))
-        # Raw cache rows retain prior-day values, but cannot restore NAS coverage proof.
-        return {
-            code: DailyHighTargets.from_daily_bars(
-                tuple(bars[:250]), as_of=date.today(), include_high_250=False,
+        # Restore display values without certifying collection or period coverage.
+        result = {}
+        for code, bars in grouped.items():
+            targets = DailyHighTargets.from_daily_bars(
+                tuple(bars[:250]), as_of=kst_today(), include_high_250=False,
             )
-            for code, bars in grouped.items()
-        }
+            result[code] = replace(targets,
+                high_5_price=max(bar.high_price for bar in bars[:5]) if len(bars) >= 5 else None,
+                high_20_price=max(bar.high_price for bar in bars[:20]) if len(bars) >= 20 else None)
+        return result
 
     def refreshed_today(self, codes: tuple[str, ...], today: date) -> set[str]:
         if not codes:
@@ -194,7 +200,7 @@ class DailyBarRepository:
                 "OR COALESCE(daily_bars.open_price, -1) != COALESCE(excluded.open_price, -1) OR COALESCE(daily_bars.low_price, -1) != COALESCE(excluded.low_price, -1) OR COALESCE(daily_bars.volume, -1) != COALESCE(excluded.volume, -1)",
                 rows,
             )
-            available_at = observed_at or datetime.now()
+            available_at = observed_at or kst_wall_now()
             for bar in targets.daily_bars[:250]:
                 trading_day = date.fromisoformat(
                     f"{bar.trade_date[:4]}-{bar.trade_date[4:6]}-{bar.trade_date[6:]}"

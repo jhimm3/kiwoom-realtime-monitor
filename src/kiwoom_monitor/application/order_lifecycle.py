@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -737,7 +739,7 @@ class MockOrderTransport(Protocol):
 class OrderLifecycle:
     def __init__(
         self, repository: ExecutionRepository, transport: MockOrderTransport | None,
-        *, now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        *, now_provider: Callable[[], datetime] = lambda: kst_now(),
     ) -> None:
         self._repository = repository
         self._transport = transport

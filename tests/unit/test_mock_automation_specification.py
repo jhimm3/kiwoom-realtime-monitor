@@ -141,7 +141,7 @@ def _hash(value):
 
 
 def mock_specification_inputs(store, *, scientific_hash="a" * 64, publish_candidate=True,
-                              unfilled_execution_policy=None):
+                              unfilled_execution_policy=None, leader_config=None):
     """One independent set of immutable inputs, using the caller-owned native store."""
     from types import SimpleNamespace
     value = SimpleNamespace(store=store)
@@ -157,7 +157,8 @@ def mock_specification_inputs(store, *, scientific_hash="a" * 64, publish_candid
         "verification_method": "ka00001",
     })
     value.repository = ForwardEvaluationRepository(value.store)
-    value.config = default_shadow_breakout_config()
+    value.config = leader_config or default_shadow_breakout_config()
+    family_id = "leader_breakout/v1" if leader_config is not None else BREAKOUT_FAMILY_ID
     execution = SimulationExecutionConfig(
         EXECUTION_MODEL_VERSION, SAME_BAR_PATH_VERSION, 10_000_000,
         SimulationCostModel(
@@ -166,8 +167,8 @@ def mock_specification_inputs(store, *, scientific_hash="a" * 64, publish_candid
         ),
     )
     candidate = {
-        "version": "final_candidate/v1", "family": BREAKOUT_FAMILY_ID,
-        "parameters": value.config.to_dict(), "execution_model": execution.to_dict(),
+        "version": "final_candidate/v2" if leader_config is not None else "final_candidate/v1", "family": family_id,
+        "parameters": ({**value.config.to_dict(), "contexts": []} if leader_config is not None else value.config.to_dict()), "execution_model": execution.to_dict(),
         "session_profile": research_session_profile_document("krx-regular/v1"),
         "implementation_hash": scientific_hash,
     }
@@ -212,9 +213,9 @@ def mock_specification_inputs(store, *, scientific_hash="a" * 64, publish_candid
             credential_profile_id=PROFILE_ID,
             expected_binding_revision=value.binding["binding_revision"],
         )
-    family = get_research_family(BREAKOUT_FAMILY_ID)
+    family = get_research_family(family_id)
     value.profile = ForwardEvaluationSpec(
-        strategy_ref="strategy-1", family_version=BREAKOUT_FAMILY_ID,
+        strategy_ref="strategy-1", family_version=family_id,
         factor_versions=family.factor_ids, policy_version=value.policy.policy_id,
         data_path="nas", account_ref=ACCOUNT_REF, environment="mock",
         evaluation_start=NOW + timedelta(hours=2),
@@ -234,12 +235,23 @@ def mock_specification_inputs(store, *, scientific_hash="a" * 64, publish_candid
     value.shadow_event = {
         "event_id": "shadow-event-1",
         "run_id": shadow_monitor_id_for_config(
-            BREAKOUT_FAMILY_ID, value.config, "krx-regular/v1",
+            family_id, value.config, "krx-regular/v1",
         ),
         "strategy_id": "krx_bar_close_breakout", "strategy_version": "v1",
         "transition": "flat->candidate", "quantity": 1,
         "available_at": NOW.isoformat(),
     }
+    if leader_config is not None:
+        from kiwoom_monitor.application.market_session_schedule import KST
+        monitor = CandidateMonitor(store, leader_config.policy, poll_seconds=1, universe_max_age_seconds=60,
+            now_provider=lambda: NOW)
+        monitor._leader_accepting = True
+        for offset, price in ((-0.001, 999), (0, 1001)):
+            at = NOW+timedelta(seconds=offset)
+            monitor.observe_trade({"code": "005930", "market": "KRX", "trade_time": at.astimezone(KST).strftime("%H%M%S"),
+                "current_price": price, "cumulative_trade_value": 100}, at, source="fixture-source", approved=True)
+        monitor.run_once()
+        value.shadow_event = store.load_shadow_candidates(0, 100)["events"][-1]
     evaluated = strategy_stage_revision(
         strategy_ref="strategy-1", previous_stage=StrategyLifecycleStage.DRAFT,
         stage=StrategyLifecycleStage.EVALUATED,
@@ -528,6 +540,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         self.assertEqual(MockAutomationReadinessStatus.READY, readiness.status)
 
         clock = [self.profile.evaluation_start + timedelta(minutes=1)]
+        self.store._execution_wall_now = lambda: clock[0]
         execution = ExecutionRepository(self.store)
         transport = _FakeBrokerTransport(lambda: clock[0])
         run_id = execution_run_id_for_spec(self.spec.spec_id)
@@ -693,6 +706,8 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
             spec=self.spec, shadow_event=self.shadow_event, current_binding=self.binding,
         )
         self.clock = self.profile.evaluation_start
+        # Runtime ownership and its transaction fence share the simulated clock.
+        self.store._execution_wall_now = lambda: self.clock
         self.execution = ExecutionRepository(self.store)
         self.transport = _FakeBrokerTransport(lambda: self.clock)
         self.run_id = execution_run_id_for_spec(self.spec.spec_id)
@@ -2377,7 +2392,8 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
                 def execute(_self, sql, params):
                     statements.append(sql); native.execute(sql.replace('%s', '?').replace(' FOR UPDATE', ''), params)
                 def fetchone(_self): return native.fetchone()
-            _require_execution_ownership(Cursor(), ownership, _record_document(child), '%s')
+            _require_execution_ownership(Cursor(), ownership, _record_document(child), '%s',
+                                         now_provider=lambda: self.clock)
         self.assertGreaterEqual(sum(sql.endswith(' FOR UPDATE') for sql in statements), 7)
         self.assertTrue(any('execution_mock_automation' not in sql and 'central_documents' in sql for sql in statements))
 

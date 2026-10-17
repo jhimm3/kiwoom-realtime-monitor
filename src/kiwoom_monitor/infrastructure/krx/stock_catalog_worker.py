@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal
 
@@ -14,7 +16,7 @@ class KrxStockCatalogWorker(QThread):
         super().__init__(); self._stocks = stocks; self._settings = settings
 
     def run(self) -> None:
-        now = datetime.now()
+        now = kst_wall_now()
         try:
             rows = fetch_krx_stock_catalog(timeout=30)
             if self.isInterruptionRequested():

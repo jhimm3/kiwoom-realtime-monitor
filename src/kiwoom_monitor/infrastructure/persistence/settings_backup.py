@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import json
 import os
 import sqlite3
@@ -66,7 +68,7 @@ class SettingsBackupService:
             document: dict[str, Any] = {
                 "format": self.FORMAT,
                 "version": self.VERSION,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "created_at": kst_wall_now().isoformat(timespec="seconds"),
             }
             if include_settings:
                 news_config = LocalNaverNewsConfig(self._database_path.parent / "naver_news.dat")
@@ -395,7 +397,7 @@ class SettingsBackupService:
         provider = str(ai_data.get("provider", current_ai.provider))
         request_mode = str(ai_data.get("request_mode", current_ai.request_mode))
         news_ai = NewsAISettings(
-            provider if provider in {"none", "openai", "gemini", "claude"} else current_ai.provider,
+            provider if provider in {"none", "openai", "gemini", "claude", "chatgpt_plan"} else current_ai.provider,
             current_ai.api_key,
             str(ai_data.get("model", current_ai.model))[:200],
             self._bounded_int(ai_data.get("daily_limit"), current_ai.daily_limit, 0, 1_000_000),

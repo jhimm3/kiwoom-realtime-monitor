@@ -103,7 +103,8 @@ def _prepare_independent_partition(dataset, selected, policy_document, descripto
         checkpoint()
         raw = theme.get('available_at')
         if raw is None:
-            continue  # Unknown availability cannot be used as historical evidence.
+            themes.append(theme)  # Preserve research material without assigning a historical time.
+            continue
         available = _partition_time(raw)
         if available < lower:
             earlier.append((available, str(theme.get('snapshot_id', '')), theme))
@@ -112,7 +113,9 @@ def _prepare_independent_partition(dataset, selected, policy_document, descripto
     if earlier:
         themes.append(max(earlier, key=lambda item: item[:2])[2])
     copied_themes = tuple(json.loads(json.dumps(theme)) for theme in sorted(
-        themes, key=lambda theme: (_partition_time(theme['available_at']), str(theme.get('snapshot_id', '')))))
+        themes, key=lambda theme: (theme.get('available_at') is None,
+            _partition_time(theme['available_at']) if theme.get('available_at') is not None else lower,
+            str(theme.get('snapshot_id', '')))))
     descriptor = {'spec': policy_document, 'evaluation': selected.to_dict(),
                   'warmup_start': lower.isoformat(), 'active_start': _partition_time(fold.start).isoformat(),
                   'end': end.isoformat(),
@@ -138,7 +141,8 @@ def _prepare_independent_partition(dataset, selected, policy_document, descripto
                 'revision_count': len(observations),
                 'revision_ids_hash': hashlib.sha256('\n'.join(str(row['revision_id']) for row in observations).encode()).hexdigest(),
                 'captured_range': {'start': lower.isoformat(), 'end': end.isoformat()},
-                'quality_summary': {'recording_gap': 'unknown', 'flags': ['partition_coverage_not_evaluated']},
+                'quality_summary': {'recording_gap': 'unknown', 'flags': ['partition_coverage_not_evaluated'] +
+                    (['theme_availability_unknown'] if any(t.get('available_at') is None for t in copied_themes) else [])},
                 'theme_snapshot_history_may_be_truncated': True,
                 'theme_snapshot_count': len(copied_themes),
                 'runtime_input_version': runtime_version, descriptor_key: descriptor}
@@ -224,6 +228,8 @@ def _validate_independent_partition(dataset, selected, descriptor, partition, ch
         raise ValueError(f'{label} input is missing its declared universe seed')
     for theme in dataset.theme_snapshots:
         checkpoint()
+        if theme.get('available_at') is None:
+            continue  # Retained for research; the point-in-time reader does not date it implicitly.
         if _partition_time(theme.get('available_at')) >= end:
             raise ValueError(f'{label} input includes a future theme snapshot')
     return active
@@ -456,8 +462,6 @@ def _bundle_manifest(children: list[tuple[str, FrozenResearchDataset]], *,
             raise ValueError("research bundle child input contracts differ")
         if manifest.get("schema_version") != 1 or not manifest.get("dataset_id") or not manifest.get("fixed_watermark"):
             raise ValueError("research bundle child dataset id is missing")
-        if manifest.get("theme_snapshot_history_may_be_truncated"):
-            raise ValueError("research bundle child theme history may be truncated")
         for observation in dataset.observations:
             checkpoint()
             revision_id = str(observation["revision_id"])
@@ -478,6 +482,8 @@ def _bundle_manifest(children: list[tuple[str, FrozenResearchDataset]], *,
                         "captured_range": captured, "revision_count": len(dataset.observations),
                         "theme_snapshot_count": len(dataset.theme_snapshots),
                         "quality_summary": manifest.get("quality_summary", {})})
+        if manifest.get("theme_snapshot_history_may_be_truncated"):
+            entries[-1]["theme_snapshot_history_may_be_truncated"] = True
     scientific_entries = [{key: value for key, value in entry.items() if key != "path"} for entry in entries]
     identity = {"bundle_version": BUNDLE_VERSION, "boundary_policy": BUNDLE_BOUNDARY_POLICY,
                 "children": scientific_entries}
@@ -590,6 +596,8 @@ def load_research_input(root: Path, *, session_profile: str | None = None,
                             "recording_gap": "unknown"},
         "runtime_input_version": "continuous_bundle_replay/v1",
     }
+    if any(entry.get('theme_snapshot_history_may_be_truncated') for entry in entries):
+        runtime_manifest['theme_snapshot_history_may_be_truncated'] = True
     return FrozenResearchDataset(runtime_manifest, observations, tuple(themes.values()))
 
 

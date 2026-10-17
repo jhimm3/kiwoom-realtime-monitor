@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -85,7 +87,7 @@ class CentralSchemaMigrationRunner:
             self._cursor.execute(
                 f"INSERT INTO {self.TABLE}(version,name,applied_at) "
                 f"VALUES({placeholders})",
-                (migration.version, migration.name, datetime.now(UTC).isoformat()),
+                (migration.version, migration.name, kst_now().isoformat()),
             )
             newly_applied.append(migration.version)
         return tuple(newly_applied)

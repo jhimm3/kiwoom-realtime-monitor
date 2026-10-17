@@ -416,6 +416,10 @@ class PaperExecutionEngine:
             raise ValueError(f"unsupported research session profile: {session_profile}")
         self.execution = execution
         self.strategy = strategy
+        from .leader_breakout import LeaderBreakoutConfig
+        self._leader = isinstance(strategy, LeaderBreakoutConfig)
+        if self._leader and strategy.execution_missing("1m"):
+            raise ValueError("leader performance blocked:" + ",".join(strategy.execution_missing("1m")))
         self.session_profile = session_profile
         self._last_processed_bar = None
         self._native_study = None
@@ -483,7 +487,7 @@ class PaperExecutionEngine:
                 ))
                 return tuple(events)
             risk_pending = self.portfolio.pending_order
-            risk_event = self._apply_intrabar_risk(bar)
+            risk_event = None if self._leader else self._apply_intrabar_risk(bar)
             if risk_event is not None:
                 events.append(risk_event)
                 if risk_pending is not None and (risk_pending.target_execution_version == POSITION_TARGET_EXECUTION_VERSION
@@ -1205,7 +1209,7 @@ class PaperExecutionEngine:
         if remaining == 0:
             fill_time = bar.bar_end if event_type == "RISK_FILL" else bar.bar_start
             ended = _aware_datetime(fill_time).astimezone(timezone.utc)
-            self.strategy_state = StrategyState(
+            self.strategy_state = StrategyState(emitted_candidate_keys=self.strategy_state.emitted_candidate_keys) if self._leader else StrategyState(
                 status="cooldown", cooldown_until=(
                     ended + timedelta(seconds=self.strategy.cooldown_seconds)
                 ).isoformat(),

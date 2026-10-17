@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import logging
 import time
 from collections.abc import Callable
@@ -283,7 +285,7 @@ class AppController(QObject):
     def ranking_now(self) -> datetime:
         provider = getattr(self.ranking_loader, "server_now", None)
         value = provider() if callable(provider) else None
-        return value if isinstance(value, datetime) else datetime.now()
+        return value if isinstance(value, datetime) else kst_wall_now()
 
     def request_ranking(self) -> None:
         if self.closing or self.api_reloading or self.ranking_loader is None or self.ranking.is_running:

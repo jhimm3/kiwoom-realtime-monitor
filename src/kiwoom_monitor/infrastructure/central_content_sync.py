@@ -6,8 +6,11 @@ import socket
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from kiwoom_monitor.domain.time_basis import as_kst
 
 from kiwoom_monitor.infrastructure.central_content_client import (
     CentralContentClient,
@@ -700,12 +703,20 @@ def _merge_journal_link(
     explicit_revision = bool(values.pop("_explicit_revision", False))
     if current is not None:
         current_revision, current_deleted, current_hash = str(current[0]), bool(current[1]), str(current[2])
-        if current_revision > revision or (current_revision == revision and current_deleted):
+        # UTC and KST strings can denote the same instant or sort in the wrong
+        # order. Keep stored receipts intact and compare their actual moments.
+        current_order, incoming_order = current_revision, revision
+        try:
+            current_order = as_kst(datetime.fromisoformat(current_revision.replace('Z', '+00:00')))
+            incoming_order = as_kst(datetime.fromisoformat(revision.replace('Z', '+00:00')))
+        except ValueError:
+            current_order, incoming_order = current_revision, revision
+        if current_order > incoming_order or (current_order == incoming_order and current_deleted):
             return False
-        if current_revision == revision and current_hash not in {"unknown", str(values.get("source_content_hash"))}:
+        if current_order == incoming_order and current_hash not in {"unknown", str(values.get("source_content_hash"))}:
             return False
         if current_deleted and not incoming_deleted and (
-            not explicit_revision or revision <= current_revision
+            not explicit_revision or incoming_order <= current_order
         ):
             return False
     values["updated_at"] = revision

@@ -361,7 +361,7 @@ def recover_install(private, allowed):
 
 
 def recover_helper_update(private):
-    """Restore only the two fixed helpers after an interrupted admin update.
+    """Restore the fixed helpers/launcher after an interrupted admin update.
 
     Caller owns operator.lock. Original revoke backups are never replaced.
     """
@@ -372,10 +372,12 @@ def recover_helper_update(private):
     if record.get('state') in ('complete', 'rolled_back'):
         return
     targets = {HELPER + '/nas_operator.py', HELPER + '/nas_operator_worker.py'}
+    launcher_targets = targets | {PROJECT + '/source-runtime/runner.py', op.CONFIG}
+    actual_targets = {x.get('path') for x in record.get('entries', [])}
     op.require(record.get('state') == 'prepared' and
                re.fullmatch('[a-f0-9]{32}', record.get('update_id', '')) and
-               type(record.get('entries')) is list and len(record['entries']) == 2 and
-               {x.get('path') for x in record['entries']} == targets,
+               type(record.get('entries')) is list and len(record['entries']) == len(actual_targets) and
+               actual_targets in (targets, launcher_targets),
                'helper_update_journal_invalid')
     index = record.get('previous_index', {})
     op.require(index.get('state') == 'complete' and
@@ -386,16 +388,20 @@ def recover_helper_update(private):
         name = 'helper-update-backups/' + record['update_id'] + '/' + str(number)
         old = private.read(name, 8 * 1024 ** 2)
         op.require(hashlib.sha256(old).hexdigest() == item.get('previous_sha256') and
-                   item.get('mode') == 0o644, 'helper_update_backup_changed')
-        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
+                   type(item.get('mode')) is int and 0 <= item['mode'] <= 0o777,
+                   'helper_update_backup_changed')
+        path = Path(item['path'])
+        with op.Tree(str(path.parent), owners=(0,) if item['path'] != PROJECT + '/source-runtime/runner.py'
+                     else None, protected=item['path'] != PROJECT + '/source-runtime/runner.py') as tree:
             current = tree.read(Path(item['path']).name, 8 * 1024 ** 2)
             op.require(hashlib.sha256(current).hexdigest() in
                        (item['previous_sha256'], item['new_sha256']), 'helper_changed_during_update')
-        restore.append((item['path'], old))
+        restore.append((item['path'], old, item['mode']))
     # Validate every backup and target before the first restore.
-    for path, old in restore:
-        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
-            tree.write(Path(path).name, old, 0o644)
+    for path, old, mode in restore:
+        with op.Tree(str(Path(path).parent), owners=(0,) if path != PROJECT + '/source-runtime/runner.py'
+                     else None, protected=path != PROJECT + '/source-runtime/runner.py') as tree:
+            tree.write(Path(path).name, old, mode)
     private.put_json('install-backup-index.json', index)
     record['state'] = 'rolled_back'
     private.put_json('helper-update.json', record)
@@ -406,6 +412,10 @@ def update_helpers(root, config, acltool):
     op.require(os.name == 'posix' and os.geteuid() == 0, 'administrator_install_required')
     op.require(config['helper_dir'] == HELPER and config['private'] == PRIVATE,
                'helper_update_scope_mismatch')
+    launcher_source = root / 'scripts/nas_source_runtime.py'
+    update_launcher = launcher_source.is_file()
+    if update_launcher:
+        op.require(config.get('store') == PROJECT + '/source-runtime', 'helper_update_scope_mismatch')
     protected_directory(HELPER, acltool)
     with op.Tree(PRIVATE, owners=(0,), protected=True) as private:
         with private.lock('operator.lock'):
@@ -432,25 +442,42 @@ def update_helpers(root, config, acltool):
                     active = store.json('active.json')['release_id']
                     update_id = secrets.token_hex(16)
                     changes, entries = [], []
-                    for number, name in enumerate(('nas_operator.py', 'nas_operator_worker.py')):
-                        data = root.joinpath('scripts', name).read_bytes()
+                    replacement = [(HELPER + '/' + name, root.joinpath('scripts', name).read_bytes())
+                                   for name in ('nas_operator.py', 'nas_operator_worker.py')]
+                    reviewed = dict(config)
+                    if update_launcher:
+                        runner = launcher_source.read_bytes()
+                        reviewed['runner_sha256'] = hashlib.sha256(runner).hexdigest()
+                        replacement += [(config['store'] + '/runner.py', runner),
+                                        (op.CONFIG, (json.dumps(reviewed, sort_keys=True) + '\n').encode())]
+                    for number, (path, data) in enumerate(replacement):
                         op.require(0 < len(data) <= 8 * 1024 ** 2, 'helper_update_size_invalid')
-                        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
-                            old = tree.read(name, 8 * 1024 ** 2)
+                        is_runner = path == config.get('store', '') + '/runner.py'
+                        with op.Tree(str(Path(path).parent), owners=(0, config['allowed_uid']) if is_runner
+                                     else (0,), protected=not is_runner) as tree:
+                            old = tree.read(Path(path).name, 8 * 1024 ** 2)
+                            mode = stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode)
+                        # Keep the existing regular-file mode, including NAS
+                        # shared-source 0777. This runner is container code;
+                        # protected host helper/config paths are checked above.
                         private.write('helper-update-backups/' + update_id + '/' + str(number), old)
-                        entries.append({'path': HELPER + '/' + name, 'mode': 0o644,
+                        entries.append({'path': path, 'mode': mode,
                                         'previous_sha256': hashlib.sha256(old).hexdigest(),
                                         'new_sha256': hashlib.sha256(data).hexdigest()})
-                        changes.append((name, data))
+                        changes.append((path, data, mode))
                     record = {'state': 'prepared', 'update_id': update_id, 'entries': entries,
                               'previous_index': index}
                     private.put_json('helper-update.json', record)
-                    for name, data in changes:
-                        with op.Tree(HELPER, owners=(0,), protected=True) as tree:
-                            tree.write(name, data, 0o644)
-                            op.require(tree.read(name) == data, 'helper_update_write_unverified')
-                        check_acl(HELPER + '/' + name, acltool)
-                    probe_config = dict(config, initial_release=active)
+                    for path, data, mode in changes:
+                        is_runner = path == config.get('store', '') + '/runner.py'
+                        with op.Tree(str(Path(path).parent), owners=(0, config['allowed_uid']) if is_runner
+                                     else (0,), protected=not is_runner) as tree:
+                            tree.write(Path(path).name, data, mode)
+                            op.require(tree.read(Path(path).name) == data, 'helper_update_write_unverified')
+                        if not is_runner:
+                            check_acl(path, acltool)
+                    supervisor.config = reviewed
+                    probe_config = dict(reviewed, initial_release=active)
                     verify_passwordless_status(probe_config)
                     supervisor.identities()
                     op.require(store.json('active.json')['release_id'] == active,

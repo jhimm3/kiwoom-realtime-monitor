@@ -248,13 +248,15 @@ class MockAutomationAdmissionTests(unittest.TestCase):
     ) -> tuple[ExecutionRuntime, ExecutionRepository]:
         repository = ExecutionRepository(self.store)
         selected = spec or self.spec
+        clock = now_provider or (lambda: NOW + timedelta(seconds=1))
+        self.store._execution_wall_now = clock
         runtime = ExecutionRuntime(
             OrderLifecycle(repository, transport or _Transport(), now_provider=lambda: NOW),
             repository,
             account_ref=ACCOUNT_REF,
             run_id=execution_run_id_for_spec(selected.spec_id),
             owner_token=owner_token,
-            now_provider=now_provider or (lambda: NOW + timedelta(seconds=1)),
+            now_provider=clock,
         )
         return runtime, repository
 

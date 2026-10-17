@@ -9,6 +9,7 @@ from pathlib import Path
 from kiwoom_monitor.infrastructure.naver_news import NaverNewsClient, NaverNewsCredentials
 from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient, DartCredentialValidationError
 from .credential_runtime import CredentialRuntimeHooks, ValidatedCredential, CredentialOperationError
+from .market_observations import KST, as_kst
 
 
 @dataclass
@@ -21,9 +22,10 @@ class _NewsClientCandidate:
 class NaverCredentialOwner:
     PROFILE = "nas-naver-default"
 
-    def __init__(self, service, vault):
+    def __init__(self, service, vault, *, now_provider=None):
         self.service = service
-        service._store.register_credential_profile("naver", self.PROFILE, datetime.now(UTC).isoformat())
+        service._store.register_credential_profile("naver", self.PROFILE,
+            (as_kst(now_provider()) if now_provider else datetime.now(KST)).isoformat())
         try:
             record = vault.load("naver", self.PROFILE)
         except Exception:
@@ -83,10 +85,11 @@ class NaverCredentialOwner:
 class DartCredentialOwner:
     PROFILE = "nas-dart-default"
 
-    def __init__(self, service, vault, cache_path: Path):
+    def __init__(self, service, vault, cache_path: Path, *, now_provider=None):
         self.service = service
         self._cache_path = cache_path
-        service._store.register_credential_profile("dart", self.PROFILE, datetime.now(UTC).isoformat())
+        service._store.register_credential_profile("dart", self.PROFILE,
+            (as_kst(now_provider()) if now_provider else datetime.now(KST)).isoformat())
         try:
             record = vault.load("dart", self.PROFILE)
         except Exception:

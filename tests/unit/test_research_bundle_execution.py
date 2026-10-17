@@ -16,9 +16,9 @@ from kiwoom_monitor.infrastructure.research_data_source import (
     research_observation_order,
 )
 from scripts.run_research import execute_research
-from test_research_bundle import write_child
-from test_research_execution import _execution, _strategy
-from research_test_support import research_request_document as _request_document
+from tests.unit.test_research_bundle import write_child
+from tests.unit.test_research_execution import _execution, _strategy
+from tests.unit.research_test_support import research_request_document as _request_document
 from kiwoom_monitor.research_process import execute_process_request, load_research_process_request
 
 KST = timezone(timedelta(hours=9))

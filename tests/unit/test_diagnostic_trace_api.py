@@ -288,7 +288,7 @@ class DiagnosticTraceApiTests(unittest.TestCase):
             self.assertEqual({"store_inputs": False, "collector_inputs": False, "top20_inputs": False},
                              capture["options"])
             self.assertEqual(["0B", "0w", "0J", "0U"], capture["collector_event_types"])
-            self.assertEqual("collector-input/v2", capture["collector_input_version"])
+            self.assertEqual("collector-input/v3", capture["collector_input_version"])
             self.assertEqual("ranking_validation_only", capture["top20_input_capture"]["scope"])
             self.assertFalse(capture["top20_input_capture"]["downstream_replay_supported"])
             self.assertEqual("observed_paths_only", capture["coverage"])

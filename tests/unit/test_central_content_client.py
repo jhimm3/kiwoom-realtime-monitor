@@ -4,6 +4,7 @@ import io
 import json
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from kiwoom_monitor.infrastructure.central_content_client import (
@@ -23,6 +24,21 @@ class Response(io.BytesIO):
 
 
 class CentralContentClientTests(unittest.TestCase):
+    def test_clock_uses_existing_response_and_preserves_timezone_instant(self):
+        calls = []
+        def opener(request, **kwargs):
+            calls.append(request)
+            response = Response(b'{"status":"ok"}')
+            response.headers = {'X-Kiwoom-Server-Time': '2026-10-15T05:21:03+00:00'}
+            return response
+        client = CentralContentClient('https://nas.test', 'fixture', opener=opener)
+        with patch('kiwoom_monitor.infrastructure.central_content_client.monotonic', return_value=10):
+            client.load_health()
+        with patch('kiwoom_monitor.infrastructure.central_content_client.monotonic', return_value=12):
+            self.assertEqual(client.server_now().isoformat(), '2026-10-15T14:21:05+09:00')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].get_header('X-kiwoom-clock'), '1')
+
     def test_source_check_is_explicit_authenticated_and_rejects_invalid_budget_without_io(self):
         calls = []
         def opener(request, **kwargs):

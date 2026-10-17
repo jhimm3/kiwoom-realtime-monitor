@@ -100,7 +100,9 @@ def build_collector_fixture(run_id: str) -> CollectorFixture:
                 late_rows.append(row(market, late_at, 3_000_000, 2))
                 expected(market, late_at, 3_000_000, 2, 6)
             messages.append((63.01, {"trnm": "REAL", "data": late_rows}))
-    return CollectorFixture(code, origin, tuple(messages), tuple(minutes.values()), tuple(seconds.values()))
+    # Current collector intentionally produces no second bars. Historical
+    # fixtures/archives remain readable via operation replay and native readers.
+    return CollectorFixture(code, origin, tuple(messages), tuple(minutes.values()), ())
 
 
 class _ReplayClock:

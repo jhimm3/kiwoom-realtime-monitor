@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .diagnostic_workloads import is_paused
+from .market_observations import KST, as_kst
 
 import asyncio
 import json
@@ -42,7 +43,9 @@ class YahooDelayedMarketCollector:
         self, store: ExternalMarketCollectorStore, symbols: dict[str, str], *, poll_seconds: int = 300,
         auto_roll_enabled: bool = True, roll_confirmations: int = 2,
         opener: Callable[..., Any] = urlopen,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
+        self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._store = store
         self._symbols = dict(symbols)
         self._poll_seconds = max(60, int(poll_seconds))
@@ -176,7 +179,7 @@ class YahooDelayedMarketCollector:
         if not task.cancelled(): task.exception()
 
     async def _collect_once(self, *, include_daily: bool) -> dict[str, int]:
-        daily_date = datetime.now(timezone.utc).date().isoformat()
+        daily_date = self._now().date().isoformat()
         if self._daily_tracking_date != daily_date:
             self._daily_tracking_date = daily_date
             self._daily_completed_contracts.clear()
@@ -243,9 +246,9 @@ class YahooDelayedMarketCollector:
                     "current_price": current_price, "previous_daily_close": reference_close,
                     "change_pct": change_percent(current_price, reference_close),
                     "change_basis": "previous_daily_close",
-                    "rolled_at": datetime.now(timezone.utc).isoformat() if evaluation.rolled else state.get("rolled_at"),
+                    "rolled_at": self._now().isoformat() if evaluation.rolled else state.get("rolled_at"),
                     "previous_contract": active_contract if evaluation.rolled else state.get("previous_contract"),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": self._now().isoformat(),
                 }
                 await asyncio.to_thread(self._save_roll_state, instrument, new_state)
                 status = "ok" if selected in intraday_by_contract and not errors else "failed"
@@ -266,7 +269,7 @@ class YahooDelayedMarketCollector:
     async def _run(self) -> None:
         while True:
             if not is_paused("external_market"):
-                today = datetime.now(timezone.utc).date().isoformat()
+                today = self._now().date().isoformat()
                 include_daily = self._last_daily_date != today
                 await self.collect_once(include_daily=include_daily)
                 if include_daily and self._daily_collection_complete:
@@ -285,7 +288,7 @@ class YahooDelayedMarketCollector:
             "owner": instrument, "key": "current", "document": {
                 "provider": "yahoo_delayed", "instrument": instrument, "contract": contract,
                 "status": status, "error": error[:1000], "saved_rows": count,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "checked_at": self._now().isoformat(),
             },
         }])
 

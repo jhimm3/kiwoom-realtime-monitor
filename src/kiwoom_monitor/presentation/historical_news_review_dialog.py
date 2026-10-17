@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
 import getpass
 import json
 from datetime import datetime
@@ -271,7 +273,7 @@ class HistoricalNewsReviewDialog(QDialog):
                 label = dict((value, label) for label, value in _DECISIONS).get(decision, decision)
                 values = (
                     label,
-                    str(article.get("published_at", "")),
+                    format_kst_time(article.get("published_at", "")),
                     row["stock_names"],
                     str(article.get("title", "")),
                     str(item.get("priority", {}).get("maximum_rule_relevance_score", 0)),
@@ -310,7 +312,7 @@ class HistoricalNewsReviewDialog(QDialog):
             self._title.setText(str(article.get("title", "")))
             self._summary.setPlainText(str(article.get("search_summary", "")))
             self._source.setText(
-                f"{row['published_at']} · {row['stock_names']} · "
+                f"{format_kst_time(row['published_at'])} · {row['stock_names']} · "
                 f"규칙 관련성 {row['rule_relevant_hint']} / 점수 {row['maximum_rule_relevance_score']}"
             )
             decision_index = self._decision.findData(row["human_decision"])
@@ -346,7 +348,7 @@ class HistoricalNewsReviewDialog(QDialog):
         decision = str(self._decision.currentData() or "")
         if decision == "relevant" and not self._event.currentText().strip() and self._current_row >= 0:
             row = self._rows[self._current_row]
-            published = row["published_at"][:10].replace("-", "")
+            published = format_kst_time(row["published_at"], "%Y%m%d").replace("-", "")
             suffix = row["review_item_id"].rsplit("-", 1)[-1][:10]
             self._event.setCurrentText(f"event-{published}-{suffix}")
         if decision in {"not_relevant", "uncertain", ""}:

@@ -858,7 +858,7 @@ class OrderLifecycleTests(unittest.TestCase):
 class AutomationCancelBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.store = SQLiteQueryStore(Path(self.directory.name) / "cancel.sqlite3")
+        self.store = SQLiteQueryStore(Path(self.directory.name) / "cancel.sqlite3", now_provider=lambda: NOW)
         self.store.initialize()
         self.repository = ExecutionRepository(self.store)
         self.transport = _Transport()

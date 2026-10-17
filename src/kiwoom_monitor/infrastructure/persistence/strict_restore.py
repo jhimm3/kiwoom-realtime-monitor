@@ -7,6 +7,8 @@ startup restore holds the exclusive lock until commit or rollback is durable.
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import ctypes
 import hashlib
 import json
@@ -340,7 +342,7 @@ class StrictRestoreCoordinator:
             )
             if news_ai is not None:
                 NewsAIBackupService(self.news_database).import_from(news_ai)
-            synced_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+            synced_at = kst_now().isoformat(timespec="seconds").replace("+00:00", "Z")
             connection = sqlite3.connect(self.monitor_database)
             try:
                 with connection:

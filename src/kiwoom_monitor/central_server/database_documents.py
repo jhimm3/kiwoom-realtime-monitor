@@ -114,6 +114,8 @@ class PostgresDocumentStoreMixin:
             "news_ai": "document:news_ai",
             "news_ai_shared": "document:news_ai_shared",
             "news_request_usage": "document:news_request_usage",
+            "morning_market_brief_settings": "document:morning_market_brief_settings",
+            "morning_market_brief_runs": "document:morning_market_brief_runs",
             "journal_news_link": "document:journal_news_link",
             "journal_v2_news_links": "document:journal_v2_news_links",
             "journal_settings": "document:journal_settings",

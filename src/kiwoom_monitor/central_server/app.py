@@ -38,7 +38,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 )
 
 
-SERVER_BUILD = "2026.10.15-action-context-gates-v1"
+SERVER_BUILD = "2026.10.17-research-input-retention-v2"
 logger = logging.getLogger(__name__)
 
 
@@ -100,9 +100,17 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     news_service = None
     ai_service = None
     realtime_hub = RealtimeHub()
+    def server_now() -> datetime:
+        # Read the existing corrected broker clock; this never starts a REST call.
+        if broker is not None:
+            return as_kst(broker._client.server_now())
+        if mock_bundle is not None:
+            return as_kst(mock_bundle.client.server_now())
+        return datetime.now(KST)
     store = create_query_store(
         active.database_url,
         observation_history_enabled=active.research_observation_history_enabled,
+        now_provider=server_now,
     )
     store.initialize()
     credential_vault = None
@@ -142,7 +150,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         except (OSError, ValueError, sqlite3.DatabaseError) as error:
             logger.warning("historical news archive unavailable: %s", type(error).__name__)
     from .credential_runtime import CredentialRuntime, install_credential_routes
-    credential_runtime = CredentialRuntime(credential_vault, store) if credential_vault is not None else None
+    credential_runtime = CredentialRuntime(credential_vault, store, now_provider=server_now) if credential_vault is not None else None
     operational = {
         "revision": 0,
         "ai_provider": active.ai_provider,
@@ -185,8 +193,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 operational["shadow_candidate_config"] = configured_shadow
         except json.JSONDecodeError:
             pass
+    from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy, document_leader_breakout_policy
     if operational["shadow_candidate_config"] is None:
-        operational["shadow_candidate_config"] = default_shadow_breakout_config().to_dict()
+        operational["shadow_candidate_config"] = document_leader_breakout_policy().to_dict()
     saved_operational = store.load_documents("server_operational_settings", "global", 1)
     if saved_operational and isinstance(saved_operational[0].get("document"), dict):
         operational.update(saved_operational[0]["document"])
@@ -194,13 +203,25 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         shadow_document = operational.get("shadow_candidate_config")
         if not isinstance(shadow_document, dict):
             raise ValueError("shadow candidate strategy config must be an object")
-        operational["shadow_candidate_config"] = BreakoutStrategyConfig(
-            **shadow_document
+        if (not active.shadow_candidate_config_json.strip()
+                and shadow_document == default_shadow_breakout_config().to_dict()):
+            # Retire the previously implicit 5-bar/3%/5%/10-minute profile.
+            # Preserve the original stored document for historical comparison.
+            shadow_document = document_leader_breakout_policy().to_dict()
+            logger.info("implicit legacy shadow profile replaced by unconfigured 0B leader policy")
+        if (not active.shadow_candidate_config_json.strip()
+                and shadow_document == json.loads(json.dumps(LeaderBreakoutPolicy().to_dict()))):
+            # Only the entirely unconfigured implicit draft changes in memory.
+            # Original stored and explicitly configured comparison policies stay intact.
+            shadow_document = document_leader_breakout_policy().to_dict()
+        operational["shadow_candidate_config"] = (
+            LeaderBreakoutPolicy.from_dict(shadow_document) if "policy_id" in shadow_document
+            else BreakoutStrategyConfig(**shadow_document)
         ).to_dict()
     except (TypeError, ValueError):
         logger.warning("invalid saved shadow candidate settings disabled", exc_info=True)
         operational["shadow_candidate_enabled"] = False
-        operational["shadow_candidate_config"] = default_shadow_breakout_config().to_dict()
+        operational["shadow_candidate_config"] = document_leader_breakout_policy().to_dict()
     if active.mock_account_monitor_enabled and not active.kiwoom_mock_configured:
         store.close()
         raise ValueError("모의계좌 모니터에는 별도 모의투자 앱 키와 시크릿 키가 필요합니다.")
@@ -234,7 +255,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 broker,
                 environment=AccountEnvironment(active.kiwoom_environment),
                 hmac_key=active.account_identity_key(),
-                now_provider=lambda: as_kst(kiwoom_client.server_now()),
+                now_provider=server_now,
             )
         if active.market_event_collection_enabled:
             market_event_service = MarketEventService(
@@ -242,7 +263,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 exact_condition_name=str(operational["hot_cohort_condition_name"]),
                 condition_substring=str(operational["hot_cohort_condition_substring"]),
                 condition_enabled=bool(operational["hot_cohort_condition_enabled"]),
-                now_provider=lambda: broker._client.server_now(),
+                now_provider=server_now,
             )
         def realtime_account_scope(raw):
             context = real_owner.bundle(real_owner.market_profile_id) if real_owner else None
@@ -253,7 +274,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
 
         collector = CentralRealtimeCollector(
             lambda: broker._client.get_access_token(), active.kiwoom_environment, realtime_hub,
-            lambda: broker._client.server_now(), store, market_event_service,
+            server_now, store, market_event_service,
             account_scope_resolver=realtime_account_scope if active.account_identity_registry_enabled else None,
         )
         if active.autonomous_top20_enabled:
@@ -274,6 +295,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             identity_hmac_key=(
                 active.account_identity_key() if active.account_identity_registry_enabled else None
             ), order_transport_enabled=active.mock_order_transport_enabled,
+            now_provider=server_now,
         )
         account_broker = mock_bundle.broker
         mock_account_monitor = mock_bundle.monitor
@@ -304,7 +326,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
 
         mock_owner = MockCredentialOwner(store, credential_vault,
             hmac_key=active.account_identity_key(), legacy_bundle=mock_bundle,
-            legacy_monitor_enabled=active.mock_account_monitor_enabled, on_change=publish_mock_bundle)
+            legacy_monitor_enabled=active.mock_account_monitor_enabled, on_change=publish_mock_bundle,
+            now_provider=server_now)
         credential_runtime.register("kiwoom_mock", mock_owner.hooks())
     account_query_manager = (
         AccountQuerySessionManager(broker, lambda: main_binding)
@@ -345,6 +368,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         )
         news_service = CentralNewsService(
             naver_client, store, dart_client, refresh_seconds=int(operational["news_refresh_seconds"]),
+            now_provider=server_now,
             jobs_enabled=active.news_history_jobs_enabled,
             jobs_parallelism=3,
             query_set_enabled=bool(operational["news_query_set_enabled"]),
@@ -379,20 +403,23 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         )
     if credential_runtime is not None:
         from .news_credentials import NaverCredentialOwner, DartCredentialOwner
-        naver_owner = NaverCredentialOwner(news_service, credential_vault)
+        naver_owner = NaverCredentialOwner(news_service, credential_vault, now_provider=server_now)
         credential_runtime.register("naver", naver_owner.hooks())
-        dart_owner = DartCredentialOwner(news_service, credential_vault, Path(active.dart_cache_path))
+        dart_owner = DartCredentialOwner(news_service, credential_vault, Path(active.dart_cache_path), now_provider=server_now)
         credential_runtime.register("dart", dart_owner.hooks())
     if active.parsed_external_market_symbols():
         external_market_service = YahooDelayedMarketCollector(
             store, active.parsed_external_market_symbols(),
+            now_provider=server_now,
             poll_seconds=int(operational["external_market_poll_seconds"]),
             auto_roll_enabled=bool(operational["external_market_auto_roll_enabled"]),
             roll_confirmations=int(operational["external_market_roll_confirmations"]),
         )
-    if active.ai_configured or credential_runtime is not None:
+    from .chatgpt_sessions import nas_chatgpt_auth
+    chatgpt_auth = nas_chatgpt_auth(active.credential_directory)
+    if active.ai_configured or credential_runtime is not None or chatgpt_auth is not None:
         from .ai_service import CentralAIService
-        ai_service = CentralAIService(active, store)
+        ai_service = CentralAIService(active, store, chatgpt_auth=chatgpt_auth, now_provider=server_now)
         ai_service.update_operational_settings(
             provider=str(operational["ai_provider"]), model=str(operational["ai_model"]),
             daily_limit=int(operational["ai_daily_limit"]),
@@ -400,11 +427,14 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         if credential_runtime is not None:
             from .ai_credentials import AICredentialOwner
             for provider in ("openai", "gemini", "claude"):
-                owner = AICredentialOwner(ai_service, credential_vault, provider)
+                owner = AICredentialOwner(ai_service, credential_vault, provider, now_provider=server_now)
                 credential_runtime.register(provider, owner.hooks())
+    from .morning_market_brief import MorningMarketBrief, create_morning_market_brief_router
+    morning_brief = MorningMarketBrief(store, ai_service, clock=server_now)
     if bool(operational["shadow_candidate_enabled"]):
         candidate_monitor = CandidateMonitor.from_json(
             store, json.dumps(operational["shadow_candidate_config"]),
+            now_provider=server_now,
             poll_seconds=float(operational["shadow_candidate_poll_seconds"]),
             universe_max_age_seconds=int(operational["shadow_candidate_universe_max_age_seconds"]),
         )
@@ -445,6 +475,18 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     from .operational_settings_routes import OperationalSettingsState, create_operational_settings_routers
     operational_state = OperationalSettingsState(
         operational, int(operational.get("revision", 0)), candidate_monitor)
+    if collector is not None:
+        def bind_document_baseline(monitor):
+            if monitor is not None:
+                monitor.set_minute_commit_provider(lambda: collector._save_success_at.get('minute_finalizations'))
+        bind_document_baseline(operational_state.candidate_monitor)
+        def observe_leader_breakout(payload, received_at, **source):
+            monitor = operational_state.candidate_monitor
+            if monitor is not None:
+                monitor.observe_trade(payload, received_at, **source)
+            if mock_automation_supervisor is not None:
+                mock_automation_supervisor.observe_leader_trade(payload, received_at, **source)
+        collector.set_breakout_trade_listener(observe_leader_breakout)
     ram_selection = {"version": "ram-shadow-selection/v1", "revision": 0, "enabled": False,
                      "theme_ids": [], "leadership_venue": "KRX", "recording": False}
     ram_selection_error = ""
@@ -477,8 +519,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                         else "position_context" if ram_selection.get("position_account_live") and not ram_selection["theme_ids"] else "theme_context",
                 "runtime": market_theme_shadow_runtime.status if market_theme_shadow_runtime is not None else {"state": "DISABLED"}}
 
-    async def check_stock_thesis_sources(expected_revision, lookback_seconds):
-        from .market_theme_shadow_inputs import read_stock_thesis_source_check
+    async def check_stock_thesis_sources(expected_revision, lookback_seconds, minute_research=False):
+        from .market_theme_shadow_inputs import read_stock_thesis_source_check, read_minute_stock_thesis_source_check
         # Explicit diagnostic only. Existing owner lock fences selection changes
         # and shutdown; cancellation drains the bounded read before releasing it.
         async with operational_state.lock:
@@ -489,9 +531,11 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             selected = deepcopy(ram_selection.get("stock_thesis"))
             if market_theme_shadow_bindings or selected is None:
                 raise RuntimeError("RAM_SHADOW_RESEARCH_THESIS_REQUIRED")
-            report = await drain_thread_call(read_stock_thesis_source_check, store, selected["evidence"],
+            reader = read_minute_stock_thesis_source_check if minute_research else read_stock_thesis_source_check
+            budget = {'lookback_minutes' if minute_research else 'lookback_seconds': lookback_seconds}
+            report = await drain_thread_call(reader, store, selected["evidence"],
                 thesis_policy_version=selected["thesis_policy_version"],
-                leadership_venue=ram_selection["leadership_venue"], lookback_seconds=lookback_seconds)
+                leadership_venue=ram_selection["leadership_venue"], **budget)
             return {**report, "selection_revision": expected_revision}
 
     async def prepare_ram_bindings(selection):
@@ -589,6 +633,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     if mock_owner is not None:
         from .mock_automation_supervisor import MockAutomationSupervisor
         mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner,
+            now_provider=server_now,
+            leader_context_source=lambda: {"policy": operational_state.settings.get("shadow_candidate_config"),
+                "revision": operational_state.applied_revision},
             price_source=collector.automation_price_observation if collector is not None else None)
         if collector is not None:
             collector.set_automation_price_listener(mock_automation_supervisor.observe_automation_price)
@@ -673,6 +720,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             await collector.start()
         if news_service is not None:
             await news_service.start()
+        await morning_brief.start()
         if external_market_service is not None and bool(operational["external_market_enabled"]):
             await external_market_service.start()
         if operational_state.candidate_monitor is not None:
@@ -720,6 +768,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         if news_service is not None:
             await news_service.close()
         status["stage"] = "ai"
+        await morning_brief.close()
         if ai_service is not None:
             await ai_service.close()
         status["stage"] = "top20"
@@ -798,6 +847,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     app.state.autonomous_top20_service = top20_service
     app.state.market_event_service = market_event_service
     app.state.external_market_collector = external_market_service
+    app.state.morning_market_brief = morning_brief
     app.state.candidate_monitor = operational_state.candidate_monitor
     app.state.mock_account_monitor = mock_account_monitor
     app.state.mock_account_realtime = mock_account_realtime
@@ -823,14 +873,22 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     def valid_token(supplied: str) -> bool:
         return bool(supplied) and hmac.compare_digest(supplied, active.access_token)
 
+    app.include_router(create_morning_market_brief_router(morning_brief, authorize))
     install_credential_routes(app, credential_runtime, authorize, active.credential_trusted_proxies, mock_owner, real_owner)
 
     from .account_settings_routes import create_account_settings_router
     app.include_router(create_account_settings_router(store, authorize, real_owner, mock_owner))
 
+    @app.middleware("http")
+    async def expose_server_clock(request, call_next):
+        response = await call_next(request)
+        if request.headers.get("X-Kiwoom-Clock") == "1":
+            response.headers["X-Kiwoom-Server-Time"] = server_now().isoformat()
+        return response
+
     @app.get("/health")
     async def health() -> dict[str, object]:
-        document = health_document()
+        document = health_document(now=server_now())
         document["server_build"] = SERVER_BUILD
         document["historical_news_archive"] = {
             "state": historical_archive_state,
@@ -845,7 +903,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             realtime_status is not None and realtime_status["persistence"]["state"] == "degraded"
         ) or (
             candidate_status is not None and (
-                candidate_status["universe"]["state"] in {"missing", "stale"}
+                candidate_status.get("universe", {}).get("state") in {"missing", "stale"}
                 or candidate_status["last_evaluation"]["status"] in {"STALE", "ERROR"}
             )
         )
@@ -945,11 +1003,14 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     app.include_router(scoped_mock_order_router)
 
     def publish_candidate_monitor(monitor):
+        if collector is not None:
+            bind_document_baseline(monitor)
         app.state.candidate_monitor = monitor
 
     operational_read_router, operational_update_router = create_operational_settings_routers(
         store, authorize, operational_state, market_event_service, external_market_service,
         ai_service, news_service, publish_candidate_monitor, logger,
+        now_provider=server_now,
         get_ram_shadow_selection=get_ram_shadow_selection,
         update_ram_shadow_selection=update_ram_shadow_selection,
         publish_allocation_models=publish_allocation_models)
@@ -958,7 +1019,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     from .diagnostic_read_routes import create_diagnostic_read_router
     diagnostic_read_router, diagnostic_workloads = create_diagnostic_read_router(
         store, authorize, active.database_url, top20_service, news_service,
-        external_market_service, lambda: operational_state.candidate_monitor, historical_archive)
+        external_market_service, lambda: operational_state.candidate_monitor, historical_archive,
+        morning_brief=morning_brief)
     app.include_router(diagnostic_read_router)
 
     from .diagnostic_workloads import control_path as diagnostic_control_path
@@ -1018,6 +1080,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     app.include_router(create_historical_news_archive_router(historical_archive, authorize))
 
     app.include_router(create_news_analysis_router(ai_service, authorize))
+    from .chatgpt_sessions import create_chatgpt_session_router
+    app.include_router(create_chatgpt_session_router(ai_service, authorize))
 
     from .historical_news_processing_routes import create_historical_news_processing_router
 
@@ -1035,11 +1099,12 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
 
     app.include_router(create_market_event_read_router(store, authorize, market_event_service))
 
-    app.include_router(create_market_archive_read_router(store, authorize))
+    app.include_router(create_market_archive_read_router(store, authorize, now_provider=server_now))
 
     from .research_read_routes import create_research_read_router
     app.include_router(create_research_read_router(store, authorize, lambda: operational_state.candidate_monitor,
         get_market_theme_shadow_runtime=lambda: market_theme_shadow_runtime,
+        now_provider=server_now,
         check_stock_thesis_sources=check_stock_thesis_sources))
 
     from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository

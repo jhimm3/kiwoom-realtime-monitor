@@ -32,6 +32,7 @@ from kiwoom_monitor.domain.execution_activation import (
     strategy_stage_revision,
 )
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from .leader_breakout import LeaderBreakoutConfig, validate_leader_shadow_event
 
 
 MOCK_AUTOMATION_LIMIT_FIELDS = (
@@ -56,6 +57,13 @@ def matching_shadow_events(
         return ()
     matched = []
     for value in events:
+        if isinstance(config, LeaderBreakoutConfig):
+            try:
+                validate_leader_shadow_event(config, value)
+            except (KeyError, TypeError, ValueError):
+                continue
+            matched.append(dict(value))
+            continue
         if (
             str(value.get("run_id", "")) != monitor_id
             or str(value.get("strategy_id", "")) != strategy_parts[0]
@@ -304,7 +312,9 @@ def publish_ready_mock_automation_spec(
     expected_monitor_id = shadow_monitor_id_for_config(family_id, config, package_session)
     family_parts = family_id.rsplit("/", 1)
     shadow_quantity = shadow_event.get("quantity")
-    if (
+    if isinstance(config, LeaderBreakoutConfig):
+        validate_leader_shadow_event(config, shadow_event)
+    elif (
         len(family_parts) != 2
         or str(shadow_event.get("run_id", "")) != expected_monitor_id
         or str(shadow_event.get("strategy_id", "")) != family_parts[0]

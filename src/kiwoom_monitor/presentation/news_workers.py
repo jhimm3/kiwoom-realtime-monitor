@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import sqlite3
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
+from threading import Event
 from typing import Callable
 from urllib.error import HTTPError, URLError
 
@@ -122,7 +125,7 @@ class NewsSearchWorker(QThread):
                 )}
                 known_ms = (perf_counter() - started) * 1000 - fetch_ms
                 new_identities = {news_identity(item) for item in fetched} - known
-                checked_at = datetime.now(UTC)
+                checked_at = kst_now()
                 new_count = repository.upsert(
                     self._stock_code, fetched, checked_at,
                     naver_checked_at=checked_at if naver_succeeded else None,
@@ -457,6 +460,11 @@ class AINewsWorker(QThread):
         self._groups, self._stock_name, self._settings = groups, stock_name, settings
         self._stock_code, self._central_client = stock_code, central_client
         self.central_cache_hit = False
+        self._plan_cancel = Event()
+
+    def requestInterruption(self) -> None:
+        self._plan_cancel.set()
+        super().requestInterruption()
 
     def run(self) -> None:
         api_attempted = False
@@ -507,9 +515,16 @@ class AINewsWorker(QThread):
                 body_hashes.append(analysis_body_hash(self._stock_name, combined_body))
                 article_count += len(group.items)
             api_attempted = True
-            model = self._settings.model.strip() or DEFAULT_MODELS[self._settings.provider]
-            results, usage = analyze_articles(self._settings, self._stock_name, tuple(event_inputs))
+            model = self._settings.model.strip() or DEFAULT_MODELS.get(self._settings.provider, "")
+            if self._settings.provider == "chatgpt_plan":
+                results, usage = analyze_articles(self._settings, self._stock_name, tuple(event_inputs), cancel=self._plan_cancel)
+            else:
+                results, usage = analyze_articles(self._settings, self._stock_name, tuple(event_inputs))
             provider = self._settings.provider
             self.completed.emit(results, tuple(body_hashes), provider, model, usage, article_count)
         except Exception as error:  # worker boundary: show a recoverable message in the UI
+            if self._settings.provider == "chatgpt_plan":
+                from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+                if isinstance(error, ChatGPTPlanError):
+                    api_attempted = error.inference_attempted
             self.failed.emit(str(error), api_attempted, article_count)

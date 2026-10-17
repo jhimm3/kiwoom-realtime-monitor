@@ -1,6 +1,8 @@
 """Stored/live market read policy; collection and native storage remain app-owned."""
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import asyncio
 import re
 from collections.abc import Callable
@@ -194,6 +196,7 @@ def create_market_event_read_router(
 
 def create_market_archive_read_router(
     store: MarketReadStore, authorize: Callable[..., None],
+    *, now_provider: Callable[[], datetime] | None = None,
 ) -> APIRouter:
     """Keep separate registration around the app-owned market-events route."""
     from fastapi import APIRouter, Depends, HTTPException, Query
@@ -244,7 +247,7 @@ def create_market_archive_read_router(
         normalized_start, normalized_end = as_kst(start), as_kst(end)
         if normalized_end <= normalized_start:
             raise HTTPException(status_code=400, detail="end는 start보다 뒤여야 합니다.")
-        cutoff = as_kst(available_by or datetime.now().astimezone())
+        cutoff = as_kst(available_by or (now_provider or kst_now)())
         from .postgres_access import db_call_source
         with db_call_source("api.market.coverage"):
             observations = await asyncio.to_thread(

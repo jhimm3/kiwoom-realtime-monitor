@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import logging
 import json
 import sqlite3
@@ -207,6 +209,8 @@ class StockNewsWindow(QDialog):
         self._ai_stock_code = ""
         self._ai_continue = False
         self._ai_automatic_run = False
+        self._ai_request_provider = ""
+        self._chatgpt_ai_paused = False
         self._manual_ai_queue = False
         self._auto_ai_identities: set[str] = set()
         self._pending_refresh = False
@@ -429,7 +433,7 @@ class StockNewsWindow(QDialog):
                 target_day = datetime.fromisoformat(self._journal_trade_date).date()
                 groups = tuple(
                     group for group in groups
-                    if any(item.published_at and item.published_at.astimezone().date() == target_day for item in group.items)
+                    if any(item.published_at and item.published_at.astimezone(ZoneInfo("Asia/Seoul")).date() == target_day for item in group.items)
                 )
             except ValueError:
                 pass
@@ -515,7 +519,7 @@ class StockNewsWindow(QDialog):
             return
         requested_code = self._stock_code
         requested_name = self._stock_name
-        two_days_ago = datetime.now(UTC) - timedelta(days=2)
+        two_days_ago = kst_now() - timedelta(days=2)
         if self._central_news_client is not None or last_naver_check is None:
             naver_since = two_days_ago
         else:
@@ -844,7 +848,7 @@ class StockNewsWindow(QDialog):
             ai = self._config.load_ai()
         except (OSError, ValueError):
             ai = NewsAISettings()
-        self._ai_button.setEnabled(bool((item.link or item.original_link) and ai.provider != "none" and ai.api_key)
+        self._ai_button.setEnabled(bool((item.link or item.original_link) and ai.provider != "none" and ai.local_credentials_configured)
                                    and (self._ai_worker is None or not self._ai_worker.isRunning()))
 
     def _restore_detail_scroll(self, identity: str, value: int) -> None:
@@ -974,6 +978,11 @@ class StockNewsWindow(QDialog):
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "AI 분석", str(error)); return
         used = self._ai_repository.daily_count()
+        if settings.provider == "chatgpt_plan":
+            if automatic and self._chatgpt_ai_paused:
+                return
+            if not automatic:
+                self._chatgpt_ai_paused = False  # Explicit single-request retry.
         block_reason = ai_start_block_reason(settings, used, len(groups))
         if block_reason == "daily_limit":
             QMessageBox.information(self, "AI 분석", f"오늘 설정한 상한 {settings.daily_limit}건을 모두 사용했습니다."); return
@@ -984,6 +993,7 @@ class StockNewsWindow(QDialog):
         self._ai_stock_code = self._stock_code
         self._ai_continue = False
         self._ai_automatic_run = automatic
+        self._ai_request_provider = settings.provider
         self._ai_worker = AINewsWorker(
             groups, self._stock_name, settings, self,
             stock_code=self._stock_code, central_client=self._central_ai_client,
@@ -1009,6 +1019,7 @@ class StockNewsWindow(QDialog):
         except (OSError, ValueError) as error:
             self._status_label.setText(f"AI 설정을 읽지 못했습니다: {error}")
             return
+        self._chatgpt_ai_paused = False  # Explicit user queue action.
         start = self._item_index(self._table.currentRow()) or 0
         candidates = unanalyzed_groups_from(
             self._visible_groups,
@@ -1034,6 +1045,8 @@ class StockNewsWindow(QDialog):
         try:
             settings = self._config.load_ai()
         except (OSError, ValueError):
+            return
+        if settings.provider == "chatgpt_plan" and self._chatgpt_ai_paused:
             return
         if not automatic_ai_run_allowed(
             settings,
@@ -1079,7 +1092,7 @@ class StockNewsWindow(QDialog):
             self._ai_repository.save(self._ai_stock_code, item, provider, model, str(body_hash), result)
             if self._ai_stock_code == self._stock_code:
                 self._ai_result_cache[news_identity(item)] = StoredAINewsAnalysis(
-                    result, provider, model, datetime.now(UTC), str(body_hash),
+                    result, provider, model, kst_now(), str(body_hash),
                 )
         requests, input_tokens, output_tokens, total_tokens = self._ai_repository.daily_usage()
         self._status_label.setText(
@@ -1110,7 +1123,7 @@ class StockNewsWindow(QDialog):
     def _on_ai_failed(self, message: str, api_attempted: bool = False, article_count: int = 0) -> None:
         if api_attempted:
             try:
-                settings = self._config.load_ai()
+                settings = getattr(self._ai_worker, "_settings", None) or self._config.load_ai()
                 model = settings.model.strip() or DEFAULT_MODELS.get(settings.provider, "")
                 self._ai_repository.log_request(
                     settings.provider, model, "batch" if len(self._ai_groups) > 1 else "single",
@@ -1118,6 +1131,12 @@ class StockNewsWindow(QDialog):
                 )
             except (OSError, ValueError, sqlite3.Error):
                 logger.warning("실패한 AI 요청 통계를 저장하지 못했습니다.", exc_info=True)
+        if self._ai_request_provider == "chatgpt_plan":
+            self._chatgpt_ai_paused = True
+            self._ai_continue = False
+            self._status_label.setText(f"ChatGPT 자동 요청 보류 · 사용량 관리·연결 설정을 확인하고 직접 재시도하세요: {message}")
+            logger.warning("ChatGPT 뉴스 요청 보류: %s", message)
+            return
         self._ai_continue = self._ai_automatic_run and bool(self._auto_ai_identities)
         if self._ai_continue:
             self._status_label.setText(f"AI 분석 실패 · 이 기사를 건너뛰고 다음 기사를 계속합니다: {message}")
@@ -1189,6 +1208,7 @@ class StockNewsWindow(QDialog):
         dialog.activateWindow()
 
     def _on_settings_saved(self) -> None:
+        self._chatgpt_ai_paused = False
         self._news_filter = self._config.load_filter()
         ai = self._config.load_ai()
         self._auto_ai_toggle.blockSignals(True)
@@ -1209,6 +1229,7 @@ class StockNewsWindow(QDialog):
             self._status_label.setText(f"AI 자동 분석 설정 저장 실패: {error}")
             return
         if enabled:
+            self._chatgpt_ai_paused = False
             self._configure_recent_auto_candidates()
             self._resume_auto_analysis()
             self._status_label.setText("AI 자동 분석을 켰습니다.")

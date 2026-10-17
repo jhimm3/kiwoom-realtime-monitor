@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today
+
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Protocol
@@ -116,7 +118,7 @@ class TradeCostService:
         return self.load_period_batch(start, end, today).costs
 
     def load_period_batch(self, start: date, end: date, today: date | None = None) -> TradeCostBatch:
-        today = today or date.today()
+        today = today or kst_today()
         settlement_end = min(today, end + timedelta(days=10))
         if settlement_end < start:
             raise ValueError("account cost query period ends before it starts")

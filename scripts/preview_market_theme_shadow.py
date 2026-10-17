@@ -23,12 +23,16 @@ from kiwoom_monitor.application.market_theme_shadow import (
 )
 from kiwoom_monitor.application.theme_leadership import (
     EntryThesis, SecondTradePoint, ThemeLeadershipParameters, ThemeLeadershipState, ThemeMembership,
-    UpperLimitReference,
+    UpperLimitReference, minute_trade_points_from_rows,
 )
 
 
 def evaluate_document(document: dict[str, Any]) -> dict[str, Any]:
     schema = document.get("schema")
+    minute_research = schema in {'market-theme-shadow/minute-research-v2', 'stock-thesis-shadow/minute-research-v2'}
+    if minute_research:
+        document = {**document, 'schema': (STOCK_THESIS_SHADOW_VERSION if schema.startswith('stock-thesis') else SHADOW_CONTEXT_VERSION)}
+        schema = document['schema']
     from kiwoom_monitor.application.order_lifecycle import (
         UNFILLED_MANAGEMENT_SHADOW_VERSION,evaluate_unfilled_order_management_document,
     )
@@ -57,7 +61,20 @@ def evaluate_document(document: dict[str, Any]) -> dict[str, Any]:
         **{**frame, "members": tuple(MarketMember(**{**member, "themes": tuple(member.get("themes", ()))})
                                     for member in frame["members"])},
     ) for frame in raw["market_frames"])
-    raw["second_points"] = tuple(SecondTradePoint(**point) for point in raw["second_points"])
+    if minute_research:
+        if 'second_points' in raw or 'minute_rows' not in raw:
+            raise ValueError('minute research requires minute_rows, never second_points')
+        required = set(ThemeLeadershipParameters.__dataclass_fields__)
+        if not required <= set(document.get('leadership_parameters', {})):
+            raise ValueError('minute research requires every leadership parameter explicitly')
+        params = document['leadership_parameters']
+        if params['window_seconds'] < 60 or params['window_seconds'] % 60 or params['max_data_age_seconds'] < 60:
+            raise ValueError('minute research needs explicit whole-minute windows and freshness')
+        raw['observation_points'] = minute_trade_points_from_rows(raw.pop('minute_rows'), as_of=raw['decision_time'])
+        raw['input_resolution'] = '1m'
+        raw['second_points'] = ()
+    else:
+        raw["second_points"] = tuple(SecondTradePoint(**point) for point in raw["second_points"])
     if raw["theme_membership"] is not None:
         raw["theme_membership"] = ThemeMembership(**{
             **raw["theme_membership"], "member_codes": tuple(raw["theme_membership"]["member_codes"]),
@@ -69,7 +86,8 @@ def evaluate_document(document: dict[str, Any]) -> dict[str, Any]:
     if raw.get("previous_leadership_state") is not None:
         raw["previous_leadership_state"] = ThemeLeadershipState(**raw["previous_leadership_state"])
     raw["upper_limits"] = tuple(UpperLimitReference(**limit) for limit in raw.get("upper_limits", ()))
-    inputs = MarketThemeShadowInputs(**raw)
+    from kiwoom_monitor.application.market_theme_shadow import MarketPriceTradeShadowInputs
+    inputs = MarketPriceTradeShadowInputs(**raw) if minute_research else MarketThemeShadowInputs(**raw)
     parameters = {
         "market_parameters": MarketFeatureParameters(**document.get("market_parameters", {})),
         "leadership_parameters": ThemeLeadershipParameters(**document.get("leadership_parameters", {})),
@@ -139,7 +157,7 @@ def main() -> int:
         if any(value is not None for value in selected):
             if not all(selected):
                 raise ValueError("research DB, run ID, entry thesis ID and policy must all be explicit")
-            if document.get("schema") != SHADOW_CONTEXT_VERSION or "stock_thesis" in document:
+            if document.get("schema") not in {SHADOW_CONTEXT_VERSION,"market-theme-shadow/minute-research-v2"} or "stock_thesis" in document:
                 raise ValueError("saved thesis selection requires a context document without an embedded thesis")
             from dataclasses import asdict
             from kiwoom_monitor.central_server.market_theme_shadow_inputs import read_persisted_stock_thesis_shadow_request
@@ -149,7 +167,7 @@ def main() -> int:
                 thesis_id=args.entry_thesis_id, thesis_policy_version=args.thesis_policy,
                 leadership_venue=document["inputs"]["leadership_venue"], decision_time=document["inputs"]["decision_time"],
             )
-            document = {**document, "schema": STOCK_THESIS_SHADOW_VERSION, "stock_thesis": asdict(request)}
+            document = {**document, "schema": ("stock-thesis-shadow/minute-research-v2" if document["schema"]=="market-theme-shadow/minute-research-v2" else STOCK_THESIS_SHADOW_VERSION), "stock_thesis": asdict(request)}
         result = native_allocation_result if native_allocation_result is not None else evaluate_document(document)
         if source_receipt is not None:
             result = {**result, 'position_outcome_source': source_receipt}

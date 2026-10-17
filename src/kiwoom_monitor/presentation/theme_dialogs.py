@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -767,7 +769,7 @@ class ThemeSuggestionReviewDialog(QDialog):
             self._table.setColumnWidth(column, width)
         for row, suggestion in enumerate(suggestions):
             published = getattr(suggestion, "article_published_at", None)
-            published_text = published.astimezone().strftime("%Y-%m-%d %H:%M") if published else "시간 없음"
+            published_text = format_kst_time(published, "%Y-%m-%d %H:%M", missing="시간 없음")
             readonly = (
                 (0, str(getattr(suggestion, "stock_name", ""))),
                 (1, str(getattr(suggestion, "raw_theme_name", ""))),

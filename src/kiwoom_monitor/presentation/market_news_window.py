@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today, kst_now
+
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -61,7 +65,7 @@ class MarketNewsLoadWorker(QThread):
         news_filter = config.load_filter()
         repository = StockNewsRepository(self._database_path, stored_news_limit=self._limit)
         key = f"MARKET:{self._source}"
-        cutoff = datetime.now(UTC) - timedelta(days=2)
+        cutoff = kst_now() - timedelta(days=2)
         previous = repository.last_naver_checked_at(key)
         since = max(previous.astimezone(UTC), cutoff) if previous else cutoff
         if not repository.recently_checked(key, 60):
@@ -90,8 +94,8 @@ class MarketNewsLoadWorker(QThread):
                             start += display
                 else:
                     endpoints = {"flash": settings.flash_url, "world": settings.world_url}
-                    for day in (date.today(), date.today() - timedelta(days=1),
-                                date.today() - timedelta(days=2)):
+                    for day in (kst_today(), kst_today() - timedelta(days=1),
+                                kst_today() - timedelta(days=2)):
                         page_number = 1
                         while len(fetched) < self._limit and page_number <= 100:
                             if self.isInterruptionRequested():
@@ -110,7 +114,7 @@ class MarketNewsLoadWorker(QThread):
                             if len(page.articles) < PAGE_SIZE[self._source] or page.older_count:
                                 break
                             page_number += 1
-                repository.upsert(key, tuple(fetched), naver_checked_at=datetime.now(UTC))
+                repository.upsert(key, tuple(fetched), naver_checked_at=kst_now())
             except Exception:
                 if not repository.load(key, limit=self._limit):
                     raise
@@ -252,7 +256,7 @@ class MarketNewsWindow(QDialog):
             return
         table.setRowCount(len(items))
         for row, item in enumerate(items):
-            for column, value in enumerate((item.get("published_at"),
+            for column, value in enumerate((format_kst_time(item.get("published_at"), missing=""),
                                             item.get("query_membership"), item.get("title"))):
                 table.setItem(row, column, QTableWidgetItem(str(value or "")))
         self._status.setText(f"{LABELS[source]} {len(items)}건" if items else

@@ -7,7 +7,9 @@ import logging
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
+
+from .market_observations import KST, as_kst
 
 from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationDesiredState,
@@ -46,12 +48,15 @@ class MockAutomationSupervisorError(RuntimeError):
 class MockAutomationSupervisor:
     """Serialize account mode changes and own one runner per mock account."""
 
-    def __init__(self, store: Any, credential_owner: Any, *, poll_seconds: float = 1.0, price_source=None) -> None:
+    def __init__(self, store: Any, credential_owner: Any, *, poll_seconds: float = 1.0, price_source=None,
+                 now_provider: Callable[[], datetime] | None = None, leader_context_source=None) -> None:
+        self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._store = store
         self._owner = credential_owner
         self._repository = ForwardEvaluationRepository(store)
         self._poll_seconds = max(0.25, float(poll_seconds))
         self._price_source = price_source
+        self._leader_context_source = leader_context_source
         self._runners: dict[str, MockAutomationRunner] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._restore_errors: dict[str, str] = {}
@@ -66,6 +71,12 @@ class MockAutomationSupervisor:
             return
         for runner in tuple(self._runners.values()):
             runner.observe_automation_price(symbol, price)
+
+    def observe_leader_trade(self, payload, received_at, **source):
+        if self._closing:
+            return
+        for runner in tuple(self._runners.values()):
+            runner.observe_leader_trade(payload, received_at, **source)
 
     def position_shadow_observation(self,observation):
         """Enrich one borrowed account cut using its current registered owner only."""
@@ -158,7 +169,7 @@ class MockAutomationSupervisor:
                 or control.desired_state is not MockAutomationDesiredState.RUNNING
             ):
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_EXPLICIT_HANDOFF_REQUIRED")
-            requested_at = datetime.now(timezone.utc)
+            requested_at = self._now()
             admission = await asyncio.to_thread(
                 self._repository.load_mock_automation_admission_for_spec, account_ref, spec_id,
             )
@@ -212,6 +223,8 @@ class MockAutomationSupervisor:
                 )
                 runner = MockAutomationRunner(
                     self._store, bundle, spec, poll_seconds=self._poll_seconds, price_source=self._price_source,
+                    now_provider=self._now,
+                    leader_context_source=self._leader_context_source,
                 )
                 await runner.start()
             except Exception:
@@ -247,7 +260,7 @@ class MockAutomationSupervisor:
                 bundle.runtime,
                 account_ref=account_ref,
                 spec_id=spec_id,
-                stopped_at=datetime.now(timezone.utc),
+                stopped_at=self._now(),
                 reason=reason,
             )
             return self.status(account_ref, credential_profile_id=credential_profile_id)
@@ -328,13 +341,15 @@ class MockAutomationSupervisor:
                 bundle.runtime,
                 account_ref=account_ref,
                 spec_id=spec_id,
-                resumed_at=datetime.now(timezone.utc),
+                resumed_at=self._now(),
                 reason=reason,
             )
             if account_ref not in self._runners:
                 try:
                     runner = MockAutomationRunner(
                         self._store, bundle, spec, poll_seconds=self._poll_seconds, price_source=self._price_source,
+                        now_provider=self._now,
+                        leader_context_source=self._leader_context_source,
                     )
                     await runner.start()
                 except Exception:

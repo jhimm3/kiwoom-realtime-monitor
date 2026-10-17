@@ -16,7 +16,7 @@ class DiagnosticStorageReadStore(Protocol):
 def create_diagnostic_read_router(
     store: DiagnosticStorageReadStore, authorize: Callable[..., None], database_url: str,
     top20_service: Any, news_service: Any, external_market_service: Any,
-    current_candidate_monitor: Callable[[], Any], historical_archive: Any,
+    current_candidate_monitor: Callable[[], Any], historical_archive: Any, *, morning_brief=None,
 ) -> tuple["APIRouter", Callable[..., Any]]:
     """Return the same workload reader used by HTTP and diagnostic control/run sampling."""
     from fastapi import APIRouter, Depends, HTTPException
@@ -65,6 +65,7 @@ def create_diagnostic_read_router(
             "external_market": external_market_service is not None,
             "candidate_monitor": current_candidate_monitor() is not None,
             "historical_news_archive": historical_archive is not None,
+            "morning_market_brief": bool(morning_brief and morning_brief.settings["enabled"]),
         }
         external_runtime = (external_market_service.diagnostic_status()
                             if external_market_service is not None else {
@@ -91,6 +92,8 @@ def create_diagnostic_read_router(
                                          and external_runtime["running"]
                                          and name not in paused)
                 item["runtime"] = external_runtime
+            if name == "morning_market_brief" and morning_brief is not None:
+                item["runtime"] = morning_brief.status()["diagnostics"]
             workloads[name] = item
         return {"diagnostic_tool": diagnostic_tool, "workloads": workloads,
             "metrics_capture": capture, "trace_capture": control["trace_capture"],

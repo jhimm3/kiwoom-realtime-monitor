@@ -173,6 +173,8 @@
       "tests.unit.test_main_window",
       "tests.unit.test_market_cache_writer",
       "tests.unit.test_realtime_gap_quality",
+      "tests.unit.test_live_0b_minute_transition",
+      "tests.unit.test_live_0b_allocation_dialog",
       "tests.unit.test_run_test_app_with_data"
     ],
     "top20-lifecycle": [
@@ -185,7 +187,14 @@
     ],
     "news-api-contract": [
       "tests.unit.test_news_api_contract_baseline",
-      "tests.unit.test_news_read_routes"
+      "tests.unit.test_news_read_routes",
+      "tests.unit.test_morning_market_brief",
+      "tests.unit.test_morning_market_ai",
+      "tests.unit.test_morning_market_brief_dialog",
+      "tests.unit.test_chatgpt_plan",
+      "tests.unit.test_chatgpt_plan_settings",
+      "tests.unit.test_nas_chatgpt_plan",
+      "tests.unit.test_chatgpt_nas_transfer"
     ],
     "dependency-audit-p0-execution-fence": [
       "tests.unit.test_mock_account_drain"
@@ -387,6 +396,7 @@
       "tests.unit.test_historical_archive_batch_reads",
       "tests.unit.test_historical_archive_completion_gate",
       "tests.unit.test_historical_archive_execution_transition",
+      "tests.unit.test_historical_archive_event_conflict_recovery",
       "tests.unit.test_index_historical_archive_lookups",
       "tests.unit.test_prepared_historical_archive_inputs",
       "tests.unit.test_historical_archive_prefix_transition",
@@ -424,6 +434,7 @@
       "tests.unit.test_krx_stock_catalog",
       "tests.unit.test_local_api_config",
       "tests.unit.test_local_storage_diagnostics",
+      "tests.unit.test_storage_time_kst_migration",
       "tests.unit.test_market_index_chart_service",
       "tests.unit.test_market_news_sources",
       "tests.unit.test_market_news_window",
@@ -456,6 +467,7 @@
       "tests.unit.test_report_historical_collection_status",
       "tests.unit.test_research_bundle",
       "tests.unit.test_research_bundle_execution",
+      "tests.unit.test_leader_breakout",
       "tests.unit.test_research_campaign",
       "tests.unit.test_research_campaign_budget",
       "tests.unit.test_research_campaign_dialog",

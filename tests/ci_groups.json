@@ -25,6 +25,8 @@
     "main-observation-delivery-contracts"
   ],
   "required_windows_additions": [
+    "tests.unit.test_live_0b_minute_transition",
+    "tests.unit.test_live_0b_allocation_dialog",
     "tests.unit.test_position_study_cohort",
     "tests.unit.test_position_study_publication",
     "tests.unit.test_position_runner_state",
@@ -114,7 +116,8 @@
     "tests.integration.test_top20_session_postgres"
   ],
   "operator_extended": [
-    "tests.integration.test_nas_operator_linux"
+    "tests.integration.test_nas_operator_linux",
+    "tests.integration.test_chatgpt_linux_store"
   ],
   "nas_operator_owned": [
     "tests.integration.test_recorded_account_postgres",

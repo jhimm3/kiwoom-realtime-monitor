@@ -1,5 +1,57 @@
 # NAS API 계약
 
+`search_calls`는 연구 요청의 검색 동작 시도 건수다. 완료되지 않은 웹 동작은 안전한 URL 근거에 포함하지 않고 기존 web_actions 항목의 선택 status에 failed/in_progress/incomplete/unknown을 남긴다. 완료된 모델 텍스트·사용량은 검색 동작/출처 부재로 버리지 않는다. 일반 기사 AI 응답 경로와 인증·전송 오류는 바꾸지 않는다.
+
+2026-10-17 후속 사용자 정정이 우선한다. 장전 `result`는 연구 자료이며 미확인 출처/시각/사실 분류를 이유로 값·evidence·참조를 지우거나 run을 실패시키지 않는다. 확인 부족은 기존 unknowns로 전달하고 모델 반환 분류와 구분한다. 근거 참조 배열은 빈 배열을 허용하며 unknowns의 개수로 연구 결과를 거절하지 않는다. JSON/수치/정의되지 않은 참조·시간 기반 과거 비교의 구조 검사는 유지한다. 기존 GET은 원래 failed run의 보존 raw_response를 읽어 현행 정책으로 처리할 수 있으면 result와 `result_recovered_from_raw_response=true`를 부가한다. 원 status/error/history와 저장 자료는 유지하며 새 AI 호출/운영 DB 쓰기가 없다. context의 input_quality_ok는 진단이며 연구 공급 차단 조건이 아니다. 아래의 미확인 제외 정책은 이전 기록이다.
+
+2026-10-17 사용자 승인에 따라 장전 결과 검증 시 `verification=unverified`이고 웹 도구 반환 출처에도 없는 항목과 그 근거 참조만 분리한다. 제외된 ID·주소·사유는 기존 `result.unknowns`에 남기며 `raw_response`·과거 실패 run은 보존한다. `original_read`/`secondary_only`의 출처 검사와 확정 사실/수치의 남은 근거·시각/참조 검증은 유지한다. 기존 GET/설정/예약/claim·출력 스키마는 바꾸지 않는다.
+
+2026-10-17 장전 run의 선택 `web_actions`는 웹 도구의 동작 종류(search/open_page/find_in_page/other)와 실제 반환된 안전한 URL 목록만 담는다. 같은 인증의 기존 GET에 부가하며 요청·설정 revision·예약/claim·결과 검증은 바뀌지 않는다. 검색어·프롬프트·계정/토큰·원시 provider 응답을 이 필드에 포함하지 않는다. URL이 출처 목록에 있다고 원문 내용 검증을 완료했다는 뜻은 아니며 기존 evidence 검증을 유지한다.
+
+## 2026-10-16 00종합 가격 기준선 관측 (로컬·미배포)
+
+기존 `leader_breakout/v1` 정책에 선택 `reference_level`을 추가한다. 정확한 키는 `type=prior_window_high`, `window_seconds=null 또는 명시 양의 정수`, `exclude_current_interval=true`다. 기존 필드가 없는 v1 직렬화/hash는 유지한다. native1분으로 증명할 수 없는 창을 반올림하지 않으며 null은 기준 미정이다. 기본 초안은 이 구조와 `observed_price_cross`/`completed_minute_close_cross` 이름만 명시하고 숫자는 넣지 않는다. 명시 환경 override와 기존 저장 원문은 보존한다.
+
+기존 후보 조회 `quality`에 새 프로필의 선택 `document_baseline_observations` 목록(최대200)을 부가한다. 실제 가격/시각/원문 ref, reference의 창·고가·quality·대표 input_refs 최대3개/전체 input_count·input_refs_hash, 관측 상태와 `observed_price_cross`, 미정 사유를 담는다. 상태는 DATA_BLOCKED/WATCH/ABOVE_REFERENCE/CROSSED_UNCONFIRMED이며 `confirmation_verified=false`, `proposal=WAIT`, `order_authorized=false`다. native 기준 자료의 영속성은 `not_verified`로 표시한다. 0B FID14 일중 누적 대금과 설정할 비교 대금 기준을 구분한다. 주도주 적격은 명시 context의 현재 가용한 사실만 사용한다. 관측은 기존 shadow decision JSON의 `baseline_observation`에 남고 신규 후보/ENTER/알림을 만들지 않는다.
+
+분봉 판단 연구 결과의 각 decision에도 같은 선택 `baseline_observation`을 부가한다. 완료 종가 교차 분석이며 fake0B/체결/손익이 아니다. 새 프로필은 `document_baseline_observation_only`로 실행 계약/진입 승인을 차단한다. 새 endpoint/인증·주문 승인 권한/DB 스키마는 추가하지 않는다. [호출 경로와 검증](docs/workstreams/realtime-entry.md#2026-10-16-00종합에-명시된-가격-기준선-연결-로컬).
+
+## 2026-10-16 현재 0B 테마 H2의 시작가격 기준 (로컬)
+
+기존 RAM Shadow context의 현재0B `leadership.facts`에 선택 진단 `price_return_basis=first_observed_second_last_received_price/v1`을 명시한다. 창 상승률의 시작 가격은 창 첫 관측 초의 마지막 가용 수신가격, 끝 가격은 창 마지막 가용 수신가격이다. 창 고가·거래대금·체결 수는 모든 가용 체결을 반영한다. 이는 초봉 객체나 저장 자료를 만드는 계약이 아니다. 기존 정책 창·임계값·만료·결측/공백·주문 미승인은 유지한다. 필드가 없는 과거0B/초봉/분봉 결과를 새 계산 기준으로 재표지하지 않는다. 필드는 기존 context 내용 hash에 포함되며 새 endpoint·인증·승인 권한은 추가하지 않는다. [대조 원장](docs/workstreams/second-trade-dependencies.md).
+
+## 2026-10-16 현재 0B 테마 H2의 시작가격 기준 (로컬)
+
+기존 RAM Shadow context의 현재0B `leadership.facts`에 선택 진단 `price_return_basis=first_observed_second_last_received_price/v1`을 명시한다. 창 상승률의 시작 가격은 창 첫 관측 초의 마지막 가용 수신가격, 끝 가격은 창 마지막 가용 수신가격이다. 창 고가·거래대금·체결 수는 모든 가용 체결을 반영한다. 이는 초봉 객체나 저장 자료를 만드는 계약이 아니다. 기존 정책 창·임계값·만료·결측/공백·주문 미승인은 유지한다. 필드가 없는 과거0B/초봉/분봉 결과를 새 계산 기준으로 재표지하지 않는다. 필드는 기존 context 내용 hash에 포함되며 새 endpoint·인증·승인 권한은 추가하지 않는다. [대조 원장](docs/workstreams/second-trade-dependencies.md).
+
+## 2026-10-16 현재 0B 동적 비중의 RMS 진단 필드 (로컬)
+
+기존 RAM Shadow 응답의 `position_allocation.facts`에는 현재0B 경로에서 선택 진단 필드 `volatility_basis=last_received_price_per_observed_second/v1`, `volatility_sample_count`를 제공한다. 표본 수는 창 안에서 실제 관측한 초별 마지막 수신가격의 수이며 체결 건수가 아니다. 무체결 초는 채우지 않는다. `observed_close_return_rms_bps`는 이 가격들에 기존 공식·최소 표본 수·반올림을 적용하고, `recent_turnover_won`은 모든 실제 체결을 합산한다. 과거 응답에 새 필드를 소급 삽입하거나 현재0B로 재표지하지 않는다. 새 endpoint·인증·주문 권한은 없다. [재현과 범위](docs/workstreams/second-trade-dependencies.md#2026-10-16-동적-비중-rms의-기존-표본-의미-복구).
+
+## 2026-10-16 주도주 돌파 실행·캠페인 연결 (로컬 구현)
+
+새 Family `leader_breakout/v1`은 기존 모의 자동운용 API/인증/승인/계좌 lease를 사용한다. 승인된 실제0B 원문과 현재 운영 설정의 명시 근거가 필요하며 Shadow 조회는 주문 권한이 아니다. `leader_breakout_execution/v1`의 미정 필드는 null로 남기고 차단한다. `leader_absolute_stop/v1`은 고정 절대가격·실제 FILL 수량/진입가·계좌/실행/규칙을 묶는 보호 proof다. 구형 bps proof는 보존한다.
+
+판단 campaign `leader_breakout_decision_campaign/v1`은 명시 정책 목록과 frozen dataset/구현 hash를 묶고 판단/차단 사유를 수집한다. PnL/승인 후보는 만들지 않는다. 성과는 기존 limited-search/final에서 명시 체결·비용·평가 조건을 요구한다. 연구는 완료·보완 분봉, 실시간은0B이며 초봉을 요구하지 않는다. `final_candidate/v2`는 contexts를 비워 과거 연구 근거의 현재 주문 사용을 막는다. 기존 v1 의미/hash는 유지한다. 아래 성과 미지원 설명은 이전 상태다. [현재 구현](docs/workstreams/realtime-entry.md#2026-10-16-자동매매연구-캠페인windows-연결-구현).
+
+## 2026-10-16 주도주 구조 돌파 — 기존 설정/후보 API의 새 정책
+
+`shadow_candidate_config.policy_id=leader_breakout/v1`은 실제0B 입력을 쓰며 초봉/분봉 DB polling을 하지 않는다. 주도주/구조 context·이격·확인 관측 수/유지 시간·대금/신선도·구조 이탈/위험의 미정 필수 값은 null로 보존하고 BLOCKED 사유를 반환한다. 명시 이전 비교 설정은 별도 호환이며 새 미지정 기본값과 과거 암묵적5봉·3%·5%·10분 프로필은 새 draft다. 원래 저장 문서는 재작성하지 않는다. 기존 인증·revision 충돌·저장/적용 실패 응답은 유지한다.
+
+새 후보는 `strategy_id=leader_breakout`, `strategy_version=v1`, `quantity=null`, `order_authorized=false`이고 기존 후보 저장/API를 쓴다. 새 monitor가 활성일 때 유효기간 안의 이전 monitor 후보는 SUPERSEDED, 끝난 episode는 INVALIDATED로 투영한다. 관찰 비활성화나 기존 Family로 전환해 새 정책의 현재 owner가 없어도 미만료 새 후보는 SUPERSEDED이며 ACTIVE로 복귀하지 않는다. EXPIRED 우선과 원본 불변 원장은 보존한다. Windows는 incremental 전달과 별도로 같은 인증 API의 최근 최대1,000건 상태를 읽어 기존 행을 갱신한다. 재확인은 신규 cursor/알림을 소비하지 않고 범위 밖·실패의 현재 상태는 미확인으로 표시한다. 후보에서 포지션/체결·주문 권한을 복원하지 않는다. 정책의 단일 비교 함수가 수행하는 HOLD/EXIT는 실제 보유 여부를 명시 입력한 순수 계산이며 현재 후보 callback은 보유/주문 owner를 대체하지 않는다.
+
+연구 실행기는 별도 명시 `mode=leader_breakout`에서 frozen 완료 분봉을 읽어 가격·판단·사유를 반환한다. 실제 수신0B 교차와 분봉 종가 교차·대금 창의 해상도 차이를 보존하며 체결·비용·성과 캠페인/최종 후보 계약은 아직 지원하지 않는다. 기존 Family로 조용히 대체하지 않는다. [정책·검증·한계](docs/workstreams/realtime-entry.md#2026-10-16-실제-돌파-로직-구현--0b-관측과-분봉-연구).
+
+## 2026-10-15 직접 검색 장전 시황 (ed9d 로컬 구현, NAS 미배포)
+
+기존 인증의 `GET/PUT /api/v1/market/morning-brief/settings`, `GET /api/v1/market/morning-brief`, `POST /api/v1/market/morning-brief/run`을 추가한다. 설정 PUT은 expected_revision과 편집 프롬프트·공급자·모델·추론·07:55 기본 예약·TTL·관심 목록을 검증하며 revision 충돌409/잘못된 추가 필드422/미인증401이다. 생성 POST는202로 실행 소유를 반환하고 GET은 저장 결과만 읽는다.
+
+분석 payload는 `morning-market-brief-v4`의 [엄격 JSON Schema](docs/workstreams/morning-market-brief-output.schema.json)를 따른다. 확정 종가는 trading_date/price_status/timestamp_precision/availability_basis로 표현하며 공식 완료 근거가 있으면 observed_at=null을 허용한다. 실시간/지연 시세의 관측 시각 요구는 유지한다. 사람용 evidence_summary, 시장 방향/참여/집중, 사실/재료/근거, proposed 관계와 UNCONFIRMED 가설, 장중 확인/반대/무효화 조건, 누락을 분리한다. 점수·확률·숫자 신뢰도·영속 ID·장중 확인 상태를 LLM 출력으로 받지 않는다. [원본 설계 대비 차이와 기존 C1 매핑](docs/workstreams/morning-market-brief-alignment.md).
+
+조회는 run/context/history를 반환한다. context.available은 cutoff 이후 실제 완료 가용시각과 TTL, 검색/필수 지표 품질을 검사한 **조회 가용성**이며 정책의 news_context 가용성 선언이 아니다. `advisory_only=true`, `auto_trade_eligible=false`, `consumer_binding=not_connected`를 유지한다. 기존 v2/v3 실행은 history/run에 보존하되 현재 context는 legacy_schema로 제외한다. 이 API를 Market State/C1/최종 매매 판단에 실제 연결했다고 표시하지 않는다. 기존 공개 엔드포인트와 정책별 required_data_capabilities는 변경하지 않는다.
+
+아래는 기존 정책·API 계약이다.
+
 `paired-net-action-selection/v2`의 선택 `action_required_data_capabilities`는 JSON `[["ADD", ["news_context"]]]`처럼 행동과 정렬된 추가 자료 배열의 쌍이며 DTO는 불변 tuple이다. 행동 키는 HOLD/ADD/REDUCE/REENTER/EXIT 중 중복 없이 정렬된 1~5개이며 비교 요청에 존재해야 한다. 추가 자료는 아래 v2 허용값을 사용하고 공통 required_data_capabilities와 합친다. 생략/None은 기존 결과·ID와 출력 모양을 유지한다. 선택 action_inputs는 행동별 required/missing_data_capabilities·reasons·원래 valid_until을 제공하고 action_selection.action_input_rejections는 제외된 후보의 사유다. 후보 결측이 다른 후보를 차단하지 않으나 HOLD 기준선의 필수 자료 결측은 WAIT다. 타점 제약/TTL은 요구한 행동에 적용하며 유효한 R3 EXIT와 공통 하드 Risk는 전체 보호 우선이다. 선택한 행동의 TTL을 receipt에도 반영한다. **현재 thesis_ref 조건은 공통 또는 행동별 stock_thesis 요구가 있을 때 필수, 그 외 빈 값이다.** 테마 없는 시작 조건은 공통 자료 요구에 적용하고 행동별 추가 자료 결측은 해당 후보를 제외한다. 별도 선택 stock_thesis/상위 allocation의 테마 시작 요건은 유지한다.
 
 상위 native 비중의 가중치0 소비자는 기존 Runtime의 typed ThemeMembership을 위험 소속으로 받아 사용 H1/H2 점수 구성요소의 시각/TTL을 검사한다. 미사용 leadership 창의 결측이 시장 점수의 lease를 줄이지 않는다. 미래 소속·상이한 중복·선택 종목 소속 결측은 차단한다. 모두 양수인 기존 가중치와 독립 owner 자료를 명시하지 않은 직접 호출 계약은 유지한다. 현재 A03 지원 계약/실제 실행 승인과 구분한다.
@@ -153,6 +205,26 @@ RAM envelope의 optional position_comparison은 live 선택에서 `input_mode=ow
 
 고정 결과의 live envelope 포함은 실시간 계좌 연결·원본 확정·Replay 적격·주문 승인 근거가 아니다. source_durability/probability_calibration은 not_verified, execution_support=shadow_only, order_authorized=false다. 실제 행동 자료 reader·실시간 계좌 owner 입력 연결은 후속이다.
 
+
+## 2026-10-15 TOP20 관측 변화의 RAM 전달 (로컬 미배포)
+
+가격 후보의 `quality.coverage`는 판단 cut 당시 기대/평가/자료 확인 종목 수와 연속성·이전/현재 표본·시세 만료의 수를 추가 제공한다. 사유별 수는 중복될 수 있다. 종목 metrics의 reasons는 기존 source 승인·연속 시작/비교 이력·RAM retention/gap·소속 품질·시세 변환, 이전/현재 창 표본과 관측 부재를 구분한다. 자료 확인 수는 전체 코호트/후보 COMPLETE 승인과 같지 않으며 미래 소속의 종목/시세를 노출하지 않는다. 기존 TTL 투영은 원래 cut의 진단을 보존하되 PC는 만료 때 `시세자료 확인 만료`로 표시한다. 부분 자료를 후보로 승격하거나 기존 전원/표본/시점/신선도 기준을 완화하지 않는다.
+
+선택 map의 `lookup_change`는 최근 완성 순위의 첫 종목 유지/교체다. Runtime의 `price_trade_leadership`은 `minute-price-trade-candidates/v1`, `primary_timeframe=1m`이며 조회순위와 독립적으로 후보를 선정한다. 같은 현재 TOP20/거래소의 완료된 직전1분과 그 앞1분을 비교한다. 각 구간 첫 시가→마지막 종가의 가격 bps, 실제 거래대금 합계(WON)를 사용하며 가격 양수·코호트 중앙값 초과, 대금 양수·중앙값 초과·동률 보존 상위 K를 모두 요구한다. `rank_price_trade_relation`은 조회순위 변경 중 후보 유지, 조회순위 유지 중 후보 교체를 구분한다. 이는 TOP20 내 관측이며 전체 시장 대장·순유입/수익성·주문 자격을 뜻하지 않는다.
+
+`timeframes`는 1m/5m 비교를 제공한다. `five_minute_confirmation`은 현재1분 후보가 최근5분 누적 가격·대금 조건과 그5개 분 중3개 이상의 동일 후보 조건을 충족하면 CONFIRMED다. 현재5분만으로 지속 확인이 가능하며, 이전5분과의 변화 비교에는10분 이력이 필요하다. 5분 결측은 완전한1분 관측을 막지 않는다. 기존 분 마감2초 지연, 같은 거래일/venue, complete/actual·출처·effective_at·당시 available_at/updated_at을 검사한다. 최신 가용 revision의 partial 정정도 반영하며 결측/추정 대금을0이나 완료 봉으로 채우지 않는다. 분봉 만료는 완료 구간 끝+90초와 소속의 H1 TTL 중 빠른 값이다. H2 초 창/만료 설정을 사용하지 않는다.
+
+초봉은 별도 `second_trade_auxiliary`다. 기존 `observed-price-trade-candidates/v1` 직접 호출/과거 저장값의 의미를 유지하되 Runtime 분봉의 필수 조건이나 만료 기준으로 사용하지 않는다. 초봉 보조에만 승인 source/retention/gap·두 창 표본·H2 창/신선도를 적용한다. 각 부가 변환/계산 실패는 해당 관측만 UNKNOWN/UNAVAILABLE이며 기존 H1/H2/보호 결과는 유지한다.
+
+기존 Runtime이 유효 소속의 최대200(code,venue)에 대해 기존 Collector.load_live_minute_bars를 읽고 완료10분 범위만 공유 cache에 둔다. 같은 day/완료 경계/코호트/기존 분 저장·마감 ACK의 읽기를 합치며 별도 polling/수집/쓰기 owner는 없다. 한 소유 비동기 읽기가 대기해도 기존 판단/보호 처리는 계속한다. 완료 시 정확히 연결된 core 결과의 부가 관측만 원래 cut으로 갱신하고 `published_at`에 실제 반영시각을 둔다. 미래 자료는 제외하며 core 판단/ID를 재계산하지 않는다. 종료는 수락한 읽기를 기다리고 정리한다. 같은 스코프의2/8 소비자가 계산을 공유하고 상태 GET100회는 추가 DB/계산0이다.
+
+기존 인증 `GET /api/v1/research/ram-shadow`의 `ram-shadow-diagnostics/v1` live envelope에 optional `market_observed_changes` map을 추가한다. 기존 Runtime이 가진 시장 프레임/H1 특징을 같은 회차에서 공유하며, map은 `market-observed-changes:<hash>`를 키로 `top20_observed_changes/v1`의 판단 cut·관측시각·원래 만료시각·venue/window·TOP20 패턴·후보 출현 사실·품질·단위/근거/한계를 담는다. 각 해당 results 행의 optional `market_observed_changes_ref`가 이를 참조한다. 기존 contexts의 v1 내용/revision ID, stock-thesis의 내용/decision ID와 주문 권한은 유지한다.
+
+테마/뉴스/성숙 결과 결측은 독립 순위·대금 관측까지 막지 않는다. 해당 관측 실패는 UNKNOWN/UNAVAILABLE로 보고하며 기존 H1/H2 판단을 무효화하지 않는다. 조회순위 1위/상위 행의 대금 비중은 대금 순위나 전체 시장 점유율·실제 매수 자격이 아니다. 후보 유지·이탈·재등장은 제공된 당일 프레임 안의 관측이다. 원본 체결 무누락/영속 기억/전략 검증을 뜻하지 않는다.
+
+조회는 계산·DB 접근 없이 복사한다. 만료 시 원래 revision ref/근거/시각은 보존하고 `projection=expired`, 패턴 UNKNOWN, 후보/변화는 빈 값, 분류 None, 관측 품질 STALE로 투영한다. 이 투영은 원본 판단 revision을 새로 생성하거나 lease를 연장하지 않는다. 실패 binding은 기존 결과에 묶인 이전 관측을 유지하며 새 cut의 관측을 잘못 연결하지 않는다. 관측 map 부재는 미확인으로 처리한다.
+
+기존 선별 기록의 categorical signature·한 행·1MiB 예산·writer를 유지한다. 관측 자체의 변화는 새 기록 계기가 아니다. 선별 시 기존 기록에 optional map을 포함하며 예산 초과 시 이 map과 행의 해당 ref만 우선 생략한 뒤 기존 출처 map의 예산 처리를 적용한다. 기록 포함/부재는 Replay·현재 EV·주문 승인 근거가 아니며 `order_authorized=false`를 유지한다. PC 관찰 표에는 기존 시장 분류와 별도로 TOP20 변화/자료 상태를 표시하고 tooltip에 관측시각·후보 수·근거를 제공한다. 저장 관찰은 당시 값이며 live 만료 값은 미확인이다.
 
 ## 2026-10-13 RAM 출처의 녹화 입력 조회 힌트 (로컬 구현)
 
@@ -429,7 +501,7 @@ v2 계좌 조회의 legacy main profile도 화면 선택에 따라 바뀌지 않
 | `pending_records`, `inflight_records`, `pending_by_kind`, `inflight`, `waiting_flushes` | 기존 버퍼·재시도 안의 저장 레코드 수와 실제 저장 중 레코드/flush 대기 수를 구분한다. 고유 입력 이벤트 수가 아니며 정상 봉·최신값 저장 주기의 대기도 포함한다. |
 | `oldest_record_at`, `timed_records`, `record_time_basis` | 보유 레코드의 관측/최신 갱신 시각 중 가장 오래된 값과 시각을 아는 레코드 수. 최초 enqueue 시각·정확한 queue 대기 시간은 미계측이다. |
 | `unresolved_failures`, 저장 `state` | 종류별 마지막 실패 시각을 같은 종류의 성공 ACK까지 보존한다. 다른 저장 성공으로 실패를 지우지 않는다. `observed`는 성공 관측 이력이며 대기열 완료나 전체 저장 정상의 뜻이 아니다. |
-| `candidate_inputs.universe` | 조회 시각의 후보군 available_at·나이·기존 max-age 기준의 fresh/stale/missing. 장외라도 시각을 임의 갱신하지 않는다. |
+| `candidate_inputs.universe` | 봉 기반 후보 모니터의 조회 시각 후보군 available_at·나이·기존 max-age 기준의 fresh/stale/missing. 장외라도 시각을 임의 갱신하지 않는다. `scope=leader_breakout_0B`에서는 이 항목이 없으며 별도 `configuration_missing`과 평가 상태를 보존한다. |
 | `candidate_inputs.last_evaluation`, `current_all_inputs_fresh` | 마지막 평가 결과/시각은 현재 신선도와 분리한다. 모든 판단 입력의 현재 최신 여부는 미계측이므로 null이다. |
 
 응답은 기존 owner의 메모리만 읽고 DB 조회·버퍼 drain·업무/주문을 시작하지 않는다.

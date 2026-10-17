@@ -1,0 +1,503 @@
+{
+  "version": 1,
+  "reviewed_additive_paths": {
+    "/api/v1/market/morning-brief/settings": {
+      "get": {
+        "summary": "Settings",
+        "operationId": "settings_api_v1_market_morning_brief_settings_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Save",
+        "operationId": "save_api_v1_market_morning_brief_settings_put",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Update"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/market/morning-brief": {
+      "get": {
+        "summary": "Latest",
+        "operationId": "latest_api_v1_market_morning_brief_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/market/morning-brief/run": {
+      "post": {
+        "summary": "Run",
+        "operationId": "run_api_v1_market_morning_brief_run_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/news/chatgpt/status": {
+      "get": {
+        "summary": "Status",
+        "operationId": "status_api_v1_news_chatgpt_status_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/news/chatgpt/models": {
+      "get": {
+        "summary": "Models",
+        "operationId": "models_api_v1_news_chatgpt_models_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/news/chatgpt/select": {
+      "post": {
+        "summary": "Select",
+        "operationId": "select_api_v1_news_chatgpt_select_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountSelection"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/news/chatgpt/disconnect": {
+      "post": {
+        "summary": "Disconnect",
+        "operationId": "disconnect_api_v1_news_chatgpt_disconnect_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/news/chatgpt/resume": {
+      "post": {
+        "summary": "Resume",
+        "operationId": "resume_api_v1_news_chatgpt_resume_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "reviewed_additive_schemas": {
+    "AccountSelection": {
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "Account Id"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "account_id"
+      ],
+      "title": "AccountSelection"
+    },
+    "Update": {
+      "properties": {
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Expected Revision"
+        },
+        "enabled": {
+          "type": "boolean",
+          "title": "Enabled"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "Time"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^(chatgpt_plan|openai)$",
+          "title": "Provider"
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Model"
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "pattern": "^(|none|low|medium|high|xhigh|max)$",
+          "title": "Reasoning Effort"
+        },
+        "ttl_minutes": {
+          "type": "integer",
+          "maximum": 720.0,
+          "minimum": 15.0,
+          "title": "Ttl Minutes"
+        },
+        "prompt": {
+          "type": "string",
+          "maxLength": 30000,
+          "minLength": 50,
+          "title": "Prompt"
+        },
+        "watchlist": {
+          "type": "string",
+          "maxLength": 5000,
+          "title": "Watchlist"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "expected_revision",
+        "enabled",
+        "time",
+        "provider",
+        "model",
+        "reasoning_effort",
+        "ttl_minutes",
+        "prompt",
+        "watchlist"
+      ],
+      "title": "Update"
+    }
+  },
+  "operational_ai_provider_property": {
+    "anyOf": [
+      {
+        "type": "string",
+        "pattern": "^(none|openai|gemini|claude|chatgpt_plan)$"
+      },
+      {
+        "type": "null"
+      }
+    ],
+    "title": "Ai Provider"
+  },
+  "route_insertions": [
+    {
+      "before": "/api/v1/settings/credentials",
+      "paths": [
+        "/api/v1/market/morning-brief/settings",
+        "/api/v1/market/morning-brief",
+        "/api/v1/market/morning-brief/run"
+      ]
+    },
+    {
+      "before": "/api/v1/news/historical-jobs/claim",
+      "paths": [
+        "/api/v1/news/chatgpt/status",
+        "/api/v1/news/chatgpt/models",
+        "/api/v1/news/chatgpt/select",
+        "/api/v1/news/chatgpt/disconnect",
+        "/api/v1/news/chatgpt/resume"
+      ]
+    }
+  ],
+  "morning_workload": {
+    "configured": true,
+    "effective": true,
+    "diagnostic_switch_available": false,
+    "paused_by_diagnostic": false,
+    "expires_at": null,
+    "runtime": {
+      "attempts": 0,
+      "completed": 0,
+      "failed": 0,
+      "elapsed_seconds": 0.0,
+      "last_status": "idle"
+    }
+  },
+  "writer_kind_insertion": {
+    "writer_id": "document.collection",
+    "index": 2,
+    "values": [
+      "document:morning_market_brief_settings",
+      "document:morning_market_brief_runs"
+    ]
+  }
+}

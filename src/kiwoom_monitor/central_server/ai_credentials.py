@@ -1,6 +1,8 @@
 """AI credential publication without executing paid validation requests."""
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
+
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -15,10 +17,11 @@ class _AICandidate:
 
 
 class AICredentialOwner:
-    def __init__(self, service, vault, provider: str):
+    def __init__(self, service, vault, provider: str, *, now_provider=None):
         self.service, self.provider = service, provider
         self.profile = f"nas-{provider}-default"
-        service._store.register_credential_profile(provider, self.profile, datetime.now(UTC).isoformat())
+        service._store.register_credential_profile(provider, self.profile,
+            (as_kst(now_provider()) if now_provider else kst_now()).isoformat())
         try:
             record = vault.load(provider, self.profile)
         except Exception:

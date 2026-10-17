@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from .market_observations import KST, as_kst
+
 import asyncio
 import hashlib
 import json
 import logging
 from copy import deepcopy
+from collections import deque
 from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL
 from .observation_frame_recovery import (
     ObservationFrameRecovery, drain_thread_call, trim_bar_frames, trim_universe_frames,
@@ -42,6 +45,11 @@ from kiwoom_monitor.application.mock_automation_recovery import (
 )
 from kiwoom_monitor.application.mock_automation_risk import mock_automation_protection_trigger
 from kiwoom_monitor.application.research_families import get_research_family, parse_strategy_config
+from kiwoom_monitor.application.leader_breakout import (
+    LeaderBreakoutConfig, LeaderBreakoutPolicy, LeaderBreakoutState,
+    evaluate_leader_breakout_trade, leader_evaluation, leader_position_proof,
+    validate_leader_position_proof,
+)
 from kiwoom_monitor.application.research_replay import (
     CandidateUniverseFrame,
     KrxMinuteBarFrame,
@@ -77,6 +85,8 @@ class MockAutomationRunner:
         *,
         poll_seconds: float = 1.0,
         price_source=None,
+        leader_context_source=None,
+        now_provider=None,
     ) -> None:
         context = bundle.automation_context
         if (
@@ -87,6 +97,7 @@ class MockAutomationRunner:
         ):
             raise ValueError("MOCK_AUTOMATION_RUNNER_CONTEXT_MISMATCH")
         self._store = store
+        self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._bundle = bundle
         self._spec = spec
         self._repository = ForwardEvaluationRepository(store)
@@ -103,6 +114,15 @@ class MockAutomationRunner:
         family_id = str(candidate.get("family", ""))
         self._family = get_research_family(family_id)
         self._config = parse_strategy_config(family_id, candidate.get("parameters", {}))
+        self._leader = isinstance(self._config, LeaderBreakoutConfig)
+        self._leader_context_source = leader_context_source
+        self._leader_queue = deque()
+        self._leader_queue_lock = Lock()
+        self._leader_observations = {}
+        self._leader_source = None
+        self._leader_discontinuity = ""
+        self._leader_position_proof = None
+        self._leader_stop_quote = None
         if spec.session_profile != str(candidate.get("session_profile", {}).get("profile", "")):
             raise ValueError("MOCK_AUTOMATION_SESSION_PROFILE_MISMATCH")
         self._poll_seconds = max(0.25, float(poll_seconds))
@@ -406,13 +426,15 @@ class MockAutomationRunner:
                 raise ValueError("invalid_mock_native_risk_trigger_time")
             if 'stop_loss' in trigger:
                 from kiwoom_monitor.application.mock_automation_risk import validate_mock_stop_loss_proof
-                validate_mock_stop_loss_proof(trigger['stop_loss'], self._spec, stop_loss_bps=self._config.stop_loss_bps)
+                validate_mock_stop_loss_proof(trigger['stop_loss'], self._spec, **self._stop_validation_terms())
 
     def _on_native_risk(self, cut) -> None:
         if self._closing:
             return
         risk, account = cut["risk"], cut["account"]
         self._stop_loss_cut = (risk, dict(account.positions))
+        if self._leader and self._leader_stop_quote is not None:
+            self._observe_leader_stop(self._leader_stop_quote)
         if (risk.account_as_of != account.as_of
                 or account.account_ref != self._bundle.account_ref):
             raise ValueError("mock_protection_native_recovery_mismatch")
@@ -466,8 +488,196 @@ class MockAutomationRunner:
         self.request_protection_review(reason="native_risk:" + ";".join(trigger["reasons"]),
             input_ref="native-risk:" + risk.snapshot_id, requested_at=now, risk_trigger=trigger)
 
+    def _stop_validation_terms(self):
+        if self._leader:
+            return {"leader_config": self._config, "position_proof": self._leader_position_proof}
+        return {"stop_loss_bps": self._config.stop_loss_bps}
+
+    def _clear_leader_observations(self, reason):
+        with self._leader_queue_lock:
+            self._leader_queue.clear()
+            self._leader_discontinuity = reason
+            self._leader_stop_quote = None
+
+    def observe_leader_trade(self, payload, received_at, *, source, approved):
+        """Bounded RAM delivery only; DB and submission stay in the owned iteration."""
+        if not self._leader or self._closing:
+            return
+        if payload.get("market", "KRX") != "KRX":
+            return
+        if approved is not True or not source:
+            self._clear_leader_observations("0B_source_unapproved")
+            return
+        envelope = (deepcopy(payload), as_kst(received_at), source)
+        generation = (source, envelope[1].date())
+        with self._leader_queue_lock:
+            if self._leader_source != generation:
+                self._leader_queue.clear()
+                self._leader_discontinuity = "0B_source_generation_changed"
+                self._leader_source = generation
+                self._leader_stop_quote = None
+            if len(self._leader_queue) >= 1000:
+                self._leader_queue.clear()
+                self._leader_discontinuity = "0B_input_overflow_no_cross_bridge"
+                self._leader_stop_quote = None
+                return
+            self._leader_queue.append(envelope)
+        if self._leader_position_proof is not None:
+            try:
+                context = validate_leader_position_proof(self._leader_position_proof, self._config, self._spec, self._bundle.run_id)
+                raw, _ = evaluate_leader_breakout_trade(self._config.policy, payload, received_at=envelope[1],
+                    source=source, decision_time=self._now(), position_open=True, position_context=context)
+                previous = self._leader_stop_quote
+                if not any(r in raw["reasons"] for r in ("input_stale", "input_from_future", "price_unavailable")) and (
+                        previous is None or datetime.fromisoformat(raw["available_at"]) > datetime.fromisoformat(previous["available_at"])):
+                    self._leader_stop_quote = raw
+                    self._observe_leader_stop(raw)
+            except (TypeError, ValueError, KeyError):
+                self._leader_stop_quote = None
+        if self._wake_loop is not None and self._wake_event is not None:
+            self._wake_loop.call_soon_threadsafe(self._wake_event.set)
+
+    def _observe_leader_stop(self, raw):
+        if (self._closing or self._spec.unfilled_execution_policy is None or self._stop_loss_cut is None
+                or self._leader_position_proof is None or raw.get("status") != "HARD_EXIT"):
+            return
+        risk, positions = self._stop_loss_cut
+        context = validate_leader_position_proof(self._leader_position_proof, self._config, self._spec, self._bundle.run_id)
+        symbol = context.symbol
+        quantity = dict(risk.owned_position_quantities).get(symbol)
+        entry = dict(risk.owned_entry_prices).get(symbol)
+        now = self._now()
+        at = datetime.fromisoformat(raw["available_at"])
+        if (not quantity or not entry or positions.get(symbol) != quantity
+                or at < risk.account_as_of or not 0 <= (now-at).total_seconds() <= self._config.max_data_age_seconds):
+            return
+        previous = self._protection_snapshot()
+        if previous is not None and previous.get("risk_trigger", {}).get("stop_loss") is not None:
+            return  # The original approved stop quote is sticky until reconciliation.
+        proof = {"version": "leader_absolute_stop/v1", "symbol": symbol, "quantity": quantity,
+            "entry_price_won": entry, "price_won": raw["signal_reference_price"], "available_at": raw["available_at"],
+            "input_ref": raw["input_ref"], "hard_stop_price": context.hard_stop_price,
+            "position_proof": deepcopy(self._leader_position_proof), "rules_hash": self._config.rules_hash,
+            "package_hash": self._spec.candidate_package_hash}
+        from kiwoom_monitor.application.mock_automation_risk import validate_mock_stop_loss_proof, _sha256
+        validate_mock_stop_loss_proof(proof, self._spec, risk, **self._stop_validation_terms())
+        trigger = mock_automation_protection_trigger(self._spec, risk, execution_run_id=self._bundle.run_id,
+            now=now, account_positions=positions)
+        if trigger is None:
+            trigger = {"version": "mock-native-risk-protection/v1", "account_ref": risk.account_ref,
+                "execution_run_id": self._bundle.run_id, "binding_revision": risk.binding_revision,
+                "snapshot_id": risk.snapshot_id, "reconciliation_revision": risk.reconciliation_revision,
+                "observed_at": risk.observed_at.isoformat(), "disposition": "EXIT_REQUIRED", "reasons": [],
+                "source": "acknowledged_account_monitor"}
+        trigger = {**trigger, "reasons": [*trigger["reasons"], "SYMBOL_STOP_LOSS_REACHED"], "stop_loss": proof}
+        trigger["cause_signature"] = _sha256({"stop_loss": proof, "disposition": trigger["disposition"], "reasons": trigger["reasons"]})
+        self.request_protection_review(reason="native_risk:leader_absolute_stop", input_ref=raw["input_ref"],
+            requested_at=now, risk_trigger=trigger)
+
+    async def _run_leader_page(self, control, limit):
+        """Actual 0B -> the shared kernel -> existing FILL/Risk/claim/dispatch."""
+        with self._leader_queue_lock:
+            discontinuity = self._leader_discontinuity
+            self._leader_discontinuity = ""
+        if discontinuity:
+            self._leader_observations.clear()
+            self._status = {"state": "WARMUP", "reason": discontinuity, "orders_enabled": False, "input_mode": "0B"}
+        if self._state.status == "open" and self._leader_position_proof is None:
+            self._status = {"state": "BLOCKED", "reason": "owned_position_context_unavailable", "orders_enabled": False}
+            await drain_thread_call(self._save_checkpoint)
+            return 0
+        consumed = 0
+        while consumed < min(limit, 1000):
+            with self._leader_queue_lock:
+                if self._leader_discontinuity:
+                    self._leader_observations.clear()
+                    self._leader_discontinuity = ""
+                if not self._leader_queue:
+                    break
+                payload, received_at, source = self._leader_queue.popleft()
+            consumed += 1
+            now = self._now()
+            try:
+                current = self._leader_context_source() if self._leader_context_source is not None else None
+                if self._state.status == "open":
+                    # Existing positions retain the admitted rules and pinned thesis,
+                    # even when current entry evidence is absent/replaced/expired.
+                    config = self._config
+                elif not isinstance(current, Mapping) or type(current.get("revision")) is not int:
+                    raise ValueError("current_leader_context_unavailable")
+                else:
+                    policy = LeaderBreakoutPolicy.from_dict(current["policy"])
+                    config = replace(self._config, contexts=policy.contexts)
+                    if LeaderBreakoutConfig.from_dict(policy.to_dict()).rules_hash != config.rules_hash:
+                        raise ValueError("current_leader_rules_require_new_approval")
+                context = validate_leader_position_proof(self._leader_position_proof, self._config, self._spec,
+                    self._bundle.run_id) if self._state.status == "open" else None
+                symbol = str(payload.get("code", ""))
+                if self._state.status == "open" and symbol != self._state.symbol:
+                    continue
+                if symbol not in self._leader_observations and len(self._leader_observations) >= 200:
+                    raise ValueError("leader_symbol_input_budget_exceeded")
+                raw, after = evaluate_leader_breakout_trade(config.policy, payload, received_at=received_at,
+                    source=source, decision_time=now, state=self._leader_observations.get(symbol),
+                    position_open=self._state.status == "open", position_context=context)
+                self._leader_observations[symbol] = after
+                if context is None:
+                    context = next((c for c in config.contexts if c.evidence_ref == raw["context_ref"]), None)
+                assessment = session_clock_assessment(config, self._state, now)
+                if assessment["exit_required"] and raw["status"] in {"HOLD", "HARD_EXIT", "INVALIDATED"}:
+                    raw = {**raw, "proposal": "EXIT", "reasons": [*raw["reasons"], *assessment["reasons"]]}
+                evaluation = leader_evaluation(run_id=self._bundle.run_id, config=config, raw=raw, state=self._state, context=context)
+                active = await drain_thread_call(self._bundle.repository.active_intents, "mock", self._bundle.account_ref, self._bundle.run_id)
+                if active:
+                    if evaluation.decision.final_action == "EXIT":
+                        self.request_protection_review(reason="registered_strategy_protective_exit", input_ref=raw["input_ref"], requested_at=now)
+                    self._status = {"state": "WAITING_ORDER", "reason": "active_intent_reconciliation", "orders_enabled": False}
+                    continue
+                self._replace_strategy_state(evaluation.state)
+                decision = evaluation.decision
+                if decision.final_action not in {"ENTER", "EXIT"}:
+                    self._status = {"state": "BLOCKED" if decision.constraints or raw["status"] == "BLOCKED" else "RUNNING",
+                        "reason": ";".join(decision.reasons), "last_decision_id": decision.decision_id, "input_mode": "0B", "orders_enabled": False}
+                    continue
+                recovery = await self._bundle.monitor.refresh_recovery()
+                risk = await drain_thread_call(self._repository.load_latest_mock_automation_risk, self._bundle.account_ref)
+                if risk is None or not self._state_matches_risk(risk):
+                    raise ValueError("strategy_state_risk_mismatch")
+                await drain_thread_call(record_mock_automation_recovery_from_risk, self._repository, self._bundle.runtime,
+                    recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
+                if await self._pause_for_protection_review():
+                    break
+                if decision.final_action == "ENTER":
+                    proof = leader_position_proof(config, spec_id=self._spec.spec_id, package_hash=self._spec.candidate_package_hash,
+                        account_ref=self._bundle.account_ref, run_id=self._bundle.run_id, decision=decision, context=context)
+                    validate_leader_position_proof(proof, self._config, self._spec, self._bundle.run_id)
+                    self._leader_position_proof = proof
+                    await drain_thread_call(self._save_checkpoint, force=True)
+                    await drain_thread_call(self._store.upsert_documents, "execution_leader_position_context",
+                        [{"owner": self._bundle.account_ref, "key": proof["entry_intent_id"], "document": proof}])
+                await drain_thread_call(self._store.upsert_documents, "execution_leader_decisions",
+                    [{"owner": self._bundle.account_ref, "key": decision.decision_id, "document": {
+                        "snapshot": evaluation.snapshot.to_dict(), "decision": decision.to_dict(),
+                        "observation": {"payload": payload, "received_at": received_at.isoformat(), "source": source, "approved": True},
+                        "operational_revision": current.get("revision") if isinstance(current, Mapping) else None,
+                        "policy_hash": config.policy.fingerprint,
+                        "policy": config.policy.to_dict(), "position_proof": self._leader_position_proof}}])
+                gate, record, _ = await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk)
+                self._status = {"state": "ORDER_SUBMITTED" if record is not None else "BLOCKED",
+                    "reason": ";".join(gate.reasons) if gate.reasons else "approved", "last_decision_id": decision.decision_id,
+                    "pending_intent_id": record.intent.intent_id if record is not None else "", "input_mode": "0B", "orders_enabled": False}
+            except (TypeError, ValueError, KeyError) as error:
+                self._leader_observations.clear()
+                self._status = {"state": "BLOCKED", "reason": str(error), "input_mode": "0B", "orders_enabled": False}
+            await drain_thread_call(self._save_checkpoint)
+        if discontinuity and not consumed:
+            await drain_thread_call(self._save_checkpoint)
+        return consumed
+
     def observe_automation_price(self, symbol, price):
         """RAM-only immediate stop cue; transport remains in the existing Runner."""
+        if self._leader:
+            return  # The approved actual-0B callback owns the new observation proof.
         if self._closing or self._spec.unfilled_execution_policy is None or self._stop_loss_cut is None:
             return
         risk, positions = self._stop_loss_cut
@@ -645,7 +855,7 @@ class MockAutomationRunner:
             if 'stop_loss' in notice.get('risk_trigger',{}):
                 from kiwoom_monitor.application.mock_automation_risk import validate_mock_stop_loss_proof
                 validate_mock_stop_loss_proof(notice['risk_trigger']['stop_loss'], self._spec, risk,
-                    stop_loss_bps=self._config.stop_loss_bps)
+                    **self._stop_validation_terms())
             active,complete=self._bundle.repository.account_active_intents(self._bundle.account_ref)
             if active or not complete:
                 raise ValueError('protection_exit_account_order_in_flight_or_coverage_unknown')
@@ -1781,7 +1991,7 @@ class MockAutomationRunner:
                     **(self._status if self._frame_recovery is not None else {}),
                     "state": "ERROR", "reason": type(error).__name__,
                     "detail": str(error), "orders_enabled": False,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": self._now().isoformat(),
                 }
                 try:
                     await drain_thread_call(self._save_checkpoint)
@@ -1830,6 +2040,8 @@ class MockAutomationRunner:
                     await drain_thread_call(self._save_checkpoint)
                 return 0
             if control.desired_state.value != "RUNNING":
+                if self._leader:
+                    self._clear_leader_observations("user_stopped")
                 if (self._config.session_exit_policy and self._session_clock is not None
                         and control.reason.startswith("session_clock:")):
                     await self._clock_call(control)
@@ -1855,6 +2067,8 @@ class MockAutomationRunner:
                 return 0
             if await self._pause_for_protection_review():
                 return 0
+            if self._leader:
+                return await self._run_leader_page(control, limit)
             load_started = perf_counter()
             if self._bootstrap_pending:
                 if await self._clock_call(control):
@@ -1900,7 +2114,7 @@ class MockAutomationRunner:
                 )
                 if observation.get("kind") == "minute_bar":
                     bar_count += 1
-                    processed_at = datetime.now(timezone.utc)
+                    processed_at = self._now()
                     last_bar_processed_at = processed_at.isoformat()
                     try:
                         available_at = datetime.fromisoformat(str(observation.get("available_at", "")))
@@ -1916,7 +2130,7 @@ class MockAutomationRunner:
                         last_bar_age_ms = age_ms
                         max_bar_age_ms = max(age_ms, max_bar_age_ms or 0)
             self._latency = {
-                "last_poll_completed_at": datetime.now(timezone.utc).isoformat(),
+                "last_poll_completed_at": self._now().isoformat(),
                 "last_poll_duration_ms": round((perf_counter() - poll_started) * 1000),
                 "load_duration_ms": load_ms,
                 "observation_count": consumed,
@@ -1932,6 +2146,8 @@ class MockAutomationRunner:
             self._unfilled_preflight_lock.release()
 
     async def _clock_call(self, control, observations=()) -> bool:
+        if self._leader:
+            return False  # New session exits require the same fresh actual 0B cut.
         if not self._config.session_exit_policy:
             return False
         # A close joins the whole broker/clock operation, including its native
@@ -2333,7 +2549,7 @@ class MockAutomationRunner:
                             emitted_candidate_keys=self._state.emitted_candidate_keys,
                         )
                     else:
-                        self._state = StrategyState(
+                        self._state = StrategyState(emitted_candidate_keys=self._state.emitted_candidate_keys) if self._leader else StrategyState(
                             status="cooldown",
                             cooldown_until=(event.occurred_at + timedelta(
                                 seconds=int(self._config.cooldown_seconds),
@@ -2360,8 +2576,11 @@ class MockAutomationRunner:
             and document.get("execution_run_id") == self._bundle.run_id
             and document.get("candidate_package_hash") == self._spec.candidate_package_hash
         ):
-            if document.get("delivery_protocol") not in (None, OBSERVATION_DELIVERY_PROTOCOL):
+            if document.get("delivery_protocol") not in ((None, "leader_0B/v1") if self._leader else (None, OBSERVATION_DELIVERY_PROTOCOL)):
                 raise RuntimeError("unsupported_mock_observation_delivery_protocol")
+            if self._leader and document.get("leader_position_proof") is not None:
+                validate_leader_position_proof(document["leader_position_proof"], self._config, self._spec, self._bundle.run_id)
+                self._leader_position_proof = deepcopy(document["leader_position_proof"])
             # Never silently discard a replacement reservation and reset its
             # anchor/budget through the legacy malformed-checkpoint bootstrap.
             registration = document.get('unfilled_registration')
@@ -2438,7 +2657,7 @@ class MockAutomationRunner:
                 self._delivery_protocol = document.get("delivery_protocol")
                 self._frame_recovery_receipt = document.get("input_recovery")
                 self._bootstrap_pending = bool(document.get("protection_resume_requires_bootstrap", False))
-                if self._delivery_protocol is None:
+                if self._delivery_protocol is None and not self._leader:
                     self._frame_recovery = ObservationFrameRecovery(
                         self._cursor, str(self._spec.session_profile),
                         int(self._config.lookback_bars) + 2,
@@ -2455,6 +2674,12 @@ class MockAutomationRunner:
         self._bootstrap()
 
     def _bootstrap(self) -> bool:
+        if self._leader:
+            self._bootstrap_pending = False
+            self._delivery_protocol = "leader_0B/v1"
+            self._status = {"state": "WARMUP", "reason": "awaiting_fresh_approved_0B", "input_mode": "0B", "orders_enabled": False}
+            self._save_checkpoint()
+            return True
         page = self._store.load_observation_bootstrap(INPUT_KINDS, per_kind_limit=5000)
         if not page.ready:
             self._status = {
@@ -2534,6 +2759,8 @@ class MockAutomationRunner:
                      (recovery.bars if recovery is not None else self._bars).values()],
             "status": deepcopy(self._status),
         }
+        if self._leader:
+            content["leader_position_proof"] = deepcopy(self._leader_position_proof)
         if recovery is not None:
             content["delivery_protocol"] = OBSERVATION_DELIVERY_PROTOCOL
             content["input_recovery"] = recovery.receipt()
@@ -2566,7 +2793,7 @@ class MockAutomationRunner:
         self._checkpoint_revision += 1
         document = {
             **content, "checkpoint_revision": self._checkpoint_revision,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "saved_at": self._now().isoformat(),
         }
         self._store.upsert_documents(
             "execution_mock_automation_runner_current",

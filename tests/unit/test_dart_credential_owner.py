@@ -428,7 +428,8 @@ class DartCredentialAPITests(unittest.TestCase):
                     def now(cls, tz=None):
                         return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
 
-                with patch("kiwoom_monitor.central_server.news_service.datetime", FixedDateTime), \
+                with patch.object(service, "_now", return_value=fixed_now), \
+                        patch("kiwoom_monitor.central_server.news_service.datetime", FixedDateTime), \
                         patch("kiwoom_monitor.infrastructure.dart_disclosures.datetime", FixedDateTime):
                     self.assertEqual([], client.portal.call(service.search, "005930", "삼성전자", None))
                     self.assertEqual(1, len(service._dart_client.calls))

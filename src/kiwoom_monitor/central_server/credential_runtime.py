@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 from starlette.requests import Request
 
 from .credential_store import CredentialStore, CredentialRecord, PROVIDER_FIELDS
+from .market_observations import KST, as_kst
 
 
 class CredentialOperationError(RuntimeError):
@@ -80,8 +81,10 @@ class CredentialRuntime:
     MAX_RETAINED = 256
 
     def __init__(self, vault: CredentialStore, store: Any, *, ttl: float = 300,
-                 deadline: float = 30, monotonic: Callable[[], float] = time.monotonic):
+                 deadline: float = 30, monotonic: Callable[[], float] = time.monotonic,
+                 now_provider: Callable[[], datetime] | None = None):
         self.vault, self.store = vault, store
+        self._wall_now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._ttl, self._deadline, self._now = ttl, deadline, monotonic
         self._guard = asyncio.Lock()
         self._operations: dict[str, _Operation] = {}
@@ -271,7 +274,7 @@ class CredentialRuntime:
             if expected_revision != (current.revision if current else 0):
                 raise CredentialOperationError("CREDENTIAL_REVISION_CONFLICT")
             operation = _Operation(str(uuid.uuid4()), provider, profile_id, request_id, digest, expected_revision,
-                                   self._now() + self._ttl, (datetime.now(UTC) + timedelta(seconds=self._ttl)).isoformat(),
+                                   self._now() + self._ttl, (self._wall_now() + timedelta(seconds=self._ttl)).isoformat(),
                                    dict(credentials), disabled)
             self._operations[operation.operation_id] = operation
             operation.task = asyncio.create_task(self._validate(operation, current), name="credential-validate")
@@ -404,7 +407,7 @@ class CredentialRuntime:
             activation = {"operation_id": op.operation_id, "request_id": op.request_id, "request_digest": op.digest,
                           "account_ref": op.candidate.account_ref, "run_id": op.candidate.run_id,
                           "environment": op.provider.removeprefix("kiwoom_") if op.provider.startswith("kiwoom_") else None,
-                          "committed_at": datetime.now(UTC).isoformat(), "disabled": op.disabled}
+                          "committed_at": self._wall_now().isoformat(), "disabled": op.disabled}
             op.state, commit_started = "COMMITTING", True
             hooks.begin_commit(op.profile_id, op.candidate)
             record = await asyncio.to_thread(self.vault.save, op.provider, op.profile_id, op.credentials,

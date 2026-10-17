@@ -1,0 +1,418 @@
+{
+  "schema": "news-market-research-v1",
+  "source_type": "GLOBAL_CONTEXT",
+  "source_mode": "provided_snapshot",
+  "as_of": "2026-10-15T07:55:00+09:00",
+  "evidence_summary": "합성 테스트 예시. 실제 시세·기업 노출·검증된 투자 규칙이 아니다.",
+  "calendar": {
+    "kr_session_status": "open",
+    "us_session_status": "open",
+    "kr_last_trading_date": "2026-10-14",
+    "kr_next_trading_date": "2026-10-15",
+    "us_last_trading_date": "2026-10-14",
+    "evidence_ids": [
+      "e1"
+    ]
+  },
+  "market_assessment": {
+    "state": "mixed",
+    "basis": "initial_hypothesis",
+    "reason": "상반된 근거",
+    "evidence_ids": [
+      "e1"
+    ]
+  },
+  "participation": {
+    "state": "unknown",
+    "observation_scope": "not_observed",
+    "reason": "장중 관측 전",
+    "evidence_ids": []
+  },
+  "concentration": {
+    "state": "unknown",
+    "observation_scope": "not_observed",
+    "reason": "장중 관측 전",
+    "evidence_ids": []
+  },
+  "market_data": [
+    {
+      "id": "US_SP500",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "index",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "US_SP500",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "close",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "US_NASDAQ",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "index",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "US_NASDAQ",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "close",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "US_SOX",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "index",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "US_SOX",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "close",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "KR_KOSPI",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "index",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "KR_KOSPI",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "close",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "KR_KOSDAQ",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "index",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "KR_KOSDAQ",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "close",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "NASDAQ_FUTURES",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "index",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "NASDAQ_FUTURES",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "futures",
+      "contract_month": "2026-12",
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "USDKRW",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "KRW_per_USD",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "USDKRW",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "close",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "US10Y",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "percent",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "US10Y",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "yield",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    },
+    {
+      "id": "WTI",
+      "value": 100,
+      "change_pct": 0.1,
+      "unit": "USD_per_barrel",
+      "observed_at": "2026-10-15T04:55:00+09:00",
+      "trading_date": "2026-10-14",
+      "price_status": "intraday",
+      "timestamp_precision": "datetime",
+      "availability_basis": "source_timestamp",
+      "status": "confirmed",
+      "instrument": "WTI",
+      "market_venue": "합성 테스트 시장",
+      "quote_type": "close",
+      "contract_month": null,
+      "comparison_basis": "합성 테스트 전일 종가",
+      "evidence_ids": [
+        "e1"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "e1",
+      "url": "https://example.test/market",
+      "publisher": "합성 자료",
+      "source_kind": "official",
+      "verification": "original_read",
+      "publisher_published_at": "2026-10-15T05:55:00+09:00",
+      "source_modified_at": null,
+      "published_date": "2026-10-15",
+      "timestamp_precision": "datetime"
+    }
+  ],
+  "facts": [
+    {
+      "fact_id": "f1",
+      "statement": "확인 사실",
+      "fact_status": "CONFIRMED",
+      "event_occurred_at": "2026-10-15T04:55:00+09:00",
+      "observed_at": "2026-10-15T05:55:00+09:00",
+      "evidence_ids": [
+        "e1"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "event_key": "evt1",
+      "title": "재료",
+      "fact_ids": [
+        "f1"
+      ],
+      "interpretation": "조건부 영향",
+      "scope": "broad",
+      "direction": "mixed",
+      "importance": "medium",
+      "importance_reason": "전달 경로 확인 필요",
+      "novelty": "new",
+      "novelty_basis": "새 발표",
+      "persistence": {
+        "horizon": "intraday",
+        "mechanism": "후속 국내 반응에 의존",
+        "assumptions": [
+          "추가 정정 없음"
+        ],
+        "review_due_at": null
+      },
+      "evidence_ids": [
+        "e1"
+      ],
+      "category": "fx",
+      "variable": "USDKRW",
+      "change": "increase",
+      "impacts": [
+        {
+          "target_ref": "exporters",
+          "direction": "positive",
+          "channel": "fx_translation",
+          "horizon": "short",
+          "thesis_change": "unknown",
+          "reason": "합성 테스트의 가정이며 실제 기업 노출 아님",
+          "evidence_ids": [
+            "e1"
+          ]
+        },
+        {
+          "target_ref": "importers",
+          "direction": "negative",
+          "channel": "costs",
+          "horizon": "short",
+          "thesis_change": "unknown",
+          "reason": "합성 테스트의 가정이며 실제 기업 노출 아님",
+          "evidence_ids": [
+            "e1"
+          ]
+        }
+      ]
+    }
+  ],
+  "themes_to_observe": [
+    {
+      "theme_key": "exporters",
+      "name": "합성 수출 업종",
+      "kind": "industry",
+      "relation_source": "inferred",
+      "status": "proposed",
+      "reason": "합성 테스트 관계",
+      "event_keys": [
+        "evt1"
+      ],
+      "evidence_ids": [
+        "e1"
+      ],
+      "contradicting_evidence_ids": []
+    },
+    {
+      "theme_key": "importers",
+      "name": "합성 수입 업종",
+      "kind": "industry",
+      "relation_source": "inferred",
+      "status": "proposed",
+      "reason": "합성 테스트 관계",
+      "event_keys": [
+        "evt1"
+      ],
+      "evidence_ids": [
+        "e1"
+      ],
+      "contradicting_evidence_ids": []
+    }
+  ],
+  "stock_contexts": [],
+  "hypotheses": [
+    {
+      "hypothesis_key": "h1",
+      "status": "UNCONFIRMED",
+      "statement": "조건부 시장 반응",
+      "scope": "broad",
+      "direction": "mixed",
+      "event_keys": [
+        "evt1"
+      ],
+      "theme_keys": [],
+      "stock_keys": [],
+      "confirming_signals": [
+        {
+          "data_source": "TURNOVER",
+          "target_ref": "market",
+          "observation": "장중 거래대금 반응 재확인",
+          "expected_change": "increase",
+          "evidence_ids": []
+        }
+      ],
+      "contradicting_signals": [
+        {
+          "data_source": "TURNOVER",
+          "target_ref": "market",
+          "observation": "장중 거래대금 반응 재확인",
+          "expected_change": "decrease",
+          "evidence_ids": []
+        }
+      ],
+      "invalidation_conditions": [
+        {
+          "data_source": "NEWS_REVISION",
+          "target_ref": "market",
+          "observation": "원 발표 취소 확인",
+          "expected_change": "cancel",
+          "evidence_ids": []
+        }
+      ],
+      "unknowns": [
+        "실시간 테마 동조 미확인"
+      ]
+    }
+  ],
+  "unknowns": [
+    {
+      "field": "participation",
+      "reason": "국내 장중 참여/집중 관측 미확인",
+      "effect": "needs_intraday_confirmation"
+    },
+    {
+      "field": "concentration",
+      "reason": "국내 장중 참여/집중 관측 미확인",
+      "effect": "needs_intraday_confirmation"
+    },
+    {
+      "field": "h1",
+      "reason": "장중 검증 전 초기 가설",
+      "effect": "needs_intraday_confirmation"
+    }
+  ],
+  "changes_from_previous": [],
+  "market_regime": {
+    "state": "mixed",
+    "reason": "합성 테스트: 상반된 전달 경로",
+    "evidence_ids": [
+      "e1"
+    ]
+  },
+  "measurements": [
+    {
+      "measurement_key": "m1",
+      "indicator": "USDKRW",
+      "target_ref": "market",
+      "value": 1400.0,
+      "unit": "KRW_per_USD",
+      "comparison_value": 1390.0,
+      "comparison_basis": "합성 테스트 전일값",
+      "period": null,
+      "observed_at": "2026-10-15T07:55:00+09:00",
+      "value_basis": "reported",
+      "fact_id": "f1",
+      "evidence_ids": [
+        "e1"
+      ]
+    }
+  ]
+}

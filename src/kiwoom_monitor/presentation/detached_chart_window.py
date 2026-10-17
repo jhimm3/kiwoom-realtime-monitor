@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import html
 import math
 import re
@@ -352,7 +354,7 @@ class DetachedChartWindow(QMainWindow):
         content_width = columns * cell_width + (columns - 1) * gap
 
         title_doc = QTextDocument(); title_doc.setDefaultStyleSheet("body{font-family:'맑은 고딕';font-size:24px;color:#222}h1{font-size:38px;margin:0 0 8px 0}")
-        title_doc.setHtml(f"<h1>{html.escape(title)}</h1><div>현재 보이는 차트 구성 · {datetime.now():%Y-%m-%d %H:%M}</div>")
+        title_doc.setHtml(f"<h1>{html.escape(title)}</h1><div>현재 보이는 차트 구성 · {kst_wall_now():%Y-%m-%d %H:%M}</div>")
         title_doc.setTextWidth(content_width); title_height = int(math.ceil(title_doc.size().height()))
         review_docs: list[QTextDocument] = []
         if self.include_review.isChecked() and context:

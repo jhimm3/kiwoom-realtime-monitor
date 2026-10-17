@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today
+
 from dataclasses import dataclass
 from datetime import date
 from calendar import monthrange
@@ -47,7 +49,7 @@ class HistoricalHighService:
         self._high_250_loader = high_250_loader
 
     def load(self, code: str, *, as_of: date | None = None) -> HistoricalHighTarget:
-        source_day = as_of or date.today()
+        source_day = as_of or kst_today()
         stored_loader = getattr(self._client, "load_stored_historical_high", None)
         stored = stored_loader(code) if callable(stored_loader) else None
         if isinstance(stored, dict):

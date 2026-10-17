@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -254,7 +257,7 @@ class MockAutomationPublicationDialog(QDialog):
         self._shadow = QComboBox()
         for event in shadow_events:
             self._shadow.addItem(
-                f"{event.get('available_at', '')} · {event.get('symbol', '')}", event,
+                f"{format_kst_time(event.get('available_at'), missing='')} · {event.get('symbol', '')}", event,
             )
         top = QFormLayout()
         top.addRow("Shadow 증거", self._shadow)
@@ -287,7 +290,7 @@ class MockAutomationPublicationDialog(QDialog):
         return group
 
     def publication_values(self) -> dict[str, Any]:
-        frozen_at = datetime.now(timezone.utc)
+        frozen_at = kst_now()
         evaluation_start = frozen_at + timedelta(minutes=self._start_delay.value())
         evaluation_end = evaluation_start + timedelta(days=self._evaluation_days.value())
         criteria = ForwardCriteria(**{
@@ -374,6 +377,11 @@ class MockAutomationDialog(QDialog):
         )
         self._message.setWordWrap(True)
         layout = QVBoxLayout(self)
+        self._strategy_scope = QLabel("등록한 정책과 승인 명세로 모의계좌를 운용합니다. "
+            "주도주 구조 돌파는 실제 0B·현재 근거·명시 실행 계약을 사용하며 미정 조건은 주문을 차단합니다. "
+            "기존 완료봉 Family는 비교 정책으로 구분합니다.")
+        self._strategy_scope.setWordWrap(True)
+        layout.addWidget(self._strategy_scope)
         layout.addLayout(form)
         layout.addLayout(buttons)
         layout.addWidget(self._message)
@@ -554,7 +562,7 @@ class MockAutomationDialog(QDialog):
             source = package.get("source_final", {})
             finished = source.get("finished_at", "") if isinstance(source, dict) else ""
             self._candidate.addItem(
-                f"{package.get('strategy_ref', '')} · {status} · {finished}", publication,
+                f"{package.get('strategy_ref', '')} · {status} · {format_kst_time(finished, missing='')}", publication,
             )
 
         selected_spec_id = str(self._context.get("selected_spec_id", ""))
@@ -607,7 +615,7 @@ class MockAutomationDialog(QDialog):
                     processed_at = str(latency.get("last_bar_processed_at") or "")
                     latency_text += (
                         f" · 마지막 분봉 가용→처리 {latency['last_bar_age_ms']}ms"
-                        f" ({processed_at[11:19]} UTC)"
+                        f" ({format_kst_time(processed_at, '%H:%M:%S')} KST)"
                     )
                 if latency.get("future_or_invalid_bar_time_count"):
                     latency_text += " · 분봉 시각 확인 필요"

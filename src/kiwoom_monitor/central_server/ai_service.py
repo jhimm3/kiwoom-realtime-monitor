@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+
 import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings
@@ -17,6 +18,7 @@ from kiwoom_monitor.domain.news_observation import (
     NEWS_ANALYSIS_SCHEMA_VERSION,
 )
 from kiwoom_monitor.infrastructure.article_text import fetch_article_text
+from .market_observations import KST, as_kst
 
 from .config import CentralServerSettings
 
@@ -61,7 +63,9 @@ class _AIRequestCredential:
 class CentralAIService:
     """AI 판정 캐시와 실행 중 요청을 중앙에서 공유한다."""
 
-    def __init__(self, settings: CentralServerSettings, store: CentralAIStore) -> None:
+    def __init__(self, settings: CentralServerSettings, store: CentralAIStore, *, chatgpt_auth=None,
+                 now_provider: Callable[[], datetime] | None = None) -> None:
+        self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._settings, self._store = settings, store
         self._provider = settings.ai_provider
         self._model = settings.ai_model
@@ -75,6 +79,12 @@ class CentralAIService:
         self._accepted: dict[str, set[asyncio.Task]] = {provider: set() for provider in DEFAULT_MODELS}
         self._credential_paused: set[str] = set()
         self._closing = False
+        self.chatgpt_auth = chatgpt_auth
+        self._plan_failure = ""
+        if chatgpt_auth is not None:
+            self._accepted["chatgpt_plan"] = set()
+            self._credential_revisions["chatgpt_plan"] = 0
+            self._credential_validation["chatgpt_plan"] = "UNVERIFIED"
 
     async def pause_credentials(self, provider: str) -> None:
         async with self._lock:
@@ -97,7 +107,7 @@ class CentralAIService:
     async def close(self) -> None:
         async with self._lock:
             self._closing = True
-            self._credential_paused.update(DEFAULT_MODELS)
+            self._credential_paused.update(self._accepted)
             tasks = tuple(task for values in self._accepted.values() for task in values)
         if tasks:
             await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
@@ -106,6 +116,10 @@ class CentralAIService:
         self._provider, self._model = provider, model
         self._daily_limit = max(0, int(daily_limit))
 
+    def resume_chatgpt(self) -> None:
+        """Explicit operator action; failures never trigger paid fallback/retry."""
+        self._plan_failure = ""
+
     def job_processing_version(self, provider: str, model: str) -> str:
         selected = (self._provider if self._provider != "none" else provider).casefold()
         selected_model = self._model or model or DEFAULT_MODELS.get(selected, "")
@@ -113,25 +127,120 @@ class CentralAIService:
 
     async def analyze(
         self, stock_code: str, stock_name: str, provider: str, model: str,
-        events: list[dict[str, Any]], article_count: int,
+        events: list[dict[str, Any]], article_count: int, *, job_timeout: float | None = None,
     ) -> dict[str, Any]:
         # NAS 운영 설정을 실제 호출 기준으로 사용한다. 공급자를 '사용 안 함'으로
         # 둔 경우에만 기존 앱별 설정을 보조값으로 받아 이전 동작을 유지한다.
         async with self._lock:
             selected = (self._provider if self._provider != "none" else provider).casefold()
             selected_model = self._model or model or DEFAULT_MODELS.get(selected, "")
+            if provider.casefold() == "chatgpt_plan" and selected != "chatgpt_plan":
+                from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+                raise ChatGPTPlanError("provider_mismatch")
+            if selected == "chatgpt_plan" and self._provider == "none":
+                selected_model = model
             if self._closing or selected in self._credential_paused:
                 raise ValueError("NAS AI 연결을 갱신 중입니다. 잠시 후 다시 요청하세요.")
-            if not self._keys.get(selected) or self._credential_revisions.get(selected) is None:
+            if selected == "chatgpt_plan":
+                from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+                if self.chatgpt_auth is None:
+                    raise ChatGPTPlanError("not_connected")
+                if self._plan_failure:
+                    raise ChatGPTPlanError(self._plan_failure)
+                status = await asyncio.to_thread(self.chatgpt_auth.status)
+                if status.get("pause_code"):
+                    self._plan_failure = str(status["pause_code"])
+                    raise ChatGPTPlanError(self._plan_failure)
+                account = next((item for item in status["accounts"] if item["id"] == status["active"]), {})
+                if not account.get("connected") or not account.get("permitted") or not selected_model:
+                    raise ChatGPTPlanError("permission_required" if account.get("connected") else "not_connected")
+                # Stable imported-session generation, separate from token rotation.
+                self._credential_revisions[selected] = int(status.get("generation", 0))
+            elif not self._keys.get(selected) or self._credential_revisions.get(selected) is None:
                 raise ValueError("중앙 서버에 선택한 AI 공급자의 API 키가 설정되지 않았습니다.")
             credential = _AIRequestCredential(selected, selected_model,
-                self._credential_revisions[selected], self._keys[selected])
+                self._credential_revisions[selected], self._keys.get(selected, ""))
             request = asyncio.create_task(self._prepare_and_run(
                 stock_code, stock_name, events, article_count, credential,
             ))
             self._accepted[selected].add(request)
             request.add_done_callback(lambda finished: self._request_finished(selected, finished))
+        if job_timeout is not None and selected != "chatgpt_plan":
+            return await asyncio.wait_for(asyncio.shield(request), timeout=job_timeout)
+        # Subscription transport already bounds network/stream lifetime. A job
+        # timeout must not enqueue a second POST while the shielded first lives.
         return await asyncio.shield(request)
+
+    async def analyze_job(self, stock_code, stock_name, provider, model, events, article_count, *, timeout_seconds):
+        return await self.analyze(stock_code, stock_name, provider, model, events, article_count,
+                                  job_timeout=timeout_seconds)
+
+    async def research_market(self, prompt: str, provider: str, model: str, effort: str):
+        """Own a grounded request through credential drain and shared usage limits."""
+        from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+        from kiwoom_monitor.infrastructure.chatgpt_plan import validate_reasoning
+        validate_reasoning(model, effort)
+        async with self._lock:
+            if self._closing or provider in self._credential_paused:
+                raise ValueError("NAS AI 연결 갱신 또는 종료 중입니다.")
+            if provider == "chatgpt_plan":
+                if self.chatgpt_auth is None:
+                    raise ChatGPTPlanError("not_connected")
+                status = await asyncio.to_thread(self.chatgpt_auth.status)
+                if self._plan_failure or status.get("pause_code"):
+                    raise ChatGPTPlanError(self._plan_failure or status["pause_code"])
+                selected = next((a for a in status["accounts"] if a["id"] == status["active"]), {})
+                if not selected.get("connected") or not selected.get("permitted"):
+                    raise ChatGPTPlanError("not_connected")
+                revision = int(status.get("generation", 0))
+            elif provider == "openai" and self._keys.get(provider) and self._credential_revisions.get(provider) is not None:
+                revision = self._credential_revisions[provider]
+            else:
+                raise ValueError("시황용 AI 공급자 연결이 필요합니다.")
+            credential = _AIRequestCredential(provider, model, revision, self._keys.get(provider, ""))
+            task = asyncio.create_task(self._research_market(prompt, credential, effort), name="central-ai-market-research")
+            self._accepted[provider].add(task)
+            task.add_done_callback(lambda done: self._request_finished(provider, done))
+        return await asyncio.shield(task)
+
+    async def _research_market(self, prompt, credential, effort):
+        from zoneinfo import ZoneInfo
+        from kiwoom_monitor.infrastructure.news_ai import research_market
+        from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+        async with self._execution_lock:
+            provider = credential.provider
+            if provider == "chatgpt_plan":
+                status = await asyncio.to_thread(self.chatgpt_auth.status)
+                if self._plan_failure or status.get("pause_code"):
+                    raise ChatGPTPlanError(self._plan_failure or status["pause_code"])
+                if int(status.get("generation", 0)) != credential.revision:
+                    raise ChatGPTPlanError("not_connected")
+            owner = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+            used = await asyncio.to_thread(self._store.load_documents, "news_request_usage", owner, 10_000)
+            if self._daily_limit > 0 and len(used) >= self._daily_limit:
+                raise ValueError("NAS AI 일일 요청 상한에 도달했습니다.")
+            settings = NewsAISettings(provider, credential.api_key, credential.model)
+            try:
+                result = await asyncio.to_thread(research_market, settings, prompt,
+                    chatgpt_auth=self.chatgpt_auth, reasoning_effort=effort)
+            except Exception as error:
+                if provider == "chatgpt_plan":
+                    self._plan_failure = error.code if isinstance(error, ChatGPTPlanError) else "response_invalid"
+                    await asyncio.to_thread(self.chatgpt_auth.pause_analysis, self._plan_failure)
+                if provider != "chatgpt_plan" or getattr(error, "inference_attempted", False):
+                    await asyncio.to_thread(self._store.upsert_documents, "news_request_usage", [{
+                        "owner": owner, "key": str(uuid4()), "document": {
+                            "provider": provider, "model": credential.model, "purpose": "morning_market_brief",
+                            "requested_at": self._now().isoformat(), "status": "failed",
+                            "usage_measured": False, "request_count": 1}}])
+                raise
+            await asyncio.to_thread(self._store.upsert_documents, "news_request_usage", [{
+                "owner": owner, "key": str(uuid4()), "document": {
+                    "provider": provider, "model": credential.model, "purpose": "morning_market_brief",
+                    "reasoning_effort": effort, "credential_revision": credential.revision,
+                    "requested_at": self._now().isoformat(), "status": "completed",
+                    "usage_measured": True, "request_count": 1, **result.usage}}])
+            return result
 
     def _request_finished(self, provider, task):
         self._accepted[provider].discard(task)
@@ -169,7 +278,8 @@ class CentralAIService:
         for index, event in enumerate(events):
             value = cached.get(str(event["identity"]))
             if isinstance(value, dict) and value.get("body_hash") == event.get("body_hash") \
-                    and value.get("provider") == provider and value.get("model") == model:
+                    and value.get("provider") == provider and value.get("model") == model \
+                    and (provider != "chatgpt_plan" or value.get("credential_revision") == credential.revision):
                 results[index] = value
                 article_revision_id = str(event.get("article_revision_id") or "")
                 body_revision_id = str(event.get("body_revision_id") or "")
@@ -189,7 +299,10 @@ class CentralAIService:
         if missing:
             # 공급자 RPM과 일일 상한은 모든 PC를 합친 중앙 기준으로 적용한다.
             async with self._execution_lock:
-                usage_owner = datetime.now().astimezone().date().isoformat()
+                if provider == "chatgpt_plan" and self._plan_failure:
+                    from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+                    raise ChatGPTPlanError(self._plan_failure)
+                usage_owner = self._now().astimezone().date().isoformat()
                 if self._daily_limit > 0:
                     used = await asyncio.to_thread(
                         self._store.load_documents, "news_request_usage", usage_owner, 10_000,
@@ -213,32 +326,51 @@ class CentralAIService:
                                 self._store.save_news_body_revision, {
                                     "article_revision_id": article_revision_id,
                                     "extractor_version": ARTICLE_BODY_EXTRACTOR_VERSION,
-                                    "fetched_at": datetime.now(UTC).timestamp(),
+                                    "fetched_at": self._now().timestamp(),
                                     "status": str(event.get("body_status") or "fulltext"),
                                     "body_text": str(event["body"]), "error": "",
                                 },
                             )
-                ai_settings = NewsAISettings(provider, credential.api_key, model)
+                ai_settings = NewsAISettings(provider, credential.api_key, model,
+                    chatgpt_storage_path=self.chatgpt_auth.store.path if provider == "chatgpt_plan" else None)
                 try:
                     analyses, usage = await asyncio.to_thread(
                         analyze_articles, ai_settings, stock_name,
                         tuple((str(event["title"]), str(event["body"])) for _, event in missing),
+                        **({"chatgpt_auth": self.chatgpt_auth} if provider == "chatgpt_plan" else {}),
                     )
-                except NewsAIProviderError as error:
-                    if self._credential_revisions[provider] == credential.revision:
-                        self._credential_validation[provider] = (
-                            "INVALID_CREDENTIAL" if error.status_code == 401 else
-                            "ACCESS_DENIED" if error.status_code == 403 else
-                            "RETRYABLE" if error.status_code == 429 or error.status_code >= 500 else "REQUEST_FAILED"
-                        )
-                    raise
-                except OSError:
-                    if self._credential_revisions[provider] == credential.revision:
+                except Exception as error:
+                    from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+                    if provider == "chatgpt_plan":
+                        # Also pause invalid news JSON. Already accepted tasks check
+                        # this fence again after acquiring the shared execution lock.
+                        self._plan_failure = error.code if isinstance(error, ChatGPTPlanError) else "response_invalid"
+                        await asyncio.to_thread(self.chatgpt_auth.pause_analysis, self._plan_failure)
+                        if (isinstance(error, ChatGPTPlanError) and error.inference_attempted) or isinstance(error, ValueError):
+                            await asyncio.to_thread(self._store.upsert_documents, "news_request_usage", [{
+                                "owner": usage_owner, "key": str(uuid4()), "document": {
+                                    "requested_at": self._now().astimezone().isoformat(), "provider": provider,
+                                    "model": model, "credential_revision": credential.revision,
+                                    "request_mode": "batch" if len(missing) > 1 else "single",
+                                    "event_count": len(missing), "article_count": article_count,
+                                    "status": "failed", "error_code": self._plan_failure,
+                                    "usage_measured": False,
+                                },
+                            }])
+                        raise ChatGPTPlanError(self._plan_failure) from None
+                    if isinstance(error, NewsAIProviderError):
+                        if self._credential_revisions[provider] == credential.revision:
+                            self._credential_validation[provider] = (
+                                "INVALID_CREDENTIAL" if error.status_code == 401 else
+                                "ACCESS_DENIED" if error.status_code == 403 else
+                                "RETRYABLE" if error.status_code == 429 or error.status_code >= 500 else "REQUEST_FAILED"
+                            )
+                    elif isinstance(error, OSError) and self._credential_revisions[provider] == credential.revision:
                         self._credential_validation[provider] = "RETRYABLE"
                     raise
                 if self._credential_revisions[provider] == credential.revision:
                     self._credential_validation[provider] = "VERIFIED"
-                now = datetime.now(UTC).isoformat()
+                now = self._now().isoformat()
                 documents = []
                 for (index, event), analysis in zip(missing, analyses, strict=True):
                     value = _analysis_document(
@@ -251,7 +383,7 @@ class CentralAIService:
                 usage_documents = [{
                     "owner": usage_owner, "key": str(uuid4()),
                     "document": {
-                        "requested_at": datetime.now().astimezone().isoformat(), "provider": provider,
+                        "requested_at": self._now().astimezone().isoformat(), "provider": provider,
                         "model": model, "request_mode": "batch" if len(missing) > 1 else "single",
                         "credential_revision": credential.revision,
                         "event_count": len(missing), "article_count": article_count,
@@ -277,7 +409,7 @@ class CentralAIService:
                             "prompt_version": ANALYSIS_PROMPT_VERSION,
                             "schema_version": NEWS_ANALYSIS_SCHEMA_VERSION,
                             "input_hash": str(event.get("body_hash", "")),
-                            "computed_at": datetime.now(UTC).timestamp(),
+                            "computed_at": self._now().timestamp(),
                             "output": document["document"], "usage": usage.__dict__,
                         })
                     await asyncio.to_thread(

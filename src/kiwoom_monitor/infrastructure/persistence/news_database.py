@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,7 +72,7 @@ def migrate_legacy_news_database(main_database_path: Path, news_database_path: P
                 source.execute(f"DROP TABLE {table}")
             source.execute(
                 "INSERT INTO legacy_news_transfer_migrations(version,name,completed_at) VALUES(1,?,?)",
-                ("main_news_tables_to_news_database", datetime.now(UTC).isoformat()),
+                ("main_news_tables_to_news_database", kst_now().isoformat()),
             )
     finally:
         source.close()

@@ -139,14 +139,34 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
             blockers.append('finalization_lineage_invalid')
         prefix_hashes={scope:hashlib.sha256() for scope in SCOPES}
         prefix_counts={scope:0 for scope in SCOPES}
-        for row in db.execute('SELECT '+TARGET_FIELDS+' FROM archive_targets_v2 ORDER BY scope,stock_code,identity,target_id'):
+        reviewed_event_ids=set()
+        target_verification_failures=[]
+        # Event-only execution transitions preserve finalized target rows. The
+        # verified lineage identifies the producer of the suffix; the latest
+        # event runner digest is not a new BODY/RULE producer.
+        finalization_digest=lineage['code_digest'] if lineage else value.get('builder_code_digest')
+        for values in db.execute('SELECT '+TARGET_FIELDS+',event_reason FROM archive_targets_v2 ORDER BY scope,stock_code,identity,target_id'):
+            row, event_reason = values[:-1], values[-1]
+            if event_reason and event_reason.startswith('reviewed_event_key:'):
+                review_id=event_reason.removeprefix('reviewed_event_key:')
+                if review_id in reviewed_event_ids:
+                    blockers.append('event_conflict_review_invalid')
+                reviewed_event_ids.add(review_id)
             scope,owner,identity,target,name,input_hash,article_id,body_id,fingerprint,prepared_json,computed_json,state,_ = row
             computed=json.loads(computed_json)
-            digest=fingerprint_digest(lineage,scope,owner,identity,value.get('builder_code_digest'))
+            digest=fingerprint_digest(lineage,scope,owner,identity,finalization_digest)
             expected_hash=hashlib.sha256(_json((POLICY,input_hash,article_id,body_id,target,name,digest,computed)).encode()).hexdigest()
             equal=_json(json.loads(prepared_json))==_json(computed)
             if fingerprint!=expected_hash or (state=='verified_equal')!=equal:
-                blockers.append('target_verification_fingerprint_invalid'); break
+                if not target_verification_failures:
+                    blockers.append('target_verification_fingerprint_invalid')
+                if len(target_verification_failures)<5:
+                    target_verification_failures.append({'scope':scope,'stock_code':owner,
+                        'identity':identity,'target_id':target,'producer_digest':digest,
+                        'fingerprint_matches':fingerprint==expected_hash,
+                        'verification_state_matches':(state=='verified_equal')==equal})
+                # Keep collecting review IDs and prefix roots from this same
+                # stream, even when one target fails its independent gate.
             if lineage and digest==lineage['parent_digest']:
                 encoded=_json(row).encode()
                 prefix_hashes[scope].update(len(encoded).to_bytes(8,'big'));prefix_hashes[scope].update(encoded)
@@ -160,6 +180,21 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
         if db.execute("SELECT 1 FROM archive_targets_v2 t LEFT JOIN central_news_event_revisions e ON e.event_revision_id=t.event_revision_id LEFT JOIN central_news_event_membership_revisions m ON m.membership_revision_id=t.membership_revision_id WHERE t.event_revision_id IS NOT NULL AND (e.event_revision_id IS NULL OR e.event_id<>t.event_id OR e.article_revision_id<>t.article_revision_id OR e.body_revision_id<>t.body_revision_id OR e.stock_code<>t.target_id OR m.membership_revision_id IS NULL OR m.event_revision_id<>t.event_revision_id OR m.article_revision_id<>t.article_revision_id OR m.body_revision_id<>t.body_revision_id) LIMIT 1").fetchone():
             blockers.append('event_membership_relation_invalid')
         manifests={key:json.loads(doc) for key,doc in db.execute('SELECT key,value_json FROM archive_build_manifest')}
+        event_review_errors=[]
+        try:
+            from scripts.prepared_historical_archive_v2 import EVENT_REVIEW_PREFIX, EVENT_DECISION_PREFIX, validate_event_review_receipt
+            receipts={key.removeprefix(EVENT_REVIEW_PREFIX):document for key,document in manifests.items() if key.startswith(EVENT_REVIEW_PREFIX)}
+            if set(receipts)!=reviewed_event_ids:
+                raise ValueError('event review receipt set differs from reviewed targets')
+            registrations={key.removeprefix(EVENT_DECISION_PREFIX) for key in manifests if key.startswith(EVENT_DECISION_PREFIX)}
+            if not registrations.issubset(receipts):
+                raise ValueError('registered event review has no completion receipt')
+            for identity, receipt in receipts.items():
+                if validate_event_review_receipt(db,receipt)!=identity:
+                    raise ValueError('event review receipt key differs')
+        except (ValueError,KeyError,TypeError,OSError,sqlite3.DatabaseError) as exc:
+            blockers.append('event_conflict_review_invalid')
+            event_review_errors.append(str(exc))
         projection=manifests.get('projection_v2',{})
         actual_counts=dict(db.execute('SELECT kind,COUNT(*) FROM archive_projection_v2 GROUP BY kind'))
         if projection.get('state')!='complete' or projection.get('counts')!=actual_counts:
@@ -260,6 +295,8 @@ def audit(path: Path, *, seed: Path | None=None, full_integrity_check: bool=Fals
         return {'archive':str(path),'read_only':True,'dataset_id':value.get('dataset_id'),
                 'progress':progress,'target_rows':target_rows,'projection_counts':actual_counts,
                 'seed_rows_verified':seed_rows,'integrity_check':integrity,
+                'target_verification_failures':target_verification_failures,
+                'event_review_errors':event_review_errors,
                 'blockers':sorted(set(blockers)),'ready_for_seal':not blockers}
 
 

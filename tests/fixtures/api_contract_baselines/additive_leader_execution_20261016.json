@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "writer_kind_insertion": {
+    "writer_id": "document.collection",
+    "after": "document:execution_mock_automation_clock_current",
+    "values": [
+      "document:execution_leader_position_context",
+      "document:execution_leader_decisions"
+    ]
+  }
+}

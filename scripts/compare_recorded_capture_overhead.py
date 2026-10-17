@@ -334,7 +334,7 @@ def worker(args):
                     'dataset_store_calls': args.store_calls, "collector_state_sha256": digest({
                         "latest": sorted(collector._latest_snapshots.items()),
                         "minutes": minute_signature(collector, origin, args.rows),
-                        "seconds": sorted((str(k), v.as_record()) for k, v in collector._second_trades._bars.items())}),
+                        "live_input_resolution": "0B", "second_bar_production": False}),
                     "store_payload_sha256": digest(sorted((r["snapshot_key"], r["payload"]) for r in stored)),
                     'account_large': None if account is None else {
                         'native_method_counts': dict(account.counts), 'outcomes_sha256': digest(account.outcomes),

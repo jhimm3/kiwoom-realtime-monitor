@@ -1,5 +1,13 @@
 # 키움 저장 경로 감사 — 첫 계측 범위
 
+## 주도주 돌파 실행 근거 (2026-10-16 로컬)
+
+기존 Runner가 `central_documents`의 계좌별 `execution_leader_position_context`(진입 intent 키)와 `execution_leader_decisions`(decision 키)에 고정 진입 근거·0B 원문·운영 revision·규칙/context/실행 계약 지문을 보존한다. 0B callback은 RAM에만 전달하고 행동 승인 직전에 기존 `upsert_documents` writer를 호출한다. 별도 테이블·writer·주문 owner는 추가하지 않는다. 이 두 collection을 기존 execution 문서의 DB 관측 종류에 등록했다. 근거 저장은 각각 기존 문서 transaction이며 뒤따르는 주문 claim transaction이 lease/control과 저장 근거를 함께 재검증한다. 부분 저장/오류는 주문 승인을 대신하지 않는다. 운영 PG/WAL 지연 수락·데이터 변경 검증과는 별개다.
+
+## 직접 검색 아침 시황 (2026-10-15 후보)
+
+기존 `central_documents` writer의 `morning_market_brief_settings`, `morning_market_brief_runs` collection을 등록했다. 독립 `morning_market_brief` 자식 pause는 신규 시작을 제어하며 소유한 요청/최종 쓰기는 보존한다. 연결·transaction·commit·주문 원장은 변경하지 않는다. claim 저장 이후만 외부 POST를 허용하고 재시작의 미확인 claim은 자동 재요청하지 않는다. 공통 PostgreSQL 문서 writer의 단계/오류 측정을 사용하고 실제 affected rows를 얻지 못하면 미계측으로 남긴다. 중복·동시·claim 실패·취소/종료·revision/TTL·출처/시각 계약을 격리 검사했다. 현재 운영 활성화 전이다. [상세](workstreams/morning-market-brief.md#저장수명진단).
+
 ## 고정 대체 주문 native 승인·제출 (2026-10-14 로컬)
 
 기존 spec/gate/approved index/dispatch collection과 execution intent/event/lease writer를 재사용한다. v3 first fixed 승인/index는 불변이며 새 Risk/짝 입력의 immutable gate는 같은 gate collection에 추가한다. QUEUED가 실제 검사한 gate/Risk 참조 3개는 `central_execution_intents.document_json.mock_replacement_claim`에 같은 create transaction으로 저장한다. 양 backend append writer는 child projection 변경 시 저장된 참조를 보존한다. typed ExecutionRecord/원래 연구 hash·기존 event/receipt 구조를 바꾸지 않는다. metadata는 실제 승인/counter 복구 근거이며 순수 Shadow 결과의 권한은 OFF로 유지한다.

@@ -3,11 +3,13 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
 
 class SettingsRepository:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, now_provider=None) -> None:
         self._database_path = database_path
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
         self._cache: dict[str, str] = {}
 
     @property
@@ -36,7 +38,7 @@ class SettingsRepository:
         """Save one settings form in one transaction, then expose its values to the UI."""
         if not values:
             return
-        updated_at = datetime.now(UTC).isoformat()
+        updated_at = self._now().isoformat()
         connection = sqlite3.connect(self._database_path)
         try:
             connection.execute(

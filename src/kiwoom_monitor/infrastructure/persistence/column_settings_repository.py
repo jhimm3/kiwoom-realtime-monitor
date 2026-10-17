@@ -3,6 +3,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
 @dataclass(frozen=True)
 class ColumnSetting:
@@ -12,7 +13,9 @@ class ColumnSetting:
     width: int
 
 class ColumnSettingsRepository:
-    def __init__(self, database_path: Path) -> None: self._database_path = database_path
+    def __init__(self, database_path: Path, *, now_provider=None) -> None:
+        self._database_path = database_path
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
     def list(self) -> tuple[ColumnSetting, ...]:
         con = sqlite3.connect(self._database_path)
         try:
@@ -43,13 +46,12 @@ class ColumnSettingsRepository:
         finally:
             con.close()
 
-    @staticmethod
-    def _record_versions(connection: sqlite3.Connection, names: tuple[str, ...]) -> None:
+    def _record_versions(self, connection: sqlite3.Connection, names: tuple[str, ...]) -> None:
         connection.execute(
             "CREATE TABLE IF NOT EXISTS central_column_setting_versions ("
             "column_name TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
         )
-        now = datetime.now(UTC).isoformat()
+        now = self._now().isoformat()
         connection.executemany(
             "INSERT INTO central_column_setting_versions(column_name,updated_at) VALUES(?,?) "
             "ON CONFLICT(column_name) DO UPDATE SET updated_at=excluded.updated_at",

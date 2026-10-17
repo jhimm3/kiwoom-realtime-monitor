@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from time import monotonic
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from threading import RLock
@@ -12,8 +13,11 @@ from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.domain.time_basis import aware_iso_kst
 
 from .client import KiwoomApiError
+
+_KST = timezone(timedelta(hours=9))
 from .account_query import (
     AccountQueryBatch,
     AccountQueryCapabilityError,
@@ -88,6 +92,7 @@ class RemoteKiwoomRestClient:
         self._selected_context = account_context
         self._command_lock = RLock()
         self._pending_submit = None
+        self._server_clock: tuple[datetime, float] | None = None
 
     def load_account_contexts(self) -> tuple[AccountQueryContext, ...]:
         request = Request(f"{self._server_url}/api/v3/kiwoom/accounts",
@@ -104,8 +109,10 @@ class RemoteKiwoomRestClient:
         matches = [c for c in self.load_account_contexts() if c.scope == scope]
         if len(matches) != 1:
             raise AccountQueryCapabilityError("선택한 계좌는 NAS 조회 연결이 준비되지 않았습니다. NAS 계좌 설정을 확인하세요.")
-        return RemoteKiwoomRestClient(self._server_url, self._access_token, opener=self._opener,
+        client = RemoteKiwoomRestClient(self._server_url, self._access_token, opener=self._opener,
             timeout_seconds=self._timeout, account_context=matches[0])
+        client._server_clock = self._server_clock
+        return client
 
     def _selected_fields(self):
         context = self._selected_context
@@ -227,8 +234,10 @@ class RemoteKiwoomRestClient:
             method="POST",
         )
         try:
+            request.add_header("X-Kiwoom-Clock", "1")
             with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
                 document = json.loads(response.read().decode("utf-8"))
+                self._capture_server_clock(response)
         except HTTPError as error:
             detail = _http_error_detail(error)
             if (error.code == 503 and isinstance(detail, dict) and detail.get("code") == "REALTIME_RECONNECTING"
@@ -263,8 +272,10 @@ class RemoteKiwoomRestClient:
             method="GET",
         )
         try:
+            request.add_header("X-Kiwoom-Clock", "1")
             with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
                 document = json.loads(response.read().decode("utf-8"))
+                self._capture_server_clock(response)
         except HTTPError as error:
             _raise_central_http_error(error, _http_error_detail(error))
         except (URLError, TimeoutError, ConnectionError, OSError) as error:
@@ -529,8 +540,10 @@ class RemoteKiwoomRestClient:
 
     def _read_central_document(self, request: Request, label: str, *, timeout_seconds=None) -> dict[str, Any]:
         try:
+            request.add_header("X-Kiwoom-Clock", "1")
             with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds, context=system_ssl_context()) as response:
                 document = json.loads(response.read().decode("utf-8"))
+                self._capture_server_clock(response)
         except HTTPError as error:
             if error.code in {404, 405, 501} and "/api/v1/market/top20-series?" in request.full_url:
                 raise CentralFeatureUnavailable("중앙 서버가 TOP20 series를 지원하지 않습니다.") from error
@@ -565,8 +578,10 @@ class RemoteKiwoomRestClient:
                 method="POST",
             )
             try:
+                request.add_header("X-Kiwoom-Clock", "1")
                 with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
                     document = json.loads(response.read().decode("utf-8"))
+                    self._capture_server_clock(response)
             except HTTPError as error:
                 detail = _http_error_detail(error)
                 if error.code in {404, 405, 501}:
@@ -638,8 +653,21 @@ class RemoteKiwoomRestClient:
             raise KiwoomApiError("개인 중앙 서버 계좌 context가 올바르지 않습니다.") from error
 
     def server_now(self) -> datetime:
-        # 실시간 수집을 중앙화하기 전까지 서비스 프로토콜과의 호환을 위한 값이다.
-        return datetime.utcnow() + timedelta(hours=9)
+        # Preserve the broker client protocol: offset-free Korean wall time.
+        clock = self._server_clock
+        value = (clock[0] + timedelta(seconds=monotonic() - clock[1])
+                 if clock else datetime.now(_KST))
+        return value.replace(tzinfo=None)
+
+    def _capture_server_clock(self, response) -> None:
+        headers = getattr(response, "headers", None)
+        raw = headers.get("X-Kiwoom-Server-Time") if headers is not None else None
+        if not isinstance(raw, str):
+            return
+        try:
+            self._server_clock = (aware_iso_kst(raw), monotonic())
+        except (ValueError, OverflowError):
+            return  # Old or malformed responses cannot change a valid clock.
 
     def get_access_token(self) -> str:
         raise KiwoomApiError("키움 접근 토큰은 중앙 서버 외부로 제공하지 않습니다.")

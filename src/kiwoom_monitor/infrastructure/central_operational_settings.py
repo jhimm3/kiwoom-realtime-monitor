@@ -41,6 +41,31 @@ class CentralOperationalSettingsClient:
             raise ValueError("시장·테마 관찰 설정을 먼저 불러오세요.")
         return self._request("PUT", body, path="/api/v1/research/ram-shadow/selection")
 
+    def chatgpt_status(self) -> dict[str, object]:
+        return self._request("GET", path="/api/v1/news/chatgpt/status")
+
+    def morning_brief_settings(self):
+        return self._request("GET", path="/api/v1/market/morning-brief/settings")
+
+    def save_morning_brief_settings(self, values):
+        return self._request("PUT", values, path="/api/v1/market/morning-brief/settings")
+
+    def morning_brief(self):
+        return self._request("GET", path="/api/v1/market/morning-brief")
+
+    def run_morning_brief(self):
+        return self._request("POST", path="/api/v1/market/morning-brief/run")
+
+    def chatgpt_models(self):
+        value = self._request("GET", path="/api/v1/news/chatgpt/models")
+        return tuple((str(item["label"]), str(item["slug"])) for item in value["models"])
+
+    def chatgpt_change(self, action: str, account_id: str = "") -> dict[str, object]:
+        if action not in {"select", "disconnect", "resume"}:
+            raise ValueError("지원하지 않는 ChatGPT 연결 작업입니다.")
+        return self._request("POST", {"account_id": account_id} if action == "select" else None,
+                             path=f"/api/v1/news/chatgpt/{action}")
+
     def _request(self, method: str, body: dict[str, object] | None = None,
                  *, path: str = "/api/v1/settings/operations") -> dict[str, object]:
         if not self._source.server_url or not self._source.access_token:
@@ -58,6 +83,8 @@ class CentralOperationalSettingsClient:
             with urlopen(request, timeout=10, context=system_ssl_context()) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
+            if error.code == 404 and path.startswith("/api/v1/market/morning-brief"):
+                raise RuntimeError("현재 NAS에 아침 시황 기능이 아직 설치되지 않았습니다. 준비된 NAS 업데이트를 먼저 적용하세요.") from error
             if error.code == 409:
                 raise RuntimeError("NAS 설정이 다른 화면에서 변경되었습니다. 다시 불러온 뒤 저장하세요.") from error
             raise RuntimeError(f"NAS 운영 설정을 처리하지 못했습니다: HTTP {error.code}") from error
@@ -69,7 +96,7 @@ class CentralOperationalSettingsClient:
         revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
         if path == "/api/v1/research/ram-shadow/selection":
             self._ram_shadow_revision = revision
-        else:
+        elif path == "/api/v1/settings/operations":
             self._revision = revision
         return result
 

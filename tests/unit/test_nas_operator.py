@@ -561,6 +561,56 @@ class NasOperatorTests(unittest.TestCase):
                 with self.subTest(change=name, approved=approved):
                     self.assertFalse(op.fingerprint_matches(value, approved))
 
+    def test_docker_reload_empty_dns_matches_original_approval_without_mutation(self):
+        original = self.identity_fixture()
+        dns_keys = ('Dns', 'DnsSearch', 'DnsOptions')
+        original['HostConfig'].update(dict.fromkeys(dns_keys, None))
+        approved = self.legacy_identity(original)
+        for empty_forms in itertools.product((None, []), repeat=3):
+            value = copy.deepcopy(original)
+            value['HostConfig'].update(zip(dns_keys, empty_forms))
+            value['Mounts'].reverse()
+            before = copy.deepcopy(value)
+            with self.subTest(empty_forms=empty_forms):
+                self.assertTrue(op.fingerprint_matches(value, approved))
+                self.assertEqual(value, before)
+
+    def test_dns_compatibility_keeps_every_other_profile_field_and_nonempty_dns(self):
+        original = self.identity_fixture()
+        dns_keys = ('Dns', 'DnsSearch', 'DnsOptions')
+        original['HostConfig'].update({key: [] for key in dns_keys})
+        approved = op.fingerprint(original)
+        changes = {
+            **{key: lambda v, key=key: v['HostConfig'].update({key: ['changed']}) for key in dns_keys},
+            'missing_dns_key': lambda v: v['HostConfig'].pop('Dns'),
+            'wrong_dns_type': lambda v: v['HostConfig'].update(Dns=False),
+            'another_null_field': lambda v: v['HostConfig'].update(Devices=[]),
+            'environment': lambda v: v['Config'].update(Env=['FIXTURE_KEY=changed']),
+            'privilege': lambda v: v['HostConfig'].update(Privileged=True),
+            'mount_rw': lambda v: v['Mounts'][0].update(RW=False),
+            'image': lambda v: v.update(Image='sha256:changed'),
+            'network': lambda v: v['NetworkSettings']['Networks']['monitor'].update(NetworkID='changed'),
+        }
+        for name, mutate in changes.items():
+            value = copy.deepcopy(original)
+            value['HostConfig'].update(dict.fromkeys(dns_keys, None))
+            mutate(value)
+            with self.subTest(change=name):
+                self.assertFalse(op.fingerprint_matches(value, approved))
+
+    def test_dns_compatibility_is_bounded_and_does_not_reorder_nonempty_dns(self):
+        original = self.identity_fixture()
+        original['HostConfig'].update(Dns=['192.0.2.1', '192.0.2.2'], DnsSearch=None, DnsOptions=None)
+        approved = op.fingerprint(original)
+        current = copy.deepcopy(original)
+        current['HostConfig'].update(DnsSearch=[], DnsOptions=[])
+        self.assertTrue(op.fingerprint_matches(current, approved))
+        current['HostConfig']['Dns'].reverse()
+        self.assertFalse(op.fingerprint_matches(current, approved))
+        with patch.object(op, '_fingerprint_with_mounts', wraps=op._fingerprint_with_mounts) as hashed:
+            self.assertFalse(op.fingerprint_matches(current, '0' * 64))
+            self.assertLessEqual(hashed.call_count, 8 * 8)
+
     def test_legacy_identity_is_accepted_at_operator_boundary_without_config_changes(self):
         original = self.identity_fixture()
         config = {'server_id': original['Id'], 'database_id': original['Id'],
@@ -667,6 +717,29 @@ class NasOperatorTests(unittest.TestCase):
     def test_duplicate_json_keys_are_not_silently_overwritten(self):
         with self.assertRaisesRegex(op.Rejected, 'duplicate_json_key'):
             op.decode(b'{"format":1,"format":2}')
+
+    def test_only_dependency_and_ddl_changes_need_runtime_review(self):
+        value, installed, _ = manifest()
+        for name in op.CONTRACT:
+            changed = copy.deepcopy(value)
+            changed['contract'][name] = 'b' * 64
+            if name in changed['files']:
+                changed['files'][name] = 'b' * 64
+            files = changed['files']
+            content = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+            changed['release_id'] = changed['server_build'] + '-' + content[:16]
+            changed['src_hash'] = hashlib.sha256(json.dumps(
+                {k: v for k, v in files.items() if k.startswith('src/')}, sort_keys=True).encode()).hexdigest()
+            with self.subTest(name=name):
+                if name in ('pyproject.toml', 'src/kiwoom_monitor/central_server/central_schema.py'):
+                    with self.assertRaisesRegex(op.Rejected, 'contract_requires_admin_update'):
+                        op.validate_manifest(changed, changed['release_id'], installed)
+                else:
+                    self.assertEqual(content, op.validate_manifest(changed, changed['release_id'], installed))
+                    if name in files:
+                        changed['contract'][name] = 'c' * 64
+                        with self.assertRaisesRegex(op.Rejected, 'contract_file_hash_mismatch'):
+                            op.validate_manifest(changed, changed['release_id'], installed)
 
     def test_parser_exposes_no_arbitrary_command_mount_dsn_or_env(self):
         with contextlib.redirect_stderr(__import__('io').StringIO()):
@@ -1131,6 +1204,9 @@ class NasOperatorTests(unittest.TestCase):
 
     def test_worker_failure_reason_preserves_only_controlled_bounded_codes(self):
         for reason in ('private_persistence_timeout', 'capacity_native_workload_incomplete',
+                       'worker_isolation_required', 'worker_memory_limit_not_enforced',
+                       'worker_memory_limit_unavailable', 'temporary_postgres_not_ready',
+                       'cluster_not_fresh',
                        'TOKEN=secret', 'private_password=secret', 'private_' + 'x' * 111, 5):
             with self.subTest(reason=reason):
                 output = MemoryTree()
@@ -1141,11 +1217,43 @@ class NasOperatorTests(unittest.TestCase):
                 with patch.object(op, 'Tree', return_value=output):
                     operator.worker_failure_diagnostics(report, 'a' * 32, '/worker')
                 summary = report['worker_result_summary']
-                if reason in ('private_persistence_timeout', 'capacity_native_workload_incomplete'):
+                if reason in ('private_persistence_timeout', 'capacity_native_workload_incomplete',
+                              'worker_isolation_required', 'worker_memory_limit_not_enforced',
+                              'worker_memory_limit_unavailable', 'temporary_postgres_not_ready',
+                              'cluster_not_fresh'):
                     self.assertEqual(reason, summary['failure_reason'])
                 else:
                     self.assertNotIn('failure_reason', summary)
                 self.assertNotIn('secret', repr(report))
+
+    def test_worker_startup_reports_stage_and_known_reason_without_exception_text(self):
+        for reason in ('cluster_not_fresh', 'TOKEN=secret'):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                (work / 'request.json').write_text(json.dumps({'command': 'test', 'profile': 'selected'}))
+                with patch.object(worker, 'WORK', work), \
+                        patch.object(worker.os, 'getuid', return_value=65534, create=True), \
+                        patch.object(worker.os, 'sched_getaffinity', return_value={0, 1}, create=True), \
+                        patch.object(worker.Path, 'is_dir', return_value=True), \
+                        patch.object(worker.Path, 'exists', return_value=False), \
+                        patch.object(worker, 'memory_limit', return_value=1024 ** 3), \
+                        patch.object(worker.sys, 'path', list(worker.sys.path)), \
+                        patch.object(worker, 'database_setup', side_effect=RuntimeError(reason)):
+                    self.assertEqual(1, worker.main())
+                outcome = json.loads((work / 'result.json').read_text())
+                self.assertEqual('database_setup', outcome['failure_stage'])
+                self.assertEqual('RuntimeError', outcome['error_type'])
+                self.assertEqual(reason if reason == 'cluster_not_fresh' else None,
+                                 outcome.get('failure_reason'))
+                output = MemoryTree()
+                output.put_json('result.json', outcome)
+                operator = op.Operator({}, None)
+                operator.inspect = lambda unused: {'State': {'ExitCode': 1, 'OOMKilled': False}}
+                report = {}
+                with patch.object(op, 'Tree', return_value=output):
+                    operator.worker_failure_diagnostics(report, 'a' * 32, '/worker')
+                self.assertEqual(outcome, report['worker_result_summary'])
+                self.assertNotIn('secret', json.dumps(report))
 
     def test_postgres_startup_diagnostics_are_bounded_and_exclude_logs_env_and_paths(self):
         job = 'a' * 32
@@ -1357,12 +1465,25 @@ class NasOperatorTests(unittest.TestCase):
         with self.assertRaisesRegex(op.Rejected, 'verified_previous_release_required'):
             operator.deploy(operator.store, 'old', rollback=True)
 
-    def test_no_gate_or_selected_only_gate_cannot_deploy(self):
+    def test_selected_related_tests_can_deploy_but_failed_stale_or_unfenced_results_cannot(self):
         operator = DeployOperator()
         operator.private.documents['gates/new.json']['profile'] = 'selected'
-        with self.assertRaisesRegex(op.Rejected, 'exact_source_gate_required'):
-            operator.deploy(operator.store, 'new')
-        self.assertEqual([], operator.actions)
+        source = operator.source
+        def admitted(release):
+            value, content = source(release)
+            value['contract']['driver'] = release  # Already admitted code-only metadata differs.
+            return value, content
+        with patch.object(operator, 'source', side_effect=admitted), \
+                patch.object(op.os, 'mkdir'), patch.object(op.os, 'rmdir'):
+            self.assertEqual('new', operator.deploy(operator.store, 'new')['release_id'])
+            self.assertEqual('old', operator.deploy(operator.store, 'old', rollback=True)['release_id'])
+        for fields in ({'passed': False}, {'source_hash': 'other-source'},
+                       {'post_job_fence_verified': False}, {'profile': 'unknown'}):
+            operator = DeployOperator()
+            operator.private.documents['gates/new.json'].update(fields)
+            with self.subTest(fields=fields), self.assertRaisesRegex(op.Rejected, 'exact_source_gate_required'):
+                operator.deploy(operator.store, 'new')
+            self.assertEqual([], operator.actions)
 
     def test_recovery_rejects_changed_active_pointer_before_any_stop(self):
         operator = DeployOperator()

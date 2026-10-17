@@ -1,5 +1,7 @@
 # NAS 진단 운영·API·제어 계약
 
+2026-10-15 아침 시황 후보: master 아래 `morning_market_brief` 자식 pause를 추가한다. 기본 pause 없음. pause는 새 예약/수동 시작만 막고 소유한 웹 조사와 완료 기록은 drain한다. master OFF/TTL/재시작은 기존 규칙을 따른다. 재개는 15분 예약 창의 미시도 날짜만 대상으로 하고 running/failed claim을 자동 재요청하지 않는다. 시도·완료·실패·경과 시간은 runtime, DB 단계는 공통 `document:morning_market_brief_settings/runs` 계측을 사용한다. 아직 운영 NAS 활성화 전이다. [계약](workstreams/morning-market-brief.md#저장수명진단).
+
 입력 묶음의 격리 측정은 data/diagnostics/20261014-allocation-input-bundle-v1/metrics.json이다. 2/8 각각 Collector/계좌/bundle/상위1·시장1·DB/COMMIT/주문0, bundle2236bytes·생성100회 평균0.1377/0.1795ms·cold frame10.647/9.301ms.100회 status/duplicate에서는 추가 account read/bundle build/evaluation0이다. 선택 기록 검사는 기존 upsert1/COMMIT1·반복0으로 새 DB 루프가 아니다. 실제 PG/NAS/장중·계좌/whole-app 성능 수락과 구분한다. [86단계](AI_TRADING_SYSTEM_REDESIGN.md#86-개발-마무리-범위-고정과-공통-입력원본-근거-묶음)
 
 이하 단계 설명은 해당 시점의 기록이다.

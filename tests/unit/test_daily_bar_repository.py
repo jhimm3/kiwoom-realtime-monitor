@@ -64,6 +64,26 @@ class DailyBarRepositoryTests(unittest.TestCase):
             connection.close()
             self.assertEqual(250, count)
 
+    def test_saved_five_and_twenty_day_highs_are_display_values_without_fresh_query_proof(self):
+        from datetime import timedelta
+        from kiwoom_monitor.application.daily_high_service import DailyBar, DailyHighTargets
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = DailyBarRepository(path)
+            day = date(2026, 10, 15)
+            bars = tuple(DailyBar((day-timedelta(days=n)).strftime("%Y%m%d"),100+n,None)
+                for n in range(20))
+            repository.upsert_targets("005930",DailyHighTargets(None,None,None,daily_bars=bars),day)
+            target = repository.load_targets(("005930",))["005930"]
+            self.assertEqual(104,target.high_5_price)
+            self.assertEqual(119,target.high_20_price)
+            self.assertIsNone(target.high_250_price)
+            self.assertFalse(target.collection_verified)
+            self.assertFalse(target.period_verified("5"))
+            self.assertFalse(target.period_verified("20"))
+
     def test_market_close_finalization_is_saved_per_stock_and_day(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ from kiwoom_monitor.application.research_factors import (
 )
 from kiwoom_monitor.application.theme_leadership import (
     SecondTradePoint,
+    RealtimeTradePoint,
     ThemeLeadershipParameters,
     ThemeMembership,
     UpperLimitReference,
@@ -53,6 +55,26 @@ def initial_points():
 
 
 class ThemeLeadershipTests(unittest.TestCase):
+    def test_live_first_second_baseline_uses_only_receipts_available_at_cut(self):
+        points=tuple(RealtimeTradePoint(
+            input_ref=f'raw:{index}',code=code,market='KRX',observed_at=f'{DAY}T09:00:12+09:00',
+            available_at=f'{DAY}T09:00:12.{receipt}+09:00',close=price,high=price,
+            volume=10,trade_value_won=price*10,trade_count=1,sequence=index)
+            for index,(code,price,receipt) in enumerate((('005930',90,'100000'),
+                ('000660',100,'200000'),('005930',100,'900000')),1))
+        original=deepcopy(points)
+        for cut,expected_price,count in (('12.500000',90,1),('13',100,2)):
+            with self.subTest(cut=cut):
+                result=evaluate_theme_leadership(membership(),points,as_of=f'{DAY}T09:00:{cut}+09:00',
+                    venue='KRX',continuity_status='COMPLETE',parameters=PARAMETERS)
+                a=next(m for m in result.members if m.code=='005930')
+                self.assertEqual(expected_price,a.first_price)
+                self.assertEqual(expected_price,a.last_price)
+                self.assertEqual(0,a.return_bps)
+                self.assertEqual(count,a.trade_count)
+                self.assertEqual('COMPLETE',result.quality['status'])
+        self.assertEqual(original,points)
+
     def test_price_and_trade_value_rank_selects_leader_and_only_reports_touched(self) -> None:
         evaluation = evaluate_theme_leadership(
             membership(), initial_points(), as_of=f"{DAY}T09:00:20+09:00",

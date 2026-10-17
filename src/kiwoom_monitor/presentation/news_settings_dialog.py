@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QSettings, QUrl, Slot
+from PySide6.QtCore import QSettings, QUrl, Slot, Qt
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -41,11 +42,14 @@ from kiwoom_monitor.infrastructure.central_operational_settings import (
 )
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
+from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTAuth, ChatGPTCredentialStore, ChatGPTPlanError, USAGE_URL
+from kiwoom_monitor.infrastructure.chatgpt_plan import ChatGPTPlanClient
 
 class NaverNewsSettingsDialog(QDialog):
     def __init__(self, config: LocalNaverNewsConfig, parent: QWidget | None = None,
                  *, database_path: Path | None = None, section: str = "news",
-                 operational_client: CentralOperationalSettingsClient | None = None) -> None:
+                 operational_client: CentralOperationalSettingsClient | None = None,
+                 chatgpt_auth: ChatGPTAuth | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self._operational_client = operational_client
@@ -54,6 +58,12 @@ class NaverNewsSettingsDialog(QDialog):
         self._operations_baseline: dict[str, object] = {}
         self._initial_load_started = False
         self._closed = False
+        self._plan_auth = chatgpt_auth or ChatGPTAuth(ChatGPTCredentialStore(config.chatgpt_storage_path))
+        self._plan_worker: SettingsRequestWorker | None = None
+        self._plan_cancel = Event()
+        self._plan_models: tuple[tuple[str, str], ...] = ()
+        self._plan_status_value: dict = {}
+        self._plan_saved_model = ""
         self._window_settings = QSettings("KiwoomMonitor", "NewsSettingsDialog")
         self._section = section if section in {"news", "connections", "all"} else "news"
         self.setWindowTitle("뉴스 API 연결" if self._section == "connections" else "뉴스 설정")
@@ -144,10 +154,12 @@ class NaverNewsSettingsDialog(QDialog):
         self._ai_provider.addItem("OpenAI", "openai")
         self._ai_provider.addItem("Google Gemini", "gemini")
         self._ai_provider.addItem("Anthropic Claude", "claude")
+        self._ai_provider.addItem("ChatGPT 구독", "chatgpt_plan")
         self._ai_provider.setCurrentIndex(max(0, self._ai_provider.findData(ai.provider)))
         self._ai_key = QLineEdit(ai.api_key)
         self._ai_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._ai_model = QComboBox()
+        self._plan_saved_model = ai.model if ai.provider == "chatgpt_plan" else ""
         self._ai_provider.currentIndexChanged.connect(self._populate_ai_models)
         self._populate_ai_models(ai.model)
         self._ai_limit = QSpinBox()
@@ -197,6 +209,42 @@ class NaverNewsSettingsDialog(QDialog):
             ai_layout.addRow(self._ai_usage)
         ai_layout.addRow("공급자", self._ai_provider)
         ai_layout.addRow("API 키", self._ai_key)
+        self._plan_status = QLabel("ChatGPT 연결 전 · 구독 사용 권한은 로그인 뒤 확인합니다.")
+        self._plan_status.setWordWrap(True)
+        self._plan_status.setTextFormat(Qt.TextFormat.PlainText)
+        self._plan_account = QComboBox()
+        self._plan_account.activated.connect(self._plan_select_account)
+        self._plan_connect = QPushButton("Continue with ChatGPT")
+        self._plan_connect.clicked.connect(self._plan_connect_account)
+        self._plan_add = QPushButton("다른 계정·워크스페이스 추가")
+        self._plan_add.clicked.connect(lambda: self._plan_connect_account(new=True))
+        self._plan_disconnect = QPushButton("ChatGPT 연결 해제")
+        self._plan_disconnect.clicked.connect(lambda: self._plan_run("disconnect"))
+        self._plan_refresh = QPushButton("계정별 모델 새로고침")
+        self._plan_refresh.clicked.connect(lambda: self._plan_run("status"))
+        self._plan_stop = QPushButton("로그인 취소")
+        self._plan_stop.clicked.connect(lambda: self._plan_cancel.set())
+        self._plan_usage = QPushButton("ChatGPT 사용량 관리")
+        self._plan_usage.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(USAGE_URL)))
+        self._plan_box = QGroupBox("ChatGPT 구독 연결 · Windows")
+        plan_layout = QFormLayout(self._plan_box)
+        plan_layout.addRow(QLabel("적격 뉴스 분석은 ChatGPT 구독·크레딧 사용량에 포함됩니다."))
+        plan_limit_guide = QLabel("앱의 요청 건수 상한과 ChatGPT의 계정·앱 사용 한도는 별개입니다.")
+        plan_limit_guide.setWordWrap(True)
+        plan_layout.addRow(plan_limit_guide)
+        plan_layout.addRow(self._plan_status)
+        plan_layout.addRow("활성 계정", self._plan_account)
+        for widget in (self._plan_connect, self._plan_add, self._plan_disconnect,
+                       self._plan_refresh, self._plan_stop, self._plan_usage):
+            plan_layout.addRow(widget)
+        ai_layout.addRow(self._plan_box)
+        if operational_client is not None:
+            self._plan_connect.setEnabled(False)
+            self._plan_add.setEnabled(False)
+            self._plan_connect.setText("NAS 연결은 이 PC에서 로그인한 뒤 이전합니다")
+            resume = QPushButton("NAS 자동 분석 재개")
+            resume.clicked.connect(lambda: self._plan_run("resume"))
+            plan_layout.addRow(resume)
         if self._section != "connections":
             ai_layout.addRow("모델", self._ai_model)
             ai_layout.addRow("하루 최대 API 요청 건수", self._ai_limit)
@@ -204,6 +252,8 @@ class NaverNewsSettingsDialog(QDialog):
             ai_layout.addRow("API 요청 방식", self._ai_request_mode)
             ai_layout.addRow("묶음당 최대 사건 수", self._ai_batch_size)
             ai_layout.addRow(self._ai_auto)
+        else:
+            ai_layout.addRow("모델", self._ai_model)
         ai_layout.addRow(ai_link)
         if operational_client is not None:
             status = QLabel(
@@ -332,6 +382,7 @@ class NaverNewsSettingsDialog(QDialog):
                     ai_options_layout.addRow("NAS", self._operations_status)
                     ai_options_layout.addRow(self._operations_reload_button)
                 ai_options_layout.addRow("모델", self._ai_model)
+                ai_options_layout.addRow(self._plan_box)
                 ai_options_layout.addRow("하루 최대 API 요청 건수", self._ai_limit)
                 ai_options_layout.addRow("종목당 최신 자동 분석 건수", self._ai_auto_recent_limit)
                 ai_options_layout.addRow("API 요청 방식", self._ai_request_mode)
@@ -347,6 +398,20 @@ class NaverNewsSettingsDialog(QDialog):
             content_layout.addWidget(column_box)
             content_layout.addWidget(color_box)
         content_layout.addStretch()
+        if operational_client is not None:
+            morning_settings = QPushButton("아침 시황 · 프롬프트·추론 모델·07:55 예약")
+            morning_settings.setObjectName("morning_market_brief_settings_button")
+            def open_morning():
+                from kiwoom_monitor.presentation.morning_market_brief_dialog import MorningMarketBriefDialog
+                dialog = getattr(self, "_morning_dialog", None)
+                if dialog is None:
+                    dialog = MorningMarketBriefDialog(operational_client, self)
+                    self._morning_dialog = dialog
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+            morning_settings.clicked.connect(open_morning)
+            content_layout.addWidget(morning_settings)
         if self._section == "news":
             ai_box.hide()
         if self._section == "connections" or operational_client is None:
@@ -359,6 +424,122 @@ class NaverNewsSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(scroll, 1)
         layout.addWidget(buttons)
+        self._ai_provider.currentIndexChanged.connect(self._plan_provider_changed)
+        self._plan_provider_changed()
+
+    def _plan_provider_changed(self) -> None:
+        selected = self._ai_provider.currentData() == "chatgpt_plan"
+        self._plan_box.setVisible(selected)
+        self._ai_key.setEnabled(not selected)
+        self._plan_stop.setEnabled(self._plan_worker is not None)
+        if selected and self._plan_worker is None:
+            self._plan_run("status")
+
+    def _plan_connect_account(self, _checked: bool = False, *, new: bool = False) -> None:
+        self._plan_run("connect", "" if new else str(self._plan_account.currentData() or ""))
+
+    def _plan_select_account(self, _index: int) -> None:
+        self._plan_saved_model = ""
+        self._plan_run("select", str(self._plan_account.currentData() or ""))
+
+    def _plan_run(self, action: str, account_id: str = "") -> None:
+        if self._plan_worker is not None:
+            return
+        self._plan_cancel = Event()
+        cancel, auth = self._plan_cancel, self._plan_auth
+        if action == "status" and self._ai_model.currentData():
+            self._plan_saved_model = str(self._ai_model.currentData())
+        if action in {"select", "connect"}:
+            self._plan_saved_model = ""
+        self._plan_models = ()
+        self._populate_ai_models()
+        self._plan_status.setText("ChatGPT 연결 확인 중…" if action != "connect" else "브라우저에서 로그인·권한을 승인하세요…")
+
+        def task() -> dict:
+            first = False
+            revoked = None
+            if self._operational_client is not None:
+                client = self._operational_client
+                if action in {"select", "disconnect", "resume"}:
+                    result = client.chatgpt_change(action, account_id)
+                    revoked = result.get("revocation_confirmed") if action == "disconnect" else None
+                status = client.chatgpt_status()
+                active = next((item for item in status["accounts"] if item["id"] == status["active"]), {})
+                models = client.chatgpt_models() if active.get("connected") and active.get("permitted") else ()
+                return {"status": status, "models": models,
+                        "message": "NAS 자동 분석 중지 · 재개 버튼으로 다시 시작하세요." if status.get("paused") else "",
+                        "first": False, "revoked": revoked}
+            if action == "connect":
+                auth.connect(cancel, account_id=account_id)
+                first = not auth.welcome_seen()
+            elif action == "select":
+                auth.select(account_id)
+            elif action == "disconnect":
+                revoked = auth.disconnect()["revocation_confirmed"]
+            status = auth.status()
+            models, message = (), ""
+            active = next((item for item in status["accounts"] if item["id"] == status["active"]), {})
+            if active.get("connected") and active.get("permitted"):
+                try:
+                    models = ChatGPTPlanClient(auth).models()
+                except ChatGPTPlanError as error:
+                    message = str(error)
+            return {"status": status, "models": models, "message": message,
+                    "first": first and active.get("permitted", False), "revoked": revoked}
+
+        worker = SettingsRequestWorker(task)
+        self._plan_worker = worker
+        for widget in (self._plan_account, self._plan_connect, self._plan_add, self._plan_disconnect, self._plan_refresh):
+            widget.setEnabled(False)
+        self._plan_stop.setEnabled(action == "connect")
+        self._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(False)
+        worker.succeeded.connect(self._plan_loaded)
+        worker.failed.connect(self._plan_failed)
+        worker.start()
+
+    def _plan_release_controls(self) -> None:
+        self._plan_worker = None
+        for widget in (self._plan_account, self._plan_connect, self._plan_add, self._plan_disconnect, self._plan_refresh):
+            widget.setEnabled(True)
+        if self._operational_client is not None:
+            self._plan_connect.setEnabled(False)
+            self._plan_add.setEnabled(False)
+        self._plan_stop.setEnabled(False)
+        self._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(True)
+
+    @Slot(object)
+    def _plan_loaded(self, result: dict) -> None:
+        self._plan_release_controls()
+        if self._closed:
+            return
+        self._plan_status_value = result["status"]
+        self._plan_models = result["models"]
+        self._plan_account.clear()
+        for account in result["status"]["accounts"]:
+            self._plan_account.addItem(account["label"], account["id"])
+        self._plan_account.setCurrentIndex(max(0, self._plan_account.findData(result["status"]["active"])))
+        active = next((item for item in result["status"]["accounts"] if item["id"] == result["status"]["active"]), {})
+        text = "ChatGPT 연결 전"
+        if active.get("connected"):
+            text = f"{active['label']} · " + ("ChatGPT 구독 사용 중" if active.get("permitted") else "로그인됨 · 구독 사용 권한 없음")
+        if result["message"]:
+            text += "\n" + result["message"]
+        if result["revoked"] is False:
+            text += "\n저장된 연결 해제 완료 · 원격 해제 미확인. ChatGPT 설정에서도 연결을 해제하세요."
+        self._plan_status.setText(text)
+        if self._ai_provider.currentData() == "chatgpt_plan":
+            self._populate_ai_models(self._plan_saved_model)
+        if result["first"]:
+            QMessageBox.information(self, "ChatGPT 구독 사용", "적격 뉴스 분석은 ChatGPT 구독·크레딧 사용량에 포함됩니다. ChatGPT 사용량 관리에서 한도를 확인할 수 있습니다.")
+
+    @Slot(str)
+    def _plan_failed(self, message: str) -> None:
+        self._plan_release_controls()
+        if not self._closed:
+            self._plan_models = ()
+            self._plan_status.setText(message)
+            if self._ai_provider.currentData() == "chatgpt_plan":
+                self._populate_ai_models()
 
     def _open_ai_key_page(self) -> None:
         pages = {
@@ -390,6 +571,13 @@ class NaverNewsSettingsDialog(QDialog):
         target = (saved_model or DEFAULT_MODELS.get(provider, "")) if isinstance(saved_model, str) \
             else DEFAULT_MODELS.get(provider, "")
         self._ai_model.clear()
+        if provider == "chatgpt_plan":
+            for label, slug in self._plan_models:
+                self._ai_model.addItem(label, slug)
+            self._ai_model.setEnabled(bool(self._plan_models))
+            index = self._ai_model.findData(target)
+            self._ai_model.setCurrentIndex(max(0, index))
+            return
         if provider == "none":
             self._ai_model.addItem("공급자를 먼저 선택하세요", "")
             self._ai_model.setEnabled(False)
@@ -435,6 +623,8 @@ class NaverNewsSettingsDialog(QDialog):
             return
         self._operational_error = ""
         self._operations_baseline = dict(values)
+        if values.get("ai_provider") == "chatgpt_plan":
+            self._plan_saved_model = str(values.get("ai_model", ""))
         index = self._ai_provider.findData(str(values.get("ai_provider", "none")))
         self._ai_provider.setCurrentIndex(max(0, index))
         if hasattr(self, "_current_provider_label"):
@@ -474,7 +664,7 @@ class NaverNewsSettingsDialog(QDialog):
             self.accept()
 
     def _save(self) -> None:
-        if self._operations_worker is not None:
+        if self._operations_worker is not None or self._plan_worker is not None:
             return
         credentials = self._config.load()
         news_filter = self._config.load_filter()
@@ -489,11 +679,12 @@ class NaverNewsSettingsDialog(QDialog):
                 QMessageBox.warning(self, "입력 확인", "Client ID와 Client Secret은 둘 다 입력하거나 둘 다 비워야 합니다.")
                 return
             ai_provider = str(self._ai_provider.currentData())
-            if ai_provider != "none" and not self._ai_key.text().strip():
+            if ai_provider not in {"none", "chatgpt_plan"} and not self._ai_key.text().strip():
                 QMessageBox.warning(self, "입력 확인", "AI를 사용하려면 선택한 공급자의 API 키를 입력하세요.")
                 return
             ai_settings = replace(
-                ai_settings, provider=ai_provider, api_key=self._ai_key.text().strip(),
+                ai_settings, provider=ai_provider,
+                api_key=ai_settings.api_key if ai_provider == "chatgpt_plan" else self._ai_key.text().strip(),
             )
             official_settings = replace(official_settings, dart_api_key=self._dart_key.text().strip())
             if self._operational_client is None:
@@ -524,6 +715,15 @@ class NaverNewsSettingsDialog(QDialog):
                     self._local_flash_url.text().strip(),
                     self._local_world_url.text().strip(),
                 )
+
+        if ai_settings.provider == "chatgpt_plan":
+            active = next((item for item in self._plan_status_value.get("accounts", [])
+                           if item["id"] == self._plan_status_value.get("active")), {})
+            if not active.get("connected") or not active.get("permitted") or not self._ai_model.currentData():
+                QMessageBox.warning(self, "ChatGPT 연결", "ChatGPT 구독 사용 권한과 계정별 모델 조회를 먼저 확인하세요.")
+                return
+            ai_settings = replace(ai_settings, model=str(self._ai_model.currentData()),
+                                  chatgpt_storage_path=self._config.chatgpt_storage_path)
 
         if self._section in {"news", "all"}:
             words = tuple(dict.fromkeys(
@@ -617,4 +817,5 @@ class NaverNewsSettingsDialog(QDialog):
         """저장·취소·X 버튼 어떤 방식으로 닫더라도 마지막 크기를 기억한다."""
         self._window_settings.setValue("geometry", self.saveGeometry())
         self._closed = True
+        self._plan_cancel.set()
         super().done(result)

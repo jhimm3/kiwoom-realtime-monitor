@@ -49,14 +49,14 @@ class CollectorReplayTests(unittest.TestCase):
                 self.assertEqual(sorted(tuple(row[k] for k in second_fields) for row in fixture.second_rows), seconds)
                 self.assertEqual(1, latest)
                 periodic = [call for call in result['calls'] if call['phase'] == 'measurement']
-                expected = {'realtime_latest': [12, 312], 'realtime_second_bar': [47, 107, 167, 227, 287, 347],
+                expected = {'realtime_latest': [12, 312], 'realtime_second_bar': [],
                             'realtime_minute': [4, 64, 124, 184, 244, 304],
                             'realtime_minute_finalize': [4, 64, 124, 184, 244, 304]}
                 for kind, offsets in expected.items():
                     times = [(datetime.fromisoformat(call['source_time']) - fixture.origin).total_seconds()
                              for call in periodic if call['kind'] == kind]
                     self.assertEqual(offsets, times, kind)
-                self.assertEqual(3, len([call for call in result['calls'] if call['phase'] == 'drain']))
+                self.assertEqual(2, len([call for call in result['calls'] if call['phase'] == 'drain']))
                 self.assertTrue(all(call['flush_id'] for call in result['calls']))
             finally:
                 store.close()

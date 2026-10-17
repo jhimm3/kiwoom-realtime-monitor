@@ -30,8 +30,38 @@ def gross_price_stop_reached(price, entry, stop_loss_bps):
     return price * 10000 <= entry * (10000 - stop_loss_bps)
 
 
-def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None):
+def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None, leader_config=None, position_proof=None):
     """Bind a sticky gross-price stop to the admitted policy and native fill basis."""
+    if isinstance(proof, Mapping) and proof.get("version") == "leader_absolute_stop/v1":
+        from .leader_breakout import _id, LeaderBreakoutContext, validate_leader_position_proof
+        required = {"version", "symbol", "quantity", "entry_price_won", "price_won", "available_at", "input_ref",
+                    "hard_stop_price", "position_proof", "rules_hash", "package_hash"}
+        if (set(proof) != required or proof["package_hash"] != spec.candidate_package_hash
+                or any(type(proof.get(k)) is not int or proof[k] <= 0 for k in
+                       ("quantity", "entry_price_won", "price_won", "hard_stop_price"))
+                or proof["price_won"] > proof["hard_stop_price"]
+                or not isinstance(proof["input_ref"], str) or not proof["input_ref"].startswith("0B:")
+                or datetime.fromisoformat(proof["available_at"]).tzinfo is None):
+            raise ValueError("leader_absolute_stop_proof_invalid")
+        position = proof["position_proof"]
+        context = LeaderBreakoutContext(**position["context"])
+        body = {k: v for k, v in position.items() if k != "proof_id"}
+        if (position.get("proof_id") != _id("leader-position-proof/v1", body)
+                or position.get("spec_id") != spec.spec_id or position.get("package_hash") != spec.candidate_package_hash
+                or proof["symbol"] != context.symbol or proof["hard_stop_price"] != context.hard_stop_price
+                or proof["rules_hash"] != position.get("rules_hash")):
+            raise ValueError("leader_stop_position_binding_invalid")
+        if position_proof is not None and position != position_proof:
+            raise ValueError("leader_stop_pinned_context_changed")
+        if leader_config is not None:
+            validate_leader_position_proof(position, leader_config, spec, position["run_id"])
+        if risk is not None and (dict(risk.owned_position_quantities).get(proof["symbol"]) != proof["quantity"]
+                or dict(risk.owned_entry_prices).get(proof["symbol"]) != proof["entry_price_won"]
+                or risk.execution_run_id != position["run_id"]):
+            raise ValueError("leader_stop_native_basis_changed")
+        return
+    if leader_config is not None:
+        raise ValueError("leader execution cannot use a legacy percentage stop proof")
     if (not isinstance(proof, Mapping) or set(proof) != {
             'symbol', 'quantity', 'entry_price_won', 'stop_loss_bps',
             'price_won', 'available_at', 'input_ref'}

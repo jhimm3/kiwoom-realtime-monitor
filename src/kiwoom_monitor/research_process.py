@@ -57,6 +57,7 @@ from kiwoom_monitor.application.research_queue import (
     build_hypothesis_experiment_spec,
     build_research_job_identity,
     should_notify_research_result,
+    LeaderDecisionCampaignSpec, decode_campaign_spec,
 )
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
@@ -78,6 +79,22 @@ from scripts.run_research import (
 
 
 @dataclass(frozen=True)
+class LeaderBreakoutProcessRequest:
+    dataset: Path
+    strategy: Any
+    session_profile: str
+    resource_limits: ResearchResourceLimits
+    mode: str = "leader_breakout"
+    family: str = "leader_breakout/v1"
+    search: Any = None
+    database: Path | None = None
+    runs_dir: Path | None = None
+    policies: tuple = ()
+    max_seconds: int = 300
+    development_partition: Any = None
+
+
+@dataclass(frozen=True)
 class ResearchProcessRequest:
     mode: str
     family: str
@@ -96,7 +113,7 @@ class ResearchProcessRequest:
 def final_candidate_spec_document(
     request: ResearchProcessRequest, implementation_hash: str,
 ) -> dict[str, Any]:
-    """Return the existing final_candidate/v1 identity document unchanged."""
+    """Preserve v1 identities; use v2 for the explicitly configured leader Family."""
     if (not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run'
             or request.search is not None or request.development_partition is not None
             or request.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES):
@@ -118,7 +135,14 @@ def final_candidate_spec_document(
                 type(rate) is not int for rate in
                 (costs.commission_bps, costs.sell_tax_bps, costs.slippage_bps)))):
         raise ValueError('final candidate requires explicit cost provenance and validity')
-    return {'version': 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
+    from kiwoom_monitor.application.leader_breakout import LeaderBreakoutConfig
+    leader = isinstance(request.strategy, LeaderBreakoutConfig)
+    if leader:
+        missing = request.strategy.execution_missing("0B", require_contexts=False)
+        if missing:
+            raise ValueError("leader candidate execution blocked:" + ",".join(missing))
+        parameters = {**parameters, "contexts": []}
+    return {'version': 'final_candidate/v2' if leader else 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
             'execution_model': execution.to_dict(),
             'session_profile': research_session_profile_document(request.session_profile),
             'implementation_hash': implementation_hash}
@@ -604,7 +628,7 @@ def execute_final_holdout_exposure(request: FinalHoldoutExposureRequest, *,
             'state': 'EXPOSED_DEVELOPMENT', 'recorded': recorded}
 
 
-def load_research_process_request(path: Path) -> ResearchProcessRequest:
+def load_research_process_request(path: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest:
     request_path = Path(path)
     try:
         document = json.loads(request_path.read_text(encoding="utf-8"))
@@ -615,8 +639,31 @@ def load_research_process_request(path: Path) -> ResearchProcessRequest:
     return _process_request_from_document(document, request_path.resolve().parent)
 
 
-def _process_request_from_document(document: Mapping[str, Any], root: Path) -> ResearchProcessRequest:
+def _process_request_from_document(document: Mapping[str, Any], root: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest:
     mode = str(document.get("mode", ""))
+    if mode == "leader_breakout":
+        from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy
+        if set(document) - {"mode", "dataset", "policy", "policies", "session_profile", "resource_budget", "database", "runs_dir"}:
+            raise ValueError("unknown leader breakout research request fields")
+        profile = document.get("session_profile")
+        if profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
+            raise ValueError("explicit supported session profile required")
+        dataset = _request_path(root, document.get("dataset"), "dataset")
+        if not dataset.is_dir():
+            raise ValueError("research dataset directory does not exist")
+        budget = _mapping(document.get("resource_budget", {}), "resource_budget")
+        policies = tuple(LeaderBreakoutPolicy.from_dict(_mapping(p, "policy")) for p in document.get("policies", ()))
+        if policies and "policy" in document:
+            raise ValueError("supply policy or explicit finite policies, not both")
+        policy = policies[0] if policies else LeaderBreakoutPolicy.from_dict(_mapping(document.get("policy"), "policy"))
+        database = _request_path(root, document["database"], "database") if "database" in document else None
+        runs_dir = _request_path(root, document["runs_dir"], "runs_dir") if "runs_dir" in document else None
+        if any(path is not None and _is_within(path, dataset) for path in (database, runs_dir)):
+            raise ValueError("research outputs must not overwrite the frozen dataset directory")
+        return LeaderBreakoutProcessRequest(dataset, policy,
+            profile, ResearchResourceLimits(int(budget.get("memory_mb", 512)), int(budget.get("cpu_duty_percent", 50))),
+            database=database, runs_dir=runs_dir,
+            policies=policies, max_seconds=int(budget.get("max_seconds", 300)))
     if mode not in {"single_run", "rank_comparison", "limited_search"}:
         raise ValueError(f"unsupported research request mode: {mode}")
     strategy_raw = _mapping(document.get("strategy"), "strategy")
@@ -692,6 +739,9 @@ def _process_request_from_document(document: Mapping[str, Any], root: Path) -> R
     )
     if not request.dataset.is_dir():
         raise ValueError("research dataset directory does not exist")
+    from kiwoom_monitor.application.leader_breakout import LeaderBreakoutConfig
+    if request.mode == "rank_comparison" and isinstance(request.strategy, LeaderBreakoutConfig):
+        raise ValueError("leader breakout does not use rank comparison")
     if request.mode == "rank_comparison" and not request.strategy.rank_persistence_enabled:
         raise ValueError("rank comparison request must enable rank persistence")
     if _is_within(request.database, request.dataset) or _is_within(
@@ -741,9 +791,12 @@ def _validate_search_input(request, dataset):
 
 def register_campaign_request(repository, campaign_id, request, *, cancel_requested=lambda: False):
     """Worker/CLI registration; never load a full partition input on the GUI thread."""
-    if request.mode != 'limited_search' or request.search is None:
+    if any(path is not None and _is_within(path, request.dataset) for path in (request.database, request.runs_dir)):
+        raise ValueError("research outputs must not overwrite the frozen dataset directory")
+    leader = isinstance(request, LeaderBreakoutProcessRequest)
+    if not leader and (request.mode != 'limited_search' or request.search is None):
         raise ValueError('campaign registration requires a limited search request')
-    if Path(repository.path).resolve() != request.database.resolve():
+    if request.database is None or request.runs_dir is None or Path(repository.path).resolve() != request.database.resolve():
         raise ValueError('campaign registration database does not match request')
     guard = ResearchResourceGuard(request.resource_limits)
     guard.preflight(research_input_encoded_bytes(request.dataset))
@@ -752,6 +805,18 @@ def register_campaign_request(repository, campaign_id, request, *, cancel_reques
             raise ResearchRunCancelled('campaign registration interrupted')
         guard.checkpoint()
     dataset = load_research_input(request.dataset, session_profile=request.session_profile, checkpoint=checkpoint)
+    if leader:
+        spec = LeaderDecisionCampaignSpec("leader_breakout_decision_campaign/v1",
+            str(dataset.manifest["dataset_id"]), str(dataset.manifest["revision_ids_hash"]),
+            tuple(p.to_dict() for p in (request.policies or (request.strategy,))), request.session_profile,
+            research_implementation_hash(request.session_profile), len(request.policies or (request.strategy,)),
+            request.max_seconds, {"memory_mb": request.resource_limits.memory_mb,
+                                 "cpu_duty_percent": request.resource_limits.cpu_duty_percent})
+        checkpoint()
+        added = repository.enqueue_campaign_experiment(campaign_id, spec, request.dataset)
+        identity = build_research_job_identity(spec)
+        return {"status": "ok", "kind": "campaign_registration", "registered": added,
+                "campaign_id": campaign_id, "job_id": identity.job_id, "experiment_id": identity.experiment_id}
     source_spec = request.search
     if (source_spec.dataset_id, source_spec.dataset_hash) != (str(dataset.manifest.get('dataset_id', '')), str(dataset.manifest.get('revision_ids_hash', ''))):
         raise ValueError('campaign source dataset identity does not match request')
@@ -765,7 +830,78 @@ def register_campaign_request(repository, campaign_id, request, *, cancel_reques
             'campaign_id': campaign_id, 'job_id': identity.job_id, 'experiment_id': identity.experiment_id}
 
 
+def _execute_leader_decision_campaign(request, dataset, cycle, checkpoint):
+    from kiwoom_monitor.application.leader_breakout import evaluate_leader_breakout_minutes
+    spec = request.search
+    if not isinstance(spec, LeaderDecisionCampaignSpec) or spec.to_dict() != cycle.get("request"):
+        raise ValueError("decision campaign captured request mismatch")
+    identity = build_research_job_identity(spec)
+    if identity.job_id != cycle.get("job_id") or (spec.dataset_id, spec.dataset_hash) != (
+            str(dataset.manifest["dataset_id"]), str(dataset.manifest["revision_ids_hash"])):
+        raise ValueError("decision campaign frozen identity mismatch")
+    if spec.implementation_hash != research_implementation_hash(spec.session_profile):
+        raise ValueError("decision campaign implementation changed")
+    repository = ResearchRepository(request.database)
+    prior = repository.load_search_job(identity.job_id)
+    owner = secrets.token_hex(16)
+    lease_seconds = max(120, spec.max_seconds + 60)
+    generation = repository.start_search_job(identity.job_id, owner_token=owner,
+        lease_seconds=lease_seconds, campaign_cycle=cycle)
+    if generation is None:
+        return {"status": "ok", "kind": "leader_breakout_campaign", "job_status": "running", "reason": "execution_lease_lost"}
+    results = list((prior or {}).get("result", {}).get("policy_results", ()))
+    if len(results) > len(spec.policies):
+        raise ValueError("decision campaign retained progress exceeds its frozen policies")
+    for index, result in enumerate(results):
+        expected = hashlib.sha256(json.dumps(spec.policies[index], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        digest = hashlib.sha256(json.dumps({k:v for k,v in result.items() if k != "result_hash"},
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if result.get("policy_hash") != expected or result.get("result_hash") != digest:
+            raise ValueError("decision campaign retained policy identity mismatch")
+    started = last_renewal = time.monotonic()
+    def step():
+        nonlocal last_renewal
+        checkpoint()
+        now = time.monotonic()
+        if now-started >= spec.max_seconds:
+            raise ResearchRunCancelled("decision_campaign_time_slice")
+        if now-last_renewal >= 20:
+            if not repository.renew_search_job(identity.job_id, owner_token=owner, generation=generation, lease_seconds=lease_seconds):
+                raise ResearchRunCancelled("decision_campaign_execution_lease_lost")
+            last_renewal = now
+    status, reason = "completed", ""
+    try:
+        for index in range(len(results), len(spec.policies)):
+            step()
+            value = evaluate_leader_breakout_minutes(request.policies[index], dataset.observations,
+                session_profile=request.session_profile, checkpoint=step)
+            value["policy_hash"] = hashlib.sha256(json.dumps(spec.policies[index], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            value["result_hash"] = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            results.append(value)
+    except ResearchRunCancelled as exc:
+        status, reason = "cancelled", str(exc)
+    except ResearchResourceBlocked as exc:
+        status, reason = "resource_blocked", str(exc)
+    result = {"kind": "leader_breakout_campaign", "policy_results": results,
+        "completed_policy_count": len(results), "performance_verified": False, "order_authorized": False,
+        "readiness": "BLOCKED" if any(r["configuration_missing"] or r["blocked_count"] for r in results) else "DECISIONS_ONLY",
+        "budget": {"used_trials": len(results), "max_trials": spec.max_trials},
+        "reason": reason}
+    persisted_status = "cancelled" if status == "resource_blocked" else status
+    if not repository.finish_search_job(identity.job_id, persisted_status, result, owner_token=owner, generation=generation):
+        raise RuntimeError("decision campaign execution lease was lost before result commit")
+    return {"status": "ok", **result, "job_status": status, "job_id": identity.job_id, "experiment_id": identity.experiment_id}
+
+
 def _campaign_request_from_spec(spec, input_path, database, runs_dir):
+    if any(_is_within(Path(path), Path(input_path)) for path in (database, runs_dir)):
+        raise ValueError("research outputs must not overwrite the frozen dataset directory")
+    if isinstance(spec, LeaderDecisionCampaignSpec):
+        from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy
+        policies = tuple(LeaderBreakoutPolicy.from_dict(p) for p in spec.policies)
+        return LeaderBreakoutProcessRequest(Path(input_path), policies[0], spec.session_profile,
+            ResearchResourceLimits(spec.resource_budget.get("memory_mb", 512), spec.resource_budget.get("cpu_duty_percent", 50)),
+            search=spec, database=Path(database), runs_dir=Path(runs_dir), policies=policies, max_seconds=spec.max_seconds)
     context = spec.research_context
     profile = context.get('session_profile')
     return _process_request_from_document({
@@ -892,7 +1028,7 @@ def _next_nas_rolling_range(source, scope, spec, now):
 
 
 def execute_process_request(
-    request: ResearchProcessRequest,
+    request: ResearchProcessRequest | LeaderBreakoutProcessRequest,
     *,
     cancel_path: Path | None = None,
     cancel_requested: Callable[[], bool] | None = None,
@@ -909,6 +1045,23 @@ def execute_process_request(
             raise ResearchRunCancelled('research input loading cancellation requested')
         resource_guard.checkpoint()
     dataset = load_research_input(request.dataset, session_profile=request.session_profile, checkpoint=loading_checkpoint)
+    if isinstance(request, LeaderBreakoutProcessRequest):
+        if campaign_cycle is not None:
+            return _execute_leader_decision_campaign(request, dataset, campaign_cycle, loading_checkpoint)
+        from kiwoom_monitor.application.leader_breakout import evaluate_leader_breakout_minutes
+        if request.policies:
+            values = [evaluate_leader_breakout_minutes(p, dataset.observations, session_profile=request.session_profile,
+                checkpoint=loading_checkpoint) for p in request.policies]
+            return {"status": "ok", "kind": "leader_breakout_campaign", "policy_results": values,
+                    "performance_verified": False, "order_authorized": False}
+        return evaluate_leader_breakout_minutes(request.strategy, dataset.observations,
+            session_profile=request.session_profile, checkpoint=loading_checkpoint)
+    from kiwoom_monitor.application.leader_breakout import LeaderBreakoutConfig
+    if isinstance(request.strategy, LeaderBreakoutConfig) and request.strategy.execution_missing("1m"):
+        missing = request.strategy.execution_missing("1m")
+        return {"status": "blocked", "kind": "leader_breakout_performance", "job_status": "resource_blocked",
+                "reason": "unconfigured:" + ",".join(missing), "configuration_missing": list(missing),
+                "performance_verified": False, "order_authorized": False}
     request, dataset = _prepare_development_request(request, dataset, loading_checkpoint)
     if campaign_cycle is not None:
         if request.search is None or request.search.to_dict() != campaign_cycle.get('request') or build_research_job_identity(request.search).job_id != campaign_cycle.get('job_id'):
@@ -1220,10 +1373,10 @@ def execute_campaign_cycle(
 
     result: dict[str, Any] = {}
     try:
-        spec = ExperimentSpec.from_dict(cycle['request'])
+        spec = decode_campaign_spec(cycle['request'])
         if spec.final_holdout_accessed_at:
             raise ValueError('campaign automatic final evaluation is disabled')
-        source_spec = ExperimentSpec.from_dict(cycle.get('source_request', cycle['request']))
+        source_spec = decode_campaign_spec(cycle.get('source_request', cycle['request']))
         request = _campaign_request_from_spec(source_spec, cycle['input_path'], repository.path, runs_dir)
         if request.development_partition is None and build_research_job_identity(request.search).job_id != cycle['job_id']:
             raise ValueError('stored campaign identity does not match its execution request')
@@ -1261,7 +1414,8 @@ def schedule_next_campaign_hypothesis(
     jobs = repository.load_campaign_jobs(campaign_id)
     if sum(job['state'] != 'COMPLETED' for job in jobs) >= int(campaign['policy']['max_active_jobs']):
         return {'status': 'waiting', 'reason': 'campaign_active_backlog_limit'}
-    templates = tuple(job for job in jobs if job['source_kind'] != 'auto_hypothesis')
+    templates = tuple(job for job in jobs if job['source_kind'] != 'auto_hypothesis'
+        and job['request'].get('version') != 'leader_breakout_decision_campaign/v1')
     if not templates:
         return {'status': 'waiting', 'reason': 'hypothesis_template_missing'}
     available = repository.load_next_campaign_hypotheses(campaign_id)
@@ -1461,9 +1615,11 @@ def discover_campaign_inputs(repository, campaign_id, worker_claim, *, cancel_re
             continue
         try:
             template = jobs[source['template_job_id']]
-            spec = ExperimentSpec.from_dict(template['source_request'])
-            profile = (spec.research_context.get('session_profile') or {}).get('profile')
-            if spec.research_context.get('implementation_hash') != research_implementation_hash(profile):
+            spec = decode_campaign_spec(template['source_request'])
+            decision_spec = isinstance(spec, LeaderDecisionCampaignSpec)
+            profile = spec.session_profile if decision_spec else (spec.research_context.get('session_profile') or {}).get('profile')
+            implementation = spec.implementation_hash if decision_spec else spec.research_context.get('implementation_hash')
+            if implementation != research_implementation_hash(profile):
                 raise ValueError('input source template implementation hash is outdated; register a new explicit request')
             guard = ResearchResourceGuard(ResearchResourceLimits(int(spec.resource_budget.get('memory_mb', 512)), int(spec.resource_budget.get('cpu_duty_percent', 50))))
             deadline = time.monotonic() + min(30, spec.max_seconds)
@@ -2104,6 +2260,21 @@ def _run_research_process(argv: list[str] | None = None) -> int:
         protected = {args.compare_runs.resolve(), comparison_request.database.resolve()}
         if args.result.resolve() in protected or (args.cancel is not None and args.cancel.resolve() in protected):
             parser.error('comparison result/cancel must not overwrite request or database')
+    leader_request = None
+    if args.request is not None:
+        try:
+            request_header = json.loads(args.request.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            request_header = None
+        if isinstance(request_header, dict) and request_header.get("mode") == "leader_breakout":
+            try:
+                leader_request = load_research_process_request(args.request)
+            except (OSError, ValueError, TypeError) as error:
+                parser.error(str(error))
+            outputs = tuple(path.resolve() for path in (args.result, args.cancel) if path is not None)
+            if (len(set(outputs)) != len(outputs) or any(path == args.request.resolve()
+                    or _is_within(path, leader_request.dataset) for path in outputs)):
+                parser.error("leader breakout result/cancel must not overwrite request or frozen dataset")
     try:
         if args.register_campaign and args.request is None:
             raise ValueError('--register-campaign requires --request')
@@ -2125,8 +2296,10 @@ def _run_research_process(argv: list[str] | None = None) -> int:
             claim = {'campaign_id': args.campaign, 'owner_token': args.worker_token, 'generation': args.worker_generation} if args.worker_token else None
             result = run_campaign_worker(args.database, args.campaign, args.runs_dir, args.result, cancel_path=args.cancel, worker_claim=claim)
         else:
-            request = load_research_process_request(args.request)
+            request = leader_request or load_research_process_request(args.request)
             if args.register_campaign:
+                if request.database is None:
+                    raise ValueError("campaign registration requires an explicit database and runs_dir")
                 result = register_campaign_request(ResearchRepository(request.database), args.register_campaign, request,
                     cancel_requested=lambda: args.cancel is not None and args.cancel.is_file())
             else:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
@@ -117,6 +117,15 @@ class PullbackReaccelerationParameters:
 
 
 FACTOR_REGISTRY: Mapping[tuple[str, str], FactorDefinition] = MappingProxyType({
+    ("leader_structure", FACTOR_VERSION): FactorDefinition(
+        factor_id="leader_structure", version=FACTOR_VERSION,
+        output_schema={"proposal": "explicit leader breakout proposal", "status": "evidence state"},
+        unit="KRW,observations", dependencies=("explicit_leader_structure_context", "0B/or/final_completed_minute"),
+        parameters=("explicit_leader_breakout_policy",), lookback="explicit confirmation and turnover window",
+        warmup="observed crossing with continuous source", max_age="explicit max_data_age_seconds",
+        missing_policy="BLOCKED; no implicit thresholds",
+        compute=lambda **kwargs: compute_leader_structure(**kwargs),
+    ),
     (ROLLING_HIGH_BREAKOUT_ID, FACTOR_VERSION): FactorDefinition(
         factor_id=ROLLING_HIGH_BREAKOUT_ID,
         version=FACTOR_VERSION,
@@ -241,6 +250,14 @@ def get_factor_definition(factor_id: str, version: str) -> FactorDefinition:
         return FACTOR_REGISTRY[(str(factor_id), str(version))]
     except KeyError as exc:
         raise ValueError(f"unregistered factor: {factor_id}/{version}") from exc
+
+
+def compute_leader_structure(**kwargs):
+    from .leader_breakout import evaluate_leader_breakout
+    raw, _ = evaluate_leader_breakout(**kwargs)
+    return FactorValue("leader_structure", FACTOR_VERSION, kwargs["policy"].fingerprint,
+        raw["symbol"], raw["decided_at"], raw["available_at"], raw, raw["status"],
+        ";".join(raw["reasons"]), (raw["input_ref"],))
 
 
 def compute_theme_leadership(
@@ -618,3 +635,27 @@ def _stable_parameters_hash(parameters: Mapping[str, Any]) -> str:
         dict(parameters), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def compute_minute_theme_leadership(membership, rows, *, as_of, venue,
+        continuity_status, parameters, previous_state=None, upper_limits=()):
+    """Research v2: explicit completed-minute windows, no invented tick path."""
+    from .theme_leadership import minute_trade_points_from_rows
+    if parameters.window_seconds < 60 or parameters.window_seconds % 60 or parameters.max_data_age_seconds < 60:
+        raise ValueError('minute research requires explicit whole-minute windows and freshness')
+    points = minute_trade_points_from_rows(rows, as_of=as_of)
+    value = compute_theme_leadership(membership, points, as_of=as_of, venue=venue,
+        continuity_status=continuity_status, parameters=parameters,
+        previous_state=previous_state, upper_limits=upper_limits)
+    return replace(value, version='v2',
+        parameters_hash=_stable_parameters_hash({'input_resolution':'1m', **asdict(parameters)}),
+        value={**value.value, 'input_resolution':'1m', 'availability_basis':'final_completed_minute'})
+
+
+# v1 remains an explicitly addressable historical factor; new research selects v2.
+FACTOR_REGISTRY = MappingProxyType({**FACTOR_REGISTRY,
+    (THEME_LEADERSHIP_ID, 'v2'): replace(FACTOR_REGISTRY[(THEME_LEADERSHIP_ID, FACTOR_VERSION)],
+        version='v2', dependencies=('minute_bar/final/closed/complete/single_venue',
+            'theme_snapshot/as_available', 'upper_limit_fact/as_available/optional'),
+        lookback='two explicit adjacent whole-minute windows',
+        compute=compute_minute_theme_leadership)})

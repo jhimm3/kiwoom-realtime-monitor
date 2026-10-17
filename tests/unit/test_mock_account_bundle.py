@@ -48,6 +48,16 @@ class FakeClient:
 
 
 class MockAccountBundleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_application_clock_is_shared_with_execution_and_monitor(self):
+        from kiwoom_monitor.central_server.market_observations import KST
+        at = datetime(2026, 10, 15, 14, 21, 3, tzinfo=KST)
+        bundle = MockAccountBundle(self.store, settings=KiwoomSettings('fake', 'fake', 'mock'),
+            account_ref='clock-account', run_id='clock-run', now_provider=lambda: at)
+        self.bundles.append(bundle)
+        self.assertEqual(bundle.runtime._now(), at)
+        self.assertEqual(bundle.monitor._now(), at)
+        self.assertEqual(bundle.runtime._lifecycle._now(), at)
+
     async def asyncSetUp(self):
         self.store = SQLiteQueryStore(Path(":memory:")); self.store.initialize()
         self.bundles = []

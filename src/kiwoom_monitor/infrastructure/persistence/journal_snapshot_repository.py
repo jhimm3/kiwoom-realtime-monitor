@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import json
 import hashlib
 import sqlite3
@@ -74,7 +76,7 @@ class JournalSnapshotRepositoryMixin:
         account_scope: AccountScope | None = None,
     ) -> None:
         """실시간 체결 시점 자료를 중복 체결번호 기준으로 안전하게 저장한다."""
-        captured_at = (now or datetime.now()).isoformat(timespec="seconds")
+        captured_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         _validate_snapshot_scope(account_scope, value)
         payload = (
             value.execution_key, value.origin_scope.broker, value.origin_scope.environment.value,
@@ -211,7 +213,7 @@ class JournalSnapshotRepositoryMixin:
             if isinstance(program, dict):
                 merged["program_trade"] = program
             with connection:
-                captured_at = datetime.now()
+                captured_at = kst_wall_now()
                 connection.execute(
                     "UPDATE trade_entry_snapshots SET investor_flow_json=?, captured_at=? WHERE execution_key=?",
                     (json.dumps(merged, ensure_ascii=False), captured_at.isoformat(timespec="seconds"), execution_key),
@@ -224,7 +226,7 @@ class JournalSnapshotRepositoryMixin:
         backfilled_news = mark_news_backfilled(news)
         with closing(sqlite3.connect(self._path, timeout=0.2)) as connection:
             with connection:
-                captured_at = datetime.now()
+                captured_at = kst_wall_now()
                 connection.execute(
                     "UPDATE trade_entry_snapshots SET news_json=?, captured_at=? WHERE execution_key=?",
                     (json.dumps(backfilled_news, ensure_ascii=False), captured_at.isoformat(timespec="seconds"), execution_key),
@@ -246,7 +248,7 @@ class JournalSnapshotRepositoryMixin:
                 investor = {}
             investor["program_trade"] = program_trade
             with connection:
-                captured_at = datetime.now()
+                captured_at = kst_wall_now()
                 connection.execute(
                     "UPDATE trade_entry_snapshots SET investor_flow_json=?, captured_at=? WHERE execution_key=?",
                     (json.dumps(investor, ensure_ascii=False), captured_at.isoformat(timespec="seconds"), execution_key),

@@ -103,6 +103,10 @@ def create_news_analysis_router(
         except NewsAIProviderError as error:
             raise HTTPException(status_code=error.status_code, detail=str(error)) from error
         except RuntimeError as error:
+            from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+            if isinstance(error, ChatGPTPlanError):
+                raise HTTPException(status_code=error.status_code if 400 <= error.status_code < 600 else 503,
+                                    detail=str(error)) from None
             raise HTTPException(status_code=502, detail=str(error)) from error
 
     return router

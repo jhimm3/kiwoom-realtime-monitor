@@ -12,7 +12,7 @@ from scripts import prepared_historical_archive_inputs as inputs
 from scripts.capture_historical_archive_sources_v2 import capture, finish_coverage
 from scripts.transition_historical_archive_execution import (
     PREFIX_KEY, _prefix_snapshot, _apply_finalized, finalization_lineage,
-    fingerprint_digest, _encoded,
+    fingerprint_digest, _encoded, _apply_active_events,
 )
 from scripts.audit_prepared_historical_archive_v2 import audit
 from scripts.historical_archive_completion_gate import audit_and_seal, verified_publication
@@ -90,6 +90,46 @@ class PrefixTransitionTests(unittest.TestCase):
             self.assertIn('target_verification_fingerprint_invalid',audit(self.f.archive,seed=self.seed)['blockers'])
         self.plan.write_text('changed',encoding='utf-8')
         self.assertIn('finalization_lineage_invalid',audit(self.f.archive,seed=self.seed)['blockers'])
+
+    def test_event_only_transitions_keep_the_original_finalization_fingerprints(self):
+        active_digest=self.new
+        self.new='b'*64
+        self.transition()
+        with patch.object(api,'code_digest',return_value=self.new):
+            api.finalize_inputs(self.f.archive,self.f.prepared,api.MARKET,self.source_hash)
+            api.finalize_events(self.f.archive,max_rows=1,batch_size=1)
+        parent='child'; parent_digest=self.new
+        for dataset,digest in [('events-first','c'*64),('events-current',active_digest)]:
+            plan=self.f.root/(dataset+'.json')
+            content=_encoded({'schema':'historical-active-events-execution/v1',
+                'parent_dataset':parent,'parent_digest':parent_digest,
+                'dataset_id':dataset,'code_digest':digest})
+            plan.write_text(content,encoding='utf-8')
+            with closing(sqlite3.connect(self.f.archive)) as db,db:
+                db.execute('BEGIN IMMEDIATE')
+                _apply_active_events(db,parent,parent_digest,dataset,digest,plan,
+                                     hashlib.sha256(content.encode()).hexdigest())
+            parent,parent_digest=dataset,digest
+        api.finalize_events(self.f.archive);api.build_projection(self.f.archive)
+        result=audit(self.f.archive,seed=self.seed,full_integrity_check=True)
+        self.assertTrue(result['ready_for_seal'],result['blockers'])
+        # A transition must not authorize rewriting old results with the new
+        # event runner digest, even though that digest is a valid descendant.
+        with closing(sqlite3.connect(self.f.archive)) as db:
+            from scripts.transition_historical_archive_execution import TARGET_FIELDS
+            row=db.execute('SELECT '+TARGET_FIELDS+' FROM archive_targets_v2 WHERE scope=? LIMIT 1',(api.MARKET,)).fetchone()
+            scope,owner,identity,target,name,hashed,aid,bid,original,_,computed,*_=row
+            changed=hashlib.sha256(api._json((api.POLICY,hashed,aid,bid,target,name,active_digest,json.loads(computed))).encode()).hexdigest()
+            key=(scope,owner,identity,target)
+            update='UPDATE archive_targets_v2 SET fingerprint=? WHERE scope=? AND stock_code=? AND identity=? AND target_id=?'
+            db.execute(update,(changed,*key));db.commit()
+            rejected=audit(self.f.archive,seed=self.seed)
+            self.assertIn('target_verification_fingerprint_invalid',rejected['blockers'])
+            self.assertTrue(rejected['target_verification_failures'])
+            db.execute(update,(original,*key));db.commit()
+        receipt=self.f.root/'event-transition-seal.json'
+        self.addCleanup(lambda:self.f.archive.chmod(stat.S_IWRITE))
+        self.assertTrue(audit_and_seal(self.f.archive,self.seed,receipt,parent,active_digest)['ready_for_seal'])
 
     def test_middle_transition_failure_preserves_all_completed_rows(self):
         with closing(sqlite3.connect(self.f.archive)) as db,db:

@@ -70,15 +70,34 @@ class SourceRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "SERVER_BUILD must change"):
             self.publish()
 
-    def test_dependency_or_schema_change_requires_runtime_update(self):
+    def test_dependency_or_ddl_change_requires_runtime_update(self):
         self.publish()
-        for name in CONTRACT_FILES:
+        for name in ("pyproject.toml", "src/kiwoom_monitor/central_server/central_schema.py"):
             target = self.source / name
             original = target.read_text()
             target.write_text("changed")
             with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "prepare a new runtime"):
                 self.publish()
             target.write_text(original)
+
+    def test_build_recipe_and_migration_clock_changes_use_existing_runtime(self):
+        first = self.publish()
+        atomic_json(self.store / "active.json", {"format": 1, "release_id": first["release_id"]})
+        before = (self.store / "runtime.json").read_bytes()
+        for name in ("deploy/synology/server.Dockerfile",
+                     "src/kiwoom_monitor/central_server/schema_migrations.py"):
+            (self.source / name).write_text("ordinary build/log/clock change\n")
+        (self.source / BUILD_FILE).write_text('SERVER_BUILD = "2026.10.16-code-only"\n')
+        second = self.publish()
+        self.assertNotEqual(release(self.store, first["release_id"])[1]["contract"],
+                            release(self.store, second["release_id"])[1]["contract"])
+        self.assertEqual(second["release_id"], release(self.store, second["release_id"])[1]["release_id"])
+        self.assertEqual(first["release_id"], release(self.store)[1]["release_id"])
+        self.assertEqual(before, (self.store / "runtime.json").read_bytes())
+        driver = self.store / "releases" / second["release_id"] / "src/kiwoom_monitor/central_server/schema_migrations.py"
+        driver.write_text("changed after publication\n")
+        with self.assertRaisesRegex(RuntimeError, "release file changed"):
+            release(self.store, second["release_id"])
 
     def test_path_escape_and_non_code_payload_are_rejected(self):
         for value in ("../data/secret", "/outside", "data/secret", "src/../../outside", "src\\x"):

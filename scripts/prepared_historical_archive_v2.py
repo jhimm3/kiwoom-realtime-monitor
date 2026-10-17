@@ -33,7 +33,7 @@ for source in (ROOT, ROOT / "src"):
 
 from scripts.stage_prepared_historical_news_archive import _input_hash, _sha256
 from scripts.finalize_prepared_historical_article_bodies import _complete_one, _CompletionBatch, _insert_many, _chunks
-from scripts.finalize_prepared_historical_news_events import _resolve_event
+from scripts.finalize_prepared_historical_news_events import _resolve_event, _group_candidates
 from scripts.build_prepared_historical_search_projection import _publication
 from scripts.verify_prepared_historical_news_rules import _code_digest as _rule_digest
 from scripts.preprocess_historical_news_to_nas import prepare_job, _prepare_rule_job
@@ -46,6 +46,8 @@ SCOPES = (SEARCH, MARKET)
 POLICY = "historical-news-archive/v2"
 EVENT_DEPENDENCY_CACHE_LIMIT = 65536
 WORLD_EXCLUSION = 'world-service-before-2021-01-01'
+EVENT_REVIEW_PREFIX = 'event_conflict_review_v1_'
+EVENT_DECISION_PREFIX = 'event_conflict_decision_v1_'
 
 
 def world_service_excluded(source: str, published_at: str | None) -> bool:
@@ -72,6 +74,303 @@ def _seed_world_excluded(encoded: str) -> int:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _review_hash(value: Any) -> str:
+    return hashlib.sha256(_json(value).encode()).hexdigest()
+
+
+def _review_rows(db: sqlite3.Connection, query: str, args=()) -> list[dict[str, Any]]:
+    cursor = db.execute(query, args)
+    columns = [item[0] for item in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor]
+
+
+def _review_one(db: sqlite3.Connection, table: str, column: str, key: str) -> dict[str, Any]:
+    rows = _review_rows(db, f'SELECT * FROM {table} WHERE {column}=?', (key,))
+    if len(rows) != 1:
+        raise ValueError('event review referenced row is missing or ambiguous')
+    return rows[0]
+
+
+def _event_conflict_snapshot(db: sqlite3.Connection, key: list[str]) -> dict[str, Any]:
+    if len(key) != 4 or not all(isinstance(item, str) and item for item in key):
+        raise ValueError('invalid event review target key')
+    where = ' WHERE scope=? AND stock_code=? AND identity=? AND target_id=?'
+    targets = _review_rows(db, 'SELECT * FROM archive_targets_v2'+where, key)
+    ready = _review_rows(db, 'SELECT * FROM archive_event_ready_v2'+where, key)
+    if len(targets) != 1 or len(ready) != 1:
+        raise ValueError('event review target or ready row missing')
+    target = targets[0]
+    result = json.loads(target['computed_json']).get('rule_result')
+    if not isinstance(result, dict) or not result.get('event_key'):
+        raise ValueError('event review requires a rule event key')
+    reason, candidates = _group_candidates(db, key[3], key[2], result['event_key'])
+    candidates = tuple(sorted(candidates))
+    if reason != 'event_key' or len(candidates) < 2:
+        raise ValueError('only ambiguous event-key reviews are supported')
+    histories = []
+    for event_id in candidates:
+        histories.append({
+            'event_id': event_id,
+            'events': _review_rows(db, 'SELECT * FROM central_news_event_revisions WHERE event_id=? ORDER BY accepted_sequence', (event_id,)),
+            'memberships': _review_rows(db, 'SELECT * FROM central_news_event_membership_revisions WHERE event_id=? ORDER BY accepted_sequence', (event_id,)),
+        })
+    selected = db.execute(
+        'SELECT event_id FROM central_news_event_revisions WHERE stock_code=? AND event_key=? ORDER BY accepted_sequence DESC LIMIT 1',
+        (key[3], result['event_key']),
+    ).fetchone()[0]
+    article = _review_one(db, 'central_news_article_revisions', 'article_revision_id', target['article_revision_id'])
+    body = _review_one(db, 'central_news_body_revisions', 'body_revision_id', target['body_revision_id'])
+    events = json.loads(db.execute("SELECT value_json FROM archive_build_manifest WHERE key='events_v2'").fetchone()[0])
+    return {'target': target, 'ready': ready[0], 'events_manifest': events,
+            'candidate_event_ids': list(candidates), 'histories': histories,
+            'selected_event_id': selected, 'article_sha256': _review_hash(article),
+            'body_sha256': _review_hash(body)}
+
+
+def _check_review_evidence(db: sqlite3.Connection, evidence: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    payload = dict(evidence)
+    if payload.pop('review_payload_sha256', None) != _review_hash(payload):
+        raise ValueError('event review evidence payload hash differs')
+    if (evidence.get('schema') != 'historical-event-conflict-review-evidence/v1' or
+            evidence.get('status') != 'design_review_only_not_applied' or
+            evidence.get('target_before') != snapshot['target'] or
+            evidence.get('ready_before') != snapshot['ready'] or
+            evidence.get('manifest', {}).get('events_v2') != snapshot['events_manifest'] or
+            evidence.get('candidate_event_ids') != snapshot['candidate_event_ids'] or
+            evidence.get('selected_event_id') != snapshot['selected_event_id'] or
+            _review_hash(evidence.get('target_article')) != snapshot['article_sha256'] or
+            evidence.get('target_body_sha256') != snapshot['body_sha256']):
+        raise ValueError('event review evidence differs from the conflict snapshot')
+    reviews = evidence.get('candidates', [])
+    if [item.get('event_id') for item in reviews] != snapshot['candidate_event_ids']:
+        raise ValueError('event review evidence candidate set differs')
+    for evidence_row, history in zip(reviews, snapshot['histories']):
+        article = _review_one(db, 'central_news_article_revisions', 'article_revision_id', evidence_row['evidence_article']['article_revision_id'])
+        body = _review_one(db, 'central_news_body_revisions', 'body_revision_id', evidence_row['evidence_body_id'])
+        if (evidence_row['event_rows'] != history['events'] or
+                evidence_row['membership_rows'] != history['memberships'] or
+                evidence_row['evidence_article'] != article or
+                evidence_row['evidence_body_sha256'] != _review_hash(body) or
+                body['article_revision_id'] != article['article_revision_id'] or
+                not any(row['article_revision_id'] == article['article_revision_id'] and
+                        row['body_revision_id'] == body['body_revision_id'] for row in history['events'])):
+            raise ValueError('reviewed candidate history or BODY evidence changed')
+
+
+def _decision_identity(decision: dict[str, Any]) -> str:
+    value = dict(decision)
+    identity = value.pop('decision_id', None)
+    if (value.get('schema') != 'historical-event-conflict-decision/v1' or
+            identity != _review_hash(value)):
+        raise ValueError('event conflict decision identity invalid')
+    return identity
+
+
+def validate_event_conflict_decision(db: sqlite3.Connection, decision: dict[str, Any], *, parent_identity=None) -> None:
+    _decision_identity(decision)
+    current = report(db)
+    expected = parent_identity or (current.get('dataset_id'), current.get('builder_code_digest'))
+    if (decision.get('parent_dataset'), decision.get('parent_digest')) != tuple(expected):
+        raise ValueError('event conflict decision parent mismatch')
+    filename = db.execute('PRAGMA database_list').fetchone()[2]
+    if str(Path(filename).resolve()) != decision.get('archive') or current.get('seed_sha256') != decision.get('seed_sha256'):
+        raise ValueError('event conflict decision archive mismatch')
+    snapshot = _event_conflict_snapshot(db, decision['target_key'])
+    if snapshot != decision.get('snapshot'):
+        raise ValueError('event conflict decision snapshot changed')
+    target, ready, events = snapshot['target'], snapshot['ready'], snapshot['events_manifest']
+    progress = db.execute('SELECT progress_state,input_hash,article_revision_id,body_revision_id FROM archive_input_progress WHERE scope=? AND stock_code=? AND identity=?',decision['target_key'][:3]).fetchone()
+    if progress != ('assessment_done',target['input_hash'],target['article_revision_id'],target['body_revision_id']):
+        raise ValueError('event conflict input progress differs')
+    conflicts = db.execute("SELECT scope,stock_code,identity,target_id FROM archive_event_ready_v2 WHERE state='conflict' LIMIT 2").fetchall()
+    if (conflicts != [tuple(decision['target_key'])] or target['event_state'] != 'conflict' or
+            ready['state'] != 'conflict' or not ready['ready'] or
+            target['event_reason'] != 'ambiguous_event_key' or events.get('state') != 'building' or
+            target['ordinal'] != events['next_ordinal']-1 or
+            json.loads(target['candidate_event_ids_json']) != snapshot['candidate_event_ids'] or
+            any(target[name] is not None for name in ('event_id','event_revision_id','membership_revision_id')) or
+            not 1 <= events['next_ordinal'] <= events['target_count']+1):
+        raise ValueError('event conflict checkpoint is not the reviewed boundary')
+    evidence_path = Path(decision['evidence_path']).resolve(strict=True)
+    if _sha256(evidence_path) != decision['evidence_sha256']:
+        raise ValueError('event conflict evidence file changed')
+    _check_review_evidence(db, json.loads(evidence_path.read_text(encoding='utf-8')), snapshot)
+
+
+def create_event_conflict_decision(path: Path, evidence_path: Path, output: Path) -> dict[str, Any]:
+    """Freeze an already reviewed, single-target choice; never mutate SQLite."""
+    evidence_path = evidence_path.resolve(strict=True)
+    evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+    key = [evidence['target_before'][name] for name in ('scope','stock_code','identity','target_id')]
+    with closing(sqlite3.connect(path.resolve(strict=True).as_uri()+'?mode=ro', uri=True)) as db:
+        db.execute('BEGIN')
+        current = report(db)
+        decision = {'schema': 'historical-event-conflict-decision/v1', 'archive': str(path.resolve()),
+                    'parent_dataset': current['dataset_id'], 'parent_digest': current['builder_code_digest'],
+                    'seed_sha256': current.get('seed_sha256'), 'target_key': key,
+                    'evidence_path': str(evidence_path), 'evidence_sha256': _sha256(evidence_path),
+                    'snapshot': _event_conflict_snapshot(db, key)}
+        decision['decision_id'] = _review_hash(decision)
+        validate_event_conflict_decision(db, decision)
+    with output.open('x', encoding='utf-8', newline='\n') as handle:
+        handle.write(_json(decision)+'\n')
+    return {'decision_id': decision['decision_id'], 'path': str(output.resolve()), 'state': 'reviewed_not_applied'}
+
+
+def _event_review_plan(db: sqlite3.Connection, decision: dict[str, Any], dataset: str, digest: str) -> None:
+    identity = _decision_identity(decision)
+    registered = db.execute('SELECT value_json FROM archive_build_manifest WHERE key=?',(EVENT_DECISION_PREFIX+identity,)).fetchone()
+    if registered:
+        expected = {'schema':'historical-event-conflict-registration/v1','dataset_id':dataset,
+                    'code_digest':digest,'decision':decision}
+        if json.loads(registered[0]) != expected or (decision['parent_dataset'],decision['parent_digest']) != (dataset,digest):
+            raise ValueError('registered event review identity differs')
+        return
+    row = db.execute('SELECT parent_dataset,parent_digest,plan_path,plan_sha256,state FROM archive_execution_transitions_v1 WHERE dataset_id=? AND code_digest=?', (dataset,digest)).fetchone()
+    if not row or row[4] != 'complete' or row[:2] != (decision['parent_dataset'],decision['parent_digest']):
+        raise ValueError('reviewed event transition identity missing')
+    encoded = Path(row[2]).read_bytes()
+    plan = json.loads(encoded)
+    if (hashlib.sha256(encoded).hexdigest() != row[3] or
+            plan.get('schema') != 'historical-active-events-execution/v1' or
+            (plan.get('dataset_id'),plan.get('code_digest')) != (dataset,digest) or
+            plan.get('reviewed_event_resolution') != decision):
+        raise ValueError('reviewed event decision is not pinned to its transition')
+
+
+def register_event_conflict_decision(path: Path, decision_path: Path) -> dict[str, Any]:
+    """Pin another independently reviewed target without changing frozen code."""
+    decision=json.loads(decision_path.read_text(encoding='utf-8'));identity=_decision_identity(decision)
+    with _writer(path) as db:
+        with _transaction(db):
+            current=report(db);key=EVENT_DECISION_PREFIX+identity
+            registration={'schema':'historical-event-conflict-registration/v1','dataset_id':current['dataset_id'],
+                          'code_digest':current['builder_code_digest'],'decision':decision}
+            existing=db.execute('SELECT value_json FROM archive_build_manifest WHERE key=?',(key,)).fetchone()
+            if existing:
+                if json.loads(existing[0]) != registration:
+                    raise ValueError('different event review registration exists')
+                _event_review_plan(db,decision,current['dataset_id'],current['builder_code_digest'])
+                return {'state':'registered','decision_id':identity,'replayed':True}
+            if db.execute("SELECT 1 FROM archive_build_manifest WHERE key IN ('projection_v2','audit_v2','seal_v2') LIMIT 1").fetchone():
+                raise ValueError('a later archive phase has already started')
+            validate_event_conflict_decision(db,decision)
+            db.execute('INSERT INTO archive_build_manifest VALUES(?,?)',(key,_json(registration)))
+    return {'state':'registered','decision_id':identity,'replayed':False}
+
+
+def validate_event_review_receipt(db: sqlite3.Connection, receipt: dict[str, Any]) -> str:
+    """Validate both sides of the sparse recovery ledger during replay/audit."""
+    decision = receipt['decision']; identity = _decision_identity(decision)
+    _event_review_plan(db, decision, receipt['dataset_id'], receipt['code_digest'])
+    if receipt.get('schema') != 'historical-event-conflict-receipt/v1' or receipt.get('state') != 'complete':
+        raise ValueError('event conflict receipt state invalid')
+    snapshot = decision['snapshot']; before = snapshot['target']; after = receipt['target_after']
+    changed = {'event_state','event_id','event_revision_id','membership_revision_id','event_reason'}
+    if ({k:v for k,v in before.items() if k not in changed} != {k:v for k,v in after.items() if k not in changed} or
+            after['event_state'] != 'connected' or after['event_reason'] != 'reviewed_event_key:'+identity or
+            after['event_id'] != snapshot['selected_event_id'] or
+            receipt['events_manifest_after'] != snapshot['events_manifest']):
+        raise ValueError('event review changed immutable target or cursor')
+    key = decision['target_key']
+    actual = _review_rows(db, 'SELECT * FROM archive_targets_v2 WHERE scope=? AND stock_code=? AND identity=? AND target_id=?', key)
+    if actual != [after]:
+        raise ValueError('event review receipt does not match its target')
+    ready = _review_rows(db, 'SELECT * FROM archive_event_ready_v2 WHERE scope=? AND stock_code=? AND identity=? AND target_id=?', key)
+    if ready != [{**snapshot['ready'], 'state': 'connected'}]:
+        raise ValueError('event review ready ledger differs')
+    for table, column, value in (
+            ('central_news_event_revisions','event_revision_id',receipt['event_after']),
+            ('central_news_event_membership_revisions','membership_revision_id',receipt['membership_after'])):
+        if _review_one(db,table,column,value[column]) != value:
+            raise ValueError('event review output revision changed')
+    event, member = receipt['event_after'], receipt['membership_after']
+    from kiwoom_monitor.application.news_rules import SupplyContractRuleResult, rule_input_hash
+    rule = SupplyContractRuleResult(**json.loads(before['computed_json'])['rule_result'])
+    if (event['event_id'] != after['event_id'] or event['stock_code'] != before['target_id'] or
+            event['article_revision_id'] != before['article_revision_id'] or event['body_revision_id'] != before['body_revision_id'] or
+            event['rule_version'] != rule.rule_version or event['input_hash'] != rule_input_hash(before['article_revision_id'],before['body_revision_id'],rule) or
+            event['event_revision_id'] != after['event_revision_id'] or member['membership_revision_id'] != after['membership_revision_id'] or
+            (member['event_id'],member['event_revision_id'],member['article_revision_id'],member['body_revision_id']) !=
+            (event['event_id'],event['event_revision_id'],event['article_revision_id'],event['body_revision_id'])):
+        raise ValueError('event review output relations invalid')
+    selected_history = next(h for h in snapshot['histories'] if h['event_id']==snapshot['selected_event_id'])
+    previous = selected_history['events'][-1]
+    if event['revision_of'] != previous['event_revision_id']:
+        raise ValueError('event review parent revision differs')
+    original = json.loads(before['computed_json'])['rule_result']
+    saved = json.loads(event['result_json'])
+    writer_fields = {'novelty','novelty_score','possible_related_event_ids','article_revision_id','body_revision_id'}
+    if ({k:v for k,v in saved.items() if k not in writer_fields} != {k:v for k,v in original.items() if k not in writer_fields} or
+            any(event[field] != original[field] for field in ('event_key','event_type','role','scope','certainty','amount_won','counterparty','importance_score','confidence_score','ai_required'))):
+        raise ValueError('event review changed the prepared rule result')
+    for history in snapshot['histories']:
+        for table, column, items in (
+                ('central_news_event_revisions','event_revision_id',history['events']),
+                ('central_news_event_membership_revisions','membership_revision_id',history['memberships'])):
+            for value in items:
+                if _review_one(db,table,column,value[column]) != value:
+                    raise ValueError('event review changed a pre-existing revision')
+    for table, column, value, hashed in (
+            ('central_news_article_revisions','article_revision_id',before['article_revision_id'],snapshot['article_sha256']),
+            ('central_news_body_revisions','body_revision_id',before['body_revision_id'],snapshot['body_sha256'])):
+        if _review_hash(_review_one(db,table,column,value)) != hashed:
+            raise ValueError('event review changed its article or body')
+    evidence_path = Path(decision['evidence_path'])
+    if _sha256(evidence_path) != decision['evidence_sha256']:
+        raise ValueError('event review evidence file changed')
+    evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+    for value in evidence['candidates']:
+        article = _review_one(db,'central_news_article_revisions','article_revision_id',value['evidence_article']['article_revision_id'])
+        body = _review_one(db,'central_news_body_revisions','body_revision_id',value['evidence_body_id'])
+        if article != value['evidence_article'] or _review_hash(body) != value['evidence_body_sha256']:
+            raise ValueError('event review candidate evidence changed')
+    return identity
+
+
+def resolve_event_conflict(path: Path, decision_path: Path) -> dict[str, Any]:
+    decision = json.loads(decision_path.read_text(encoding='utf-8'))
+    identity = _decision_identity(decision)
+    with _writer(path) as db:
+        with _transaction(db):
+            current = report(db)
+            _event_review_plan(db,decision,current['dataset_id'],current['builder_code_digest'])
+            key = EVENT_REVIEW_PREFIX+identity
+            prior = db.execute('SELECT value_json FROM archive_build_manifest WHERE key=?',(key,)).fetchone()
+            if prior:
+                validate_event_review_receipt(db,json.loads(prior[0]))
+                return {'state':'complete','decision_id':identity,'replayed':True}
+            validate_event_conflict_decision(db,decision,parent_identity=(decision['parent_dataset'],decision['parent_digest']))
+            before = decision['snapshot']['target']; target_key = decision['target_key']
+            result = _resolve_event(db,before['target_id'],before['identity'],before['article_revision_id'],before['body_revision_id'],
+                                    json.loads(before['computed_json']),SUPPLY_CONTRACT_RULE_VERSION,
+                                    reviewed_choice=decision['snapshot'])
+            outcome, _, event_id, event_revision, membership, _, _, candidates = result
+            if outcome != 'connected':
+                raise ValueError('reviewed conflict did not connect an event')
+            reason = 'reviewed_event_key:'+identity
+            updated = db.execute("UPDATE archive_targets_v2 SET event_state=?,event_id=?,event_revision_id=?,membership_revision_id=?,event_reason=? WHERE scope=? AND stock_code=? AND identity=? AND target_id=? AND event_state='conflict'",
+                                 (outcome,event_id,event_revision,membership,reason,*target_key)).rowcount
+            readied = db.execute("UPDATE archive_event_ready_v2 SET state=? WHERE scope=? AND stock_code=? AND identity=? AND target_id=? AND state='conflict'",(outcome,*target_key)).rowcount
+            if updated != 1 or readied != 1 or list(candidates) != decision['snapshot']['candidate_event_ids']:
+                raise ValueError('reviewed conflict lost its checkpoint')
+            if not db.execute("SELECT 1 FROM archive_targets_v2 WHERE article_revision_id=? AND event_state IN ('pending','conflict') LIMIT 1",(before['article_revision_id'],)).fetchone():
+                db.execute("UPDATE archive_event_ready_v2 SET ready=1 WHERE parent_id=? AND state='pending'",(before['article_revision_id'],))
+            if not db.execute("SELECT 1 FROM archive_targets_v2 WHERE scope=? AND stock_code=? AND identity=? AND event_state IN ('pending','conflict') LIMIT 1",target_key[:3]).fetchone():
+                if db.execute("UPDATE archive_input_progress SET progress_state='event_done' WHERE scope=? AND stock_code=? AND identity=? AND progress_state='assessment_done'",target_key[:3]).rowcount != 1:
+                    raise ValueError('reviewed event input progress is inconsistent')
+            receipt = {'schema':'historical-event-conflict-receipt/v1','state':'complete','decision':decision,
+                       'dataset_id':current['dataset_id'],'code_digest':current['builder_code_digest'],
+                       'target_after':_review_rows(db,'SELECT * FROM archive_targets_v2 WHERE scope=? AND stock_code=? AND identity=? AND target_id=?',target_key)[0],
+                       'events_manifest_after':json.loads(db.execute("SELECT value_json FROM archive_build_manifest WHERE key='events_v2'").fetchone()[0]),
+                       'event_after':_review_one(db,'central_news_event_revisions','event_revision_id',event_revision),
+                       'membership_after':_review_one(db,'central_news_event_membership_revisions','membership_revision_id',membership)}
+            validate_event_review_receipt(db,receipt)
+            db.execute('INSERT INTO archive_build_manifest VALUES(?,?)',(key,_json(receipt)))
+    return {'state':'complete','decision_id':identity,'event_id':event_id,'event_revision_id':event_revision,
+            'membership_revision_id':membership,'next_ordinal':receipt['events_manifest_after']['next_ordinal'],'replayed':False}
 
 
 def code_digest() -> str:
@@ -614,7 +913,7 @@ def finalize_events(path: Path, *, max_rows: int = 0, batch_size: int = 80) -> d
         raise ValueError("invalid event batch arguments")
     with _writer(path) as db:
         _freeze_events(db)
-        if db.execute("SELECT 1 FROM archive_targets_v2 WHERE event_state='conflict' LIMIT 1").fetchone():
+        if db.execute("SELECT 1 FROM archive_event_ready_v2 WHERE state='conflict' LIMIT 1").fetchone():
             raise ValueError("ambiguous event requires explicit resolution")
         done=0
         blocked=None
@@ -771,6 +1070,16 @@ def main() -> None:
     events=commands.add_parser("events")
     events.add_argument("--archive",type=Path,required=True)
     events.add_argument("--max-rows",type=int,default=0)
+    review=commands.add_parser('review-event-conflict')
+    review.add_argument('--archive',type=Path,required=True)
+    review.add_argument('--evidence',type=Path,required=True)
+    review.add_argument('--output',type=Path,required=True)
+    resolve=commands.add_parser('resolve-event-conflict')
+    resolve.add_argument('--archive',type=Path,required=True)
+    resolve.add_argument('--decision',type=Path,required=True)
+    register=commands.add_parser('register-event-conflict')
+    register.add_argument('--archive',type=Path,required=True)
+    register.add_argument('--decision',type=Path,required=True)
     projection=commands.add_parser('projection')
     projection.add_argument('--archive',type=Path,required=True)
     projection.add_argument('--max-rows',type=int,default=0)
@@ -790,6 +1099,12 @@ def main() -> None:
         value=initialize(args.archive,dataset_id=args.dataset_id)
     elif args.command == "events":
         value=finalize_events(args.archive,max_rows=args.max_rows)
+    elif args.command == 'review-event-conflict':
+        value=create_event_conflict_decision(args.archive,args.evidence,args.output)
+    elif args.command == 'resolve-event-conflict':
+        value=resolve_event_conflict(args.archive,args.decision)
+    elif args.command == 'register-event-conflict':
+        value=register_event_conflict_decision(args.archive,args.decision)
     elif args.command == 'projection':
         value=build_projection(args.archive,max_rows=args.max_rows)
     elif args.command == "stage":

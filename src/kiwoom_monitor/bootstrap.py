@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import sys
 import logging
 import ctypes
@@ -381,7 +383,7 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
     def retain_market_bars_after_startup() -> None:
         def run() -> None:
             try:
-                minute_bar_repository.purge_before(datetime.now().date() - timedelta(days=30))
+                minute_bar_repository.purge_before(kst_wall_now().date() - timedelta(days=30))
             except sqlite3.Error as error:
                 logging.getLogger(__name__).warning("시작 후 분봉 보존 정리를 건너뜁니다: %s", error)
             try:

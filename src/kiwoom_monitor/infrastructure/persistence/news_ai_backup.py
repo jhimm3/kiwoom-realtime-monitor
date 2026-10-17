@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -41,7 +43,7 @@ class NewsAIBackupService:
         document = {
             "format": self.FORMAT,
             "version": self.VERSION,
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": kst_now().isoformat(),
             "analyses": [dict(zip(columns, row, strict=True)) for row in rows],
             "shared_analyses": [dict(zip(shared_columns, row, strict=True)) for row in shared_rows],
         }
@@ -97,7 +99,7 @@ class NewsAIBackupService:
                             str(item.get("outlook", "")), int(item.get("confidence", 0)),
                             str(item.get("reason", "")), str(item.get("positive_evidence", "[]")),
                             str(item.get("negative_evidence", "[]")), str(item.get("body_hash", "")),
-                            str(item.get("analyzed_at", datetime.now(UTC).isoformat())),
+                            str(item.get("analyzed_at", kst_now().isoformat())),
                         )
                         for item in valid
                     ],
@@ -112,7 +114,7 @@ class NewsAIBackupService:
                         str(item.get("summary", "")), str(item.get("category", "")),
                         str(item.get("positive_evidence", "[]")), str(item.get("negative_evidence", "[]")),
                         str(item.get("company_impacts", "[]")), str(item.get("body_hash", "")),
-                        str(item.get("analyzed_at", datetime.now(UTC).isoformat())),
+                        str(item.get("analyzed_at", kst_now().isoformat())),
                     ) for item in valid_shared],
                 )
         finally:

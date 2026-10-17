@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.application.research_queue import decode_campaign_spec, LeaderDecisionCampaignSpec
+
 import json
 import hashlib
 import sqlite3
@@ -30,7 +32,9 @@ from kiwoom_monitor.research_process import (load_research_process_request,
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy, campaign_worker_retry_delay_ms
 from kiwoom_monitor.application.research_search import ExperimentSpec
 from kiwoom_monitor.application.research_evaluation import DevelopmentEvidence
-from kiwoom_monitor.application.research_families import get_research_family
+from kiwoom_monitor.application.research_families import (
+    get_research_family, RESEARCH_DIRECTION_NOTICE, RESEARCH_FAMILY_LABELS,
+)
 from kiwoom_monitor.application.research_hypotheses import (
     DevelopmentEvidenceRef,
     HypothesisGenerationRequest,
@@ -167,6 +171,9 @@ class ResearchDialog(QDialog):
         self._table.horizontalHeader().setStretchLastSection(True)
 
         layout = QVBoxLayout(self)
+        self._research_direction = QLabel(RESEARCH_DIRECTION_NOTICE)
+        self._research_direction.setWordWrap(True)
+        layout.addWidget(self._research_direction)
         layout.addLayout(request_row)
         layout.addWidget(self._summary)
         layout.addLayout(actions)
@@ -257,9 +264,11 @@ class ResearchDialog(QDialog):
             return
         try:
             request = load_research_process_request(Path(self._request_path.text().strip()))
-            if request.mode != 'limited_search' or request.search is None:
-                raise ValueError('제한 탐색 요청만 캠페인에 등록할 수 있습니다')
-            if request.development_partition is not None:
+            if request.mode not in {'limited_search', 'leader_breakout'}:
+                raise ValueError('제한 탐색 또는 주도주 분봉 판단 요청을 등록하세요')
+            if request.mode == 'leader_breakout' and (request.database is None or request.runs_dir is None):
+                raise ValueError('판단 캠페인의 database와 runs_dir를 명시하세요')
+            if request.mode == 'leader_breakout' or request.development_partition is not None:
                 self._start_campaign_registration(request)
                 return
             if self._campaign_selection is None:
@@ -300,14 +309,22 @@ class ResearchDialog(QDialog):
         operation = uuid.uuid4().hex
         files = {name: self._state_dir / f'campaign_registration_{operation}.{suffix}'
                  for name, suffix in (('request', 'json'), ('result', 'result.json'), ('cancel', 'cancel'))}
-        self._registration = {**files, 'selection': selection, 'source_spec': request.search}
-        document = {
-            'mode': request.mode, 'family': request.family, 'dataset': str(request.dataset),
-            'database': str(request.database), 'runs_dir': str(request.runs_dir),
-            'strategy': request.strategy.to_dict(), 'execution': request.execution.to_dict(),
-            'evaluation': request.evaluation.to_dict(), 'session_profile': request.session_profile,
-            'development_partition': request.development_partition.to_dict(), 'search': request.search.to_dict(),
-        }
+        self._registration = {**files, 'selection': selection, 'source_spec': request.search, 'leader_request': request if request.mode == 'leader_breakout' else None}
+        if request.mode == 'leader_breakout':
+            document = {'mode': request.mode, 'dataset': str(request.dataset),
+                'database': str(request.database), 'runs_dir': str(request.runs_dir),
+                'session_profile': request.session_profile,
+                'policies': [p.to_dict() for p in (request.policies or (request.strategy,))],
+                'resource_budget': {'memory_mb': request.resource_limits.memory_mb,
+                    'cpu_duty_percent': request.resource_limits.cpu_duty_percent, 'max_seconds': request.max_seconds}}
+        else:
+            document = {
+                'mode': request.mode, 'family': request.family, 'dataset': str(request.dataset),
+                'database': str(request.database), 'runs_dir': str(request.runs_dir),
+                'strategy': request.strategy.to_dict(), 'execution': request.execution.to_dict(),
+                'evaluation': request.evaluation.to_dict(), 'session_profile': request.session_profile,
+                'development_partition': request.development_partition.to_dict(), 'search': request.search.to_dict(),
+            }
         try:
             write_json_command(files['request'], document)
             command = build_auxiliary_command('kiwoom_monitor.research_process', '--research-process', [
@@ -362,7 +379,15 @@ class ResearchDialog(QDialog):
                     raise ValueError('요청과 다른 캠페인 등록 결과입니다')
                 repository = self._campaign_repository()
                 job = repository.load_campaign_job(selection['campaign_id'], result.get('job_id'))
-                if job is None or ExperimentSpec.from_dict(job['request']).experiment_id != result.get('experiment_id') or ExperimentSpec.from_dict(job['source_request']).evidence_dict() != registration['source_spec'].evidence_dict():
+                if job is None or decode_campaign_spec(job['request']).experiment_id != result.get('experiment_id'):
+                    raise ValueError('저장된 요청과 등록 결과가 일치하지 않습니다')
+                leader_request = registration.get('leader_request')
+                if leader_request is not None:
+                    spec = decode_campaign_spec(job['source_request'])
+                    expected = json.loads(json.dumps([p.to_dict() for p in (leader_request.policies or (leader_request.strategy,))]))
+                    if not isinstance(spec, LeaderDecisionCampaignSpec) or list(spec.policies) != expected or spec.session_profile != leader_request.session_profile:
+                        raise ValueError('저장된 판단 정책과 요청이 일치하지 않습니다')
+                elif decode_campaign_spec(job['source_request']).evidence_dict() != registration['source_spec'].evidence_dict():
                     raise ValueError('저장된 요청과 등록 결과가 일치하지 않습니다')
                 message = '캠페인 요청 등록 완료' if result.get('registered') else '이미 등록된 캠페인 요청입니다'
                 if registration['cancel'].is_file():
@@ -430,7 +455,7 @@ class ResearchDialog(QDialog):
                 raise ValueError('먼저 캠페인을 일시정지하세요')
             jobs = tuple(
                 job for job in repository.load_campaign_jobs(campaign_id)
-                if job['source_kind'] != 'auto_hypothesis'
+                if job['source_kind'] != 'auto_hypothesis' and job['request'].get('version') != 'leader_breakout_decision_campaign/v1'
             )
             if not jobs:
                 raise ValueError('기준 실험을 먼저 등록하세요')
@@ -452,11 +477,13 @@ class ResearchDialog(QDialog):
         family = QComboBox(editor)
         family_jobs: dict[str, Mapping[str, Any]] = {}
         for job in jobs:
-            spec = ExperimentSpec.from_dict(job['request'])
+            spec = decode_campaign_spec(job['request'])
+            if isinstance(spec, LeaderDecisionCampaignSpec):
+                continue
             family_id = spec.family_allowlist[0]
             if family_id not in family_jobs:
                 family_jobs[family_id] = job
-                family.addItem(family_id, family_id)
+                family.addItem(RESEARCH_FAMILY_LABELS[family_id], family_id)
         parameter = QComboBox(editor)
         values = QLineEdit(editor)
         values.setPlaceholderText('예: 300, 500, 700')
@@ -586,7 +613,9 @@ class ResearchDialog(QDialog):
                 raise ValueError('전체 가설 상한은 이미 등록된 가설 수보다 작을 수 없습니다')
             bootstrap = ()
             if policy.auto_hypotheses:
-                spec = ExperimentSpec.from_dict(job['request'])
+                spec = decode_campaign_spec(job['request'])
+                if isinstance(spec, LeaderDecisionCampaignSpec):
+                    raise ValueError('판단 캠페인은 명시 정책 목록을 평가합니다. 성과 가설 생성은 성과 요청을 등록하세요')
                 family_id = spec.family_allowlist[0]
                 allowed = policy.hypothesis_parameter_values.get(family_id)
                 if not allowed:
@@ -674,7 +703,8 @@ class ResearchDialog(QDialog):
         layout.addRow(buttons)
 
         def select(index):
-            spec = ExperimentSpec.from_dict(jobs[index]['request'])
+            spec = decode_campaign_spec(jobs[index]['request'])
+            trials.setMaximum(spec.max_trials if isinstance(spec, LeaderDecisionCampaignSpec) else 1000)
             trials.setMinimum(spec.max_trials)
             trials.setValue(spec.max_trials)
             seconds.setValue(max(1, spec.max_seconds))
@@ -684,7 +714,7 @@ class ResearchDialog(QDialog):
 
         def save_budget():
             job = jobs[selector.currentIndex()]
-            spec = ExperimentSpec.from_dict(job['request'])
+            spec = decode_campaign_spec(job['request'])
             updated = replace(spec, max_trials=trials.value(), max_seconds=seconds.value(),
                               resource_budget={**spec.resource_budget, 'memory_mb': memory.value(), 'cpu_duty_percent': cpu.value()})
             if self._save_campaign_budget(job['job_id'], updated, job['budget_revision']):
@@ -932,6 +962,17 @@ class ResearchDialog(QDialog):
             self._summary.setText(f"요청 확인 필요 · {exc}")
             self._run.setEnabled(False)
             return False
+        if request.mode == "leader_breakout":
+            policies = request.policies or (request.strategy,)
+            missing = tuple(dict.fromkeys(name for policy in policies for name in policy.missing("1m")))
+            self._summary.setText(f"주도주 구조 돌파 · 명시 정책 {len(policies)}개 · 확정/보완 분봉 · 체결·손익 모의 없음 · " +
+                ("설정 미완료: " + ", ".join(missing) if missing else "명시 정책으로 분봉 종가 교차 판단"))
+            self._table.setHorizontalHeaderLabels(("분 종료·종목", "상태", "기준가격", "분봉 종가", "판단", "자료", "사유"))
+            self._run.setText("분봉 돌파 판단 실행")
+            self._run.setEnabled(not self._manager.is_running and self._registration is None)
+            self._settings.setValue("request_path", str(path))
+            return True
+        self._table.setHorizontalHeaderLabels(("구간", "상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익"))
         folds = ", ".join(f"{fold.name}({fold.role})" for fold in request.evaluation.folds)
         cost = request.execution.cost_model
         search = request.search
@@ -941,7 +982,8 @@ class ResearchDialog(QDialog):
             if search is not None else ""
         )
         self._summary.setText(
-            f"{request.mode} · {request.family} · 데이터 {request.dataset.name} · 구간 {folds}"
+            f"{request.mode} · {RESEARCH_FAMILY_LABELS[request.family]} ({request.family})"
+            f" · 데이터 {request.dataset.name} · 구간 {folds}"
             f"{search_text} · "
             f"비용 {cost.rate_basis if cost else '없음'} / {cost.source if cost else ''}"
         )
@@ -1103,7 +1145,15 @@ class ResearchDialog(QDialog):
 
     def _apply_result(self, result: Mapping[str, Any]) -> None:
         status = str(result.get("status", "unknown"))
-        if status == 'resource_blocked' or result.get('job_status') == 'resource_blocked':
+        kind = result.get("kind")
+        if kind in {"leader_breakout", "leader_breakout_campaign"}:
+            self._table.setHorizontalHeaderLabels(("분 종료·종목", "상태", "기준가격", "분봉 종가", "판단", "자료", "사유"))
+            self._table.setColumnWidth(0,250)
+        elif kind == "leader_breakout_performance":
+            self._table.setHorizontalHeaderLabels(("실행 준비", "상태", "성과", "성과", "", "입력", "미정 조건"))
+        elif kind == "limited_search":
+            self._table.setHorizontalHeaderLabels(("실험", "상태", "최대 낙폭", "손익", "완료 거래", "활성일", "사유"))
+        if kind != "leader_breakout_performance" and (status == 'resource_blocked' or result.get('job_status') == 'resource_blocked'):
             self._status.setText('자원 한도 도달 · 메모리/CPU 예산을 확인한 뒤 다시 실행하세요')
             self._table.setRowCount(0)
             return
@@ -1117,7 +1167,10 @@ class ResearchDialog(QDialog):
         self._table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             for column, value in enumerate(row):
-                self._table.setItem(row_index, column, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                if kind in {'leader_breakout','leader_breakout_campaign'}:
+                    item.setToolTip(value)
+                self._table.setItem(row_index, column,item)
 
     def stop(self) -> None:
         self._settings.setValue("geometry", self.saveGeometry())
@@ -1177,6 +1230,26 @@ class ResearchDialog(QDialog):
 
 
 def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, ...], ...]:
+    if result.get("kind") == "leader_breakout_performance" and result.get("status") == "blocked":
+        return tuple(("실행 준비", "BLOCKED", "미산출", "미산출", "", "분봉", str(reason))
+                     for reason in result.get("configuration_missing", ()))
+    if result.get("kind") == "leader_breakout_campaign":
+        return tuple(row for policy in result.get("policy_results", ()) for row in format_research_result_rows(policy))
+    if result.get("kind") == "leader_breakout":
+        rows = []
+        for row in result.get('decisions', ()):
+            baseline = row.get('baseline_observation', {})
+            reference = baseline.get('reference', {}).get('reference_price') or row['reference_price']
+            reasons = [*row['reasons']]
+            if baseline:
+                state={'DATA_BLOCKED':'기준 자료/설정 미확인','CROSSED_UNCONFIRMED':'가격 교차 관측 · 확인 미정',
+                    'ABOVE_REFERENCE':'기준선 위 관측','WATCH':'기준선 관찰'}.get(baseline['state'],baseline['state'])
+                reasons.insert(0,'00종합 기준선: '+state+' / 진입·주문 미승인')
+            status = '진입 보류' if baseline and row['status']=='BLOCKED' else str(row['status'])
+            rows.append((str(row['decided_at'])+' · '+str(row['symbol']),status,
+                str(reference) if reference is not None else '미정',str(row['signal_reference_price']),
+                str(row['proposal']),'분봉 종가','; '.join(reasons)))
+        return tuple(rows)
     if result.get("kind") == "limited_search":
         cards = result.get("candidate_cards", ())
         return tuple((

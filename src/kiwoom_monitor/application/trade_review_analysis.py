@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -104,7 +106,7 @@ def analyze_trade_episode(
             add_style = "상승 확인 후 추가"
         else:
             add_style = "동일 가격대 분할"
-    end = sells[-1].filled_at if sells else ((now or datetime.now()) if episode.summary.open_quantity > 0 else episode.ended_at)
+    end = sells[-1].filled_at if sells else ((now or kst_wall_now()) if episode.summary.open_quantity > 0 else episode.ended_at)
     start = buys[0].filled_at if buys else episode.started_at
     holding_seconds = max(0, int((end - start).total_seconds()))
 

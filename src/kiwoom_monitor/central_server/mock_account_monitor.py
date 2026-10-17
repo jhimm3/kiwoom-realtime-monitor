@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import asyncio
 from .diagnostic_replay_contract import captured_workload
 import json
@@ -50,7 +52,7 @@ class _AccountRealtimeCollector:
         self,
         token_provider: Callable[[], str],
         event_handler: Callable[[str, object], None],
-        now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        now_provider: Callable[[], datetime] = lambda: kst_now(),
         account_scope_resolver: Callable[[str], AccountScope | None] | None = None,
         async_token_provider: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
@@ -248,7 +250,7 @@ class MockAccountMonitor:
         runtime: ExecutionRuntime,
         repository: ExecutionRepository,
         *,
-        now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        now_provider: Callable[[], datetime] = lambda: kst_now(),
         lease_seconds: int = 60,
         read_limiter: asyncio.Semaphore | None = None,
         automation_risk_repository: object | None = None,

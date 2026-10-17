@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -10,6 +12,80 @@ from typing import Any, Iterable, Mapping
 from kiwoom_monitor.application.research_families import get_research_family
 from kiwoom_monitor.application.research_hypotheses import ResearchHypothesis
 from kiwoom_monitor.application.research_search import ExperimentSpec
+
+
+@dataclass(frozen=True)
+class LeaderDecisionCampaignSpec:
+    """Finite decision observations, stored by the existing campaign/job owner."""
+    version: str
+    dataset_id: str
+    dataset_hash: str
+    policies: tuple[Mapping[str, Any], ...]
+    session_profile: str
+    implementation_hash: str
+    max_trials: int
+    max_seconds: int
+    resource_budget: Mapping[str, int]
+    research_context: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from .leader_breakout import LeaderBreakoutPolicy
+        from .market_session_schedule import SUPPORTED_RESEARCH_SESSION_PROFILES
+        import json
+        if self.version != "leader_breakout_decision_campaign/v1" or not self.dataset_id or not self.dataset_hash:
+            raise ValueError("explicit decision campaign version and frozen dataset identity required")
+        if self.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
+            raise ValueError("explicit decision campaign session required")
+        if len(self.implementation_hash) != 64 or any(c not in "0123456789abcdef" for c in self.implementation_hash):
+            raise ValueError("decision campaign implementation SHA256 required")
+        if not 1 <= len(self.policies) <= 1000 or self.max_trials != len(self.policies) or not 1 <= self.max_seconds <= 86400:
+            raise ValueError("finite explicit policies and positive time budget required")
+        normalized = tuple(json.loads(json.dumps(LeaderBreakoutPolicy.from_dict(p).to_dict())) for p in self.policies)
+        if len({json.dumps(p, sort_keys=True) for p in normalized}) != len(normalized):
+            raise ValueError("duplicate decision campaign policy")
+        object.__setattr__(self, "policies", normalized)
+        from .research_resources import ResearchResourceLimits
+        ResearchResourceLimits(self.resource_budget.get("memory_mb", 512), self.resource_budget.get("cpu_duty_percent", 50))
+        if self.research_context:
+            raise ValueError("decision campaign has no performance research_context")
+
+    @classmethod
+    def from_dict(cls, value):
+        raw = dict(value)
+        raw["policies"] = tuple(raw.get("policies", ()))
+        return cls(**raw)
+
+    def to_dict(self):
+        from dataclasses import asdict
+        import json
+        return json.loads(json.dumps(asdict(self)))
+
+    def evidence_dict(self):
+        return {k: v for k, v in self.to_dict().items() if k not in {"max_trials", "max_seconds", "resource_budget"}}
+
+    @property
+    def experiment_id(self):
+        import json
+        return "leader_decision_experiment_" + hashlib.sha256(json.dumps(self.evidence_dict(),
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @property
+    def final_holdout_accessed_at(self):
+        return ""
+
+
+def decode_campaign_spec(document):
+    version = document.get("version")
+    if version == "leader_breakout_decision_campaign/v1":
+        return LeaderDecisionCampaignSpec.from_dict(document)
+    return ExperimentSpec.from_dict(document)
+
+
+def campaign_trial_count(spec):
+    if isinstance(spec, LeaderDecisionCampaignSpec):
+        return len(spec.policies)
+    from .research_search import generate_trials
+    return len(generate_trials(spec))
 
 
 @dataclass(frozen=True)
@@ -156,7 +232,7 @@ def build_hypothesis_experiment_spec(
 def campaign_worker_retry_delay_ms(worker: Mapping[str, Any], now: datetime | None = None) -> int | None:
     if worker['state'] == 'NEEDS_ATTENTION':
         return None
-    moment = now or datetime.now(UTC)
+    moment = now or kst_now()
     if moment.tzinfo is None:
         raise ValueError('worker retry clock must be timezone-aware')
     target = worker['lease_expires_at'] if worker['state'] in ('STARTING', 'RUNNING') else worker['next_retry_at']

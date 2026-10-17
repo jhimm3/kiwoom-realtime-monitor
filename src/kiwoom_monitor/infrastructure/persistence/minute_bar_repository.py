@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today, kst_wall_now
+
 import sqlite3
 import json
 from collections import defaultdict
@@ -71,7 +73,7 @@ class MinuteBarRepository:
             # between the check and the canonical bar upsert.
             connection.execute("BEGIN IMMEDIATE")
             writable_rows = []
-            available_at = datetime.now()
+            available_at = kst_wall_now()
             for code, bars in bars_by_code.items():
                 if not code:
                     continue
@@ -149,7 +151,7 @@ class MinuteBarRepository:
             for code, minutes in minutes_by_code.items():
                 if code.startswith("market:") and not minutes:
                     # Legacy count-only gaps cannot identify the missing index minute.
-                    now = datetime.now().replace(second=0, microsecond=0)
+                    now = kst_wall_now().replace(second=0, microsecond=0)
                     retained = connection.execute(
                         "SELECT minute FROM market_index_minute_bars WHERE market=? AND trade_date=?",
                         (code[7:], now.date().isoformat()),
@@ -307,7 +309,7 @@ class MinuteBarRepository:
         for (market, minute), value in rows.items():
             observation = local_minute_bar_observation(f"market:{market}", minute, value,
                 source="kiwoom-ka20005", actual_trade_value=False, origin=ObservationOrigin.QUERY,
-                completeness=DataCompleteness.COMPLETE if minute < datetime.now().replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS)
+                completeness=DataCompleteness.COMPLETE if minute < kst_wall_now().replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS)
             upsert_market_data_metadata(connection, minute.isoformat(timespec="minutes"), observation)
 
     @staticmethod
@@ -447,7 +449,7 @@ class MinuteBarRepository:
         tuple[tuple[date, float, float, float], ...],
     ]:
         """완료된 날짜는 저장된 일별 집계를 읽고 당일만 원자료로 계산한다."""
-        today = date.today()
+        today = kst_today()
         first = today - timedelta(days=max(1, int(days)) - 1)
         calendar = [(first + timedelta(days=offset)).isoformat() for offset in range((today - first).days + 1)]
         connection = sqlite3.connect(self._path)
@@ -478,7 +480,7 @@ class MinuteBarRepository:
     ) -> dict[str, dict[str, object]]:
         if not days:
             return {}
-        today = date.today().isoformat()
+        today = kst_today().isoformat()
         cached = {
             str(day): json.loads(str(raw)) for day, raw in connection.execute(
                 "SELECT trade_date,summary_json FROM top20_statistics_daily_cache "

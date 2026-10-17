@@ -213,7 +213,9 @@ class _Owner:
 
 
 class _Runner:
-    def __init__(self, store, bundle, spec, *, poll_seconds, price_source=None):
+    def __init__(self, store, bundle, spec, *, poll_seconds, price_source=None, now_provider=None, leader_context_source=None):
+        self.now_provider = now_provider
+        self.leader_context_source = leader_context_source
         self.started = False
         self.closed = False
         self.status = {

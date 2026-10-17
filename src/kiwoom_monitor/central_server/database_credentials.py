@@ -10,7 +10,9 @@ import json
 import uuid
 from datetime import datetime, timezone
 from time import time
-from typing import Any
+from typing import Any, Callable
+
+from .market_observations import KST, as_kst
 
 from kiwoom_monitor.central_server.database_account_identity import (
     _account_binding_document, _account_binding_values, _canonical_account_ref, _stable_id,
@@ -65,7 +67,8 @@ def _list_credential_profiles(cursor: Any) -> list[dict[str, Any]]:
     return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
 
-def _archive_credential_profile(cursor: Any, provider: str, profile_id: str, p: str) -> dict[str, Any]:
+def _archive_credential_profile(cursor: Any, provider: str, profile_id: str, p: str,
+                                *, now_provider: Callable[[], datetime] | None = None) -> dict[str, Any]:
     cursor.execute(
         f"SELECT provider,lifecycle_state FROM central_credential_profiles WHERE profile_id={p}",
         (profile_id,),
@@ -77,7 +80,7 @@ def _archive_credential_profile(cursor: Any, provider: str, profile_id: str, p: 
         cursor.execute(
             "UPDATE central_credential_profiles SET lifecycle_state='archived',archived_at=" + p
             + f" WHERE profile_id={p} AND provider={p}",
-            (datetime.now(timezone.utc).isoformat(), profile_id, provider),
+            ((as_kst(now_provider()) if now_provider else datetime.now(KST)).isoformat(), profile_id, provider),
         )
     return {"provider": provider, "profile_id": profile_id, "lifecycle_state": "archived"}
 
@@ -113,7 +116,7 @@ def _find_credential_activation(cursor: Any, operation_id: str, provider: str, p
 
 
 def _create_credential_profile(cursor: Any, provider: str, request_id: str, label: str,
-                               digest: str, p: str) -> dict[str, Any]:
+                               digest: str, p: str, *, now_provider: Callable[[], datetime] | None = None) -> dict[str, Any]:
     from kiwoom_monitor.domain.credential_contract import PROVIDER_FIELDS
     if provider not in PROVIDER_FIELDS or len(label) > 120:
         raise ValueError("invalid credential profile")
@@ -132,7 +135,8 @@ def _create_credential_profile(cursor: Any, provider: str, request_id: str, labe
     environment = provider.removeprefix("kiwoom_") if provider.startswith("kiwoom_") else None
     cursor.execute("INSERT INTO central_credential_profiles(profile_id,provider,environment,label,lifecycle_state,created_at) "
                    f"VALUES({','.join([p] * 6)})",
-                   (profile_id, provider, environment, label, "draft", datetime.now(timezone.utc).isoformat()))
+                   (profile_id, provider, environment, label, "draft",
+                    (as_kst(now_provider()) if now_provider else datetime.now(KST)).isoformat()))
     document = {"provider": provider, "profile_id": profile_id, "label": label, "request_digest": digest}
     cursor.execute("INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                    f"VALUES({','.join([p] * 5)})",
@@ -258,12 +262,12 @@ class SQLiteCredentialStoreMixin:
     def create_credential_profile(self, provider: str, request_id: str, label: str, digest: str) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            return _create_credential_profile(connection.cursor(), provider, request_id, label, digest, "?")
+            return _create_credential_profile(connection.cursor(), provider, request_id, label, digest, "?", now_provider=self._now_provider)
 
     def archive_credential_profile(self, provider: str, profile_id: str) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            return _archive_credential_profile(connection.cursor(), provider, profile_id, "?")
+            return _archive_credential_profile(connection.cursor(), provider, profile_id, "?", now_provider=self._now_provider)
 
     def rename_credential_profile(self, provider: str, profile_id: str, label: str) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
@@ -314,7 +318,7 @@ class PostgresCredentialStoreMixin:
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
-            return _create_credential_profile(cursor, provider, request_id, label, digest, "%s")
+            return _create_credential_profile(cursor, provider, request_id, label, digest, "%s", now_provider=self._now_provider)
 
     def archive_credential_profile(self, provider: str, profile_id: str) -> dict[str, Any]:
         from .postgres_access import DBWriterContext, open_observed_connection
@@ -325,7 +329,7 @@ class PostgresCredentialStoreMixin:
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
-            return _archive_credential_profile(cursor, provider, profile_id, "%s")
+            return _archive_credential_profile(cursor, provider, profile_id, "%s", now_provider=self._now_provider)
 
     def rename_credential_profile(self, provider: str, profile_id: str, label: str) -> dict[str, Any]:
         from .postgres_access import DBWriterContext, open_observed_connection

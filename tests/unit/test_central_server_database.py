@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -67,6 +68,44 @@ from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
 
 
 class CentralServerDatabaseTests(unittest.TestCase):
+    def test_postgres_kst_connections_preserve_existing_safety_options(self):
+        cases = (
+            ('dbname=fixture', {}, '-c timezone=Asia/Seoul'),
+            ("dbname=fixture options='-c statement_timeout=5000 -c default_transaction_read_only=on'",
+             {'PGOPTIONS': '-c lock_timeout=1'},
+             '-c statement_timeout=5000 -c default_transaction_read_only=on -c timezone=Asia/Seoul'),
+            ('dbname=fixture', {'PGOPTIONS': '-c statement_timeout=5000 -c timezone=UTC'},
+             '-c statement_timeout=5000 -c timezone=UTC -c timezone=Asia/Seoul'),
+            ("dbname=fixture options=''", {'PGOPTIONS': '-c statement_timeout=5000'}, '-c timezone=Asia/Seoul'),
+        )
+        for url, environment, expected in cases:
+            with self.subTest(url=url, environment=environment), patch.dict(os.environ, environment, clear=True), patch(
+                    'psycopg.connect') as connect:
+                PostgresQueryStore(url)._connect()
+                connect.assert_called_once_with(url, options=expected)
+
+    def test_minute_receipt_and_operation_share_kst_clock_without_changing_source_identity(self):
+        at = datetime(2026, 10, 15, 14, 21, 3, tzinfo=ZoneInfo('Asia/Seoul'))
+        store = SQLiteQueryStore(Path(':memory:'), now_provider=lambda: at)
+        self.addCleanup(store.close)
+        store.initialize()
+        value = {'trading_date': '2026-10-15', 'minute': '14:20', 'code': '005930',
+                 'market': 'KRX', 'open': 100, 'high': 105, 'low': 99, 'close': 104,
+                 'volume': 10, 'trade_value_million_won': 100, 'updated_at': at.timestamp(),
+                 'operation_id': 'kst-clock-test'}
+        observation = minute_bar_observation(value, origin=ObservationOrigin.QUERY,
+            completeness=DataCompleteness.COMPLETE, source='kiwoom-ka10080',
+            value_kind=DataValueKind.ESTIMATED)
+        key = bar_observation_key(observation)
+        store.save_minute_bars([value], observations=[(key, observation)])
+        first = store.load_observation_revisions('minute_bar')[0]
+        self.assertEqual(first['received_at'], at.isoformat())
+        with store._connection() as connection:
+            processed = connection.execute('SELECT processed_at FROM central_minute_bar_operations').fetchone()[0]
+        self.assertEqual(processed, at.isoformat())
+        store.save_minute_bars([value], observations=[(key, observation)])
+        self.assertEqual(store.load_observation_revisions('minute_bar'), [first])
+
     def test_mock_lineage_statement_keeps_snapshot_during_concurrent_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lineage.sqlite3"
@@ -2356,6 +2395,8 @@ class SecondTradeShadowReaderTests(unittest.TestCase):
         from kiwoom_monitor.central_server.market_theme_shadow_inputs import read_market_theme_shadow_inputs
         from kiwoom_monitor.application.market_theme_shadow import evaluate_market_theme_shadow
         from kiwoom_monitor.domain.research_contract import THEME_BACKUP_FORMAT, THEME_BACKUP_VERSION
+        from kiwoom_monitor.application.theme_leadership import ThemeLeadershipParameters
+        parameters=ThemeLeadershipParameters(window_seconds=60,max_data_age_seconds=90)
         document = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION,
                     "active_profile": "default", "profiles": [{"name": "default", "stock_themes": [
                         {"code": "005930", "theme": "반도체"}, {"code": "000660", "theme": "반도체"}]}]}
@@ -2368,9 +2409,11 @@ class SecondTradeShadowReaderTests(unittest.TestCase):
             observation=ranking_observation("5", at.isoformat(), payload, at, source="fixture"))
         self.store.save_second_trade_bars([self.bar(), self.bar(code="000660")])
         values = read_market_theme_shadow_inputs(self.store, decision_time=self.cut.isoformat(),
-                                               theme_id="반도체", leadership_venue="KRX")
+                                               theme_id="반도체", leadership_venue="KRX",leadership_parameters=parameters)
         self.assertEqual(1, len(values.market_frames))
-        self.assertEqual(2, len(values.second_points))
+        self.assertEqual((),values.second_points)
+        self.assertEqual((),values.observation_points)
+        self.assertEqual('1m',values.input_resolution)
         self.assertEqual(("반도체",), values.market_frames[0].members[0].themes)
         self.assertEqual("UNAVAILABLE", values.continuity_status)
         result = evaluate_market_theme_shadow(values)
@@ -2380,7 +2423,7 @@ class SecondTradeShadowReaderTests(unittest.TestCase):
         with patch("kiwoom_monitor.central_server.database_documents.time", return_value=self.cut.timestamp() - 1):
             self.store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": removed}])
         values = read_market_theme_shadow_inputs(self.store, decision_time=self.cut.isoformat(),
-                                               theme_id="반도체", leadership_venue="KRX")
+                                               theme_id="반도체", leadership_venue="KRX",leadership_parameters=parameters)
         self.assertIsNone(values.theme_membership)
         self.assertEqual((), values.second_points)
 

@@ -31,20 +31,25 @@ def selected_high_price(
 ) -> int | None:
     """선택 기간과 출처 우선순위에 맞는 화면 신고가를 반환한다."""
     if period == "5":
-        target = daily.high_5_price if daily is not None and daily.period_verified("5") else None
+        target = daily.high_5_price if daily is not None else None
     elif period == "20":
-        target = daily.high_20_price if daily is not None and daily.period_verified("20") else None
+        target = daily.high_20_price if daily is not None else None
     elif period == "historical":
         candidates = (
             historical_high,
             daily.high_250_price if daily is not None and daily.period_verified("250") else None,
         )
         target = max((value for value in candidates if value is not None), default=None)
+        if target is None:
+            target = (daily.high_250_price or daily.cached_high_250_price) if daily is not None else None
+            if target is None and fundamentals is not None:
+                target = fundamentals.high_250_price
     else:
         target = (
             daily.high_250_price
-            if daily is not None and daily.period_verified("250")
-            else None
+            if daily is not None and daily.high_250_price is not None
+            else daily.cached_high_250_price if daily is not None and daily.cached_high_250_price is not None
+            else fundamentals.high_250_price if fundamentals is not None else None
         )
     if target is None:
         return None

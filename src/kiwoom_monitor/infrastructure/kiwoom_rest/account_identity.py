@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import hashlib
 import hmac
 from dataclasses import dataclass
@@ -59,7 +61,7 @@ class KiwoomAccountIdentityReader:
         self._broker = broker
         self._environment = environment
         self._hmac_key = bytes(hmac_key)
-        self._now = now_provider or (lambda: datetime.now(UTC))
+        self._now = now_provider or (lambda: kst_now())
 
     async def verify(self) -> VerifiedAccountIdentity:
         result = await self._broker.request(ACCOUNT_ID_API, ACCOUNT_PATH, {})

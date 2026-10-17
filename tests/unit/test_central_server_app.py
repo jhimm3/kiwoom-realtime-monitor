@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.unit.test_market_profile_settings import contract_storage_hash, fixed_contract_clock
+
 import asyncio
 import io
 import itertools
@@ -56,6 +58,8 @@ DIAGNOSTIC_RUN_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_co
 REALTIME_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/realtime_asgi_v1.json"
 ADDITIVE_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/additive_contract_20261013.json"
 RAM_ADDITIVE_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/additive_contract_20261015.json"
+NEWS_MORNING_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/additive_news_morning_20261015.json"
+LEADER_EXECUTION_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/additive_leader_execution_20261016.json"
 LIFESPAN_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/server_lifespan_v1.json"
 LIFESPAN_CASES = (
     [("legacy", ""), ("external-disabled", ""), ("vault", "")]
@@ -122,6 +126,7 @@ async def capture_server_lifespan_contract(app_factory, database_path, mode, fai
         ("market_events", "MarketEventService", "market"),
         ("realtime_collector", "CentralRealtimeCollector", "collector"),
         ("news_service", "CentralNewsService", "news"),
+        ("morning_market_brief", "MorningMarketBrief", "morning"),
         ("external_market_collector", "YahooDelayedMarketCollector", "external"),
         ("candidate_monitor", "CandidateMonitor", "candidate"),
         ("ai_service", "CentralAIService", "ai"),
@@ -145,7 +150,7 @@ async def capture_server_lifespan_contract(app_factory, database_path, mode, fai
             stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.account_identity.KiwoomAccountIdentityReader.verify", verify))
             stack.enter_context(patch("kiwoom_monitor.central_server.diagnostic_trace.recover_interrupted", recover))
             stack.enter_context(patch("kiwoom_monitor.central_server.diagnostic_trace.stop", stop))
-            stack.enter_context(patch("kiwoom_monitor.central_server.schema_migrations.datetime", FixedNow))
+            stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             stack.enter_context(patch("uuid.uuid4", side_effect=(uuid.UUID(int=i) for i in range(1, 1000))))
             settings = CentralServerSettings(f"sqlite:///{database_path}", "private-token",
                 kiwoom_app_key="controlled-key", kiwoom_secret_key="controlled-secret",
@@ -204,7 +209,7 @@ def expected_server_lifespan_contract(mode, failure=""):
     startup = (["credentials.start", "trace.recover", "broker.start", "real.start",
                 "mock-owner.start", "supervisor.start"] if mode == "vault" else
                ["trace.recover", "broker.start", "identity.verify", "mock-bundle.start"])
-    startup += ["top20.start", "market.start", "collector.start", "news.start"]
+    startup += ["top20.start", "market.start", "collector.start", "news.start", "morning.start"]
     if mode != "external-disabled":
         startup += ["external.start"]
     startup += ["candidate.start", "yield", "mock-bundle:present",
@@ -212,7 +217,7 @@ def expected_server_lifespan_contract(mode, failure=""):
     shutdown = ["trace.stop:server_shutdown"]
     shutdown += (["credentials.close", "supervisor.close", "real.close", "mock-owner.close"]
                  if mode == "vault" else ["mock-bundle.close"])
-    shutdown += ["candidate.close", "external.close", "news.close", "ai.close", "top20.close",
+    shutdown += ["candidate.close", "external.close", "news.close", "morning.close", "ai.close", "top20.close",
                  "collector.close", "market.close"]
     if mode != "vault":
         shutdown += ["account-query.close"]
@@ -255,6 +260,7 @@ async def capture_realtime_asgi_contract(app_factory, database_path, with_collec
     class Collector:
         async def start(self): calls.append("collector.start")
         async def close(self): calls.append("collector.close")
+        def set_breakout_trade_listener(self, listener): self.breakout_trade_listener = listener
         def credential_connection_status(self): return {"state": "controlled-upstream"}
         def initial_realtime_snapshots(self, snapshots, codes):
             calls.append({"initial": snapshots, "codes": codes})
@@ -390,7 +396,7 @@ def diagnostic_run_contract_app(app_factory, database_path, mode):
         return {"run_id": "measure-report", "state": "running"}
     try:
         with ExitStack() as stack:
-            stack.enter_context(patch("kiwoom_monitor.central_server.schema_migrations.datetime", FixedNow))
+            stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.object(workloads, "control_path", return_value=control_path if mode != "absent" else None))
             stack.enter_context(patch.object(sampling, "read_host_snapshot", side_effect=host))
@@ -444,7 +450,7 @@ def capture_diagnostic_run_http_contract(client, app, state, database_path, cont
         with closing(sqlite3.connect(database_path)) as connection:
             assert storage == hashlib.sha256("\n".join(connection.iterdump()).encode()).hexdigest(), (name, "HTTP mutated application DB")
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
-                      "files": before, "storage_hash": storage, "calls": list(state["calls"])})
+                      "files": before, "storage_hash": contract_storage_hash(database_path), "calls": list(state["calls"])})
         return response.json()
     paths = (("GET", "snapshot"), ("POST", "runs"), ("GET", "runs/missing"), ("POST", "runs/missing/cancel"),
              ("GET", "reports"), ("GET", "reports/missing"), ("GET", "history"))
@@ -570,7 +576,7 @@ def capture_diagnostic_control_http_contract(client, app, control_path, state, d
             assert previous == files(), (name, "read/rejected request changed native control")
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
                       "body": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
-                      "control_and_history": files(), "trace_calls": list(state["calls"]), "storage_hash": before})
+                      "control_and_history": files(), "trace_calls": list(state["calls"]), "storage_hash": contract_storage_hash(database_path)})
         return response
     for method, path in (("GET", "capabilities"), ("PUT", "control"), ("POST", "trace"),
                          ("GET", "trace"), ("POST", "trace/stop"), ("GET", "trace/missing"), ("GET", "trace/id/chunks/name")):
@@ -682,7 +688,7 @@ def capture_diagnostic_read_http_contract(client, app, store, request_store, con
         assert status == response.status_code, (name, status, response.status_code, response.text)
         assert before == snapshot(), (name, "diagnostic read changed application database")
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
-                      "body": response.json(), "storage_hash": before})
+                      "body": response.json(), "storage_hash": contract_storage_hash(database_path)})
         return response.json()
     paths = ("resources", "workloads", "market-bar-saves", "writers", "db-calls",
              "news-job-claim-plan", "news-job-claim-readonly-analyze")
@@ -750,6 +756,8 @@ def mock_orders_contract_app(app_factory, database_path, enabled):
         publication = {"current": "contract-mock", "during_submit": None}
         with ExitStack() as stack:
             stack.enter_context(patch("kiwoom_monitor.central_server.execution_runtime.datetime", FixedNow))
+            store._execution_wall_now = lambda: FixedNow.now(KST)
+            request_store._execution_wall_now = store._execution_wall_now
             stack.enter_context(patch("kiwoom_monitor.central_server.database_execution.datetime", FixedNow))
             for index, profile in enumerate(("contract-mock", "contract-mock-b"), 1):
                 ref = refs["mock"] if index == 1 else str(uuid.UUID(int=22))
@@ -814,7 +822,7 @@ def capture_mock_orders_http_contract(client, app, store, bundles, transports, p
             assert before == after, (name, "read/rejected request changed native ledger")
         assert all(not gateway._commands for gateway in owned_gateways), "owned command still running after response"
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
-            "storage_hash": after, "transport_calls": {profile: list(transport.calls) for profile, transport in transports.items()}})
+            "storage_hash": contract_storage_hash(database_path), "transport_calls": {profile: list(transport.calls) for profile, transport in transports.items()}})
         return response.json()
     events = "/api/v2/mock/accounts/" + a.account_ref + "/execution-events"
     for method, path, body in (("POST", legacy, command), ("GET", legacy + "/missing", None),
@@ -930,7 +938,7 @@ def operations_contract_app(app_factory, database_path, configured):
 
     try:
         with ExitStack() as stack:
-            stack.enter_context(patch("kiwoom_monitor.central_server.schema_migrations.datetime", FixedNow))
+            stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_shadow_state.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.dict(app_factory.__globals__, {"create_query_store": owned_store,
@@ -945,7 +953,10 @@ def operations_contract_app(app_factory, database_path, configured):
                 kiwoom_app_key="contract-key" if configured else "", kiwoom_secret_key="contract-secret" if configured else "",
                 openai_api_key="contract-ai" if configured else "", autonomous_top20_enabled=False,
                 market_event_collection_enabled=configured, external_market_symbols="TEST:TEST.CME" if configured else "",
-                news_history_jobs_enabled=False, news_naver_stock_enabled=configured, news_query_set_enabled=False))
+                news_history_jobs_enabled=False, news_naver_stock_enabled=configured, news_query_set_enabled=False,
+                # This frozen v1 fixture explicitly exercises the old comparison
+                # profile. Fresh installations now use the unconfigured 0B policy.
+                shadow_candidate_config_json=json.dumps(default_shadow_breakout_config().to_dict())))
             assert len(app_stores) == 1
             app.openapi()
             yield app, store, app_stores[0], services, events, monitors, condition
@@ -978,7 +989,7 @@ def capture_operations_http_contract(client, app, store, request_store, services
             assert before == after, (name, "rejected/read request changed storage")
         current = app.state.candidate_monitor
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
-            "storage_hash": after, "stored": store.load_documents("server_operational_settings", "global", 1),
+            "storage_hash": contract_storage_hash(database_path), "stored": store.load_documents("server_operational_settings", "global", 1),
             "events": list(events), "candidate_index": next((i for i, monitor in enumerate(monitors) if monitor is current), None)})
         return response.json()
 
@@ -1108,7 +1119,7 @@ def capture_account_query_http_contract(client, app, store, request_store, conte
         if any(manager._tasks for manager in managers.values()):
             raise AssertionError((name, "native query task still running after response"))
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
-                      "storage_hash": after, "profile_reads": [(call.args, call.kwargs) for call in reads.call_args_list], "broker_calls": calls})
+                      "storage_hash": contract_storage_hash(database_path), "profile_reads": [(call.args, call.kwargs) for call in reads.call_args_list], "broker_calls": calls})
         return response.json()
 
     accounts, v2, v3 = "/api/v3/kiwoom/accounts", "/api/v2/kiwoom/account-query", "/api/v3/kiwoom/account-query"
@@ -1199,6 +1210,7 @@ def market_query_contract_app(app_factory, database_path, *, configured):
 
     try:
         with ExitStack() as stack:
+            stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             for module in ("schema_migrations", "database_market_bars"):
                 stack.enter_context(patch(f"kiwoom_monitor.central_server.{module}.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_observation_writes.datetime", FixedNow))
@@ -1264,7 +1276,7 @@ def capture_market_query_http_contract(client, app, store, broker, request_store
         if stored_hash() != before:
             raise AssertionError((name, "HTTP query changed native archive"))
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
-            "storage_hash": before, "store_calls": {key: [(call.args, call.kwargs) for call in spy.call_args_list]
+            "storage_hash": contract_storage_hash(database_path), "store_calls": {key: [(call.args, call.kwargs) for call in spy.call_args_list]
                                                        for key, spy in spies.items()},
             "broker_calls": [(call.args, call.kwargs) for call in broker.request.call_args_list] if broker is not None else []})
 
@@ -1339,7 +1351,7 @@ def market_event_contract_app(app_factory, database_path, *, configured):
 
     try:
         with ExitStack() as stack:
-            stack.enter_context(patch("kiwoom_monitor.central_server.schema_migrations.datetime", FixedNow))
+            stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.dict(app_factory.__globals__, {
                 "MarketEventService": MagicMock(return_value=service), "create_query_store": owned_store,
@@ -1413,7 +1425,7 @@ def capture_market_event_http_contract(client, store, service, database_path, re
             raise AssertionError((name, "condition document query arguments", documents.call_args_list))
         cases.append({"name": name, "request": {"path": path, "params": params, "authenticated": authenticated},
             "status": response.status_code, "headers": {k: response.headers[k] for k in ("content-type", "content-length")},
-            "body": response.json(), "database_sha256": before, "runtime_calls": runtime_calls,
+            "body": response.json(), "database_sha256": contract_storage_hash(database_path), "runtime_calls": runtime_calls,
             "store_calls": {key: [{"args": call.args, "kwargs": call.kwargs} for call in spy.call_args_list]
                             for key, spy in (("history", history), ("current", current), ("condition", documents))}})
 
@@ -1458,7 +1470,7 @@ def market_read_contract_app(app_factory, database_path):
     collectors = []
     try:
         with ExitStack() as stack:
-            stack.enter_context(patch("kiwoom_monitor.central_server.schema_migrations.datetime", FixedNow))
+            stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_market_bars.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_observation_writes.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.minute_bars.uuid.uuid4",
@@ -1521,10 +1533,13 @@ def capture_market_read_http_contract(client, app, store, collectors, database_p
 
     def request(name, path, *, authenticated=True, **params):
         before = stored_hash()
+        normalized_before = contract_storage_hash(database_path)
         response = client.get("/api/v1/market/" + path, params=params,
             headers={"Authorization": "Bearer private-token"} if authenticated else {})
+        assert before == stored_hash(), (name, "market read changed native storage")
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
-                      "body": response.json(), "stored_before": before, "stored_after": stored_hash()})
+                      "body": response.json(), "stored_before": normalized_before,
+                      "stored_after": contract_storage_hash(database_path)})
 
     common = {"code": "005930", "trading_date": "2026-09-14"}
     paths = {"minute-bars": common, "recent-minute-bars": {"code": "005930", "end_date": "2026-09-14", "trading_days": 2},
@@ -1839,10 +1854,12 @@ def research_contract_app(app_factory, database_path):
     monitors = [MagicMock(spec=CandidateMonitor), MagicMock(spec=CandidateMonitor)]
     for index, monitor in enumerate(monitors, 1):
         monitor.quality = {"status": "WARMUP", "reason": f"fixture-generation-{index}", "monitor_id": f"monitor-{index}"}
-    store = SQLiteQueryStore(database_path)
+        monitor.project_leader_candidate_status.return_value = None  # explicit historical comparison
+    store = SQLiteQueryStore(database_path, now_provider=lambda: FixedObservationClock.now(KST))
     store.initialize()
     try:
-        with patch("uuid.uuid4", side_effect=lambda: uuid.UUID(int=next(ids))), \
+        with fixed_contract_clock(app_factory, FixedObservationClock), \
+                patch("uuid.uuid4", side_effect=lambda: uuid.UUID(int=next(ids))), \
                 patch("kiwoom_monitor.central_server.database_observation_writes.datetime", FixedObservationClock), \
                 patch("kiwoom_monitor.central_server.database_research_export.datetime", FixedObservationClock), \
                 patch.object(CandidateMonitor, "from_json", side_effect=monitors):
@@ -1933,6 +1950,50 @@ def capture_research_read_http_contract(client, store, monitors):
 
 
 class CentralServerAppTests(unittest.TestCase):
+
+    def test_health_document_preserves_instant_and_renders_in_kst(self):
+        from kiwoom_monitor.central_server.contracts import health_document
+        document = health_document(datetime(2026, 10, 15, 5, 21, 3, tzinfo=timezone.utc))
+        self.assertEqual(document['server_time'], '2026-10-15T14:21:03+09:00')
+        self.assertEqual(datetime.fromisoformat(document['server_time']).timestamp(),
+                         datetime(2026, 10, 15, 5, 21, 3, tzinfo=timezone.utc).timestamp())
+
+    def test_health_uses_existing_kiwoom_clock_without_requesting_new_market_data(self):
+        async def exercise():
+            import httpx
+            settings = CentralServerSettings('sqlite:///:memory:', 'fixture-token',
+                kiwoom_app_key='fixture-key', kiwoom_secret_key='fixture-secret',
+                autonomous_top20_enabled=False, market_event_collection_enabled=False,
+                news_naver_api_enabled=False, external_market_enabled=False)
+            store = SQLiteQueryStore(Path(':memory:'))
+            with patch('kiwoom_monitor.central_server.app.create_query_store', return_value=store) as make_store, patch(
+                    'kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now',
+                    return_value=datetime(2026, 10, 15, 14, 21, 3)), patch(
+                    'kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.get_access_token',
+                    side_effect=AssertionError('health_must_not_request_kiwoom')):
+                app = create_app(settings)
+                try:
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                        response = await client.get('/health', headers={'X-Kiwoom-Clock': '1'})
+                        coverage = await client.get('/api/v1/market/coverage',
+                            headers={'Authorization': 'Bearer fixture-token'}, params={
+                                'kind': 'minute_bar', 'subject': '005930:KRX',
+                                'start': '2026-10-15T09:00:00+09:00',
+                                'end': '2026-10-15T09:01:00+09:00'})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()['server_time'], '2026-10-15T14:21:03+09:00')
+                    self.assertEqual(response.headers['X-Kiwoom-Server-Time'],
+                                     '2026-10-15T14:21:03+09:00')
+                    self.assertEqual(make_store.call_args.kwargs['now_provider']().isoformat(),
+                                     '2026-10-15T14:21:03+09:00')
+                    self.assertEqual(app.state.morning_market_brief.clock().isoformat(),
+                                     '2026-10-15T14:21:03+09:00')
+                    self.assertEqual(coverage.status_code, 200, coverage.text)
+                    self.assertEqual(coverage.json()['available_by'], '2026-10-15T14:21:03+09:00')
+                finally:
+                    store.close()
+        asyncio.run(exercise())
+
     def test_server_lifespan_preserves_startup_and_repairs_reviewed_cleanup_gaps(self):
         # Retain the original 23 scenarios and baseline; reviewed changes concern shutdown only.
         original = json.loads(LIFESPAN_BASELINE.read_text(encoding="utf-8"))["results"]
@@ -1950,10 +2011,13 @@ class CentralServerAppTests(unittest.TestCase):
                     end = next(i for i, event in enumerate(events)
                                if event.endswith(".close") or event == "trace.stop:server_shutdown")
                     return events[:end]
-                self.assertEqual(prefix(before["events"]), prefix(actual["events"]))
+                legacy_prefix = [event for event in prefix(actual["events"]) if event != "morning.start"]
+                self.assertEqual(prefix(before["events"]), legacy_prefix)
+                if "news.start" in actual["events"] and failure != "news.start":
+                    self.assertEqual(actual["events"].count("morning.start"), 1)
 
     def test_server_lifespan_stops_before_dependencies_after_each_close_failure(self):
-        for mode, stages in (("legacy", ("mock-bundle.close", "external.close", "news.close", "ai.close",
+        for mode, stages in (("legacy", ("mock-bundle.close", "external.close", "news.close", "morning.close", "ai.close",
                                           "top20.close", "collector.close", "market.close", "account-query.close",
                                           "store.close")),
                              ("vault", ("supervisor.close", "mock-owner.close", "vault.close"))):
@@ -2285,6 +2349,18 @@ class CentralServerAppTests(unittest.TestCase):
             for insertion in ram_additions["route_insertions"]:
                 position = case["route_order"].index(insertion["before"])
                 case["route_order"][position:position] = insertion["paths"]
+            minute_additions=json.loads((REALTIME_BASELINE.parent/'live_0b_minute_20261016.json').read_text(encoding='utf-8'))
+            case['schema']['paths'].update(minute_additions['reviewed_additive_paths'])
+            for insertion in minute_additions['route_insertions']:
+                position=case['route_order'].index(insertion['before'])
+                case['route_order'][position:position]=insertion['paths']
+            news_additions = json.loads(NEWS_MORNING_CONTRACT.read_text(encoding="utf-8"))
+            case["schema"]["paths"].update(news_additions["reviewed_additive_paths"])
+            case["schema"]["components"]["schemas"].update(news_additions["reviewed_additive_schemas"])
+            case["schema"]["components"]["schemas"]["OperationalSettingsUpdate"]["properties"]["ai_provider"] = news_additions["operational_ai_provider_property"]
+            for insertion in news_additions["route_insertions"]:
+                position = case["route_order"].index(insertion["before"])
+                case["route_order"][position:position] = insertion["paths"]
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -2335,6 +2411,12 @@ class CentralServerAppTests(unittest.TestCase):
         }
         for cases in expected:
             for case in cases:
+                body = case.get('body', {})
+                if isinstance(body, dict) and 'trace_input_capture' in body:
+                    transition=json.loads((DIAGNOSTIC_CONTROL_BASELINE.parent/'live_0b_minute_20261016.json').read_text(encoding='utf-8'))
+                    self.assertEqual('collector-input/v2', body['trace_input_capture']['collector_input_version'])
+                    body['trace_input_capture']['collector_input_version']=transition['collector_input_version']
+                    case['headers']['content-length']=str(len(json.dumps(body,ensure_ascii=False,separators=(',',':')).encode('utf-8')))
                 for call in case["trace_calls"]:
                     if call["action"] == "start":
                         call["kwargs"].update(defaults)
@@ -2352,6 +2434,11 @@ class CentralServerAppTests(unittest.TestCase):
                         "realtime_lifecycle_legacy":"top20-realtime-tape/v1",
                     })
                     body["server_build"] = create_app.__globals__["SERVER_BUILD"]
+                    changed = True
+                if isinstance(body, dict) and "workloads" in body:
+                    morning = json.loads(NEWS_MORNING_CONTRACT.read_text(encoding="utf-8"))["morning_workload"]
+                    morning["diagnostic_switch_available"] = case["name"] != "master-disable-revokes-children"
+                    body["workloads"]["morning_market_brief"] = morning
                     changed = True
                 if changed:
                     case["headers"]["content-length"] = str(len(json.dumps(
@@ -2371,9 +2458,18 @@ class CentralServerAppTests(unittest.TestCase):
         for cases in expected:
             for case in cases:
                 body = case["body"]
+                if isinstance(body, dict) and "workloads" in body:
+                    morning = json.loads(NEWS_MORNING_CONTRACT.read_text(encoding="utf-8"))["morning_workload"]
+                    morning["diagnostic_switch_available"] = case["name"] != "workloads-disabled"
+                    body["workloads"]["morning_market_brief"] = morning
+                    case["headers"]["content-length"] = str(len(json.dumps(
+                        body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
                 if not isinstance(body, dict) or not isinstance(body.get("writers"), list):
                     continue
                 writers = body["writers"]
+                insertion = json.loads(NEWS_MORNING_CONTRACT.read_text(encoding="utf-8"))["writer_kind_insertion"]
+                document_writer = next(row for row in writers if row["writer_id"] == insertion["writer_id"])
+                document_writer["common_db_observed_kinds"][insertion["index"]:insertion["index"]] = insertion["values"]
                 for insertion in additions["writer_kind_insertions"]:
                     writer = next(row for row in writers if row["writer_id"] == insertion["writer_id"])
                     kinds = writer["common_db_observed_kinds"]
@@ -2381,6 +2477,11 @@ class CentralServerAppTests(unittest.TestCase):
                 position = next(index for index, row in enumerate(writers)
                                 if row["writer_id"] == "dataset.statistics_cache") + 1
                 writers.insert(position, additions["new_writer"])
+                insertion = json.loads(LEADER_EXECUTION_CONTRACT.read_text(encoding="utf-8"))["writer_kind_insertion"]
+                writer = next(row for row in writers if row["writer_id"] == insertion["writer_id"])
+                kinds = writer["common_db_observed_kinds"]
+                position = kinds.index(insertion["after"]) + 1
+                kinds[position:position] = insertion["values"]
                 case["headers"]["content-length"] = str(len(json.dumps(
                     body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
         actual = []
@@ -2403,6 +2504,22 @@ class CentralServerAppTests(unittest.TestCase):
 
     def test_operational_settings_save_apply_recovery_match_pre_extraction_baseline(self) -> None:
         expected = json.loads(OPERATIONS_BASELINE.read_text(encoding="utf-8"))["results"]
+        # The reviewed new provider also appears in Pydantic's exact validation response.
+        provider = json.loads(NEWS_MORNING_CONTRACT.read_text(encoding="utf-8"))["operational_ai_provider_property"]["anyOf"][0]
+        for cases in expected:
+            for case in cases:
+                body = case["body"]
+                if not isinstance(body, dict) or not isinstance(body.get("detail"), list):
+                    continue
+                changed = False
+                for error in body["detail"]:
+                    if error.get("loc") == ["body", "ai_provider"] and "pattern" in error.get("ctx", {}):
+                        error["ctx"]["pattern"] = provider["pattern"]
+                        error["msg"] = "String should match pattern '" + provider["pattern"] + "'"
+                        changed = True
+                if changed:
+                    case["headers"]["content-length"] = str(len(json.dumps(
+                        body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
         for configured, baseline in zip((False, True), expected, strict=True):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "operations.sqlite3"
@@ -2495,6 +2612,13 @@ class CentralServerAppTests(unittest.TestCase):
     def test_research_read_http_and_fixed_dataset_match_pre_extraction_baseline(self) -> None:
         baseline = Path(__file__).resolve().parents[2] / "tests/fixtures/api_contract_baselines/research_reads_http_v1.json"
         expected = json.loads(baseline.read_text(encoding="utf-8"))["result"]
+        # Receipt representation changes to KST; source instants and export IDs stay frozen.
+        observation_lists = [case["body"].get("observations", []) for case in expected["cases"]
+                             if isinstance(case["body"], dict)]
+        observation_lists.append(expected["stored"]["fixed_export"]["observations"])
+        for observations in observation_lists:
+            for observation in observations:
+                observation["received_at"] = datetime.fromisoformat(observation["received_at"]).astimezone(KST).isoformat()
         with tempfile.TemporaryDirectory() as directory:
             with research_contract_app(create_app, Path(directory) / "research.sqlite3") as (app, store, monitors):
                 with TestClient(app) as client:
@@ -3297,6 +3421,8 @@ class CentralServerAppTests(unittest.TestCase):
                 intent_id = first.json()["intent_id"]
                 loaded = client.get(f"/api/v1/mock/orders/{intent_id}", headers=headers)
                 FakeClient.instances[0].now = datetime(2026, 9, 14, 16, 0, 0)
+                # This fixture jumps seven hours without the bundle's periodic heartbeat.
+                client.app.state.mock_account_bundle.runtime.heartbeat()
                 after_probe = client.post(
                     "/api/v1/mock/orders", headers=headers,
                     json={**body, "request_id": "manual-api-after-1"},
@@ -3383,6 +3509,15 @@ class CentralServerAppTests(unittest.TestCase):
         )
         expected = {
             ("GET", "/health"),
+            ("GET", "/api/v1/market/morning-brief/settings"),
+            ("PUT", "/api/v1/market/morning-brief/settings"),
+            ("GET", "/api/v1/market/morning-brief"),
+            ("POST", "/api/v1/market/morning-brief/run"),
+            ("GET", "/api/v1/news/chatgpt/status"),
+            ("GET", "/api/v1/news/chatgpt/models"),
+            ("POST", "/api/v1/news/chatgpt/select"),
+            ("POST", "/api/v1/news/chatgpt/disconnect"),
+            ("POST", "/api/v1/news/chatgpt/resume"),
             ("GET", "/api/v1/capabilities"),
             ("POST", "/api/v1/mock/orders"),
             ("GET", "/api/v1/mock/orders/{intent_id}"),
@@ -3538,6 +3673,7 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual("DISABLED", response.json()["quality"]["status"])
 
     def test_operational_settings_can_be_changed_and_are_persisted(self) -> None:
+        from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
                 f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
@@ -3559,8 +3695,9 @@ class CentralServerAppTests(unittest.TestCase):
             for key, value in body.items():
                 self.assertEqual(value, loaded[key])
             self.assertFalse(loaded["shadow_candidate_enabled"])
+            from kiwoom_monitor.application.leader_breakout import document_leader_breakout_policy
             self.assertEqual(
-                default_shadow_breakout_config().to_dict(),
+                json.loads(json.dumps(document_leader_breakout_policy().to_dict())),
                 loaded["shadow_candidate_config"],
             )
 
@@ -3680,6 +3817,7 @@ class CentralServerAppTests(unittest.TestCase):
                 kiwoom_app_key='fixture-key', kiwoom_secret_key='fixture-secret',
                 autonomous_top20_enabled=False, market_event_collection_enabled=False,
                 shadow_candidate_enabled=True,
+                shadow_candidate_config_json=json.dumps(default_shadow_breakout_config().to_dict()),
             )
             with patch('kiwoom_monitor.central_server.app.create_query_store', return_value=store), \
                     patch('kiwoom_monitor.central_server.app.CentralRealtimeCollector', return_value=collector):

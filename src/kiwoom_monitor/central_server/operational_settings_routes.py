@@ -55,6 +55,7 @@ def create_operational_settings_routers(
     ai_service: "CentralAIService | None", news_service: "CentralNewsService | None",
     publish_candidate_monitor: Callable[[CandidateMonitor | None], None], logger: Any,
     *, get_ram_shadow_selection=None, update_ram_shadow_selection=None, publish_allocation_models=None,
+    now_provider=None,
 ) -> tuple["APIRouter", "APIRouter"]:
     """Keep save-before-apply and retry without incrementing a persisted revision."""
     from fastapi import APIRouter, Depends, HTTPException
@@ -126,7 +127,7 @@ def create_operational_settings_routers(
 
     class OperationalSettingsUpdate(BaseModel):
         expected_revision: int | None = Field(default=None, ge=0)
-        ai_provider: str | None = Field(default=None, pattern=r"^(none|openai|gemini|claude)$")
+        ai_provider: str | None = Field(default=None, pattern=r"^(none|openai|gemini|claude|chatgpt_plan)$")
         ai_model: str | None = Field(default=None, max_length=100)
         ai_daily_limit: int | None = Field(default=None, ge=0, le=1_000_000)
         news_refresh_seconds: int | None = Field(default=None, ge=60, le=86_400)
@@ -175,6 +176,17 @@ def create_operational_settings_routers(
             if values.expected_revision is not None and values.expected_revision != int(operational["revision"]):
                 raise HTTPException(status_code=409, detail="OPERATIONAL_SETTINGS_REVISION_CONFLICT")
             proposed = {**operational, **changes}
+            if proposed["ai_provider"] == "chatgpt_plan" and {"ai_provider", "ai_model"}.intersection(changes):
+                from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+                from kiwoom_monitor.infrastructure.chatgpt_plan import ChatGPTPlanClient
+                if ai_service is None or ai_service.chatgpt_auth is None:
+                    raise HTTPException(422, "CHATGPT_SESSION_UNAVAILABLE")
+                try:
+                    models = await asyncio.to_thread(ChatGPTPlanClient(ai_service.chatgpt_auth).models)
+                    if proposed["ai_model"] not in {slug for _label, slug in models}:
+                        raise ChatGPTPlanError("model_unavailable")
+                except ChatGPTPlanError as error:
+                    raise HTTPException(422, str(error)) from None
             for field in ("news_naver_stock_url", "news_naver_flash_url", "news_naver_world_url"):
                 endpoint = str(proposed[field]).strip()
                 parsed = urlsplit(endpoint)
@@ -218,6 +230,7 @@ def create_operational_settings_routers(
                         universe_max_age_seconds=int(
                             proposed["shadow_candidate_universe_max_age_seconds"]
                         ),
+                        now_provider=now_provider,
                     )
                 except (TypeError, ValueError) as error:
                     raise HTTPException(status_code=422, detail=str(error)) from error

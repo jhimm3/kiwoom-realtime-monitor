@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 from datetime import date, datetime, time, timedelta
 
 from PySide6.QtCore import QThread, Signal
@@ -26,7 +28,7 @@ class ConfirmWorker(QThread):
 
     def run(self) -> None:
         try:
-            now = datetime.now()
+            now = kst_wall_now()
             target = datetime.combine(self._target_day, time()) if self._target_day else now
             after_close = target.date() < now.date() or now.hour >= 20
             bars = (

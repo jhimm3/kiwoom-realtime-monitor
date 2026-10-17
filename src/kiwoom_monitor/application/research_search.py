@@ -100,6 +100,8 @@ class ExperimentSpec:
             raise ValueError("cost stress multiplier must be at least the locked base cost")
         if not set(self.ablations) <= {"rank_persistence"}:
             raise ValueError("search contains an unregistered ablation")
+        if family.family_id == "leader_breakout/v1" and self.ablations:
+            raise ValueError("leader breakout has no registered rank ablation")
         if not self.objective:
             raise ValueError("at least one explicit objective is required")
         if set(self.objective.values()) - {"maximize", "minimize"}:

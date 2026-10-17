@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import json
 import sqlite3
 from contextlib import closing
@@ -55,7 +57,7 @@ class JournalTradeRepositoryMixin:
             raise ValueError("execution projection cannot use the legacy account scope")
         scope = page.origin_scope
         canonical = page.effective_scope
-        projected_at = (now or datetime.now()).isoformat(timespec="seconds")
+        projected_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         touched_intents = tuple(dict.fromkeys(event.intent_id for event in page.events))
         inserted = detailed = aggregate = 0
         with closing(sqlite3.connect(self._path)) as connection:
@@ -235,7 +237,7 @@ class JournalTradeRepositoryMixin:
         now: datetime | None = None, *, account_scope: AccountScope | None = None,
         canonical_scope: AccountScope | None = None,
     ) -> None:
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         scope = account_scope or LEGACY_ACCOUNT_SCOPE
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
@@ -294,7 +296,7 @@ class JournalTradeRepositoryMixin:
         self, group_id: str, cycle_index: int, manual_type: str, now: datetime | None = None,
         *, account_scope: AccountScope | None = None, canonical_scope: AccountScope | None = None,
     ) -> None:
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         scope = account_scope or LEGACY_ACCOUNT_SCOPE
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
@@ -365,7 +367,7 @@ class JournalTradeRepositoryMixin:
         *, account_scope: AccountScope | None = None, canonical_scope: AccountScope | None = None,
     ) -> None:
         """자동 판정 저장과 과거 단일 수동 유형 이전을 원자적으로 확정한다."""
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         scope = account_scope or LEGACY_ACCOUNT_SCOPE
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
@@ -451,7 +453,7 @@ class JournalTradeRepositoryMixin:
             tuple(fill.origin_scope for fill in fills)
             + tuple(cost.origin_scope for cost in costs),
         )
-        confirmed_at = (now or datetime.now()).isoformat(timespec="seconds")
+        confirmed_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 self._upsert_fills(connection, fills)
@@ -541,7 +543,7 @@ class JournalTradeRepositoryMixin:
     ) -> None:
         if not fill_keys or not group_id:
             return
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         scope = account_scope or LEGACY_ACCOUNT_SCOPE
         effective_scope = canonical_scope or scope
         with closing(sqlite3.connect(self._path)) as connection:
@@ -582,7 +584,7 @@ class JournalTradeRepositoryMixin:
                     "AND origin_environment=? AND origin_account_ref=?",
                     ((key, scope.broker, scope.environment.value, scope.account_ref) for key in fill_keys),
                 )
-                deleted_at = datetime.now().isoformat(timespec="microseconds")
+                deleted_at = kst_wall_now().isoformat(timespec="microseconds")
                 for key in fill_keys:
                     self._record_sync_state(
                         connection, "journal_group_overrides", key, True, deleted_at,
@@ -631,7 +633,7 @@ class JournalTradeRepositoryMixin:
         account_scope: AccountScope | None = None,
     ) -> None:
         _validate_write_scope(account_scope, (review.origin_scope,))
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 connection.execute(
@@ -651,7 +653,7 @@ class JournalTradeRepositoryMixin:
         if not costs:
             return
         _validate_write_scope(account_scope, tuple(cost.origin_scope for cost in costs))
-        confirmed_at = (now or datetime.now()).isoformat(timespec="seconds")
+        confirmed_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 self._upsert_trade_costs(connection, costs, confirmed_at)
@@ -698,7 +700,7 @@ class JournalTradeRepositoryMixin:
         self, task: EnrichmentTask, now: datetime | None = None,
     ) -> EnrichmentTask:
         """동일 입력·정책 작업을 하나만 만들고 기존 진행 상태를 보존한다."""
-        created_at = (now or datetime.now()).isoformat(timespec="seconds")
+        created_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 connection.execute(
@@ -865,7 +867,7 @@ class JournalTradeRepositoryMixin:
             link.link_id, link.execution_ref, link.run_id, link.decision_id, link.snapshot_id,
             link.entry_thesis_id, link.evidence_timing,
             link.available_at.isoformat() if link.available_at else None,
-            (link.created_at or datetime.now()).isoformat(timespec="seconds"),
+            (link.created_at or kst_wall_now()).isoformat(timespec="seconds"),
             *_scope_values(link.origin_scope, link.effective_scope),
         )
         with closing(sqlite3.connect(self._path)) as connection:

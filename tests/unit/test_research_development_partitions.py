@@ -21,9 +21,9 @@ from kiwoom_monitor.infrastructure.research_data_source import (
 )
 from kiwoom_monitor.research_process import execute_process_request, load_research_process_request
 from scripts.run_research import execute_research, PaperExecutionEngine, ResearchRunCancelled, main as research_main
-from test_research_bundle_execution import rows_for, child, KST, PROFILE
-from test_research_execution import _execution as base_execution, _strategy
-from research_test_support import research_request_document as _request_document
+from tests.unit.test_research_bundle_execution import rows_for, child, KST, PROFILE
+from tests.unit.test_research_execution import _execution as base_execution, _strategy
+from tests.unit.research_test_support import research_request_document as _request_document
 
 
 def _execution():
@@ -85,7 +85,11 @@ class DevelopmentPartitionTests(unittest.TestCase):
         prepared = self.prepare()
         end = datetime.fromisoformat(self.at(10))
         self.assertTrue(all(datetime.fromisoformat(row['available_at']) < end for row in prepared.observations))
-        self.assertEqual(('old', 'during'), tuple(theme['snapshot_id'] for theme in prepared.theme_snapshots))
+        self.assertEqual(('old', 'during', 'unknown'), tuple(theme['snapshot_id'] for theme in prepared.theme_snapshots))
+        self.assertNotIn('available_at', prepared.theme_snapshots[-1])
+        self.assertIn('theme_availability_unknown', prepared.manifest['quality_summary']['flags'])
+        self.assertEqual(datetime.fromisoformat(self.at(2)), development_partition_start(
+            prepared, self.partition.evaluation_for(self.evaluation)))
         self.assertEqual(len(prepared.observations), prepared.manifest['revision_count'])
         self.assertNotIn('children', prepared.manifest)
         self.assertNotIn('fixed_watermark', prepared.manifest)

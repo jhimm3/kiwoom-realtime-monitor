@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import sqlite3
 import threading
 import hashlib
@@ -444,7 +446,7 @@ class CentralJournalSyncService:
             "source_collection,source_owner,source_key,source_content_hash,source_observed_at,"
             "source_modified_at,target_collection,target_key,status,imported_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (*source, datetime.now(UTC).isoformat()),
+            (*source, kst_now().isoformat()),
         )
 
     @staticmethod

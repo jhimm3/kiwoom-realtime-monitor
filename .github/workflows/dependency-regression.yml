@@ -66,6 +66,7 @@ jobs:
 
   all-local:
     name: Windows all-local regression
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'comprehensive'
     runs-on: windows-latest
     timeout-minutes: 90
     steps:

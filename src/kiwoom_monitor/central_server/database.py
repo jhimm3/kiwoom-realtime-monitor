@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import os
 import sqlite3
 import uuid
 from collections import Counter, defaultdict
@@ -252,6 +253,8 @@ from kiwoom_monitor.central_server.database_credentials import (
     _finalize_credential_activation,
 )
 from kiwoom_monitor.central_server.market_observations import (
+    KST,
+    as_kst,
     bar_observation_key,
     minute_bar_observation,
     minute_bar_revision_payload,
@@ -506,8 +509,12 @@ class SQLiteQueryStore(
 
     _candidate_grouper = staticmethod(grouped_candidate_identities)
 
-    def __init__(self, path: Path, *, observation_history_enabled: bool = True) -> None:
+    def __init__(self, path: Path, *, observation_history_enabled: bool = True,
+                 now_provider: Callable[[], datetime] | None = None) -> None:
         self._path = path
+        self._now_provider = (lambda: as_kst(now_provider())) if now_provider is not None else (lambda: datetime.now(KST))
+        if now_provider is not None:
+            self._execution_wall_now = self._now_provider
         self._observation_history_enabled = observation_history_enabled
         self._lock = RLock()
         self._memory_uri = f"file:central-query-store-{id(self)}?mode=memory&cache=shared" if str(path) == ":memory:" else ""
@@ -625,8 +632,12 @@ class PostgresQueryStore(
     _candidate_grouper = staticmethod(grouped_candidate_identities)
 
     def __init__(self, database_url: str, *, observation_history_enabled: bool = True,
-                 shadow_checkpoint_frames_enabled: bool = False) -> None:
+                 shadow_checkpoint_frames_enabled: bool = False,
+                 now_provider: Callable[[], datetime] | None = None) -> None:
         self._database_url = database_url
+        self._now_provider = (lambda: as_kst(now_provider())) if now_provider is not None else (lambda: datetime.now(KST))
+        if now_provider is not None:
+            self._execution_wall_now = self._now_provider
         self._observation_delivery = ObservationDeliveryState()
         self._observation_history_enabled = observation_history_enabled
         # Opt in only after storage/rollback and dedicated-PG gates pass.
@@ -697,23 +708,32 @@ class PostgresQueryStore(
     def _connect(self):
         try:
             import psycopg
+            from psycopg.conninfo import conninfo_to_dict
         except ImportError as error:
             raise RuntimeError("PostgreSQL 서버 의존성을 설치하세요: pip install -e .[server]") from error
-        return psycopg.connect(self._database_url)
+        # Native timestamptz values retain their instant, including historical
+        # rows. Set the representation on every connection without a row rewrite.
+        options = conninfo_to_dict(self._database_url).get(
+            "options", os.environ.get("PGOPTIONS", ""),
+        )
+        return psycopg.connect(
+            self._database_url, options=(options + " -c timezone=Asia/Seoul").strip(),
+        )
 
 
 def create_query_store(
     database_url: str, *, observation_history_enabled: bool = True,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> QueryStore:
     if database_url.startswith("sqlite:///"):
         raw = unquote(database_url.removeprefix("sqlite:///"))
         # sqlite:///C:/...와 sqlite:///relative/path를 모두 지원한다.
         return SQLiteQueryStore(
-            Path(raw), observation_history_enabled=observation_history_enabled,
+            Path(raw), observation_history_enabled=observation_history_enabled, now_provider=now_provider,
         )
     parsed = urlsplit(database_url)
     if parsed.scheme in {"postgres", "postgresql"}:
         return PostgresQueryStore(
-            database_url, observation_history_enabled=observation_history_enabled,
+            database_url, observation_history_enabled=observation_history_enabled, now_provider=now_provider,
         )
     raise ValueError("중앙 DB 주소는 sqlite:/// 또는 postgresql:// 형식이어야 합니다.")

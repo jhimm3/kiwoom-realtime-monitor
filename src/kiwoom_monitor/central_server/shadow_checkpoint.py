@@ -6,6 +6,8 @@ frames are normalized here; observation and decision ledgers are never edited.
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -190,7 +192,7 @@ def downgrade_schema(cursor: Any) -> int:
         if document is None:
             raise RuntimeError("missing shadow checkpoint parent during downgrade")
         cursor.execute("UPDATE central_shadow_monitor_state SET updated_at=%s,document_json=%s "
-                       "WHERE monitor_id=%s", (datetime.now(timezone.utc), json.dumps(document, ensure_ascii=False), monitor_id))
+                       "WHERE monitor_id=%s", (kst_now(), json.dumps(document, ensure_ascii=False), monitor_id))
     cursor.execute(f"DROP TABLE {FRAME_TABLE}")
     cursor.execute(f"DROP TABLE {HEADER_TABLE}")
     cursor.execute("DELETE FROM central_schema_migrations WHERE version=%s AND name=%s",

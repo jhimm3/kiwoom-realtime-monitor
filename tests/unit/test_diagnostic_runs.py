@@ -139,7 +139,7 @@ class DiagnosticRunTests(unittest.TestCase):
                             child.assert_not_called()
                     capabilities = client.get('/api/v1/diagnostics/capabilities', headers=headers).json()
                     deferred = capabilities['trace_input_capture']['deferred_persistence']
-                    self.assertEqual('collector-input/v2', capabilities['trace_input_capture']['collector_input_version'])
+                    self.assertEqual('collector-input/v3', capabilities['trace_input_capture']['collector_input_version'])
                     self.assertEqual(['0B', '0w', '0J', '0U'], capabilities['trace_input_capture']['collector_event_types'])
                     self.assertEqual(8 * 1024**3, deferred['memory_limit_bytes'])
                     self.assertEqual(5_000_000, deferred['event_capacity'])

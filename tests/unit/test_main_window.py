@@ -39,17 +39,171 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
-    def test_gap_keeps_latest_price_but_blocks_partial_trade_alert_and_entry_inputs(self) -> None:
+    def test_google_drive_dirty_comparison_preserves_mixed_offset_instants(self):
+        for local, uploaded, expected in (
+            ('2026-10-16T14:00:00+09:00', '2026-10-16T06:00:00Z', False),
+            ('2026-10-16T06:00:00Z', '2026-10-16T14:00:00+09:00', True),
+            ('2026-10-16T14:00:00+09:00', '2026-10-16T05:00:00Z', False),
+        ):
+            with self.subTest(local=local, uploaded=uploaded):
+                values = {'google_drive_local_changed_at': local,
+                          'google_drive_last_upload_success_at': uploaded,
+                          'google_drive_unsynced_changes': '0'}
+                owner = SimpleNamespace(_settings=SimpleNamespace(get=values.get))
+                self.assertEqual(MainWindow._has_newer_local_google_drive_changes(owner), expected)
+
+    def test_google_drive_local_marker_uses_kst_without_changing_instant(self):
+        from datetime import timezone
+        from kiwoom_monitor.domain.time_basis import as_kst
+        value = as_kst(datetime(2026, 10, 16, 5, tzinfo=timezone.utc))
+        with patch('kiwoom_monitor.presentation.main_window.kst_now', return_value=value):
+            self.assertEqual(MainWindow._google_drive_timestamp_now(), '2026-10-16T14:00:00+09:00')
+
+    def test_saved_high_is_visible_on_ranking_and_blue_dot_tracks_daily_refresh(self):
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        database = Database(path); database.initialize()
+        database.settings.set("high_distance_period", "250")
+        stocks = StockRepository(path)
+        stocks.upsert("005930", "삼성전자", "KOSPI")
+        stocks.update_fundamentals("005930",1000,50,70000)
+        daily = DailyBarRepository(path)
+        window = MainWindow(database.settings,FakeRankingLoader(),stock_lookup=stocks,daily_bar_repository=daily)
+        now = datetime(2026,10,16,10,0,10)
+        window._ranking_now = lambda: now
+        window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+        role = NxtMarkerDelegate.HIGH_REFRESH_PENDING_ROLE
+        self.assertEqual("70,000",window._table.item(0,13).text())
+        self.assertTrue(window._table.item(0,13).data(role))
+        # Actual 0B updates the price/distance without reading cached bars again.
+        with patch.object(daily,"load_targets",side_effect=AssertionError("DB read in 0B")):
+            window._on_trade_tick(TradeTick("005930",65000,None,1000,10,66000,"100010"))
+            window._flush_trade_tick_updates()
+        self.assertTrue(window._table.item(0,13).data(role))
+        self.assertIn("7.14",window._table.item(0,14).text())
+        fresh = DailyHighTargets(None,None,68000,period_statuses=(("250","ready"),),
+            collection_verified=True,query_basis_date=now.date().isoformat())
+        window._on_daily_high_received("005930",fresh)
+        self.assertEqual("68,000",window._table.item(0,13).text())
+        self.assertFalse(window._table.item(0,13).data(role))
+        window._on_fundamentals_received("005930",StockFundamentals(1000,50,99999))
+        self.assertEqual("68,000",window._table.item(0,13).text())
+        now += timedelta(days=1)
+        window._render_new_high_price("005930")
+        self.assertTrue(window._table.item(0,13).data(role))
+        window._on_daily_high_received("005930",DailyHighTargets(None,None,None))
+        self.assertEqual("68,000",window._table.item(0,13).text())
+        self.assertTrue(window._table.item(0,13).data(role))
+        window._on_daily_high_received("005930",replace(fresh,high_250_price=67000,
+            query_basis_date=now.date().isoformat()))
+        self.assertEqual("67,000",window._table.item(0,13).text())
+        self.assertFalse(window._table.item(0,13).data(role))
+        window.close()
+
+    def test_short_period_cache_and_partial_refresh_keep_each_period_marker_independent(self):
+        from kiwoom_monitor.application.daily_high_service import DailyBar
+        from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        database = Database(path); database.initialize()
+        database.settings.set("high_distance_period","5")
+        daily = DailyBarRepository(path)
+        now = datetime(2026,10,16,10,0)
+        bars = tuple(DailyBar((now-timedelta(days=n+1)).strftime("%Y%m%d"),100+n,None) for n in range(20))
+        daily.upsert_targets("005930",DailyHighTargets(None,None,None,daily_bars=bars),now.date())
+        window = MainWindow(database.settings,FakeRankingLoader(),daily_bar_repository=daily)
+        window._ranking_now = lambda: now
+        window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+        role = NxtMarkerDelegate.HIGH_REFRESH_PENDING_ROLE
+        self.assertEqual("104",window._table.item(0,13).text())
+        self.assertTrue(window._table.item(0,13).data(role))
+        fresh = DailyHighTargets(103,None,None,period_statuses=(("5","ready"),),
+            collection_verified=True,query_basis_date=now.date().isoformat())
+        window._on_daily_high_received("005930",fresh)
+        self.assertEqual("103",window._table.item(0,13).text())
+        self.assertFalse(window._table.item(0,13).data(role))
+        database.settings.set("high_distance_period","20")
+        window._render_new_high_price("005930")
+        self.assertEqual("119",window._table.item(0,13).text())
+        self.assertTrue(window._table.item(0,13).data(role))
+        window._on_daily_high_received("005930",replace(fresh,high_20_price=118,
+            period_statuses=(("5","ready"),("20","ready"))))
+        self.assertEqual("118",window._table.item(0,13).text())
+        self.assertFalse(window._table.item(0,13).data(role))
+        window.close()
+
+    def test_historical_cache_refresh_marker_survives_finish_and_reloads_checked_date(self):
+        from kiwoom_monitor.application.historical_high_service import HistoricalHighTarget
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        database = Database(path); database.initialize()
+        database.settings.set("high_distance_period","historical")
+        stocks = StockRepository(path); stocks.upsert("005930","삼성전자","KOSPI")
+        stocks.update_historical_high_price("005930",70000,1980,2026,"2026-10-15")
+        window = MainWindow(database.settings,FakeRankingLoader(),stock_lookup=stocks)
+        now = datetime(2026,10,16,10,0)
+        window._ranking_now = lambda: now
+        window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+        role = NxtMarkerDelegate.HIGH_REFRESH_PENDING_ROLE
+        self.assertEqual("70,000",window._table.item(0,13).text())
+        self.assertTrue(window._table.item(0,13).data(role))
+        window._on_historical_high_received("005930",HistoricalHighTarget(68000,1980,2026))
+        window._on_historical_high_worker_finished()
+        window._render_new_high_price("005930")
+        self.assertEqual("68,000",window._table.item(0,13).text())
+        self.assertFalse(window._table.item(0,13).data(role))
+        window._historical_high_refreshed_on.clear()
+        window._load_cached_historical_highs(("005930",))
+        self.assertFalse(window._table.item(0,13).data(role))
+        window._on_historical_high_received("005930",HistoricalHighTarget(None,None,None))
+        self.assertEqual("68,000",window._table.item(0,13).text())
+        now += timedelta(days=1)
+        window._render_new_high_price("005930")
+        self.assertTrue(window._table.item(0,13).data(role))
+        window.close()
+
+    def test_high_refresh_blue_dot_paints_top_right_and_preserves_nxt_triangle(self):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QImage, QPainter, QStandardItem, QStandardItemModel
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+        model = QStandardItemModel(1,1)
+        item = QStandardItem("70,000")
+        model.setItem(0,0,item)
+        item.setData(True,Qt.ItemDataRole.UserRole+2)
+        delegate = NxtMarkerDelegate()
+        def render(pending):
+            item.setData(pending,delegate.HIGH_REFRESH_PENDING_ROLE)
+            image = QImage(120,48,QImage.Format.Format_ARGB32); image.fill(Qt.GlobalColor.white)
+            option = QStyleOptionViewItem(); option.rect = QRect(0,0,120,48)
+            option.state = QStyle.StateFlag.State_Enabled
+            painter = QPainter(image)
+            try: delegate.paint(painter,option,model.index(0,0))
+            finally: painter.end()
+            return image
+        pending, fresh = render(True),render(False)
+        blue = delegate.HIGH_REFRESH_PENDING_COLOR.name()
+        self.assertTrue(any(pending.pixelColor(x,y).name()==blue for x in range(108,120) for y in range(9)))
+        self.assertFalse(any(fresh.pixelColor(x,y).name()==blue for x in range(108,120) for y in range(9)))
+        self.assertFalse(any(pending.pixelColor(x,y).name()==blue for x in range(12) for y in range(9)))
+        for image in (pending,fresh):
+            self.assertTrue(any(image.pixelColor(x,y).name()=="#c00000" for x in range(110,120) for y in range(39,48)))
+
+    def test_gap_keeps_live_values_strength_and_alert_with_separate_quality(self) -> None:
         from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             database.settings.set("trade_value_alert_enabled", "1")
             database.settings.set("trade_value_1m_alert_eok", "1")
+            database.settings.set("strength_show_icon", "0")
             window = MainWindow(database.settings, FakeRankingLoader())
             now = datetime(2026, 10, 9, 10, 15, 10)
             window._ranking_now = lambda: now
             window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+            window._fundamentals["005930"] = StockFundamentals(1000, 50)
             first = TradeTick("005930", 100, None, 1000, 10, None, "101501")
             window._on_trade_tick(first)
             window._on_trade_tick(replace(first, cumulative_trade_value=1250))
@@ -60,9 +214,23 @@ class MainWindowTest(unittest.TestCase):
             window._on_trade_tick(replace(first, current_price=110, cumulative_trade_value=1300))
             window._flush_trade_tick_updates()
             self.assertEqual(110, window._current_prices["005930"])
-            self.assertIn("부분", window._table.item(0, 6).text())
-            self.assertFalse(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
-            self.assertIsNone(window._entry_market_state()["ranking_table"]["visible_trade_value_1m_eok"])
+            self.assertAlmostEqual(2.5, float(window._table.item(0, 6).text()))
+            self.assertIn("부분", window._table.item(0, 6).toolTip())
+            self.assertAlmostEqual(0.5, float(window._table.item(0, 4).text().rstrip("%")))
+            self.assertIn("부분", window._table.item(0, 4).toolTip())
+            self.assertTrue(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
+            state = window._entry_market_state()
+            self.assertEqual(2.5, state["ranking_table"]["visible_trade_value_1m_eok"])
+            self.assertEqual("partial", state["input_quality"]["005930"]["1"])
+            from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import OrderExecution
+            snapshots = []
+            writer = SimpleNamespace(isRunning=lambda: True, enqueue=snapshots.append)
+            with patch.object(MainWindow, "_entry_snapshot_writer", property(lambda owner: writer)):
+                window._on_order_execution(OrderExecution("order", "fill", "005930", "삼성전자",
+                    "매수", 110, 1, "101510"))
+            self.assertEqual(2.5, snapshots[0].trade_value_1m_eok)
+            self.assertEqual(2.5, snapshots[0].trade_value_5m_eok)
+            self.assertEqual("partial", snapshots[0].market_state["input_quality"]["005930"]["1"])
             pressure = window._execution_pressure_at_entry("005930", now)
             self.assertFalse(pressure["available"])
             self.assertIsNone(pressure["buy_share_percent"])
@@ -72,6 +240,67 @@ class MainWindowTest(unittest.TestCase):
             self.assertTrue(recovered.get("available", True))
             self.assertEqual(100.0, recovered["buy_share_percent"])
             self.assertFalse(pressure["available"])  # Historical snapshot stays partial.
+            window.close()
+
+    def test_nas_unconfirmed_values_update_live_and_previous_minute_without_quality_gate(self) -> None:
+        from kiwoom_monitor.domain.market_data_contract import (
+            DataCompleteness, MarketDataMetadata, ObservationOrigin,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            for period in ("1m", "5m", "60m", "day"):
+                database.settings.set(f"trade_value_{period}_alert_eok", "1")
+            database.settings.set("trade_value_alert_enabled", "1")
+            database.settings.set("strength_show_icon", "0")
+            database.settings.set("theme_trade_summary_enabled", "1")
+            database.settings.set("theme_trade_summary_excluded_enabled", "1")
+            database.settings.set("theme_trade_summary_excluded_stocks", "제외종목")
+            database.settings.set("theme_trade_summary_period", "1m")
+            window = MainWindow(database.settings, FakeRankingLoader())
+            now = datetime(2026, 10, 9, 10, 15, 10)
+            window._ranking_now = lambda: now
+            window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+            window._minute_aggregator = type(window._minute_aggregator)()
+            window._fundamentals["005930"] = StockFundamentals(1000, 50)
+            window._themes["삼성전자"] = "반도체"
+            minute = now.replace(second=0)
+            metadata = MarketDataMetadata(
+                effective_at=minute, available_at=now, completeness=DataCompleteness.UNCONFIRMED,
+                origin=ObservationOrigin.REALTIME, source="NAS:kiwoom-websocket-0B",
+            )
+            bar = MinuteOhlcv(minute, 100, 100, 100, 100, 10, 2.5, metadata)
+            window._minute_aggregator.seed("005930", (bar,), now,
+                include_current_snapshot=True, query_authoritative=False)
+            window._on_trade_tick(TradeTick("005930", 100, None, 1000, 10, None, "101510"))
+            window._on_trade_tick(TradeTick("005930", 110, None, 1250, 10, None, "101511"))
+            window._minute_history_codes.add("005930")
+            window._flush_trade_tick_updates()
+            for column in (6, 7, 8, 9):
+                self.assertEqual(5.0, float(window._table.item(0, column).text()))
+                self.assertTrue(window._table.item(0, column).data(window.TRADE_VALUE_ALERT_ROLE))
+                self.assertIn("미확인", window._table.item(0, column).toolTip())
+            for column in (4, 10, 11, 12):
+                self.assertAlmostEqual(1.0, float(window._table.item(0, column).text().rstrip("%")))
+                self.assertIn("미확인", window._table.item(0, column).toolTip())
+            window._refresh_theme_trade_summary()
+            for label in (window._theme_trade_summary, window._theme_trade_excluded_summary):
+                self.assertIn("반도체", label.text())
+                self.assertNotIn("미확인", label.text())
+                self.assertIn("미확인", label.toolTip())
+            # The same received minute remains usable after changing to the prior-minute view.
+            now += timedelta(minutes=1)
+            database.settings.set("trade_display_1m_mode", "completed")
+            window._render_trade_values("005930")
+            self.assertEqual(5.0, float(window._table.item(0, 6).text()))
+            self.assertAlmostEqual(1.0, float(window._table.item(0, 4).text().rstrip("%")))
+            self.assertTrue(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
+            self.assertEqual(DataCompleteness.UNCONFIRMED,
+                window._minute_aggregator.bucket_quality("005930", 1, now, previous=True))
+            # Disabling the existing alert setting still takes effect.
+            database.settings.set("trade_value_alert_enabled", "0")
+            window._render_trade_values("005930")
+            self.assertFalse(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
             window.close()
 
     def test_after_hours_daily_restore_only_reads_missing_nas_proof(self) -> None:

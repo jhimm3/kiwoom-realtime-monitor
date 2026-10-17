@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
 
 from kiwoom_monitor.application.account_identity import (
     bind_verified_account_identity, prepare_verified_account_identity,
@@ -25,7 +25,7 @@ from kiwoom_monitor.infrastructure.persistence.execution_repository import Execu
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
 
 from .execution_runtime import ExecutionRuntime, ManualMockOrderGateway
-from .market_observations import as_kst
+from .market_observations import KST, as_kst
 from .mock_account_monitor import MockAccountMonitor, MockAccountRealtimeCollector
 from .rest_broker import CentralRestBroker, MOCK_ACCOUNT_ENDPOINTS
 from .credential_runtime import CredentialRuntimeHooks, CredentialOperationError, ValidatedCredential
@@ -88,9 +88,11 @@ class MockCredentialOwner:
     """Own profile bundles, account exclusion and the mock activation boundary."""
 
     def __init__(self, store: Any, vault: Any, *, hmac_key: bytes,
-                 legacy_bundle: Any = None, legacy_monitor_enabled: bool = False, on_change: Any = None):
+                 legacy_bundle: Any = None, legacy_monitor_enabled: bool = False, on_change: Any = None,
+                 now_provider: Callable[[], datetime] | None = None):
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
         self.store, self.vault, self.hmac_key = store, vault, hmac_key
+        self._now_provider = now_provider
         self._legacy_monitor_enabled = legacy_monitor_enabled
         self._bundles: dict[str, MockAccountBundle] = {}
         self._contexts = {"nas-mock-default": legacy_bundle} if legacy_bundle is not None else {}
@@ -433,7 +435,7 @@ class MockCredentialOwner:
             account_ref=plan.account_ref, run_id=plan.run_id, credential_profile_id=profile_id,
             identity_hmac_key=self.hmac_key, order_transport_enabled=configuration["mock_order_enabled"],
             client=plan.client, broker=plan.broker, identity=plan.identity, binding=binding,
-            require_initial_read=True, read_limiter=self._slots)
+            require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider)
         self._contexts[profile_id] = bundle  # Retain failed committed transport for explicit recovery.
         try:
             if self._closing: raise RuntimeError("MOCK_OWNER_CLOSED")
@@ -475,7 +477,7 @@ class MockCredentialOwner:
                 account_ref=previous.account_ref, run_id=previous.run_id, credential_profile_id=profile_id,
                 identity_hmac_key=self.hmac_key, order_transport_enabled=previous.gateway is not None,
                 client=plan.client, broker=plan.broker, identity=previous._identity, binding=previous.binding,
-                require_initial_read=True, read_limiter=self._slots)
+                require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider)
             try:
                 if plan.previous_monitor_enabled:
                     restored.set_position_order_observation_account(self._position_order_observation_account)
@@ -595,7 +597,8 @@ class MockCredentialOwner:
             new = MockAccountBundle(self.store, settings=old.client._settings, account_ref=old.account_ref,
                 run_id=old.run_id, credential_profile_id=profile_id, identity_hmac_key=self.hmac_key,
                 order_transport_enabled=saved["mock_order_enabled"], client=old.client, broker=old.broker,
-                identity=old._identity, binding=old.binding, require_initial_read=True, read_limiter=self._slots)
+                identity=old._identity, binding=old.binding, require_initial_read=True, read_limiter=self._slots,
+                now_provider=self._now_provider)
             self._contexts[profile_id] = new
             new.set_position_order_observation_account(self._position_order_observation_account)
             if saved["monitor_enabled"]: await new.start()
@@ -697,6 +700,7 @@ class MockCredentialOwner:
                 read_limiter=self._slots,
                 runtime_mode=mode,
                 automation_context=automation_context,
+                now_provider=self._now_provider,
             )
             self._contexts[profile_id] = new
             new.set_position_order_observation_account(self._position_order_observation_account)
@@ -738,6 +742,7 @@ class MockAccountBundle:
         read_limiter: asyncio.Semaphore | None = None,
         runtime_mode: MockAccountRuntimeMode = MockAccountRuntimeMode.MANUAL,
         automation_context: MockAutomationRuntimeContext | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
 
@@ -781,11 +786,13 @@ class MockAccountBundle:
         self.account_queries = AccountQuerySessionManager(self.broker,
             lambda: self._binding if not self._closing else None, read_limiter=read_limiter)
         self.repository = ExecutionRepository(store)
-        now = lambda: as_kst(self.client.server_now())
-        transport = make_mock_transport(self.client) if order_transport_enabled else None
+        now = ((lambda: as_kst(now_provider())) if now_provider is not None
+               else (lambda: as_kst(self.client.server_now())))
+        transport = make_mock_transport(self.client, now_provider=now) if order_transport_enabled else None
         self.runtime = ExecutionRuntime(
             OrderLifecycle(self.repository, transport, now_provider=now), self.repository,
             account_ref=account_ref, run_id=run_id, owner_token=uuid.uuid4().hex,
+            now_provider=now if now_provider is not None else (lambda: datetime.now(KST)),
         )
         self.monitor = MockAccountMonitor(
             KiwoomMockAccountReader(

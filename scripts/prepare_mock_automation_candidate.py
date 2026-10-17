@@ -136,12 +136,17 @@ def final_preparation_text(report: dict[str, Any]) -> str:
     window, inputs = report["final_window"], report["input_review"]
     parameters = report["candidate_spec"]["parameters"]
     costs = report["candidate_spec"]["execution_model"]["cost_model"]
+    leader = report["family"] == "leader_breakout/v1"
+    contract = parameters.get("execution_contract") or {}
     lines = ["후보·final 동결 준비 · 확인 필요", f"전략: {report['strategy_ref'] or '미정'} / {report['family']}",
              f"후보 설정 hash: {report['candidate_spec_hash']}",
-             f"보유 {parameters['max_hold_minutes']}분 / 손절 {parameters['stop_loss_bps']}bp / 익절 {parameters['target_bps']}bp",
-             f"수량 {parameters['quantity']}주 / 전략 자금 {parameters['capital_won']}원",
-             "시간 정책: " + (f"정규장 단일가 이전 청산 / 여유 {parameters['session_exit_buffer_seconds']}초"
-                if parameters.get("session_exit_policy") == "krx_regular_before_auction/v1" else "기본 정책"),
+             ("실시간 0B / 확정·보완 분봉 연구 · 명시 구조/고정 하드 경계" if leader else
+              f"보유 {parameters['max_hold_minutes']}분 / 손절 {parameters['stop_loss_bps']}bp / 익절 {parameters['target_bps']}bp"),
+             (f"명시 수량 {contract.get('quantity')}주 / 전략 자금 {contract.get('capital_won')}원" if leader else
+              f"수량 {parameters['quantity']}주 / 전략 자금 {parameters['capital_won']}원"),
+             (f"시간 정책: {contract.get('session_exit_policy')} · 현재 근거 별도 검증" if leader else
+              "시간 정책: " + (f"정규장 단일가 이전 청산 / 여유 {parameters['session_exit_buffer_seconds']}초"
+                if parameters.get("session_exit_policy") == "krx_regular_before_auction/v1" else "기본 정책")),
              f"비용: 수수료 각 {costs['commission_bps']}bp / 매도세 {costs['sell_tax_bps']}bp / 슬리피지 {costs['slippage_bps']}bp",
              "", "적격 기준 · 아직 동결하지 않음"]
     lines.insert(3, "고정 연구 요청 설정: " + ("후보와 일치 · 자료·기간 승인은 별도" if "fixed_request" in report else "별도 대조 필요"))

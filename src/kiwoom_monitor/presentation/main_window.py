@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today, kst_wall_now, kst_now
+
 import logging
 import os
 import ctypes
@@ -553,6 +555,7 @@ class MainWindow(QMainWindow):
         self._realtime_upper_limits: dict[str, int] = {}
         self._daily_highs: dict[str, DailyHighTargets] = {}
         self._historical_high_prices: dict[str, int] = {}
+        self._historical_high_refreshed_on: dict[str, date] = {}
         self._previous_day_trade_values: dict[str, float] = {}
         self._previous_day_close_prices: dict[str, int] = {}
         self._daily_high_cache_date: date | None = None
@@ -804,7 +807,7 @@ class MainWindow(QMainWindow):
         )
         # 코호트·기준값·분 마감은 화면과 독립된 수집 객체가 소유한다.
         self._top20_collector = Top20TradeValueCollector()
-        self._top20_view_date = date.today()
+        self._top20_view_date = kst_today()
         self._top20_view_mode = "minute"
         self._top20_repair_worker_controller.completed.connect(
             self._on_top20_market_repaired
@@ -817,7 +820,7 @@ class MainWindow(QMainWindow):
         if self._minute_bar_repository is not None:
             try:
                 saved_index = self._minute_bar_repository.load_recent_top20_trade_value_index(
-                    1_440, trade_date=date.today(),
+                    1_440, trade_date=kst_today(),
                 )
                 self._top20_collector.completed.extend(
                     (minute, kospi, kosdaq, unknown)
@@ -880,6 +883,11 @@ class MainWindow(QMainWindow):
         market_news_button.setToolTip("공통뉴스·실시간 속보·해외뉴스")
         market_news_button.clicked.connect(self._show_market_news)
         toolbar.addWidget(market_news_button)
+        morning_brief_button = QPushButton("아침 시황")
+        morning_brief_button.setObjectName("morning_market_brief_button")
+        morning_brief_button.setToolTip("AI가 직접 조사한 아침 시황 · 프롬프트·모델·예약 설정")
+        morning_brief_button.clicked.connect(self._show_morning_market_brief)
+        toolbar.addWidget(morning_brief_button)
         toolbar.addWidget(top20_index_button)
         journal_button = QPushButton("매매일지")
         journal_button.setToolTip("과거 매매목록을 열고, 종목이 선택되어 있으면 오늘 분봉도 함께 표시합니다.")
@@ -1465,8 +1473,14 @@ class MainWindow(QMainWindow):
     def _has_newer_local_google_drive_changes(self) -> bool:
         local_changed_at = self._settings.get("google_drive_local_changed_at")
         last_upload_at = self._settings.get("google_drive_last_upload_success_at")
+        local_time = MainWindow._parse_google_drive_time(local_changed_at or "")
+        uploaded_time = MainWindow._parse_google_drive_time(last_upload_at or "")
+        newer = (local_time > uploaded_time
+                 if local_time is not None and uploaded_time is not None
+                 and local_time.tzinfo is not None and uploaded_time.tzinfo is not None
+                 else bool(local_changed_at) and (not last_upload_at or local_changed_at > last_upload_at))
         return self._settings.get("google_drive_unsynced_changes") == "1" or (
-            bool(local_changed_at) and (not last_upload_at or local_changed_at > last_upload_at)
+            newer
         )
 
     def _resume_pending_google_drive_upload(self) -> None:
@@ -1528,7 +1542,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _google_drive_timestamp_now() -> str:
-        return datetime.now().astimezone().astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        return kst_now().isoformat(timespec="seconds")
 
     def _on_google_drive_metadata_received(self, remote_modified_at: str) -> None:
         """시작 자동 동기화 전에 Drive와 로컬의 최신 변경을 안전하게 비교한다."""
@@ -1858,6 +1872,27 @@ class MainWindow(QMainWindow):
     def _show_market_news(self) -> None:
         self._news_window.show_market_news()
 
+    def _show_morning_market_brief(self) -> None:
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
+        from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
+        from kiwoom_monitor.presentation.morning_market_brief_dialog import MorningMarketBriefDialog
+        current = getattr(self, "_morning_market_brief_dialog", None)
+        if current is None:
+            config_path = self._news_window.config_path
+            if config_path is None:
+                self.statusBar().showMessage("뉴스 설정 파일 위치를 확인하세요.")
+                return
+            source = DataSourceConfig(config_path.with_name("data_source.json")).load()
+            if source.mode not in {"personal_server", "local_server"}:
+                QMessageBox.information(self, "아침 시황", "NAS 연결을 설정한 뒤 아침 시황을 열 수 있습니다.")
+                return
+            current = MorningMarketBriefDialog(CentralOperationalSettingsClient(source), self)
+            current.setWindowModality(Qt.WindowModality.NonModal)
+            self._morning_market_brief_dialog = current
+        current.show()
+        current.raise_()
+        current.activateWindow()
+
     def _poll_journal_news_request(self) -> None:
         document = self._journal_news_inbox.read_new()
         if document is None:
@@ -1983,7 +2018,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"로그 폴더를 열 수 없습니다: {log_dir}")
 
     def _export_settings_backup(self) -> None:
-        default_name = f"키움_모니터_설정백업_{datetime.now():%Y%m%d}.json"
+        default_name = f"키움_모니터_설정백업_{kst_wall_now():%Y%m%d}.json"
         path, _ = QFileDialog.getSaveFileName(self, "설정 백업 저장", str(Path.home() / "Documents" / default_name), "설정 백업 (*.json)")
         if not path:
             return
@@ -2037,7 +2072,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "설정 복원", "설정을 복원하고 바로 적용했습니다.")
 
     def _export_theme_backup(self) -> None:
-        default_name = f"키움_모니터_테마DB_{datetime.now():%Y%m%d}.json"
+        default_name = f"키움_모니터_테마DB_{kst_wall_now():%Y%m%d}.json"
         path, _ = QFileDialog.getSaveFileName(self, "테마 DB 저장", str(Path.home() / "Documents" / default_name), "테마 DB 백업 (*.json)")
         if not path:
             return
@@ -2072,7 +2107,7 @@ class MainWindow(QMainWindow):
     def _export_journal_backup(self) -> None:
         if self._journal_database_path is None:
             return
-        default = Path.home() / "Documents" / f"키움_매매일지백업_{datetime.now():%Y%m%d}.sqlite3"
+        default = Path.home() / "Documents" / f"키움_매매일지백업_{kst_wall_now():%Y%m%d}.sqlite3"
         path, _ = QFileDialog.getSaveFileName(self, "매매일지 백업 저장", str(default), "매매일지 백업 (*.sqlite3)")
         if not path:
             return
@@ -2615,6 +2650,8 @@ class MainWindow(QMainWindow):
             self._today_high_prices.update(self._stock_lookup.load_intraday_highs(codes, self._ranking_now().date()))
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_fundamentals"):
             self._fundamentals.update(self._stock_lookup.load_fundamentals(codes))
+        self._load_cached_daily_highs(codes)
+        self._load_cached_historical_highs(codes)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_nxt_enabled"):
             saved_nxt = self._stock_lookup.load_nxt_enabled(codes, self._ranking_now().strftime("%Y-%m-%d"))
             self._nxt_checked_codes.update(saved_nxt)
@@ -2769,6 +2806,15 @@ class MainWindow(QMainWindow):
         price = self._selected_high_price(code)
         label = f"{price:,}" if price else "-"
         item = QTableWidgetItem(label)
+        period = self._settings.get("high_distance_period")
+        today = self._ranking_now().date()
+        daily = self._daily_highs.get(code)
+        refreshed = (self._historical_high_refreshed_on.get(code) == today if period == "historical" else
+            bool(daily and daily.collection_verified and daily.query_basis_date == today.isoformat()
+                 and daily.period_verified(period)))
+        item.setData(NxtMarkerDelegate.HIGH_REFRESH_PENDING_ROLE, bool(price and not refreshed))
+        if price:
+            item.setToolTip("저장·참고 신고가 · 새 조회 갱신 대기 (파란 점)" if not refreshed else "새 조회로 갱신된 신고가")
         item.setBackground(self._row_background_color(code, row))
         self._table.setItem(row, 13, item)
 
@@ -3665,10 +3711,8 @@ class MainWindow(QMainWindow):
             stock_code=execution.code, stock_name=name, side=execution.side,
             executed_at=executed_at, price=execution.price, quantity=execution.quantity,
             market=execution.market, rank=self._ranking_execution.rank_by_code.get(execution.code),
-            trade_value_1m_eok=(self._minute_aggregator.trade_value_eok(execution.code, 1)
-                if self._minute_aggregator.recent_quality(execution.code, 1, now) == DataCompleteness.COMPLETE else None),
-            trade_value_5m_eok=(self._minute_aggregator.trade_value_eok(execution.code, 5)
-                if self._minute_aggregator.recent_quality(execution.code, 5, now) == DataCompleteness.COMPLETE else None),
+            trade_value_1m_eok=self._minute_aggregator.trade_value_eok(execution.code, 1),
+            trade_value_5m_eok=self._minute_aggregator.trade_value_eok(execution.code, 5),
             themes=themes, theme_ranks=self._theme_ranks_at_entry(execution.code, themes),
             high_distance_percent=high_distance, orderbook=self._execution_pressure_at_entry(execution.code, now),
             investor_flow=investor_flow,
@@ -3726,9 +3770,6 @@ class MainWindow(QMainWindow):
         now = self._ranking_now()
         input_quality = {code: {str(minutes): self._minute_aggregator.recent_quality(code, minutes, now).value
                                for minutes in (1, 5)} for code, _ in ordered}
-        for minutes in (1, 5):
-            if any(value[str(minutes)] != "complete" for value in input_quality.values()):
-                visible_state[f"visible_trade_value_{minutes}m_eok"] = None
         return {**self._latest_market_state, "ranking_table": visible_state, "input_quality": input_quality}
 
     def _on_market_index_tick(self, tick: object) -> None:
@@ -3751,7 +3792,7 @@ class MainWindow(QMainWindow):
         market.update({key: value for key, value in updates.items() if value is not None})
         state[tick.market] = market
         state["source"] = "kiwoom_realtime_0J_0U"
-        state["observed_at"] = datetime.now().isoformat(timespec="seconds")
+        state["observed_at"] = kst_wall_now().isoformat(timespec="seconds")
         state["trade_time"] = tick.trade_time
         self._latest_market_state = state
         if tick.index_value is not None:
@@ -3834,8 +3875,6 @@ class MainWindow(QMainWindow):
             self._journal_background_sync_day = now.date()
             self._ensure_journal_process()
             self._send_journal_command(action="sync")
-        self._load_cached_daily_highs(codes)
-        self._load_cached_historical_highs(codes)
         finalization_date, finalization = self._finalization_candidates(codes)
         if finalization:
             self._after_close_finalization_codes = set(finalization)
@@ -4202,6 +4241,15 @@ class MainWindow(QMainWindow):
                 bar.trade_date == target_day.strftime("%Y%m%d") for bar in targets.daily_bars
             ):
                 self._after_close_daily_received.add(code)
+            previous = self._daily_highs.get(code)
+            retained = {period: getattr(previous, name) for period, name in
+                (("5", "high_5_price"), ("20", "high_20_price"), ("250", "high_250_price"))
+                if previous is not None and getattr(targets, name) is None and getattr(previous, name) is not None}
+            if retained:
+                statuses = dict(targets.period_statuses)
+                statuses.update({period: "unverified" for period in retained})
+                targets = replace(targets, period_statuses=tuple(statuses.items()),
+                    **{f"high_{period}_price": value for period, value in retained.items()})
             self._daily_highs[code] = targets
             if targets.collection_verified:
                 self._daily_high_basis_refresh_received.add(code)
@@ -4293,8 +4341,15 @@ class MainWindow(QMainWindow):
             return
         try:
             self._historical_high_prices.update(self._stock_lookup.load_historical_high_prices(codes))
+            today = self._ranking_now().date()
+            if hasattr(self._stock_lookup, "historical_high_checked_today"):
+                checked = self._stock_lookup.historical_high_checked_today(codes, today.isoformat())
+                self._historical_high_refreshed_on.update({code: today for code in checked})
         except Exception as error:
             logger.warning("역사적 신고가 캐시 조회 실패: %s", error)
+        for code in codes:
+            self._render_new_high_price(code)
+            self._render_high_distance(code)
 
     def _start_historical_high_loading(self, codes: tuple[str, ...]) -> bool:
         if self._closing or self._ranking_execution.priority_preparing or not self._historical_high_worker_controller.available:
@@ -4320,6 +4375,7 @@ class MainWindow(QMainWindow):
         if not isinstance(target, HistoricalHighTarget) or target.price is None:
             return
         self._historical_high_prices[code] = target.price
+        self._historical_high_refreshed_on[code] = self._ranking_now().date()
         self._historical_high_refresh_received.add(code)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_historical_high_price"):
             self._stock_lookup.update_historical_high_price(
@@ -4383,11 +4439,12 @@ class MainWindow(QMainWindow):
         visible_values = zip(range(6, 7), ("1m",), values[:1]) if live_only else zip(range(6, 10), ("1m", "5m", "60m", "day"), values)
         for column, period, value in visible_values:
             quality = self._trade_value_quality(code, period, now)
-            label = self._minute_quality_label(code, quality)
-            item = QTableWidgetItem(f"{label}{value:.{self._decimal_places('trade_value')}f}")
-            item.setToolTip(f"자료 품질: {quality.value} · {self._minute_aggregator.recovery_state(code)}")
+            item = QTableWidgetItem(f"{value:.{self._decimal_places('trade_value')}f}")
+            item.setToolTip(
+                f"수신값으로 표시·강도·알림 계산\n자료 상태: {self._minute_quality_label(code, quality).rstrip(' · ') or '정상'}"
+                f" · {quality.value} · {self._minute_aggregator.recovery_state(code)}")
             threshold = float(self._settings.get(f"trade_value_{period}_alert_eok"))
-            is_alert = quality == DataCompleteness.COMPLETE and self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
+            is_alert = self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
             row = self._row_by_code.get(code, 0)
             item.setData(self.TRADE_VALUE_ALERT_ROLE, is_alert)
             item.setBackground(self.TRADE_VALUE_ALERT_COLOR if is_alert else self._row_background_color(code, row))
@@ -4410,7 +4467,7 @@ class MainWindow(QMainWindow):
                     fundamentals,
                     current_price=self._previous_day_close_prices.get(code) if previous_day else self._current_prices.get(code),
                     market_cap_eok=None if previous_day else self._market_cap_eok(code, fundamentals),
-                ) if quality == DataCompleteness.COMPLETE else None
+                )
                 interest = float(self._settings.get(f"strength_{period}_interest"))
                 caution = float(self._settings.get(f"strength_{period}_caution"))
                 fire = float(self._settings.get(f"strength_{period}_fire"))
@@ -4423,8 +4480,9 @@ class MainWindow(QMainWindow):
                     self._decimal_places("strength"),
                     self._strength_badge_icons(),
                 ))
-                if quality != DataCompleteness.COMPLETE:
-                    item.setText(self._minute_quality_label(code, quality) + "—")
+                item.setToolTip(
+                    f"수신 거래대금 기준 강도\n자료 상태: {self._minute_quality_label(code, quality).rstrip(' · ') or '정상'}"
+                    f" · {quality.value} · {self._minute_aggregator.recovery_state(code)}")
                 level = "fire" if strength is not None and strength >= fire else "caution" if strength is not None and strength >= caution else "interest" if strength is not None and strength >= interest else ""
                 image = self._strength_icon_image_path(level) if level else None
                 if image is not None:
@@ -4509,6 +4567,8 @@ class MainWindow(QMainWindow):
              if period == "day" else self._minute_aggregator.bucket_quality(code, minutes[period], now)) != DataCompleteness.COMPLETE
             for code in self._ranked_stock_names
         ) else ""
+        for summary in (self._theme_trade_summary, self._theme_trade_excluded_summary):
+            summary.setToolTip(f"{quality_notice}수신 거래대금 기준 합계\n클릭하면 1분 · 5분 · 60분 · 1일 기준으로 전환합니다.")
         if show_summary:
             entries: list[tuple[str, str, float]] = []
             for code, name in self._ranked_stock_names.items():
@@ -4519,7 +4579,7 @@ class MainWindow(QMainWindow):
                 self._theme_trade_summary.setText("상위 테마 거래대금: 테마가 지정된 종목이 없습니다.")
             else:
                 values = self._theme_trade_summary_values(top, digits)
-                self._theme_trade_summary.setText(f"{quality_notice}상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): {values}")
+                self._theme_trade_summary.setText(f"상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): {values}")
         excluded_names = parse_themes(self._settings.get("theme_trade_summary_excluded_stocks"), ",/|;")
         excluded = {"".join(value.split()).casefold() for value in excluded_names}
         if not show_excluded_summary:
@@ -4538,7 +4598,7 @@ class MainWindow(QMainWindow):
         )
         self._theme_trade_excluded_summary.setVisible(True)
         self._theme_trade_excluded_summary.setText(
-            f"{quality_notice}제외 종목 반영 상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): "
+            f"제외 종목 반영 상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): "
             f"{self._theme_trade_summary_values(excluded_top, digits) if excluded_top else '표시할 테마가 없습니다.'}"
         )
 

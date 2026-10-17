@@ -5,7 +5,7 @@ import json
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -52,6 +52,14 @@ class NewsAISettings:
     auto_analyze: bool = False
     request_mode: str = "single"
     batch_size: int = 10
+    # Runtime location only: never serialized into config/backups or sent to NAS.
+    chatgpt_storage_path: Path | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def local_credentials_configured(self) -> bool:
+        if self.provider == "chatgpt_plan":
+            return bool(self.model and self.chatgpt_storage_path)
+        return bool(self.api_key)
 
 
 @dataclass(frozen=True)
@@ -91,8 +99,14 @@ class NaverNewsPage:
 
 
 class LocalNaverNewsConfig:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, chatgpt_storage_path: Path | None = None) -> None:
         self._path = path
+        self._chatgpt_storage_path = chatgpt_storage_path
+
+    @property
+    def chatgpt_storage_path(self) -> Path:
+        from kiwoom_monitor.infrastructure.chatgpt_auth import storage_path_for
+        return self._chatgpt_storage_path or storage_path_for(self._path)
 
     def load(self) -> NaverNewsCredentials:
         values = self._load_values()
@@ -141,6 +155,7 @@ class LocalNaverNewsConfig:
             bool(values.get("ai_auto_analyze", False)),
             str(values.get("ai_request_mode", "single")) if values.get("ai_request_mode") in {"single", "batch"} else "single",
             max(2, min(20, batch_size)),
+            self.chatgpt_storage_path if values.get("ai_provider") == "chatgpt_plan" else None,
         )
 
     @property

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+
 import json
 import logging
 import queue
@@ -80,7 +82,7 @@ class ParallelValidationClient:
         fallback_on_unavailable: bool = False, queue_limit: int = 30,
         late_threshold_ms: float = 2_000.0,
         monotonic_provider: Callable[[], float] = time.monotonic,
-        now_provider: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+        now_provider: Callable[[], datetime] = lambda: kst_now(),
     ) -> None:
         self._primary = primary
         self._local = local
@@ -377,7 +379,7 @@ class RealtimeValidationRecorder:
         report_queue_limit: int = 2_000,
         match_timeout_seconds: float = 5.0, late_threshold_ms: float = 1_000.0,
         monotonic_provider: Callable[[], float] = time.monotonic,
-        now_provider: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+        now_provider: Callable[[], datetime] = lambda: kst_now(),
     ) -> None:
         self._report_path = report_path
         self._pending_limit = max(100, pending_limit)

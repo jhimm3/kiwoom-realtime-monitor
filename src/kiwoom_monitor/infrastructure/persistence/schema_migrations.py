@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import re
 import sqlite3
 from collections.abc import Callable, Iterable
@@ -67,7 +69,7 @@ class SQLiteMigrationRunner:
         if row is None:
             self._connection.execute(
                 f"INSERT INTO {self._table}(version,name,applied_at) VALUES(?,?,?)",
-                (version, name, datetime.now(UTC).isoformat()),
+                (version, name, kst_now().isoformat()),
             )
             return
         stored_name = str(row[0] or "")
@@ -78,7 +80,7 @@ class SQLiteMigrationRunner:
         if not stored_name:
             self._connection.execute(
                 f"UPDATE {self._table} SET name=?,applied_at=? WHERE version=?",
-                (name, datetime.now(UTC).isoformat(), version),
+                (name, kst_now().isoformat(), version),
             )
 
     def apply(self, migrations: Iterable[SQLiteMigration]) -> tuple[int, ...]:

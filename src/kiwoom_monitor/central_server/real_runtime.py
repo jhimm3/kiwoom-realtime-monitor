@@ -5,6 +5,8 @@ accounts own read-only brokers, never another TOP20 or market WebSocket.
 """
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+
 import asyncio
 import hmac
 import uuid
@@ -187,7 +189,7 @@ class RealCredentialOwner:
             self.market_profile_id = store.load_market_profile_settings()["market_profile_id"]
             self._contexts[self.market_profile_id] = RealAccountContext(market_client, market_broker)
             self.store.register_credential_profile("kiwoom_real", self.market_profile_id,
-                                                   datetime.now().astimezone().isoformat())
+                                                   kst_now().isoformat())
         self._bundles = {}
         self._revisions = {}
         self._settings_revisions = {}

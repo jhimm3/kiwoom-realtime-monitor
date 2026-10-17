@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+
 import json
 import hashlib
 import sqlite3
@@ -79,7 +81,7 @@ class ThemeBackupService:
             common = {
                 "format": self.FORMAT,
                 "version": self.VERSION,
-                "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "created_at": kst_now().isoformat(timespec="seconds"),
                 "active_profile": str(active_row[0]) if active_row is not None else "",
                 "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
                 "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
@@ -142,7 +144,7 @@ class ThemeBackupService:
             document = {
                 "format": self.FORMAT,
                 "version": self.VERSION,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "created_at": kst_wall_now().isoformat(timespec="seconds"),
                 "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM themes ORDER BY theme_name")],
                 "stock_themes": [
                     {"code": code, "theme": theme, "color": color}
@@ -235,7 +237,7 @@ class ThemeBackupService:
                     "theme_suggestions": self._suggestion_documents(connection, profile_id),
                 })
             document = {
-                "format": self.FORMAT, "version": self.VERSION, "created_at": datetime.now().isoformat(timespec="seconds"),
+                "format": self.FORMAT, "version": self.VERSION, "created_at": kst_wall_now().isoformat(timespec="seconds"),
                 "profiles": profiles,
                 "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
                 "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
@@ -270,7 +272,7 @@ class ThemeBackupService:
                 raise ThemeBackupError("내보낼 테마 프로필을 찾을 수 없습니다.")
             profile_id, profile_name = profile
             document = {
-                "format": self.FORMAT, "version": self.VERSION, "created_at": datetime.now().isoformat(timespec="seconds"), "profile": profile_name,
+                "format": self.FORMAT, "version": self.VERSION, "created_at": kst_wall_now().isoformat(timespec="seconds"), "profile": profile_name,
                 "themes": [{"name": name, "color": color} for name, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
                 "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
                 "theme_name_decisions": self._decision_documents(connection, profile_id),
@@ -426,7 +428,7 @@ class ThemeBackupService:
                 "VALUES(?,?,?,?,?,?)",
                 (profile_id, kind, source, target,
                  str(item.get("decision_source") or "user"),
-                 str(item.get("updated_at") or datetime.now().astimezone().isoformat(timespec="seconds"))),
+                 str(item.get("updated_at") or kst_now().isoformat(timespec="seconds"))),
             )
 
     @staticmethod

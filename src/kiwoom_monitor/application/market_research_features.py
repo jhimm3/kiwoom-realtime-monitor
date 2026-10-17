@@ -7,16 +7,22 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from statistics import median
 from typing import Any, Iterable, Mapping
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.domain.ranking import normalize_stock_code
+from kiwoom_monitor.application.theme_leadership import SecondTradePoint
 
 
 MARKET_RULE_VERSION = "top20_market_types/v1"
+MARKET_CHANGE_RULE_VERSION = "top20_observed_changes/v1"
+PRICE_TRADE_CANDIDATE_VERSION = "observed-price-trade-candidates/v1"
 THEME_ALLOCATION_POLICY = "first_representative_theme/v1"
 MARKET_TYPES = frozenset({
     "NORMAL_LEADER", "SINGLE_LEADER", "THEME_LED",
@@ -154,6 +160,657 @@ class StrategyMarketAssessment:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class MarketCandidateObservation:
+    """입력 프레임 내 출현 사실. 매수 자격이나 영속 Stock Memory가 아니다."""
+
+    code: str
+    state: str
+    previous_rank: int | None
+    current_rank: int | None
+    presence_count: int
+    observation_count: int
+    first_seen_at: str
+    last_seen_at: str
+    change_bps_delta: int | None
+    trade_value_delta_million_won: int | None
+    reasons: tuple[str, ...]
+    input_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MarketPriceTradeInputs:
+    """기존 0B 집계 관측. 순위 소속과 시세의 시각/venue/연속성을 분리한다."""
+
+    universe_ref: str
+    universe_available_at: str
+    member_codes: tuple[str, ...]
+    venue: str
+    points: tuple[SecondTradePoint, ...]
+    continuity: Mapping[str, str]
+    window_seconds: int = 10
+    max_data_age_seconds: int = 3
+    universe: str = "TOP20"
+    max_membership_age_seconds: int = 90
+    continuity_reasons: Mapping[str, tuple[str, ...]] | None = None
+    input_resolution: str = 'seconds'
+
+    def __post_init__(self) -> None:
+        codes = tuple(normalize_stock_code(code) for code in self.member_codes)
+        if (not self.universe_ref or self.venue not in {"KRX", "NXT"}
+                or len(codes) != len(set(codes)) or any(not code for code in codes)
+                or self.window_seconds <= 0 or self.max_data_age_seconds <= 0 or self.max_membership_age_seconds <= 0
+                or self.universe not in {"TOP20", "RECORDED_COHORT"}):
+            raise ValueError("market price/trade scope is invalid")
+        _aware_datetime(self.universe_available_at)
+        object.__setattr__(self, "member_codes", codes)
+
+
+def _minute_row_json(row):
+    return json.dumps({**row, "metadata": dict(row["metadata"])}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def compute_price_trade_candidates(
+    inputs: MarketPriceTradeInputs, *, as_of: datetime, top_k: int = 5,
+) -> dict[str, Any]:
+    """두 관측 창의 가격 반응·대금 우위를 독립 축으로 확인한다.
+
+    조회순서/뉴스/테마/돌파 성과를 후보 선정에 사용하지 않는다. 당시 수신한
+    관측 집합의 후보이며 시장 전체 대장·순유입·매수 자격은 아니다.
+    """
+    if as_of.tzinfo is None or as_of.utcoffset() is None or not 1 <= top_k <= 20:
+        raise ValueError("price/trade cut and top_k must be explicit")
+    cutoff = as_of.astimezone(timezone.utc)
+    midpoint = cutoff - timedelta(seconds=inputs.window_seconds)
+    start = midpoint - timedelta(seconds=inputs.window_seconds)
+    reasons = []
+    if _aware_datetime(inputs.universe_available_at) > cutoff:
+        reasons.append("membership_not_available_at_cut")
+    membership_expiry = _aware_datetime(inputs.universe_available_at) + timedelta(seconds=inputs.max_membership_age_seconds)
+    if cutoff >= membership_expiry:
+        reasons.append("membership_stale")
+    if inputs.universe == "TOP20" and len(inputs.member_codes) != 20:
+        reasons.append("top20_membership_incomplete")
+    if len(inputs.member_codes) < 2:
+        reasons.append("comparison_cohort_insufficient")
+    if _aware_datetime(inputs.universe_available_at).astimezone(_SEOUL).date() != cutoff.astimezone(_SEOUL).date():
+        reasons.append("membership_trading_day_mismatch")
+    by_ref: dict[str, SecondTradePoint] = {}
+    latest: dict[tuple[str, datetime], SecondTradePoint] = {}
+    codes = set(inputs.member_codes) if not any(reason in reasons for reason in (
+        "membership_not_available_at_cut", "membership_trading_day_mismatch",
+    )) else set()
+    for point in inputs.points:
+        observed, available = _aware_datetime(point.observed_at), _aware_datetime(point.available_at)
+        code = normalize_stock_code(point.code)
+        if point.market != inputs.venue or code not in codes or available > cutoff or not start < observed <= cutoff:
+            continue
+        if point.input_ref in by_ref and by_ref[point.input_ref] != point:
+            raise ValueError("conflicting immutable price/trade observation")
+        by_ref[point.input_ref] = point
+        # Historical bars choose the latest revision; individual 0B receipts
+        # with the same broker second must all survive in receive order.
+        key = (code, observed, point.input_ref) if hasattr(point, 'sequence') else (code, observed)
+        previous = latest.get(key)
+        if previous is not None and available == _aware_datetime(previous.available_at) and point != previous:
+            raise ValueError("ambiguous price/trade revision at one observation time")
+        if previous is None or available > _aware_datetime(previous.available_at):
+            latest[key] = point
+    ordered = sorted(latest.values(), key=lambda point: (_aware_datetime(point.observed_at),
+        _aware_datetime(point.available_at), getattr(point, 'sequence', 0), point.input_ref))
+    metrics = []
+    missing_codes = []
+    expiries = []
+    for code in sorted(codes):
+        rows = [point for point in ordered if normalize_stock_code(point.code) == code]
+        before = [point for point in rows if _aware_datetime(point.observed_at) <= midpoint]
+        after = [point for point in rows if _aware_datetime(point.observed_at) > midpoint]
+        missing = []
+        if inputs.continuity.get(code) != "COMPLETE":
+            missing.append("price_trade_continuity_unconfirmed")
+            missing.extend((inputs.continuity_reasons or {}).get(code, ()))
+        if len(before) < 2 or len(after) < 2:
+            missing.append("two_window_price_sample_insufficient")
+        if len(before) < 2:
+            missing.append("previous_price_sample_insufficient")
+        if len(after) < 2:
+            missing.append("current_price_sample_insufficient")
+        if not after:
+            missing.append("current_price_observation_unavailable")
+        if any(point.trade_value_won is None for point in rows):
+            missing.append('0B_turnover_delta_unavailable')
+        if after:
+            # Event time prevents a delayed old quote from refreshing the lease.
+            expiry = _aware_datetime(after[-1].observed_at) + timedelta(seconds=inputs.max_data_age_seconds)
+            expiries.append(expiry)
+            if cutoff >= expiry:
+                missing.append("price_observation_stale")
+        if missing:
+            missing_codes.append(code)
+        metrics.append({"code": code, "quality": "PARTIAL" if missing else "COMPLETE", "reasons": tuple(dict.fromkeys(missing)),
+            "previous_return_bps": (before[-1].close - before[0].close) * 10_000 // before[0].close if len(before) >= 2 else None,
+            "current_return_bps": (after[-1].close - after[0].close) * 10_000 // after[0].close if len(after) >= 2 else None,
+            "previous_trade_value_won": sum(point.trade_value_won for point in before) if before and all(point.trade_value_won is not None for point in before) else None,
+            "current_trade_value_won": sum(point.trade_value_won for point in after) if after and all(point.trade_value_won is not None for point in after) else None,
+            "previous_observation_count": len(before), "current_observation_count": len(after),
+            "last_observed_at": after[-1].observed_at if after else None,
+            "last_available_at": after[-1].available_at if after else None,
+            "input_refs": tuple(point.input_ref for point in rows)})
+    if missing_codes:
+        reasons.append("comparison_cohort_price_trade_incomplete")
+    selected, totals, state = _compare_price_trade_windows(metrics, top_k, reasons)
+    before_set, after_set = set(selected["previous"]), set(selected["current"])
+    return {"policy_version": ("observed-price-trade-candidates/0B-v2" if inputs.input_resolution == '0B' else PRICE_TRADE_CANDIDATE_VERSION),
+        **({'input_resolution':'0B', 'primary_timeframe':'0B'} if inputs.input_resolution=='0B' else {}), "as_of": cutoff.isoformat(),
+        "universe": inputs.universe, "universe_ref": inputs.universe_ref, "venue": inputs.venue,
+        "window_seconds": inputs.window_seconds, "top_k": top_k,
+        "window_start": start.isoformat(), "window_midpoint": midpoint.isoformat(),
+        "expires_at": min(*expiries, membership_expiry).isoformat() if expiries and not reasons else cutoff.isoformat(),
+        "state": state, "previous_candidates": selected["previous"], "current_candidates": selected["current"],
+        "retained_candidates": tuple(sorted(before_set & after_set)),
+        "entered_candidates": tuple(sorted(after_set - before_set)), "left_candidates": tuple(sorted(before_set - after_set)),
+        "metrics": tuple(metrics), "market_flow": totals,
+        "quality": {"status": "PARTIAL" if reasons else "COMPLETE", "reasons": tuple(dict.fromkeys(reasons)),
+                    "missing_codes": tuple(missing_codes), "comparison_denominator": len(codes),
+                    "coverage": {"expected_members": 20 if inputs.universe == "TOP20" else len(codes),
+                        "evaluated_members": len(metrics),
+                        "usable_members": sum(row["quality"] == "COMPLETE" for row in metrics),
+                        "continuity_unconfirmed_members": sum("price_trade_continuity_unconfirmed" in row["reasons"] for row in metrics),
+                        "previous_sample_insufficient_members": sum("previous_price_sample_insufficient" in row["reasons"] for row in metrics),
+                        "current_sample_insufficient_members": sum("current_price_sample_insufficient" in row["reasons"] for row in metrics),
+                        "stale_members": sum("price_observation_stale" in row["reasons"] for row in metrics)}},
+        "input_refs": ((*((inputs.universe_ref,) if codes else ()), *(point.input_ref for point in ordered))),
+        "limitations": ("observed_cohort_not_whole_market", "received_0B_not_all_exchange_trades",
+                         "price_trade_axes_not_independent_sources", "candidate_rule_not_strategy_validation"),
+        "order_authorized": False}
+
+
+def _compare_price_trade_windows(metrics, top_k, reasons):
+    """One price/money candidate policy shared by second and minute observations."""
+    selected = {"previous": (), "current": ()}
+    totals = {}
+    if not reasons:
+        for window in ("previous", "current"):
+            returns = [row[f"{window}_return_bps"] for row in metrics]
+            amounts = [row[f"{window}_trade_value_won"] for row in metrics]
+            return_median, value_median = median(returns), median(amounts)
+            candidates = []
+            for row in metrics:
+                change, value = row[f"{window}_return_bps"], row[f"{window}_trade_value_won"]
+                # Competition ranks preserve ties; no code-based tie-breaking.
+                rank = 1 + sum(amount > value for amount in amounts)
+                row[f"{window}_trade_value_rank"] = rank
+                row[f"{window}_relative_return_bps"] = change - return_median
+                row[f"{window}_relative_trade_value_won"] = value - value_median
+                if change > 0 and change > return_median and value > 0 and value > value_median and rank <= top_k:
+                    candidates.append(row["code"])
+            selected[window] = tuple(sorted(candidates))
+            total = sum(amounts)
+            totals[window] = {"trade_value_won": total, "positive_price_ratio_ppm": sum(value > 0 for value in returns) * 1_000_000 // len(returns),
+                "top1_trade_value_share_ppm": max(amounts) * 1_000_000 // total if total > 0 else None,
+                "price_return_median_bps": return_median, "trade_value_median_won": value_median}
+    before_set, after_set = set(selected["previous"]), set(selected["current"])
+    state = "UNKNOWN" if reasons else (
+        "NO_CANDIDATE" if not before_set and not after_set else
+        "EMERGING" if not before_set else "LOST" if not after_set else
+        "RETAINED" if before_set == after_set else
+        "REPLACED" if not before_set & after_set else "ROTATING_GROUP"
+    )
+    return selected, totals, state
+
+
+@dataclass(frozen=True)
+class MarketMinuteTradeInputs:
+    universe_ref: str
+    universe_available_at: str
+    member_codes: tuple[str, ...]
+    venue: str
+    rows: tuple[Mapping[str, Any], ...]
+    max_membership_age_seconds: int = 90
+    max_bar_age_seconds: int = 90
+
+    def __post_init__(self):
+        codes = tuple(normalize_stock_code(code) for code in self.member_codes)
+        if (not self.universe_ref or self.venue not in {"KRX", "NXT"} or not all(codes)
+                or len(codes) != len(set(codes)) or len(codes) > 20 or len(self.rows) > 10000
+                or min(self.max_membership_age_seconds, self.max_bar_age_seconds) <= 0):
+            raise ValueError("minute market scope is invalid")
+        _aware_datetime(self.universe_available_at)
+        object.__setattr__(self, "member_codes", codes)
+        scalar = (str, int, float, bool, type(None))
+        if any(any(not isinstance(value, scalar) for key, value in row.items() if key != "metadata")
+               or any(not isinstance(value, scalar) for value in dict(row.get("metadata") or {}).values()) for row in self.rows):
+            raise ValueError("minute observations require native scalar fields")
+        object.__setattr__(self, "rows", tuple(MappingProxyType({**row,
+            "metadata": MappingProxyType(dict(row.get("metadata") or {}))}) for row in self.rows))
+
+    def __deepcopy__(self, memo):
+        # Frozen scalar fields and read-only row/metadata maps are safe to share
+        # through the existing monitor's defensive input copy boundary.
+        memo[id(self)] = self
+        return self
+
+
+def compute_minute_trade_candidates(inputs: MarketMinuteTradeInputs, *, as_of: datetime, top_k: int = 5):
+    """Closed 1m price/money candidates, with independent rolling 5m persistence.
+
+    No second observations or H2 leases enter this market comparison. Missing 5m
+    history does not erase a complete 1m observation. In-progress/estimated or
+    future bars are never treated as closed actual observations.
+    """
+    if as_of.tzinfo is None or as_of.utcoffset() is None or not 1 <= top_k <= 20:
+        raise ValueError("minute market cut/top_k must be explicit")
+    cutoff = as_of.astimezone(timezone.utc)
+    end = (cutoff - timedelta(seconds=2)).replace(second=0, microsecond=0)
+    available = _aware_datetime(inputs.universe_available_at)
+    scope_reasons = []
+    if available > cutoff:
+        scope_reasons.append("membership_not_available_at_cut")
+    if available.astimezone(_SEOUL).date() != cutoff.astimezone(_SEOUL).date():
+        scope_reasons.append("membership_trading_day_mismatch")
+    if len(inputs.member_codes) != 20:
+        scope_reasons.append("top20_membership_incomplete")
+    membership_expiry = available + timedelta(seconds=inputs.max_membership_age_seconds)
+    if cutoff >= membership_expiry:
+        scope_reasons.append("membership_stale")
+    codes = set(inputs.member_codes) if not any(reason in scope_reasons for reason in (
+        "membership_not_available_at_cut", "membership_trading_day_mismatch")) else set()
+    latest, rejected = {}, {}
+    for row in inputs.rows:
+        code = normalize_stock_code(row.get("code", ""))
+        if code not in codes or row.get("market") != inputs.venue:
+            continue
+        observed = None
+        try:
+            observed = datetime.fromisoformat(f"{row['trading_date']}T{row['minute']}").replace(tzinfo=_SEOUL).astimezone(timezone.utc)
+            if not end - timedelta(minutes=10) <= observed < end:
+                continue
+            metadata = row.get("metadata", {})
+            ready = _aware_datetime(metadata["available_at"])
+            updated = datetime.fromtimestamp(float(row["updated_at"]), timezone.utc)
+            if ready > cutoff or updated > cutoff or not end - timedelta(minutes=10) <= observed < end:
+                continue
+        except (KeyError, TypeError, ValueError, OSError):
+            rejected[(code, observed)] = "minute_bar_lineage_unconfirmed"
+            continue
+        key = (code, observed)
+        previous = latest.get(key)
+        if previous and previous[0] == ready and _minute_row_json(previous[1]) != _minute_row_json(row):
+            raise ValueError("conflicting immutable minute observation")
+        if previous is None or ready > previous[0]:
+            latest[key] = (ready, row)
+    # Pick the cut's latest revision before testing completeness, so a later
+    # partial correction cannot leave an obsolete complete value in use.
+    for (code, observed), (ready, row) in tuple(latest.items()):
+        reason = ""
+        try:
+            metadata = row["metadata"]
+            if metadata.get("venue") != inputs.venue or metadata.get("completeness") != "complete" or metadata.get("value_kind") != "actual":
+                reason = "minute_bar_not_closed_actual"
+            elif (observed + timedelta(minutes=1) > ready or not metadata.get("source")
+                    or _aware_datetime(metadata["effective_at"]) != observed):
+                reason = "minute_bar_lineage_unconfirmed"
+            else:
+                values = (row["open"], row["close"], row["trade_value_million_won"])
+                if any(type(value) is not int for value in values) or min(values[:2]) <= 0 or values[2] < 0:
+                    reason = "minute_bar_values_invalid"
+        except (KeyError, TypeError, ValueError, OSError):
+            reason = "minute_bar_lineage_unconfirmed"
+        if reason:
+            rejected[(code, observed)] = reason
+            del latest[(code, observed)]
+    timeframes = {}
+    for minutes in (1, 5):
+        midpoint, start = end - timedelta(minutes=minutes), end - timedelta(minutes=2 * minutes)
+        metrics = []
+        reasons = list(scope_reasons)
+        for code in sorted(codes):
+            before_keys = tuple(start + timedelta(minutes=index) for index in range(minutes))
+            after_keys = tuple(midpoint + timedelta(minutes=index) for index in range(minutes))
+            before = [latest[(code, stamp)][1] for stamp in before_keys if (code, stamp) in latest]
+            after = [latest[(code, stamp)][1] for stamp in after_keys if (code, stamp) in latest]
+            missing = [rejected[(code, None)]] if (code, None) in rejected else []
+            if len(before) != minutes:
+                missing.append("previous_minute_history_incomplete")
+            if len(after) != minutes:
+                missing.append("current_minute_history_incomplete")
+            missing.extend(dict.fromkeys(rejected[key] for key in rejected if key[0] == code
+                and (key[1] is None or start <= key[1] < end)))
+            if cutoff >= end + timedelta(seconds=inputs.max_bar_age_seconds):
+                missing.append("minute_bar_stale")
+            metrics.append({"code": code, "quality": "PARTIAL" if missing else "COMPLETE", "reasons": tuple(dict.fromkeys(missing)),
+                "previous_return_bps": (before[-1]["close"] - before[0]["open"]) * 10000 // before[0]["open"] if len(before) == minutes else None,
+                "current_return_bps": (after[-1]["close"] - after[0]["open"]) * 10000 // after[0]["open"] if len(after) == minutes else None,
+                "previous_trade_value_won": sum(row["trade_value_million_won"] for row in before) * 1000000 if len(before) == minutes else None,
+                "current_trade_value_won": sum(row["trade_value_million_won"] for row in after) * 1000000 if len(after) == minutes else None,
+                "previous_observation_count": len(before), "current_observation_count": len(after)})
+        if any(row["quality"] != "COMPLETE" for row in metrics):
+            reasons.append("comparison_cohort_minute_history_incomplete")
+        selected, flow, state = _compare_price_trade_windows(metrics, top_k, reasons)
+        before_set, after_set = set(selected["previous"]), set(selected["current"])
+        refs = tuple("minute-bar:" + hashlib.sha256(_minute_row_json(row).encode()).hexdigest()
+            for (code, stamp), (_, row) in sorted(latest.items()) if start <= stamp < end)
+        timeframes[f"{minutes}m"] = {"state": state, "minutes": minutes, "window_start": start.isoformat(),
+            "window_midpoint": midpoint.isoformat(), "window_end": end.isoformat(),
+            "expires_at": min(membership_expiry, end + timedelta(seconds=inputs.max_bar_age_seconds)).isoformat(),
+            "previous_candidates": selected["previous"], "current_candidates": selected["current"],
+            "retained_candidates": tuple(sorted(before_set & after_set)), "entered_candidates": tuple(sorted(after_set - before_set)),
+            "left_candidates": tuple(sorted(before_set - after_set)), "metrics": tuple(metrics), "market_flow": flow,
+            "quality": {"status": "PARTIAL" if reasons else "COMPLETE", "reasons": tuple(dict.fromkeys(reasons)),
+                "coverage": {"expected_members": 20, "evaluated_members": len(metrics),
+                    "usable_members": sum(row["quality"] == "COMPLETE" for row in metrics)}}, "input_refs": refs}
+    primary, persistence = timeframes["1m"], timeframes["5m"]
+    five_available = not scope_reasons and all(row["current_observation_count"] == 5 for row in persistence["metrics"])
+    qualifying_minutes = dict.fromkeys(sorted(codes), 0)
+    five_candidates = ()
+    if five_available:
+        for index in range(5):
+            stamp = end - timedelta(minutes=5 - index)
+            scratch = []
+            for code in sorted(codes):
+                row = latest[(code, stamp)][1]
+                change = (row["close"] - row["open"]) * 10000 // row["open"]
+                amount = row["trade_value_million_won"] * 1000000
+                scratch.append({"code": code, "previous_return_bps": change, "current_return_bps": change,
+                    "previous_trade_value_won": amount, "current_trade_value_won": amount})
+            selected, _, _ = _compare_price_trade_windows(scratch, top_k, ())
+            for code in selected["current"]:
+                qualifying_minutes[code] += 1
+        scratch = [{**row, "previous_return_bps": row["current_return_bps"],
+                    "previous_trade_value_won": row["current_trade_value_won"]} for row in persistence["metrics"]]
+        selected, _, _ = _compare_price_trade_windows(scratch, top_k, ())
+        five_candidates = selected["current"]
+    confirmed = tuple(sorted(code for code in primary["current_candidates"]
+        if code in five_candidates and qualifying_minutes[code] >= 3))
+    return {**primary, "policy_version": "minute-price-trade-candidates/v1", "as_of": cutoff.isoformat(),
+        "universe": "TOP20", "universe_ref": inputs.universe_ref, "venue": inputs.venue, "top_k": top_k,
+        "primary_timeframe": "1m", "timeframes": timeframes,
+        "five_minute_confirmation": {"status": "CONFIRMED" if confirmed else "NOT_CONFIRMED"
+            if primary["quality"]["status"] == "COMPLETE" and five_available else "UNAVAILABLE",
+            "confirmed_candidates": confirmed, "qualifying_minutes": qualifying_minutes if five_available else {},
+            "required_qualifying_minutes": 3, "observed_minutes": 5 if five_available else 0},
+        "input_refs": ((inputs.universe_ref,) if codes else ()) + tuple(dict.fromkeys((*primary["input_refs"], *persistence["input_refs"]))),
+        "limitations": ("observed_top20_not_whole_market", "actual_closed_bars_only", "missing_minutes_not_zero_filled",
+            "five_minute_is_rolling_window", "money_unit_from_million_won_column", "not_strategy_profitability_validation"),
+        "order_authorized": False}
+
+
+@dataclass(frozen=True)
+class MarketContextChanges:
+    as_of: str
+    observed_at: str | None
+    expires_at: str | None
+    venue: str
+    window: str
+    pattern: str
+    reasons: tuple[str, ...]
+    features: MarketResearchFeatures | None
+    classification: MarketClassification | None
+    changes: Mapping[str, Any]
+    candidates: tuple[MarketCandidateObservation, ...]
+    theme_evidence: Mapping[str, Any]
+    quality: Mapping[str, Any]
+    input_refs: tuple[str, ...]
+    rule_version: str = MARKET_CHANGE_RULE_VERSION
+    universe: str = "TOP20"
+    parameters: MarketFeatureParameters = MarketFeatureParameters()
+    lookup_change: Mapping[str, Any] | None = None
+    limitations: tuple[str, ...] = (
+        "top20_not_whole_market",
+        "lookup_rank_not_trade_value_rank_or_buy_eligibility",
+        "ranking_observations_not_all_trades",
+        "available_at_not_exchange_event_time",
+        "supplied_frame_history_not_persistent_stock_memory",
+        "observed_pattern_not_validated_strategy_or_order_permission",
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def compute_market_context_changes(
+    frames: Iterable[MarketResearchFrame],
+    parameters: MarketFeatureParameters = MarketFeatureParameters(),
+    *,
+    as_of: datetime,
+    venue: str,
+    window: str,
+    breakout_summary: MatureBreakoutSummary | None = None,
+    breakout_available_at: datetime | None = None,
+    breakout_input_ref: str = "",
+    _current_features: MarketResearchFeatures | None = None,
+) -> MarketContextChanges:
+    """선택 호출용 TOP20 변화 관측. 기존 v1 특징/분류·저장·Runtime은 유지한다.
+
+    테마/뉴스/돌파 성과는 순위·대금 변화 관측의 필수 자료가 아니다. 선택한
+    breakout_summary는 근거 ID와 가용시각을 함께 요구한다. 기본값 또는
+    미래 근거는 성숙 사례 0건이며 v1 분류의 UNKNOWN을 임의 보완하지 않는다.
+    """
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
+    if not venue or not window:
+        raise ValueError("market change venue and window are required")
+    cutoff = as_of.astimezone(timezone.utc)
+    if breakout_summary is not None:
+        if breakout_available_at is None or not breakout_input_ref.strip():
+            raise ValueError("breakout summary requires available_at and input_ref")
+        if breakout_available_at.tzinfo is None or breakout_available_at.utcoffset() is None:
+            raise ValueError("breakout available_at must be timezone-aware")
+    breakout_eligible = (breakout_summary is not None and breakout_available_at is not None
+                         and breakout_available_at <= cutoff)
+    breakout_status = "AVAILABLE" if breakout_eligible else "FUTURE" if breakout_summary is not None else "MISSING"
+    unique: dict[str, MarketResearchFrame] = {}
+    for frame in frames:
+        if (frame.venue != venue or frame.window != window
+                or _aware_datetime(frame.available_at) > cutoff):
+            continue
+        previous = unique.get(frame.revision_id)
+        if previous is not None and previous != frame:
+            raise ValueError("conflicting immutable market frame revision")
+        unique[frame.revision_id] = frame
+    ordered = tuple(sorted(unique.values(), key=lambda frame: (
+        _aware_datetime(frame.available_at), frame.revision_id,
+    )))
+    if len({_aware_datetime(frame.available_at) for frame in ordered}) != len(ordered):
+        raise ValueError("distinct market revisions require distinct observation times")
+    if not ordered:
+        return MarketContextChanges(
+            cutoff.isoformat(), None, None, venue, window, "UNKNOWN",
+            ("market_frames_unavailable",), None, None, {}, (),
+            {"status": "UNKNOWN", "reasons": ("theme_evidence_unavailable",)},
+            {"status": "MISSING", "reasons": ("market_frames_unavailable",)}, (), parameters=parameters,
+        )
+
+    current = ordered[-1]
+    same_day = tuple(frame for frame in ordered if frame.trading_date == current.trading_date)
+    recent = same_day[-parameters.min_history_observations:]
+    previous = same_day[-2] if len(same_day) >= 2 else None
+    summary = breakout_summary if breakout_eligible else MatureBreakoutSummary(0, 0, 0)
+    assert summary is not None
+    # Reserved for the existing H1 owner after its full immutable scope check.
+    # Direct callers compute here; Runtime does not recalculate the current cut.
+    features = _current_features if _current_features is not None else compute_market_research_features(
+        ordered, summary, parameters, as_of=cutoff,
+    )
+    if (features.as_of, features.venue, features.window) != (current.available_at, venue, window):
+        raise ValueError("shared market features belong to another cut or scope")
+    previous_features = (
+        compute_market_research_features(
+            ordered, MatureBreakoutSummary(0, 0, 0), parameters,
+            as_of=_aware_datetime(previous.available_at),
+        ) if previous is not None else None
+    )
+    expires = _aware_datetime(current.available_at) + timedelta(seconds=parameters.max_gap_seconds)
+    stale = cutoff >= expires or current.trading_date != cutoff.astimezone(_SEOUL).date().isoformat()
+    missing: list[str] = []
+    if stale:
+        missing.append("market_frame_stale")
+    if len(recent) < parameters.min_history_observations:
+        missing.append("rank_history_warmup")
+    if any(not _complete_top20_frame(frame) for frame in recent):
+        missing.append("top20_membership_incomplete")
+    missing.extend(_gap_reasons(recent, parameters.max_gap_seconds))
+    if features.trade_value_denominator_million_won is None or (
+        previous_features is None or previous_features.trade_value_denominator_million_won is None
+    ):
+        missing.append("trade_value_denominator_unavailable")
+
+    def difference(field: str) -> int | None:
+        after = getattr(features, field)
+        before = getattr(previous_features, field) if previous_features is not None else None
+        return after - before if after is not None and before is not None and not missing else None
+
+    before_leader = normalize_stock_code(previous.members[0].code) if previous and previous.members else ""
+    after_leader = normalize_stock_code(current.members[0].code) if current.members else ""
+    concentration_delta = difference("top1_concentration_ppm")
+    changes = {
+        "previous_observed_at": previous.available_at if previous else None,
+        "previous_leader_code": before_leader,
+        "current_leader_code": after_leader,
+        "top1_concentration_delta_ppm": concentration_delta,
+        "top5_concentration_delta_ppm": difference("top5_concentration_ppm"),
+        "concentration_direction": "UNKNOWN" if concentration_delta is None else (
+            "INCREASED" if concentration_delta > 0 else "DECREASED" if concentration_delta < 0 else "UNCHANGED"
+        ),
+    }
+    pattern, reasons = _observed_market_pattern(features, before_leader, after_leader, tuple(missing))
+    classification = classify_market(features)
+    if missing:
+        classification = MarketClassification(
+            "UNKNOWN", (), tuple(dict.fromkeys((*classification.reasons, *missing))),
+            {**dict(classification.quality), "status": "STALE" if stale else "PARTIAL"},
+        )
+    theme_available = bool(current.theme_revision_id and features.theme_valid_member_count)
+    theme_evidence = {
+        "status": "STALE" if theme_available and stale else "OBSERVED" if theme_available else "UNKNOWN",
+        "revision_id": current.theme_revision_id if theme_available else "",
+        "revision_available_at": None,
+        "observed_at": current.available_at if theme_available else None,
+        "leading_theme": features.leading_theme if theme_available else "",
+        "concentration_ppm": features.leading_theme_concentration_ppm if theme_available else None,
+        "valid_member_count": features.theme_valid_member_count if theme_available else 0,
+        "universe_size": features.universe_size,
+        "allocation_policy": THEME_ALLOCATION_POLICY,
+        "reasons": ("theme_evidence_stale",) if theme_available and stale else (
+            ("representative_theme_only_not_causal_news_evidence", "theme_revision_timestamp_not_in_frame")
+            if theme_available else ("theme_evidence_unavailable",)
+        ),
+    }
+    return MarketContextChanges(
+        cutoff.isoformat(), current.available_at, expires.isoformat(), venue, window,
+        pattern, reasons, features, classification, changes,
+        _candidate_observations(same_day, parameters, stale), theme_evidence,
+        {"status": "STALE" if stale else "PARTIAL" if missing else "COMPLETE",
+         "reasons": tuple(dict.fromkeys(missing)), "observation_count": len(same_day),
+         "recent_observation_count": len(recent), "breakout_evidence_status": breakout_status,
+         "required_data_capabilities": ("complete_top20_membership_history", "top20_trade_value_snapshot"),
+         "candidate_history_status": "COMPLETE" if (
+             all(_complete_top20_frame(frame) for frame in same_day)
+             and not _gap_reasons(same_day, parameters.max_gap_seconds)
+         ) else "PARTIAL"},
+        tuple(dict.fromkeys((*(frame.revision_id for frame in same_day), *features.input_refs,
+                             *((breakout_input_ref,) if breakout_eligible else ())))),
+        parameters=parameters,
+        lookup_change={
+            "state": "UNKNOWN" if (stale or previous is None
+                or not all(_complete_top20_frame(frame) for frame in same_day[-2:])
+                or _gap_reasons(same_day[-2:], parameters.max_gap_seconds))
+                else "CHANGED" if before_leader != after_leader else "RETAINED",
+            "previous_first_code": before_leader, "current_first_code": after_leader,
+            "meaning": "lookup_first_rank_only_not_price_trade_leader",
+            "input_refs": tuple(frame.revision_id for frame in same_day[-2:]),
+        },
+    )
+
+
+def _complete_top20_frame(frame: MarketResearchFrame) -> bool:
+    return frame.capture_quality == "complete" and len(frame.members) == 20
+
+
+def _observed_market_pattern(
+    features: MarketResearchFeatures, before_leader: str, after_leader: str,
+    missing: tuple[str, ...],
+) -> tuple[str, tuple[str, ...]]:
+    if missing:
+        return "UNKNOWN", missing
+    if (features.fixed_k_turnover_ppm is not None and features.fixed_k_turnover_ppm >= 400_000
+            and features.jaccard_change_ppm is not None and features.jaccard_change_ppm >= 350_000
+            and features.leader_turnover_ppm is not None and features.leader_turnover_ppm >= 500_000
+            and features.current_leader_top_k_residency_ppm is not None
+            and features.current_leader_top_k_residency_ppm <= 500_000
+            and features.top1_concentration_ppm is not None and features.top1_concentration_ppm < 400_000):
+        return "DISPERSED_ROTATION", ("observed_rank_rotation_without_breakout_outcome_claim",)
+    if before_leader != after_leader:
+        return "LEADER_REPLACEMENT", ("observed_first_rank_changed",)
+    if (features.top1_concentration_ppm is not None and features.top1_concentration_ppm >= 400_000
+            and features.current_leader_top_k_residency_ppm is not None
+            and features.current_leader_top_k_residency_ppm >= 667_000):
+        return "LEADER_CONCENTRATION", ("observed_first_rank_trade_value_concentration_and_residency",)
+    return "LEADER_RETAINED", ("observed_first_rank_retained",)
+
+
+def _candidate_observations(
+    frames: tuple[MarketResearchFrame, ...], parameters: MarketFeatureParameters, stale: bool,
+) -> tuple[MarketCandidateObservation, ...]:
+    rows = tuple({normalize_stock_code(row.code): (rank, row)
+                  for rank, row in enumerate(frame.members, 1)} for frame in frames)
+    seen_indices: dict[str, list[int]] = {}
+    for index, frame_rows in enumerate(rows):
+        for code in frame_rows:
+            seen_indices.setdefault(code, []).append(index)
+    current = frames[-1]
+    previous = frames[-2] if len(frames) >= 2 else None
+    pair_complete = (previous is not None and not stale
+                     and all(_complete_top20_frame(frame) for frame in frames[-2:])
+                     and not _gap_reasons(frames[-2:], parameters.max_gap_seconds))
+    history_complete = (all(_complete_top20_frame(frame) for frame in frames)
+                        and not _gap_reasons(frames, parameters.max_gap_seconds))
+    result = []
+    for code, seen in sorted(seen_indices.items()):
+        before = rows[-2].get(code) if previous is not None else None
+        after = rows[-1].get(code)
+        price_delta = value_delta = None
+        reasons = []
+        if stale:
+            state, reasons = "UNKNOWN", ["market_frame_stale"]
+        elif previous is None:
+            state, reasons = "OBSERVED", ["no_previous_rank_observation"]
+        elif not pair_complete:
+            state, reasons = "UNKNOWN", ["latest_membership_transition_unconfirmed"]
+        elif before and after:
+            state, reasons = "RETAINED", ["present_in_latest_two_frames"]
+            if before[1].change_bps is not None and after[1].change_bps is not None:
+                price_delta = after[1].change_bps - before[1].change_bps
+            else:
+                reasons.append("price_change_unavailable")
+            if current.window != "cumulative_session":
+                reasons.append("trade_value_window_not_cumulative")
+            elif before[1].trade_value_million_won is None or after[1].trade_value_million_won is None:
+                reasons.append("trade_value_unavailable")
+            elif after[1].trade_value_million_won < before[1].trade_value_million_won:
+                reasons.append("trade_value_counter_decreased")
+            else:
+                value_delta = after[1].trade_value_million_won - before[1].trade_value_million_won
+        elif before:
+            state, reasons = "LEFT", ["absent_from_latest_complete_top20_not_market_exit"]
+        elif after and history_complete:
+            state = "REAPPEARED" if seen[0] < len(frames) - 2 else "ENTERED"
+            reasons = ["within_supplied_same_day_frames_only"]
+        elif after:
+            state, reasons = "UNKNOWN", ["earlier_membership_history_unconfirmed"]
+        else:
+            state, reasons = "ABSENT", ["absent_from_latest_complete_top20_not_market_exit"]
+        result.append(MarketCandidateObservation(
+            code, state, before[0] if before else None, after[0] if after else None,
+            len(seen), len(frames), frames[seen[0]].available_at, frames[seen[-1]].available_at,
+            price_delta, value_delta, tuple(reasons),
+            tuple(frames[index].revision_id for index in sorted(
+                {*seen, *range(max(0, len(frames) - 2), len(frames))},
+            )),
+        ))
+    return tuple(result)
 
 
 def compute_market_research_features(

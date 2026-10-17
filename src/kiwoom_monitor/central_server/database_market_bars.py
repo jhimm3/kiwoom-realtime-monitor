@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 from time import monotonic, time
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.domain.market_data_contract import (
@@ -153,7 +153,7 @@ def _final_minute_observation(
 
 def _save_final_minute_revision_sqlite(
     connection: sqlite3.Connection, merged: dict[str, Any], closure: dict[str, Any],
-    history_enabled: bool,
+    history_enabled: bool, *, now_provider: Callable[[], datetime] | None = None,
 ) -> None:
     observation = _final_minute_observation(merged, closure)
     key = bar_observation_key(observation)
@@ -171,10 +171,12 @@ def _save_final_minute_revision_sqlite(
                 operation_id=str(closure["operation_id"]),
             ),
             observation,
+            now_provider=now_provider,
         )
 
 def _save_final_minute_revision_postgres(
     cursor: Any, merged: dict[str, Any], closure: dict[str, Any], history_enabled: bool,
+    *, now_provider: Callable[[], datetime] | None = None,
 ) -> None:
     observation = _final_minute_observation(merged, closure)
     key = bar_observation_key(observation)
@@ -192,6 +194,7 @@ def _save_final_minute_revision_postgres(
                 operation_id=str(closure["operation_id"]),
             ),
             observation,
+            now_provider=now_provider,
         )
 
 def _load_sqlite_latest_revisions(
@@ -232,6 +235,7 @@ def _insert_sqlite_observation_revisions_batch(
     connection: sqlite3.Connection,
     sources: list[ObservationRevisionSource],
     latest_by_key: dict[tuple[str, str, str], tuple[object, object] | None],
+    *, now_provider: Callable[[], datetime] | None = None,
 ) -> tuple[int, int]:
     """Insert changed revisions in bounded statements, preserving input chains."""
     columns = (
@@ -271,7 +275,7 @@ def _insert_sqlite_observation_revisions_batch(
         latest = latest_by_key[key]
         if latest is not None and str(latest[1]) == source.payload_hash:
             continue
-        pending.append(_observation_revision_values(source, latest, sqlite=True))
+        pending.append(_observation_revision_values(source, latest, sqlite=True, now_provider=now_provider))
         latest_by_key[key] = (str(pending[-1][0]), source.payload_hash)
         if len(pending) >= SQLITE_REVISION_BATCH_ROWS:
             flush()
@@ -536,6 +540,7 @@ def _insert_postgres_observation_revisions_batch(
     latest_by_key: dict[tuple[str, str, str], tuple[object, object] | None],
     *,
     execute_seconds: list[float] | None = None,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> tuple[int, int]:
     """Insert changed revisions in bounded multi-row statements, preserving input order.
 
@@ -592,7 +597,7 @@ def _insert_postgres_observation_revisions_batch(
         latest = latest_by_key[key]
         if latest is not None and str(latest[1]) == source.payload_hash:
             continue
-        values = _observation_revision_values(source, latest, sqlite=False)
+        values = _observation_revision_values(source, latest, sqlite=False, now_provider=now_provider)
         pending.append(values)
         latest_by_key[key] = (str(values[0]), source.payload_hash)
         if len(pending) >= batch_size:
@@ -877,11 +882,12 @@ class SQLiteMarketBarStoreMixin:
                 if merged is not None and _minute_query_authority(connection, closure, postgres=False) != DataCompleteness.COMPLETE.value:
                     _save_final_minute_revision_sqlite(
                         connection, merged, closure, self._observation_history_enabled,
+                        now_provider=self._now_provider,
                     )
                 connection.execute(
                     "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
                     "VALUES(?,?,?)",
-                    (operation_id, operation_hash, datetime.now(timezone.utc).isoformat()),
+                    (operation_id, operation_hash, self._now_provider().isoformat()),
                 )
 
 
@@ -968,11 +974,12 @@ class SQLiteMarketBarStoreMixin:
                                 finalization_source="realtime_flush", operation_id=operation_id,
                             ),
                             merged_observation,
+                            now_provider=self._now_provider,
                         )
                 connection.execute(
                     "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
                     "VALUES(?,?,?)",
-                    (operation_id, operation_hash, datetime.now(timezone.utc).isoformat()),
+                    (operation_id, operation_hash, self._now_provider().isoformat()),
                 )
 
 
@@ -1057,6 +1064,7 @@ class SQLiteMarketBarStoreMixin:
                 latest_by_key = _load_sqlite_latest_revisions(connection, revision_sources)
                 _insert_sqlite_observation_revisions_batch(
                     connection, revision_sources, latest_by_key,
+                    now_provider=self._now_provider,
                 )
         # The connection context has committed before changes become visible to callers.
         return tuple(dict.fromkeys(tuple(str(value) for value in row) for row in changed_bar_rows))
@@ -1241,11 +1249,12 @@ class PostgresMarketBarStoreMixin:
                             cursor, closure, postgres=True) != DataCompleteness.COMPLETE.value):
                         _save_final_minute_revision_postgres(
                             cursor, merged, closure, self._observation_history_enabled,
+                            now_provider=self._now_provider,
                         )
                     cursor.execute(
                         "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
                         "VALUES(%s,%s,%s)",
-                        (operation_id, operation_hash, datetime.now(timezone.utc)),
+                        (operation_id, operation_hash, self._now_provider()),
                     )
             else:
                 operation_hashes = _load_postgres_minute_operation_hashes(
@@ -1283,7 +1292,7 @@ class PostgresMarketBarStoreMixin:
                                     operation_id=operation_id,
                                 ), observation,
                             ))
-                    operation_rows.append((operation_id, operation_hash, datetime.now(timezone.utc)))
+                    operation_rows.append((operation_id, operation_hash, self._now_provider()))
                 _save_postgres_metadata(cursor, observations, multirow=True)
                 if revision_sources:
                     latest_by_key = _load_postgres_latest_revisions(
@@ -1291,6 +1300,7 @@ class PostgresMarketBarStoreMixin:
                     )
                     _insert_postgres_observation_revisions_batch(
                         cursor, revision_sources, latest_by_key,
+                        now_provider=self._now_provider,
                     )
                 _execute_multirow_upsert(
                     cursor,
@@ -1463,6 +1473,7 @@ class PostgresMarketBarStoreMixin:
                     )
                     _, domain_counts["revision_inserts"] = _insert_postgres_observation_revisions_batch(
                         cursor, revision_sources, latest_by_key,
+                        now_provider=self._now_provider,
                     )
                 if merged_observations:
                     domain_phase_ms["metadata_revision"] = (monotonic() - phase_started) * 1000
@@ -1470,7 +1481,7 @@ class PostgresMarketBarStoreMixin:
                 _execute_multirow_upsert(
                     cursor,
                     "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) VALUES",
-                    [(operation_id, operation_hash, datetime.now(timezone.utc))
+                    [(operation_id, operation_hash, self._now_provider())
                      for _, operation_id, operation_hash, _ in pending],
                     "", placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
                 )
@@ -1540,14 +1551,14 @@ class PostgresMarketBarStoreMixin:
                                     finalization_source="realtime_flush", operation_id=operation_id,
                                 ),
                                 merged_observation,
-                            ):
+                             now_provider=self._now_provider):
                                 domain_counts["revision_inserts"] += 1
                         domain_phase_ms["metadata_revision"] = domain_phase_ms.get("metadata_revision", 0) + (monotonic() - phase_started) * 1000
                     phase_started = monotonic()
                     cursor.execute(
                         "INSERT INTO central_minute_bar_operations(operation_id,operation_hash,processed_at) "
                         "VALUES(%s,%s,%s)",
-                        (operation_id, operation_hash, datetime.now(timezone.utc)),
+                        (operation_id, operation_hash, self._now_provider()),
                     )
                     domain_phase_ms["operation_insert"] = domain_phase_ms.get("operation_insert", 0) + (monotonic() - phase_started) * 1000
                     domain_counts["operation_inserts"] += 1
@@ -1724,6 +1735,7 @@ class PostgresMarketBarStoreMixin:
                      revision_insert_rows) = _insert_postgres_observation_revisions_batch(
                         cursor, revision_sources, latest_by_key,
                         execute_seconds=insert_execute_seconds,
+                        now_provider=self._now_provider,
                     )
                     revision_rows_ms = round((monotonic() - row_phase_started) * 1000)
                     revision_insert_execute_ms = round(insert_execute_seconds[0] * 1000)

@@ -267,11 +267,6 @@ class MinuteBarRepositoryTests(unittest.TestCase):
             self.assertEqual((1, 1), (minute_count, daily_count))
 
     def test_top20_statistics_include_1530_and_prefer_ka20006_market_total(self) -> None:
-        class FixedDate(date):
-            @classmethod
-            def today(cls):
-                return date(2026, 9, 9)
-
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
             Database(path).initialize()
@@ -288,7 +283,8 @@ class MinuteBarRepositoryTests(unittest.TestCase):
                 "kospi", (("2026-09-08T00:00", 1.0, 1.0, 1.0, 1.0, 1, 200.0),),
             )
 
-            with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.date", FixedDate):
+            with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_today",
+                       return_value=date(2026, 9, 9)):
                 _hourly, comparisons = repository.load_top20_statistics(30)
 
         row = next(value for value in comparisons if value[0].isoformat() == "2026-09-08")

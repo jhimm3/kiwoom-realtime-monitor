@@ -81,6 +81,39 @@
     ],
     [
       "src/kiwoom_monitor/central_server/ai_service.py",
+      "CentralAIService._research_market",
+      "self._store",
+      "load_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/ai_service.py",
+      "CentralAIService._research_market",
+      "self._store",
+      "upsert_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/ai_service.py",
+      "CentralAIService._research_market",
+      "self._store",
+      "upsert_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/ai_service.py",
       "CentralAIService._run",
       "self._store",
       "find_news_ai_revision",
@@ -185,6 +218,17 @@
       "save_news_body_revision",
       "hasattr_probe",
       "hasattr",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/ai_service.py",
+      "CentralAIService._run",
+      "self._store",
+      "upsert_documents",
+      "callable_argument",
+      "asyncio.to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -2489,6 +2533,72 @@
       "reviewed_store_binding"
     ],
     [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief.__init__",
+      "store",
+      "load_documents",
+      "direct_call",
+      "store.load_documents",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief._generate",
+      "self.store",
+      "upsert_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief.latest",
+      "self.store",
+      "load_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief.request",
+      "self.store",
+      "load_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief.request.claim_and_launch",
+      "self.store",
+      "upsert_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief.update.save_and_publish",
+      "self.store",
+      "upsert_documents",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
       "src/kiwoom_monitor/central_server/news_credentials.py",
       "DartCredentialOwner.__init__",
       "service._store",
@@ -3634,6 +3744,17 @@
     ],
     [
       "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+      "ExecutionRepository.protection_claim",
+      "self._store",
+      "load_execution_intent",
+      "direct_call",
+      "self._store.load_execution_intent",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
       "ExecutionRepository.release_runtime",
       "self._store",
       "release_execution_runtime",
@@ -4239,6 +4360,17 @@
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_runner.py",
+      "MockAutomationRunner._start_first_protection_exit_locked.verify",
+      "self._repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "self._repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_runner.py",
       "MockAutomationRunner.resolve_protection_review",
       "self._repository",
       "load_mock_automation_control",
@@ -4288,6 +4420,17 @@
       "load_mock_automation_control",
       "callable_argument",
       "asyncio.to_thread",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.publish_native_unfilled_population",
+      "self._repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
       "",
       "",
       "unresolved_candidate"
@@ -4478,39 +4621,6 @@
       "",
       "",
       "store_internal_delegate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_runner.py",
-      "MockAutomationRunner._start_first_protection_exit_locked.verify",
-      "self._repository",
-      "load_mock_automation_control",
-      "direct_call",
-      "self._repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
-      "ExecutionRepository.protection_claim",
-      "self._store",
-      "load_execution_intent",
-      "direct_call",
-      "self._store.load_execution_intent",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.publish_native_unfilled_population",
-      "self._repository",
-      "load_mock_automation_control",
-      "bound_reference",
-      "",
-      "",
-      "",
-      "unresolved_candidate"
     ]
   ],
   "forwarding_identities": [
@@ -4718,6 +4828,17 @@
       "CentralAIService",
       "store",
       "1",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "MorningMarketBrief",
+      "store",
+      "0",
       "direct_call",
       "",
       "",

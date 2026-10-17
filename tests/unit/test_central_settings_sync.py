@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import closing
 
 from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsSyncService, is_shared_setting
 
@@ -23,6 +24,35 @@ class _Client:
 
 
 class CentralSettingsSyncTests(unittest.TestCase):
+    def test_utc_and_kst_versions_compare_instants_in_both_directions(self):
+        cases = (
+            ('2026-10-15T14:30:00+09:00', '2026-10-15T06:00:00+00:00', 'remote'),
+            ('2026-10-15T06:00:00+00:00', '2026-10-15T14:30:00+09:00', 'local'),
+        )
+        for local, remote, expected in cases:
+            with self.subTest(local=local, remote=remote), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'fixture.sqlite3'
+                with closing(sqlite3.connect(path)) as c, c:
+                    c.executescript('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);'
+                                    'CREATE TABLE central_setting_versions(setting_key TEXT PRIMARY KEY,updated_at TEXT NOT NULL);'
+                                    'CREATE TABLE column_settings(column_name TEXT PRIMARY KEY,visible INTEGER,position INTEGER,width INTEGER);'
+                                    'CREATE TABLE central_column_setting_versions(column_name TEXT PRIMARY KEY,updated_at TEXT NOT NULL);')
+                    c.execute("INSERT INTO settings VALUES('rank_query_type','local')")
+                    c.execute("INSERT INTO central_setting_versions VALUES('rank_query_type',?)", (local,))
+                    c.execute("INSERT INTO column_settings VALUES('stock',1,1,333)")
+                    c.execute("INSERT INTO central_column_setting_versions VALUES('stock',?)", (local,))
+                client = _Client()
+                client.remote = {'app_settings': [{'key': 'rank_query_type', 'document': {
+                    'key': 'rank_query_type', 'value': 'remote', 'updated_at': remote}}],
+                    'app_column_settings': [{'key': 'stock', 'document': {
+                        'column_name': 'stock', 'visible': False, 'position': 2, 'updated_at': remote}}]}
+                service = CentralSettingsSyncService(client)
+                service.sync(path)
+                with closing(sqlite3.connect(path)) as c:
+                    self.assertEqual(c.execute('SELECT value FROM settings').fetchone()[0], expected)
+                    self.assertEqual(c.execute('SELECT visible FROM column_settings').fetchone()[0], expected == 'local')
+                self.assertEqual(service.sync(path), 0)
+
     def test_screen_paths_and_sync_state_are_local_only(self) -> None:
         self.assertFalse(is_shared_setting("window_x"))
         self.assertFalse(is_shared_setting("theme_excel_import_dir"))

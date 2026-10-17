@@ -1,4 +1,4 @@
-"""연구에서 실행할 수 있는 두 전략 Family의 명시적 등록표."""
+"""주도주 구조 돌파와 보존된 비교 전략 Family의 명시적 등록표."""
 
 from __future__ import annotations
 
@@ -21,9 +21,24 @@ from kiwoom_monitor.application.pullback_reacceleration_strategy import (
     PullbackReaccelerationConfig,
     evaluate_pullback_reacceleration_bar,
 )
+from kiwoom_monitor.application.leader_breakout import (
+    POLICY_ID as LEADER_BREAKOUT_FAMILY_ID, LeaderBreakoutConfig, evaluate_leader_breakout_bar,
+)
 
 
 BREAKOUT_FAMILY_ID = f"{BREAKOUT_STRATEGY_ID}/{BREAKOUT_STRATEGY_VERSION}"
+
+# Presentation metadata only. Keep the historical execution contracts and IDs intact.
+RESEARCH_FAMILY_LABELS: Mapping[str, str] = MappingProxyType({
+    LEADER_BREAKOUT_FAMILY_ID: "주도주 구조 돌파 · 실시간 0B / 연구 분봉",
+    BREAKOUT_FAMILY_ID: "완료봉 고가 돌파 v1 · 기존 비교 실험",
+    PULLBACK_FAMILY_ID: "눌림 재가속 v1 · 기존 비교 실험",
+})
+RESEARCH_DIRECTION_NOTICE = (
+    "연구 방향: 사용자 주도주 돌파 구상(00 AI 인텔리전스, 미완성 초안). "
+    "기존 완료봉 돌파·눌림 실험은 이 전략의 구현이나 검증 결과가 아닙니다. "
+    "주도주 구조 돌파는 실시간 0B·분봉 연구 경로를 사용하며, 미정 필수 조건은 진입을 차단합니다."
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +52,20 @@ class ResearchFamilyDefinition:
 
 
 FAMILY_REGISTRY: Mapping[str, ResearchFamilyDefinition] = MappingProxyType({
+    LEADER_BREAKOUT_FAMILY_ID: ResearchFamilyDefinition(
+        family_id=LEADER_BREAKOUT_FAMILY_ID, config_type=LeaderBreakoutConfig,
+        evaluate_bar=evaluate_leader_breakout_bar, factor_ids=("leader_structure/v1",),
+        searchable_parameters=frozenset({"minimum_confirmation_observations", "persistence_seconds",
+            "breakout_buffer_bps", "max_data_age_seconds", "signal_valid_seconds", "minimum_turnover_won",
+            "research_turnover_lookback_bars"}),
+        contract={"required_inputs": ("minute_bar/KRX/final_completed", "explicit_leader_structure_evidence"),
+            "live_inputs": ("kiwoom-websocket-0B/KRX", "explicit_current_leader_structure_evidence"),
+            "state_contract": "observation_separate_from_fill_owned_position",
+            "entry_contract": "explicit_leader_structure_cross",
+            "exit_contract": "pinned_absolute_hard_stop_or_structure_invalidation",
+            "size_contract": "explicit_execution_contract_only",
+            "execution_environments": ("replay", "simulation", "mock_0B")},
+    ),
     BREAKOUT_FAMILY_ID: ResearchFamilyDefinition(
         family_id=BREAKOUT_FAMILY_ID,
         config_type=BreakoutStrategyConfig,
@@ -83,6 +112,8 @@ def get_research_family(family_id: str) -> ResearchFamilyDefinition:
 
 def parse_strategy_config(family_id: str, value: Mapping[str, Any]) -> Any:
     definition = get_research_family(family_id)
+    if definition.config_type is LeaderBreakoutConfig:
+        return LeaderBreakoutConfig.from_dict(value)
     return definition.config_type(**dict(value))
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
@@ -384,7 +386,7 @@ class MinuteTradeValueAggregator:
         recovery_generation: int | None = None,
     ) -> None:
         """REST로 받은 과거 1분봉을 시간순으로 넣어 접속 전 누락분을 보완한다."""
-        now = now or datetime.now()
+        now = now or kst_wall_now()
         current_minute = now.replace(second=0, microsecond=0)
         by_minute = {
             bar.minute: bar for bar in bars if bar.minute.date() == now.date() and bar.minute < current_minute
@@ -450,7 +452,7 @@ class MinuteTradeValueAggregator:
         self._bars[code] = deque(ordered[-self._max_minutes :], maxlen=self._max_minutes)
 
     def today_trade_value_eok(self, code: str, now: datetime | None = None) -> float:
-        today = (now or datetime.now()).date()
+        today = (now or kst_wall_now()).date()
         return sum(bar.trade_value_eok for bar in self._bars.get(code, ()) if bar.minute.date() == today)
 
     def completed_today_trade_value_eok(self, code: str, now: datetime) -> float:

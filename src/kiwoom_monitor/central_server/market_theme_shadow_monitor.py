@@ -1,11 +1,11 @@
-"""Evaluate supplied RAM snapshots on arrival; no database or network polling."""
+"""Shared RAM evaluation with bounded native minute-history reads; no broker polling."""
 from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import math
 import json
@@ -14,9 +14,12 @@ import uuid
 from kiwoom_monitor.application.market_research_features import MarketFeatureParameters, MarketMember, MarketResearchFrame
 from kiwoom_monitor.application.market_theme_shadow import (
     MarketThemeShadowInputs, StockThesisShadowRequest,
+    MarketPriceTradeShadowInputs,
     evaluate_market_theme_shadow, evaluate_stock_thesis_shadow, evaluate_market_theme_shadow_batch, _same_shadow_scope,
+    _attach_price_candidate_value, compute_minute_trade_candidates,
 )
 from kiwoom_monitor.application.theme_leadership import ThemeLeadershipParameters, ThemeLeadershipState
+from kiwoom_monitor.domain.ranking import normalize_stock_code
 from .observation_frame_recovery import drain_thread_call
 
 logger = logging.getLogger(__name__)
@@ -31,7 +34,7 @@ def _copy_shadow_inputs(inputs):
 
     Frozen dataclasses may still contain caller-supplied lists. Only the exact
     frame/member types with tuple members/themes and scalar fields are shared.
-    Every other field, including H2 points/state, retains native deepcopy behavior.
+    Validated immutable 0B point tuples are also shared; mutable state/mappings retain the copy fence.
     """
     if not isinstance(inputs, MarketThemeShadowInputs):
         return deepcopy(inputs)
@@ -204,6 +207,7 @@ class MarketThemeShadowMonitor:
         self._retry_seconds = retry_seconds
         self._state = None
         self._result = None
+        self._market_changes_receipt = None
         self._pending = None
         self._last_offered = None
         self._last_error = ""
@@ -258,7 +262,7 @@ class MarketThemeShadowMonitor:
             inputs.theme_membership is not None and inputs.theme_membership.theme_id != self._theme_id
         ):
             raise ValueError("RAM inputs belong to another monitor theme or venue")
-        if (len(inputs.market_frames) > 1000 or len(inputs.second_points) > 10000 or
+        if (len(inputs.market_frames) > 1000 or len(inputs.second_points) + len(getattr(inputs, "observation_points", ())) > 10000 or
             len(inputs.upper_limits) > 200 or any(len(frame.members) > 20 for frame in inputs.market_frames) or
             (inputs.theme_membership is not None and len(inputs.theme_membership.member_codes) > 200)):
             raise ValueError("RAM shadow snapshot exceeds the input budget")
@@ -318,6 +322,7 @@ class MarketThemeShadowMonitor:
         next_state = ThemeLeadershipState(**state) if state is not None else None
         self._state = next_state
         self._result = result
+        self._market_changes_receipt = None
         self._evaluations += 1
         self._last_error = ""
 
@@ -353,13 +358,15 @@ class MarketThemeShadowMonitor:
             self._closed = True
 
 
-async def run_market_theme_shadow_monitors_once(monitors):
+async def run_market_theme_shadow_monitors_once(monitors, *, include_market_changes=False):
     """Share identical cut/scope/parameters/previous-state calculation for one round.
 
     Uses each monitor's existing pending slot and iteration ownership; no worker,
     store or cross-round cache is introduced. Result/error slots follow input order.
     """
     monitors = tuple(monitors)
+    if type(include_market_changes) is not bool:
+        raise ValueError("include_market_changes must be boolean")
     if not 1 <= len(monitors) <= 32 or len({id(m) for m in monitors}) != len(monitors):
         raise ValueError("shared RAM shadow calculation requires 1..32 distinct monitors")
     if any(not isinstance(m, MarketThemeShadowMonitor) for m in monitors):
@@ -370,7 +377,7 @@ async def run_market_theme_shadow_monitors_once(monitors):
             await locks.enter_async_context(monitor._iteration_lock)
         if any(m._closing or m._closed or (m._task is not None and not m._task.done()) for m in monitors):
             raise RuntimeError("individual shadow workers must stop and monitors must be open")
-        taken, groups, outcomes = {}, [], {}
+        taken, groups, outcomes, observations = {}, [], {}, {}
         for index, monitor in enumerate(monitors):
             inputs = monitor._pending
             if inputs is None:
@@ -390,12 +397,16 @@ async def run_market_theme_shadow_monitors_once(monitors):
             try:
                 for (inputs, market_parameters, leadership_parameters), indices in groups:
                     try:
+                        changes = [] if include_market_changes else None
                         results = evaluate_market_theme_shadow_batch(
                             inputs, tuple(monitors[i]._stock_thesis for i in indices),
                             market_parameters=market_parameters, leadership_parameters=leadership_parameters,
                             _market_cache=market_cache,
+                            **({"_observed_changes": changes} if changes is not None else {}),
                         )
                         outcomes.update(zip(indices, results))
+                        if changes:
+                            observations.update((index, deepcopy(changes[0])) for index in indices)
                     except Exception as error:
                         outcomes.update((index, error) for index in indices)
             finally:
@@ -418,6 +429,8 @@ async def run_market_theme_shadow_monitors_once(monitors):
                     if isinstance(result, Exception):
                         raise result
                     monitor._publish_result(result)
+                    monitor._market_changes_receipt = ((monitor._result, observations[index])
+                                                       if index in observations else None)
                     report["evaluated"].append(index)
                 except Exception as error:
                     monitor._last_error = f"{type(error).__name__}: {error}"
@@ -510,6 +523,10 @@ class MarketThemeShadowRuntime:
         self._record_writes = self._record_attempts = self._record_coalesced = 0
         self._session_id = uuid.uuid4().hex
         self._source_provenance = {}
+        self._market_minute_cache = None
+        self._market_minute_reads = 0
+        self._market_minute_read_task = None
+        self._market_minute_targets = {}
         self._dropped = 0
         self._retention = max((2 * m._leadership_parameters.window_seconds for m in monitors), default=1)
         if self._allocation is not None:self._retention=max(self._retention,self._allocation['policy'].capacity_window_seconds)
@@ -541,7 +558,7 @@ class MarketThemeShadowRuntime:
     @property
     def latest_results(self):
         """Copied bounded live results; shared context appears once in the envelope."""
-        contexts, results, coverage, provenance = {}, [], {}, {}
+        contexts, results, coverage, provenance, changes = {}, [], {}, {}, {}
         for index, monitor in enumerate(self._monitors):
             result = monitor.last_result
             if result is None:
@@ -559,11 +576,53 @@ class MarketThemeShadowRuntime:
                             "status": monitor.status,
                             "context_ref": ref,
                             "decision": result if monitor._stock_thesis is not None else None})
+            receipt = monitor._market_changes_receipt
+            if receipt is not None and receipt[0] is monitor._result:
+                observation = deepcopy(receipt[1])
+                change_ref = observation["revision_id"]
+                # Expire the projection only; the original evidence/lease is retained.
+                expires = observation.get("expires_at")
+                if observation.get("observed_at") and expires and datetime.fromisoformat(expires) <= self._collector._now_provider():
+                    observation = {**observation, "pattern": "UNKNOWN", "candidates": (), "changes": {},
+                        "lookup_change": {**(observation.get("lookup_change") or {}), "state": "UNKNOWN"},
+                        "rank_price_trade_relation": {"lookup_first_is_candidate": None,
+                            "rank_changed_candidate_retained": False, "candidate_changed_rank_retained": False},
+                        "projection": "expired",
+                        "classification": None, "theme_evidence": {"status": "STALE"},
+                        "quality": {**observation["quality"], "status": "STALE",
+                            "reasons": tuple(dict.fromkeys((*observation["quality"].get("reasons", ()),
+                                                           "market_frame_stale")))}}
+                price = observation.get("price_trade_leadership")
+                if (price and price["quality"]["status"] == "COMPLETE"
+                        and datetime.fromisoformat(price["expires_at"]) <= self._collector._now_provider()):
+                    observation["price_trade_leadership"] = {**price, "state": "UNKNOWN", "projection": "expired",
+                        "current_candidates": (), "previous_candidates": (), "retained_candidates": (),
+                        "entered_candidates": (), "left_candidates": (),
+                        **({"five_minute_confirmation": {"status": "UNAVAILABLE", "confirmed_candidates": ()}}
+                           if price.get("primary_timeframe") == "1m" else {}),
+                        **({"timeframes": {key: {**frame, "state": "UNKNOWN", "projection": "expired",
+                            "current_candidates": (), "previous_candidates": (), "retained_candidates": (),
+                            "entered_candidates": (), "left_candidates": (),
+                            "quality": {**frame["quality"], "status": "STALE"}}
+                            for key, frame in price.get("timeframes", {}).items()}}
+                           if price.get("primary_timeframe") == "1m" else {}),
+                        "quality": {**price["quality"], "status": "STALE", "reasons": ("price_trade_observation_expired",)}}
+                    observation["rank_price_trade_relation"] = {"lookup_first_is_candidate": None,
+                        "rank_changed_candidate_retained": False, "candidate_changed_rank_retained": False}
+                auxiliary = observation.get("second_trade_auxiliary")
+                if (auxiliary and auxiliary["quality"]["status"] == "COMPLETE"
+                        and datetime.fromisoformat(auxiliary["expires_at"]) <= self._collector._now_provider()):
+                    observation["second_trade_auxiliary"] = {**auxiliary, "state": "UNKNOWN", "projection": "expired",
+                        "current_candidates": (), "quality": {**auxiliary["quality"], "status": "STALE"}}
+                changes[change_ref] = observation
+                results[-1]["market_observed_changes_ref"] = change_ref
         envelope = {"schema": "ram-shadow-diagnostics/v1", "session_id": self._session_id,
                 "coverage": "latest_snapshot", "contexts": contexts, "results": results,
                 "source_coverage": coverage, "input_provenance": provenance,
                 "source_durability": "not_verified", "replay_eligible": False,
                 "order_authorized": False}
+        if changes:
+            envelope["market_observed_changes"] = changes
         if self._position_account_source is not None:
             envelope["position_comparison"] = deepcopy(self._position_receipt)
         elif self._position_comparison is not None:
@@ -647,6 +706,10 @@ class MarketThemeShadowRuntime:
                                            key=datetime.fromisoformat)
         if self._allocation_receipt and self._allocation_receipt.get('decision_time'):
             snapshot['selected_at']=max(snapshot['selected_at'],self._allocation_receipt['decision_time'],key=datetime.fromisoformat)
+        if len(json.dumps(snapshot, ensure_ascii=False).encode("utf-8")) > 1024 * 1024:
+            snapshot.pop("market_observed_changes", None)
+            for slot in snapshot["results"]:
+                slot.pop("market_observed_changes_ref", None)
         if len(json.dumps(snapshot, ensure_ascii=False).encode("utf-8")) > 1024 * 1024:
             # Optional diagnostic metadata must not displace a previously valid
             # selected decision at the existing recording budget boundary.
@@ -872,7 +935,19 @@ class MarketThemeShadowRuntime:
                 and row['position_study']['study'].version in {'position-action-study/v3','position-action-study/v4'}
                 for row in self._allocation_models['rows'].values()):
             kwargs['include_closed_minutes']=True
-        snapshot = self._collector.ram_observation_snapshot(None if all_sources else self._codes(), seconds=self._retention,**kwargs)
+        codes = self._codes()
+        # Retain the existing sources first; read already collected TOP20 RAM only
+        # within the same 200-code budget. This adds no REG or collector owner.
+        market_codes = set()
+        cutoff = self._collector._now_provider()
+        for _, context in self._bindings:
+            eligible = [frame for frame in context.market_frames if frame.venue == context.market_venue
+                        and frame.window == context.market_window and datetime.fromisoformat(frame.available_at) <= cutoff]
+            if eligible:
+                frame = max(eligible, key=lambda value: (datetime.fromisoformat(value.available_at), value.revision_id))
+                market_codes.update(normalize_stock_code(row.code) for row in frame.members)
+        codes = (*codes, *sorted(market_codes - set(codes))[:max(0, 200 - len(codes))])
+        snapshot = self._collector.ram_observation_snapshot(None if all_sources else codes, seconds=self._retention,**kwargs)
         self._snapshot_reads += 1
         dropped = self._subscriber.dropped_events if self._subscriber else self._dropped
         snapshot["collector_gap_at"] = snapshot["gap_at"]
@@ -885,17 +960,146 @@ class MarketThemeShadowRuntime:
             snapshot["generation"] = f"{snapshot['generation']}:delivery-{self._dropped}"
         snapshot["delivery_gap_at"] = self._consumer_gap_at
         snapshot["dropped_events"] = self._dropped
+        if snapshot.get('input_resolution') == '0B':
+            from .market_theme_shadow_inputs import prepare_ram_trade_observations
+            snapshot['_trade_cut'] = prepare_ram_trade_observations(snapshot)
         return snapshot
 
-    async def _dispatch(self, snapshot):
-        from .market_theme_shadow_inputs import market_theme_shadow_inputs_from_ram
-        self._pending_context = False
-        prepared, offered = [], {}
+    def _market_minute_key(self, snapshot):
+        """Existing native live-minute reader, shared per minute/cohort/commit.
+
+        Only closed 10-minute history is cached in this runtime owner, using
+        its single owned reader task and existing Collector read boundary.
+        No minute accumulators, writers or subscriptions are added.
+        """
+        cutoff = datetime.fromisoformat(snapshot["decision_time"])
+        end = (cutoff - timedelta(seconds=2)).replace(second=0, microsecond=0)
+        wanted = set()
         for monitor, context in self._bindings:
-            key = (context, monitor._leadership_parameters.window_seconds)
+            frames = [frame for frame in context.market_frames if frame.venue == context.market_venue
+                and frame.window == context.market_window and datetime.fromisoformat(frame.available_at) <= cutoff]
+            if frames:
+                frame = max(frames, key=lambda value: (datetime.fromisoformat(value.available_at), value.revision_id))
+                if (len(frame.members) == 20 and frame.capture_quality == "complete"
+                        and frame.trading_date == cutoff.astimezone(timezone(timedelta(hours=9))).date().isoformat()
+                        and cutoff < datetime.fromisoformat(frame.available_at) + timedelta(seconds=monitor._market_parameters.max_gap_seconds)):
+                    wanted.update((normalize_stock_code(row.code), context.leadership_venue) for row in frame.members)
+        wanted = tuple(sorted(wanted))[:200]
+        commits = getattr(self._collector, "_save_success_at", {})
+        # A late native close/commit refreshes the bounded read without a timer,
+        # retry loop or changes to any writer's receipt/transaction ownership.
+        key = (cutoff.astimezone(timezone(timedelta(hours=9))).date().isoformat(), end, wanted,
+               commits.get("minute_bars"), commits.get("minute_finalizations"))
+        return key
+
+
+    async def _market_minutes(self, snapshot, *, key=None):
+        key = key or self._market_minute_key(snapshot)
+        end, wanted = key[1:3]
+        if self._market_minute_cache is not None and self._market_minute_cache[0] == key:
+            return self._market_minute_cache[1:]
+        rows, errors = [], {}
+        for code, venue in wanted:
+            try:
+                loaded = await self._collector.load_live_minute_bars(code, key[0], venue)
+                self._market_minute_reads += 1
+                for row in loaded or ():
+                    at = datetime.fromisoformat(f"{row['trading_date']}T{row['minute']}").replace(tzinfo=timezone(timedelta(hours=9)))
+                    if end - timedelta(minutes=10) <= at < end:
+                        rows.append(deepcopy(row))
+            except Exception as error:
+                errors[(code, venue)] = type(error).__name__
+        self._market_minute_cache = (key, tuple(rows), errors)
+        return tuple(rows), errors
+
+
+    async def _read_market_minute_history(self, snapshot, key):
+        try:
+            await self._market_minutes(snapshot, key=key)
+        except Exception as error:
+            self._market_minute_cache = (key, (), {source: type(error).__name__ for source in key[2]})
+        if not self._closing:
+            self._attach_ready_market_minutes()
+
+
+    def _attach_ready_market_minutes(self):
+        """Refresh only minute sidecars; never re-evaluate or delay protection."""
+        from .market_theme_shadow_inputs import market_minute_trade_inputs_from_rows
+        cache = self._market_minute_cache
+        if cache is None:
+            return
+        calculated = []
+        for monitor, (core, inputs, token) in tuple(self._market_minute_targets.items()):
+            receipt = monitor._market_changes_receipt
+            if token is cache or monitor._result is not core or receipt is None or receipt[0] is not core:
+                continue
+            try:
+                old = inputs.market_minute_trade_inputs
+                rows = (*(old.rows if old is not None else ()), *cache[1])
+                minute_inputs = market_minute_trade_inputs_from_rows({"decision_time": inputs.decision_time}, inputs, rows,
+                    max_membership_age_seconds=monitor._market_parameters.max_gap_seconds)
+                error = next((value for (code, venue), value in cache[2].items() if minute_inputs is not None
+                    and code in minute_inputs.member_codes and venue == minute_inputs.venue), "")
+                scope = (inputs.decision_time, minute_inputs, error, monitor._market_parameters.top_k)
+                found = next((value for key, value in calculated if _same_shadow_scope(key, scope)), None)
+                if found is None:
+                    if error or minute_inputs is None:
+                        raise ValueError("minute_history_unavailable")
+                    found = compute_minute_trade_candidates(minute_inputs, as_of=datetime.fromisoformat(inputs.decision_time),
+                        top_k=monitor._market_parameters.top_k)
+                    found["published_at"] = self._collector._now_provider().isoformat()
+                    calculated.append((scope, found))
+            except Exception as error:
+                found = {"policy_version": "minute-price-trade-candidates/v1", "primary_timeframe": "1m", "state": "UNKNOWN",
+                    "expires_at": inputs.decision_time, "quality": {"status": "UNAVAILABLE",
+                    "reasons": ("minute_history_unavailable",), "error_type": type(error).__name__},
+                    "order_authorized": False}
+            observation = deepcopy(receipt[1])
+            _attach_price_candidate_value(observation, found)
+            monitor._market_changes_receipt = (core, observation)
+            self._market_minute_targets[monitor] = (core, inputs, cache)
+
+
+    async def _dispatch(self, snapshot):
+        from .market_theme_shadow_inputs import market_theme_shadow_inputs_from_ram, market_price_trade_inputs_from_ram, market_minute_trade_inputs_from_rows
+        # Keep existing minute context beside the shared individual 0B cut.
+        # The owned read never blocks H1/H2, account or protective evaluation.
+        key = self._market_minute_key(snapshot)
+        if not key[2] or self._collector._store is None:
+            self._market_minute_cache = (key, (), {})
+        elif (not self._closing and (self._market_minute_cache is None or self._market_minute_cache[0] != key)
+                and (self._market_minute_read_task is None or self._market_minute_read_task.done())):
+            self._market_minute_read_task = asyncio.create_task(self._read_market_minute_history(snapshot, key), name="market-minute-history-read")
+        token = self._market_minute_cache
+        minute_rows, minute_errors = token[1:] if token is not None else ((), {})
+        self._pending_context = False
+        prepared, offered, price_scopes = [], {}, []
+        for monitor, context in self._bindings:
+            key = (context, monitor._leadership_parameters.window_seconds, monitor._leadership_parameters.max_data_age_seconds,
+                   monitor._market_parameters.max_gap_seconds)
             cached = next((value for scope, value in prepared if scope == key), None)
             if cached is None:
                 cached = market_theme_shadow_inputs_from_ram(snapshot, context, window_seconds=key[1])
+                price_scope = (context.market_venue, context.market_window, context.market_frames, context.leadership_venue,
+                               key[1], key[2], key[3])
+                found = next((value for scope, value in price_scopes if _same_shadow_scope(scope, price_scope)), None)
+                if found is None:
+                    try:
+                        found = (market_price_trade_inputs_from_ram(snapshot, context, window_seconds=key[1],
+                            max_data_age_seconds=key[2], max_membership_age_seconds=key[3]), "")
+                    except Exception as error:
+                        found = (None, type(error).__name__)
+                    price_scopes.append((price_scope, found))
+                try:
+                    minute_inputs = (market_minute_trade_inputs_from_rows(snapshot, context, minute_rows,
+                        max_membership_age_seconds=key[3]) if token is not None else None)
+                    minute_error = next((error for (code, venue), error in minute_errors.items()
+                        if minute_inputs is not None and code in minute_inputs.member_codes and venue == minute_inputs.venue), "")
+                except Exception as error:
+                    minute_inputs, minute_error = None, type(error).__name__
+                cached = MarketPriceTradeShadowInputs(**{**vars(cached), "market_price_trade_inputs": found[0],
+                    "market_price_trade_input_error": found[1], "market_primary_timeframe": "1m",
+                    "market_minute_trade_inputs": minute_inputs, "market_minute_trade_input_error": minute_error})
                 prepared.append((key, cached))
             await monitor.offer_inputs(cached)
             offered[monitor] = cached
@@ -903,7 +1107,7 @@ class MarketThemeShadowRuntime:
         before = tuple(monitor._result for monitor in self._monitors)
         source = self._source_coverage(snapshot, offered)
         try:
-            report = (await run_market_theme_shadow_monitors_once(self._monitors) if self._monitors
+            report = (await run_market_theme_shadow_monitors_once(self._monitors, include_market_changes=True) if self._monitors
                       else {"evaluated": [], "errors": {}, "results": ()})
         finally:
             # The existing shared executor publishes successful slots even while
@@ -926,10 +1130,12 @@ class MarketThemeShadowRuntime:
                     "theme_revision_id": membership.revision_id if membership else None,
                     "member_codes": list(membership.member_codes) if membership else [],
                     "leadership_venue": inputs.leadership_venue,
-                    "second_point_count": len(inputs.second_points),
+                    "observation_count": len(getattr(inputs,"observation_points",())), "input_resolution": "0B",
                     "supplied_market_frame_refs": [frame.revision_id for frame in inputs.market_frames],
                     "supplied_upper_limit_refs": [limit.input_ref for limit in inputs.upper_limits]}
                 self._source_provenance[index] = (result, provenance, source)
+                self._market_minute_targets[monitor] = (result, inputs, token)
+            self._attach_ready_market_minutes()
         await self._refresh_position_inputs(snapshot, tuple(offered.values()))
         self._select_record()
         return report
@@ -1079,6 +1285,7 @@ class MarketThemeShadowRuntime:
             return value.isoformat() if value is not None else None
         return {"version": "ram-source-coverage/v1", "coverage_ref": f"ram-coverage:{uuid.uuid4().hex}",
             "source_id": snapshot["source_id"], "source_generation": snapshot["generation"],
+            "input_resolution": snapshot.get('input_resolution','seconds'),
             "decision_time": snapshot["decision_time"],
             "retention_since": stamp(snapshot["retention_since"]),
             "collector_gap_at": stamp(snapshot.get("collector_gap_at", snapshot["gap_at"])),
@@ -1166,6 +1373,8 @@ class MarketThemeShadowRuntime:
                     await self._task
                 except asyncio.CancelledError:
                     pass
+            if self._market_minute_read_task is not None:
+                await join_owned_close(self._market_minute_read_task)
             if snapshot is not None:
                 await self._refresh_sources(datetime.fromisoformat(snapshot["decision_time"]).timestamp(), ranking_snapshots=ranking_snapshots)
                 await self._dispatch(snapshot)
@@ -1194,6 +1403,9 @@ class MarketThemeShadowRuntime:
                     if self._retention_owned:
                         self._collector.set_ram_observation_retention(0, owner=self)
                     self._task = self._subscriber = self._record_task = None
+                    self._market_minute_cache = None
+                    self._market_minute_read_task = None
+                    self._market_minute_targets.clear()
                     self._closed = True
 
 

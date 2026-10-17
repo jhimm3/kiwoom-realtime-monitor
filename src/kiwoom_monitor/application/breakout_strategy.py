@@ -1,10 +1,10 @@
-"""첫 KRX 완료봉 돌파 Family의 결정론적 판단과 상태 계약."""
+"""KRX 완료봉 Family와 별도 0B RAM 돌파 후보의 순수 판단 계약."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Protocol
 
@@ -23,6 +23,7 @@ from kiwoom_monitor.application.research_replay import (
     CandidateUniverseFrame,
     KrxMinuteBarFrame,
 )
+from kiwoom_monitor.application.theme_leadership import second_trade_points_from_rows
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 from kiwoom_monitor.application.market_session_schedule import (
     KST, krx_regular_session_hours, krx_closing_auction_hours,
@@ -82,6 +83,9 @@ def regular_session_time_rejection(at: datetime) -> str:
 
 def session_entry_time_rejection(config: StrategyRuntimeConfig, at: datetime, *,
                                  include_signal_validity: bool = True) -> str:
+    from .leader_breakout import LeaderBreakoutConfig, leader_session_entry_rejection
+    if isinstance(config, LeaderBreakoutConfig):
+        return leader_session_entry_rejection(config, at)
     if not config.session_exit_policy:
         return ""
     reason = regular_session_time_rejection(at)
@@ -598,3 +602,215 @@ def _aware_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("strategy timestamps must be timezone-aware")
     return parsed
+
+
+REALTIME_BREAKOUT_POLICY = "observed_window_high_breakout/v1"
+REALTIME_BREAKOUT_CAPABILITIES = (
+    "approved_krx_0b", "ram_second_price_trade_value", "ram_window_continuity",
+)
+
+
+@dataclass(frozen=True)
+class RealtimeBreakoutPolicy:
+    """Explicit research settings, independent of the completed-minute Family."""
+
+    window_seconds: int
+    buffer_bps: int
+    minimum_trade_value_won: int
+    max_data_age_seconds: int
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not int for value in asdict(self).values()):
+            raise ValueError("realtime breakout settings must be integers")
+        if not 1 <= self.window_seconds <= 30 or not 0 <= self.buffer_bps < 10_000:
+            raise ValueError("realtime window/buffer is outside the supported budget")
+        if self.minimum_trade_value_won <= 0 or self.max_data_age_seconds <= 0:
+            raise ValueError("explicit positive turnover and freshness limits are required")
+
+
+@dataclass(frozen=True)
+class RealtimeBreakoutState:
+    symbol: str
+    source_id: str
+    generation: int | str
+    parameters_hash: str
+    status: str = "WATCH"
+    episode_id: str = ""
+    reference_high: int | None = None
+    last_cut: str = ""
+    reference_input_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status not in {"WATCH", "CANDIDATE", "INVALIDATED", "DATA_BLOCKED"}:
+            raise ValueError("unsupported realtime breakout state")
+        if self.status == "CANDIDATE" and (not self.episode_id or not self.reference_high):
+            raise ValueError("candidate state requires fixed episode evidence")
+
+
+@dataclass(frozen=True)
+class RealtimeBreakoutEvaluation:
+    decision_id: str
+    policy_id: str
+    as_of: str
+    observed_at: str
+    available_at: str
+    valid_until: str
+    status: str
+    proposal: str
+    reasons: tuple[str, ...]
+    required_data_capabilities: tuple[str, ...]
+    missing_data_capabilities: tuple[str, ...]
+    input_refs: tuple[str, ...]
+    reference_high: int | None
+    observed_price: int | None
+    current_trade_value_won: int | None
+    new_candidate: bool
+    state: RealtimeBreakoutState
+    order_authorized: bool = False
+
+    def __post_init__(self) -> None:
+        if self.order_authorized:
+            raise ValueError("realtime entry research cannot authorize orders")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def evaluate_realtime_breakout(
+    snapshot: Mapping[str, Any], *, symbol: str, policy: RealtimeBreakoutPolicy,
+    state: RealtimeBreakoutState | None = None,
+) -> RealtimeBreakoutEvaluation:
+    """Consume one existing Collector RAM cut, with no IO or market/EV calculation.
+
+    Windows are (cut-2W, cut-W] for the high and (cut-W, cut] for
+    current turnover/price. Empty seconds are not fabricated as trades.
+    A candidate's high remains fixed until invalidation or data discontinuity.
+    """
+    code = normalize_stock_code(symbol)
+    cut = _aware_datetime(snapshot["decision_time"])
+    source_id, generation = snapshot["source_id"], snapshot["generation"]
+    # The shared Runtime appends a delivery-gap fence to the Collector integer.
+    # Keep that identity opaque instead of dropping the consumer discontinuity.
+    valid_generation = ((type(generation) is int and generation >= 0)
+                        or (type(generation) is str and 0 < len(generation) <= 128))
+    if (not code or not isinstance(source_id, str) or not source_id
+            or not valid_generation or snapshot["durable"] is not False):
+        raise ValueError("realtime breakout requires an identified ephemeral RAM cut")
+    parameters_hash = _content_id(REALTIME_BREAKOUT_POLICY, asdict(policy))
+    if state is not None and (state.symbol != code or state.parameters_hash != parameters_hash):
+        raise ValueError("realtime state belongs to another symbol or policy settings")
+    same_source = state is not None and (state.source_id, state.generation) == (source_id, generation)
+    before = state if same_source else RealtimeBreakoutState(code, source_id, generation, parameters_hash)
+    start = cut - timedelta(seconds=2 * policy.window_seconds)
+    middle = cut - timedelta(seconds=policy.window_seconds)
+    refs: tuple[str, ...] = ()
+    reference_refs: tuple[str, ...] = ()
+    observed_at = available_at = valid_until = ""
+
+    def result(status, reason, *, missing=(), high=None, price=None, turnover=None,
+               episode="", new=False, preserve=False):
+        after = (
+            before if reason == "out_of_order_cut" else replace(before, last_cut=cut.isoformat())
+        ) if preserve else RealtimeBreakoutState(
+            code, source_id, generation, parameters_hash, status, episode, high, cut.isoformat(),
+            reference_refs,
+        )
+        body = dict(
+            policy_id=REALTIME_BREAKOUT_POLICY, as_of=cut.isoformat(),
+            observed_at=observed_at, available_at=available_at, valid_until=valid_until, status=status,
+            proposal="ENTER" if status == "CANDIDATE" else "WAIT", reasons=(reason,),
+            required_data_capabilities=REALTIME_BREAKOUT_CAPABILITIES,
+            missing_data_capabilities=tuple(missing), input_refs=tuple(dict.fromkeys((*reference_refs, *refs))),
+            reference_high=high, observed_price=price, current_trade_value_won=turnover,
+            new_candidate=new, state=asdict(after), order_authorized=False,
+        )
+        return RealtimeBreakoutEvaluation(
+            decision_id=_content_id("realtime-breakout", body), **{**body, "state": after},
+        )
+
+    if state is not None and state.last_cut and cut < _aware_datetime(state.last_cut):
+        # A delayed callback may not rewind a later episode, even across a reconnect.
+        before = state
+        return result("DATA_BLOCKED", "out_of_order_cut", preserve=True)
+    if (code, "KRX") not in snapshot["approved_sources"]:
+        return result("DATA_BLOCKED", "krx_source_not_approved", missing=("approved_krx_0b",))
+    floors = (snapshot["continuous_from"].get((code, "KRX")), snapshot["retention_since"])
+    if any(value is None for value in floors):
+        return result("DATA_BLOCKED", "ram_window_not_warmed_up", missing=("ram_window_continuity",))
+    bounds = (*floors, snapshot.get("gap_at"))
+    if any(value is not None and _aware_datetime(value) > start for value in bounds):
+        return result("DATA_BLOCKED", "ram_window_not_continuous", missing=("ram_window_continuity",))
+    if regular_session_time_rejection(cut) or regular_session_time_rejection(start):
+        return result("WATCH", "outside_regular_continuous_session")
+    if start.astimezone(KST).date() != cut.astimezone(KST).date():
+        return result("DATA_BLOCKED", "window_crosses_session_date", missing=("ram_window_continuity",))
+
+    # Reuse the H2 row/point contract, but do not require membership or H1/H2 scores.
+    rows = []
+    for row in snapshot["rows"]:
+        if normalize_stock_code(row.get("code", "")) != code or row.get("market") != "KRX":
+            continue
+        # Apply the information cut before validating payload values: an unavailable
+        # future payload must not turn a valid past decision into DATA_BLOCKED.
+        try:
+            raw_available = row.get("available_at")
+            available = (datetime.fromtimestamp(raw_available, timezone.utc)
+                         if isinstance(raw_available, (int, float)) else _aware_datetime(raw_available))
+            if available > cut:
+                continue
+            observed = datetime.fromisoformat(
+                f"{row.get('trading_date', '')}T{row.get('trade_second', '')}"
+            ).replace(tzinfo=KST)
+            if not start < observed <= cut:
+                continue
+        except (TypeError, ValueError, OverflowError, OSError):
+            return result("DATA_BLOCKED", "invalid_second_trade_row", missing=("ram_second_price_trade_value",))
+        rows.append(row)
+    if len(rows) > 61:
+        return result("DATA_BLOCKED", "ram_second_rows_exceed_budget", missing=("ram_second_price_trade_value",))
+    points = second_trade_points_from_rows(
+        {**row, "revision_id": f"ram:{source_id}:{generation}:{_content_id('second-trade', row)}"}
+        for row in rows
+    )
+    if len(points) != len(rows) or any(point.high < point.close for point in points):
+        return result("DATA_BLOCKED", "invalid_second_trade_row", missing=("ram_second_price_trade_value",))
+    eligible = tuple(point for point in points
+                     if start < _aware_datetime(point.observed_at) <= cut
+                     and _aware_datetime(point.available_at) <= cut)
+    refs = tuple(point.input_ref for point in eligible)
+    if len({_aware_datetime(point.observed_at) for point in eligible}) != len(eligible):
+        return result("DATA_BLOCKED", "duplicate_second_trade_row", missing=("ram_second_price_trade_value",))
+    previous = tuple(point for point in eligible if _aware_datetime(point.observed_at) <= middle)
+    current = tuple(point for point in eligible if _aware_datetime(point.observed_at) > middle)
+    if not current or (not previous and before.status != "CANDIDATE"):
+        return result("DATA_BLOCKED", "observed_window_price_missing", missing=("ram_second_price_trade_value",))
+    latest = current[-1]
+    observed_at, available_at = latest.observed_at, latest.available_at
+    valid_until = (min(_aware_datetime(observed_at), _aware_datetime(available_at))
+                   + timedelta(seconds=policy.max_data_age_seconds)).isoformat()
+    if any((cut - _aware_datetime(at)).total_seconds() > policy.max_data_age_seconds
+           for at in (latest.observed_at, latest.available_at)):
+        return result("DATA_BLOCKED", "observed_price_stale_or_delayed", missing=("ram_second_price_trade_value",))
+    price = latest.close
+    turnover = sum(point.trade_value_won for point in current)
+    high = before.reference_high if before.status == "CANDIDATE" else max(point.high for point in previous)
+    reference_refs = (before.reference_input_refs if before.status == "CANDIDATE"
+                      else tuple(point.input_ref for point in previous))
+    assert high is not None
+    if before.status == "CANDIDATE" and price <= high:
+        return result("INVALIDATED", "fixed_breakout_structure_lost", high=high,
+                      price=price, turnover=turnover, episode=before.episode_id)
+    above = price * 10_000 > high * (10_000 + policy.buffer_bps)
+    reason = "observed_high_not_broken" if not above else "current_turnover_below_threshold"
+    if not above or turnover < policy.minimum_trade_value_won:
+        # This is entry eligibility only; it never emits an EXIT for held positions.
+        return result("WATCH", reason, high=high, price=price, turnover=turnover,
+                      preserve=before.status == "CANDIDATE")
+    new = before.status != "CANDIDATE"
+    episode = before.episode_id if not new else _content_id("realtime-breakout-episode", {
+        "symbol": code, "source_id": source_id, "generation": generation,
+        "parameters_hash": parameters_hash, "as_of": cut.isoformat(), "input_refs": refs,
+        "reference_high": high,
+    })
+    return result("CANDIDATE", "observed_high_and_turnover_confirmed" if new else "candidate_condition_unchanged",
+                  high=high, price=price, turnover=turnover, episode=episode, new=new)

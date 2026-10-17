@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import hashlib
 import json
 from dataclasses import dataclass
@@ -237,11 +239,11 @@ class JournalEnrichmentService:
     ) -> bool:
         if task.state in {"complete", "unavailable", "cancelled", "running"}:
             return False
-        current = now or datetime.now()
+        current = now or kst_wall_now()
         return force or task.next_retry_at is None or task.next_retry_at <= current
 
     def start(self, task_id: str, now: datetime | None = None, *, force: bool = False) -> bool:
-        current = now or datetime.now()
+        current = now or kst_wall_now()
         task = self._repository.load_enrichment_task(task_id)
         if task is None or not self.can_start(task, current, force=force):
             return False
@@ -266,7 +268,7 @@ class JournalEnrichmentService:
         reason: str,
         now: datetime | None = None,
     ) -> bool:
-        current = now or datetime.now()
+        current = now or kst_wall_now()
         return self._repository.transition_enrichment_task(
             task_id,
             expected_states=("running",),
@@ -278,7 +280,7 @@ class JournalEnrichmentService:
         )
 
     def fail(self, task_id: str, error: str, now: datetime | None = None) -> bool:
-        current = now or datetime.now()
+        current = now or kst_wall_now()
         task = self._repository.load_enrichment_task(task_id)
         if task is None or task.state != "running":
             return False
@@ -303,13 +305,13 @@ class JournalEnrichmentService:
             task_id,
             expected_states=("running",),
             state="unavailable",
-            now=now or datetime.now(),
+            now=now or kst_wall_now(),
             result=result or {},
             error=reason,
         )
 
     def recover_interrupted(self, now: datetime | None = None) -> int:
-        return self._repository.recover_running_enrichment_tasks(now or datetime.now())
+        return self._repository.recover_running_enrichment_tasks(now or kst_wall_now())
 
     def _finish(
         self,
@@ -323,7 +325,7 @@ class JournalEnrichmentService:
             task_id,
             expected_states=("running",),
             state=state,
-            now=now or datetime.now(),
+            now=now or kst_wall_now(),
             result=result,
         )
 
@@ -374,7 +376,7 @@ def journal_analysis_revision(
         fingerprint,
         analysis_version,
         dict(normalized_content),
-        (now or datetime.now()).replace(microsecond=0),
+        (now or kst_wall_now()).replace(microsecond=0),
         account_scope,
         canonical_scope,
     )
@@ -415,7 +417,7 @@ def journal_research_link(
         entry_thesis_id,
         evidence_timing,
         available_at,
-        (now or datetime.now()).replace(microsecond=0),
+        (now or kst_wall_now()).replace(microsecond=0),
         account_scope,
         canonical_scope,
     )

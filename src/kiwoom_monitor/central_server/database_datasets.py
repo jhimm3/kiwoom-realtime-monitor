@@ -83,6 +83,7 @@ class SQLiteDatasetStoreMixin:
                     if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
                         _append_sqlite_observation_revision(
                             connection, kind, subject, snapshot_key, payload, observation,
+                            now_provider=self._now_provider,
                         )
 
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]:
@@ -230,6 +231,7 @@ class PostgresDatasetStoreMixin:
                             if self._observation_history_enabled and kind in RESEARCH_OBSERVATION_KINDS:
                                 _append_postgres_observation_revision(
                                     cursor, kind, subject, snapshot_key, payload, observation,
+                                    now_provider=self._now_provider,
                                 )
                 snapshot_at = monotonic()
                 metadata_at = snapshot_at

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Protocol
 
 from kiwoom_monitor.domain.order_contract import (
@@ -274,6 +274,8 @@ class ExecutionRepository:
     ) -> bool:
         if environment != "mock":
             raise ValueError("only mock account snapshots may enter the execution ledger")
+        if received_at.tzinfo is None or received_at.utcoffset() is None:
+            raise ValueError("account snapshot receipt must be timezone-aware")
         body = {
             "environment": environment,
             "account_ref": snapshot.account_ref,
@@ -283,7 +285,10 @@ class ExecutionRepository:
             "as_of": snapshot.as_of.isoformat(),
             "received_at": received_at.isoformat(),
         }
-        fingerprint = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        # Runtime receipts were historically UTC. Keep that canonical ID boundary
+        # while the stored receipt uses the application's KST representation.
+        canonical = {**body, "received_at": received_at.astimezone(timezone.utc).isoformat()}
+        fingerprint = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
         body["snapshot_id"] = f"account_snapshot_{hashlib.sha256(fingerprint).hexdigest()}"
         return self._store.save_execution_account_snapshot(body, **self._write_options())
 

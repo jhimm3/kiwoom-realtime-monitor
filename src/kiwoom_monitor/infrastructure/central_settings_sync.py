@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+from kiwoom_monitor.domain.time_basis import aware_iso_kst, as_kst, kst_now
 
 
 _LOCAL_EXACT = {
@@ -35,8 +36,10 @@ class CentralSettingsSyncService:
     COLLECTION = "app_settings"
     COLUMN_COLLECTION = "app_column_settings"
 
-    def __init__(self, client: CentralContentClient) -> None:
+    def __init__(self, client: CentralContentClient, *, now_provider=None) -> None:
         self._client = client
+        clock = now_provider or getattr(client, 'server_now', kst_now)
+        self._now = lambda: as_kst(clock())
 
     def sync(self, database_path: Path) -> int:
         if not database_path.is_file():
@@ -69,7 +72,7 @@ class CentralSettingsSyncService:
             with connection:
                 if not remote:
                     # 비어 있는 개인 서버의 최초 PC만 현재 설정을 기준본으로 삼는다.
-                    now = datetime.now(UTC).isoformat()
+                    now = self._now().isoformat()
                     connection.executemany(
                         "INSERT OR IGNORE INTO central_setting_versions(setting_key,updated_at) VALUES(?,?)",
                         ((str(row[0]), now) for row in connection.execute("SELECT key FROM settings")
@@ -83,10 +86,11 @@ class CentralSettingsSyncService:
                     updated_at = str(document.get("updated_at", ""))
                     if not key or not updated_at or not is_shared_setting(key):
                         continue
+                    updated_at = aware_iso_kst(updated_at).isoformat()
                     local = connection.execute(
                         "SELECT updated_at FROM central_setting_versions WHERE setting_key=?", (key,),
                     ).fetchone()
-                    if local is not None and str(local[0]) >= updated_at:
+                    if local is not None and aware_iso_kst(str(local[0])) >= aware_iso_kst(updated_at):
                         continue
                     connection.execute(
                         "INSERT INTO settings(key,value) VALUES(?,?) "
@@ -99,7 +103,7 @@ class CentralSettingsSyncService:
                         (key, updated_at),
                     )
                 if columns_supported and has_columns and not remote_columns:
-                    now = datetime.now(UTC).isoformat()
+                    now = self._now().isoformat()
                     names = tuple(str(row[0]) for row in connection.execute("SELECT column_name FROM column_settings"))
                     connection.executemany(
                         "INSERT OR IGNORE INTO central_column_setting_versions(column_name,updated_at) "
@@ -114,13 +118,14 @@ class CentralSettingsSyncService:
                     updated_at = str(document.get("updated_at", ""))
                     if not name or not updated_at:
                         continue
+                    updated_at = aware_iso_kst(updated_at).isoformat()
                     exists = connection.execute(
                         "SELECT 1 FROM column_settings WHERE column_name=?", (name,),
                     ).fetchone()
                     local = connection.execute(
                         "SELECT updated_at FROM central_column_setting_versions WHERE column_name=?", (name,),
                     ).fetchone()
-                    if exists is None or (local is not None and str(local[0]) >= updated_at):
+                    if exists is None or (local is not None and aware_iso_kst(str(local[0])) >= aware_iso_kst(updated_at)):
                         continue
                     connection.execute(
                         "UPDATE column_settings SET visible=?,position=? WHERE column_name=?",

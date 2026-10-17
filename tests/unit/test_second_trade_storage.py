@@ -95,39 +95,18 @@ class SecondTradeStorageTests(unittest.TestCase):
 
             self.assertEqual((100, 110, 90, 120, 12, 1_020, 4, 3.0), _stored(path))
 
-    def test_commit_then_retry_does_not_double_count(self) -> None:
+    def test_historical_archive_retry_does_not_double_count(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "monitor.sqlite3"
-            store = SQLiteQueryStore(path)
-            store.initialize()
+            path=Path(directory)/'archive.sqlite3'
+            store=SQLiteQueryStore(path);store.initialize()
+            try:
+                value=_bar()
+                store.save_second_trade_bars([value])
+                store.save_second_trade_bars([value])
+                self.assertEqual((100,110,90,105,10,1020,3,2.0),_stored(path))
+            finally:store.close()
 
-            class CommitThenFailStore:
-                def __init__(self) -> None:
-                    self.failed = False
-
-                def save_second_trade_bars(self, values):
-                    store.save_second_trade_bars(values)
-                    if not self.failed:
-                        self.failed = True
-                        raise OSError("result lost after commit")
-
-            collector = CentralRealtimeCollector(
-                lambda: "token", "real", RealtimeHub(),
-                lambda: datetime(2026, 9, 10, 10, 0, 1), CommitThenFailStore(),
-            )
-            collector._second_trades.add(
-                TradeTick("005930", 100, 1_001, 700, 1, None, "100001"),
-                datetime(2026, 9, 10, 10, 0, 1),
-                1.0,
-            )
-
-            with self.assertRaises(OSError):
-                asyncio.run(collector._flush_snapshots())
-            asyncio.run(collector._flush_snapshots())
-
-            self.assertEqual((100, 100, 100, 100, 1, 100, 1, 1.0), _stored(path))
-
-    def test_parsed_0b_ticks_reach_the_second_trade_table(self) -> None:
+    def test_parsed_0b_ticks_never_write_new_second_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
             store = SQLiteQueryStore(path)
@@ -152,7 +131,9 @@ class SecondTradeStorageTests(unittest.TestCase):
             })
             asyncio.run(collector._flush_snapshots())
 
-            self.assertEqual((100, 110, 100, 110, 3, 320, 2), _stored(path)[:7])
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(0,connection.execute('SELECT count(*) FROM central_second_trade_bars').fetchone()[0])
+            store.close()
 
 
 if __name__ == "__main__":

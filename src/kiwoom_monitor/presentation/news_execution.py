@@ -37,7 +37,7 @@ def automatic_ai_run_allowed(
         return False
     if settings.provider == "none":
         return False
-    if not settings.api_key and not central_client_available:
+    if not settings.local_credentials_configured and not central_client_available:
         return False
     if settings.daily_limit > 0 and used_requests >= settings.daily_limit:
         return False

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, datetime
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.application.news_grouping import NewsEventGroup
@@ -31,6 +32,26 @@ def _item(title: str, link: str = "https://example.com") -> StockNewsItem:
 
 
 class NewsViewModelTests(unittest.TestCase):
+    def test_kst_display_preserves_instants_and_date_precision(self):
+        utc = datetime(2026, 10, 14, 16, 30, tzinfo=UTC)
+        before = utc.timestamp()
+        for value in (utc, utc.timestamp(), "2026-10-14T16:30:00Z", "2026-10-15T01:30:00+09:00"):
+            with self.subTest(value=value):
+                self.assertEqual(format_kst_time(value), "2026-10-15 01:30:00 KST")
+        self.assertEqual(utc.timestamp(), before)
+        self.assertEqual(format_kst_time("2026-10-15T01:30:00"), "2026-10-15 01:30:00 KST")
+        self.assertEqual(format_kst_time("2026-10-15"), "2026-10-15")
+        self.assertEqual(format_kst_time(None, missing="미확인"), "미확인")
+        self.assertEqual(format_kst_time("invalid"), "invalid")
+        # Formatting never silently repairs an incorrectly tagged historical UTC value.
+        self.assertEqual(format_kst_time("2026-10-15T14:21:02+00:00"), "2026-10-15 23:21:02 KST")
+
+    def test_news_publication_uses_kst_across_utc_date_boundary(self):
+        from dataclasses import replace
+        item = replace(_item("시각 확인"), published_at=datetime(2026, 10, 14, 16, 30, tzinfo=UTC))
+        row = build_display_row(item, NewsEventGroup(item, (item,)), None)
+        self.assertEqual(row.published, "10-15 01:30")
+
     def test_ai_judgment_and_display_row_keep_existing_labels(self) -> None:
         item = _item("테스트기업 공급계약")
         stored = StoredAINewsAnalysis(

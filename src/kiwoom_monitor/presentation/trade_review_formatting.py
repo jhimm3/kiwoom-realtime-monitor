@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
 from datetime import datetime, time
 from typing import Protocol
 
@@ -85,7 +87,7 @@ def format_linked_news_blocks(news: tuple[LinkedNewsDisplayLike, ...]) -> tuple[
     return (
         "\n[매매일지 대표 뉴스]",
         *(
-            f"{item.published_at.astimezone().strftime('%H:%M') if item.published_at else '--:--'} · "
+            f"{format_kst_time(item.published_at, '%H:%M', missing='--:--')} · "
             f"{item.assessment.outlook or '미분류'} · {item.title}"
             for item in news
         ),
@@ -178,6 +180,6 @@ def format_entry_snapshot_blocks(entry: EntrySnapshotDisplayLike) -> tuple[str, 
             f"거래대금 {kospi.get('trade_value_eok', '-')}억 / "
             f"코스닥 {kosdaq.get('index', '-')} ({kosdaq.get('change_rate', '-')}%) · "
             f"거래대금 {kosdaq.get('trade_value_eok', '-')}억 · "
-            f"시장 조회 {entry.market_state.get('observed_at', '-')}"
+            f"시장 조회 {format_kst_time(entry.market_state.get('observed_at'))}"
         )
     return tuple(blocks)

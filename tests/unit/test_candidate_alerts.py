@@ -98,7 +98,7 @@ class CandidateAlertTests(unittest.TestCase):
         client = CountingClient()
         pages: list[dict] = []
         worker = CandidatePollWorker(client, poll_seconds=0.05)
-        worker.pageReceived.connect(pages.append)
+        worker.pageReceived.connect(lambda page: pages.append(page) if not page.get("status_only") else None)
 
         def pump_until(predicate, timeout: float = 2.0) -> bool:
             deadline = time.monotonic() + timeout
@@ -118,7 +118,7 @@ class CandidateAlertTests(unittest.TestCase):
             self.assertTrue(pump_until(lambda: len(pages) >= 1))
             self.assertTrue(pages[0]["initial_sync"])
 
-            self.assertTrue(pump_until(lambda: client.calls >= 2))
+            self.assertTrue(pump_until(lambda: len(pages) >= 2))
             worker.set_polling_enabled(False)
             self.assertTrue(pump_until(lambda: len(pages) >= 2))
             paused_calls = client.calls
@@ -173,6 +173,123 @@ class CandidateAlertTests(unittest.TestCase):
 
 
 class RamShadowDialogTests(unittest.TestCase):
+    def test_minute_primary_and_five_minute_confirmation_are_visible_without_seconds(self):
+        from test_market_research_features import MinuteMarketCandidateTests
+        helper=MinuteMarketCandidateTests();price=helper.compute();price['expires_at']='2099-10-13T09:21:30+09:00'
+        page=self.page()['live'];ref='minute-primary-fixture'
+        page['market_observed_changes']={ref:{'revision_id':ref,'pattern':'UNKNOWN','quality':{'status':'PARTIAL','reasons':()},
+            'observed_at':'2026-09-14T09:00:20+09:00','expires_at':'2099-09-14T09:01:50+09:00',
+            'lookup_change':{'state':'RETAINED'},'candidates':(),'input_refs':(),
+            'price_trade_leadership':price,'second_trade_auxiliary':None}}
+        for slot in page['results']:slot['market_observed_changes_ref']=ref
+        with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start'), \
+             patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
+            dialog=CandidateMonitorDialog(FakeClient())
+            try:
+                dialog._apply_ram_page({'live':page,'runtime':{'state':'RUNNING'}})
+                item=dialog._ram_table.item(0,2)
+                self.assertIn('1분 가격·대금 후보: 후보 유지',item.text())
+                self.assertIn('5분 지속: 확인',item.text())
+                self.assertIn('1분 TOP20 관측: 가격 상승 5.0%',item.text())
+                self.assertIn('실시간 시장 관찰에도 확정 분봉',item.toolTip())
+                self.assertIn('현재가·체결·보호는 0B',item.toolTip())
+                price['expires_at']='2026-10-13T09:21:30+09:00'
+                dialog._render_ram_results()
+                self.assertIn('1분 가격·대금 후보: 미확인',dialog._ram_table.item(0,2).text())
+                self.assertIn('5분 지속: 미확인',dialog._ram_table.item(0,2).text())
+            finally:dialog.stop();dialog.deleteLater();self.app.processEvents()
+
+    def test_market_observation_is_separate_and_expiry_hides_live_candidates_only(self):
+        from PySide6.QtCore import QCoreApplication, QEvent
+        page = self.page()["live"]
+        ref = "observed-change-fixture"
+        observation = {"revision_id": ref, "pattern": "LEADER_REPLACEMENT",
+            "as_of": "2026-09-14T09:00:20+09:00", "observed_at": "2026-09-14T09:00:20+09:00",
+            "expires_at": "2099-09-14T09:01:50+09:00", "quality": {"status": "COMPLETE", "reasons": ()},
+            "candidates": ({"code": "005930", "state": "REAPPEARED"},), "input_refs": ("rank-fixture",)}
+        page["market_observed_changes"] = {ref: observation}
+        for slot in page["results"]:
+            slot["market_observed_changes_ref"] = ref
+        with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start"), \
+             patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()), \
+             patch.object(QApplication, "beep") as beep:
+            dialog = CandidateMonitorDialog(FakeClient())
+            try:
+                dialog._apply_ram_page({"live": page, "runtime": {"state": "RUNNING"}})
+                self.assertIn("조회순위 변화: 첫 순위 교체", dialog._ram_table.item(0, 2).text())
+                self.assertIn("재등장 1", dialog._ram_table.item(0, 2).toolTip())
+                self.assertIn("rank-fixture", dialog._ram_table.item(0, 2).toolTip())
+                observation["expires_at"] = "2026-09-14T09:01:50+09:00"
+                dialog._render_ram_results()
+                self.assertIn("조회순위 변화: 미확인", dialog._ram_table.item(0, 2).text())
+                self.assertIn("재등장 0", dialog._ram_table.item(0, 2).toolTip())
+                self.assertEqual("유지 제안", dialog._ram_table.item(0, 5).text())
+                dialog._ram_recorded = deepcopy(page)
+                dialog._ram_view.setCurrentIndex(1)
+                self.assertIn("조회순위 변화: 첫 순위 교체", dialog._ram_table.item(0, 2).text())
+                beep.assert_not_called()
+            finally:
+                dialog.stop(); dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
+    def test_price_candidate_and_lookup_expire_independently(self):
+        page=self.page()['live']; ref='rank-price-separate'
+        observation={'revision_id':ref,'pattern':'UNKNOWN','observed_at':'2026-09-14T09:00:20+09:00',
+            'expires_at':'2099-09-14T09:01:50+09:00','quality':{'status':'PARTIAL','reasons':()},'candidates':(),
+            'lookup_change':{'state':'CHANGED'},'input_refs':(),
+            'price_trade_leadership':{'state':'RETAINED','expires_at':'2099-09-14T09:00:23+09:00',
+                'quality':{'status':'COMPLETE','reasons':(),'coverage':{'usable_members':20,'expected_members':20}},'current_candidates':('005930',),'metrics':(),
+                'venue':'KRX','universe':'TOP20'}}
+        page['market_observed_changes']={ref:observation}
+        for slot in page['results']:slot['market_observed_changes_ref']=ref
+        with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start'), \
+             patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
+            dialog=CandidateMonitorDialog(FakeClient())
+            try:
+                dialog._apply_ram_page({'live':page,'runtime':{'state':'RUNNING'}})
+                text=dialog._ram_table.item(0,2).text()
+                self.assertIn('조회순위 변화: 첫 순위 교체',text)
+                self.assertIn('가격·대금 주도 후보: 후보 유지',text)
+                self.assertIn('005930',text)
+                self.assertIn('판단시점 시세자료 20/20종목',text)
+                observation['price_trade_leadership']['expires_at']='2026-09-14T09:00:23+09:00'
+                dialog._render_ram_results();text=dialog._ram_table.item(0,2).text()
+                self.assertIn('조회순위 변화: 첫 순위 교체',text)
+                self.assertIn('가격·대금 주도 후보: 미확인',text)
+                self.assertIn('시세자료 확인 만료',text)
+                dialog._ram_recorded=deepcopy(page);dialog._ram_view.setCurrentIndex(1)
+                self.assertIn('가격·대금 주도 후보: 후보 유지',dialog._ram_table.item(0,2).text())
+            finally:dialog.stop();dialog.deleteLater();self.app.processEvents()
+
+    def test_partial_price_coverage_shows_code_and_readable_reasons_without_candidate(self):
+        page=self.page()['live'];ref='partial-price-coverage'
+        observation={'revision_id':ref,'pattern':'UNKNOWN','observed_at':'2026-09-14T09:00:20+09:00',
+            'expires_at':'2099-09-14T09:01:50+09:00','quality':{'status':'PARTIAL','reasons':()},'candidates':(),
+            'lookup_change':{'state':'RETAINED'},'input_refs':(),
+            'price_trade_leadership':{'state':'UNKNOWN','expires_at':'2026-09-14T09:00:20+09:00',
+                'quality':{'status':'PARTIAL','reasons':('comparison_cohort_price_trade_incomplete',),
+                    'coverage':{'usable_members':17,'expected_members':20}},'current_candidates':(),
+                'metrics':({'code':'005930','quality':'PARTIAL','previous_observation_count':2,'current_observation_count':1,
+                    'reasons':('current_price_sample_insufficient','trade_source_history_insufficient')},),
+                'venue':'KRX','universe':'TOP20'}}
+        page['market_observed_changes']={ref:observation}
+        for slot in page['results']:slot['market_observed_changes_ref']=ref
+        with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start'), \
+             patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
+            dialog=CandidateMonitorDialog(FakeClient())
+            try:
+                dialog._apply_ram_page({'live':page,'runtime':{'state':'RUNNING'}})
+                item=dialog._ram_table.item(0,2)
+                self.assertIn('조회순위 변화: 첫 순위 유지',item.text())
+                self.assertIn('가격·대금 주도 후보: 미확인',item.text())
+                self.assertIn('판단시점 시세자료 17/20종목',item.text())
+                self.assertIn('005930: 이전 2건 / 현재 1건',item.toolTip())
+                self.assertIn('수신 승인 뒤 비교 이력 부족',item.toolTip())
+                self.assertIn('현재 구간 가격 표본 부족',item.toolTip())
+                self.assertNotIn('trade_source_history_insufficient',item.toolTip())
+            finally:dialog.stop();dialog.deleteLater();self.app.processEvents()
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -706,12 +823,12 @@ class StockThesisSourceCheckDialogTests(unittest.TestCase):
                 "thesis_policy_version": "PRICE_ONLY"}
 
     def report(self, **changes):
-        return {"version": "stock-thesis-source-check/v1", "selection_revision": 2,
+        return {"version": "stock-thesis-source-check/v2", "selection_revision": 2,
                 "thesis_ref": "stored-thesis", "as_of": "2026-09-14T00:00:20+00:00",
-                "lookback_seconds": 20, "scope": "bounded_current_native_values",
+                "lookback_minutes": 20, "scope": "bounded_final_completed_minutes",
                 "source_durability": "not_verified", "replay_eligible": False, "order_authorized": False,
                 "theme": {"status": "MATCHED", "rows_read": 1, "budget_reached": False},
-                "seconds": {"expected": 8, "matched": 8, "unmatched_refs": [], "rows_read": 8},
+                "minutes": {"expected": 8, "matched": 8, "unmatched_refs": [], "rows_read": 8},
                 "unverified_refs": {"leadership": [], "factors": ["opaque-factor"], "hypotheses": []},
                 "timing_ms": {"total": 12.0}, **changes}
 
@@ -731,9 +848,9 @@ class StockThesisSourceCheckDialogTests(unittest.TestCase):
             def load_ram_shadow(self, **kwargs):
                 self.calls.append(("live", kwargs, threading.get_ident()))
                 return {"live": None, "recorded": None, "runtime": {"state": "DISABLED"}}
-            def check_ram_shadow_sources(self, **kwargs):
+            def check_ram_shadow_minute_sources(self, **kwargs):
                 self.calls.append(("check", kwargs, threading.get_ident()))
-                return helper.report(lookback_seconds=kwargs["lookback_seconds"])
+                return helper.report(lookback_minutes=kwargs["lookback_minutes"])
         return Client()
 
     def test_only_loaded_saved_supported_thesis_enables_explicit_check(self):
@@ -768,13 +885,13 @@ class StockThesisSourceCheckDialogTests(unittest.TestCase):
              patch.object(dialog, "_save_ram_selection", side_effect=AssertionError("check saved settings")):
             dialog._ram_source_check.click()
             self.assertTrue(self.pump_until(lambda: dialog._settings_worker is None))
-        self.assertEqual([("check", {"expected_revision": 2, "lookback_seconds": 30})], [(kind, args) for kind, args, _ in client.calls])
+        self.assertEqual([("check", {"expected_revision": 2, "lookback_minutes": 30})], [(kind, args) for kind, args, _ in client.calls])
         self.assertNotEqual(main_thread, client.calls[0][2])
         self.assertEqual("editing-thesis", dialog._ram_thesis_id.text())
         self.assertIs(before_page, dialog._ram_page)
         self.assertEqual(live_status, dialog._ram_status.text())
         self.assertIn("8/8", dialog._ram_source_status.text())
-        self.assertIn("30초", dialog._ram_source_status.text())
+        self.assertIn("30분", dialog._ram_source_status.text())
         self.assertIn("운영/재생 승인 없음", dialog._ram_source_status.text())
         self.assertTrue(dialog._ram_source_check.isEnabled())
         beep.assert_not_called()
@@ -806,18 +923,18 @@ class StockThesisSourceCheckDialogTests(unittest.TestCase):
         dialog._apply_ram_selection(self.selection(stock_thesis=self.selected()))
         for report in (self.report(selection_revision=1), self.report(order_authorized=True),
                        self.report(replay_eligible=True), self.report(scope="approved"),
-                       self.report(seconds={"expected": 8, "matched": 9, "unmatched_refs": [], "rows_read": 8}),
+                       self.report(minutes={"expected": 8, "matched": 9, "unmatched_refs": [], "rows_read": 8}),
                        self.report(timing_ms={"total": float("nan")})):
             dialog._apply_ram_source_check(report, 2, "stored-thesis", 20)
             self.assertIn("확인할 수 없습니다", dialog._ram_source_status.text())
             self.assertNotIn("8/8", dialog._ram_source_status.text())
         missing = self.report(theme={"status": "NOT_FOUND_IN_BOUNDED_READ", "rows_read": 100, "budget_reached": True},
-                              seconds={"expected": 8, "matched": 0, "unmatched_refs": [str(n) for n in range(8)], "rows_read": 0})
+                              minutes={"expected": 8, "matched": 0, "unmatched_refs": [str(n) for n in range(8)], "rows_read": 0})
         dialog._apply_ram_source_check(missing, 2, "stored-thesis", 20)
         self.assertIn("조회 범위에서", dialog._ram_source_status.text())
         self.assertIn("한도 도달", dialog._ram_source_status.text())
         self.assertIn("0/8", dialog._ram_source_status.text())
-        empty = self.report(seconds={"expected": 0, "matched": 0, "unmatched_refs": [], "rows_read": 8},
+        empty = self.report(minutes={"expected": 0, "matched": 0, "unmatched_refs": [], "rows_read": 8},
                             unverified_refs={"leadership": ["legacy-ref"], "factors": [], "hypotheses": []})
         dialog._apply_ram_source_check(empty, 2, "stored-thesis", 20)
         self.assertIn("대조 가능한 참조 없음", dialog._ram_source_status.text())
@@ -832,7 +949,7 @@ class StockThesisSourceCheckDialogTests(unittest.TestCase):
         class Client(FakeClient):
             def __init__(self):
                 self.calls = 0
-            def check_ram_shadow_sources(self, **kwargs):
+            def check_ram_shadow_minute_sources(self, **kwargs):
                 self.calls += 1; entered.set()
                 if not release.wait(3):
                     raise AssertionError("source HTTP not released")

@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+from .diagnostic_replay_contract import COLLECTOR_INPUT_VERSION
 
 if TYPE_CHECKING:
     from fastapi import APIRouter
@@ -107,7 +108,7 @@ def create_diagnostic_control_router(
                     "store_input_profiles": {"stock-catalog-documents/v1": {
                         "method": "replace_documents", "collection": "stock_catalog",
                         "maximum_copy_bytes": 16 * 1024 * 1024}},
-                    "collector_input_version": "collector-input/v2",
+                    "collector_input_version": COLLECTOR_INPUT_VERSION,
                     "collector_event_types": ["0B", "0w", "0J", "0U"],
                     "coverage": "observed_paths_only",
                     "overhead_verified": False,

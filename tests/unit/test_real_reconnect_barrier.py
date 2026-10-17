@@ -213,7 +213,6 @@ class ReconnectSaveBoundaryTests(unittest.IsolatedAsyncioTestCase):
         collector = CentralRealtimeCollector(lambda: "fake", "real", hub, lambda: current)
         old = TradeTick("005930", 100, 100, None, 2, None, "100029", market="KRX")
         collector._minute_bars.add(old, current, 1)
-        collector._second_trades.add(old, current, 1)
         collector._minute_bars.mark_capture_gap()
         collector._approved_trade_sources = {("005930", "KRX")}
         finished = False
@@ -250,7 +249,7 @@ class ReconnectSaveBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(collector, "_market_session", side_effect=lambda: None if finished else "KRX"):
             await asyncio.wait_for(collector._receive("KRX"), timeout=5)
         self.assertEqual(5, collector._minute_bars.drain_dirty()[0]["volume"])
-        self.assertEqual(5, sum(value["volume"] for value in collector._second_trades.drain_dirty()))
+        self.assertFalse(hasattr(collector,"_second_trades"))
         self.assertEqual(current, collector._continuous_from[("005930", "KRX")])
         await collector.close()
 

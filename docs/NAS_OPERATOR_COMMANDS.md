@@ -1,5 +1,35 @@
 # NAS 제한 운영 명령 구현 계약
 
+## 2026-10-17 재부팅 후 DNS 빈 값 표현의 승인 비교 오탐 수정
+
+실제 NAS의 서버·DB에서 `HostConfig.Dns`/`DnsSearch`/`DnsOptions` 세 필드만 현재 빈 배열에서 과거 null 표현으로 대조했을 때 **기존 승인 해시와 정확히 일치**했다. Docker24.0.2의 `readHostConfig`→`InitDNSHostConfig`는 저장 설정을 다시 읽을 때 이 세 nil slice를 빈 slice로 바꾼다([해당 버전 원문](https://github.com/moby/moby/blob/v24.0.2/container/container.go#L197-L220), [세 필드 변환](https://github.com/moby/moby/blob/v24.0.2/container/container.go#L503-L523)). 한 필드씩만 바꿨던 앞선 진단은 동시에 바뀐 세 필드를 설명하지 못했다. `IPAMOperational`은 지문 입력이 아니며 원인이 아니다.
+
+기존 `fingerprint` 생성 방식과 설치 승인값은 유지한다. `fingerprint_matches`에서 존재하는 위 세 필드의 null/빈 배열 조합만 최대8개 대조하며, 같은 기존 해시가 일치해야 한다. 누락 필드를 추가하거나 임의의 빈 값·DNS 주소·순서·권한·마운트·image/network ID를 정규화하지 않는다. 기존 mount-order 호환은 같은 파일의 작은 내부 함수로 재사용한다. 새 승인 명령·지문 체계·운영 계층은 없다.
+
+로컬 관련77건·조건부 적용의 원인 확인3건, 실제 NAS Linux 관련100건이 통과했다. 실제 기존 해시 일치를 먼저 확인한 관리자 묶음이 기존 updater로 helper만 수정했고 무암호 status를 검증했다. `operator.json`은 **바이트까지 불변**이며 sudoers·기존 revoke 백업·worker·source runner·운영 release·DB 컨테이너를 보존했다. 운영 재시작·재배포·DB 복사는 없었다. 이후 SSH의 기존 무암호 status도 성공했다. 근거: `data/diagnostics/kst-existing-storage-20261016/dns-operator-update-result.json`, `dns-compat-before.log`, `dns-compat-after-user.log`, `dns-update-proof-tests.log`.
+
+## 2026-10-16 계약 지문 조사와 코드 변경의 재승인 축소
+
+Git 전체 이력에서 4개 파일의 전체 바이트를 runtime 계약으로 묶는 구현은 `d92ded6`(2026-10-01 23:42 KST)에 이미 있다. 별도 Codex snapshot `05032e1`(2026-10-08 02:42)의 커밋 목적도 완전한 source snapshot 고정이었고, `035af0a`(같은 날 11:14)의 제한형 operator가 이를 관리자 승인 조건으로 사용했다. `05032e1`을 현재 main의 최초 도입 커밋으로 혼동하지 않는다. Git 작성자·커밋 메시지만으로 사용자가 이 파일별 재승인 정책을 직접 요청했다고 증명할 수는 없다.
+
+실제 사용처는 `nas_source_runtime.stage/release`의 runtime 계약 비교, `nas_operator.validate_manifest`의 설치 계약 비교, `Operator.deploy`의 이전/신규 계약 재비교였다. 기존에는 `pyproject.toml`, Dockerfile, `central_schema.py`, `schema_migrations.py` 중 하나의 바이트만 달라도 일반 배포·검사를 막았다. 따라서 Dockerfile의 빌드 표시 변경이나 migration 영수증의 UTC→KST 시각 변경도 스키마 변경으로 잘못 분류됐다. 이번 누적 배포에서 확인한 직접 원인이다.
+
+이 비교는 의존성 이미지 불일치와 검토하지 않은 DDL 전환/롤백을 보수적으로 막지만, 권한이나 데이터 무결성을 증명하지 않는다. 파일별 source hash/비활성 사설 snapshot은 검사한 바이트의 변경을 잡고, 고정 Docker image/container/mount/network·root 소유 launcher·명령 제한은 실제 권한 경계를 지킨다. DB 버전/transaction/호환성 검사는 DB 경계이며, 이들 기능을 4개 파일의 전체 동등성으로 대체할 수 없다. 일반 앱 코드도 DB writer를 사용하므로 migration driver의 파일 고정만으로 DB 손상을 막는다는 설명도 맞지 않는다.
+
+수정: runtime/설치 계약 비교는 기존 `pyproject.toml`과 **DDL 정의 파일 `central_schema.py`** 보호만 남긴다. Dockerfile과 migration driver의 지문은 구형 manifest 형식 호환 기록으로 유지하지만 관리자 재승인 조건에서 제외한다. driver는 해당 신규 release 자체의 파일 hash와 계속 대조하며 이전 릴리스와 같아야 한다는 중복 비교는 제거한다. 기존 `selected` 관련 검사 통과도 같은 소스의 배포에 인정하며 특정 storage/replay profile 강제는 제거한다. 실패·소스 불일치·정리/후검사 미확인은 계속 거부한다. 새 지문·게이트·sudo 명령은 추가하지 않는다. DDL 파일의 전체 바이트 비교는 여전히 보수적이므로 그 파일의 주석 변경도 별도 검토 대상이라는 한계가 있다. 이번 변경을 실제 DDL의 의미를 비교하는 구현으로 설명하지 않는다.
+
+별개로 `f15648d`(10월9일)는 Docker inspect Mounts 배열 순서 오탐을 고쳤고, `3b2fd30`(10월11일)은 Windows CRLF 빌드 표시 파싱 오탐을 고쳤다. 이들은 계약 파일의 내용 변경과 다른 원인이다. helper 자체가 root 권한을 갖기 때문에 이 결함을 고친 helper 갱신에는 관리자 인증이 필요했지만, 단순 앱 코드/로그 변경까지 매번 같은 인증을 요구할 이유는 없다.
+
+이 제한을 제거하는 helper와 source 런처 자체의 최초 교체는 기존 `nas_operator_install.py --update`로 수행한다. 기존 갱신 journal/백업·실패 복구를 사용해 고정 helper·런처와 기존 설정의 `runner_sha256`만 갱신한다. 새 권한/명령/운영 계층 없이 원래 회수 백업, 운영 source 선택, DB/서버와 runtime 계약 파일을 보존한다. 이후 같은 의존성·DDL의 코드 배포는 기존 무암호 test/deploy/rollback 경로를 쓴다. 런처 교체 및 NAS Linux/실운영 검증 전까지는 로컬 수정 완료와 운영 반영을 구분한다.
+
+NAS 배포·커밋·push 전에는 수정 코드와 연결된 기능의 관련 테스트를 수행한다. `all-local` 전수 회귀는 사용자 명시 요청이 있을 때만 실행하며 관련 검사나 배포의 필수 조건으로 추가하지 않는다.
+
+갱신 실측 보완: 최초 묶음의 NAS Linux 관련96건은 통과했으나 실제 교체 전에 `helper_update_target_mode_invalid`로 중단됐다. 공유 `runner.py`의 실제 mode는0777/소유UID1026이고 root helper는0644였다. updater가 모든 대상에0600/0644만 허용한 가정이 원인이다. 기존 mode를 그대로 백업·교체·복구하도록 이 제한을 제거했고 실제0777에서 성공 및 probe/fence 실패 복구를 확인하는 Linux fixture로 고쳤다. root helper/config의 기존 보호 경로·설치 승인 mode/내용 검사와 runtime runner 내용 검사는 유지한다. 기존 공유 권한을 바꿔 절차에 맞추거나 새 권한·게이트를 추가하지 않는다. 실패 전후 설치 helper/runner 바이트와 운영 active release가 동일함을 확인했다.
+
+최종 갱신 묶음은 실제 NAS 관련96건과 helper 갱신·무암호 status 검증을 통과했다. 이후 누적 제품 후보의 소스 입고는 완료됐지만 격리 worker가 시작 과정의 `RuntimeError`로 종료했다. 기존 worker는 이 단계에서 예외 종류만 저장하므로 Docker 자체 거절·제품 테스트 실패·worker 사전 준비 실패를 같은 것으로 단정하지 않는다. OOM은 없고 PG readiness 및 컨테이너 자원/격리 확인·임시 컨테이너 정리는 완료됐다.
+
+시작 진단 보완은 기존 result/report에 고정 `failure_stage`와 알려진 사전 준비 오류 코드만 추가한다. 원문 예외 메시지·DSN·비밀번호는 공개하지 않으며 테스트/배포 판정과 권한은 바꾸지 않는다. 관련 로컬81건과 NAS Python/셸 구문·11파일 hash를 확인했고 관리자 helper 갱신은 대기다. `nas-operator-update-1bfac9f11668181d.sh`는 기존 갱신 절차의 파일 묶음만 교체하며 제품 source release를 새로 게시/복사하지 않는다. 후속 test/deploy는 이미 완성된 같은 후보의 사설 사본을 재사용한다. 원인 확인 전 제품 소스 수정·검사 통과·배포 완료로 보고하지 않는다.
+
 2026-10-08 · NAS Linux gate 45개 통과, 최초 설치 및 실제 `k379` 무암호 status 검증 완료.
 
 2026-10-09 identity-fence 보완: Docker inspect의 `Mounts` 배열은 순서가 고정되지 않는다.
@@ -274,6 +304,8 @@ argv 배열과 제한 환경을 사용하고 shell 실행, Docker context/env ov
 
 ## 명령 계약
 
+에이전트는 이 기존 무암호 경로의 일반 테스트를 직접 실행한다. 사용자가 매번 `sudo`/관리자 암호를 입력하는 절차로 바꾸지 않는다. 공개 client가 내부에서 제한된 root launcher를 호출하며 실행 코드는 격리 worker에만 들어간다. `--help`/`status`와 허용 profile/선택 테스트를 먼저 확인하고 실행 후 보고서·정리/fence까지 확인한다. 관리자 전용 archive/보존 PGDATA/원문 로그나 임의 host 스크립트는 일반 `test` worker의 제공 mount에 포함되지 않는다. 그런 별도 작업의 관리자 인증이 필요한 경우에는 이 구체적인 경계를 설명하며 일반 테스트 실행 권한 부족으로 뭉뚱그리지 않는다. [작업자 정본 지침](../AGENTS.md#nas-테스트의-기존-무암호-실행-경로).
+
 | 명령 | 동작 |
 |---|---|
 | `status` | release/build, capture 상태, 진행 작업, blocker를 비밀 없이 출력. 제어 변경 없음 |
@@ -416,8 +448,9 @@ OS cache 및 운영 NAS의 외부 I/O가 달라질 수 있는 한계도 유지�
 ## deploy/rollback 상태 전이
 
 운영 container/image/mount/command/network가 설치 시 승인한 fingerprint와 다르면 중단한다.
-동일 runtime/dependency/schema 계약만 자동 배포한다. `pyproject.toml`, Dockerfile 계약,
-`central_schema.py`, `schema_migrations.py` 변경은 별도 관리자 절차다. candidate의 migration
+같은 의존성/DDL 정의 안의 코드 변경은 자동 배포한다. `pyproject.toml`과
+`central_schema.py` 변경은 별도 관리자 절차이며 Dockerfile의 빌드 표시나
+`schema_migrations.py`의 코드/로그/시각 변경은 이 사유로 재승인하지 않는다. candidate의 migration
 script를 supervisor가 운영 DB 자격증명으로 먼저 실행하는 우회로를 만들지 않는다.
 
 1. 사설 snapshot 검증 및 exact-source gate 결과 확인. 현재/이전 release, DB container ID,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
 from html import escape
 from typing import Any
 
@@ -190,7 +192,7 @@ class HistoricalNewsArchiveDialog(QDialog):
                 index = len(self._items)
                 self._items.append(row)
                 self._table.insertRow(index)
-                for column, value in enumerate((display.get("published_at") or "시각 없음",
+                for column, value in enumerate((format_kst_time(display.get("published_at"), missing="시각 없음"),
                                                 row.get("body_status") or display.get("body_status") or "미확인",
                                                 display.get("title") or "")):
                     self._table.setItem(index, column, QTableWidgetItem(str(value)))

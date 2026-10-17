@@ -218,14 +218,18 @@ def recorder_capacity(request):
 
 def main():
     outcome = {'state': 'failed'}
+    stage = 'isolation_check'
     try:
         require(os.getuid() != 0 and Path('/app/candidate/src').is_dir() and
                 not Path('/var/run/docker.sock').exists(), 'worker_isolation_required')
+        stage = 'memory_limit'
         limit = memory_limit()
         affinity = ','.join(str(x) for x in sorted(os.sched_getaffinity(0)))
+        stage = 'request_read'
         request = json.loads((WORK / 'request.json').read_text())
         # Only temporary fixture input is visible. No inherited operational configuration.
         sys.path[:0] = [str(ROOT / 'src'), str(ROOT)]
+        stage = 'test_or_replay'
         if request['command'] == 'test' and request['profile'] in ('recorder-capacity-smoke', 'recorder-capacity'):
             require(limit == 12 * 1024 ** 3 and request.get('pause_operational') is True,
                     'capacity_resource_or_pause_mismatch')
@@ -233,14 +237,19 @@ def main():
         elif request['command'] == 'test' and request['profile'] == 'replay-cache':
             outcome = test(request, None, None)
         else:
+            stage = 'database_setup'
             diagnostic_url, replay_url = database_setup(request)
+            stage = 'test_or_replay'
             outcome = test(request, diagnostic_url, replay_url) if request['command'] == 'test' else replay(request, replay_url)
         outcome['memory_limit_bytes'] = limit
         outcome['cpu_affinity'] = affinity
         return 0 if outcome['state'] == 'passed' else 1
     except Exception as error:
-        outcome.update(error_type=type(error).__name__)
-        if re.fullmatch(r'(?:capacity|private|trace|top20)_[a-z0-9_]{1,110}', str(error)):
+        outcome.update(error_type=type(error).__name__, failure_stage=stage)
+        if (str(error) in ('worker_isolation_required', 'worker_memory_limit_not_enforced',
+                           'worker_memory_limit_unavailable', 'temporary_postgres_not_ready',
+                           'cluster_not_fresh') or
+                re.fullmatch(r'(?:capacity|private|trace|top20)_[a-z0-9_]{1,110}', str(error))):
             outcome['failure_reason'] = str(error)
         return 1
     finally:

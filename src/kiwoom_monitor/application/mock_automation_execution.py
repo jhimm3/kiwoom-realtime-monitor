@@ -683,7 +683,7 @@ def dispatch_mock_automation_decision(
             )
             repository.save_mock_automation_decision_gate(gate)
             return gate, None, None
-        expected_intent = _intent_for_decision(spec, admission, decision)
+        expected_intent = _intent_for_decision(spec, admission, decision, family_id=profile.family_version if profile is not None else None)
         if protection_exit_id is not None:
             from dataclasses import replace
             from kiwoom_monitor.application.mock_automation_risk import PROTECTION_EXIT_VERSION
@@ -1338,6 +1338,7 @@ def _intent_for_decision(
     spec: MockAutomationOperatingSpec,
     admission: MockAutomationAdmission,
     decision: StrategyDecision,
+    *, family_id=None,
 ) -> OrderIntent:
     decided_at = datetime.fromisoformat(decision.decided_at)
     side = OrderSide.BUY if decision.final_action == "ENTER" else OrderSide.SELL
@@ -1356,7 +1357,7 @@ def _intent_for_decision(
         limit_price=decision.signal_reference_price,
         created_at=decided_at,
         expires_at=decided_at + timedelta(seconds=validity_seconds),
-        policy_version=f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{spec.session_profile}",
+        policy_version="leader_execution_adapter/v1" if family_id == "leader_breakout/v1" else f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{spec.session_profile}",
     )
 
 

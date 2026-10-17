@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime
+
+from .market_observations import KST, as_kst
 
 
 API_VERSION = "v1"
@@ -42,10 +44,10 @@ class ServerCapabilities:
         }
 
 
-def health_document() -> dict[str, object]:
+def health_document(now: datetime | None = None) -> dict[str, object]:
     return {
         "status": "ok",
         "api_version": API_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "server_time": datetime.now(UTC).isoformat(),
+        "server_time": as_kst(now if now is not None else datetime.now(KST)).isoformat(),
     }

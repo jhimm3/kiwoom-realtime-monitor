@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Protocol
 
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst
+
 from kiwoom_monitor.domain.order_contract import BrokerSubmission, OrderIntent, OrderSide, OrderType
 
 from .client import KiwoomApiError, KiwoomRestClient, KiwoomSubmissionUnknownError
@@ -38,10 +40,11 @@ class OneShotOrderClient(Protocol):
 
 
 class KiwoomMockExecutionTransport:
-    def __init__(self, client: OneShotOrderClient) -> None:
+    def __init__(self, client: OneShotOrderClient, *, now_provider=None) -> None:
         if client.environment != "mock":
             raise ValueError("mock order transport requires mock credentials")
         self._client = client
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
 
     def submit(self, intent: OrderIntent) -> BrokerSubmission:
         if intent.environment != "mock" or intent.venue != "KRX":
@@ -56,7 +59,7 @@ class KiwoomMockExecutionTransport:
             "cond_uv": "",
         }
         response = self._send(api_id, body)
-        return BrokerSubmission(str(response.get("ord_no") or ""), datetime.now(timezone.utc))
+        return BrokerSubmission(str(response.get("ord_no") or ""), self._now())
 
     def cancel(self, intent: OrderIntent, broker_order_id: str, quantity: int = 0) -> BrokerSubmission:
         if not broker_order_id.strip():
@@ -67,7 +70,7 @@ class KiwoomMockExecutionTransport:
             "stk_cd": intent.symbol,
             "cncl_qty": str(max(0, quantity)),
         })
-        return BrokerSubmission(str(response.get("ord_no") or ""), datetime.now(timezone.utc))
+        return BrokerSubmission(str(response.get("ord_no") or ""), self._now())
 
     def _send(self, api_id: str, body: dict[str, object]) -> dict[str, object]:
         try:
@@ -83,5 +86,5 @@ class KiwoomMockExecutionTransport:
         return response
 
 
-def make_mock_transport(client: KiwoomRestClient) -> KiwoomMockExecutionTransport:
-    return KiwoomMockExecutionTransport(client)
+def make_mock_transport(client: KiwoomRestClient, *, now_provider=None) -> KiwoomMockExecutionTransport:
+    return KiwoomMockExecutionTransport(client, now_provider=now_provider)

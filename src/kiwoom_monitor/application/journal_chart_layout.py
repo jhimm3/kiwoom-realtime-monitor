@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import math
 from datetime import date, datetime, time
 
@@ -39,7 +41,7 @@ def chart_close_information(
     fills: tuple[TradeFill, ...], rows: tuple[tuple[object, ...], ...], *,
     index_mode: bool = False, as_of: datetime | None = None,
 ) -> str:
-    current = as_of or datetime.now()
+    current = as_of or kst_wall_now()
     target_day = max((fill.filled_at.date() for fill in fills), default=None)
     day_rows = tuple(row for row in rows if target_day is not None and datetime.fromisoformat(str(row[0])).date() == target_day)
     if not day_rows:

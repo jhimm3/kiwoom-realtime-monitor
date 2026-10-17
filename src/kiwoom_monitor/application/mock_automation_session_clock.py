@@ -48,7 +48,8 @@ def session_clock_assessment(config, state, now: datetime, active=(), *, managem
             reasons.append("position_time_from_future")
         if now >= due:
             reasons.append("session_exit_due")
-        if now >= opened + timedelta(minutes=config.max_hold_minutes):
+        from .leader_breakout import LeaderBreakoutConfig
+        if not isinstance(config, LeaderBreakoutConfig) and now >= opened + timedelta(minutes=config.max_hold_minutes):
             reasons.append("max_hold_reached")
     if now >= deadline and (state.status == "open" or active):
         reasons.append("session_deadline_passed")

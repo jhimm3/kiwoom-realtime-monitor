@@ -40,7 +40,7 @@ class ThemeMembership:
 
 
 @dataclass(frozen=True)
-class SecondTradePoint:
+class PriceTradePoint:
     input_ref: str
     code: str
     market: str
@@ -48,23 +48,100 @@ class SecondTradePoint:
     available_at: str
     close: int
     high: int
-    volume: int
-    trade_value_won: int
+    volume: int | None
+    trade_value_won: int | None
     trade_count: int
 
     def __post_init__(self) -> None:
         observed = _aware_datetime(self.observed_at)
         available = _aware_datetime(self.available_at)
         if not self.input_ref or not normalize_stock_code(self.code):
-            raise ValueError("second trade point identity is required")
+            raise ValueError("price/trade point identity is required")
         if self.market not in {"KRX", "NXT"}:
             raise ValueError("theme leadership keeps KRX and NXT separate")
         if available < observed:
             raise ValueError("second trade point cannot be available before observation")
         if self.close <= 0 or self.high <= 0:
             raise ValueError("second trade price must be positive")
-        if min(self.volume, self.trade_value_won, self.trade_count) < 0:
+        if any(type(v) is not int or v < 0 for v in (self.volume, self.trade_value_won, self.trade_count) if v is not None):
             raise ValueError("second trade totals must not be negative")
+
+
+@dataclass(frozen=True)
+class SecondTradePoint(PriceTradePoint):
+    """Historical second-bar replay only; no live producer uses this DTO."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.volume is None or self.trade_value_won is None:
+            raise ValueError('historical second trade totals must be explicit')
+
+
+@dataclass(frozen=True)
+class RealtimeTradePoint(PriceTradePoint):
+    """One individual approved 0B receipt, including same-second order."""
+    sequence: int = 0
+
+
+class RealtimeTradePoints(tuple):
+    """Validated immutable observations, shared through monitor copy fences."""
+    def __new__(cls, values=()):
+        result = super().__new__(cls, values)
+        if any(type(point) is not RealtimeTradePoint or any(type(value) not in (str,int,type(None))
+                for value in vars(point).values()) for point in result):
+            raise ValueError('immutable scalar 0B observations required')
+        return result
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+@dataclass(frozen=True)
+class MinuteTradePoint(PriceTradePoint):
+    """One completed minute; historical research only."""
+
+
+def realtime_trade_points_from_rows(rows) -> tuple[RealtimeTradePoint, ...]:
+    points = []
+    for row in rows:
+        if row.get('input_resolution') != '0B':
+            raise ValueError('individual 0B observations required')
+        points.append(RealtimeTradePoint(
+            input_ref=row['input_ref'], code=row['code'], market=row['market'],
+            observed_at=row['observed_at'], available_at=datetime.fromtimestamp(row['available_at'], _SEOUL).isoformat(),
+            close=row['price_won'], high=row['price_won'], volume=row['volume'],
+            trade_value_won=row['trade_value_won'], trade_count=1, sequence=row['sequence']))
+    return RealtimeTradePoints(points)
+
+
+def minute_trade_points_from_rows(rows, *, as_of: str) -> tuple[MinuteTradePoint, ...]:
+    """Final completed native minutes. Receipt/source stay in the content ref.
+
+    Analysis time is the completed bar end, as in the leader research adapter;
+    this does not rewrite the database receipt or fabricate individual trades.
+    """
+    cutoff = _aware_datetime(as_of)
+    latest = {}
+    for row in rows:
+        if row.get('completeness') != 'complete' or row.get('market') not in {'KRX', 'NXT'}:
+            continue
+        query = str(row.get('source', '')).startswith('kiwoom-ka10080')
+        if row.get('value_kind') != 'actual' and not (query and row.get('value_kind') == 'estimated'):
+            continue
+        start = datetime.fromisoformat(row['trading_date']+'T'+row['minute']).replace(tzinfo=_SEOUL)
+        end = start + timedelta(minutes=1)
+        if end > cutoff or any(type(row.get(k)) is not int or row[k] < 0
+                               for k in ('volume', 'trade_value_million_won')):
+            continue
+        key = (row['code'], row['market'], start)
+        rank = (query, float(row.get('available_at') or row.get('updated_at') or 0))
+        if key in latest and rank < latest[key][0]:
+            continue
+        point = MinuteTradePoint(_content_id('minute-trade', dict(row)), row['code'], row['market'],
+            end.isoformat(), end.isoformat(), row['close'], row['high'], row['volume'],
+            row['trade_value_million_won']*1_000_000, 1)
+        latest[key] = (rank, point)
+    return tuple(value[1] for _, value in sorted(latest.items(), key=lambda item: item[0][2]))
 
 
 @dataclass(frozen=True)
@@ -337,7 +414,7 @@ def theme_memberships_from_snapshot(
 
 def evaluate_theme_leadership(
     membership: ThemeMembership,
-    points: Iterable[SecondTradePoint],
+    points: Iterable[PriceTradePoint],
     *,
     as_of: str,
     venue: str,
@@ -373,11 +450,14 @@ def evaluate_theme_leadership(
         and _aware_datetime(point.observed_at).astimezone(timezone.utc) <= cutoff
         and _aware_datetime(point.observed_at).astimezone(timezone.utc) > previous_start
         and _aware_datetime(point.available_at).astimezone(timezone.utc) <= cutoff
-    ), key=lambda point: (point.observed_at, point.available_at, point.input_ref)))
+    ), key=lambda point: (_aware_datetime(point.observed_at), _aware_datetime(point.available_at),
+                         getattr(point, 'sequence', 0), point.input_ref)))
     input_refs = tuple(dict.fromkeys((membership.revision_id, *(point.input_ref for point in eligible))))
     quality_reasons: list[str] = []
     if continuity_status != "COMPLETE":
         quality_reasons.append(f"second_trade_continuity_{continuity_status.casefold()}")
+    if any(point.trade_value_won is None or point.volume is None for point in eligible):
+        quality_reasons.append('0B_turnover_or_volume_delta_unavailable')
     current_by_code = {
         code: tuple(point for point in eligible if normalize_stock_code(point.code) == code
                     and _aware_datetime(point.observed_at).astimezone(timezone.utc) > window_start)
@@ -393,7 +473,8 @@ def evaluate_theme_leadership(
         quality_reasons.append("member_current_price_unavailable")
     stale = tuple(
         code for code, values in current_by_code.items()
-        if values and (cutoff - _aware_datetime(values[-1].available_at).astimezone(timezone.utc)).total_seconds()
+        if values and (cutoff - _aware_datetime(values[-1].observed_at if isinstance(values[-1], RealtimeTradePoint)
+                                              else values[-1].available_at).astimezone(timezone.utc)).total_seconds()
         > parameters.max_data_age_seconds
     )
     if stale:
@@ -410,6 +491,14 @@ def evaluate_theme_leadership(
         current = current_by_code[code]
         previous = previous_by_code[code]
         first, last = current[0].close, current[-1].close
+        if isinstance(current[0], RealtimeTradePoint):
+            # Keep the original first observed second's closing-price basis.
+            # Retain every receipt for peak, turnover and count; no bars/state.
+            first_second = _aware_datetime(current[0].observed_at).replace(microsecond=0)
+            for point in current[1:]:
+                if _aware_datetime(point.observed_at).replace(microsecond=0) != first_second:
+                    break
+                first = point.close
         peak = max(point.high for point in current)
         current_value = sum(point.trade_value_won for point in current)
         previous_value = sum(point.trade_value_won for point in previous)

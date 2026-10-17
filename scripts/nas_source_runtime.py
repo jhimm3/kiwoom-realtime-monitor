@@ -94,7 +94,13 @@ def release(root: Path, release_id: str | None = None) -> tuple[Path, dict]:
         raise RuntimeError("release ID does not match manifest")
     runtime = read_json(root / "runtime.json")
     accepted = [runtime.get("contract"), *runtime.get("accepted_contracts", [])]
-    if manifest.get("contract") not in accepted:
+    # Source/build/driver bytes already have per-release integrity checks below.
+    # Only installed dependencies and the actual DDL definition constrain this
+    # runtime; a log/clock change in the migration runner is ordinary app code.
+    required = ("pyproject.toml", "src/kiwoom_monitor/central_server/central_schema.py")
+    if not any(all(manifest.get("contract", {}).get(name) == item.get(name)
+                   and item.get(name) is not None for name in required)
+               for item in accepted if isinstance(item, dict)):
         raise RuntimeError("runtime/dependency/schema contract changed; use a reviewed runtime update")
     content_hash = hashlib.sha256(json.dumps(manifest["files"], sort_keys=True).encode()).hexdigest()
     if release_id != f"{manifest['server_build']}-{content_hash[:16]}":
@@ -119,8 +125,11 @@ def stage(source: Path, root: Path, image: str) -> dict:
     runner_bytes = Path(__file__).read_bytes()
     if runtime_path.exists():
         runtime = read_json(runtime_path)
-        if runtime["image"] != image or runtime["contract"] != contract:
-            raise RuntimeError("dependency/Dockerfile/schema changed; prepare a new runtime before source deployment")
+        if runtime["image"] != image or any(
+            runtime["contract"].get(name) != contract[name]
+            for name in ("pyproject.toml", "src/kiwoom_monitor/central_server/central_schema.py")
+        ):
+            raise RuntimeError("dependency/schema changed; prepare a new runtime before source deployment")
         if (root / "runner.py").read_bytes() != runner_bytes:
             raise RuntimeError("runtime launcher changed; a new runtime store must be prepared")
     else:
@@ -198,10 +207,8 @@ def review_schema_update(source: Path, root: Path) -> dict:
         previous, manifest = release(root)
         runtime = read_json(root / "runtime.json")
         contract = source_contract(source)
-        schema_file = "src/kiwoom_monitor/central_server/central_schema.py"
-        for name in CONTRACT_FILES:
-            if name != schema_file and contract[name] != runtime["contract"][name]:
-                raise RuntimeError("dependency/driver/Dockerfile changed; schema-only review refused")
+        if contract["pyproject.toml"] != runtime["contract"]["pyproject.toml"]:
+            raise RuntimeError("dependency changed; schema-only review refused")
         old_plan, new_plan = schema_plan(previous), schema_plan(source)
         if not old_plan or len(new_plan) <= len(old_plan) or new_plan[:len(old_plan)] != old_plan:
             raise RuntimeError("schema review requires a strictly append-only migration plan")

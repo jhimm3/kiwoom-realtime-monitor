@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from kiwoom_monitor.domain.time_basis import KST, as_kst
+
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_AFTER_MARKET_EFFECTIVE_DATE,
     session_window_at,
@@ -24,7 +26,6 @@ from kiwoom_monitor.domain.market_data_contract import (
 )
 
 
-KST = timezone(timedelta(hours=9))
 
 
 def ranking_observation(
@@ -205,12 +206,6 @@ def snapshot_datetime(snapshot_key: str, fallback: datetime) -> datetime:
     except ValueError:
         return as_kst(fallback)
     return as_kst(parsed)
-
-
-def as_kst(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=KST)
-    return value.astimezone(KST)
 
 
 def _bar_subject(value: dict[str, Any]) -> str:

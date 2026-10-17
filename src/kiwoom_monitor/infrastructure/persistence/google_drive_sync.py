@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import base64
 import hashlib
 import json
@@ -177,7 +179,7 @@ class GoogleDriveSyncService:
                 manifest = {
                     "format": self.BUNDLE_FORMAT, "version": 2,
                     "generation": generation,
-                    "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "created_at": kst_now().isoformat(timespec="seconds"),
                     "target": target, "components": components,
                 }
                 manifest_bytes = (json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")

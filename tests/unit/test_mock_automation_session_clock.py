@@ -95,7 +95,7 @@ async def inspect_stopped_runtime_in_process(database_path: str, recovery_path: 
     """파일 DB의 새 소유권·복구가 영속 중지를 풀지 않는지 native 경로로 확인한다."""
     payload = json.loads(Path(recovery_path).read_text(encoding="utf-8"))
     now = datetime.fromisoformat(payload["observed_at"])
-    store = fixture.SQLiteQueryStore(Path(database_path))
+    store = fixture.SQLiteQueryStore(Path(database_path), now_provider=lambda: now)
     store.initialize()
     repository = fixture.ForwardEvaluationRepository(store)
     execution = fixture.ExecutionRepository(store)
@@ -116,7 +116,7 @@ async def inspect_stopped_runtime_in_process(database_path: str, recovery_path: 
         peer_repository = fixture.ExecutionRepository(store)
         peer = fixture.ExecutionRuntime(
             fixture.OrderLifecycle(peer_repository, transport), peer_repository,
-            account_ref=fixture.ACCOUNT_REF, run_id=run_id, owner_token="competing-process-owner",
+            account_ref=fixture.ACCOUNT_REF, run_id=run_id, owner_token="competing-process-owner", now_provider=lambda: now,
         )
         try:
             peer.start(new_orders_enabled=False)

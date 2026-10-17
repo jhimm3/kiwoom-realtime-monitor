@@ -5,7 +5,7 @@ import logging
 from time import perf_counter
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment, assess_stock_news
@@ -22,6 +22,7 @@ from .news_jobs import NewsJobRunner
 from .diagnostic_workloads import is_paused
 from .market_news_sources import MarketFeedNewsCollector
 from .news_sources import DEFAULT_NEWS_QUERY_SET, QuerySetNewsCollector
+from .market_observations import KST, as_kst
 
 
 LOGGER = logging.getLogger(__name__)
@@ -108,7 +109,9 @@ class CentralNewsService:
         naver_api_enabled: bool = True, naver_stock_enabled: bool = False,
         stock_client: NaverStockNewsClient | None = None,
         read_only_search: bool = False, jobs_parallelism: int = 1,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
+        self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._client = client
         self._stock_client = stock_client or NaverStockNewsClient()
         self._naver_api_enabled = bool(naver_api_enabled)
@@ -271,7 +274,7 @@ class CentralNewsService:
             cached = await asyncio.to_thread(self._load_cached, code, name, since)
             return await asyncio.to_thread(self._merge_confirmed, code, name, cached, since)
         watch_document = {
-            "stock_code": code, "stock_name": name, "registered_at": datetime.now(UTC).isoformat(),
+            "stock_code": code, "stock_name": name, "registered_at": self._now().isoformat(),
         }
         if automation is None:
             existing = await asyncio.to_thread(self._store.load_documents, "news_watchlist", code, 1)
@@ -356,7 +359,7 @@ class CentralNewsService:
         if snapshots and snapshots[0].get("snapshot_key"):
             try:
                 observed_at = datetime.fromisoformat(str(snapshots[0]["snapshot_key"]))
-                if observed_at.tzinfo is None or datetime.now(UTC) - observed_at.astimezone(UTC) > timedelta(minutes=10):
+                if observed_at.tzinfo is None or self._now() - observed_at.astimezone(UTC) > timedelta(minutes=10):
                     snapshots = []
             except ValueError:
                 snapshots = []
@@ -370,7 +373,7 @@ class CentralNewsService:
         if not self._read_only_search:
             rows.extend(await asyncio.to_thread(self._store.load_documents, "news_watchlist", "", 10_000))
         refreshed = 0
-        since = datetime.now(UTC) - timedelta(days=2)
+        since = self._now() - timedelta(days=2)
         seen: set[str] = set()
         for row in rows:
             if is_paused("news_stock_refresh"):
@@ -503,7 +506,7 @@ class CentralNewsService:
                 checked_at = None
             if (
                 checked_at is not None
-                and datetime.now(UTC) - checked_at.astimezone(UTC)
+                and self._now() - checked_at.astimezone(UTC)
                 < timedelta(seconds=self.SELECTED_STOCK_CACHE_SECONDS)
             ):
                 cached = await asyncio.to_thread(self._load_cached, code, name, None)
@@ -533,7 +536,7 @@ class CentralNewsService:
         if self._naver_stock_enabled:
             try:
                 cursor_text = str(site_state.get("site_cursor_published_at") or "")
-                window_floor = datetime.now(UTC) - timedelta(days=2)
+                window_floor = self._now() - timedelta(days=2)
                 try:
                     stock_since = datetime.fromisoformat(cursor_text).astimezone(UTC) if cursor_text else window_floor
                 except ValueError:
@@ -554,7 +557,7 @@ class CentralNewsService:
                 site_state["site_pending_latest_published_at"] = "" if found.complete or found.page_limit_reached else latest
                 site_state["site_coverage_complete"] = found.complete
                 if found.page_limit_reached:
-                    site_state["site_last_page_limit_at"] = datetime.now(UTC).isoformat()
+                    site_state["site_last_page_limit_at"] = self._now().isoformat()
                 if (found.complete or found.page_limit_reached) and latest:
                     site_state["site_cursor_published_at"] = latest
             except Exception as error:
@@ -585,7 +588,7 @@ class CentralNewsService:
         ])
         await asyncio.to_thread(self._store.upsert_documents, "news_sync", [{
             "owner": code, "key": "latest",
-            "document": {**site_state, "checked_at": datetime.now(UTC).isoformat()},
+            "document": {**site_state, "checked_at": self._now().isoformat()},
         }])
         cached = await asyncio.to_thread(self._load_cached, code, name, None)
         fresh = [value for value, _collector in documents]

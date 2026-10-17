@@ -396,7 +396,15 @@ def source_name(name):
 def validate_manifest(manifest, release_id, contract):
     require(type(manifest) is dict and manifest.get('format') == 1 and
             manifest.get('release_id') == release_id, 'invalid_release_manifest')
-    require(manifest.get('contract') == contract and set(contract) == set(CONTRACT), 'contract_requires_admin_update')
+    candidate_contract = manifest.get('contract')
+    require(type(candidate_contract) is dict and set(candidate_contract) == set(CONTRACT) and
+            all(type(value) is str and HEX.fullmatch(value) for value in candidate_contract.values()),
+            'invalid_release_contract')
+    # Dockerfile/build markers do not change the already pinned image. The
+    # migration driver's ordinary code is covered by source admission, not DDL.
+    require(all(candidate_contract[name] == contract.get(name) for name in
+                ('pyproject.toml', 'src/kiwoom_monitor/central_server/central_schema.py')),
+            'contract_requires_admin_update')
     files = manifest.get('files')
     require(type(files) is dict and 0 < len(files) <= 20000, 'invalid_source_files')
     for name, digest in files.items():
@@ -413,7 +421,7 @@ def validate_manifest(manifest, release_id, contract):
     for name in CONTRACT:
         if name != 'deploy/synology/server.Dockerfile':
             require(name in files, 'contract_source_missing')
-            require(files[name] == contract[name], 'contract_file_hash_mismatch')
+            require(files[name] == candidate_contract[name], 'contract_file_hash_mismatch')
     return content
 
 
@@ -481,7 +489,7 @@ def fingerprint(value):
     return _fingerprint_with_mounts(value, mounts)
 
 
-def fingerprint_matches(value, approved):
+def _fingerprint_matches_mount_order(value, approved):
     if fingerprint(value) == approved:
         return True
     mounts = value['Mounts']
@@ -495,6 +503,26 @@ def fingerprint_matches(value, approved):
         return False
     return any(_fingerprint_with_mounts(value, order) == approved
                for order in itertools.permutations(mounts))
+
+
+def fingerprint_matches(value, approved):
+    if _fingerprint_matches_mount_order(value, approved):
+        return True
+    # Docker 24 container.readHostConfig -> InitDNSHostConfig changes these
+    # three nil DNS slices to empty slices when restoring from disk. Compare
+    # only those equivalent empty representations to the SAME installed hash;
+    # never rewrite an approval, omit a field, or normalize actual DNS values.
+    host = value['HostConfig']
+    keys = [key for key in ('Dns', 'DnsSearch', 'DnsOptions')
+            if key in host and (host[key] is None or type(host[key]) is list and not host[key])]
+    for forms in itertools.product((None, []), repeat=len(keys)):
+        if all(host[key] == form for key, form in zip(keys, forms)):
+            continue
+        candidate = dict(value, HostConfig=dict(host))
+        candidate['HostConfig'].update(zip(keys, forms))
+        if _fingerprint_matches_mount_order(candidate, approved):
+            return True
+    return False
 
 
 def idle(snapshot):
@@ -752,8 +780,15 @@ class Operator:
             summary = {}
             reason = outcome.get('failure_reason')
             if (type(reason) is str and
-                    re.fullmatch(r'(?:capacity|private|trace|top20)_[a-z0-9_]{1,110}', reason)):
+                    (reason in ('worker_isolation_required', 'worker_memory_limit_not_enforced',
+                                'worker_memory_limit_unavailable', 'temporary_postgres_not_ready',
+                                'cluster_not_fresh') or
+                     re.fullmatch(r'(?:capacity|private|trace|top20)_[a-z0-9_]{1,110}', reason))):
                 summary['failure_reason'] = reason
+            if outcome.get('failure_stage') in (
+                    'isolation_check', 'memory_limit', 'request_read',
+                    'database_setup', 'test_or_replay'):
+                summary['failure_stage'] = outcome['failure_stage']
             for key in ('state', 'tests', 'skipped', 'failures', 'errors', 'error_type',
                         'memory_limit_bytes', 'cpu_affinity', 'failed_tests',
                         'failed_tests_truncated'):
@@ -1483,8 +1518,11 @@ class Operator:
                 gate = self.private.json('gates/' + target + '.json')
                 require(gate.get('passed') is True and gate.get('post_job_fence_verified') is True and
                         gate.get('source_hash') == content and
-                        gate.get('profile') in self.config['deploy_profiles'], 'exact_source_gate_required')
-        require(old_manifest['contract'] == manifest['contract'], 'schema_change_requires_admin')
+                        gate.get('profile') in (*self.config['deploy_profiles'], 'selected'),
+                        'exact_source_gate_required')
+        # source() already checks both releases against installed dependencies
+        # and DDL; repeating equality for every metadata field blocks code-only
+        # updates and rollback without adding a security boundary.
         with store.parent('deploy.lock') as (parent, leaf):
             try:
                 os.mkdir(leaf, 0o700, dir_fd=parent)

@@ -120,7 +120,7 @@ class SQLiteShadowStateStoreMixin:
             connection.execute(
                 "INSERT INTO central_shadow_monitor_state VALUES(?,?,?) "
                 "ON CONFLICT(monitor_id) DO UPDATE SET updated_at=excluded.updated_at,document_json=excluded.document_json",
-                (monitor_id, datetime.now(timezone.utc).isoformat(), encoded),
+                (monitor_id, self._now_provider().isoformat(), encoded),
             )
 
     def save_shadow_evaluation(
@@ -171,7 +171,7 @@ class PostgresShadowStateStoreMixin:
             operation="save_shadow_monitor_state", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            updated_at = datetime.now(timezone.utc)
+            updated_at = self._now_provider()
             encode_started = monotonic()
             encoded = json.dumps(document, ensure_ascii=False)
             payload_bytes = len(encoded.encode("utf-8"))

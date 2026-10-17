@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-import test_research_development_partitions as partitions
+from tests.unit import test_research_development_partitions as partitions
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import load_research_input
 from kiwoom_monitor.research_process import execute_process_request, load_research_process_request

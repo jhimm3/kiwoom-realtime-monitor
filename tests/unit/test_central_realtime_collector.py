@@ -14,7 +14,6 @@ from kiwoom_monitor.central_server.realtime_collector import (
     REALTIME_ITEMS_PER_TYPE,
     _registered_trade_sources,
     _next_latest_checkpoint,
-    _next_second_checkpoint,
     contains_krx_observation,
 )
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
@@ -29,6 +28,21 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 class CentralRealtimeCollectorTests(unittest.TestCase):
+    def test_status_times_share_injected_kiwoom_kst_clock(self) -> None:
+        from kiwoom_monitor.central_server.market_observations import KST
+        at = datetime(2026, 10, 15, 14, 21, 3, tzinfo=KST)
+        collector = CentralRealtimeCollector(lambda: 'not-requested', 'real', RealtimeHub(), lambda: at)
+        collector._observe_reconnect_trade()
+        self.assertEqual(collector._last_trade_observed_at, at.isoformat())
+        with collector._observe_save('fixture', [{'updated_at': at.timestamp()}]):
+            self.assertEqual(collector._active_save['started_at'], at.isoformat())
+            self.assertEqual(collector._active_save['oldest_record_at'], at.isoformat())
+        self.assertEqual(collector._save_success_at['fixture'], at.isoformat())
+        with self.assertRaisesRegex(RuntimeError, 'fixture_failure'):
+            with collector._observe_save('fixture', []):
+                raise RuntimeError('fixture_failure')
+        self.assertEqual(collector._save_failures['fixture'], at.isoformat())
+
     def test_live_read_keeps_inflight_and_lost_ack_delta_visible_without_double_count(self) -> None:
         from threading import Event
         from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
@@ -72,7 +86,8 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                     health = collector.operational_status()['persistence']
                     self.assertEqual(('saving', 0, 1), (health['state'], health['pending_records'], health['inflight_records']))
                     self.assertIsNone(health['last_success_at'])
-                    self.assertEqual(datetime.fromtimestamp(at.timestamp(), timezone.utc).isoformat(), health['oldest_record_at'])
+                    from kiwoom_monitor.central_server.market_observations import KST
+                    self.assertEqual(datetime.fromtimestamp(at.timestamp(), KST).isoformat(), health['oldest_record_at'])
                     [during] = await collector.load_live_minute_bars('005930', '2026-10-06', 'KRX')
                     self.assertEqual(2, during['volume'])
                     self.assertEqual([], store.load_minute_bars('005930', '2026-10-06', 'KRX'))
@@ -119,7 +134,6 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: at + timedelta(seconds=15), store)
             tick = TradeTick('005930', 100, None, None, 2, None, '100450')
             collector._minute_bars.add(tick, at, at.timestamp())
-            collector._second_trades.add(tick, at, at.timestamp())
             collector._pending_snapshots[('trade', '005930')] = {
                 'event_type': 'trade', 'item_key': '005930', 'received_at': at.timestamp(), 'event': {'type': 'trade', 'payload': {}},
             }
@@ -136,12 +150,12 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             )
             try:
                 before = collector.operational_status()['persistence']
-                self.assertEqual(6, before['pending_records'])
+                self.assertEqual(5, before['pending_records'])
                 self.assertEqual(before, collector.operational_status()['persistence'])
                 self.assertFalse(store.load_minute_bars('005930', '2026-10-06', 'KRX'))
                 asyncio.run(collector._flush_snapshots())
                 after = collector.operational_status()['persistence']
-                self.assertEqual(set(before['pending_by_kind']), set(after['last_success_by_kind']))
+                self.assertEqual(set(before['pending_by_kind'])-{'second_bars'}, set(after['last_success_by_kind']))
                 self.assertEqual((0, 0), (after['pending_records'], after['inflight_records']))
                 stamp = after['last_success_at']
                 asyncio.run(collector._flush_snapshots())
@@ -212,13 +226,11 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             async def exercise():
                 tick = TradeTick('005930', 100, 1, 1000, 2, None, '100459')
                 collector._minute_bars.add(tick, now[0], now[0].timestamp())
-                collector._second_trades.add(tick, now[0], now[0].timestamp())
                 await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
                 self.assertFalse(store.load_minute_bars('005930', '2026-10-06', 'KRX'))
                 now[0] = datetime(2026, 10, 6, 10, 5, 2)
                 late = TradeTick('005930', 110, 2, 1010, 3, None, '100459')
                 collector._minute_bars.add(late, now[0], now[0].timestamp())
-                collector._second_trades.add(late, now[0], now[0].timestamp())
                 await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
                 [bar] = store.load_minute_bars('005930', '2026-10-06', 'KRX')
                 self.assertEqual((100, 110, 100, 110, 5), tuple(bar[key] for key in ('open', 'high', 'low', 'close', 'volume')))
@@ -228,14 +240,14 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                 await collector._flush_snapshots(flush_latest=False, periodic=True)
                 with closing(sqlite3.connect(path)) as db:
                     row = db.execute('SELECT volume,trade_count FROM central_second_trade_bars').fetchone()
-                self.assertEqual((5, 2), row)
+                self.assertIsNone(row)
 
             try:
                 asyncio.run(exercise())
             finally:
                 store.close()
 
-    def test_periodic_loop_delays_second_writer_until_forty_five(self) -> None:
+    def test_periodic_loop_never_schedules_second_writer(self) -> None:
         from unittest.mock import patch
         clock = [datetime(2026, 10, 6, 10, 5, 43).timestamp()]
         calls = []
@@ -259,7 +271,7 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                     await collector._save_snapshots()
 
         asyncio.run(exercise())
-        self.assertEqual([False, True, False], [call['flush_seconds'] for call in calls])
+        self.assertTrue(all('flush_seconds' not in call for call in calls))
         self.assertTrue(all(call['periodic'] for call in calls))
         self.assertTrue(all(not call['flush_latest'] for call in calls))
 
@@ -298,13 +310,8 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         self.assertEqual(['10:04', '10:05'], store.saved)
         self.assertEqual(['10:04', '10:05'], store.closed)
 
-    def test_second_checkpoint_uses_next_minute_forty_five_seconds(self) -> None:
-        start = datetime(2026, 10, 6, 10, 5, tzinfo=timezone(timedelta(hours=9))).timestamp()
-        self.assertEqual(start + 45, _next_second_checkpoint(start))
-        self.assertEqual(start + 45, _next_second_checkpoint(start + 44.9))
-        self.assertEqual(start + 105, _next_second_checkpoint(start + 45))
 
-    def test_periodic_bars_keep_open_minute_and_save_previous_seconds_at_forty_five(self) -> None:
+    def test_periodic_and_shutdown_keep_minutes_without_second_writes(self) -> None:
         class Store:
             def __init__(self):
                 self.minutes, self.seconds, self.closures, self.order, self.documents = [], [], [], [], []
@@ -332,7 +339,6 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             now[0] = at
             tick = TradeTick('005930', 100, cumulative, cumulative, volume, None, at.strftime('%H%M%S'))
             collector._minute_bars.add(tick, at, at.timestamp())
-            collector._second_trades.add(tick, at, at.timestamp())
 
         async def exercise():
             add(now[0], 2, 1)
@@ -352,43 +358,15 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             self.assertFalse(store.seconds)
             now[0] = datetime(2026, 10, 6, 10, 5, 45)
             await collector._flush_snapshots(flush_latest=False, periodic=True)
-            self.assertEqual(['10:04:59'], [row['trade_second'] for row in store.seconds])
+            self.assertFalse(store.seconds)
             self.assertEqual(['10:04'], [row['minute'] for row in store.minutes])
             # Normal shutdown flushes the open minute and all deferred seconds.
             await collector.close()
             self.assertEqual(['10:04', '10:05'], [row['minute'] for row in store.minutes])
-            self.assertEqual(['10:04:59', '10:05:01'], [row['trade_second'] for row in store.seconds])
+            self.assertFalse(store.seconds)
 
         asyncio.run(exercise())
 
-    def test_failed_delayed_seconds_retry_without_waiting_for_next_deadline(self) -> None:
-        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
-
-        class Store:
-            def __init__(self):
-                self.calls, self.saved = 0, []
-
-            def save_second_trade_bars(self, rows):
-                self.calls += 1
-                if self.calls == 1:
-                    raise OSError('delayed second batch failed')
-                self.saved.extend(rows)
-
-        store = Store()
-        at = datetime(2026, 10, 6, 10, 4, 59)
-        collector = CentralRealtimeCollector(
-            lambda: 'token', 'real', RealtimeHub(), lambda: at.replace(minute=5, second=45), store,
-        )
-        collector._second_trades.add(TradeTick('005930', 100, 1, 1, 2, None, '100459'), at, at.timestamp())
-
-        async def exercise():
-            with self.assertRaises(OSError):
-                await collector._flush_snapshots(flush_latest=False, periodic=True)
-            await collector._flush_snapshots(flush_latest=False, periodic=True, flush_seconds=False)
-
-        asyncio.run(exercise())
-        self.assertEqual(2, store.calls)
-        self.assertEqual(2, store.saved[0]['volume'])
 
     def test_latest_checkpoint_uses_five_minute_boundary_plus_ten_seconds(self) -> None:
         kst = timezone(timedelta(hours=9))

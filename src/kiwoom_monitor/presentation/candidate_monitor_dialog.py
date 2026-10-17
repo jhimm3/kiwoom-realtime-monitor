@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+
 import threading
 import sqlite3
 import math
@@ -12,12 +14,16 @@ from typing import Any
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QGroupBox,
+    QApplication, QAbstractItemView, QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QTabWidget, QWidget, QComboBox, QLineEdit, QFileDialog, QScrollArea,
+    QVBoxLayout, QTabWidget, QWidget, QComboBox, QLineEdit, QFileDialog, QScrollArea, QPlainTextEdit,
 )
 
 from kiwoom_monitor.application.breakout_strategy import default_shadow_breakout_config
+from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy, document_leader_breakout_policy, document_baseline_missing
+from kiwoom_monitor.application.research_families import (
+    BREAKOUT_FAMILY_ID, RESEARCH_DIRECTION_NOTICE, RESEARCH_FAMILY_LABELS,
+)
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
 
@@ -77,6 +83,18 @@ class CandidatePollWorker(QThread):
                     self._cursor = max(self._cursor, int(page.get("high_watermark", self._cursor)))
                 page["consumed_sequence"] = self._cursor
                 self.pageReceived.emit(page)
+                # The ledger is immutable, but the server projects expiry and
+                # current episode validity. Incremental delivery alone cannot
+                # refresh rows already shown. Keep the forward cursor separate.
+                with self._condition:
+                    refresh = caught_up and self._cursor > 0 and self._polling_enabled
+                if refresh and not self.isInterruptionRequested():
+                    try:
+                        current = self._client.load_candidate_events(
+                            after_sequence=max(0, self._cursor - 1000), limit=1000)
+                        self.pageReceived.emit({**current, "status_only": True})
+                    except (RuntimeError, ValueError, OSError) as error:
+                        self.pageReceived.emit({"events": [], "status_only": True, "status_error": str(error)})
             except (RuntimeError, ValueError, OSError) as error:
                 self.failed.emit(str(error))
             with self._condition:
@@ -162,10 +180,13 @@ class CandidateMonitorDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._settings = QSettings("KiwoomMonitor", "CandidateMonitor")
         self._known_events: set[str] = set()
+        self._event_rows: dict[str, int] = {}
         self._operational_client = operational_client
         self._settings_worker: CandidateSettingsWorker | None = None
         self._operational_settings_loaded = False
-        self._strategy_config = default_shadow_breakout_config().to_dict()
+        self._strategy_config = document_leader_breakout_policy().to_dict()
+        self._legacy_candidate_settings = None
+        self._leader_policy_text = json.dumps(self._strategy_config, ensure_ascii=False, indent=2)
         self._content_client = client
         self._ram_selection_loaded = False
         self._ram_supported = False
@@ -178,6 +199,7 @@ class CandidateMonitorDialog(QDialog):
         self._ram_position_read_pending = False
 
         self._quality = QLabel("NAS 후보 상태를 확인하는 중입니다…")
+        self._quality.setWordWrap(True)
         self._alert_enabled = QCheckBox("새 후보 화면·소리 알림")
         self._alert_enabled.setChecked(
             str(self._settings.value("alert_enabled", "0")) == "1"
@@ -187,8 +209,14 @@ class CandidateMonitorDialog(QDialog):
         top.addWidget(self._quality, 1)
         top.addWidget(self._alert_enabled)
 
-        self._candidate_enabled = QCheckBox("후보 감지 사용")
-        self._strategy_name = QLabel("완료봉 돌파 v1")
+        self._candidate_enabled = QCheckBox("명시 정책으로 0B 돌파 후보 관찰")
+        self._strategy_name = QLabel("주도주 구조 돌파 · 0B · 주문 승인 없음")
+        self._strategy_selector = QComboBox()
+        self._strategy_selector.addItem("주도주 구조 돌파 · 실시간 0B", "leader_breakout/v1")
+        self._strategy_selector.addItem("기존 완료봉 돌파 · 저장된 비교 설정", "legacy_comparison")
+        self._strategy_selector.model().item(1).setEnabled(False)
+        self._server_policy_status = QLabel("서버 적용 정책 확인 전 · 화면 선택만으로 서버 설정이 바뀌지 않습니다.")
+        self._server_policy_status.setWordWrap(True)
         self._lookback_bars = QSpinBox(); self._lookback_bars.setRange(1, 240)
         self._buffer_percent = QDoubleSpinBox(); self._buffer_percent.setRange(0, 30); self._buffer_percent.setDecimals(2); self._buffer_percent.setSuffix(" %")
         self._rank_persistence = QCheckBox("순위 지속 조건 사용")
@@ -200,8 +228,10 @@ class CandidateMonitorDialog(QDialog):
         self._settings_status.setWordWrap(True)
         self._save_settings = QPushButton("Shadow 설정 저장")
         self._save_settings.clicked.connect(self._save_operational_settings)
-        self._settings_group = QGroupBox("후보 감지 설정")
+        self._settings_group = QGroupBox("주도주 구조 돌파")
         settings_form = QFormLayout(self._settings_group)
+        settings_form.addRow("판단 정책", self._strategy_selector)
+        settings_form.addRow(self._server_policy_status)
         settings_form.addRow("작동", self._candidate_enabled)
         settings_form.addRow("전략", self._strategy_name)
         settings_form.addRow("돌파 기준 봉", self._lookback_bars)
@@ -211,13 +241,31 @@ class CandidateMonitorDialog(QDialog):
         settings_form.addRow("목표 기준", self._target_percent)
         settings_form.addRow("최대 관찰", self._max_hold_minutes)
         settings_form.addRow("순위 자료 유효시간", self._universe_max_age)
+        self._settings_form = settings_form
+        self._leader_policy_editor = QPlainTextEdit()
+        self._leader_policy_editor.setPlainText(self._leader_policy_text)
+        self._leader_policy_editor.setMaximumHeight(200)
+        settings_form.addRow("주도주 돌파 명시 정책", self._leader_policy_editor)
+        self._use_leader_policy = QPushButton("미정 초안으로 초기화")
+        self._use_leader_policy.clicked.connect(self._reset_leader_policy)
+        self._strategy_selector.currentIndexChanged.connect(self._select_candidate_policy)
+        settings_form.addRow(self._use_leader_policy)
         settings_form.addRow(self._settings_status)
         settings_form.addRow(self._save_settings)
         self._settings_group.setEnabled(False)
+        self._render_candidate_settings({"shadow_candidate_config": self._strategy_config})
+        self._settings_group.setEnabled(False)
+        self._settings_status.setText("NAS 설정을 불러오는 중입니다…")
 
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(("감지 시각", "종목", "기준가", "수량", "만료", "상태"))
+        self._table = QTableWidget(0, 7)
+        self._table.setHorizontalHeaderLabels(("감지 시각", "종목", "기준가", "수량", "만료", "상태", "판단 정책"))
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._baseline_status = QLabel('00종합 기준선 관측 대기 · 거래 조건의 미정 값은 유지합니다.')
+        self._baseline_status.setWordWrap(True)
+        self._baseline_table = QTableWidget(0,5)
+        self._baseline_table.setHorizontalHeaderLabels(('종목','0B 관측가','직전 구간 고가','기준선 관측','거래 준비'))
+        self._baseline_table.setMaximumHeight(160)
+        self._baseline_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.horizontalHeader().setStretchLastSection(True)
 
@@ -225,12 +273,17 @@ class CandidateMonitorDialog(QDialog):
         candidate_layout = QVBoxLayout(candidate_page)
         candidate_layout.addLayout(top)
         candidate_layout.addWidget(self._settings_group)
+        candidate_layout.addWidget(self._baseline_status)
+        candidate_layout.addWidget(self._baseline_table)
         candidate_layout.addWidget(self._table)
         self._tabs = QTabWidget()
-        self._tabs.addTab(candidate_page, "매매 후보")
+        self._tabs.addTab(candidate_page, "주도주 돌파 · 0B")
         self._tabs.addTab(self._build_ram_page(), "시장·테마 관찰")
         self._tabs.currentChanged.connect(self._tab_changed)
         layout = QVBoxLayout(self)
+        self._research_direction = QLabel(RESEARCH_DIRECTION_NOTICE)
+        self._research_direction.setWordWrap(True)
+        layout.addWidget(self._research_direction)
         layout.addWidget(self._tabs)
         self._ram_timer = QTimer(self)
         self._ram_timer.setInterval(5000)
@@ -270,10 +323,28 @@ class CandidateMonitorDialog(QDialog):
             self._worker.start()
 
     def _apply_page(self, page: dict[str, Any]) -> None:
+        if page.get("status_only"):
+            refreshed = set()
+            for event in page.get("events", []):
+                if not isinstance(event, dict):
+                    continue
+                event_id = str(event.get("event_id", ""))
+                row = self._event_rows.get(event_id)
+                if row is not None:
+                    self._write_event(row, event)
+                    refreshed.add(event_id)
+            for event_id, row in self._event_rows.items():
+                item = self._table.item(row, 5)
+                if event_id not in refreshed and item.text() in {"ACTIVE", "현재 미확인"}:
+                    item.setText("현재 미확인")
+                    item.setToolTip(str(page.get("status_error") or "최근 1,000건 상태 확인 범위 밖입니다."))
+            return
         quality = page.get("quality", {})
+        self._render_document_baselines(quality)
         status = _quality_status(quality.get("status", "UNKNOWN"))
         reason = _quality_reason(quality.get("reason", ""))
         self._quality.setText(f"NAS 후보: {status}" + (f" · {reason}" if reason else ""))
+        self._quality.setToolTip(str(quality.get('reason','')))
         initial = bool(page.get("initial_sync"))
         self._settings.setValue(
             "last_consumed_sequence", str(max(0, int(page.get(
@@ -285,7 +356,12 @@ class CandidateMonitorDialog(QDialog):
             if not isinstance(event, dict):
                 continue
             event_id = str(event.get("event_id", ""))
-            if not event_id or event_id in self._known_events:
+            if not event_id:
+                continue
+            if event_id in self._known_events:
+                row = self._event_rows.get(event_id)
+                if row is not None:
+                    self._write_event(row, event)
                 continue
             self._known_events.add(event_id)
             self._append_event(event)
@@ -300,20 +376,52 @@ class CandidateMonitorDialog(QDialog):
             self.raise_()
             self.activateWindow()
 
+    def _render_document_baselines(self,quality):
+        observations = quality.get('document_baseline_observations',())
+        self._baseline_table.setRowCount(0)
+        if not isinstance(observations,(tuple,list)) or len(observations)>200:
+            self._baseline_status.setText('00종합 기준선 자료 확인 필요')
+            return
+        labels={'WATCH':'기준선 관찰','ABOVE_REFERENCE':'기준선 위 관측',
+            'CROSSED_UNCONFIRMED':'가격 교차 관측 · 확인 미완료','DATA_BLOCKED':'자료/설정 미확인'}
+        for value in observations:
+            row=self._baseline_table.rowCount();self._baseline_table.insertRow(row)
+            reference=value.get('reference',{})
+            texts=(value.get('symbol',''),value.get('price'),reference.get('reference_price'),
+                labels.get(value.get('state'),'미확인'),'거래 미승인 · 조건 미정')
+            details=('00종합 ② 10절 · 현재 구간을 제외한 완료 분봉 고가 / 현재 가격은 0B',
+                '주도주 선정·확인 조건·대금 문턱·무효화/위험 조건은 임의로 채우지 않습니다.',
+                str(value.get('observed_at','')),
+                str(reference.get('window_start',''))+' ~ '+str(reference.get('window_end','')),
+                *(_leader_missing_label(name) for name in value.get('configuration_missing',())),*value.get('reasons',()),
+                *reference.get('input_refs',()))
+            for column,text in enumerate(texts):
+                item=QTableWidgetItem('미정' if text is None else str(text));item.setToolTip('\n'.join(details))
+                self._baseline_table.setItem(row,column,item)
+        self._baseline_table.resizeColumnsToContents()
+        self._baseline_status.setText('00종합 가격 기준선 관측 · '+str(len(observations))+'종목 · 주도주/진입 확정·주문 승인 아님')
+
     def _append_event(self, event: dict[str, Any]) -> None:
         row = self._table.rowCount()
         self._table.insertRow(row)
+        if event.get("event_id"):
+            self._event_rows[str(event["event_id"])] = row
+        self._write_event(row, event)
+        self._table.scrollToBottom()
+
+    def _write_event(self, row: int, event: dict[str, Any]) -> None:
         values = (
             _display_time(event.get("available_at")),
             str(event.get("symbol", "")),
             f"{int(event.get('signal_reference_price', 0)):,}",
-            str(event.get("quantity", "")),
+            "미정" if event.get("quantity") is None else str(event["quantity"]),
             _display_time(event.get("expires_at")),
             str(event.get("status", "")),
+            ("주도주 구조 돌파 · 0B" if event.get("strategy_id") == "leader_breakout"
+             else "기존 비교 · " + str(event.get("strategy_id", "출처 미확인"))),
         )
         for column, value in enumerate(values):
             self._table.setItem(row, column, QTableWidgetItem(value))
-        self._table.scrollToBottom()
 
     def _show_failure(self, message: str) -> None:
         self._quality.setText(f"NAS 후보 연결 대기 · {message}")
@@ -338,6 +446,83 @@ class CandidateMonitorDialog(QDialog):
         self._operational_settings_loaded = True
         self._operational_revision = values.get("revision")
         config = values.get("shadow_candidate_config")
+        leader_mode = isinstance(config, dict) and "policy_id" in config
+        implicit_draft = leader_mode and json.dumps(config,sort_keys=True) == json.dumps(LeaderBreakoutPolicy().to_dict(),sort_keys=True)
+        self._legacy_candidate_settings = deepcopy(values) if isinstance(config, dict) and not leader_mode else None
+        self._strategy_selector.model().item(1).setEnabled(self._legacy_candidate_settings is not None)
+        server_policy = "주도주 구조 돌파 · 0B" if leader_mode else "기존 완료봉 비교" if isinstance(config, dict) else "미확인"
+        self._server_policy_status.setText(
+            f"서버 저장 #{self._operational_revision}: {server_policy} · "
+            + ("켜짐" if values.get("shadow_candidate_enabled") else "꺼짐")
+            + " · 편집한 정책은 저장 후 서버에 적용됩니다.")
+        if leader_mode:
+            self._leader_policy_text = json.dumps(document_leader_breakout_policy().to_dict() if implicit_draft else config,
+                ensure_ascii=False,indent=2)
+        selected_legacy = self._strategy_selector.currentData() == "legacy_comparison" and self._legacy_candidate_settings is not None
+        blocked = self._strategy_selector.blockSignals(True)
+        self._strategy_selector.setCurrentIndex(1 if selected_legacy else 0)
+        self._strategy_selector.blockSignals(blocked)
+        self._render_candidate_settings({**values,'shadow_candidate_enabled':False,
+            'shadow_candidate_config':document_leader_breakout_policy().to_dict()} if implicit_draft else values if leader_mode or selected_legacy else {
+            "shadow_candidate_enabled": False, "shadow_candidate_config": document_leader_breakout_policy().to_dict()})
+        if not leader_mode and not selected_legacy:
+            self._settings_status.setText("새 0B 정책 편집 중 · 서버의 기존 비교 설정은 아직 전환되지 않았습니다. "
+                + self._settings_status.text())
+        elif implicit_draft:
+            self._settings_status.setText('00종합 초안 편집 중 · 서버의 기존 미정 설정은 저장 후 전환됩니다. '+self._settings_status.text())
+
+    def _select_candidate_policy(self, _index: int) -> None:
+        if "policy_id" in self._strategy_config:
+            self._leader_policy_text = self._leader_policy_editor.toPlainText()
+        if self._strategy_selector.currentData() == "legacy_comparison":
+            if self._legacy_candidate_settings is not None:
+                self._render_candidate_settings(self._legacy_candidate_settings)
+        else:
+            self._render_candidate_settings({"shadow_candidate_enabled": False,
+                "shadow_candidate_config": document_leader_breakout_policy().to_dict()})
+
+    def _reset_leader_policy(self) -> None:
+        self._leader_policy_text = json.dumps(document_leader_breakout_policy().to_dict(), ensure_ascii=False, indent=2)
+        if self._strategy_selector.currentIndex() == 0:
+            self._render_candidate_settings({"shadow_candidate_config": document_leader_breakout_policy().to_dict()})
+        else:
+            self._strategy_selector.setCurrentIndex(0)
+
+    def _render_candidate_settings(self, values: dict[str, Any]) -> None:
+        config = values.get("shadow_candidate_config")
+        leader_mode = isinstance(config, dict) and "policy_id" in config
+        self._leader_policy_editor.setVisible(leader_mode)
+        self._use_leader_policy.setVisible(leader_mode)
+        self._settings_form.labelForField(self._leader_policy_editor).setVisible(leader_mode)
+        for widget in (self._lookback_bars, self._buffer_percent, self._rank_persistence,
+                self._stop_loss_percent, self._target_percent, self._max_hold_minutes, self._universe_max_age):
+            widget.setVisible(not leader_mode)
+            self._settings_form.labelForField(widget).setVisible(not leader_mode)
+        if leader_mode:
+            self._strategy_config = deepcopy(config)
+            self._leader_policy_editor.setPlainText(self._leader_policy_text)
+            self._candidate_enabled.setText("명시 정책으로 0B 돌파 후보 관찰")
+            self._candidate_enabled.setChecked(bool(values.get("shadow_candidate_enabled", False)))
+            self._strategy_name.setText("주도주 구조 돌파 · 0B · 주문 승인 없음")
+            self._settings_group.setTitle("주도주 구조 돌파")
+            try:
+                policy = LeaderBreakoutPolicy.from_dict(json.loads(self._leader_policy_text))
+                missing = policy.missing("0B")
+                self._settings_status.setText("진입 차단 · 미정: " + ", ".join(missing) if missing else
+                    "실제 0B 가격 교차 판단 · 명시 주도주/구조 근거 필요 · 주문 승인 없음")
+                if policy.reference_level is not None:
+                    missing = document_baseline_missing(policy,'0B')
+                    self._candidate_enabled.setText('00종합 기준선의 0B 관측·기록')
+                    self._strategy_name.setText('주도주 구조 돌파 · 0B · 00종합 기준선 관측')
+                    self._settings_status.setText('00종합 기준선 관측 · 현재 구간 제외 · 주문 승인 없음 · 미정: '+
+                        ', '.join(_leader_missing_label(name) for name in missing))
+            except (ValueError, TypeError) as error:
+                self._settings_status.setText("정책 확인 필요 · " + str(error))
+            self._settings_group.setEnabled(True)
+            return
+        self._candidate_enabled.setText("완료봉 비교 실험의 후보 기록 사용")
+        self._strategy_name.setText(RESEARCH_FAMILY_LABELS[BREAKOUT_FAMILY_ID])
+        self._settings_group.setTitle("기존 완료봉 비교 실험 설정")
         if isinstance(config, dict):
             self._strategy_config = {**default_shadow_breakout_config().to_dict(), **config}
         self._candidate_enabled.setChecked(bool(values.get("shadow_candidate_enabled", False)))
@@ -350,10 +535,9 @@ class CandidateMonitorDialog(QDialog):
         self._universe_max_age.setValue(
             max(1, int(values.get("shadow_candidate_universe_max_age_seconds", 90)))
         )
-        self._settings_status.setText(
+        self._settings_status.setText("기존 비교 설정 편집 중 · 새 주도주 돌파 정책이 아닙니다. " + (
             "켜짐 · 주문 없이 후보만 기록합니다."
-            if self._candidate_enabled.isChecked() else "꺼짐 · 기존 후보 기록은 보존됩니다."
-        )
+            if self._candidate_enabled.isChecked() else "꺼짐 · 기존 후보 기록은 보존됩니다."))
         self._settings_group.setEnabled(True)
 
     def _show_settings_failure(self, message: str) -> None:
@@ -371,6 +555,19 @@ class CandidateMonitorDialog(QDialog):
         self._update_position_source_buttons()
 
     def _save_operational_settings(self) -> None:
+        if "policy_id" in self._strategy_config:
+            try:
+                config = LeaderBreakoutPolicy.from_dict(json.loads(self._leader_policy_editor.toPlainText())).to_dict()
+            except (TypeError, ValueError) as error:
+                self._settings_status.setText("정책 확인 필요 · " + str(error))
+                return
+            changes = {"shadow_candidate_enabled": self._candidate_enabled.isChecked(),
+                "shadow_candidate_config": config}
+            revision = getattr(self, "_operational_revision", None)
+            if isinstance(revision, int):
+                changes["expected_revision"] = revision
+            self._start_settings_request(changes)
+            return
         config = dict(self._strategy_config)
         rank_enabled = self._rank_persistence.isChecked()
         config.update({
@@ -430,9 +627,14 @@ class CandidateMonitorDialog(QDialog):
     def _build_ram_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        note = QLabel("시장·테마를 주문 없이 관찰합니다. 수집되지 않은 종목은 자료를 기다립니다.")
+        note = QLabel("시장·테마의 기존 관찰·보유 행동 비교입니다. 주도주 돌파의 진입 정책은 첫 탭에서 설정합니다.\n"
+            "현재가·체결·매매 실행은 0B를 사용하며, 필요한 기존 분봉 계산도 함께 유지합니다. "
+            "연구는 일봉·5분봉·1분봉 등으로 규칙과 자동매매 적용 방법을 검증합니다. 기존 초봉 자료는 보존합니다.")
         note.setWordWrap(True)
         layout.addWidget(note)
+        self._ram_open_breakout = QPushButton("주도주 돌파 · 0B 판단 설정 열기")
+        self._ram_open_breakout.clicked.connect(lambda: self._tabs.setCurrentIndex(0))
+        layout.addWidget(self._ram_open_breakout)
         self._ram_enabled = QCheckBox("시장·테마 관찰 사용")
         self._ram_themes = QLineEdit()
         self._ram_themes.setPlaceholderText("테마 ID를 쉼표로 구분해 입력하세요")
@@ -444,9 +646,9 @@ class CandidateMonitorDialog(QDialog):
         form.addRow("테마", self._ram_themes)
         form.addRow("거래소", self._ram_venue)
         form.addRow(self._ram_recording)
-        thesis_group = QGroupBox("저장된 연구 가설의 행동 제안")
+        thesis_group = QGroupBox("기존 분봉 연구 가설의 보유 행동 비교")
         thesis_layout = QVBoxLayout(thesis_group)
-        self._ram_thesis_enabled = QCheckBox("선택한 연구 가설 사용 · 주문 없음")
+        self._ram_thesis_enabled = QCheckBox("선택한 기존 연구 가설 비교 · 주문 없음")
         thesis_layout.addWidget(self._ram_thesis_enabled)
         self._ram_thesis_details = QWidget()
         thesis_form = QFormLayout(self._ram_thesis_details)
@@ -459,11 +661,11 @@ class CandidateMonitorDialog(QDialog):
         self._ram_thesis_run = QLineEdit(); self._ram_thesis_id = QLineEdit()
         self._ram_thesis_policy = QComboBox()
         for policy in ("PRICE_ONLY", "IMMEDIATE_EXIT", "REDUCE_ON_RISK", "CONFIRM_THEN_EXIT"):
-            self._ram_thesis_policy.addItem(_ram_label(policy), policy)
+            self._ram_thesis_policy.addItem("기존 보유 비교 · " + _ram_label(policy), policy)
         self._ram_thesis_policy.setCurrentIndex(-1)
         thesis_form.addRow("연구 실행 ID", self._ram_thesis_run)
         thesis_form.addRow("진입 가설 ID", self._ram_thesis_id)
-        thesis_form.addRow("행동 정책", self._ram_thesis_policy)
+        thesis_form.addRow("보유 비교 정책", self._ram_thesis_policy)
         thesis_layout.addWidget(self._ram_thesis_details)
         self._ram_thesis_details.setEnabled(False)
         self._ram_thesis_enabled.toggled.connect(self._ram_thesis_details.setEnabled)
@@ -529,8 +731,8 @@ class CandidateMonitorDialog(QDialog):
         source_layout = QVBoxLayout(source_group)
         source_row = QHBoxLayout()
         self._ram_source_window = QSpinBox(); self._ram_source_window.setRange(1, 60)
-        self._ram_source_window.setValue(20); self._ram_source_window.setSuffix(" 초")
-        self._ram_source_check = QPushButton("저장된 가설 원본 대조")
+        self._ram_source_window.setValue(20); self._ram_source_window.setSuffix(" 분 조회")
+        self._ram_source_check = QPushButton("확정 분봉 원본 대조")
         self._ram_source_check.setEnabled(False)
         self._ram_source_check.clicked.connect(lambda: self._start_ram_request("source_check"))
         source_row.addWidget(QLabel("대조 범위")); source_row.addWidget(self._ram_source_window)
@@ -557,6 +759,15 @@ class CandidateMonitorDialog(QDialog):
         self._ram_position_status.setWordWrap(True)
         self._ram_position_status.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self._ram_position_status)
+        self._ram_allocation_status = QLabel('동적 비중 자료 없음 · 현재 체결 0B / 기존 분봉 연구 비교 유지')
+        self._ram_allocation_status.setWordWrap(True)
+        self._ram_allocation_status.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self._ram_allocation_status)
+        self._ram_allocation_table = QTableWidget(0, 5)
+        self._ram_allocation_table.setHorizontalHeaderLabels(('종목', '현재가(원)', '창 거래대금(원)', '관측초 가격 RMS(bp)', '관측 창(초)'))
+        self._ram_allocation_table.resizeColumnToContents(3)
+        self._ram_allocation_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self._ram_allocation_table)
         self._ram_position_table = QTableWidget(0, 9)
         self._ram_position_table.setHorizontalHeaderLabels(("행동", "실제 / 확인된 미체결 매수·매도", "예상 / 목표",
             "추가 수량", "비용 차감 평균(원)", "HOLD 대비 차이(원)", "짝 표본", "차이 표준오차(원)", "자료 상태"))
@@ -608,9 +819,9 @@ class CandidateMonitorDialog(QDialog):
             def request():
                 if QThread.currentThread().isInterruptionRequested():
                     raise RuntimeError("원본 대조가 중단되었습니다.")
-                return self._content_client.check_ram_shadow_sources(expected_revision=revision, lookback_seconds=window)
+                return self._content_client.check_ram_shadow_minute_sources(expected_revision=revision, lookback_minutes=window)
             callback = lambda values: self._apply_ram_source_check(values, revision, thesis_ref, window)
-            self._ram_source_status.setText(f"저장된 선택 #{revision} · {window}초 범위 대조 중…")
+            self._ram_source_status.setText(f"저장된 선택 #{revision} · {window}분 조회 범위 대조 중…")
         elif kind == 'position_source':
             if self._settings_worker is not None or not self._ram_selection_loaded or not self._ram_supported:
                 return False
@@ -685,7 +896,7 @@ class CandidateMonitorDialog(QDialog):
 
     def _can_check_ram_sources(self):
         return (self._ram_selection_loaded and self._ram_supported and self._ram_saved_stock_thesis is not None
-                and not self._ram_stopping and callable(getattr(self._content_client, "check_ram_shadow_sources", None)))
+                and not self._ram_stopping and callable(getattr(self._content_client, "check_ram_shadow_minute_sources", None)))
 
     def _update_source_check_button(self):
         busy = self._settings_worker is not None and self._settings_worker.isRunning()
@@ -699,16 +910,17 @@ class CandidateMonitorDialog(QDialog):
             self._ram_source_status.setText("선택이 바뀌어 이전 대조 결과를 표시하지 않습니다. 저장된 선택을 다시 불러오세요.")
             return
         try:
-            if (values["version"] != "stock-thesis-source-check/v1" or values["selection_revision"] != revision
-                    or values["thesis_ref"] != thesis_ref or values["lookback_seconds"] != window
-                    or values["scope"] != "bounded_current_native_values"
+            minute_check = values['version'] == 'stock-thesis-source-check/v2'
+            if (values["version"] not in {"stock-thesis-source-check/v1", "stock-thesis-source-check/v2"} or values["selection_revision"] != revision
+                    or values["thesis_ref"] != thesis_ref or values["lookback_minutes" if minute_check else "lookback_seconds"] != window
+                    or values["scope"] != ("bounded_final_completed_minutes" if minute_check else "bounded_current_native_values")
                     or values["source_durability"] != "not_verified"
                     or values["replay_eligible"] is not False or values["order_authorized"] is not False):
                 raise ValueError("대조 대상 또는 승인 범위가 다릅니다")
             as_of = datetime.fromisoformat(values["as_of"])
             if as_of.tzinfo is None or as_of.utcoffset() is None:
                 raise ValueError("대조 판단 시각을 확인할 수 없습니다")
-            theme, seconds = values["theme"], values["seconds"]
+            theme, seconds = values["theme"], values["minutes" if minute_check else "seconds"]
             theme_label = {"MATCHED": "테마 내용 일치", "NOT_FOUND_IN_BOUNDED_READ": "조회 범위에서 테마를 찾지 못함",
                            "CONTENT_HASH_MISMATCH": "테마 내용 해시 불일치", "MEMBERSHIP_MISMATCH": "테마 구성원 불일치"}[theme["status"]]
             counts = (seconds["expected"], seconds["matched"], seconds["rows_read"], theme["rows_read"])
@@ -724,12 +936,13 @@ class CandidateMonitorDialog(QDialog):
             if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0:
                 raise ValueError("대조 시간을 확인할 수 없습니다")
             budget = " · 테마 조회 한도 도달" if theme["budget_reached"] else ""
-            second_label = f"초봉 {counts[1]}/{counts[0]} 일치" if counts[0] else "초봉 대조 가능한 참조 없음"
+            unit = '분봉' if minute_check else '과거 초봉'
+            second_label = f"{unit} {counts[1]}/{counts[0]} 일치" if counts[0] else f"{unit} 대조 가능한 참조 없음"
             self._ram_source_status.setText(
-                f"저장된 선택 #{revision} · 판단 시각 {_display_time(values['as_of'])} · {window}초 범위\n"
+                f"저장된 선택 #{revision} · 판단 시각 {_display_time(values['as_of'])} · {window}{'분' if minute_check else '초'} 조회 범위\n"
                 f"{theme_label}{budget} · {second_label} · 기타 미대조 참조 {sum(map(len, lists[1:]))}개\n"
-                f"테마 {counts[3]}행 / 초봉 {counts[2]}행 조회 · {elapsed:.1f}ms\n"
-                "초봉 이전 이력·수집 연속성·요인/가설 출처 미확인 · 운영/재생 승인 없음")
+                f"테마 {counts[3]}행 / {unit} {counts[2]}행 조회 · {elapsed:.1f}ms\n"
+                f"{unit} 이전 이력·수집 연속성·요인/가설 출처 미확인 · 운영/재생 승인 없음")
         except (KeyError, TypeError, ValueError) as error:
             self._ram_source_status.setText("원본 대조 응답을 확인할 수 없습니다. 운영 승인은 별도입니다. " + str(error))
 
@@ -770,7 +983,7 @@ class CandidateMonitorDialog(QDialog):
                     raise ValueError("연구 DB와 진입 가설을 명시 선택하세요.")
                 request = persisted_stock_thesis_shadow_request_from_evidence(evidence,
                     run_id=run_id, thesis_id=thesis_id, thesis_policy_version=policy,
-                    leadership_venue=changes["leadership_venue"], decision_time=datetime.now().astimezone().isoformat())
+                    leadership_venue=changes["leadership_venue"], decision_time=kst_now().isoformat())
                 if request.entry_thesis.theme_id not in changes["theme_ids"]:
                     raise ValueError("진입 가설의 테마를 관찰 대상에 포함하세요.")
                 return {**changes, "stock_thesis": {"evidence": evidence, "thesis_policy_version": policy}}
@@ -887,6 +1100,7 @@ class CandidateMonitorDialog(QDialog):
         recorded = self._ram_view.currentIndex() == 1
         envelope = self._ram_recorded if recorded else (self._ram_page or {}).get("live")
         self._render_position_comparison(envelope, recorded=recorded)
+        self._render_position_allocation(envelope, recorded=recorded)
         self._ram_table.setRowCount(0)
         if not envelope:
             self._ram_status.setText("최근 저장 결과가 없습니다." if recorded else "관찰 결과 준비 중 · " + str((self._ram_page or {}).get("runtime", {}).get("state", "DISABLED")))
@@ -902,27 +1116,184 @@ class CandidateMonitorDialog(QDialog):
             inference = h2["inferences"]
             expiry = decision["valid_until"] if decision else context["expires_at"]
             try:
-                expired = datetime.fromisoformat(expiry) <= datetime.now().astimezone()
+                expired = datetime.fromisoformat(expiry) <= kst_now()
             except (ValueError, TypeError):
                 expired = True
+            market_text = _ram_label(h1["inferences"].get("market_type", "UNKNOWN"))
+            observation = envelope.get("market_observed_changes", {}).get(slot.get("market_observed_changes_ref"))
+            observation_tip = ()
+            observation_status = ""
+            if observation:
+                try:
+                    change_expired = (not recorded and observation.get("observed_at") is not None
+                        and datetime.fromisoformat(observation["expires_at"]) <= kst_now())
+                except (ValueError, TypeError, KeyError):
+                    change_expired = True
+                status = "STALE" if change_expired else observation["quality"]["status"]
+                pattern = "UNKNOWN" if change_expired else observation.get("pattern", "UNKNOWN")
+                labels = {"LEADER_CONCENTRATION": "첫 순위 집중", "LEADER_REPLACEMENT": "첫 순위 교체",
+                    "DISPERSED_ROTATION": "분산 순위 회전", "LEADER_RETAINED": "첫 순위 유지", "UNKNOWN": "미확인"}
+                lookup = observation.get("lookup_change")
+                market_text += "\n조회순위 변화: " + ({"CHANGED": "첫 순위 교체", "RETAINED": "첫 순위 유지"}.get(lookup["state"], "미확인")
+                    if lookup and not change_expired else labels.get(pattern, "미확인"))
+                observation_status = " / 변화 " + {"UNAVAILABLE": "미확인", "MISSING": "자료 없음"}.get(status, _ram_label(status))
+                candidates = () if change_expired else observation.get("candidates", ())
+                counts = {state: sum(row["state"] == state for row in candidates)
+                          for state in ("RETAINED", "LEFT", "REAPPEARED")}
+                observation_tip = ("TOP20 조회순위 관측 · 전체 시장/매수 승인 아님",
+                    "관측 " + (_display_time(observation["observed_at"]) if observation.get("observed_at") else "미확인"),
+                    "판단 " + _display_time(observation.get("as_of")),
+                    "만료 " + (_display_time(observation["expires_at"]) if observation.get("expires_at") else "미확인"),
+                    f"유지 {counts['RETAINED']} · 이탈 {counts['LEFT']} · 재등장 {counts['REAPPEARED']}",
+                    *observation["quality"].get("reasons", ()), *observation.get("input_refs", ()))
+                price = observation.get("price_trade_leadership")
+                if price:
+                    try:
+                        price_expired = not recorded and price["quality"]["status"] == "COMPLETE" and datetime.fromisoformat(price["expires_at"]) <= kst_now()
+                    except (ValueError, TypeError, KeyError):
+                        price_expired = True
+                    state = "UNKNOWN" if price_expired else price["state"]
+                    price_labels = {"UNKNOWN": "미확인", "NO_CANDIDATE": "조건 충족 후보 없음", "EMERGING": "새 후보 관측",
+                        "LOST": "기존 후보 조건 이탈", "RETAINED": "후보 유지", "REPLACED": "후보 교체", "ROTATING_GROUP": "후보 일부 변화"}
+                    candidate_codes = () if price_expired else price.get("current_candidates", ())
+                    minute_primary = price.get("primary_timeframe") == "1m"
+                    price_basis = '0B ' if price.get('input_resolution') == '0B' else '과거 관측 '
+                    market_text += ("\n1분 가격·대금 후보: " if minute_primary else '\n'+price_basis+"가격·대금 주도 후보: ") + price_labels.get(state, "미확인")
+                    if candidate_codes:
+                        market_text += " (" + ", ".join(candidate_codes) + ")"
+                    if minute_primary:
+                        confirmation = price.get("five_minute_confirmation", {})
+                        confirmed_state = "UNAVAILABLE" if price_expired else confirmation.get("status", "UNAVAILABLE")
+                        market_text += "\n5분 지속: " + {"CONFIRMED": "확인", "NOT_CONFIRMED": "지속 근거 부족", "UNAVAILABLE": "미확인"}.get(confirmed_state, "미확인")
+                        observation_tip += ("주 판단은 완료된 1분봉, 지속성은 최근 5분 중 가격·대금 우위 3분 이상",
+                            "실시간 시장 관찰에도 확정 분봉을 사용하며, 현재가·체결·보호는 0B를 사용합니다.")
+                        observation_tip += ("분봉 기준 " + _display_time(price.get("as_of")),)
+                        if price.get("published_at"):
+                            observation_tip += ("분봉 결과 반영 " + _display_time(price["published_at"]),)
+                        for label, frame in price.get("timeframes", {}).items():
+                            flow = frame.get("market_flow", {})
+                            if not price_expired and frame["quality"]["status"] == "COMPLETE" and flow:
+                                current, previous = flow["current"], flow["previous"]
+                                direction = "증가" if current["trade_value_won"] > previous["trade_value_won"] else "감소" if current["trade_value_won"] < previous["trade_value_won"] else "유지"
+                                text = f"{label} TOP20 관측: 가격 상승 {current['positive_price_ratio_ppm']/10000:.1f}% · 대금 {direction}"
+                                if label == "1m":
+                                    market_text += "\n" + text.replace("1m", "1분")
+                                observation_tip += (text + f" · 대금 합계 {current['trade_value_won']:,}원",)
+                    price_reason_labels = {
+                        "price_trade_continuity_unconfirmed": "연속 수신 확인 부족",
+                        "two_window_price_sample_insufficient": "두 비교 구간 가격 표본 부족",
+                        "previous_price_sample_insufficient": "이전 구간 가격 표본 부족",
+                        "current_price_sample_insufficient": "현재 구간 가격 표본 부족",
+                        "current_price_observation_unavailable": "현재 구간 시세 없음",
+                        "price_observation_stale": "최근 시세 유효기간 지남",
+                        "trade_source_not_approved": "해당 거래소 수신 승인 없음",
+                        "trade_source_history_unconfirmed": "연속 수신 시작시각 미확인",
+                        "trade_source_history_insufficient": "수신 승인 뒤 비교 이력 부족",
+                        "ram_retention_history_insufficient": "보존된 비교 이력 부족",
+                        "ram_delivery_gap_in_window": "비교 구간 수신·전달 공백",
+                        "price_trade_row_conversion_incomplete": "시세 변환 일부 미확인",
+                        "membership_capture_incomplete": "TOP20 소속 자료 불완전",
+                        "membership_trading_day_mismatch": "소속 자료 거래일 불일치",
+                        "comparison_cohort_price_trade_incomplete": "비교 종목 전원의 자료가 갖춰지지 않음",
+                        "membership_stale": "조회순위 소속 자료 만료",
+                        "price_trade_observation_expired": "판단 시점 시세자료 만료",
+                        "price_trade_inputs_unavailable": "가격·거래대금 자료 미확인",
+                        "previous_minute_history_incomplete": "이전 비교 구간 분봉 부족",
+                        "current_minute_history_incomplete": "현재 비교 구간 분봉 부족",
+                        "comparison_cohort_minute_history_incomplete": "비교 종목 전원의 완료 분봉이 갖춰지지 않음",
+                        "minute_bar_not_closed_actual": "미완성 또는 추정 대금 분봉",
+                        "minute_bar_lineage_unconfirmed": "분봉 시점·출처 미확인",
+                    }
+                    coverage = price["quality"].get("coverage")
+                    if coverage:
+                        coverage_expired = price_expired or price.get("projection") == "expired" or price["quality"]["status"] == "STALE"
+                        if coverage_expired:
+                            market_text += "\n시세자료 확인 만료"
+                        else:
+                            market_text += f"\n판단시점 시세자료 {coverage['usable_members']}/{coverage['expected_members']}종목"
+                    observation_tip += ("주도 후보는 조회순서와 독립된 최근 가격 반응·대금 우위로 판단",
+                        "시세 범위 " + str(price.get("universe", "미확인")) + " / " + str(price.get("venue", "미확인")),
+                        "가격·대금 만료 " + _display_time(price.get("expires_at")),
+                        *(price_reason_labels.get(reason, reason) for reason in price["quality"].get("reasons", ())))
+                    for metric in price.get("metrics", ()):
+                        if metric.get("quality") == "PARTIAL":
+                            observation_tip += (f"{metric['code']}: 이전 {metric['previous_observation_count']}건 / 현재 {metric['current_observation_count']}건 · "
+                                + " · ".join(price_reason_labels.get(reason, reason) for reason in metric["reasons"]),)
+                        if metric["code"] in candidate_codes:
+                            observation_tip += (f"{metric['code']}: 가격 {metric['current_return_bps']}bps · "
+                                f"관측 대금 {metric['current_trade_value_won']}원 · 대금 순위 {metric.get('current_trade_value_rank', '미확인')}",)
             values = (slot.get("theme_id", h2["facts"].get("theme_id", "")) + (" / " + decision["symbol"] + "\n" + _ram_label(decision["thesis_policy_version"]) if decision else ""),
                 slot.get("leadership_venue", context["scope"]["leadership_venue"]),
-                _ram_label(h1["inferences"].get("market_type", "UNKNOWN")),
+                market_text,
                 inference.get("displayed_leader_id") or "미확인",
                 " / ".join(_ram_label(inference.get(key, "UNKNOWN")) for key in ("trend_state", "expansion_state", "limit_state")),
                 _ram_label(decision["action"]) if decision else "관찰",
-                "시장 " + _ram_label(h1["quality"]["status"]) + " / 테마 " + _ram_label(h2["quality"]["status"]),
+                "시장 " + _ram_label(h1["quality"]["status"]) + " / 테마 " + _ram_label(h2["quality"]["status"]) + observation_status,
                 _display_time(context["decision_time"]) + " · " + ("만료" if expired else "유효"))
             row = self._ram_table.rowCount(); self._ram_table.insertRow(row)
             reasons = (*h1["quality"].get("reasons", ()), *h2["quality"].get("reasons", ()))
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                item.setToolTip("\n".join((*reasons, *context.get("evidence_refs", ()))))
+                leadership_tip = ()
+                if column == 3 and h2['facts'].get('price_return_basis') == 'first_observed_second_last_received_price/v1':
+                    leadership_tip = ('창 첫 관측 초의 마지막 수신가격 → 창 마지막 수신가격 기준 상승률',
+                        '고가·거래대금·체결 수는 모든 수신 체결 반영')
+                item.setToolTip("\n".join((*leadership_tip, *reasons, *context.get("evidence_refs", ()), *observation_tip)))
                 self._ram_table.setItem(row, column, item)
         self._ram_table.resizeRowsToContents()
         runtime = (self._ram_page or {}).get("runtime", {})
         error = runtime.get("last_error") or runtime.get("recording", {}).get("last_error")
         self._ram_status.setText(("최근 저장 · " + _display_time(envelope.get("selected_at")) + " · 과거 관찰 결과" if recorded else "실시간 관찰 · " + str(runtime.get("state", ""))) + (" · " + str(error) if error else ""))
+
+    def _render_position_allocation(self, envelope, *, recorded):
+        self._ram_allocation_table.setRowCount(0)
+        self._ram_allocation_status.setToolTip('')
+        value = (envelope or {}).get('position_allocation')
+        if not value:
+            self._ram_allocation_status.setText('동적 비중 자료 없음 · 현재 체결 0B / 기존 분봉 연구 비교 유지')
+            return
+        try:
+            if value.get('order_authorized') is not False or value.get('version') != 'dynamic-position-allocation-ram/v1':
+                raise ValueError('비중 결과의 관찰 계약을 확인할 수 없습니다')
+            basis = value.get('input_resolution')
+            if not recorded and basis != '0B':
+                raise ValueError('구형 집계 입력 · 실시간 0B 결과 필요')
+            facts = value['facts']
+            if not isinstance(facts, list) or len(facts) > 200:
+                raise ValueError('비중 관측 종목 수 초과')
+            expired = not recorded and datetime.fromisoformat(value['valid_until']) <= kst_now()
+            status = '자료 만료' if expired else {'BLOCKED':'계산 보류', 'CALCULATED':'계산됨'}.get(value['quality']['status'], '미확인')
+            prefix = '최근 저장 · ' if recorded else ''
+            resolution = '개별 0B 체결' if basis == '0B' else '과거 초봉 집계'
+            reasons = tuple(value['quality'].get('reasons', ()))
+            self._ram_allocation_status.setText(prefix+'동적 비중 · '+resolution+' · '+status+
+                ' · '+_display_time(value['decision_time'])+'\n미정 근거는 보류 · 주문 승인 없음')
+            details = [_ram_label(reason) for reason in reasons]
+            goals = value.get('r4_action_comparison', {}).get('goals', ())
+            if goals:
+                details.append('기존 분봉의 조건부 모의 비교 · 연구 규칙의 실시간 적용 방법은 미정 · 주문 승인 없음')
+                for goal in goals[:200]:
+                    conditional = goal.get('model_support', {}).get('conditional_shadow')
+                    if conditional:
+                        details.append(str(goal.get('symbol', ''))+' 분봉 모의 비교: '+str(conditional['status']))
+                        details.extend('분봉 모의 비교 조건: '+_ram_label(reason)
+                                       for reason in conditional.get('reasons', ()))
+            self._ram_allocation_status.setToolTip('\n'.join(details))
+            for row in facts:
+                index = self._ram_allocation_table.rowCount()
+                self._ram_allocation_table.insertRow(index)
+                values = (row['symbol'], row.get('reference_price_won'), row.get('recent_turnover_won'),
+                          row.get('observed_close_return_rms_bps'), row.get('turnover_window_seconds'))
+                for column, item in enumerate(values):
+                    cell = QTableWidgetItem('미확인' if item is None else f'{item:,}' if type(item) is int else str(item))
+                    details = list(row.get('input_refs', ()))
+                    if column == 3 and row.get('volatility_basis') == 'last_received_price_per_observed_second/v1':
+                        details[:0] = ['관측 초별 마지막 수신가격 사이 수익률의 RMS',
+                            '가격 표본 '+str(row['volatility_sample_count'])+'개 · 무체결 초의 가격은 채우지 않습니다.']
+                    cell.setToolTip('\n'.join(details))
+                    self._ram_allocation_table.setItem(index, column, cell)
+        except (ValueError, TypeError, KeyError) as error:
+            self._ram_allocation_status.setText('동적 비중 자료 확인 실패 · '+str(error))
 
     def _render_position_comparison(self, envelope, *, recorded):
         self._ram_position_table.setRowCount(0)
@@ -946,7 +1317,7 @@ class CandidateMonitorDialog(QDialog):
             if cut.tzinfo is None or cut.utcoffset() is None:
                 raise ValueError("자료 판단 시각을 확인할 수 없습니다.")
             actions = result["actions"]
-            expired = live_account and datetime.fromisoformat(value["valid_until"]) <= datetime.now().astimezone()
+            expired = live_account and datetime.fromisoformat(value["valid_until"]) <= kst_now()
             if not 2 <= len(actions) <= 5 or len({r["action"] for r in actions}) != len(actions):
                 raise ValueError("행동 비교 수가 허용 범위를 벗어납니다.")
             def number(value):
@@ -1050,10 +1421,8 @@ def _ram_label(value):
 
 
 def _display_time(value: object) -> str:
-    try:
-        return datetime.fromisoformat(str(value)).astimezone().strftime("%m-%d %H:%M:%S")
-    except ValueError:
-        return str(value)
+    from kiwoom_monitor.infrastructure.time_display import format_kst_time
+    return format_kst_time(value, "%m-%d %H:%M:%S")
 
 
 def _quality_status(value: object) -> str:
@@ -1063,11 +1432,14 @@ def _quality_status(value: object) -> str:
         "READY": "작동 중",
         "STALE": "자료 지연",
         "ERROR": "오류",
+        "BLOCKED": "진입 보류",
     }.get(str(value), str(value))
 
 
 def _quality_reason(value: object) -> str:
     reason = str(value)
+    if reason.startswith('unconfigured:') or 'document_baseline_observation_only' in reason:
+        return '주도주·진입·보호 조건 중 미정인 항목이 있어 진입을 보류합니다'
     exact = {
         "shadow_candidate_generation_disabled": "후보 감지가 꺼져 있습니다",
         "not_started": "감지 작업을 시작하는 중입니다",
@@ -1078,3 +1450,14 @@ def _quality_reason(value: object) -> str:
     if reason.startswith("candidate_universe_stale:"):
         return "사용할 최신 순위 자료가 아직 없습니다"
     return exact.get(reason, reason)
+
+
+def _leader_missing_label(name):
+    return {'max_data_age_seconds':'자료 신선도 기준','signal_valid_seconds':'후보 유효시간',
+        'minimum_turnover_won':'진입 거래대금 기준','structural_exit_rule':'구조 무효화 규칙',
+        'hard_risk_profile_ref':'하드 위험 기준','minimum_confirmation_observations':'교차 확인 관측 수',
+        'persistence_seconds':'교차 유지시간','breakout_buffer_bps':'돌파 여유 기준',
+        'live_turnover_basis':'실시간 대금 비교 기준','research_turnover_basis':'연구 대금 비교 기준',
+        'research_turnover_lookback_bars':'연구 대금 비교 창','leader_structure_context':'주도주·구조 근거',
+        'reference_level.window_seconds':'기준가격 관찰 창','live_confirmation':'실시간 확인 방식',
+        'research_confirmation':'분봉 확인 방식','leader_selection_evidence':'주도주 선정 근거'}.get(name,name)

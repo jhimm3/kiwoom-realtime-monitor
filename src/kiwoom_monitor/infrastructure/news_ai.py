@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from threading import Event
 from dataclasses import dataclass
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -108,7 +109,20 @@ def analyze_article(settings: NewsAISettings, stock_name: str, title: str, artic
 
 def analyze_articles(
     settings: NewsAISettings, stock_name: str, articles: tuple[tuple[str, str], ...],
+    *, cancel: Event | None = None, chatgpt_auth=None,
 ) -> tuple[tuple[AINewsAnalysis, ...], AIRequestUsage]:
+    if settings.provider == "chatgpt_plan":
+        if not settings.local_credentials_configured:
+            raise ValueError("ChatGPT 연결과 계정별 모델 선택이 필요합니다.")
+        if not articles:
+            return (), AIRequestUsage()
+        from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTAuth, ChatGPTCredentialStore
+        from kiwoom_monitor.infrastructure.chatgpt_plan import ChatGPTPlanClient
+        client = ChatGPTPlanClient(chatgpt_auth or ChatGPTAuth(ChatGPTCredentialStore(settings.chatgpt_storage_path)))
+        text, usage = client.respond(settings.model, _batch_prompt(stock_name, articles), cancel=cancel)
+        _validate_plan_json(text, len(articles))
+        return _parse_many(text, len(articles)), AIRequestUsage(
+            usage["input_tokens"], usage["output_tokens"], usage["total_tokens"])
     if settings.provider not in DEFAULT_MODELS or not settings.api_key:
         raise ValueError("AI 공급자와 API 키를 뉴스 설정에서 입력하세요.")
     if not articles:
@@ -122,6 +136,39 @@ def analyze_articles(
     else:
         text, usage = _claude(settings.api_key, model, prompt)
     return _parse_many(text, len(articles)), usage
+
+
+def _validate_plan_json(text: str, expected: int) -> None:
+    """A completed stream with missing news fields is still a failed analysis."""
+    try:
+        value = json.loads(text)
+        values = [value] if expected == 1 and isinstance(value, dict) else value
+        if not isinstance(values, list) or len(values) != expected:
+            raise ValueError()
+        if expected > 1 and sorted(item["id"] for item in values) != list(range(1, expected + 1)):
+            raise ValueError()
+        for item in values:
+            if not isinstance(item, dict) or any(not isinstance(item.get(key), str) or not item[key].strip()
+                    for key in ("summary", "reason", "category")):
+                raise ValueError()
+            if item.get("outlook") not in {"긍정", "부정", "혼재", "판단 자료 부족"}:
+                raise ValueError()
+            if type(item.get("confidence")) is not int or not 0 <= item["confidence"] <= 100:
+                raise ValueError()
+            for key in ("positive_evidence", "negative_evidence"):
+                if not isinstance(item.get(key), list) or any(not isinstance(part, str) for part in item[key]):
+                    raise ValueError()
+            for key, fields in (("company_impacts", ("company", "outlook", "reason")),
+                                ("theme_candidates", ("name", "evidence"))):
+                if not isinstance(item.get(key), list):
+                    raise ValueError()
+                for part in item[key]:
+                    if not isinstance(part, dict) or any(not isinstance(part.get(field), str) or not part[field].strip() for field in fields):
+                        raise ValueError()
+                    if type(part.get("confidence")) is not int or not 0 <= part["confidence"] <= 100:
+                        raise ValueError()
+    except Exception:
+        raise ValueError("ChatGPT 뉴스 JSON의 필수 판정 항목이 없거나 요청 사건과 일치하지 않습니다.") from None
 
 
 def _prompt(stock_name: str, title: str, article_text: str) -> str:
@@ -178,10 +225,39 @@ def _request(url: str, headers: dict[str, str], payload: dict[str, object]) -> d
     raise RuntimeError("AI 서버 응답을 받지 못했습니다.")
 
 
-def _openai(key: str, model: str, prompt: str) -> tuple[str, AIRequestUsage]:
+def research_market(settings: NewsAISettings, prompt: str, *, chatgpt_auth=None,
+                    reasoning_effort: str = ""):
+    """Web research is required; existing article/quote collectors are never read."""
+    from kiwoom_monitor.infrastructure.chatgpt_plan import (
+        ChatGPTPlanClient, GroundedResponse, _final_text, _usage, search_evidence, validate_reasoning,
+    )
+    validate_reasoning(settings.model, reasoning_effort)
+    if settings.provider == "chatgpt_plan":
+        return ChatGPTPlanClient(chatgpt_auth).research(
+            settings.model, prompt, reasoning_effort=reasoning_effort)
+    if settings.provider != "openai" or not settings.api_key:
+        raise ValueError("시황 웹 검색용 ChatGPT 구독 또는 OpenAI 연결을 먼저 설정하세요.")
+    body = {"model": settings.model, "input": prompt, "store": False,
+            "tools": [{"type": "web_search"}], "tool_choice": "required",
+            "include": ["web_search_call.action.sources"]}
+    if reasoning_effort:
+        body["reasoning"] = {"effort": reasoning_effort}
+    final = _request("https://api.openai.com/v1/responses", {
+        "Authorization": f"Bearer {settings.api_key}", "Content-Type": "application/json"}, body)
+    if final.get("status") != "completed" or final.get("error"):
+        raise ValueError("시황 검색 응답이 완료되지 않았습니다.")
+    actions = []
+    sources, calls = search_evidence(final, actions=actions)
+    return GroundedResponse(_final_text(final), _usage(final), sources, calls, tuple(actions))
+
+
+def _openai(key: str, model: str, prompt: str, *, reasoning_effort: str = "") -> tuple[str, AIRequestUsage]:
+    body = {"model": model, "input": prompt, "max_output_tokens": 7000, "store": False}
+    if reasoning_effort:
+        body["reasoning"] = {"effort": reasoning_effort}
     payload = _request("https://api.openai.com/v1/responses", {
         "Authorization": f"Bearer {key}", "Content-Type": "application/json",
-    }, {"model": model, "input": prompt, "max_output_tokens": 7000, "store": False})
+    }, body)
     if payload.get("output_text"):
         text = str(payload["output_text"])
     else:

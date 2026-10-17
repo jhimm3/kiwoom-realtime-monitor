@@ -11,9 +11,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server.server_logging import configure_server_logging
+from kiwoom_monitor.infrastructure.logging_config import KSTFormatter as DesktopKSTFormatter
 
 
 class CentralServerLoggingTests(unittest.TestCase):
+    def test_desktop_log_formatter_explicitly_uses_kst(self):
+        record = logging.LogRecord("clock", logging.INFO, __file__, 0, "ready", (), None)
+        record.created = datetime.fromisoformat("2026-10-14T16:30:00+00:00").timestamp()
+        record.msecs = 0
+        formatter = DesktopKSTFormatter("%(asctime)s KST %(message)s")
+        self.assertEqual(formatter.format(record), "2026-10-15 01:30:00,000 KST ready")
+
     @contextmanager
     def _log_directory(self):
         with tempfile.TemporaryDirectory() as directory:

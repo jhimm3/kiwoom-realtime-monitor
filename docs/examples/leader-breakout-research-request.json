@@ -1,0 +1,27 @@
+{
+  "mode": "leader_breakout",
+  "dataset": null,
+  "session_profile": null,
+  "policy": {
+    "policy_id": "leader_breakout/v1",
+    "live_confirmation": "observed_price_cross",
+    "research_confirmation": "completed_minute_close_cross",
+    "minimum_confirmation_observations": null,
+    "persistence_seconds": null,
+    "breakout_buffer_bps": null,
+    "max_data_age_seconds": null,
+    "signal_valid_seconds": null,
+    "minimum_turnover_won": null,
+    "live_turnover_basis": null,
+    "research_turnover_basis": null,
+    "research_turnover_lookback_bars": null,
+    "structural_exit_rule": null,
+    "hard_risk_profile_ref": null,
+    "contexts": [],
+    "reference_level": {
+      "type": "prior_window_high",
+      "window_seconds": null,
+      "exclude_current_interval": true
+    }
+  }
+}

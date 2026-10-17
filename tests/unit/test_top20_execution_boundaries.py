@@ -17,8 +17,8 @@ class Top20ExecutionBoundaryTests(unittest.IsolatedAsyncioTestCase):
             RealtimeHub(), lambda: datetime.fromisoformat("2026-09-10T09:30:01+09:00"))
         _require_fresh_collector(collector)
         for owner, name in ((collector, "_latest_snapshots"), (collector, "_continuous_from"),
-                (collector, "_pending_second_retries"), (collector._minute_bars, "_cumulative"),
-                (collector._minute_bars, "_bars"), (collector._second_trades, "_seen")):
+                (collector, "_ram_trade_baselines"), (collector._minute_bars, "_cumulative"),
+                (collector._minute_bars, "_bars"), (collector, "_ram_stock_references")):
             with self.subTest(field=name):
                 target = getattr(owner, name)
                 target["previous-run"] = 1

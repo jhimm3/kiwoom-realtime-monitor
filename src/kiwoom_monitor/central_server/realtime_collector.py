@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from contextlib import contextmanager
+from collections import deque
 from itertools import chain
 from uuid import uuid4
 from dataclasses import asdict
@@ -39,8 +40,10 @@ from .diagnostic_replay_contract import (
     COLLECTOR_EVENT_FIELDS, COLLECTOR_INPUT_VERSION, captured_workload, validate_collector_message,
 )
 from .diagnostic_top20_lifecycle_input import captured_subscription
-from .minute_bars import MinuteBarAccumulator, SecondTradeAccumulator
+from .minute_bars import MinuteBarAccumulator
 from .market_observations import (
+    KST,
+    as_kst,
     bar_observation_key,
     market_state_observation,
     minute_bar_observation,
@@ -97,12 +100,6 @@ def _next_latest_checkpoint(now: float) -> float:
     boundary = int(now // LATEST_CHECKPOINT_SECONDS) * LATEST_CHECKPOINT_SECONDS
     due = boundary + LATEST_CHECKPOINT_OFFSET_SECONDS
     return float(due if due > now else due + LATEST_CHECKPOINT_SECONDS)
-
-
-def _next_second_checkpoint(now: float) -> float:
-    boundary = int(now // 60) * 60
-    due = boundary + 45
-    return float(due if due > now else due + 60)
 
 
 def _chunks(values: tuple[str, ...], size: int = REALTIME_ITEMS_PER_GROUP) -> tuple[tuple[str, ...], ...]:
@@ -176,6 +173,7 @@ class CentralRealtimeCollector:
         self._account_scope_resolver = account_scope_resolver
         self._account_event_handler = account_event_handler
         self._automation_price_listener = None
+        self._breakout_trade_listener = None
         self._snapshot_sleep = snapshot_sleep or asyncio.sleep
         self._input_replay_only = False
         self._task: asyncio.Task[None] | None = None
@@ -192,8 +190,11 @@ class CentralRealtimeCollector:
         self._inflight_minute_bars: list[dict[str, Any]] = []
         self._pending_minute_finalizations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._minute_bars = MinuteBarAccumulator()
-        self._pending_second_retries: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-        self._second_trades = SecondTradeAccumulator()
+        # Individual 0B receipts, owned by this collector; never persisted as bars.
+        self._ram_trades: deque[dict[str, Any]] = deque()
+        self._ram_trade_baselines: dict[tuple[str, str], tuple] = {}
+        self._ram_trade_sequence = 0
+        self._ram_trade_retention_seconds = 0
         self._ram_source_id = uuid4().hex
         self._ram_observation_generation = 0
         self._ram_observation_gap_at = None
@@ -258,7 +259,7 @@ class CentralRealtimeCollector:
             if oldest is None or at < oldest:
                 oldest = at
         return {"records": count,
-                "oldest_record_at": datetime.fromtimestamp(oldest, timezone.utc).isoformat() if oldest is not None else None,
+                "oldest_record_at": datetime.fromtimestamp(oldest, KST).isoformat() if oldest is not None else None,
                 "timed_records": known}
 
     def operational_status(self) -> dict[str, object]:
@@ -272,10 +273,8 @@ class CentralRealtimeCollector:
             "account_entry_symbols": self._save_record_summary(self._pending_account_entry_symbols.values()),
             "stock_references": self._save_record_summary(self._pending_stock_references.values()),
             "minute_finalizations": self._save_record_summary(self._pending_minute_finalizations.values()),
-            "second_bars": self._save_record_summary(chain(
-                ({"available_at": self._second_trades._bars[key].available_at} for key in self._second_trades._dirty),
-                self._pending_second_retries.values(),
-            )),
+            # Empty compatibility bucket in the existing diagnostic HTTP v1.
+            "second_bars": self._save_record_summary(()),
             "market_history": self._save_record_summary(
                 {"available_at": value[3].metadata.available_at}
                 for value in self._pending_market_history.values()),
@@ -313,15 +312,15 @@ class CentralRealtimeCollector:
         # The existing serialized flush and owned native await retain ownership.
         self._active_save = {
             "kind": kind, **self._save_record_summary(records),
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": as_kst(self._now_provider()).isoformat(),
         }
         try:
             yield
         except BaseException:
-            self._save_failures[kind] = datetime.now(timezone.utc).isoformat()
+            self._save_failures[kind] = as_kst(self._now_provider()).isoformat()
             raise
         else:
-            self._save_success_at[kind] = datetime.now(timezone.utc).isoformat()
+            self._save_success_at[kind] = as_kst(self._now_provider()).isoformat()
             self._save_failures.pop(kind, None)
         finally:
             self._active_save = None
@@ -348,7 +347,7 @@ class CentralRealtimeCollector:
         if not self._planned_reconnect:
             self._planned_reconnect = True
             self._reconnect_deadline = time.monotonic() + 30.0
-            self._reconnect_started_at = datetime.now(timezone.utc).isoformat()
+            self._reconnect_started_at = as_kst(self._now_provider()).isoformat()
             self._reconnect_previous_trade_at = self._last_trade_observed_at
             self._reconnect_previous_trade_clock = self._last_trade_observed_clock
             self._reconnect_first_trade_at = None
@@ -392,7 +391,7 @@ class CentralRealtimeCollector:
 
     def _observe_reconnect_trade(self) -> None:
         observed_clock = time.monotonic()
-        self._last_trade_observed_at = datetime.now(timezone.utc).isoformat()
+        self._last_trade_observed_at = as_kst(self._now_provider()).isoformat()
         self._last_trade_observed_clock = observed_clock
         if (self._reconnect_started_at is not None and self._reconnect_first_trade_at is None
                 and self._credential_phase == "READY" and not self._credential_paused):
@@ -543,9 +542,9 @@ class CentralRealtimeCollector:
         if not self._input_replay_only:
             raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
         return {"pending_records": len(self._pending_snapshots) + len(self._minute_bars._dirty)
-                + len(self._second_trades._dirty) + len(self._pending_minute_retries)
+                + len(self._pending_minute_retries)
                 + len(self._inflight_minute_bars) + len(self._pending_minute_finalizations)
-                + len(self._pending_second_retries) + len(self._pending_market_history)
+                + len(self._pending_market_history)
                 + len(self._pending_stock_references) + len(self._pending_account_entry_symbols),
                 "stopped": self._credential_phase == "STOPPED"}
 
@@ -563,7 +562,10 @@ class CentralRealtimeCollector:
         if reset_all or added_sources or removed_sources:
             self._ram_observation_generation += 1
         self._minute_bars.reset_cumulative_sources(reset_sources)
-        self._second_trades.reset_cumulative_sources(reset_sources)
+        for key in removed_sources | reset_sources:
+            self._ram_trade_baselines.pop(key, None)
+        self._ram_trades = deque(row for row in self._ram_trades
+                                if (row['code'], row['market']) not in removed_sources | reset_sources)
         for key in removed_sources:
             self._continuous_from.pop(key, None)
         for key in reset_sources:
@@ -877,16 +879,90 @@ class CentralRealtimeCollector:
         self._ram_observation_generation += 1
         self._ram_observation_gap_at = self._now_provider()
         self._ram_stock_references.clear()
+        self._ram_trades.clear()
+        self._ram_trade_baselines.clear()
+
+    def set_breakout_trade_listener(self, listener) -> None:
+        """Attach the existing candidate owner; callbacks must not perform I/O."""
+        self._breakout_trade_listener = listener
+
+    def _observe_ram_trade(self, tick, now: datetime, received_at: float) -> None:
+        """Retain individual approved 0B receipts, with original cumulative facts.
+
+        Reuse the former received-trade price/volume combination without
+        grouping into second bars. FID14's million-KRW delta stays separate.
+        """
+        key = (tick.code, str(tick.market or 'KRX').upper())
+        if not self._ram_trade_retention_seconds or key not in self._approved_trade_sources:
+            return
+        if self._ram_trades and received_at < self._ram_trades[-1]['available_at']:
+            self._ram_trades.clear()
+            self._ram_trade_baselines.clear()
+            self._ram_observation_gap_at = now
+        try:
+            observed = datetime.combine(now.astimezone(KST).date(),
+                datetime.strptime(str(tick.trade_time), '%H%M%S').time(), tzinfo=KST)
+            price = abs(int(tick.current_price))
+            if now.tzinfo is None or observed > now or price <= 0:
+                raise ValueError('invalid trade time or price')
+        except (TypeError, ValueError):
+            self._ram_observation_gap_at = now
+            self._ram_trade_baselines.pop(key, None)
+            return
+        signature = (observed.isoformat(), price, tick.trade_volume,
+                     tick.cumulative_volume, tick.cumulative_trade_value)
+        previous = self._ram_trade_baselines.get(key)
+        if previous is not None and previous[0] == observed.date() and previous[3] == signature:
+            if tick.cumulative_volume is not None or tick.cumulative_trade_value is not None:
+                return
+        if previous is not None and (previous[0] != observed.date() or observed < previous[4]):
+            self._ram_observation_gap_at = now
+            previous = None
+        turnover = None
+        if (previous is not None and tick.cumulative_trade_value is not None and previous[2] is not None
+                and tick.cumulative_trade_value >= previous[2]):
+            turnover = (tick.cumulative_trade_value - previous[2]) * 1_000_000
+        volume = abs(int(tick.trade_volume)) if tick.trade_volume is not None else None
+        if volume is None and previous is not None and tick.cumulative_volume is not None and previous[1] is not None:
+            if tick.cumulative_volume >= previous[1]:
+                volume = tick.cumulative_volume - previous[1]
+        if (previous is not None and tick.cumulative_volume is not None and previous[1] is not None
+                and tick.cumulative_volume < previous[1]):
+            self._ram_observation_gap_at = now
+        self._ram_trade_baselines[key] = (observed.date(), tick.cumulative_volume,
+                                         tick.cumulative_trade_value, signature, observed)
+        self._ram_trade_sequence += 1
+        start = received_at - self._ram_trade_retention_seconds
+        while self._ram_trades and self._ram_trades[0]['available_at'] < start:
+            self._ram_trades.popleft()
+        if len(self._ram_trades) >= 10000:
+            self._ram_trades.popleft()
+            self._ram_observation_gap_at = now
+        self._ram_trades.append({
+            'input_ref': f'ram-0B:{self._ram_source_id}:{self._ram_observation_generation}:{self._ram_trade_sequence}',
+            'sequence': self._ram_trade_sequence, 'code': key[0], 'market': key[1],
+            'observed_at': observed.isoformat(), 'available_at': received_at,
+            'price_won': price, 'volume': volume, 'trade_value_won': price*volume if volume is not None else None,
+            'trade_value_basis': 'received_trade_price_x_volume',
+            'cumulative_trade_value_delta_won': turnover,
+            'cumulative_volume': tick.cumulative_volume,
+            'cumulative_trade_value_million_won': tick.cumulative_trade_value,
+            'input_resolution': '0B', 'source': 'kiwoom-websocket-0B',
+        })
 
     def set_ram_observation_retention(self, seconds: int, *, owner=None) -> None:
         if self._ram_observation_owner is not None and self._ram_observation_owner is not owner:
             raise RuntimeError("Collector RAM observation lifetime already has an owner")
-        previous = self._second_trades._ram_retention.total_seconds()
-        self._second_trades.set_ram_retention(seconds)
+        if type(seconds) is not int or not 0 <= seconds <= 60:
+            raise ValueError("RAM observation retention must be 0..60 seconds")
+        previous = self._ram_trade_retention_seconds
+        self._ram_trade_retention_seconds = seconds
         if owner is not None:
             self._ram_observation_owner = owner if seconds else None
         if seconds == 0:
             self._ram_retention_since = None
+            self._ram_trades.clear()
+            self._ram_trade_baselines.clear()
         elif self._ram_retention_since is None or seconds > previous:
             self._ram_retention_since = self._now_provider()
 
@@ -899,7 +975,15 @@ class CentralRealtimeCollector:
         capture_anchor = self._ram_capture_anchor()
         if codes is None:
             codes = tuple(sorted({code for code, _ in self._approved_trade_sources}))
-        rows = self._second_trades.observation_snapshot(codes, at=at, seconds=seconds)
+        if type(seconds) is not int or not 1 <= seconds <= 60 or len(set(codes)) > 200:
+            raise ValueError("RAM observation cut/scope exceeds the budget")
+        start = (at - timedelta(seconds=seconds)).timestamp()
+        retained_start = (at - timedelta(seconds=self._ram_trade_retention_seconds)).timestamp()
+        while self._ram_trades and self._ram_trades[0]['available_at'] < retained_start:
+            self._ram_trades.popleft()
+        rows = tuple(dict(row) for row in self._ram_trades if row['code'] in codes
+                     and start <= datetime.fromisoformat(row['observed_at']).timestamp() <= at.timestamp()
+                     and row['available_at'] <= at.timestamp())
         day = at.astimezone(timezone(timedelta(hours=9))).date().isoformat()
         self._ram_stock_references = {
             key: reference for key, reference in self._ram_stock_references.items()
@@ -913,7 +997,7 @@ class CentralRealtimeCollector:
                 for code in codes if (price := self.automation_price_observation(code)) is not None)}
                if include_trade_references else {}),
             "source_id": self._ram_source_id, "generation": self._ram_observation_generation,
-            "decision_time": at.isoformat(), "rows": rows,
+            "decision_time": at.isoformat(), "rows": rows, "input_resolution": "0B",
             "approved_sources": tuple(sorted(self._approved_trade_sources)),
             "continuous_from": dict(self._continuous_from),
             "retention_since": self._ram_retention_since, "gap_at": self._ram_observation_gap_at,
@@ -959,8 +1043,7 @@ class CentralRealtimeCollector:
                            "continuous_from": tuple((code, market, at) for (code, market), at in
                                                     sorted(self._continuous_from.items())),
                            "initial_state": "cold_with_prefix",
-                           "warm_accumulators": bool(self._pending_snapshots or self._minute_bars._dirty
-                                                     or self._second_trades._dirty)}
+                           "warm_accumulators": bool(self._pending_snapshots or self._minute_bars._dirty)}
                 trace.emit_payload(trace_id, "collector_input", {
                     **fields, "input_kind": "initial_state", "input_id": uuid4().hex,
                 }, initial)
@@ -1111,11 +1194,18 @@ class CentralRealtimeCollector:
                     self._observe_reconnect_trade()
                     now = self._now_provider()
                     received_at = now.timestamp()
+                    if self._breakout_trade_listener is not None:
+                        try:
+                            self._breakout_trade_listener(payload, now,
+                                source=f"{self._ram_source_id}:{self._ram_observation_generation}",
+                                approved=(code, str(payload.get("market", "KRX"))) in self._approved_trade_sources)
+                        except Exception:
+                            logger.exception("0B 주도주 돌파 관측 전달 실패")
                     self._minute_bars.add(
                         value, now, received_at,
                         capture_complete=self._minute_capture_complete(value, now),
                     )
-                    self._second_trades.add(value, now, received_at)
+                    self._observe_ram_trade(value, now, received_at)
                 elif name == "market_state":
                     market = str(payload.get("market", ""))
                     now = self._now_provider()
@@ -1171,7 +1261,7 @@ class CentralRealtimeCollector:
         if self._credential_paused or source not in self._approved_trade_sources or row is None:
             return None
         payload = row['event']['payload']
-        at = datetime.fromtimestamp(row['received_at'], timezone.utc)
+        at = datetime.fromtimestamp(row['received_at'], KST)
         since = self._continuous_from.get(source)
         if (payload.get('market') != 'KRX' or type(payload.get('current_price')) is not int
                 or payload['current_price'] <= 0 or since is None or at < since
@@ -1233,13 +1323,11 @@ class CentralRealtimeCollector:
 
     async def _save_snapshots(self) -> None:
         next_latest = _next_latest_checkpoint(self._now_provider().timestamp())
-        next_second = _next_second_checkpoint(self._now_provider().timestamp())
         while True:
             await self._snapshot_sleep(1)
             latest_due = self._now_provider().timestamp() >= next_latest
-            second_due = self._now_provider().timestamp() >= next_second
             try:
-                await self._flush_snapshots(flush_latest=latest_due, periodic=True, flush_seconds=second_due)
+                await self._flush_snapshots(flush_latest=latest_due, periodic=True)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1248,8 +1336,6 @@ class CentralRealtimeCollector:
                 # 다음 주기에 다시 시도한다.
                 logger.exception("키움 중앙 실시간 DB 저장 실패; 다음 주기에 재시도합니다")
             else:
-                if second_due:
-                    next_second = _next_second_checkpoint(self._now_provider().timestamp())
                 if latest_due:
                     next_latest = _next_latest_checkpoint(self._now_provider().timestamp())
                     cutoff = self._now_provider().timestamp() - 300
@@ -1375,21 +1461,6 @@ class CentralRealtimeCollector:
                     )
                     self._pending_minute_finalizations[key] = value
                 raise
-        drained_second_bars = self._second_trades.drain_dirty(
-            before=cycle_now.replace(second=0, microsecond=0) if periodic else None,
-        ) if flush_seconds else []
-        for value in drained_second_bars:
-            self._keep_second_retry(value)
-        second_bars = list(self._pending_second_retries.values())
-        self._pending_second_retries.clear()
-        if second_bars:
-            try:
-                with self._observe_save("second_bars", second_bars):
-                    await owned_to_thread(self._store.save_second_trade_bars, second_bars)
-            except Exception:
-                for value in second_bars:
-                    self._keep_second_retry(value)
-                raise
         market_history_by_subject = self._pending_market_history
         market_history = list(market_history_by_subject.values())
         self._pending_market_history.clear()
@@ -1419,19 +1490,6 @@ class CentralRealtimeCollector:
         if previous is not None and previous != value:
             raise ValueError("minute bar operation_id payload changed")
         self._pending_minute_retries[operation_id] = dict(value)
-
-    def _keep_second_retry(self, value: dict[str, Any]) -> None:
-        """초 봉의 최신 절대 상태만 보관해 재시도 때 이중 합산을 막는다."""
-        key = tuple(
-            str(value[name]) for name in ("trading_date", "trade_second", "code", "market")
-        )
-        previous = self._pending_second_retries.get(key)
-        if previous is None or (
-            float(value["available_at"]), int(value["trade_count"])
-        ) >= (
-            float(previous["available_at"]), int(previous["trade_count"])
-        ):
-            self._pending_second_retries[key] = dict(value)
 
     def _minute_capture_complete(self, tick: Any, now: datetime) -> bool:
         market = str(tick.market or "KRX").upper()

@@ -11,10 +11,13 @@ from kiwoom_monitor.application.trade_strength import StockFundamentals
 
 
 class HighPricePolicyTests(unittest.TestCase):
-    def test_unverified_legacy_values_and_intraday_overlay_do_not_certify_period(self):
+    def test_cached_display_and_intraday_overlay_do_not_certify_period(self):
+        cached = DailyHighTargets(110, 120, 130)
         for period in ("5", "20", "250"):
-            self.assertIsNone(selected_high_price(period, daily=DailyHighTargets(110, 120, 130),
+            self.assertEqual(1000, selected_high_price(period, daily=cached,
                               fundamentals=StockFundamentals(100, 50, 999), historical_high=999, today_high=1000))
+            self.assertFalse(cached.period_verified(period))
+        self.assertFalse(cached.collection_verified)
 
     def test_fundamentals_refresh_keeps_cached_adjusted_high(self) -> None:
         value = merge_fundamentals_with_adjusted_high(
@@ -33,7 +36,7 @@ class HighPricePolicyTests(unittest.TestCase):
         )
         self.assertEqual(3_002_000, value.high_250_price)
 
-    def test_250_day_requires_verified_daily_instead_of_fundamental_fallback(self) -> None:
+    def test_250_day_displays_cache_until_daily_refresh_replaces_it(self) -> None:
         fundamentals = StockFundamentals(1_000, 50, 2_987_000)
         self.assertEqual(
             3_002_000,
@@ -43,12 +46,20 @@ class HighPricePolicyTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            None,
+            2_987_000,
             selected_high_price(
                 "250", daily=DailyHighTargets(None, None, None),
                 fundamentals=fundamentals, historical_high=None, today_high=None,
             ),
         )
+
+    def test_new_lower_daily_and_historical_values_replace_higher_saved_values(self):
+        daily = DailyHighTargets(None, None, 200, period_statuses=(("250", "ready"),))
+        fundamentals = StockFundamentals(1000, 50, 999)
+        self.assertEqual(200, selected_high_price("250",daily=daily,fundamentals=fundamentals,
+            historical_high=None,today_high=None))
+        self.assertEqual(250, selected_high_price("historical",daily=daily,fundamentals=fundamentals,
+            historical_high=250,today_high=None))
 
     def test_historical_and_intraday_values_are_lower_bounds(self) -> None:
         self.assertEqual(

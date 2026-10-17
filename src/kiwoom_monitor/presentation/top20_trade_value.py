@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 from datetime import date, datetime, timedelta
 
@@ -155,7 +156,7 @@ class Top20TradeValueChart(QWidget):
         status = f"{series.get('trading_date', '')} · {basis} · 확인 {coverage.get('complete', 0)}/720분"
         status += " · 30초 배분 추정"
         if series.get("available_at"):
-            status += f" · 게시 {series['available_at'][11:19]}"
+            status += f" · 게시 {format_kst_time(series['available_at'], '%H:%M:%S')}"
         if series.get("read_error"):
             status += f" · NAS 갱신 실패: {series['read_error']}"
         identity = (str(series.get("trading_date")), str(series.get("basis")))

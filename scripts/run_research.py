@@ -34,6 +34,7 @@ from kiwoom_monitor.application.research_factors import (
     compute_market_regime,
 )
 from kiwoom_monitor.application.research_families import family_for_config
+from kiwoom_monitor.application.leader_breakout import LeaderBreakoutConfig, leader_research_rows, evaluate_leader_breakout_bar_step
 from kiwoom_monitor.application.research_evaluation import (
     ResearchComparison,
     build_research_comparison,
@@ -115,6 +116,13 @@ def execute_research(
     unfilled_action_plan: tuple | None = None,
     position_action_study=None, position_study_case=None,position_study_cohort=None,position_study_context=None,
 ) -> ResearchRunResult:
+    leader = isinstance(config, LeaderBreakoutConfig)
+    if leader:
+        missing = config.execution_missing("1m")
+        if missing:
+            raise ValueError("leader performance blocked:" + ",".join(missing))
+        if position_target_plan or unfilled_action_plan or position_action_study:
+            raise ValueError("leader ADD/REDUCE/unfilled study policy is unconfigured")
     def partition_checkpoint():
         if cancel_requested is not None and cancel_requested():
             raise ResearchRunCancelled('development partition validation interrupted')
@@ -138,7 +146,7 @@ def execute_research(
     if historical_reconstruction:
         if dataset.manifest.get('not_contemporaneous_top20') is not True:
             raise ValueError('historical reconstruction input is missing its population boundary')
-        if config.rank_persistence_enabled:
+        if not leader and config.rank_persistence_enabled:
             raise ValueError('historical reconstruction does not support the contemporaneous rank factor')
         if session_profile not in (None, 'krx-regular/v1'):
             raise ValueError('historical reconstruction currently supports krx-regular/v1 only')
@@ -159,7 +167,12 @@ def execute_research(
             ("historical_candidate_population",)
             if historical_reconstruction else ("top20_membership",)
         ),
-    ) if bundle_replay or partition_replay else None
+    ) if (bundle_replay or partition_replay) and not leader else None
+    leader_rows = leader_research_rows(dataset.observations, session_profile=session_profile,
+        checkpoint=checkpoint) if leader else ()
+    leader_frames = replay_krx_minute_bars(leader_rows, strict=False, session_profile=session_profile) if leader else ()
+    leader_frames_by_revision = {bar.revision_id: bar for bar in leader_frames}
+    leader_minute_states = {}
     family = family_for_config(config)
     run_id, spec = research_run_identity(dataset, config, execution_config, evaluation_spec,
                                         session_profile=session_profile, execution_scope=execution_scope,
@@ -193,6 +206,7 @@ def execute_research(
     decision_rows: list[dict[str, Any]] = []
     processed_execution_bars: set[tuple[str, str]] = set()
     candidate_count = 0
+    leader_position_context = None
     decision_count = 0
     last_available_at: datetime | None = None
     pending_evaluations = []
@@ -216,14 +230,18 @@ def execute_research(
     try:
         if cancel_requested is not None and cancel_requested():
             raise ResearchRunCancelled("research run cancellation requested")
-        for observation in _ordered_minute_observations(dataset):
+        for observation in (leader_rows if leader else _ordered_minute_observations(dataset)):
             checkpoint()
             if cancel_requested is not None and cancel_requested():
                 raise ResearchRunCancelled("research run cancellation requested")
             cutoff = _aware_datetime(observation.get("available_at"))
             cutoff_utc = cutoff.astimezone(timezone.utc)
             last_available_at = max(last_available_at, cutoff_utc) if last_available_at else cutoff_utc
-            if cursor is not None:
+            if leader:
+                evaluation_bar = leader_frames_by_revision.get(observation["revision_id"])
+                bars = (evaluation_bar,) if evaluation_bar is not None else ()
+                universe = ()
+            elif cursor is not None:
                 evaluation_bar, bars, universe = cursor.advance_for_observation(observation)
             else:
                 bars = replay_krx_minute_bars(dataset.observations, as_of=cutoff, strict=True,
@@ -240,6 +258,10 @@ def execute_research(
                 continue
             # Replay warmup history/universe, but keep the new portfolio empty until the active window.
             if active_start is not None and (cutoff_utc < active_start or _aware_datetime(evaluation_bar.bar_start).astimezone(timezone.utc) < active_start):
+                if leader:
+                    _, leader_minute_states[evaluation_bar.code] = evaluate_leader_breakout_bar_step(
+                        run_id=run_id, evaluation_bar=evaluation_bar, config=config, state=StrategyState(),
+                        minute_state=leader_minute_states.get(evaluation_bar.code), original_observation=observation)
                 continue
             # Keep the full as-of universe, with same-code/day bar history for each admitted target.
             if target_partition is not None and not target_partition.allows(evaluation_bar.code):
@@ -271,16 +293,25 @@ def execute_research(
                 engine.portfolio.pending_order is not None
                 and engine.portfolio.pending_order.symbol == evaluation_bar.code
             )
-            if evaluation_bar.code not in latest_codes and not managed_symbol and (cutoff_utc,evaluation_bar.code) not in unfilled_plan:
+            if not leader and evaluation_bar.code not in latest_codes and not managed_symbol and (cutoff_utc,evaluation_bar.code) not in unfilled_plan:
                 continue
-            evaluation = family.evaluate_bar(
+            if leader:
+                evaluation, leader_minute_states[evaluation_bar.code] = evaluate_leader_breakout_bar_step(
+                    run_id=run_id, evaluation_bar=evaluation_bar, config=config, state=engine.strategy_state,
+                    minute_state=leader_minute_states.get(evaluation_bar.code),
+                    position_context=leader_position_context, original_observation=observation)
+            else:
+                evaluation = family.evaluate_bar(
                 run_id=run_id,
                 evaluation_bar=evaluation_bar,
                 bar_history=bars,
                 universe_frames=universe,
                 config=config,
                 state=engine.strategy_state,
-            )
+                )
+            if leader and evaluation.decision.final_action == "ENTER":
+                from kiwoom_monitor.application.leader_breakout import LeaderBreakoutContext
+                leader_position_context = LeaderBreakoutContext(**evaluation.snapshot.feature_values[0]["context"])
             pending_evaluations.append(evaluation)
             # The report only counts NO_TRADE reasons by fold. Keep that bounded
             # projection, while the complete immutable decision is in the repository.
@@ -354,7 +385,7 @@ def execute_research(
         execution_events.extend(final_events)
         for event in final_events:
             append_logical({"execution": event.to_dict()})
-        final_bars = replay_krx_minute_bars(
+        final_bars = leader_frames if leader else replay_krx_minute_bars(
             dataset.observations, strict=True,
             session_profile=session_profile or "krx-regular/v1",
         )
@@ -385,7 +416,7 @@ def execute_research(
             report = build_research_report(
                 run_id,
                 input_manifest=dataset.manifest,
-                observations=dataset.observations,
+                observations=leader_rows if leader else dataset.observations,
                 candidate_events=candidate_events,
                 decisions=decision_rows,
                 execution_events=execution_events,
@@ -642,11 +673,11 @@ def _run_spec(
         "code_hash": research_implementation_hash(session_profile),
         "factor_versions": factor_versions,
         "family": family.family_id,
-        "policy_version": "single_position_buy_then_sell/v1",
+        "policy_version": "leader_execution_adapter/v1" if isinstance(config, LeaderBreakoutConfig) else "single_position_buy_then_sell/v1",
         "parameters": config.to_dict(),
         "initial_state": StrategyState().to_dict(),
         "seed": 0,
-        "clock": "historical_bar_close" if historical_reconstruction else "observation_available_at",
+        "clock": "final_completed_minute" if isinstance(config, LeaderBreakoutConfig) else "historical_bar_close" if historical_reconstruction else "observation_available_at",
         "ordering": "available_at,accepted_sequence,revision_id",
         "cost_model": (
             execution_config.cost_model.to_dict() if execution_config.cost_model else None

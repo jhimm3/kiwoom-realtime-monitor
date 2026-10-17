@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from time import monotonic
-from typing import Any
+from typing import Any, Callable
+
+from .market_observations import KST, as_kst
 
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
 from kiwoom_monitor.domain.research_contract import (
@@ -47,6 +49,7 @@ def _append_sqlite_observation_revision(
     observation_key: str,
     payload: dict[str, Any],
     observation: MarketDataObservation[object],
+    *, now_provider: Callable[[], datetime] | None = None,
 ) -> None:
     source = ObservationRevisionSource.from_observation(
         kind, subject, observation_key, payload, observation,
@@ -65,7 +68,7 @@ def _append_sqlite_observation_revision(
         "kind,subject,venue,effective_at,received_at,available_at,revision_of,payload_hash,unit,"
         "value_kind,completeness,origin,candidate_universe,quality_flags_json,clock_quality,"
         "source_ref_json,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        _observation_revision_values(source, latest, sqlite=True),
+        _observation_revision_values(source, latest, sqlite=True, now_provider=now_provider),
     )
 
 def _append_postgres_observation_revision(
@@ -75,6 +78,7 @@ def _append_postgres_observation_revision(
     observation_key: str,
     payload: dict[str, Any],
     observation: MarketDataObservation[object],
+    *, now_provider: Callable[[], datetime] | None = None,
 ) -> bool:
     source = ObservationRevisionSource.from_observation(
         kind, subject, observation_key, payload, observation,
@@ -86,16 +90,19 @@ def _append_postgres_observation_revision(
         (source.kind, source.subject, source.observation_key, source.source_id),
     )
     latest = cursor.fetchone()
-    return _insert_postgres_observation_revision(cursor, source, latest) is not None
+    return _insert_postgres_observation_revision(
+        cursor, source, latest, now_provider=now_provider,
+    ) is not None
 
 def _insert_postgres_observation_revision(
     cursor: Any, source: ObservationRevisionSource,
     latest: tuple[object, object] | None,
     *, execute_seconds: list[float] | None = None,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> str | None:
     if latest is not None and str(latest[1]) == source.payload_hash:
         return None
-    values = _observation_revision_values(source, latest, sqlite=False)
+    values = _observation_revision_values(source, latest, sqlite=False, now_provider=now_provider)
     execute_started = monotonic() if execute_seconds is not None else 0.0
     cursor.execute(
         "INSERT INTO central_observation_revisions("
@@ -114,10 +121,11 @@ def _observation_revision_values(
     latest: tuple[object, ...] | None,
     *,
     sqlite: bool,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> tuple[object, ...]:
     effective_at: object = source.effective_at
     available_at: object = source.available_at
-    received_at: object = datetime.now(timezone.utc)
+    received_at: object = as_kst(now_provider()) if now_provider else datetime.now(KST)
     if sqlite:
         effective_at = source.effective_at.isoformat() if source.effective_at else None
         available_at = source.available_at.isoformat() if source.available_at else None

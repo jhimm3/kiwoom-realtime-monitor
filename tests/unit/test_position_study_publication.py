@@ -672,6 +672,8 @@ class CurrentStudyRamTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1,borrowed.call_count);self.assertEqual(1,source.call_count)
             self.assertEqual('CALCULATED',receipt['quality']['status'],receipt)
             goal=receipt['r4_action_comparison']['goals'][0];conditional=goal['model_support']['conditional_shadow']
+            self.assertTrue(borrowed.call_args.kwargs['include_closed_minutes'])
+            self.assertEqual('0B',receipt['input_resolution'])
             self.assertEqual('SUPPORTED_UNDER_PAPER_ASSUMPTIONS',conditional['status'],goal)
             self.assertIsNotNone(conditional['result']);self.assertTrue(goal['current_account_risk_bound'])
             self.assertIsNone(goal['result']);self.assertFalse(goal['order_authorized']);self.assertFalse(receipt['order_authorized'])
@@ -680,6 +682,33 @@ class CurrentStudyRamTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(before,runtime.latest_results['position_allocation']);self.assertEqual(1,source.call_count)
             clock[0]=datetime.fromisoformat(receipt['valid_until'])
             self.assertNotIn('goals',runtime.latest_results['position_allocation']['r4_action_comparison'])
+
+    async def test_0b_cut_keeps_minute_source_and_legacy_exact_checks_separate(self):
+        from types import SimpleNamespace
+        from kiwoom_monitor.central_server.market_theme_shadow_inputs import _position_study_observation_from_ram
+        runtime,collector,clock,source,*_=self.prepare(2)
+        snapshot=runtime._snapshot()
+        self.assertEqual('0B',snapshot['input_resolution'])
+        row=next(r for r in snapshot['closed_minute_observations'] if r['code']=='005930')
+        observation=source(runtime._allocation['policy'].account_ref)
+        model=runtime._allocation_models['rows']['005930']['position_study']
+        at=datetime.fromtimestamp(row['available_at'],tz=clock[0].tzinfo)
+        def request(**changes):
+            return SimpleNamespace(**{'symbol':'005930','decision_time':clock[0],
+                'max_snapshot_age_seconds':runtime._allocation['policy'].max_snapshot_age_seconds,
+                'reference_price_won':row['close'],'reference_price_available_at':at,**changes})
+        raw,reasons,refs=_position_study_observation_from_ram(model,request(),observation,snapshot)
+        self.assertIsNotNone(raw);self.assertEqual([],reasons);self.assertTrue(refs)
+        for changed in ({'reference_price_won':row['close']+1},
+                        {'reference_price_available_at':at+timedelta(seconds=1)}):
+            raw,reasons,refs=_position_study_observation_from_ram(model,request(**changed),observation,snapshot)
+            self.assertEqual((None,['current_closed_minute_quote_cut_mismatch'],[]),(raw,reasons,refs))
+        missing={**snapshot,'closed_minute_observations':()}
+        self.assertEqual((None,['current_closed_minute_support_observation_unavailable'],[]),
+            _position_study_observation_from_ram(model,request(),observation,missing))
+        partial={**snapshot,'closed_minute_observations':({**row,'capture_quality':'partial'},)}
+        self.assertEqual((None,['current_closed_minute_support_quality_or_continuity_invalid'],[]),
+            _position_study_observation_from_ram(model,request(),observation,partial))
 
     async def test_cost_owner_loss_and_pending_protection_remove_only_conditional_support(self):
         runtime,collector,clock,source,monitor,state,owner=self.prepare(2)
@@ -707,9 +736,10 @@ class CurrentStudyRamTests(unittest.IsolatedAsyncioTestCase):
                 '10':'1020','15':'1','13':'62','14':'61','20':'090459','311':'1234'}}]})
             await runtime._dispatch(runtime._snapshot())
         receipt=runtime.latest_results['position_allocation']
-        conditional=receipt['r4_action_comparison']['goals'][0]['model_support']['conditional_shadow']
-        self.assertIsNone(conditional['result'])
-        self.assertIn('current_closed_minute_support_quality_or_continuity_invalid',conditional['reasons'])
+        self.assertIsNone(receipt['result'])
+        self.assertEqual('BLOCKED',receipt['quality']['status'])
+        self.assertIn('native_turnover_window_incomplete:005930',receipt['quality']['reasons'])
+        self.assertNotIn('r4_action_comparison',receipt)
         self.assertFalse(receipt['order_authorized']);self.assertEqual(2,source.call_count)
 
     async def test_running_shadow_worker_uses_existing_owner_and_publishes_conditional_value(self):

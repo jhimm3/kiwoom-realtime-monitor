@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -44,7 +46,7 @@ class JournalBarRepositoryMixin:
     _path: Path
 
     def mark_bar_backfill(self, code: str, day: date, state: str, message: str = "", now: datetime | None = None) -> None:
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 self._mark_bar_backfill(connection, code, day, state, message, updated_at)
@@ -159,7 +161,7 @@ class JournalBarRepositoryMixin:
     def upsert_daily_bars(
         self, code: str, rows: tuple[tuple[object, ...], ...], now: datetime | None = None,
     ) -> None:
-        confirmed_at = (now or datetime.now()).isoformat(timespec="seconds")
+        confirmed_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         values: list[tuple[object, ...]] = []
         for row in rows:
             if len(row) < 7:
@@ -184,7 +186,7 @@ class JournalBarRepositoryMixin:
                     "volume=excluded.volume, trade_value_eok=excluded.trade_value_eok, confirmed_at=excluded.confirmed_at",
                     values,
                 )
-                available_at = now or datetime.now()
+                available_at = now or kst_wall_now()
                 for value in values:
                     trading_day = date.fromisoformat(str(value[0]))
                     observation = local_daily_bar_observation(
@@ -247,7 +249,7 @@ class JournalBarRepositoryMixin:
     ) -> bool:
         """한 날짜의 보완 분봉과 완료 상태를 모두 저장하거나 모두 되돌린다."""
         matching = tuple(bar for bar in bars if bar.minute.date() == day)
-        saved_at = confirmed_at or datetime.now()
+        saved_at = confirmed_at or kst_wall_now()
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 if not matching:
@@ -310,7 +312,7 @@ class JournalBarRepositoryMixin:
             incoming_source = "realtime_partial" if bar.metadata is not None and not bar.metadata.is_complete else source
             preserve_previous = preserve_confirmed or incoming_source == "realtime_partial"
             saved_source, saved_at = preserved.get(key, (incoming_source, None)) if preserve_previous else (incoming_source, None)
-            effective_available_at = confirmed_at or datetime.now()
+            effective_available_at = confirmed_at or kst_wall_now()
             if saved_at:
                 try:
                     effective_available_at = datetime.fromisoformat(str(saved_at))

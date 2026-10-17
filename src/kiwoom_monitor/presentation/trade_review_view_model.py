@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -145,9 +147,9 @@ def build_trade_history_summary_view_model(
             if cost.net_realized_profit is not None
             else (f"예정 {summary.realized_profit - estimated_cost:+,}원" if estimated_cost else "—")
         )
-        period = episode.started_at.strftime("%Y-%m-%d %H:%M")
+        period = format_kst_time(episode.started_at, "%Y-%m-%d %H:%M")
         if episode.ended_at != episode.started_at:
-            period += " ~ " + episode.ended_at.strftime("%m-%d %H:%M")
+            period += " ~ " + format_kst_time(episode.ended_at, "%m-%d %H:%M")
         values = (
             period,
             summary.stock_name or summary.stock_code,

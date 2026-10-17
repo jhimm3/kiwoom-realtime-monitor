@@ -1,11 +1,14 @@
 """모의 후보 기준 동결·final 근거 준비·검토·게시 화면과 작업 수명."""
 
 from __future__ import annotations
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 from copy import deepcopy
 from pathlib import Path
 import sqlite3
 from typing import Any
+
+from kiwoom_monitor.application.research_families import RESEARCH_FAMILY_LABELS
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
@@ -133,10 +136,10 @@ def publication_summary(document: dict) -> str:
     spec = package["candidate_spec"]
     parameters = spec["parameters"]
     lines = [
-        f"전략: {package['strategy_ref']} · {spec['family']}",
+        f"전략: {package['strategy_ref']} · {RESEARCH_FAMILY_LABELS.get(spec['family'], spec['family'])} ({spec['family']})",
         f"판정: {'적격' if receipt['status'] == 'ELIGIBLE' else '차단'}",
-        f"기준 동결: {policy['frozen_at']}",
-        f"final 완료: {source['finished_at']}",
+        f"기준 동결: {format_kst_time(policy['frozen_at'])}",
+        f"final 완료: {format_kst_time(source['finished_at'])}",
         f"final batch: {source['batch_id']}", f"final run: {source['run_id']}",
         "", "전략 조건",
     ]
@@ -151,6 +154,15 @@ def publication_summary(document: dict) -> str:
         if name in parameters:
             value = parameters[name]
             lines.append(f"{label}: {'사용' if value is True else '미사용' if value is False else value}")
+    if spec["family"] == "leader_breakout/v1":
+        lines.append("입력: 실시간 0B / 연구 확정·보완 분봉 · 현재 근거 별도 검증")
+        for name, label in (("breakout_buffer_bps", "돌파 여유(bp)"), ("minimum_confirmation_observations", "확인 관측 수"),
+                ("persistence_seconds", "확인 유지(초)"), ("minimum_turnover_won", "최소 거래대금(원)")):
+            lines.append(f"{label}: {parameters.get(name) if parameters.get(name) is not None else '미정'}")
+        contract = parameters.get("execution_contract") or {}
+        for name, label in (("quantity", "명시 수량(주)"), ("capital_won", "전략 자금(원)"),
+                ("order_type", "주문 방식"), ("session_exit_policy", "세션 처리")):
+            lines.append(f"{label}: {contract.get(name) if contract.get(name) is not None else '미정'}")
     lines.extend(["", "적격 기준"])
     for name, label in POLICY_INPUTS:
         value = policy[name]
@@ -230,7 +242,7 @@ class MockAutomationCandidateDialog(QDialog):
         self._summary = QPlainTextEdit()
         self._summary.setReadOnly(True)
         self._buttons = {}
-        development_button = QPushButton("돌파·눌림 개발 결과 확인")
+        development_button = QPushButton("기존 돌파·눌림 비교 결과 확인")
         development_button.clicked.connect(lambda: self._request("development"))
         self._buttons["development"] = development_button
         inputs_button = QPushButton("일별 개발 비용·입력 점검")
@@ -247,6 +259,11 @@ class MockAutomationCandidateDialog(QDialog):
             self._buttons[operation] = button
             row.addWidget(button)
         layout = QVBoxLayout(self)
+        self._strategy_scope = QLabel("주도주 구조 돌파는 분봉 성과·final 검증과 실제 0B Shadow 근거를 통과한 후보를 게시합니다. "
+            "수량·비용·위험·운용 한도가 미정이면 차단하며 현재 실시간 근거는 별도로 확인합니다. "
+            "기존 완료봉 Family는 비교 정책입니다.")
+        self._strategy_scope.setWordWrap(True)
+        layout.addWidget(self._strategy_scope)
         layout.addWidget(scroll, 2)
         layout.addWidget(development_button)
         layout.addWidget(inputs_button)

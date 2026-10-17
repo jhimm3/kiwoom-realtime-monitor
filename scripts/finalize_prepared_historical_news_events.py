@@ -258,7 +258,7 @@ def _release_run_lease(archive: sqlite3.Connection, owner: str) -> None:
 
 def _resolve_event(archive: sqlite3.Connection, stock: str, identity: str,
                    article_id: str, body_id: str, computed: dict[str, Any],
-                   rule_version: str) -> tuple[Any, ...]:
+                   rule_version: str, *, reviewed_choice: dict[str, Any] | None = None) -> tuple[Any, ...]:
     """Resolve one target inside the caller's transaction, without jobs or commit."""
     if not archive.in_transaction:
         raise ValueError("event resolution requires a caller-owned transaction")
@@ -280,13 +280,24 @@ def _resolve_event(archive: sqlite3.Connection, stock: str, identity: str,
             (article_id, body_id, rule_version, rule_hash, stock),
         ).fetchone()
         if exact:
+            if reviewed_choice is not None:
+                raise ValueError("reviewed conflict already has an event revision")
             outcome = reason = "exact_reuse"
             event_revision_id, event_id = str(exact[0]), str(exact[1])
         else:
             reason, groups = _group_candidates(archive, stock, identity,
                                                 result.get("event_key"))
             candidate_event_ids = tuple(sorted(groups))
-            if len(groups) > 1:
+            if reviewed_choice is not None:
+                selected = archive.execute(
+                    "SELECT event_id FROM central_news_event_revisions WHERE stock_code=? AND event_key=? "
+                    "ORDER BY accepted_sequence DESC LIMIT 1", (stock, result.get("event_key")),
+                ).fetchone()
+                if (reason != "event_key" or len(groups) < 2 or
+                        list(candidate_event_ids) != reviewed_choice.get("candidate_event_ids") or
+                        selected != (reviewed_choice.get("selected_event_id"),)):
+                    raise ValueError("reviewed event choice differs from current candidates or writer")
+            if len(groups) > 1 and reviewed_choice is None:
                 outcome, reason = "conflict", f"ambiguous_{reason}"
             else:
                 article = archive.execute(
@@ -310,6 +321,8 @@ def _resolve_event(archive: sqlite3.Connection, stock: str, identity: str,
                     "result": result,
                 })
                 outcome = "new_group" if not groups else "connected"
+                if reviewed_choice is not None:
+                    reason = "reviewed_event_key"
         if event_revision_id:
             event = archive.execute(
                 "SELECT event_id,revision_of,available_at FROM central_news_event_revisions "
@@ -325,6 +338,8 @@ def _resolve_event(archive: sqlite3.Connection, stock: str, identity: str,
                 raise ValueError("event revision has no unique matching membership")
             event_id, event_parent = event[0], event[1]
             membership_id, membership_parent = members[0]
+            if reviewed_choice is not None and event_id != reviewed_choice["selected_event_id"]:
+                raise ValueError("event writer did not preserve the reviewed choice")
     return (outcome, reason, event_id, event_revision_id, membership_id,
             event_parent, membership_parent, candidate_event_ids)
 

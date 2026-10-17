@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
 from kiwoom_monitor.application.theme_suggestions import ThemeSuggestion
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
@@ -35,7 +37,8 @@ def news_identity(item: StockNewsItem) -> str:
 
 
 class NewsAIRepository:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, now_provider=None) -> None:
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
         self._database_path = database_path
         initialize_news_schema(self._database_path)
 
@@ -114,7 +117,7 @@ class NewsAIRepository:
                 "theme_candidates=excluded.theme_candidates",
                 (stock_code, news_identity(item), provider, model, analysis.summary, analysis.category, analysis.outlook,
                  analysis.confidence, analysis.reason, json.dumps(analysis.positive_evidence, ensure_ascii=False),
-                 json.dumps(analysis.negative_evidence, ensure_ascii=False), body_hash, datetime.now(UTC).isoformat(),
+                 json.dumps(analysis.negative_evidence, ensure_ascii=False), body_hash, self._now().isoformat(),
                  json.dumps([candidate.__dict__ for candidate in analysis.theme_candidates], ensure_ascii=False)),
             )
             if analysis.company_impacts:
@@ -127,7 +130,7 @@ class NewsAIRepository:
                      json.dumps(analysis.positive_evidence, ensure_ascii=False),
                      json.dumps(analysis.negative_evidence, ensure_ascii=False),
                      json.dumps([impact.__dict__ for impact in analysis.company_impacts], ensure_ascii=False),
-                     body_hash, datetime.now(UTC).isoformat()),
+                     body_hash, self._now().isoformat()),
                 )
 
     def list_theme_suggestions(self, limit: int = 1000) -> tuple[ThemeSuggestion, ...]:
@@ -156,7 +159,7 @@ class NewsAIRepository:
         return tuple(result)
 
     def daily_count(self) -> int:
-        today = datetime.now().astimezone().date().isoformat()
+        today = self._now().astimezone().date().isoformat()
         with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
                 "SELECT COUNT(*) FROM news_ai_requests WHERE substr(requested_at, 1, 10)=?", (today,)
@@ -169,12 +172,12 @@ class NewsAIRepository:
             connection.execute(
                 "INSERT INTO news_ai_requests(requested_at,provider,model,request_mode,event_count,article_count,input_tokens,output_tokens,total_tokens) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                (datetime.now().astimezone().isoformat(), provider, model, request_mode, event_count, article_count,
+                (self._now().astimezone().isoformat(), provider, model, request_mode, event_count, article_count,
                  usage.input_tokens, usage.output_tokens, usage.total_tokens),
             )
 
     def daily_usage(self) -> tuple[int, int, int, int]:
-        today = datetime.now().astimezone().date().isoformat()
+        today = self._now().astimezone().date().isoformat()
         with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
                 "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(total_tokens),0) "

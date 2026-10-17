@@ -1,0 +1,79 @@
+{
+  "collector_input_version": "collector-input/v3",
+  "second_bar_production": false,
+  "minute_source_check_route": "/api/v2/research/ram-shadow/source-check",
+  "minute_source_check_version": "stock-thesis-source-check/v2",
+  "reviewed_additive_paths": {
+    "/api/v2/research/ram-shadow/source-check": {
+      "get": {
+        "summary": "Research Minute Thesis Source Check",
+        "operationId": "research_minute_thesis_source_check_api_v2_research_ram_shadow_source_check_get",
+        "parameters": [
+          {
+            "name": "expected_revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Expected Revision"
+            }
+          },
+          {
+            "name": "lookback_minutes",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 60,
+              "minimum": 1,
+              "title": "Lookback Minutes"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Research Minute Thesis Source Check Api V2 Research Ram Shadow Source Check Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "route_insertions": [
+    {
+      "before": "/api/v1/research/ram-shadow",
+      "paths": [
+        "/api/v2/research/ram-shadow/source-check"
+      ]
+    }
+  ]
+}

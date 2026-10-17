@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from dataclasses import replace, asdict
+from dataclasses import dataclass, replace, asdict
+from types import MappingProxyType
 import hashlib
 import json
 from typing import Any, Protocol
@@ -12,6 +13,7 @@ import math
 from fractions import Fraction
 
 from kiwoom_monitor.application.market_research_features import market_frames_from_observations
+from kiwoom_monitor.domain.ranking import normalize_stock_code
 from kiwoom_monitor.application.market_theme_shadow import (
     MarketThemeShadowInputs, MatureBreakoutEvidence, stock_thesis_shadow_request_from_dict,
 )
@@ -569,7 +571,12 @@ def freeze_dynamic_allocation_input_bundle(receipt,models,selection):
 
 
 def _position_study_observation_from_ram(model,request,observation,snapshot):
-    """Join the Collector's completed bar to the already borrowed owner basis."""
+    """Join the completed bar for the legacy exact Paper comparison only.
+
+    A shared cut can contain both current 0B receipts and completed minutes.
+    Its live resolution does not invalidate the separate minute observation;
+    the existing exact-comparison checks below remain scoped to that study.
+    """
     from kiwoom_monitor.application.mock_automation_risk import _sha256
     from kiwoom_monitor.application.research_replay import replay_krx_minute_bars
     basis=getattr(observation,'study_portfolio',None);state=getattr(observation,'runner_state',None)
@@ -621,6 +628,7 @@ def dynamic_allocation_inputs_from_ram(selection, snapshot, contexts, observatio
     from kiwoom_monitor.application.mock_automation_risk import (
         MockAutomationRiskSnapshot, VERIFIED_DAILY_PNL_SOURCE, mock_automation_risk_snapshot_from_dict)
     from kiwoom_monitor.application.position_target import PositionAccountObservation
+    snapshot=_prepared_ram_snapshot(snapshot)
     policy=selection['policy'];cut=datetime.fromisoformat(snapshot['decision_time'])
     age=policy.max_snapshot_age_seconds;reasons=[];expires=[policy.valid_until];source_times=[policy.available_at]
     receipt={'version':'dynamic-position-allocation-ram/v1','policy_ref':policy.policy_ref,
@@ -629,6 +637,9 @@ def dynamic_allocation_inputs_from_ram(selection, snapshot, contexts, observatio
         'source_durability':'not_verified','order_authorized':False,
         'coverage':'selected_KRX_symbols_and_TOP20_context',
         'missing_producers':['allocation_ev','conservative_full_exit_capacity','stress_loss_model']}
+    if snapshot.get('input_resolution') == '0B':
+        receipt['input_resolution'] = '0B'
+        receipt['observation_contract'] = 'individual-0B-price-volume/v1'
     def fresh(at,label):
         at=datetime.fromisoformat(at) if isinstance(at,str) else at
         if at.tzinfo is None or not 0<=(cut-at).total_seconds()<age:reasons.append(label+'_cut_invalid')
@@ -715,11 +726,13 @@ def dynamic_allocation_inputs_from_ram(selection, snapshot, contexts, observatio
         breadth=context['market']['facts'].get('top20_breadth_ppm')
         theme_strength=sum(m['return_bps']>0 for m in members)*10000//len(members) if members else None
         prepared_contexts.append((context,member_map,breadth,theme_strength))
-    window_rows={}
-    for row in snapshot['rows']:
+    window_rows={};incomplete_symbols=set()
+    for row in _ram_price_rows(snapshot,selection['symbols'],'KRX'):
         if row['market']!='KRX' or row['code'] not in selection['symbols']:continue
-        at=datetime.fromisoformat(row['trading_date']+'T'+row['trade_second']).replace(tzinfo=ZoneInfo('Asia/Seoul'))
-        if start<at<=cut and row['available_at']<=cut.timestamp():window_rows.setdefault(row['code'],[]).append((at,row))
+        at=_ram_row_time(row,snapshot)
+        if start<at<=cut and row['available_at']<=cut.timestamp():
+            window_rows.setdefault(row['code'],[]).append((at,row))
+            if type(row.get('trade_value_won')) is not int:incomplete_symbols.add(row['code'])
     for symbol in selection['symbols']:
         facts={'symbol':symbol,'reference_price_won':None,'market_cap_won':None,'theme_ids':[],
             'market_strength_bps':None,'theme_strength_bps':None,'stock_strength_bps':None,
@@ -764,15 +777,23 @@ def dynamic_allocation_inputs_from_ram(selection, snapshot, contexts, observatio
         floors=[snapshot.get('retention_since'),snapshot.get('gap_at'),snapshot['continuous_from'].get((symbol,'KRX'))]
         complete=all(at is not None and at<=start for at in (floors[0],floors[2])) and (floors[1] is None or floors[1]<=start)
         rows=window_rows.get(symbol,[])
-        if complete and rows:
-            rows.sort(key=lambda value:value[0]);facts['recent_turnover_won']=sum(r['trade_value_won'] for _,r in rows)
+        if complete and rows and symbol not in incomplete_symbols:
+            rows.sort(key=lambda value:(value[0],value[1].get('sequence',0)));facts['recent_turnover_won']=sum(r['trade_value_won'] for _,r in rows)
             window_body={'source_id':snapshot['source_id'],'generation':snapshot['generation'],
                 'symbol':symbol,'venue':'KRX','start':start.isoformat(),'end':cut.isoformat(),
-                'absolute_rows':[r for _,r in rows]}
+                'absolute_rows':[r for _,r in rows], 'input_resolution':snapshot.get('input_resolution','seconds')}
             digest=hashlib.sha256(json.dumps(window_body,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-            facts['window_input_ref']='ram-allocation-window:'+digest
+            facts['window_input_ref']=('ram-allocation-0B-window:' if snapshot.get('input_resolution')=='0B' else 'ram-allocation-window:')+digest
             facts['input_refs'].append(facts['window_input_ref'])
-            prices=[r['close'] for _,r in rows]
+            if snapshot.get('input_resolution') == '0B':
+                # Preserve the existing observed-second close RMS. Summing
+                # turnover still uses every receipt; sampling prices here
+                # creates no second OHLCV, retained state or writer.
+                prices=list({at.replace(microsecond=0):r['price_won'] for at,r in rows}.values())
+                facts['volatility_basis']='last_received_price_per_observed_second/v1'
+                facts['volatility_sample_count']=len(prices)
+            else:
+                prices=[r['close'] for _,r in rows]
             if len(prices)>=3 and all(type(p) is int and p>0 for p in prices):
                 returns=[Fraction((b-a)*10000,a) for a,b in zip(prices,prices[1:])]
                 square=sum(r*r for r in returns)/len(returns)
@@ -939,12 +960,13 @@ def persisted_stock_thesis_shadow_request_from_evidence(
             <= datetime.fromisoformat(thesis.available_at) <= cutoff):
         raise ValueError("saved research thesis is not available at the decision cut")
     refs = (*leadership.input_refs, *thesis.factor_refs, *thesis.hypothesis_refs, thesis.theme_revision_id)
-    if any(not isinstance(ref, str) or ref.startswith("ram:") for ref in refs):
+    if any(not isinstance(ref, str) or ref.startswith(("ram:", "ram-0B:")) for ref in refs):
         raise ValueError("ephemeral RAM references cannot be recovered as saved thesis evidence")
     return request
 
 
 class MarketThemeShadowReadStore(Protocol):
+    def load_minute_bars(self, code: str, trading_date: str, market: str = '') -> list[dict[str, Any]]: ...
     def load_observation_revisions(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
     def load_theme_snapshots(self, *, available_at: float | None = None, limit: int = 100) -> list[dict[str, Any]]: ...
     def load_second_trade_bars(
@@ -1035,10 +1057,92 @@ def read_stock_thesis_source_check(
     }
 
 
+def read_minute_stock_thesis_source_check(
+    store: MarketThemeShadowReadStore, saved, *, thesis_policy_version: str,
+    leadership_venue: str, lookback_minutes: int = 20, theme_limit: int = 100,
+) -> dict[str, Any]:
+    """Explicit bounded native comparison, never a completeness/approval gate.
+
+    Each native read retains its own transaction. Second bars preserve current
+    values only; a missing hash cannot distinguish correction, retention or an
+    earlier value outside this requested window. No replay or live-path reads.
+    """
+    from time import perf_counter
+    from kiwoom_monitor.domain.news_observation import stable_document_hash
+    if (type(lookback_minutes) is not int or not 1 <= lookback_minutes <= 60
+            or type(theme_limit) is not int or not 1 <= theme_limit <= 1000):
+        raise ValueError("source check budgets must be 1-60 minutes and 1-1000 themes")
+    if len(json.dumps(saved, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 1024 * 1024:
+        raise ValueError("source check evidence exceeds 1 MiB")
+    request = persisted_stock_thesis_shadow_request_from_evidence(saved,
+        run_id=saved["thesis"]["run_id"], thesis_id=saved["thesis"]["thesis_id"],
+        thesis_policy_version=thesis_policy_version, leadership_venue=leadership_venue,
+        decision_time=saved["thesis"]["available_at"])
+    thesis = request.entry_thesis
+    leadership = saved["leadership"]
+    codes = tuple(member["code"] for member in leadership["members"])
+    refs = tuple(dict.fromkeys(leadership["input_refs"]))
+    if (not 2 <= len(codes) <= 200 or len(set(codes)) != len(codes)
+            or any(len(code) != 6 or not code.isdigit() for code in codes) or len(refs) > 10000):
+        raise ValueError("source check requires 2-200 members and at most 10000 references")
+    cut = datetime.fromisoformat(leadership["as_of"]).astimezone(timezone.utc)
+    local = cut.astimezone(ZoneInfo("Asia/Seoul"))
+    start = max(local.replace(hour=0, minute=0, second=0, microsecond=0),
+                local - timedelta(minutes=lookback_minutes))
+    expected = tuple(ref for ref in refs if ref.startswith("minute-trade:")
+                     and len(ref) == 77 and all(c in "0123456789abcdef" for c in ref[13:]))
+    expected_set = set(expected)
+    unknown = tuple(ref for ref in refs if ref != thesis.theme_revision_id and ref not in expected_set)
+    started = perf_counter()
+    snapshots = store.load_theme_snapshots(available_at=cut.timestamp(), limit=theme_limit)
+    theme_ms = (perf_counter() - started) * 1000
+    snapshot = next((value for value in snapshots if value["snapshot_id"] == thesis.theme_revision_id
+                     and float(value["available_at"]) <= cut.timestamp()), None)
+    theme_status = "NOT_FOUND_IN_BOUNDED_READ"
+    if snapshot is not None:
+        if snapshot["content_hash"] != stable_document_hash(snapshot["document"]):
+            theme_status = "CONTENT_HASH_MISMATCH"
+        else:
+            membership = next((value for value in theme_memberships_from_snapshot(snapshot)
+                               if value.theme_id == thesis.theme_id), None)
+            theme_status = ("MATCHED" if membership and set(membership.member_codes) == set(codes)
+                            and len(membership.member_codes) == len(codes)
+                            and thesis.theme_revision_id in refs else "MEMBERSHIP_MISMATCH")
+    second_started = perf_counter()
+    from kiwoom_monitor.application.theme_leadership import minute_trade_points_from_rows
+    rows = []
+    for code in codes:
+        loaded = store.load_minute_bars(code, local.date().isoformat(), leadership_venue)
+        if len(loaded) > 1440 or len(rows) + len(loaded) > 10000:
+            raise ValueError('source check minute row budget exceeded')
+        rows.extend(loaded)
+    points = minute_trade_points_from_rows(rows, as_of=cut.isoformat())
+    native_refs = {point.input_ref for point in points if point.code in codes and point.market == leadership_venue
+                   and start.astimezone(timezone.utc) <= datetime.fromisoformat(point.observed_at) <= cut}
+    matched = tuple(ref for ref in expected if ref in native_refs)
+    unmatched = tuple(ref for ref in expected if ref not in native_refs)
+    return {
+        "version": "stock-thesis-source-check/v2", "thesis_ref": thesis.thesis_id,
+        "leadership_ref": thesis.leadership_revision_id, "as_of": cut.isoformat(),
+        "scope": "bounded_final_completed_minutes", "lookback_minutes": lookback_minutes,
+        "theme": {"ref": thesis.theme_revision_id, "status": theme_status,
+                  "rows_read": len(snapshots), "budget_reached": len(snapshots) >= theme_limit},
+        "minutes": {"expected": len(expected), "matched": len(matched),
+                    "unmatched_refs": list(unmatched), "rows_read": len(rows)},
+        "unverified_refs": {"leadership": list(unknown), "factors": list(thesis.factor_refs),
+                            "hypotheses": list(thesis.hypothesis_refs)},
+        "unverified": ["minute_revision_history", "capture_continuity", "factor_hypothesis_lineage",
+                       "cross_read_snapshot", "operational_approval"],
+        "source_durability": "not_verified", "replay_eligible": False, "order_authorized": False,
+        "timing_ms": {"theme_read": theme_ms, "minute_read_and_compare": (perf_counter() - second_started) * 1000,
+                      "total": (perf_counter() - started) * 1000},
+    }
+
+
 def read_market_theme_shadow_inputs(
     store: MarketThemeShadowReadStore, *, decision_time: str, theme_id: str,
     leadership_venue: str, ranking_limit: int = 100, theme_limit: int = 100,
-    leadership_parameters: ThemeLeadershipParameters = ThemeLeadershipParameters(),
+    leadership_parameters: ThemeLeadershipParameters,
     breakout_evidence: MatureBreakoutEvidence | None = None,
     previous_leadership_state: ThemeLeadershipState | None = None,
 ) -> MarketThemeShadowInputs:
@@ -1051,6 +1155,9 @@ def read_market_theme_shadow_inputs(
         raise ValueError("shadow theme and leadership venue must be explicit")
     if not 1 <= ranking_limit <= 1000 or not 1 <= theme_limit <= 1000:
         raise ValueError("shadow source read budgets must be 1-1000")
+    if (leadership_parameters.window_seconds < 60 or leadership_parameters.window_seconds % 60
+            or leadership_parameters.max_data_age_seconds < 60):
+        raise ValueError('minute research needs explicit whole-minute windows and freshness')
     snapshots = tuple(store.load_theme_snapshots(available_at=cutoff.timestamp(), limit=theme_limit))
     eligible = tuple(snapshot for snapshot in snapshots if float(snapshot["available_at"]) <= cutoff.timestamp())
     # Native reader already orders by accepted_sequence; timestamps are not revision order.
@@ -1059,30 +1166,101 @@ def read_market_theme_shadow_inputs(
                        if value.theme_id == theme_id), None) if latest else None
     observations = store.load_observation_revisions("ranking", "5", ranking_limit)
     market_frames = market_frames_from_observations(observations, eligible)
+    from kiwoom_monitor.application.theme_leadership import minute_trade_points_from_rows
+    from kiwoom_monitor.application.market_theme_shadow import MarketPriceTradeShadowInputs
     rows = []
     if membership:
-        local = cutoff.astimezone(ZoneInfo("Asia/Seoul"))
-        start = max(local.replace(hour=0, minute=0, second=0, microsecond=0),
-                    local - timedelta(seconds=2 * leadership_parameters.window_seconds))
-        rows = store.load_second_trade_bars(
-            membership.member_codes, local.date().isoformat(), leadership_venue,
-            start_second=start.strftime("%H:%M:%S"), end_second=local.strftime("%H:%M:%S"),
-            available_at=cutoff.timestamp(),
-        )
-    return MarketThemeShadowInputs(
+        local = cutoff.astimezone(ZoneInfo('Asia/Seoul'))
+        for code in membership.member_codes:
+            loaded = store.load_minute_bars(code, local.date().isoformat(), leadership_venue)
+            if len(loaded)>1440 or len(rows)+len(loaded)>10000:
+                raise ValueError('minute research row budget exceeded')
+            rows.extend(loaded)
+    return MarketPriceTradeShadowInputs(
         decision_time=cutoff.isoformat(), market_venue="COMBINED", market_window="cumulative_session",
         leadership_venue=leadership_venue, market_frames=market_frames, theme_membership=membership,
-        second_points=second_trade_points_from_rows(rows), continuity_status="UNAVAILABLE",
+        second_points=(), observation_points=minute_trade_points_from_rows(rows, as_of=cutoff.isoformat()),
+        input_resolution='1m', continuity_status="UNAVAILABLE",
         breakout_evidence=breakout_evidence, previous_leadership_state=previous_leadership_state,
     )
 
 
+@dataclass(frozen=True)
+class RamTradeObservationCut:
+    """One cut's shared index/immutable points; no collector, writer or lifetime."""
+    rows: tuple
+    rows_by_source: object
+    points_by_ref: object
+    times_by_ref: object
+
+    def __deepcopy__(self, memo):
+        # Keep copied raw rows isolated while retaining index-to-row identity.
+        # Immutable points/timestamps can be reused; mappingproxy itself cannot
+        # be pickled by the default deepcopy implementation.
+        from copy import deepcopy
+        value = RamTradeObservationCut(deepcopy(self.rows, memo),
+            MappingProxyType({key:deepcopy(rows, memo) for key,rows in self.rows_by_source.items()}),
+            MappingProxyType(dict(self.points_by_ref)), MappingProxyType(dict(self.times_by_ref)))
+        memo[id(self)] = value
+        return value
+
+
+def prepare_ram_trade_observations(snapshot):
+    from kiwoom_monitor.application.theme_leadership import realtime_trade_points_from_rows
+    rows = snapshot['rows']
+    groups = {}
+    for row in rows:
+        groups.setdefault((row['code'],row['market']),[]).append(row)
+    return RamTradeObservationCut(rows,
+        MappingProxyType({key:tuple(values) for key,values in groups.items()}),
+        MappingProxyType({point.input_ref:point for point in realtime_trade_points_from_rows(rows)}),
+        MappingProxyType({row['input_ref']:datetime.fromisoformat(row['observed_at']) for row in rows}))
+
+
+def _prepared_ram_snapshot(snapshot):
+    if snapshot.get('input_resolution') != '0B':
+        return snapshot
+    value = snapshot.get('_trade_cut')
+    if isinstance(value,RamTradeObservationCut) and value.rows is snapshot['rows']:
+        return snapshot
+    return {**snapshot, '_trade_cut':prepare_ram_trade_observations(snapshot)}
+
+
+def _ram_cut(snapshot):
+    value = snapshot.get('_trade_cut')
+    return value if isinstance(value,RamTradeObservationCut) and value.rows is snapshot['rows'] else prepare_ram_trade_observations(snapshot)
+
+
+def _ram_price_rows(snapshot, codes=None, venue=None):
+    if snapshot.get('input_resolution') != '0B' or codes is None:
+        return snapshot['rows']
+    cut = _ram_cut(snapshot)
+    return (row for code in sorted(set(codes)) for row in cut.rows_by_source.get((code,venue),()))
+
+
+def _ram_row_time(row, snapshot=None):
+    if row.get('input_resolution') == '0B':
+        if snapshot is not None:
+            return _ram_cut(snapshot).times_by_ref[row['input_ref']]
+        return datetime.fromisoformat(row['observed_at'])
+    return datetime.fromisoformat(row['trading_date']+'T'+row['trade_second']).replace(tzinfo=ZoneInfo('Asia/Seoul'))
+
+
+def _ram_points(snapshot, rows):
+    if snapshot.get('input_resolution') == '0B':
+        from kiwoom_monitor.application.theme_leadership import RealtimeTradePoints
+        points = _ram_cut(snapshot).points_by_ref
+        return RealtimeTradePoints(points[row['input_ref']] for row in rows)
+    return second_trade_points_from_rows(rows)
+
+
 def market_theme_shadow_inputs_from_ram(snapshot, context: MarketThemeShadowInputs, *, window_seconds: int):
-    """Use canonical collector seconds with explicit ephemeral refs and conservative coverage.
+    """Use individual collector 0B receipts with explicit refs and conservative coverage.
 
     Market/theme/reference context is supplied by its existing owner. No native
     revision/accepted sequence or durable status is invented for RAM observations.
     """
+    snapshot=_prepared_ram_snapshot(snapshot)
     cutoff = datetime.fromisoformat(snapshot["decision_time"])
     if cutoff.tzinfo is None or not 1 <= window_seconds <= 30 or snapshot["durable"] is not False:
         raise ValueError("RAM source cut/window/durability is invalid")
@@ -1097,17 +1275,20 @@ def market_theme_shadow_inputs_from_ram(snapshot, context: MarketThemeShadowInpu
     complete = complete and all((code, venue) in approved and since.get((code, venue)) is not None
                                 and since[(code, venue)] <= start for code in codes)
     rows = []
-    for record in snapshot["rows"]:
+    for record in _ram_price_rows(snapshot,codes,venue):
         if record["code"] not in codes or record["market"] != venue:
             continue
-        observed = datetime.fromisoformat(f"{record['trading_date']}T{record['trade_second']}").replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        observed = _ram_row_time(record,snapshot)
         if not start <= observed <= cutoff or record["available_at"] > cutoff.timestamp():
             continue
         source_start = since.get((record["code"], venue))
         if source_start is None or observed < source_start or any(observed < floor for floor in floors):
             continue
-        digest = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        rows.append({**record, "revision_id": f"ram:{snapshot['source_id']}:{snapshot['generation']}:{digest}"})
+        if snapshot.get('input_resolution')=='0B':
+            rows.append(record)
+        else:
+            digest = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            rows.append({**record, "revision_id": f"ram:{snapshot['source_id']}:{snapshot['generation']}:{digest}"})
     limits = list(context.upper_limits)
     day = cutoff.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()
     for reference in snapshot.get("stock_references", ()):
@@ -1126,9 +1307,85 @@ def market_theme_shadow_inputs_from_ram(snapshot, context: MarketThemeShadowInpu
             code=reference["code"], price=price,
             available_at=datetime.fromtimestamp(reference["available_at"], timezone.utc).isoformat(),
         ))
-    return replace(context, decision_time=cutoff.isoformat(), second_points=second_trade_points_from_rows(rows),
-                   upper_limits=tuple(limits),
-                   continuity_status="COMPLETE" if complete else "PARTIAL" if rows else "UNAVAILABLE")
+    points = _ram_points(snapshot, rows)
+    complete = complete and len(points) == len(rows)
+    values = dict(decision_time=cutoff.isoformat(), upper_limits=tuple(limits),
+                  continuity_status="COMPLETE" if complete else "PARTIAL" if rows else "UNAVAILABLE")
+    if snapshot.get('input_resolution') == '0B':
+        from kiwoom_monitor.application.market_theme_shadow import MarketPriceTradeShadowInputs
+        return MarketPriceTradeShadowInputs(**{**vars(context), **values,
+            'second_points': (), 'observation_points': points, 'input_resolution': '0B',
+            'market_primary_timeframe': '0B'})
+    return replace(context, second_points=points, **values)
+
+
+def market_minute_trade_inputs_from_rows(snapshot, context, rows, *, max_membership_age_seconds=90):
+    from kiwoom_monitor.application.market_research_features import MarketMinuteTradeInputs
+    cutoff = datetime.fromisoformat(snapshot["decision_time"])
+    eligible = [frame for frame in context.market_frames if frame.venue == context.market_venue
+        and frame.window == context.market_window and datetime.fromisoformat(frame.available_at) <= cutoff]
+    if not eligible:
+        return None
+    frame = max(eligible, key=lambda value: (datetime.fromisoformat(value.available_at), value.revision_id))
+    if frame.capture_quality != "complete":
+        return None
+    codes = tuple(normalize_stock_code(member.code) for member in frame.members)
+    return MarketMinuteTradeInputs(frame.revision_id, frame.available_at, codes, context.leadership_venue,
+        tuple(row for row in rows if row.get("code") in codes and row.get("market") == context.leadership_venue),
+        max_membership_age_seconds=max_membership_age_seconds)
+
+
+def market_price_trade_inputs_from_ram(snapshot, context, *, window_seconds, max_data_age_seconds, max_membership_age_seconds=90):
+    """Reuse one approved RAM cut for the actual TOP20 price/trade cohort, without a theme."""
+    from kiwoom_monitor.application.market_research_features import MarketPriceTradeInputs
+    snapshot=_prepared_ram_snapshot(snapshot)
+    cutoff = datetime.fromisoformat(snapshot["decision_time"])
+    eligible = [frame for frame in context.market_frames if frame.venue == context.market_venue
+                and frame.window == context.market_window and datetime.fromisoformat(frame.available_at) <= cutoff]
+    if not eligible:
+        return None
+    frame = max(eligible, key=lambda value: (datetime.fromisoformat(value.available_at), value.revision_id))
+    codes = tuple(normalize_stock_code(row.code) for row in frame.members)
+    venue = context.leadership_venue
+    start = cutoff - timedelta(seconds=2 * window_seconds)
+    floors = tuple(value for value in (snapshot["retention_since"], snapshot["gap_at"]) if value is not None)
+    approved, since = set(snapshot["approved_sources"]), snapshot["continuous_from"]
+    continuity, continuity_reasons = {}, {}
+    for code in codes:
+        source_start = since.get((code, venue))
+        issues = tuple(reason for reason, failed in (
+            ("membership_capture_incomplete", frame.capture_quality != "complete"),
+            ("membership_trading_day_mismatch", frame.trading_date != cutoff.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat()),
+            ("ram_retention_history_insufficient", snapshot["retention_since"] is None or snapshot["retention_since"] > start),
+            ("ram_delivery_gap_in_window", snapshot["gap_at"] is not None and snapshot["gap_at"] > start),
+            ("trade_source_not_approved", (code, venue) not in approved),
+            ("trade_source_history_unconfirmed", source_start is None),
+            ("trade_source_history_insufficient", source_start is not None and source_start > start),
+        ) if failed)
+        continuity[code] = "UNKNOWN" if issues else "COMPLETE"
+        continuity_reasons[code] = issues
+    rows = []
+    for record in _ram_price_rows(snapshot,codes,venue):
+        if record["code"] not in codes or record["market"] != venue:
+            continue
+        observed = _ram_row_time(record,snapshot)
+        source_start = since.get((record["code"], venue))
+        if (not start < observed <= cutoff or record["available_at"] > cutoff.timestamp()
+                or source_start is None or observed < source_start or any(observed < floor for floor in floors)):
+            continue
+        if snapshot.get('input_resolution')=='0B':
+            rows.append(record)
+        else:
+            digest = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            rows.append({**record, "revision_id": f"ram:{snapshot['source_id']}:{snapshot['generation']}:{digest}"})
+    points = _ram_points(snapshot, rows)
+    if len(points) != len(rows):
+        continuity = dict.fromkeys(codes, "UNKNOWN")
+        continuity_reasons = {code: (*continuity_reasons[code], "price_trade_row_conversion_incomplete") for code in codes}
+    return MarketPriceTradeInputs(frame.revision_id, frame.available_at, codes, venue, points, continuity,
+                                 window_seconds, max_data_age_seconds, max_membership_age_seconds=max_membership_age_seconds,
+                                 continuity_reasons=continuity_reasons,
+                                 input_resolution=snapshot.get('input_resolution','seconds'))
 
 
 def market_frame_from_live_membership(snapshot, theme_snapshots=()):

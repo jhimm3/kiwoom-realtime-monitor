@@ -306,10 +306,16 @@ class NasOperatorLinuxTests(unittest.TestCase):
 
     def test_helper_update_preserves_revoke_backups_and_rolls_back_failed_probe(self):
         from scripts import nas_operator_install as installer
-        source = Path(__file__).resolve().parents[2]
-        for failed in (False, True, 'fence'):
-            with self.subTest(failed=failed), contextlib.ExitStack() as stack:
+        workspace = Path(__file__).resolve().parents[2]
+        for include_launcher, failed in ((launcher, failure) for launcher in (False, True)
+                                         for failure in (False, True, 'fence')):
+            with self.subTest(launcher=include_launcher, failed=failed), contextlib.ExitStack() as stack:
                 root = Path(tempfile.mkdtemp(prefix='refresh-', dir=self.directory))
+                source = root / 'bundle'
+                (source / 'scripts').mkdir(parents=True)
+                for name in ('nas_operator.py', 'nas_operator_worker.py',
+                             *(('nas_source_runtime.py',) if include_launcher else ())):
+                    shutil.copyfile(workspace / 'scripts' / name, source / 'scripts' / name)
                 helper = root / 'helper'
                 helper.mkdir(mode=0o755)
                 private_path = root / 'private'
@@ -318,7 +324,8 @@ class NasOperatorLinuxTests(unittest.TestCase):
                          'ROOT_LAUNCHER': str(root / 'launcher'), 'CLIENT': str(root / 'client'),
                          'SUDOERS': str(root / 'sudoers')}
                 stack.enter_context(patch.multiple(op, **paths))
-                stack.enter_context(patch.multiple(installer, HELPER=str(helper), PRIVATE=str(private_path)))
+                stack.enter_context(patch.multiple(installer, HELPER=str(helper), PRIVATE=str(private_path),
+                                                  PROJECT=str(root)))
                 stack.enter_context(patch.object(installer, 'protected_directory'))
                 stack.enter_context(patch.object(installer, 'check_acl'))
                 stack.enter_context(patch.object(op, 'validate_sudo_policy'))
@@ -346,7 +353,14 @@ class NasOperatorLinuxTests(unittest.TestCase):
                                         'installed_mode': 0o644})
                     original_index = {'state': 'complete', 'format': 2, 'entries': entries}
                     private.put_json('install-backup-index.json', original_index)
-                    config = {'helper_dir': str(helper), 'private': str(private_path)}
+                    config = {'helper_dir': str(helper), 'private': str(private_path),
+                              'store': str(root / 'source-runtime'), 'allowed_uid': 0}
+                    if include_launcher:
+                        runner = root / 'source-runtime' / 'runner.py'
+                        runner.parent.mkdir()
+                        runner.write_bytes(b'previous launcher')
+                        runner.chmod(0o777)  # Actual NAS shared-source mode.
+                        originals[str(runner)] = runner.read_bytes()
                     if failed:
                         with self.assertRaisesRegex(op.Rejected, 'injected_(probe|fence)_failure'):
                             installer.update_helpers(source, config, '/acl')
@@ -354,6 +368,8 @@ class NasOperatorLinuxTests(unittest.TestCase):
                         self.assertEqual('rolled_back', private.json('helper-update.json')['state'])
                         for path, data in originals.items():
                             self.assertEqual(data, Path(path).read_bytes())
+                        if include_launcher:
+                            self.assertEqual(0o777, stat.S_IMODE(runner.stat().st_mode))
                     else:
                         result = installer.update_helpers(source, config, '/acl')
                         self.assertTrue(result['sudoers_unchanged'])
@@ -366,8 +382,14 @@ class NasOperatorLinuxTests(unittest.TestCase):
                                              new['installed_sha256'])
                         for name in ('nas_operator.py', 'nas_operator_worker.py'):
                             self.assertEqual((source / 'scripts' / name).read_bytes(), (helper / name).read_bytes())
+                        if include_launcher:
+                            self.assertEqual((source / 'scripts/nas_source_runtime.py').read_bytes(), runner.read_bytes())
+                            self.assertEqual(0o777, stat.S_IMODE(runner.stat().st_mode))
+                            self.assertEqual(hashlib.sha256(runner.read_bytes()).hexdigest(),
+                                             json.loads(Path(op.CONFIG).read_bytes())['runner_sha256'])
                         for path, data in originals.items():
-                            if Path(path).parent != helper:
+                            if Path(path).parent != helper and not (include_launcher and
+                                    path in (op.CONFIG, str(runner))):
                                 self.assertEqual(data, Path(path).read_bytes())
                     for number in range(len(entries)):
                         self.assertEqual(b'original-before-install', private.read('install-backups/' + str(number)))

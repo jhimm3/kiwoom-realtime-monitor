@@ -3,6 +3,9 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from datetime import datetime, timedelta
+from unittest.mock import patch
+from types import SimpleNamespace
 from urllib.error import HTTPError
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import (
@@ -21,6 +24,29 @@ class Response:
 
 
 class RemoteKiwoomRestClientTests(unittest.TestCase):
+    def test_server_clock_from_existing_response_advances_without_extra_requests(self):
+        calls = []
+        def opener(request, **kwargs):
+            calls.append(request.full_url)
+            response = Response({'snapshots': []})
+            response.headers = {'X-Kiwoom-Server-Time': '2026-10-15T14:21:03.123456+09:00'}
+            return response
+        client = RemoteKiwoomRestClient('https://nas.example.test', 'fixture', opener=opener)
+        with patch('kiwoom_monitor.infrastructure.kiwoom_rest.remote_client.monotonic', return_value=100):
+            client.load_stored_ranking('5')
+        with patch('kiwoom_monitor.infrastructure.kiwoom_rest.remote_client.monotonic', return_value=102.5):
+            self.assertEqual(client.server_now(), datetime(2026, 10, 15, 14, 21, 5, 623456))
+        self.assertEqual(len(calls), 1)
+
+    def test_malformed_or_naive_server_clock_cannot_replace_verified_instant(self):
+        client = RemoteKiwoomRestClient('https://nas.example.test', 'fixture')
+        with patch('kiwoom_monitor.infrastructure.kiwoom_rest.remote_client.monotonic', return_value=100):
+            client._capture_server_clock(SimpleNamespace(headers={
+                'X-Kiwoom-Server-Time': '2026-10-15T05:21:03+00:00'}))
+            for value in ('invalid', '2026-10-15T14:21:03', '', None):
+                client._capture_server_clock(SimpleNamespace(headers={'X-Kiwoom-Server-Time': value}))
+            self.assertEqual(client.server_now(), datetime(2026, 10, 15, 14, 21, 3))
+
     def test_daily_bars_keeps_legacy_shape_and_carries_optional_coverage(self):
         calls = []
         coverage = {"collection_verified": True, "periods": {"250": {"status": "ready"}}}

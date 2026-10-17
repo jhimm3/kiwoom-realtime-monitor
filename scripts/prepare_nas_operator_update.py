@@ -12,7 +12,8 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = ('scripts/nas_operator.py', 'scripts/nas_operator_worker.py',
-         'scripts/nas_operator_install.py', 'tests/unit/test_nas_operator.py',
+         'scripts/nas_operator_install.py', 'scripts/nas_source_runtime.py',
+         'tests/unit/test_nas_operator.py', 'tests/unit/test_nas_source_runtime.py',
          'tests/integration/test_nas_operator_linux.py')
 SHELL_FILES = ('deploy/synology/check-nas-operator.sh',)
 
@@ -105,7 +106,7 @@ def prepare(nas_root, workspace_commit=None):
     bundle_sources.update({relative: normalize_shell(data) for relative, data in
                            tuple(bundle_sources.items()) if relative in SHELL_FILES})
     bundle_id = bundle_fingerprint(bundle_sources)
-    name = 'nas-operator-update-replay-pause-' + bundle_id[:16]
+    name = 'nas-operator-update-' + bundle_id[:16]
     artifact = nas_root / 'artifacts' / name
     artifact.mkdir(exist_ok=False)
     bundle = artifact / 'bundle'

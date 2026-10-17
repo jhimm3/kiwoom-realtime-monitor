@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst
+
 from .diagnostic_replay_contract import captured_workload
 
 from .diagnostic_workloads import is_paused
@@ -11,12 +13,13 @@ from .observation_frame_recovery import (
 )
 
 import asyncio
+from collections import deque, OrderedDict
 from contextlib import ExitStack
 from copy import deepcopy
 import json
 import logging
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from threading import RLock
 from typing import Any, Mapping
 
@@ -27,6 +30,10 @@ from kiwoom_monitor.application.market_session_schedule import (
 from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
     StrategyState,
+)
+from kiwoom_monitor.application.leader_breakout import (
+    LeaderBreakoutPolicy, evaluate_leader_breakout_trade, _id,
+    document_breakout_reference, document_breakout_observation,
 )
 from kiwoom_monitor.application.pullback_reacceleration_strategy import PullbackReaccelerationConfig
 from kiwoom_monitor.application.research_families import (
@@ -54,16 +61,39 @@ class CandidateMonitor:
     def __init__(
         self,
         store: Any,
-        config: BreakoutStrategyConfig | PullbackReaccelerationConfig,
+        config: BreakoutStrategyConfig | PullbackReaccelerationConfig | LeaderBreakoutPolicy,
         *,
         poll_seconds: float,
         universe_max_age_seconds: int,
         session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
+        now_provider=None,
     ) -> None:
         if universe_max_age_seconds <= 0:
             raise ValueError("universe_max_age_seconds must be positive")
         self._store = store
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
         self._config = config
+        self._leader_policy = config if isinstance(config, LeaderBreakoutPolicy) else None
+        if self._leader_policy is not None:
+            self.monitor_id = _id("leader-breakout-monitor", config.to_dict())
+            self._poll_seconds = max(0.5, float(poll_seconds))
+            self._iteration_lock = RLock()
+            self._leader_states = {}
+            self._leader_symbols = frozenset(c.symbol for c in config.contexts)
+            self._leader_pending = deque()
+            self._leader_signatures = {}
+            self._leader_accepting = False
+            self._document_inputs = OrderedDict()
+            self._document_references = {}
+            self._document_observations = {}
+            self._document_recorded = {}
+            self._minute_commit_provider = lambda: None
+            self._frame_recovery = None
+            self._task = None
+            self._quality = {"status": "BLOCKED" if config.missing("0B") else "WARMUP",
+                "reason": ";".join("unconfigured:"+key for key in config.missing("0B")) or "awaiting_0B",
+                "input_mode": "0B", "last_processed_sequence": 0}
+            return
         self._family = family_for_config(config)
         if tuple(self._family.contract["required_inputs"]) != SUPPORTED_INPUTS:
             raise ValueError("unsupported shadow candidate input contract")
@@ -97,40 +127,111 @@ class CandidateMonitor:
         universe_max_age_seconds: int,
         session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
         family_id: str = BREAKOUT_FAMILY_ID,
+        now_provider=None,
     ) -> "CandidateMonitor":
         try:
             document = json.loads(config_json)
             if not isinstance(document, dict):
                 raise ValueError("strategy config must be an object")
-            config = parse_strategy_config(family_id, document)
+            config = (LeaderBreakoutPolicy.from_dict(document) if "policy_id" in document
+                      else parse_strategy_config(family_id, document))
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid shadow candidate strategy config: {error}") from error
         return cls(
             store, config, poll_seconds=poll_seconds,
             universe_max_age_seconds=universe_max_age_seconds,
             session_profile=session_profile,
+            now_provider=now_provider,
         )
 
     @property
     def required_inputs(self) -> tuple[str, ...]:
         """The registered strategy contract; this reader accepts complete KRX minute bars."""
-        return tuple(self._family.contract["required_inputs"])
+        return (("kiwoom-websocket-0B/KRX", "explicit_leader_structure_evidence") if self._leader_policy
+                else tuple(self._family.contract["required_inputs"]))
 
     @property
     def quality(self) -> dict[str, Any]:
         value = {**self._quality, "monitor_id": self.monitor_id}
+        if self._leader_policy is not None and self._leader_policy.reference_level is not None:
+            with self._iteration_lock:
+                value['document_baseline_observations'] = deepcopy(tuple(self._document_observations.values()))
         if self._frame_recovery is not None:
             value.update(status="WARMUP", reason="legacy_frames_recovery",
                          input_recovery=self._frame_recovery.receipt())
         return value
 
+    def set_minute_commit_provider(self, provider):
+        """Reuse the existing native close marker; this does not own its writer."""
+        self._minute_commit_provider = provider
+
+    def _refresh_document_observations(self):
+        if self._leader_policy.reference_level is None or not self._leader_accepting:
+            return
+        with self._iteration_lock:
+            pending = tuple(self._document_inputs.items())
+        token = self._minute_commit_provider()
+        for symbol, item in pending:
+            if not self._leader_accepting:
+                break
+            cut = datetime.fromisoformat(item['available_at'])
+            # Same native two-second close fence as the existing minute reader.
+            end = (cut-timedelta(seconds=2)).replace(second=0,microsecond=0)
+            key = (cut.date().isoformat(),end,token)
+            cached = self._document_references.get(symbol)
+            if cached is None or cached[0] != key:
+                seconds = self._leader_policy.reference_level['window_seconds']
+                rows = self._store.load_minute_bars(symbol,cut.date().isoformat(),'KRX') if seconds and seconds%60 == 0 else ()
+                reference = document_breakout_reference(self._leader_policy,rows,symbol=symbol,
+                    decision_time=cut.isoformat(),mode='0B')
+                cached = (key,reference)
+                with self._iteration_lock:
+                    current = self._document_inputs.get(symbol)
+                    if current is None or current['source'] != item['source'] or not self._leader_accepting:
+                        continue
+                    self._document_references[symbol] = cached
+            reference = cached[1]
+            # The cut can move across a minute while the worker is loading.
+            if reference['window_end'] != cut.replace(second=0,microsecond=0).isoformat():
+                continue
+            with self._iteration_lock:
+                current = self._document_inputs.get(symbol)
+                if not self._leader_accepting or current is None or current['source'] != item['source']:
+                    continue
+                self._observe_document_baseline(symbol,current,reference)
+
+    def _observe_document_baseline(self,symbol,item,reference):
+        """Existing monitor lock/queue own facts and transition records, never orders."""
+        if reference['window_end'] != datetime.fromisoformat(item['available_at']).replace(second=0,microsecond=0).isoformat():
+            return
+        observation = document_breakout_observation(self._leader_policy,reference,
+            **{name:item[name] for name in ('price','observed_at','available_at','input_ref','previous','source','turnover_won')},mode='0B')
+        self._document_observations[symbol] = observation
+        signature = (observation['state'],reference['reference_ref'],observation['source'],tuple(observation['configuration_missing']))
+        if self._document_recorded.get(symbol) == signature:
+            return
+        if len(self._leader_pending)>=1000:
+            self._document_observations[symbol] = {**observation,'state':'DATA_BLOCKED',
+                'reasons':[*observation['reasons'],'candidate_publication_backpressure']}
+            return
+        decision = {**item['decision'],'baseline_observation':observation}
+        decision['decision_id'] = _id('document-baseline-decision',[self._leader_policy.fingerprint,decision])
+        self._leader_pending.append((decision,None,''))
+        self._document_recorded[symbol] = signature
+
     async def start(self) -> None:
+        if self._leader_policy:
+            self._leader_accepting = True
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="shadow-candidate-monitor")
 
     def operational_status(self, *, now: datetime | None = None) -> dict[str, object]:
         """Report universe freshness now, separately from last evaluation quality."""
-        at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        at = as_kst(now or self._now())
+        if self._leader_policy:
+            return {"scope": "leader_breakout_0B", "checked_at": at.isoformat(),
+                "configuration_missing": list(self._leader_policy.missing("0B")),
+                "last_evaluation": dict(self._quality), "current_all_inputs_fresh": None}
         # The worker publishes list replacements/appends; snapshot before inspecting.
         frames = tuple(self._universes)
         eligible = [datetime.fromisoformat(frame.available_at).astimezone(timezone.utc)
@@ -157,6 +258,8 @@ class CandidateMonitor:
         }
 
     async def close(self) -> None:
+        if self._leader_policy:
+            self._leader_accepting = False
         if self._task is None:
             return
         self._task.cancel()
@@ -165,6 +268,106 @@ class CandidateMonitor:
         except asyncio.CancelledError:
             pass
         self._task = None
+        if self._leader_policy:
+            await drain_thread_call(self.run_once)
+
+    def project_leader_candidate_status(self, event):
+        if self._leader_policy is None:
+            return None
+        with self._iteration_lock:
+            if event.get("run_id") != self.monitor_id:
+                return "SUPERSEDED"
+            state = self._leader_states.get(event.get("symbol"))
+            return "ACTIVE" if self._leader_accepting and state and state.episode_id == event.get("event_id") else "INVALIDATED"
+
+    def observe_trade(self, payload, received_at, *, source, approved):
+        """Pure bounded 0B judgment on the collector loop; persistence is deferred."""
+        if self._leader_policy is None or not self._leader_accepting:
+            return
+        if payload.get("market", "KRX") != "KRX":
+            return
+        symbol = str(payload.get("code", ""))
+        document_mode = self._leader_policy.reference_level is not None
+        if symbol not in self._leader_symbols and not document_mode:
+            return
+        if len(symbol) != 6 or not symbol.isdigit():
+            return
+        with self._iteration_lock:
+            if not approved or is_paused("candidate_monitor"):
+                self._leader_states.pop(symbol, None)
+                self._document_inputs.pop(symbol,None)
+                self._document_observations.pop(symbol,None)
+                self._document_references.pop(symbol,None)
+                self._document_recorded.pop(symbol,None)
+                self._quality = {**self._quality, "status": "BLOCKED", "reason": "0B_source_not_ready_or_paused"}
+                return
+            try:
+                decision, state = evaluate_leader_breakout_trade(self._leader_policy, payload,
+                    received_at=received_at, source=source, state=self._leader_states.get(symbol))
+            except (ValueError, TypeError, KeyError) as error:
+                self._leader_states.pop(symbol, None)
+                self._quality = {**self._quality, "status": "BLOCKED", "reason": "invalid_0B:"+str(error)}
+                return
+            self._leader_states[symbol] = state
+            if document_mode:
+                previous = self._document_inputs.get(symbol)
+                if previous is not None and previous['source'] == source+':'+received_at.date().isoformat() and (
+                        datetime.fromisoformat(decision['available_at']) <= datetime.fromisoformat(previous['available_at'])
+                        or datetime.fromisoformat(decision['observed_at']) < datetime.fromisoformat(previous['observed_at'])):
+                    return
+                if type(decision['signal_reference_price']) is not int or decision['signal_reference_price'] <= 0:
+                    return
+                current = {'price':decision['signal_reference_price'],'observed_at':decision['observed_at'],
+                    'available_at':decision['available_at'],'input_ref':decision['input_ref'],
+                    'source':source+':'+received_at.date().isoformat(),'turnover_won':decision['turnover_won']}
+                current['previous'] = ({name:previous[name] for name in ('price','observed_at','available_at','source')}
+                    if previous is not None else None)
+                current['decision'] = decision
+                self._document_inputs[symbol] = current
+                self._document_inputs.move_to_end(symbol)
+                while len(self._document_inputs)>200:
+                    removed,_=self._document_inputs.popitem(last=False)
+                    self._leader_states.pop(removed,None)
+                    self._leader_signatures.pop(removed,None)
+                    self._document_observations.pop(removed,None)
+                    self._document_references.pop(removed,None)
+                    self._document_recorded.pop(removed,None)
+                cached = self._document_references.get(symbol)
+                if cached is not None:
+                    self._observe_document_baseline(symbol,current,cached[1])
+            self._quality = {**self._quality, "status": decision["status"], "reason": ";".join(decision["reasons"]),
+                "last_decision_at": decision["decided_at"], "last_symbol": symbol}
+            signature = (decision["status"], decision["proposal"], decision["context_ref"], tuple(decision["reasons"]))
+            if not decision["new_candidate"] and self._leader_signatures.get(symbol) == signature:
+                return
+            if len(self._leader_pending) >= 1000:
+                self._leader_pending.clear()
+                self._leader_states.clear()
+                self._leader_signatures.clear()
+                self._document_inputs.clear()
+                self._document_observations.clear()
+                self._document_references.clear()
+                self._document_recorded.clear()
+                self._quality = {**self._quality, "status": "BLOCKED", "reason": "candidate_publication_backpressure"}
+                return
+            candidate = None
+            if decision["new_candidate"]:
+                candidate = {"event_id": decision["episode_id"], "dedup_key": decision["episode_id"],
+                    "run_id": self.monitor_id, "symbol": symbol, "strategy_id": "leader_breakout",
+                    "strategy_version": "v1", "setup": "explicit_leader_structure_cross",
+                    "reference_revision_id": decision["context_ref"], "transition": "observed_cross",
+                    "quantity": None, "signal_reference_price": decision["signal_reference_price"],
+                    "available_at": decision["available_at"], "snapshot_id": decision["input_ref"],
+                    "decision_id": decision["decision_id"], "order_authorized": False}
+                from kiwoom_monitor.application.leader_breakout import LeaderBreakoutConfig
+                context = next(c for c in self._leader_policy.contexts if c.evidence_ref == decision["context_ref"])
+                candidate.update(evidence_version="leader_shadow_evidence/v1",
+                    rules_hash=LeaderBreakoutConfig.from_dict(self._leader_policy.to_dict()).rules_hash,
+                    context_hash=_id("leader-context/v1", asdict(context)), policy=self._leader_policy.to_dict(),
+                    observation={"payload": deepcopy(payload), "received_at": received_at.isoformat(), "source": source,
+                                 "approved": approved}, decision=deepcopy(decision))
+            self._leader_pending.append((decision, candidate, decision["valid_until"] if candidate else ""))
+            self._leader_signatures[symbol] = signature
 
     @captured_workload("shadow", "candidate_monitor")
     async def _run(self) -> None:
@@ -176,15 +379,32 @@ class CandidateMonitor:
                 logger.exception("shadow candidate monitor iteration failed")
                 self._quality = {
                     **self._quality, "status": "ERROR", "reason": str(error),
-                    "last_error_at": datetime.now(timezone.utc).isoformat(),
+                    "last_error_at": self._now().isoformat(),
                 }
-                try:
-                    await drain_thread_call(self._save_checkpoint, reason="error")
-                except Exception:
-                    logger.exception("shadow candidate monitor checkpoint failed")
+                if not self._leader_policy:
+                    try:
+                        await drain_thread_call(self._save_checkpoint, reason="error")
+                    except Exception:
+                        logger.exception("shadow candidate monitor checkpoint failed")
             await asyncio.sleep(self._poll_seconds)
 
     def run_once(self, *, limit: int = 1000) -> int:
+        if self._leader_policy:
+            self._refresh_document_observations()
+            saved = 0
+            for _ in range(limit):
+                with self._iteration_lock:
+                    if not self._leader_pending:
+                        break
+                    item = self._leader_pending.popleft()
+                try:
+                    self._store.save_shadow_evaluation(self.monitor_id, *item)
+                except Exception:
+                    with self._iteration_lock:
+                        self._leader_pending.appendleft(item)
+                    raise
+                saved += 1
+            return saved
         with self._iteration_lock:
             if self._bootstrap_pending:
                 self._bootstrap()
@@ -451,6 +671,8 @@ def run_shadow_monitors_once(monitors, *, limit: int = 1000) -> dict[str, Any]:
         raise ValueError("shared shadow delivery requires 1..32 consumers and a 1..5000 row budget")
     if any(not isinstance(monitor, CandidateMonitor) for monitor in monitors):
         raise TypeError("shared shadow delivery requires candidate monitors")
+    if any(monitor._leader_policy is not None for monitor in monitors):
+        raise ValueError("0B leader monitors do not consume historical observation pages")
     store = monitors[0]._store
     if any(monitor._store is not store for monitor in monitors):
         raise ValueError("shared shadow consumers must use the same source store")

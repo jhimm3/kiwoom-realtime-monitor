@@ -23,13 +23,14 @@ from kiwoom_monitor.domain.order_contract import (
     TERMINAL_ORDER_STATES,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord, ExecutionRepository
+from .market_observations import KST, as_kst
 
 
 class ExecutionRuntime:
     def __init__(
         self, lifecycle: OrderLifecycle, repository: ExecutionRepository,
         *, account_ref: str, run_id: str, owner_token: str,
-        now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        now_provider: Callable[[], datetime] = lambda: datetime.now(KST),
     ) -> None:
         if not account_ref.strip() or not run_id.strip() or not owner_token.strip():
             raise ValueError("account_ref, run_id and owner_token are required")
@@ -94,7 +95,7 @@ class ExecutionRuntime:
                 raise RuntimeError("MOCK_RUNTIME_RETIRED")
             if new_orders_enabled is not None:
                 self._new_orders_enabled = bool(new_orders_enabled)
-            now = datetime.now(timezone.utc)
+            now = self.server_now()
             self._lease_seconds = max(1, lease_seconds)
             self._active = self._repository.claim_runtime(
                 "mock", self.account_ref, self.run_id, self.owner_token, now, self._lease_seconds,
@@ -127,7 +128,7 @@ class ExecutionRuntime:
                 raise RuntimeError("mock execution runtime has not acquired ownership")
             if not self._repository.claim_runtime(
                 "mock", self.account_ref, self.run_id, self.owner_token,
-                datetime.now(timezone.utc), self._lease_seconds,
+                self.server_now(), self._lease_seconds,
             ):
                 self._active = False
                 raise RuntimeError("mock execution ownership was lost")
@@ -139,7 +140,7 @@ class ExecutionRuntime:
             self._require_active(intent)
             if not self._new_orders_enabled:
                 raise RuntimeError("MOCK_NEW_ORDERS_DISABLED")
-            self._repository.save_account_snapshot("mock", account, datetime.now(timezone.utc))
+            self._repository.save_account_snapshot("mock", account, self.server_now())
             self._lifecycle.queue(intent)
             return self._lifecycle.submit(intent.intent_id, account, reference_price=reference_price)
 
@@ -163,7 +164,7 @@ class ExecutionRuntime:
         value = self._now()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("execution runtime clock must be timezone-aware")
-        return value
+        return as_kst(value)
 
     @contextmanager
     def automation_decision_guard(self) -> Iterator[None]:
@@ -289,7 +290,7 @@ class ExecutionRuntime:
                 raise ValueError("intent does not belong to this mock runtime")
             if not self._repository.claim_runtime(
                 "mock", self.account_ref, self.run_id, self.owner_token,
-                datetime.now(timezone.utc), self._lease_seconds,
+                self.server_now(), self._lease_seconds,
             ):
                 self._active = False
                 raise RuntimeError("mock execution ownership was lost")
@@ -304,7 +305,7 @@ class ManualMockOrderGateway:
         repository: ExecutionRepository,
         account_refresh: Callable[[], Awaitable[AccountSnapshot]],
         *,
-        now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        now_provider: Callable[[], datetime] = lambda: datetime.now(KST),
     ) -> None:
         self._runtime = runtime
         self._repository = repository

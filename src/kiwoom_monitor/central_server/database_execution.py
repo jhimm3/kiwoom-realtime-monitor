@@ -6,6 +6,8 @@ intent/event writes remain atomic. No broker or order scheduling belongs here.
 """
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -28,7 +30,7 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
     row = cursor.fetchone()
     expiry = row[1] if row and isinstance(row[1], datetime) else datetime.fromisoformat(str(row[1])) if row else None
     if not row or row[0] != ownership["owner_token"] or expiry <= (
-            datetime.now(timezone.utc) if now_provider is None else now_provider()):
+            kst_now() if now_provider is None else now_provider()):
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
     control_revision = ownership.get("control_revision")
     if control_revision is not None:
@@ -55,12 +57,92 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         _require_mock_replacement_claim(cursor, ownership, value, p, new_intent_claim=new_intent_claim)
     if ownership.get('protection_claim') is not None and 'intent_id' in value:
         _require_mock_protection_claim(cursor, ownership, value, p, now_provider=now_provider,new_intent_claim=new_intent_claim)
+    if new_intent_claim and value.get('policy_version') == 'leader_execution_adapter/v1':
+        _require_leader_execution_claim(cursor, ownership, value, p, now_provider=now_provider)
     if "intent_id" in value:
         cursor.execute(f"SELECT environment,account_ref,run_id FROM central_execution_intents WHERE intent_id={p}",
                        (value["intent_id"],))
         stored = cursor.fetchone()
         if stored is not None and tuple(stored) != (value["environment"], value["account_ref"], value["run_id"]):
             raise RuntimeError("EXECUTION_OWNER_SCOPE_MISMATCH")
+
+
+def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider):
+    """Bind the already-approved generic gate to the new Family's exact evidence."""
+    from kiwoom_monitor.application.leader_breakout import (
+        LeaderBreakoutConfig, LeaderBreakoutPolicy, LeaderBreakoutState, evaluate_leader_breakout_trade,
+        validate_leader_position_proof, leader_evaluation,
+    )
+    from kiwoom_monitor.application.research_families import parse_strategy_config
+    from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
+    from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
+    from kiwoom_monitor.application.breakout_strategy import StrategyState
+    lock = ' FOR UPDATE' if p == '%s' else ''
+    def document(collection, owner, key):
+        cursor.execute(f'SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} AND document_key={p}'+lock,
+            (collection, owner, key))
+        row = cursor.fetchone()
+        if not row:
+            raise RuntimeError('LEADER_EXECUTION_EVIDENCE_MISSING')
+        return _json_document(row[0])
+    account = value['account_ref']
+    spec = mock_automation_spec_from_dict(document('execution_mock_automation_specs', account, ownership['active_spec_id']))
+    package = candidate_package_from_dict(document('execution_mock_automation_candidate_packages', spec.strategy_ref, spec.candidate_package_hash))
+    config = parse_strategy_config(package.candidate_spec['family'], package.candidate_spec['parameters'])
+    if not isinstance(config, LeaderBreakoutConfig) or package.package_hash != spec.candidate_package_hash:
+        raise RuntimeError('LEADER_EXECUTION_PACKAGE_CHANGED')
+    record = document('execution_leader_decisions', account, value['decision_id'])
+    raw = record['snapshot']['feature_values'][0]['value']
+    policy = LeaderBreakoutPolicy.from_dict(record['policy'])
+    configured = LeaderBreakoutConfig.from_dict({**record['policy'], 'execution_contract': config.execution_contract.to_dict()})
+    if configured.rules_hash != config.rules_hash:
+        raise RuntimeError('LEADER_EXECUTION_RULES_CHANGED')
+    proof = record['position_proof']
+    context = validate_leader_position_proof(proof, config, spec, ownership['run_id'])
+    saved = document('execution_leader_position_context', account, proof['entry_intent_id'])
+    if saved != proof:
+        raise RuntimeError('LEADER_PINNED_CONTEXT_CHANGED')
+    state = dict(record['decision']['state_before'])
+    state['emitted_candidate_keys'] = tuple(state['emitted_candidate_keys'])
+    state = StrategyState(**state)
+    observation = record['observation']
+    if (observation.get('approved') is not True or not observation.get('source')
+            or record.get('policy_hash') != policy.fingerprint
+            or value['side'] == 'BUY' and type(record.get('operational_revision')) is not int):
+        raise RuntimeError('LEADER_INPUT_AUTHORITY_MISSING')
+    reproduced, _ = evaluate_leader_breakout_trade(policy, observation['payload'],
+        received_at=datetime.fromisoformat(observation['received_at']), source=observation['source'],
+        decision_time=datetime.fromisoformat(raw['decided_at']), state=LeaderBreakoutState(**raw['state_before']),
+        position_open=state.status == 'open', position_context=context if state.status == 'open' else None)
+    from kiwoom_monitor.application.mock_automation_session_clock import session_clock_assessment
+    assessment = session_clock_assessment(config, state, datetime.fromisoformat(raw['decided_at']))
+    if assessment['exit_required'] and reproduced['status'] in {'HOLD','HARD_EXIT','INVALIDATED'}:
+        reproduced = {**reproduced, 'proposal':'EXIT', 'reasons':[*reproduced['reasons'],*assessment['reasons']]}
+    canonical = lambda obj: json.dumps(obj, sort_keys=True, separators=(',', ':'))
+    if canonical(reproduced) != canonical(raw):
+        raise RuntimeError('LEADER_0B_DECISION_PROOF_CHANGED')
+    expected = leader_evaluation(run_id=ownership['run_id'], config=configured, raw=raw, state=state, context=context)
+    if canonical(expected.decision.to_dict()) != canonical(record['decision']):
+        raise RuntimeError('LEADER_SIZED_DECISION_CHANGED')
+    now = kst_now() if now_provider is None else now_provider()
+    at = datetime.fromisoformat(raw['available_at'])
+    observed = datetime.fromisoformat(raw['observed_at'])
+    if (not 0 <= (now-at).total_seconds() <= config.max_data_age_seconds
+            or not 0 <= (now-observed).total_seconds() <= config.max_data_age_seconds
+            or value['symbol'] != expected.decision.symbol or value['quantity'] != expected.decision.quantity
+            or value['decision_id'] != expected.decision.decision_id
+            or value['side'] != {'ENTER': 'BUY', 'EXIT': 'SELL'}.get(expected.decision.final_action)
+            or value['order_type'] != config.execution_contract.order_type
+            or value['limit_price'] != expected.decision.signal_reference_price):
+        raise RuntimeError('LEADER_PRICE_OR_ORDER_CHANGED')
+    if value['side'] == 'BUY':
+        if now >= datetime.fromisoformat(raw['valid_until']):
+            raise RuntimeError('LEADER_ENTRY_SIGNAL_EXPIRED')
+        settings = document('server_operational_settings', 'global', 'current')
+        live = LeaderBreakoutPolicy.from_dict(settings['shadow_candidate_config'])
+        if (LeaderBreakoutConfig.from_dict(live.to_dict()).rules_hash != config.rules_hash
+                or context not in live.contexts or now >= datetime.fromisoformat(context.valid_until)):
+            raise RuntimeError('LEADER_CURRENT_ENTRY_CONTEXT_CHANGED')
 
 
 def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_claim):
@@ -202,10 +284,21 @@ def _require_mock_protection_claim(cursor, ownership, value, p, *, now_provider=
         if package.package_hash != spec.candidate_package_hash:
             raise RuntimeError('MOCK_STOP_LOSS_CANDIDATE_CHANGED')
         config=parse_strategy_config(package.candidate_spec['family'],package.candidate_spec['parameters'])
-        validate_mock_stop_loss_proof(snapshot['request_trigger']['stop_loss'],spec,risk,stop_loss_bps=config.stop_loss_bps)
+        from kiwoom_monitor.application.leader_breakout import LeaderBreakoutConfig
+        if isinstance(config, LeaderBreakoutConfig):
+            proof = snapshot['request_trigger']['stop_loss']
+            position = proof.get('position_proof', {})
+            cursor.execute(f'SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} AND document_key={p}'+lock,
+                ('execution_leader_position_context', value['account_ref'], position.get('entry_intent_id', '')))
+            row = cursor.fetchone()
+            if not row:
+                raise RuntimeError('LEADER_STOP_ENTRY_CONTEXT_MISSING')
+            validate_mock_stop_loss_proof(proof, spec, risk, leader_config=config, position_proof=_json_document(row[0]))
+        else:
+            validate_mock_stop_loss_proof(snapshot['request_trigger']['stop_loss'],spec,risk,stop_loss_bps=config.stop_loss_bps)
         if datetime.fromisoformat(snapshot['price_available_at']) > risk.observed_at:
             raise RuntimeError('MOCK_STOP_LOSS_ACCOUNT_CUT_NOT_ALIGNED')
-    now=datetime.now(timezone.utc) if now_provider is None else now_provider()
+    now=kst_now() if now_provider is None else now_provider()
     age=min(spec.maximum_data_gap_seconds,spec.unfilled_execution_policy.max_snapshot_age_seconds)
     trigger=mock_automation_protection_trigger(spec,risk,execution_run_id=ownership['run_id'],now=now)
     if (risk.snapshot_id != claim['risk_snapshot_id'] or risk.reconciliation_revision != claim['risk_reconciliation_revision']
@@ -299,7 +392,7 @@ def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provid
     cursor.execute('SELECT document_json FROM central_execution_events WHERE intent_id IN ('+
                    ','.join(p for _ in ids)+') ORDER BY accepted_sequence'+lock,ids)
     events = tuple(_json_document(row[0]) for row in cursor.fetchall())
-    now = datetime.now(timezone.utc) if now_provider is None else now_provider()
+    now = kst_now() if now_provider is None else now_provider()
     cue = protective_cancel_recovery(native,events,policy,frozen,now)
     risk = mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_current_risk',value['account_ref']))
     if (cue['state'] != 'RETRY_READY' or cue['attempt'] != claim['attempt']
@@ -562,7 +655,7 @@ class SQLiteExecutionStoreMixin:
                 "VALUES(?,?,?,?) ON CONFLICT(owner_key) DO UPDATE SET owner_token=excluded.owner_token,"
                 "lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at "
                 "WHERE central_execution_runtime_leases.owner_token=excluded.owner_token OR "
-                "central_execution_runtime_leases.lease_expires_at<=excluded.updated_at",
+                "julianday(central_execution_runtime_leases.lease_expires_at)<=julianday(excluded.updated_at)",
                 (owner_key, owner_token, lease_expires_at, now),
             )
         return cursor.rowcount == 1

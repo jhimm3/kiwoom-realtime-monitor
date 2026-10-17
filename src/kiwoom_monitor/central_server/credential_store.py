@@ -1,6 +1,8 @@
 """NAS-only encrypted credentials. No token persistence or secret-reading API."""
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now
+
 import base64
 import hashlib
 import hmac
@@ -271,7 +273,7 @@ def compose_credential_settings(settings: Any, vault: CredentialStore, store: An
             if record is None:
                 statuses[provider if profile_id != "nas-main-mock-default" else "legacy_main_mock"] = "UNCONFIGURED"
                 continue
-            store.register_credential_profile(provider, profile_id, datetime.now(UTC).isoformat())
+            store.register_credential_profile(provider, profile_id, kst_now().isoformat())
             activations = store.load_credential_activations(profile_id)
             if activations and int(activations[-1]["credential_revision"]) > record.revision:
                 raise CredentialStoreError("RECOVERY_REQUIRED")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment
 from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
@@ -15,7 +16,8 @@ from kiwoom_monitor.infrastructure.persistence.sqlite_connections import (
 
 
 class StockNewsRepository:
-    def __init__(self, database_path: Path, *, stored_news_limit: int | None = 200) -> None:
+    def __init__(self, database_path: Path, *, stored_news_limit: int | None = 200, now_provider=None) -> None:
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
         self._database_path = database_path
         self._stored_news_limit = None if stored_news_limit is None else max(50, min(1000, int(stored_news_limit)))
         self._initialize_schema()
@@ -50,7 +52,7 @@ class StockNewsRepository:
                 "SELECT checked_at FROM stock_news_sync WHERE stock_code=?", (stock_code,)
             ).fetchone()
         checked_at = _parse_datetime(row[0]) if row else None
-        return bool(checked_at and datetime.now(UTC) - checked_at.astimezone(UTC) < timedelta(seconds=max_age_seconds))
+        return bool(checked_at and self._now() - checked_at.astimezone(UTC) < timedelta(seconds=max_age_seconds))
 
     def last_naver_checked_at(self, stock_code: str) -> datetime | None:
         with sqlite_read_connection(self._database_path) as connection:
@@ -63,7 +65,7 @@ class StockNewsRepository:
         self, stock_code: str, items: tuple[StockNewsItem, ...], checked_at: datetime | None = None,
         *, naver_checked_at: datetime | None = None,
     ) -> int:
-        checked_at = checked_at or datetime.now(UTC)
+        checked_at = checked_at or self._now()
         with sqlite_transaction(self._database_path) as connection:
             existing = {
                 str(row[0]) for row in connection.execute(
@@ -105,7 +107,7 @@ class StockNewsRepository:
     ) -> None:
         effective_scope = canonical_scope or account_scope
         _validate_scope_pair(account_scope, effective_scope)
-        revised_at = datetime.now(UTC).isoformat()
+        revised_at = self._now().isoformat()
         with sqlite_transaction(self._database_path) as connection:
             if linked:
                 connection.execute(

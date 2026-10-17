@@ -127,6 +127,8 @@ class AlertSettingsDialog(QDialog):
 
 class NxtMarkerDelegate(QStyledItemDelegate):
     ACTIVE_MARKER_COLOR = QColor("#0078D7")
+    HIGH_REFRESH_PENDING_ROLE = Qt.ItemDataRole.UserRole + 4
+    HIGH_REFRESH_PENDING_COLOR = QColor("#0078D7")
 
     def __init__(self, parent: object | None = None) -> None:
         super().__init__(parent)
@@ -145,6 +147,14 @@ class NxtMarkerDelegate(QStyledItemDelegate):
             | QStyle.StateFlag.State_HasFocus
         )
         super().paint(painter, cell_option, index)
+        if index.data(self.HIGH_REFRESH_PENDING_ROLE):
+            rect = option.rect
+            diameter = min(4, rect.width(), rect.height())
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self.HIGH_REFRESH_PENDING_COLOR)
+            painter.drawEllipse(rect.right() - diameter - 2, rect.top() + 2, diameter, diameter)
+            painter.restore()
         if active:
             rect = option.rect
             painter.save()

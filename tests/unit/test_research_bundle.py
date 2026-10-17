@@ -111,7 +111,7 @@ class BundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'date order'):
                     write_frozen_research_bundle(root, paths)
 
-    def test_different_profiles_and_truncated_theme_history_are_rejected(self):
+    def test_different_profiles_reject_but_partial_theme_history_is_retained(self):
         for scenario in ('profile', 'truncated'):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -119,9 +119,19 @@ class BundleTests(unittest.TestCase):
                 second = write_child(root, date(2026, 9, 15),
                                      profile='krx-after/v1' if scenario == 'profile' else 'krx-regular/v1',
                                      truncated=scenario == 'truncated')
-                with self.assertRaises(ValueError):
-                    write_frozen_research_bundle(root, (first, second))
-                self.assertFalse((root / 'manifest.json').exists())
+                if scenario == 'profile':
+                    with self.assertRaises(ValueError):
+                        write_frozen_research_bundle(root, (first, second))
+                    self.assertFalse((root / 'manifest.json').exists())
+                else:
+                    originals = [(root / path / 'manifest.json').read_bytes() for path in (first, second)]
+                    bundle = write_frozen_research_bundle(root, (first, second))
+                    self.assertTrue(bundle.manifest['children'][1]['theme_snapshot_history_may_be_truncated'])
+                    from kiwoom_monitor.infrastructure.research_data_source import load_research_input
+                    dataset = load_research_input(root, session_profile='krx-regular/v1')
+                    self.assertTrue(dataset.manifest['theme_snapshot_history_may_be_truncated'])
+                    self.assertEqual(2, len(dataset.observations))
+                    self.assertEqual(originals, [(root / path / 'manifest.json').read_bytes() for path in (first, second)])
 
     def test_shared_revision_dedup_ignores_only_export_ordinal_and_conflict_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

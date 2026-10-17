@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from kiwoom_monitor.application.breakout_strategy import StrategyEvaluation
-from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy, build_research_job_identity
+from kiwoom_monitor.application.research_queue import (ResearchCampaignPolicy, build_research_job_identity,
+    LeaderDecisionCampaignSpec, decode_campaign_spec, campaign_trial_count)
 from kiwoom_monitor.application.research_search import ExperimentSpec, generate_trials
 from kiwoom_monitor.application.research_splits import DevelopmentPartitionSpec, ResearchEvaluationSpec, FinalHoldoutBatchSpec
 from kiwoom_monitor.application.context_candidates import ContextHypothesis
@@ -2084,8 +2085,8 @@ class ResearchRepository:
                 raise ValueError('budget revision must preserve generated candidates and must not reduce trial limit')
             if _operating_budget(current) == _operating_budget(spec) and job['reason'] != 'budget_expansion_required':
                 return expected_revision
-            used = connection.execute('SELECT COUNT(*) FROM research_search_trials WHERE experiment_id=?', (spec.experiment_id,)).fetchone()[0]
-            remaining = used < min(spec.max_trials, len(generate_trials(spec)))
+            used = _campaign_completed_units(connection, spec)
+            remaining = used < min(spec.max_trials, campaign_trial_count(spec))
             search_completed = connection.execute('SELECT status FROM research_search_jobs WHERE job_id=?', (job_id,)).fetchone()[0] == 'completed'
             if remaining and job['state'] == 'COMPLETED':
                 count = connection.execute("SELECT COUNT(*) FROM research_campaign_jobs WHERE campaign_id=? AND state!='COMPLETED'", (campaign_id,)).fetchone()[0]
@@ -2402,8 +2403,8 @@ class ResearchRepository:
                     _enqueue_search_job(connection, job_id, spec.experiment_id, spec.dataset_id, spec.dataset_hash,
                                         max_retained_jobs=policy.max_active_jobs, now=now)
                 if search[0] == 'completed':
-                    used = connection.execute('SELECT COUNT(*) FROM research_search_trials WHERE experiment_id=?', (spec.experiment_id,)).fetchone()[0]
-                    if used < min(spec.max_trials, len(generate_trials(spec))) and work['budget_revision'] > 1:
+                    used = _campaign_completed_units(connection, spec)
+                    if used < min(spec.max_trials, campaign_trial_count(spec)) and work['budget_revision'] > 1:
                         count = connection.execute("SELECT COUNT(*) FROM research_search_jobs WHERE status IN ('queued','running')").fetchone()[0]
                         cap = min(policy.max_active_jobs, int(spec.resource_budget.get('max_retained_jobs', 100)))
                         if count >= cap:
@@ -3391,14 +3392,14 @@ def _bind_campaign_hypothesis(connection, campaign_id, hypothesis_id, job_id, no
 def _campaign_job_spec(connection, job):
     budget = json.loads(connection.execute('SELECT budget_json FROM research_campaign_job_budgets WHERE campaign_id=? AND job_id=? AND revision=?',
                                           (job['campaign_id'], job['job_id'], job['budget_revision'])).fetchone()[0])
-    return replace(ExperimentSpec.from_dict(json.loads(job['request_json'])), **budget)
+    return replace(decode_campaign_spec(json.loads(job['request_json'])), **budget)
 
 
 def _campaign_source_spec(connection, job):
     effective = _campaign_job_spec(connection, job)
     if not job['source_request_json']:
         return effective
-    return replace(ExperimentSpec.from_dict(json.loads(job['source_request_json'])), **_operating_budget(effective))
+    return replace(decode_campaign_spec(json.loads(job['source_request_json'])), **_operating_budget(effective))
 
 
 def _campaign_policy(connection, campaign_id, *, revision=None):
@@ -3536,16 +3537,24 @@ def _finish_campaign_worker(connection, worker, outcome, reason, exit_code, mome
     _refresh_campaign_state(connection, campaign_id, moment.isoformat())
 
 
+def _campaign_completed_units(connection, spec):
+    if isinstance(spec, LeaderDecisionCampaignSpec):
+        job_id = build_research_job_identity(spec).job_id
+        row = connection.execute('SELECT result_json FROM research_search_jobs WHERE job_id=?', (job_id,)).fetchone()
+        return int(json.loads(row[0] or '{}').get('completed_policy_count', 0)) if row else 0
+    return connection.execute('SELECT COUNT(*) FROM research_search_trials WHERE experiment_id=?', (spec.experiment_id,)).fetchone()[0]
+
+
 def _campaign_completion_reason(connection, job_id, request_json, *, verify_trial_rows=False):
     row = connection.execute('SELECT result_json FROM research_search_jobs WHERE job_id=?', (job_id,)).fetchone()
     budget = json.loads(row[0] or '{}').get('budget', {})
     if verify_trial_rows:
-        experiment_id = ExperimentSpec.from_dict(json.loads(request_json)).experiment_id
-        budget['used_trials'] = connection.execute('SELECT COUNT(*) FROM research_search_trials WHERE experiment_id=?', (experiment_id,)).fetchone()[0]
+        experiment_id = decode_campaign_spec(json.loads(request_json)).experiment_id
+        budget['used_trials'] = _campaign_completed_units(connection, decode_campaign_spec(json.loads(request_json)))
     if 'used_trials' not in budget:
         return 'registered_jobs_completed'
-    spec = ExperimentSpec.from_dict(json.loads(request_json))
-    total = len(generate_trials(spec))
+    spec = decode_campaign_spec(json.loads(request_json))
+    total = campaign_trial_count(spec)
     if int(budget['used_trials']) < min(spec.max_trials, total):
         return 'budget_expansion_required'
     return 'trial_budget_exhausted' if spec.max_trials < total else 'registered_jobs_completed'

@@ -24,6 +24,67 @@ ACCOUNT_SETTINGS_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_
 
 
 @contextmanager
+def fixed_contract_clock(app_factory, clock):
+    """Freeze the shared clock boundaries used by the native HTTP fixtures."""
+    from kiwoom_monitor.domain.time_basis import KST
+    with ExitStack() as stack:
+        stack.enter_context(patch("kiwoom_monitor.central_server.database.datetime", clock))
+        for module in ("schema_migrations", "database_execution"):
+            stack.enter_context(patch(f"kiwoom_monitor.central_server.{module}.kst_now",
+                                     side_effect=lambda: clock.now(KST)))
+        stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now",
+                                 side_effect=lambda: clock.now(KST)))
+        stack.enter_context(patch.dict(app_factory.__globals__, {"datetime": clock}))
+        yield
+
+
+def contract_storage_hash(database_path):
+    """Require KST writes and compare all other bytes to the frozen UTC contract.
+
+    Only these audited clock columns change representation. The native fixture
+    stays untouched; normalizing its in-memory copy preserves the original
+    baseline's checks of every row, identifier, value, and JSON/hash payload.
+    """
+    clock_columns = (
+        ("central_schema_migrations", "applied_at"),
+        ("central_observation_revisions", "received_at"),
+        ("central_minute_bar_operations", "processed_at"),
+        ("central_execution_runtime_leases", "lease_expires_at"),
+        ("central_execution_runtime_leases", "updated_at"),
+        ("central_execution_account_snapshots", "received_at"),
+        ("central_shadow_monitor_state", "updated_at"),
+        ("central_credential_profiles", "created_at"),
+        ("central_credential_profiles", "archived_at"),
+    )
+    with closing(sqlite3.connect(database_path)) as source, closing(sqlite3.connect(":memory:")) as copy:
+        source.backup(copy)
+        for table, column in clock_columns:
+            if column not in {row[1] for row in copy.execute(f"PRAGMA table_info({table})")}:
+                continue
+            for (value,) in copy.execute(f"SELECT DISTINCT {column} FROM {table}").fetchall():
+                if value is None:
+                    continue
+                at = datetime.fromisoformat(value)
+                # Credential activation fixtures also seed caller-supplied UTC
+                # event times, which are distinct from the server's clock writes.
+                allowed = {0, 32400} if table == "central_credential_profiles" else {32400}
+                if at.tzinfo is None or at.utcoffset().total_seconds() not in allowed:
+                    raise AssertionError((table, column, "expected aware KST clock write", value))
+                copy.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?",
+                             (at.astimezone(timezone.utc).isoformat(), value))
+        for snapshot_id, document in copy.execute(
+                "SELECT snapshot_id,document_json FROM central_execution_account_snapshots").fetchall():
+            body = json.loads(document)
+            received = datetime.fromisoformat(body["received_at"])
+            if received.tzinfo is None or received.utcoffset().total_seconds() != 32400:
+                raise AssertionError("expected KST snapshot receipt")
+            body["received_at"] = received.astimezone(timezone.utc).isoformat()
+            copy.execute("UPDATE central_execution_account_snapshots SET document_json=? WHERE snapshot_id=?",
+                         (json.dumps(body, ensure_ascii=False, separators=(",", ":")), snapshot_id))
+        return hashlib.sha256("\n".join(copy.iterdump()).encode()).hexdigest()
+
+
+@contextmanager
 def account_settings_contract_app(app_factory, database_path, mode):
     """Native settings storage; owner doubles cover HTTP delegation, not live admission."""
     from kiwoom_monitor.central_server.config import CentralServerSettings
@@ -58,7 +119,7 @@ def account_settings_contract_app(app_factory, database_path, mode):
 
     try:
         with ExitStack() as stack:
-            stack.enter_context(patch("kiwoom_monitor.central_server.schema_migrations.datetime", FixedNow))
+            stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_credentials.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.news_credentials.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.ai_credentials.datetime", FixedNow))
@@ -125,7 +186,7 @@ def capture_account_settings_http_contract(client, store, request_store, real, m
         if before != after:
             raise AssertionError((name, "settings HTTP request changed native storage"))
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
-            "body": response.json(), "storage_hash": after,
+            "body": response.json(), "storage_hash": contract_storage_hash(database_path),
             "market_reads": [(call.args, call.kwargs) for call in market.call_args_list],
             "account_reads": [(call.args, call.kwargs) for call in account.call_args_list],
             "real_calls": [(call[0], call.args, call.kwargs) for call in real.method_calls] if real is not None else [],

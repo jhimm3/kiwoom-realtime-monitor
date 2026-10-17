@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now
+
 import json
 import sqlite3
 from contextlib import closing
@@ -17,7 +19,7 @@ class JournalStrategySettingsRepositoryMixin:
     _path: Path
     def save_personal_rules(self, rules: tuple[str, ...], now: datetime | None = None) -> None:
         """원본 문서가 이동되어도 복기에 쓸 수 있도록 추출한 원칙만 로컬 DB에 보관한다."""
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         payload = json.dumps(list(rules), ensure_ascii=False)
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
@@ -46,7 +48,7 @@ class JournalStrategySettingsRepositoryMixin:
         return tuple(sorted(packs, key=lambda pack: (not pack.enabled, pack.priority, pack.name)))
 
     def save_strategy_packs(self, packs: tuple[StrategyPackManifest, ...], now: datetime | None = None) -> None:
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         payload = json.dumps([pack.to_dict() for pack in packs], ensure_ascii=False)
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
@@ -57,7 +59,7 @@ class JournalStrategySettingsRepositoryMixin:
                 )
 
     def save_strategy_pack_draft(self, pack_id: str, draft: ExtractedStrategyDraft, now: datetime | None = None) -> None:
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         payload = json.dumps({
             "rules": [rule.to_dict() for rule in draft.rules],
             # 원문 파일이 이동되어도 재검토할 수 있도록 추출 텍스트만 로컬 DB에 보존한다.
@@ -96,7 +98,7 @@ class JournalStrategySettingsRepositoryMixin:
         now: datetime | None = None,
     ) -> None:
         """강의 추가 전 상태를 복원 가능한 버전으로 보관한다."""
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         payload = json.dumps({
             "manifest": pack.to_dict(),
             "draft": None if draft is None else {
@@ -151,7 +153,7 @@ class JournalStrategySettingsRepositoryMixin:
     def save_structured_personal_rules(
         self, rules: tuple[StructuredTradeRule, ...], now: datetime | None = None,
     ) -> None:
-        updated_at = (now or datetime.now()).isoformat(timespec="seconds")
+        updated_at = (now or kst_wall_now()).isoformat(timespec="seconds")
         payload = json.dumps([rule.to_dict() for rule in rules], ensure_ascii=False)
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:

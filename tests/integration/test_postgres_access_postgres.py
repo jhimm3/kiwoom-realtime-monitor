@@ -4154,6 +4154,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
 
         service = object.__new__(AutonomousTop20Service)
         service._store = self.store
+        service._now = lambda: datetime(2026, 9, 28, 10, tzinfo=KST)
         asyncio.run(service._capture_candidate_investor_flow(code, day))
 
         calls = [
@@ -5966,9 +5967,11 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             spec_id=spec_id,
             strategy_ref=f"diagnostic-strategy-{uuid.uuid4().hex}",
             candidate_package_hash=package_hash,
+            unfilled_execution_policy=None,
+            maximum_data_gap_seconds=60,
             session_profile="krx-regular/v1",
         )
-        candidate_package = SimpleNamespace(candidate_spec={
+        candidate_package = SimpleNamespace(scientific_implementation_hash="a" * 64, candidate_spec={
             "family": BREAKOUT_FAMILY_ID,
             "parameters": default_shadow_breakout_config().to_dict(),
             "session_profile": {"profile": "krx-regular/v1"},

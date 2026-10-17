@@ -1,6 +1,8 @@
 """Research read HTTP contracts; the app retains storage and monitor ownership."""
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst
+
 import asyncio
 from collections.abc import Callable, Awaitable
 from datetime import datetime, timezone
@@ -31,9 +33,11 @@ def create_research_read_router(
     get_candidate_monitor: Callable[[], CandidateMonitor | None],
     *, get_market_theme_shadow_runtime: Callable[[], Any] = lambda: None,
     check_stock_thesis_sources: Callable[[int, int], Awaitable[dict[str, Any]]] | None = None,
+    now_provider=None,
 ) -> APIRouter:
     """Read the app-owned current monitor after the DB await, including runtime replacement."""
     router = APIRouter()
+    now_kst = (lambda: as_kst(now_provider())) if now_provider else kst_now
 
     @router.get("/api/v1/research/ram-shadow/source-check", dependencies=[Depends(authorize)])
     async def research_stock_thesis_source_check(
@@ -48,6 +52,19 @@ def create_research_read_router(
         except RuntimeError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @router.get('/api/v2/research/ram-shadow/source-check', dependencies=[Depends(authorize)])
+    async def research_minute_thesis_source_check(
+        expected_revision: int = Query(ge=0), lookback_minutes: int = Query(ge=1, le=60),
+    ) -> dict[str, Any]:
+        if check_stock_thesis_sources is None:
+            raise HTTPException(status_code=409, detail='source check is unavailable')
+        try:
+            return await check_stock_thesis_sources(expected_revision, lookback_minutes, True)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
     @router.get("/api/v1/research/ram-shadow", dependencies=[Depends(authorize)])
     async def research_ram_shadow(include_recorded: bool = Query(default=False)) -> dict[str, object]:
         from .market_theme_shadow_monitor import SHADOW_RESULT_COLLECTION, SHADOW_RESULT_OWNER
@@ -57,7 +74,7 @@ def create_research_read_router(
                 SHADOW_RESULT_COLLECTION, SHADOW_RESULT_OWNER, "latest")
         runtime = get_market_theme_shadow_runtime()
         live = runtime.latest_results if runtime is not None else None
-        now = datetime.now(timezone.utc)
+        now = now_kst()
         for envelope in (live, recorded.get("document") if recorded else None):
             if envelope is None:
                 continue
@@ -116,7 +133,7 @@ def create_research_read_router(
         limit: int = Query(default=100, ge=1, le=1000),
     ) -> dict[str, object]:
         page = await asyncio.to_thread(store.load_shadow_candidates, after_sequence, limit)
-        now = datetime.now(timezone.utc)
+        now = now_kst()
         for event in page["events"]:
             try:
                 expires_at = datetime.fromisoformat(str(event.get("expires_at", "")))
@@ -125,6 +142,16 @@ def create_research_read_router(
                 expired = True
             event["status"] = "EXPIRED" if expired else "ACTIVE"
         candidate_monitor = get_candidate_monitor()
+        projector = getattr(candidate_monitor, "project_leader_candidate_status", None)
+        for event in page["events"]:
+            if event["status"] == "ACTIVE":
+                projected = projector(event) if callable(projector) else None
+                if projected is not None:
+                    event["status"] = projected
+                elif event.get("strategy_id") == "leader_breakout":
+                    # A disabled or legacy owner cannot keep a new-policy
+                    # episode active merely because its original TTL remains.
+                    event["status"] = "SUPERSEDED"
         page["quality"] = (
             candidate_monitor.quality if candidate_monitor is not None
             else {"status": "DISABLED", "reason": "shadow_candidate_generation_disabled"}

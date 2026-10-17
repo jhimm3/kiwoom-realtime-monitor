@@ -218,11 +218,16 @@ class NewsJobRunner:
         event["body"] = cleaned_body or str(event.get("description") or "")
         event["article_revision_id"] = job["article_revision_id"]
         event["body_revision_id"] = body["body_revision_id"]
-        result = await asyncio.wait_for(self._ai_service.analyze(
+        arguments = (
             str(job["stock_code"]), str(payload.get("stock_name") or job["stock_code"]),
             str(payload.get("provider") or "none"), str(payload.get("model") or ""),
             [event], int(payload.get("article_count") or 1),
-        ), timeout=self._ai_timeout)
+        )
+        owned = getattr(self._ai_service, "analyze_job", None)
+        if owned is not None:
+            result = await owned(*arguments, timeout_seconds=self._ai_timeout)
+        else:
+            result = await asyncio.wait_for(self._ai_service.analyze(*arguments), timeout=self._ai_timeout)
         revisions = result.get("analysis_revision_ids", [])
         return str(revisions[0]) if revisions else str(event.get("body_hash") or job["input_hash"])
 

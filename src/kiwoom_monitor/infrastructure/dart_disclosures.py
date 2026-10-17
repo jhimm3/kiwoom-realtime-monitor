@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+
 import io
 import json
 import zipfile
@@ -31,7 +33,7 @@ class DartDisclosureClient:
         """Probe today's first disclosure without loading or changing the company-code cache."""
         if not self._api_key:
             raise DartCredentialValidationError("INVALID_CREDENTIAL")
-        today = datetime.now().strftime("%Y%m%d")
+        today = kst_wall_now().strftime("%Y%m%d")
         query = urlencode({"crtfc_key": self._api_key, "bgn_de": today, "end_de": today,
                            "page_no": 1, "page_count": 1})
         try:
@@ -59,7 +61,7 @@ class DartDisclosureClient:
         corp_code = self._corp_codes().get(stock_code[:6])
         if not corp_code:
             return ()
-        today = datetime.now().date()
+        today = kst_wall_now().date()
         query = urlencode({
             "crtfc_key": self._api_key, "corp_code": corp_code,
             "bgn_de": (today - timedelta(days=days)).strftime("%Y%m%d"),
@@ -117,7 +119,7 @@ class DartDisclosureClient:
             page += 1
 
     def _corp_codes(self) -> dict[str, str]:
-        if self._cache_path.exists() and datetime.now().timestamp() - self._cache_path.stat().st_mtime < 86400 * 30:
+        if self._cache_path.exists() and kst_now().timestamp() - self._cache_path.stat().st_mtime < 86400 * 30:
             return json.loads(self._cache_path.read_text(encoding="utf-8"))
         request = Request(
             "https://opendart.fss.or.kr/api/corpCode.xml?" + urlencode({"crtfc_key": self._api_key}),

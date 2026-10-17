@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from kiwoom_monitor.application.news_grouping import NewsEventGroup
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem, news_provider
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import StoredAINewsAnalysis
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,7 @@ def build_display_row(
     group: NewsEventGroup,
     stored: StoredAINewsAnalysis | None,
 ) -> NewsDisplayRow:
-    published = item.published_at.astimezone().strftime("%m-%d %H:%M") if item.published_at else "-"
+    published = format_kst_time(item.published_at, "%m-%d %H:%M")
     category, outlook, _reason, source = effective_judgment(item, stored)
     displayed_outlook = f"{outlook}  ᴬᴵ" if source.startswith("AI 원문 분석") else outlook
     suffixes: list[str] = []
@@ -89,7 +90,7 @@ def related_articles_html(group: NewsEventGroup) -> str:
         return ""
     rows: list[str] = []
     for item in group.items[1:]:
-        published = item.published_at.astimezone().strftime("%m-%d %H:%M") if item.published_at else "-"
+        published = format_kst_time(item.published_at, "%m-%d %H:%M")
         url = item.original_link or item.link
         title = escape_html(item.title)
         title_html = f"<a href='{escape_html(url)}'>{title}</a>" if url else title

@@ -1,0 +1,130 @@
+[
+  {
+    "schema": "news-market-research-v1",
+    "as_of": "2026-10-15T07:55:00+09:00",
+    "source_mode": "provided_snapshot",
+    "event_key": "evt1",
+    "category": "fx",
+    "variable": "USDKRW",
+    "change": "increase",
+    "importance": "medium",
+    "novelty": "new",
+    "market_regime": "mixed",
+    "target_ref": "exporters",
+    "target_kind": "industry",
+    "target_code": null,
+    "direction": "positive",
+    "channel": "fx_translation",
+    "horizon": "short",
+    "thesis_change": "unknown",
+    "fact_statuses": [
+      "CONFIRMED"
+    ],
+    "fact_ids": [
+      "f1"
+    ],
+    "evidence_ids": [
+      "e1"
+    ],
+    "measurements": [
+      {
+        "measurement_key": "m1",
+        "indicator": "USDKRW",
+        "target_ref": "market",
+        "value": 1400.0,
+        "unit": "KRW_per_USD",
+        "comparison_value": 1390.0,
+        "comparison_basis": "합성 테스트 전일값",
+        "period": null,
+        "observed_at": "2026-10-15T07:55:00+09:00",
+        "value_basis": "reported",
+        "fact_id": "f1",
+        "evidence_ids": [
+          "e1"
+        ]
+      }
+    ],
+    "unknowns": [
+      {
+        "field": "participation",
+        "reason": "국내 장중 참여/집중 관측 미확인",
+        "effect": "needs_intraday_confirmation"
+      },
+      {
+        "field": "concentration",
+        "reason": "국내 장중 참여/집중 관측 미확인",
+        "effect": "needs_intraday_confirmation"
+      },
+      {
+        "field": "h1",
+        "reason": "장중 검증 전 초기 가설",
+        "effect": "needs_intraday_confirmation"
+      }
+    ],
+    "interpretation_status": "MODEL_HYPOTHESIS"
+  },
+  {
+    "schema": "news-market-research-v1",
+    "as_of": "2026-10-15T07:55:00+09:00",
+    "source_mode": "provided_snapshot",
+    "event_key": "evt1",
+    "category": "fx",
+    "variable": "USDKRW",
+    "change": "increase",
+    "importance": "medium",
+    "novelty": "new",
+    "market_regime": "mixed",
+    "target_ref": "importers",
+    "target_kind": "industry",
+    "target_code": null,
+    "direction": "negative",
+    "channel": "costs",
+    "horizon": "short",
+    "thesis_change": "unknown",
+    "fact_statuses": [
+      "CONFIRMED"
+    ],
+    "fact_ids": [
+      "f1"
+    ],
+    "evidence_ids": [
+      "e1"
+    ],
+    "measurements": [
+      {
+        "measurement_key": "m1",
+        "indicator": "USDKRW",
+        "target_ref": "market",
+        "value": 1400.0,
+        "unit": "KRW_per_USD",
+        "comparison_value": 1390.0,
+        "comparison_basis": "합성 테스트 전일값",
+        "period": null,
+        "observed_at": "2026-10-15T07:55:00+09:00",
+        "value_basis": "reported",
+        "fact_id": "f1",
+        "evidence_ids": [
+          "e1"
+        ]
+      }
+    ],
+    "unknowns": [
+      {
+        "field": "participation",
+        "reason": "국내 장중 참여/집중 관측 미확인",
+        "effect": "needs_intraday_confirmation"
+      },
+      {
+        "field": "concentration",
+        "reason": "국내 장중 참여/집중 관측 미확인",
+        "effect": "needs_intraday_confirmation"
+      },
+      {
+        "field": "h1",
+        "reason": "장중 검증 전 초기 가설",
+        "effect": "needs_intraday_confirmation"
+      }
+    ],
+    "interpretation_status": "MODEL_HYPOTHESIS"
+  }
+]

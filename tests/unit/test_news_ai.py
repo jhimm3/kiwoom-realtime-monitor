@@ -9,6 +9,35 @@ from kiwoom_monitor.infrastructure.news_ai import (
 )
 
 
+class MarketResearchSourceTests(unittest.TestCase):
+    def test_api_research_without_search_sources_preserves_completed_text_and_usage(self):
+        from kiwoom_monitor.infrastructure.news_ai import research_market
+        final = {'status':'completed','output':[{'type':'message','status':'completed','role':'assistant',
+            'content':[{'type':'output_text','text':'research output'}]}],
+            'usage':{'input_tokens':2,'output_tokens':3,'total_tokens':5}}
+        with patch('kiwoom_monitor.infrastructure.news_ai._request',return_value=final) as request:
+            reply = research_market(NewsAISettings('openai','fake-key','model'),'prompt')
+        self.assertEqual('research output',reply.text)
+        self.assertEqual(5,reply.usage['total_tokens'])
+        self.assertEqual((),reply.sources)
+        self.assertEqual(1,request.call_count)
+
+    def test_api_research_retains_same_open_page_evidence_as_subscription(self):
+        from kiwoom_monitor.infrastructure.news_ai import research_market
+        url = 'https://example.test/opened'
+        final = {'status': 'completed', 'output': [
+            {'type': 'web_search_call', 'status': 'completed',
+             'action': {'type': 'open_page', 'url': url}},
+            {'type': 'message', 'status': 'completed', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'research output'}]},
+        ], 'usage': {'input_tokens': 2, 'output_tokens': 3, 'total_tokens': 5}}
+        with patch('kiwoom_monitor.infrastructure.news_ai._request', return_value=final) as request:
+            reply = research_market(NewsAISettings('openai', 'fake-key', 'model'), 'prompt')
+        self.assertEqual(({'url': url, 'title': ''},), reply.sources)
+        self.assertEqual(({'type': 'open_page', 'urls': [url]},), reply.web_actions)
+        self.assertEqual(1, request.call_count)
+
+
 class TestNewsAi(unittest.TestCase):
     def test_parse_ai_result_accepts_json_wrapped_in_text(self) -> None:
         result = _parse('result: {"summary":"요약","category":"수주·계약","outlook":"혼재","confidence":72,"reason":"양쪽 근거","positive_evidence":["수주"],"negative_evidence":["비용"],"theme_candidates":[{"name":"호남클러스터","confidence":81,"evidence":"복수 기업 참여"}]}')

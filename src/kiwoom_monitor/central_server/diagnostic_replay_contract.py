@@ -46,7 +46,8 @@ LARGE_INPUT_METHODS = frozenset({
     "save_shadow_monitor_state",
 })
 _UNSET_PAYLOAD = object()
-COLLECTOR_INPUT_VERSION = "collector-input/v2"
+COLLECTOR_INPUT_VERSION = "collector-input/v3"
+PREVIOUS_COLLECTOR_INPUT_VERSION = "collector-input/v2"
 LEGACY_COLLECTOR_INPUT_VERSION = "collector-input/v1"
 # Only parser-consumed market fields. Never expand this to arbitrary REAL rows.
 COLLECTOR_EVENT_FIELDS = {
@@ -61,7 +62,7 @@ def validate_collector_message(message: Any, *, version: str = COLLECTOR_INPUT_V
                                allow_empty: bool = False) -> None:
     """Validate recorded market input before any parser or native store runs."""
     allowed = {"0B"} if version == LEGACY_COLLECTOR_INPUT_VERSION else set(COLLECTOR_EVENT_FIELDS)
-    if version not in {COLLECTOR_INPUT_VERSION, LEGACY_COLLECTOR_INPUT_VERSION}:
+    if version not in {COLLECTOR_INPUT_VERSION, PREVIOUS_COLLECTOR_INPUT_VERSION, LEGACY_COLLECTOR_INPUT_VERSION}:
         raise ValueError("recorded_collector_input_version_unsupported")
     data = message.get("data") if type(message) is dict else None
     if (type(message) is not dict or set(message) != {"trnm", "data"}
@@ -816,7 +817,7 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
                 if type(value) is not dict or row.get("input_kind") not in {"initial_state", "message", "source_approval", "capture_gap"}:
                     raise ValueError("recorded_collector_input_invalid")
                 version = row.get("collector_input_version", LEGACY_COLLECTOR_INPUT_VERSION)
-                if version not in {LEGACY_COLLECTOR_INPUT_VERSION, COLLECTOR_INPUT_VERSION}:
+                if version not in {LEGACY_COLLECTOR_INPUT_VERSION, PREVIOUS_COLLECTOR_INPUT_VERSION, COLLECTOR_INPUT_VERSION}:
                     raise ValueError("recorded_collector_input_version_unsupported")
                 component = row["producer_component"]
                 if collector_versions.setdefault(component, version) != version:
@@ -859,6 +860,8 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
         replace = False
         if mode == "collector_with_background" and row.get("producer_component") in components:
             version = collector_versions[row["producer_component"]]
+            if row['method'] == 'save_second_trade_bars':
+                raise ValueError('historical_second_bar_collector_requires_operation_replay')
             replace = row["method"] in _COLLECTOR_SINKS
             if row["method"] == "save_realtime_snapshots":
                 allowed = {"trade"} if version == LEGACY_COLLECTOR_INPUT_VERSION else {
@@ -871,7 +874,7 @@ def compile_recorded_plan(events: list[dict], *, started_mono_ns: int,
                 if "market_state" in kinds:
                     if kinds != {"market_state"}:
                         raise ValueError("recorded_collector_mixed_dataset_unsupported")
-                    if version != COLLECTOR_INPUT_VERSION:
+                    if version not in {COLLECTOR_INPUT_VERSION, PREVIOUS_COLLECTOR_INPUT_VERSION}:
                         raise ValueError("recorded_collector_market_input_missing")
                     replace = True
         if replace:

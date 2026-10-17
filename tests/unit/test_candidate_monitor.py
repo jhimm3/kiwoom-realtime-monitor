@@ -1311,13 +1311,15 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors)) if count else None
         if runtime and cleanup:
             self.addAsyncCleanup(runtime.close)
+        if runtime:
+            collector.set_ram_observation_retention(runtime._retention)
         return now, hub, collector, monitors, runtime
 
     def trades(self, collector, now, seconds=40):
         for second in range(seconds):
             now[0] = now[0].replace(second=second)
             collector._publish_parsed({"trnm": "REAL", "data": [{"type": "0B", "item": code, "values": {
-                "10": str(price + second), "15": "2", "13": str(100 + second * 2),
+                "10": str(price + second), "15": "2", "13": str(100 + second * 2), "14": str(100+second*(2 if code=="005930" else 1)),
                 "20": now[0].strftime("%H%M%S"),
             }} for code, price in (("005930", 1000), ("000660", 900))]})
 
@@ -1341,13 +1343,13 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await runtime.start()
             self.assertEqual(requested, hub.requested_codes())
             self.trades(collector, now)
-            before = (set(collector._second_trades._dirty), set(collector._minute_bars._dirty))
+            before = (tuple(r["input_ref"] for r in collector._ram_trades), set(collector._minute_bars._dirty))
             await self.wait_for(lambda: all(m.status["evaluations"] == 1 for m in monitors))
             self.assertEqual((1, 1, 1, 1), (snapshots.call_count, conversions.call_count, h1.call_count, h2.call_count))
-            self.assertEqual(before, (set(collector._second_trades._dirty), set(collector._minute_bars._dirty)))
+            self.assertEqual(before, (tuple(r["input_ref"] for r in collector._ram_trades), set(collector._minute_bars._dirty)))
             self.assertEqual(1, len({m.last_result["revision_id"] for m in monitors}))
             self.assertEqual("COMPLETE", monitors[0].last_result["leadership"]["quality"]["status"])
-            self.assertTrue(all(point.input_ref.startswith("ram:") for point in monitors[0]._last_offered.second_points))
+            self.assertTrue(all(point.input_ref.startswith("ram-0B:") for point in monitors[0]._last_offered.observation_points))
             await asyncio.sleep(0.03)
             self.assertEqual(1, snapshots.call_count)
             self.assertFalse(runtime.status["durable"])
@@ -1466,7 +1468,7 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.offer_context(context)
         await self.wait_for(lambda: monitors[0].status["evaluations"] == 2)
         self.assertEqual("accepted-theme-2", monitors[0]._last_offered.theme_membership.revision_id)
-        self.assertTrue(all(p.input_ref.startswith("ram:") for p in monitors[0]._last_offered.second_points))
+        self.assertTrue(all(p.input_ref.startswith("ram-0B:") for p in monitors[0]._last_offered.observation_points))
         with self.assertRaises(ValueError):
             await runtime.offer_context(replace(context, leadership_venue="NXT"))
         self.assertEqual(2, runtime.status["snapshot_reads"])
@@ -1480,7 +1482,7 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 now, hub, collector, monitors, runtime = self.fixture(count, store)
                 try:
                     with patch.object(collector._minute_bars, "add", wraps=collector._minute_bars.add) as minutes, \
-                         patch.object(collector._second_trades, "add", wraps=collector._second_trades.add) as seconds:
+                         patch.object(collector, "_observe_ram_trade", wraps=collector._observe_ram_trade) as seconds:
                         if runtime:
                             await runtime.start()
                         self.trades(collector, now)
@@ -1510,8 +1512,7 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                          connection.execute("SELECT * FROM central_second_trade_bars ORDER BY code,trade_second").fetchall()))
                     if runtime:
                         # The canonical clean RAM window survives native write drain.
-                        snapshot = collector._second_trades.observation_snapshot(("005930", "000660"),
-                            at=now[0].replace(minute=0, second=39), seconds=20)
+                        snapshot = tuple(collector._ram_trades)
                         self.assertEqual(42, len(snapshot))
                         await runtime.close()
                 finally:
@@ -1520,10 +1521,10 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     store.close()
         self.assertEqual(payloads[0], payloads[1])
         self.assertEqual(payloads[0], payloads[2])
-        self.assertEqual([4, 4, 4], [r["commits"] for r in reports])
-        self.assertEqual([4, 4, 4], [r["connections"] for r in reports])
+        self.assertEqual([3, 3, 3], [r["commits"] for r in reports])
+        self.assertEqual([3, 3, 3], [r["connections"] for r in reports])
         self.assertEqual([0, 1, 1], [r["ram_reads"] for r in reports])
-        self.assertTrue(all(value == 1 for r in reports for value in r["writer_calls"].values()))
+        self.assertTrue(all(value == (0 if name=="save_second_trade_bars" else 1) for r in reports for name,value in r["writer_calls"].items()))
         print("RAM_SHADOW_NATIVE_PROBE=" + json.dumps(reports))
 
     async def test_actual_app_lifespan_owns_explicit_bindings_and_cleans_up_start_failure(self):
@@ -1592,12 +1593,12 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
             collector.set_ram_observation_retention(0)
         await other.close()
         self.assertEqual(1, hub.client_count)
-        self.assertEqual(timedelta(seconds=20), collector._second_trades._ram_retention)
+        self.assertEqual(20, collector._ram_trade_retention_seconds)
         self.trades(collector, now)
         await self.wait_for(lambda: all(m.status["evaluations"] == 1 for m in monitors))
         await runtime.close()
         self.assertIsNone(collector._ram_observation_owner)
-        self.assertEqual(timedelta(seconds=5), collector._second_trades._ram_retention)
+        self.assertEqual(0, collector._ram_trade_retention_seconds)
 
 
 class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
@@ -1625,6 +1626,8 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, replace(shadow_inputs(), market_venue="COMBINED")) for m in monitors),
                                           ranking_source=ranking, theme_source=theme_source or themes)
         self.addAsyncCleanup(runtime.close)
+        if runtime:
+            collector.set_ram_observation_retention(runtime._retention)
         return now, hub, collector, monitors, runtime, source, ranking, themes
 
     async def test_eight_monitors_share_owner_reads_and_unchanged_receipt_does_not_recalculate(self):
@@ -1732,7 +1735,7 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(closer, return_exceptions=True)
         self.assertEqual(3, len(calls))
         self.assertEqual(now[0].timestamp(), calls[-1])
-        self.assertTrue(any(p.code == "100003" for p in monitors[0]._last_offered.second_points))
+        self.assertTrue(any(p.code == "100003" for p in monitors[0]._last_offered.observation_points))
         self.assertEqual("native-theme-new", monitors[0]._last_offered.theme_membership.revision_id)
         self.assertEqual(0, hub.client_count)
 
@@ -1984,7 +1987,11 @@ class RamShadowSourceCoverageTests(unittest.IsolatedAsyncioTestCase):
         snapshot = runtime.latest_results
         snapshot.update(coverage="selected_latest_transition", selection="first_result_or_categorical_state_change",
                         selected_at=max(c["decision_time"] for c in snapshot["contexts"].values()), diagnostic_padding="")
-        legacy = {k: v for k, v in snapshot.items() if k not in {"source_coverage", "input_provenance"}}
+        legacy = deepcopy(snapshot)
+        for key in ("source_coverage", "input_provenance", "market_observed_changes"):
+            legacy.pop(key, None)
+        for slot in legacy["results"]:
+            slot.pop("market_observed_changes_ref", None)
         snapshot["diagnostic_padding"] = "x" * (1024 * 1024 - 10 - len(json.dumps(legacy, ensure_ascii=False).encode("utf-8")))
         store = Mock()
         runtime._record_store = store
@@ -2127,6 +2134,8 @@ class SelectedRamShadowRecordingTests(unittest.IsolatedAsyncioTestCase):
         now, hub, collector, monitors, _ = self.fixture(count, cleanup=False)
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
             record_store=store, record_interval_seconds=interval)
+        if runtime:
+            collector.set_ram_observation_retention(runtime._retention)
         return now, hub, collector, monitors, runtime
 
     async def test_eight_consumers_one_context_one_commit_and_unchanged_state_no_write(self):
@@ -3250,7 +3259,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
                     position_document=document, position_account_source=source)
                 try:
                     runtime._apply_theme_snapshot(())
-                    dirty = (set(collector._minute_bars._dirty), set(collector._second_trades._dirty))
+                    dirty = (set(collector._minute_bars._dirty), tuple(r["input_ref"] for r in collector._ram_trades))
                     with patch.object(collector, 'ram_observation_snapshot', wraps=collector.ram_observation_snapshot) as read, \
                          patch.object(position_target, 'evaluate_position_action_comparison_shadow',
                                       wraps=position_target.evaluate_position_action_comparison_shadow) as evaluate, \
@@ -3275,7 +3284,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
                         for _ in range(100):
                             runtime.latest_results
                         self.assertEqual((1, 1, 1), (read.call_count, source.call_count, evaluate.call_count))
-                    self.assertEqual(dirty, (set(collector._minute_bars._dirty), set(collector._second_trades._dirty)))
+                    self.assertEqual(dirty, (set(collector._minute_bars._dirty), tuple(r["input_ref"] for r in collector._ram_trades)))
                 finally:
                     await runtime.close()
 
@@ -3895,9 +3904,9 @@ class CollectorUpperLimitShadowTests(unittest.IsolatedAsyncioTestCase):
         await runtime.start()
         self.trades(collector, now)
         await self.wait_for(lambda: monitors[0].status["evaluations"] == 1)
-        counts = (collector._minute_bars._dirty.copy(), collector._second_trades._dirty.copy())
+        counts = (collector._minute_bars._dirty.copy(), tuple(r["input_ref"] for r in collector._ram_trades))
         with patch.object(collector._minute_bars, "add", side_effect=AssertionError("reference reaggregated trade")), \
-             patch.object(collector._second_trades, "add", side_effect=AssertionError("reference reaggregated trade")), \
+             patch.object(collector, "_observe_ram_trade", side_effect=AssertionError("reference reaggregated trade")), \
              patch("sqlite3.connect", side_effect=AssertionError("reference read DB")):
             for index, (price, expected) in enumerate((("1040", "NEAR"), ("1030", "TOUCHED"),
                                                      ("1200", "NONE"), ("", "UNKNOWN")), start=2):
@@ -3908,7 +3917,7 @@ class CollectorUpperLimitShadowTests(unittest.IsolatedAsyncioTestCase):
             self.reference(collector, "")
             await self.wait_for(lambda: runtime.status["snapshot_reads"] > before)
             self.assertEqual(5, monitors[0].status["evaluations"])
-            self.assertEqual(counts, (collector._minute_bars._dirty, collector._second_trades._dirty))
+            self.assertEqual(counts, (collector._minute_bars._dirty, tuple(r["input_ref"] for r in collector._ram_trades)))
             await runtime.close()
 
     async def test_reference_snapshot_is_scoped_copied_and_available_at_cut(self):
@@ -4054,6 +4063,379 @@ class CollectorUpperLimitShadowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
+    def minute_inputs(self, value):
+        from tests.unit.test_market_research_features import MinuteMarketCandidateTests
+        helper=MinuteMarketCandidateTests();raw=helper.inputs()
+        value=self.price_inputs(value)
+        cut=datetime.fromisoformat(value.decision_time)
+        delta=(cut-timedelta(seconds=2)).replace(second=0,microsecond=0)-(helper.cut-timedelta(seconds=2)).replace(second=0,microsecond=0)
+        rows=[]
+        for row in raw.rows:
+            metadata=row['metadata'];at=datetime.fromisoformat(metadata['effective_at'])+delta
+            local=at.astimezone(timezone(timedelta(hours=9)))
+            rows.append({**row,'trading_date':local.date().isoformat(),'minute':local.strftime('%H:%M'),
+                'updated_at':row['updated_at']+delta.total_seconds(),
+                'metadata':{**metadata,'effective_at':at.isoformat(),
+                    'available_at':(datetime.fromisoformat(metadata['available_at'])+delta).isoformat()}})
+        raw=replace(raw,universe_available_at=cut.isoformat(),rows=tuple(rows))
+        return replace(value,market_primary_timeframe='1m',market_minute_trade_inputs=raw)
+
+    async def test_minute_primary_shared_and_second_failure_cannot_block_market_candidate(self):
+        for count in (2,8):
+            values=tuple(self.minute_inputs(self.observed_inputs(i)) for i in range(count))
+            monitors=tuple(self.monitor(v) for v in values)
+            expected=tuple(evaluate_market_theme_shadow(v) for v in values)
+            for m,v in zip(monitors,values):await m.offer_inputs(v)
+            with patch.object(shadow_context,'compute_minute_trade_candidates',wraps=shadow_context.compute_minute_trade_candidates) as minutes, \
+                 patch.object(shadow_context,'compute_price_trade_candidates',side_effect=OSError('auxiliary seconds unavailable')) as seconds:
+                report=await run_market_theme_shadow_monitors_once(monitors,include_market_changes=True)
+            self.assertEqual((1,1),(minutes.call_count,seconds.call_count));self.assertEqual(expected,report['results'])
+            observed=monitors[0]._market_changes_receipt[1]
+            self.assertEqual('RETAINED',observed['price_trade_leadership']['state'])
+            self.assertEqual('CONFIRMED',observed['price_trade_leadership']['five_minute_confirmation']['status'])
+            self.assertIsNone(observed['second_trade_auxiliary'])
+
+    async def test_minute_failure_keeps_four_thesis_policies_and_protective_exit(self):
+        from tests.unit import test_entry_thesis as fixtures
+        fixture=fixtures.StockThesisShadowTests();fixture.setUp()
+        value=self.minute_inputs(fixture.weak_inputs())
+        requests=tuple(fixture.request(p) for p in ('PRICE_ONLY','IMMEDIATE_EXIT','REDUCE_ON_RISK','CONFIRM_THEN_EXIT'))
+        monitors=tuple(self.monitor(value,stock_thesis=r,leadership_parameters=fixtures.PARAMETERS) for r in requests)
+        expected=tuple(evaluate_stock_thesis_shadow(value,r,leadership_parameters=fixtures.PARAMETERS) for r in requests)
+        for m in monitors:await m.offer_inputs(value)
+        with patch.object(shadow_context,'compute_minute_trade_candidates',side_effect=OSError('minute failure')):
+            report=await run_market_theme_shadow_monitors_once(monitors,include_market_changes=True)
+        self.assertEqual(expected,report['results']);self.assertEqual('EXIT',report['results'][1]['action'])
+
+    async def test_native_minutes_loaded_once_for_eight_consumers_and_independent_expiry(self):
+        helper=CollectorRamShadowRuntimeTests()
+        now,hub,collector,monitors,runtime=helper.fixture(8,cleanup=False);self.addAsyncCleanup(runtime.close)
+        value=self.minute_inputs(self.observed_inputs(0))
+        value=replace(value,theme_membership=replace(value.theme_membership,theme_id='반도체'))
+        runtime._bindings=tuple((m,value) for m in monitors)
+        monitors[-1]._leadership_parameters=replace(monitors[-1]._leadership_parameters,window_seconds=20,max_data_age_seconds=1)
+        runtime._retention=40
+        collector._store=Mock()
+        rows=value.market_minute_trade_inputs.rows
+        async def load(code,day,venue):return [{**row,'metadata':dict(row['metadata'])} for row in rows if row['code']==code and row['market']==venue]
+        with patch.object(collector,'load_live_minute_bars',side_effect=load) as read, \
+             patch('kiwoom_monitor.central_server.market_theme_shadow_monitor.compute_minute_trade_candidates',wraps=shadow_context.compute_minute_trade_candidates) as calculate:
+            await runtime.start();helper.trades(collector,now)
+            await helper.wait_for(lambda:all(m.status['evaluations']==1 and m._market_changes_receipt is not None
+                and m._market_changes_receipt[1]['price_trade_leadership']['state']=='RETAINED' for m in monitors))
+            self.assertEqual((20,1),(read.await_count,calculate.call_count))
+            page=runtime.latest_results;ref,observed=next(iter(page['market_observed_changes'].items()))
+            self.assertEqual('RETAINED',observed['price_trade_leadership']['state'])
+            now[0]+=timedelta(seconds=4)
+            for _ in range(100):page=runtime.latest_results
+            self.assertEqual('RETAINED',page['market_observed_changes'][ref]['price_trade_leadership']['state'])
+            self.assertEqual((20,1),(read.await_count,calculate.call_count))
+            cached,errors=await runtime._market_minutes({'decision_time':now[0].isoformat()})
+            sort_rows=lambda values:sorted(values,key=lambda row:(row['code'],row['minute']))
+            self.assertEqual(sort_rows(rows),sort_rows(cached));self.assertEqual({},errors)
+            self.assertEqual(20,read.await_count)
+            collector._save_success_at['minute_finalizations']='native-new-close'
+            await runtime._market_minutes({'decision_time':now[0].isoformat()})
+            self.assertEqual(40,read.await_count)
+            now[0]+=timedelta(seconds=120)
+            expired=runtime.latest_results['market_observed_changes'][ref]['price_trade_leadership']
+            self.assertEqual('UNKNOWN',expired['state'])
+            self.assertTrue(all(not frame['current_candidates'] for frame in expired['timeframes'].values()))
+            self.assertEqual('RETAINED',monitors[0]._market_changes_receipt[1]['price_trade_leadership']['state'])
+        await runtime.close();self.assertIsNone(runtime._market_minute_cache)
+
+    async def test_minute_primary_uses_existing_sqlite_reader_without_writes_or_consumer_scaling(self):
+        from tests.unit.test_market_research_features import MinuteMarketCandidateTests
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        from kiwoom_monitor.central_server.market_observations import minute_bar_observation
+        from kiwoom_monitor.domain.market_data_contract import ObservationOrigin,DataCompleteness,DataValueKind
+        raw=MinuteMarketCandidateTests().inputs();cut=MinuteMarketCandidateTests.cut
+        core=self.observed_inputs(0);delta=cut-datetime.fromisoformat(core.decision_time)
+        core=replace(core,decision_time=cut.isoformat(),market_frames=tuple(replace(f,
+            available_at=(datetime.fromisoformat(f.available_at)+delta).isoformat(),trading_date='2026-10-13') for f in core.market_frames))
+        value=self.minute_inputs(core);value=replace(value,theme_membership=replace(value.theme_membership,theme_id='반도체'))
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'native-minute.sqlite3';store=SQLiteQueryStore(path);store.initialize()
+            observations=[]
+            for row in raw.rows:
+                value_row={key:value for key,value in row.items() if key!='metadata'}
+                observation=minute_bar_observation(value_row,origin=ObservationOrigin.REALTIME,
+                    completeness=DataCompleteness.COMPLETE,source='kiwoom-websocket-0B',value_kind=DataValueKind.ACTUAL)
+                observations.append((row['trading_date']+'T'+row['minute'],observation))
+            store.save_minute_bars([{key:value for key,value in row.items() if key!='metadata'} for row in raw.rows],observations=observations)
+            before=path.read_bytes()
+            helper=CollectorRamShadowRuntimeTests()
+            now,hub,collector,monitors,runtime=helper.fixture(8,store=store,cleanup=False);now[0]=cut
+            runtime._bindings=tuple((m,value) for m in monitors)
+            try:
+                with patch.object(store,'load_minute_bars',wraps=store.load_minute_bars) as read, \
+                     patch.object(store,'save_minute_bars',side_effect=AssertionError('minute observer wrote bars')):
+                    await runtime.start();await helper.wait_for(lambda:all(m.status['evaluations']==1 and m._market_changes_receipt is not None
+                        and m._market_changes_receipt[1]['price_trade_leadership']['state']=='RETAINED' for m in monitors))
+                    observed=next(iter(runtime.latest_results['market_observed_changes'].values()))
+                    self.assertEqual('RETAINED',observed['price_trade_leadership']['state'])
+                    self.assertEqual('CONFIRMED',observed['price_trade_leadership']['five_minute_confirmation']['status'])
+                    self.assertEqual(20,read.call_count)
+                    for _ in range(100):runtime.latest_results
+                    self.assertEqual(20,read.call_count);self.assertEqual(before,path.read_bytes())
+                    await runtime.close();self.assertEqual(20,read.call_count)
+            finally:await runtime.close();store.close()
+
+    async def test_close_during_native_minute_read_drains_worker_before_returning(self):
+        helper=CollectorRamShadowRuntimeTests();now,hub,collector,monitors,runtime=helper.fixture(2,cleanup=False)
+        self.addAsyncCleanup(runtime.close)
+        value=self.minute_inputs(self.observed_inputs(0));value=replace(value,theme_membership=replace(value.theme_membership,theme_id='반도체'))
+        runtime._bindings=tuple((m,value) for m in monitors);now[0]=datetime.fromisoformat(value.decision_time)
+        rows=value.market_minute_trade_inputs.rows;entered,release=threading.Event(),threading.Event();calls=[]
+        class Store:
+            def load_minute_bars(self,code,day,venue,**kwargs):
+                calls.append(code)
+                if len(calls)==1:
+                    entered.set()
+                    if not release.wait(5):raise TimeoutError('test minute reader not released')
+                return [{**r,'metadata':dict(r['metadata'])} for r in rows if r['code']==code]
+        collector._store=Store();closer=None
+        try:
+            await runtime.start();self.assertTrue(await asyncio.to_thread(entered.wait,2))
+            # The minute source remains blocked while existing core H1/H2 has
+            # already published; this I/O cannot delay a protective proposal.
+            await helper.wait_for(lambda:all(m.status['evaluations']==1 for m in monitors))
+            self.assertFalse(release.is_set())
+            now[0]+=timedelta(seconds=1)
+            collector._publish_parsed({'trnm':'REAL','data':[{'type':'0B','item':'005930',
+                'values':{'10':'1000','13':'100','15':'2','20':now[0].strftime('%H%M%S')}}]})
+            await helper.wait_for(lambda:all(m.status['evaluations']==2 for m in monitors))
+            self.assertFalse(release.is_set())
+            closer=asyncio.create_task(runtime.close());await asyncio.sleep(.02);closer.cancel()
+            self.assertFalse(closer.done());release.set()
+            with self.assertRaises(asyncio.CancelledError):await closer
+            count=len(calls);await asyncio.sleep(.02)
+            self.assertEqual(count,len(calls));self.assertEqual('STOPPED',runtime.status['state'])
+            self.assertEqual(0,hub.client_count);self.assertIsNone(runtime._market_minute_cache)
+        finally:
+            release.set()
+            if closer:await asyncio.gather(closer,return_exceptions=True)
+
+    def observed_inputs(self, index):
+        from kiwoom_monitor.application.market_research_features import MarketMember
+        value = self.inputs(index)
+        frames = tuple(replace(frame, theme_revision_id="", members=tuple(
+            MarketMember(f"{code:06d}", 1900 if code == 1 else 100, 200, ())
+            for code in range(1, 21))) for frame in value.market_frames)
+        return replace(value, market_frames=frames, breakout_evidence=None)
+
+    def price_inputs(self, value, *, candidate='000001'):
+        from tests.unit.test_market_research_features import PriceTradeCandidateTests
+        from kiwoom_monitor.application.market_theme_shadow import MarketPriceTradeShadowInputs
+        helper = PriceTradeCandidateTests()
+        raw = helper.inputs(current=candidate)
+        cut = datetime.fromisoformat(value.decision_time)
+        delta = cut - helper.cut
+        raw = replace(raw, universe_available_at=(datetime.fromisoformat(raw.universe_available_at)+delta).isoformat(),
+            points=tuple(replace(p, observed_at=(datetime.fromisoformat(p.observed_at)+delta).isoformat(),
+                available_at=(datetime.fromisoformat(p.available_at)+delta).isoformat()) for p in raw.points))
+        return MarketPriceTradeShadowInputs(**{**vars(value), 'market_price_trade_inputs':raw})
+
+    async def test_price_candidates_shared_once_independent_of_lookup_and_core(self):
+        from kiwoom_monitor.application import research_factors as factors_module
+        for count in (2,8):
+            values = tuple(self.price_inputs(self.observed_inputs(i)) for i in range(count))
+            monitors = tuple(self.monitor(v) for v in values)
+            expected = tuple(evaluate_market_theme_shadow(v) for v in values)
+            for monitor,value in zip(monitors,values): await monitor.offer_inputs(value)
+            with patch.object(shadow_context,'compute_price_trade_candidates',wraps=shadow_context.compute_price_trade_candidates) as price, \
+                 patch.object(factors_module,'compute_market_research_features',wraps=factors_module.compute_market_research_features) as h1:
+                report = await run_market_theme_shadow_monitors_once(monitors,include_market_changes=True)
+            self.assertEqual((1,1),(price.call_count,h1.call_count))
+            self.assertEqual(expected,report['results'])
+            observation=monitors[0]._market_changes_receipt[1]
+            self.assertEqual('RETAINED',observation['price_trade_leadership']['state'])
+            changed=replace(values[0],market_frames=(*values[0].market_frames[:-1],replace(values[0].market_frames[-1],
+                members=(values[0].market_frames[-1].members[1],values[0].market_frames[-1].members[0],*values[0].market_frames[-1].members[2:]))))
+            other=self.monitor(changed); await other.offer_inputs(changed)
+            await run_market_theme_shadow_monitors_once((other,),include_market_changes=True)
+            self.assertTrue(other._market_changes_receipt[1]['rank_price_trade_relation']['rank_changed_candidate_retained'])
+            replaced=self.price_inputs(self.observed_inputs(0),candidate='000002')
+            other=self.monitor(replaced); await other.offer_inputs(replaced)
+            await run_market_theme_shadow_monitors_once((other,),include_market_changes=True)
+            self.assertTrue(other._market_changes_receipt[1]['rank_price_trade_relation']['candidate_changed_rank_retained'])
+
+    async def test_price_failure_preserves_all_four_protective_policies(self):
+        from tests.unit import test_entry_thesis as fixtures
+        fixture=fixtures.StockThesisShadowTests(); fixture.setUp()
+        inputs=self.price_inputs(fixture.weak_inputs())
+        requests=tuple(fixture.request(p) for p in ('PRICE_ONLY','IMMEDIATE_EXIT','REDUCE_ON_RISK','CONFIRM_THEN_EXIT'))
+        monitors=tuple(self.monitor(inputs,stock_thesis=r,leadership_parameters=fixtures.PARAMETERS) for r in requests)
+        expected=tuple(evaluate_stock_thesis_shadow(inputs,r,leadership_parameters=fixtures.PARAMETERS) for r in requests)
+        for m in monitors: await m.offer_inputs(inputs)
+        with patch.object(shadow_context,'compute_price_trade_candidates',side_effect=OSError('isolated')) as price:
+            report=await run_market_theme_shadow_monitors_once(monitors,include_market_changes=True)
+        self.assertEqual(1,price.call_count)
+        self.assertEqual(expected,report['results']); self.assertEqual('EXIT',report['results'][1]['action'])
+        self.assertEqual('UNAVAILABLE',monitors[0]._market_changes_receipt[1]['price_trade_leadership']['quality']['status'])
+
+    async def test_price_expiry_does_not_expire_lookup_or_mutate_receipt(self):
+        helper=CollectorRamShadowRuntimeTests()
+        now,hub,collector,monitors,runtime=helper.fixture(2,cleanup=False)
+        self.addAsyncCleanup(runtime.close)
+        value=self.price_inputs(self.observed_inputs(0))
+        value=replace(value,theme_membership=replace(value.theme_membership,theme_id='반도체'))
+        for monitor in monitors: await monitor.offer_inputs(value)
+        await run_market_theme_shadow_monitors_once(monitors,include_market_changes=True)
+        now[0]=datetime.fromisoformat(value.decision_time)+timedelta(seconds=3)
+        with patch.object(collector,'ram_observation_snapshot',side_effect=AssertionError('read on projection')):
+            for _ in range(100): page=runtime.latest_results
+        observed=next(iter(page['market_observed_changes'].values()))
+        self.assertEqual('UNKNOWN',observed['price_trade_leadership']['state'])
+        self.assertEqual('STALE',observed['price_trade_leadership']['quality']['status'])
+        self.assertEqual('RETAINED',observed['lookup_change']['state'])
+        self.assertEqual('RETAINED',monitors[0]._market_changes_receipt[1]['price_trade_leadership']['state'])
+
+    async def test_observed_changes_share_current_features_and_preserve_all_v1_results(self):
+        from kiwoom_monitor.application import market_research_features as features_module
+        from kiwoom_monitor.application import research_factors as factors_module
+        for count in (2, 8):
+            values = tuple(self.observed_inputs(index) for index in range(count))
+            expected = tuple(evaluate_market_theme_shadow(value) for value in values)
+            monitors = tuple(self.monitor(value) for value in values)
+            for monitor, value in zip(monitors, values):
+                await monitor.offer_inputs(value)
+            with patch.object(factors_module, "compute_market_research_features", wraps=factors_module.compute_market_research_features) as current, \
+                 patch.object(features_module, "compute_market_research_features", wraps=features_module.compute_market_research_features) as previous, \
+                 patch.object(shadow_context, "compute_market_context_changes", wraps=shadow_context.compute_market_context_changes) as changes, \
+                 patch("sqlite3.connect", side_effect=AssertionError("observation read DB")), \
+                 patch("psycopg.connect", side_effect=AssertionError("observation read DB")):
+                report = await run_market_theme_shadow_monitors_once(monitors, include_market_changes=True)
+            self.assertEqual((1, 1, 1), (current.call_count, previous.call_count, changes.call_count))
+            self.assertEqual(expected, report["results"])
+            receipts = [monitor._market_changes_receipt[1] for monitor in monitors]
+            self.assertTrue(all(receipt == receipts[0] for receipt in receipts))
+            self.assertEqual("LEADER_CONCENTRATION", receipts[0]["pattern"])
+            self.assertEqual("COMPLETE", receipts[0]["quality"]["status"])
+            self.assertEqual("UNKNOWN", receipts[0]["classification"]["market_type"])
+            self.assertFalse(receipts[0]["order_authorized"])
+            import hashlib
+            body = {key: value for key, value in receipts[0].items() if key != "revision_id"}
+            digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            self.assertEqual("market-observed-changes:" + digest, receipts[0]["revision_id"])
+            receipts[0]["quality"]["status"] = "MUTATED"
+            self.assertEqual("COMPLETE", receipts[1]["quality"]["status"])
+
+    async def test_auxiliary_observation_failure_cannot_change_existing_policy_or_pending(self):
+        values = tuple(self.observed_inputs(index) for index in range(2))
+        monitors = tuple(self.monitor(value) for value in values)
+        expected = tuple(evaluate_market_theme_shadow(value) for value in values)
+        for monitor, value in zip(monitors, values):
+            await monitor.offer_inputs(value)
+        with patch.object(shadow_context, "compute_market_context_changes", side_effect=OSError("isolated observation failure")) as changes:
+            report = await run_market_theme_shadow_monitors_once(monitors, include_market_changes=True)
+        self.assertEqual(1, changes.call_count)
+        self.assertEqual(expected, report["results"])
+        self.assertEqual({}, report["errors"])
+        self.assertTrue(all(monitor.status["pending_snapshots"] == 0 for monitor in monitors))
+        self.assertTrue(all(monitor._market_changes_receipt[1]["quality"]["status"] == "UNAVAILABLE" for monitor in monitors))
+        # A later round must recompute rather than retaining the failed cache.
+        for monitor, value in zip(monitors, values):
+            await monitor.offer_inputs(replace(value, decision_time="2026-09-14T09:00:21+09:00"))
+        with patch.object(shadow_context, "compute_market_context_changes", wraps=shadow_context.compute_market_context_changes) as changes:
+            await run_market_theme_shadow_monitors_once(monitors, include_market_changes=True)
+        self.assertEqual(1, changes.call_count)
+        self.assertEqual("COMPLETE", monitors[0]._market_changes_receipt[1]["quality"]["status"])
+
+    async def test_observation_reuse_keeps_full_scope_and_clears_disabled_receipts(self):
+        base = self.observed_inputs(0)
+        values = (base, self.observed_inputs(1),
+            replace(self.observed_inputs(2), market_frames=tuple(replace(frame, index_return_bps=100.0) for frame in base.market_frames)))
+        monitors = tuple(self.monitor(value) for value in values)
+        for monitor, value in zip(monitors, values):
+            await monitor.offer_inputs(value)
+        with patch.object(shadow_context, "compute_market_context_changes", wraps=shadow_context.compute_market_context_changes) as changes:
+            await run_market_theme_shadow_monitors_once(monitors, include_market_changes=True)
+        self.assertEqual(2, changes.call_count)
+        self.assertNotEqual(monitors[0]._market_changes_receipt[1]["revision_id"], monitors[2]._market_changes_receipt[1]["revision_id"])
+        for monitor, value in zip(monitors, values):
+            await monitor.offer_inputs(replace(value, decision_time="2026-09-14T09:00:21+09:00"))
+        await run_market_theme_shadow_monitors_once(monitors)
+        self.assertTrue(all(monitor._market_changes_receipt is None for monitor in monitors))
+
+    async def test_observation_failure_keeps_four_thesis_policies_and_immediate_exit_identical(self):
+        from tests.unit import test_entry_thesis as fixtures
+        fixture = fixtures.StockThesisShadowTests(); fixture.setUp()
+        inputs = fixture.weak_inputs()
+        requests = tuple(fixture.request(policy) for policy in
+            ("PRICE_ONLY", "IMMEDIATE_EXIT", "REDUCE_ON_RISK", "CONFIRM_THEN_EXIT"))
+        monitors = tuple(self.monitor(inputs, stock_thesis=request, leadership_parameters=fixtures.PARAMETERS)
+                         for request in requests)
+        expected = tuple(evaluate_stock_thesis_shadow(inputs, request, leadership_parameters=fixtures.PARAMETERS)
+                         for request in requests)
+        for monitor in monitors:
+            await monitor.offer_inputs(inputs)
+        with patch.object(shadow_context, "compute_market_context_changes", side_effect=OSError("auxiliary failure")):
+            report = await run_market_theme_shadow_monitors_once(monitors, include_market_changes=True)
+        self.assertEqual(expected, report["results"])
+        self.assertEqual("EXIT", report["results"][1]["action"])
+        self.assertEqual({}, report["errors"])
+
+    async def test_runtime_publishes_one_observation_and_expires_without_reads_or_recalculation(self):
+        from kiwoom_monitor.central_server import market_theme_shadow_inputs as adapters
+        helper = CollectorRamShadowRuntimeTests()
+        now, hub, collector, monitors, runtime = helper.fixture(8, cleanup=False)
+        self.addAsyncCleanup(runtime.close)
+        value = self.observed_inputs(0)
+        value = replace(value, theme_membership=replace(value.theme_membership, theme_id="반도체"))
+        runtime._bindings = tuple((monitor, value) for monitor in monitors)
+        with patch.object(shadow_context, "compute_market_context_changes", wraps=shadow_context.compute_market_context_changes) as changes, \
+             patch.object(adapters, 'market_price_trade_inputs_from_ram', wraps=adapters.market_price_trade_inputs_from_ram) as price_inputs, \
+             patch.object(shadow_context, 'compute_price_trade_candidates', wraps=shadow_context.compute_price_trade_candidates) as price, \
+             patch.object(collector, "ram_observation_snapshot", wraps=collector.ram_observation_snapshot) as snapshots, \
+             patch("sqlite3.connect", side_effect=AssertionError("observation read DB")), \
+             patch("psycopg.connect", side_effect=AssertionError("observation read DB")):
+            await runtime.start()
+            helper.trades(collector, now)
+            await helper.wait_for(lambda: all(monitor.status["evaluations"] == 1 for monitor in monitors))
+            envelope = runtime.latest_results
+            observations = envelope["market_observed_changes"]
+            self.assertEqual(1, len(observations))
+            ref, original = next(iter(observations.items()))
+            self.assertEqual("LEADER_CONCENTRATION", original["pattern"])
+            self.assertTrue(all(slot["market_observed_changes_ref"] == ref for slot in envelope["results"]))
+            original_core = deepcopy(envelope["contexts"])
+            now[0] += timedelta(seconds=120)
+            for _ in range(100):
+                latest = runtime.latest_results
+            expired = latest["market_observed_changes"][ref]
+            self.assertEqual((1, 1), (changes.call_count, snapshots.call_count))
+            self.assertEqual((1,1),(price_inputs.call_count,price.call_count))
+            self.assertEqual('UNKNOWN',original['price_trade_leadership']['state'])
+            self.assertEqual(original_core, latest["contexts"])
+            self.assertEqual("STALE", expired["quality"]["status"])
+            self.assertEqual("UNKNOWN", expired["pattern"])
+            self.assertEqual((), expired["candidates"])
+            self.assertEqual(original["expires_at"], expired["expires_at"])
+            self.assertEqual("LEADER_CONCENTRATION", monitors[0]._market_changes_receipt[1]["pattern"])
+            self.assertFalse(latest["order_authorized"])
+            await runtime.close()
+            self.assertEqual(0, hub.client_count)
+
+    async def test_large_observation_cannot_displace_existing_selected_record_or_add_writes(self):
+        helper = CollectorRamShadowRuntimeTests()
+        now, hub, collector, monitors, runtime = helper.fixture(1, cleanup=False)
+        self.addAsyncCleanup(runtime.close)
+        await monitors[0].offer_inputs(shadow_inputs())
+        await run_market_theme_shadow_monitors_once(monitors, include_market_changes=True)
+        original = monitors[0].last_result
+        monitors[0]._market_changes_receipt[1]["input_refs"] = ("large-optional-" + "x" * (2 * 1024 * 1024),)
+        store = Mock()
+        runtime._record_store = store
+        runtime._select_record()
+        selected = runtime._record_pending[1]
+        self.assertNotIn("market_observed_changes", selected)
+        self.assertNotIn("market_observed_changes_ref", selected["results"][0])
+        self.assertEqual(original, selected["contexts"][original["revision_id"]])
+        runtime._select_record()
+        await runtime.close()
+        self.assertEqual(1, store.upsert_documents.call_count)
+
     def inputs(self, index, **changes):
         inputs = shadow_inputs()
         return replace(inputs, theme_membership=replace(inputs.theme_membership,
@@ -4339,7 +4721,7 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
                         h1 = hooks.enter_context(patch.object(shadow_context, "compute_market_regime", wraps=shadow_context.compute_market_regime))
                         h2 = hooks.enter_context(patch.object(shadow_context, "evaluate_theme_leadership", wraps=shadow_context.evaluate_theme_leadership))
                         minutes = hooks.enter_context(patch.object(collector._minute_bars, "add", wraps=collector._minute_bars.add))
-                        seconds = hooks.enter_context(patch.object(collector._second_trades, "add", wraps=collector._second_trades.add))
+                        seconds = hooks.enter_context(patch.object(collector, "_observe_ram_trade", wraps=collector._observe_ram_trade))
                         writers = {name: hooks.enter_context(patch.object(store, name, wraps=getattr(store, name))) for name in (
                             "save_realtime_snapshots", "save_minute_bars", "finalize_minute_bars", "save_second_trade_bars")}
                         records = hooks.enter_context(patch.object(store, "upsert_documents", wraps=store.upsert_documents))
@@ -4356,10 +4738,10 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
                         now[0] = now[0].replace(minute=1, second=2)
                         await collector._flush_snapshots()
                         self.assertEqual((80, 80), (minutes.call_count, seconds.call_count))
-                        self.assertEqual({name: 1 for name in writers}, {name: writer.call_count for name, writer in writers.items()})
+                        self.assertEqual({name: (0 if name=="save_second_trade_bars" else 1) for name in writers}, {name: writer.call_count for name, writer in writers.items()})
                         self.assertEqual(int(record), records.call_count)
-                        self.assertEqual(4 + int(record), connections.call_count)
-                        self.assertEqual(4 + int(record), sum(sql.strip().upper() == "COMMIT" for sql in statements))
+                        self.assertEqual(3 + int(record), connections.call_count)
+                        self.assertEqual(3 + int(record), sum(sql.strip().upper() == "COMMIT" for sql in statements))
                         if record:
                             document = records.call_args.args[1][0]["document"]
                             self.assertEqual((8, 8), (len(document["contexts"]), len(document["results"])))
@@ -4527,6 +4909,7 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
         runtime=MarketThemeShadowRuntime(hub,collector,tuple((m,shadow_inputs()) for m in monitors),
             position_document=position_document,position_account_source=source,
             position_allocation=compile_dynamic_allocation_ram_selection(document))
+        collector.set_ram_observation_retention(runtime._retention)
         collector._ram_retention_since=now[0]
         self.trades(collector,now)
         for code in ('005930','000660'):
@@ -4537,7 +4920,7 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_quote_cap_turnover_and_ack_risk_are_shared_once_for_eight_monitors(self):
         from kiwoom_monitor.application import position_target
         runtime,collector,now,source,observation,_=self.prepare()
-        dirty=(set(collector._minute_bars._dirty),set(collector._second_trades._dirty))
+        dirty=(set(collector._minute_bars._dirty),tuple(r["input_ref"] for r in collector._ram_trades))
         with patch('sqlite3.connect',side_effect=AssertionError('RAM read DB')),patch('psycopg.connect',side_effect=AssertionError('RAM read PG')), \
              patch.object(position_target,'evaluate_dynamic_position_allocation',side_effect=AssertionError('unknown EV/cap fabricated')):
             await runtime._dispatch(runtime._snapshot())
@@ -4548,7 +4931,7 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(facts['005930']['recent_turnover_won']);self.assertIsNone(facts['005930']['net_ev_bps'])
         self.assertIsNone(receipt['result']);self.assertFalse(receipt['order_authorized'])
         self.assertEqual('ALLOW',receipt['risk_disposition']);self.assertIn('full_exit_capacity_unavailable',receipt['quality']['reasons'])
-        self.assertEqual(dirty,(set(collector._minute_bars._dirty),set(collector._second_trades._dirty)))
+        self.assertEqual(dirty,(set(collector._minute_bars._dirty),tuple(r["input_ref"] for r in collector._ram_trades)))
         self.assertEqual(1,runtime._allocation_evaluations)
 
     async def test_r4_and_allocation_reuse_same_account_cut_even_on_source_failure(self):
@@ -4710,9 +5093,62 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
         facts={f['symbol']:f for f in runtime.latest_results['position_allocation']['facts']}
         self.assertEqual(41180,facts['005930']['recent_turnover_won'])
         self.assertEqual(10,facts['005930']['observed_close_return_rms_bps'])
-        self.assertTrue(facts['005930']['window_input_ref'].startswith('ram-allocation-window:'))
+        self.assertTrue(facts['005930']['window_input_ref'].startswith('ram-allocation-0B-window:'))
         self.assertIn(facts['005930']['window_input_ref'],facts['005930']['input_refs'])
         self.assertNotEqual(facts['005930']['recent_turnover_won'],facts['000660']['recent_turnover_won'])
+
+    async def test_0b_rms_preserves_observed_second_prices_despite_receipt_frequency_and_excursions(self):
+        from kiwoom_monitor.central_server.market_theme_shadow_inputs import dynamic_allocation_inputs_from_ram
+        from kiwoom_monitor.central_server.minute_bars import SecondTradeAccumulator
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        runtime,collector,now,_,observation,_=self.prepare(1)
+        snapshot=runtime._snapshot();cut=datetime.fromisoformat(snapshot['decision_time'])
+        template=next(row for row in snapshot['rows'] if row['code']=='005930')
+        scenarios=(((10000,),(10100,),(10200,)),
+            ((10000,)*4,(10100,)*4,(10200,)*4),((9000,10000),(9000,10100),(9000,10200)))
+        for seconds in scenarios:
+            with self.subTest(receipts=seconds):
+                legacy=SecondTradeAccumulator();legacy.set_ram_retention(60)
+                rows=[]
+                for second,prices in enumerate(seconds):
+                    at=(cut-timedelta(seconds=9-second)).replace(microsecond=0)
+                    for offset,price in enumerate(prices):
+                        seq=len(rows)+1;received=at+timedelta(microseconds=offset*1000)
+                        rows.append({**template,'input_ref':'ram-0B:rms-regression:'+str(seq),'sequence':seq,
+                            'observed_at':at.isoformat(),'available_at':received.timestamp(),
+                            'price_won':price,'volume':1,'trade_value_won':price})
+                        legacy.add(TradeTick('005930',price,seq,None,1,None,at.strftime('%H%M%S'),market='KRX'),
+                            received,received.timestamp())
+                archived=legacy.observation_snapshot(('005930',),at=cut,seconds=20)
+                with patch('sqlite3.connect',side_effect=AssertionError('RMS SQLite read')), \
+                     patch('psycopg.connect',side_effect=AssertionError('RMS PostgreSQL read')):
+                    report=dynamic_allocation_inputs_from_ram(runtime._allocation,{**snapshot,'rows':tuple(rows)},(),observation)
+                fact=next(f for f in report['facts'] if f['symbol']=='005930')
+                self.assertEqual(100,fact['observed_close_return_rms_bps'])
+                self.assertEqual(3,fact['volatility_sample_count'])
+                self.assertEqual('last_received_price_per_observed_second/v1',fact['volatility_basis'])
+                self.assertEqual([10000,10100,10200],[r['close'] for r in archived])
+                self.assertEqual(sum(r['trade_value_won'] for r in archived),fact['recent_turnover_won'])
+                self.assertFalse(report['order_authorized'])
+        self.assertFalse(hasattr(collector,'_second_trades'))
+
+    async def test_many_receipts_in_one_second_do_not_fabricate_rms_history_or_fill_empty_seconds(self):
+        from kiwoom_monitor.central_server.market_theme_shadow_inputs import dynamic_allocation_inputs_from_ram
+        runtime,_,_,_,observation,_=self.prepare(1)
+        snapshot=runtime._snapshot();cut=datetime.fromisoformat(snapshot['decision_time'])
+        template=next(row for row in snapshot['rows'] if row['code']=='005930')
+        for offsets,expected_count,expected_rms in (((9,9,9,9),1,None),((9,6,2),3,100)):
+            rows=[]
+            for index,offset in enumerate(offsets):
+                at=(cut-timedelta(seconds=offset)).replace(microsecond=0)
+                price=10000+index*100
+                rows.append({**template,'input_ref':'ram-0B:rms-history:'+str(index),'sequence':index,
+                    'observed_at':at.isoformat(),'available_at':at.timestamp()+index/1000,
+                    'price_won':price,'volume':1,'trade_value_won':price})
+            result=dynamic_allocation_inputs_from_ram(runtime._allocation,{**snapshot,'rows':tuple(rows)},(),observation)
+            fact=next(f for f in result['facts'] if f['symbol']=='005930')
+            self.assertEqual(expected_count,fact['volatility_sample_count'])
+            self.assertEqual(expected_rms,fact['observed_close_return_rms_bps'])
 
     async def test_selection_disallows_fabricated_model_facts_and_mismatched_account(self):
         from kiwoom_monitor.central_server.market_theme_shadow_inputs import compile_dynamic_allocation_ram_selection
@@ -4747,6 +5183,7 @@ class AllocationModelPublicationTests(unittest.IsolatedAsyncioTestCase):
         now,hub,collector,monitors,_=self.fixture(count,cleanup=False)
         now[0]=exit_case.fixture.cut.astimezone(timezone(timedelta(hours=9))).replace(second=0,microsecond=0)
         collector._apply_trade_source_approval({('005930','KRX'),('000660','KRX')},now[0],reset_all=True)
+        collector.set_ram_observation_retention(20)
         collector._ram_retention_since=now[0]
         native=NativePositionSelectionInputsTests();native.setUp();base=DynamicPositionAllocationTests();base.setUp()
         at=now[0]+timedelta(seconds=39);account=replace(native.account,as_of=at)
@@ -4769,7 +5206,7 @@ class AllocationModelPublicationTests(unittest.IsolatedAsyncioTestCase):
         for second in range(40):
             now[0]=now[0].replace(second=second)
             collector._publish_parsed({'trnm':'REAL','data':[{'type':'0B','item':code,'values':{
-                '10':str(price+second),'15':'2','13':str(100+second*2),'20':now[0].strftime('%H%M%S'),
+                '10':str(price+second),'15':'2','13':str(100+second*2),'14':str(100+second*(2 if code=='005930' else 1)),'20':now[0].strftime('%H%M%S'),
                 '311':'1234'}} for code,price in (('005930',xr['evidence'].reference_price_won-39),('000660',900))]})
         packet=prepare_dynamic_allocation_model_publication(document,[{'symbol':'005930','ev_receipt':er,'exit_receipt':xr}],expected_selection_revision=1)
         self.addAsyncCleanup(runtime.close)

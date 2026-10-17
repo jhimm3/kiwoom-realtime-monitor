@@ -186,7 +186,7 @@ def _apply_finalized(db,parent_dataset,parent_digest,dataset,digest,plan_path,pl
     return lineage
 
 
-def _apply_active_events(db,parent_dataset,parent_digest,dataset,digest,plan_path,plan_hash):
+def _apply_active_events(db,parent_dataset,parent_digest,dataset,digest,plan_path,plan_hash, *, reviewed_event_resolution=None):
     """Change only execution identity while preserving a live event cursor."""
     from scripts import prepared_historical_archive_v2 as api
     from scripts import prepared_historical_archive_inputs as inputs
@@ -205,11 +205,21 @@ def _apply_active_events(db,parent_dataset,parent_digest,dataset,digest,plan_pat
     if not event_row:
         raise ValueError('event finalization has not started')
     events=json.loads(event_row[0])
-    if events.get('state')!='building' or type(events.get('next_ordinal')) is not int or type(events.get('target_count')) is not int or not 1<=events['next_ordinal']<=events['target_count']:
+    if events.get('state')!='building' or type(events.get('next_ordinal')) is not int or type(events.get('target_count')) is not int or not 1<=events['next_ordinal']<=events['target_count']+(reviewed_event_resolution is not None):
         raise ValueError('event cursor is not resumable')
     if db.execute("SELECT 1 FROM archive_build_manifest WHERE key IN ('projection_v2','audit_v2','seal_v2') LIMIT 1").fetchone():
         raise ValueError('a later archive phase has already started')
-    if db.execute('SELECT 1 FROM archive_targets_v2 WHERE event_state=\'conflict\' LIMIT 1').fetchone():
+    if reviewed_event_resolution is not None:
+        encoded = Path(plan_path).read_bytes()
+        reviewed_plan=json.loads(encoded)
+        if (hashlib.sha256(encoded).hexdigest()!=plan_hash or
+                reviewed_plan.get('reviewed_event_resolution')!=reviewed_event_resolution or
+                reviewed_plan.get('schema')!='historical-active-events-execution/v1' or
+                (reviewed_plan.get('dataset_id'),reviewed_plan.get('code_digest'),reviewed_plan.get('parent_dataset'),reviewed_plan.get('parent_digest')) !=
+                (dataset,digest,parent_dataset,parent_digest)):
+            raise ValueError('reviewed event transition plan differs')
+        api.validate_event_conflict_decision(db,reviewed_event_resolution)
+    elif db.execute('SELECT 1 FROM archive_targets_v2 WHERE event_state=\'conflict\' LIMIT 1').fetchone():
         raise ValueError('event conflict requires explicit review')
     if db.execute('SELECT 1 FROM archive_execution_transitions_v1 WHERE dataset_id=?',(dataset,)).fetchone():
         raise ValueError('event execution transition already exists')
@@ -287,9 +297,12 @@ def rollback(db,dataset,digest):
     db.execute("UPDATE archive_execution_transitions_v1 SET state='reverted' WHERE dataset_id=?",(dataset,))
 
 
-def transition(path,old_root,new_root,parent_dataset,dataset, *, finalized=False,active_events=False):
+def transition(path,old_root,new_root,parent_dataset,dataset, *, finalized=False,active_events=False,reviewed_event_resolution=None):
     if finalized and active_events:
         raise ValueError('select one transition boundary')
+    if reviewed_event_resolution is not None and not active_events:
+        raise ValueError('event conflict review requires active event transition')
+    decision=json.loads(reviewed_event_resolution.read_text(encoding='utf-8')) if reviewed_event_resolution is not None else None
     for source in (new_root/'src',new_root):sys.path.insert(0,str(source))
     from scripts import prepared_historical_archive_v2 as api
     from scripts import prepared_historical_archive_inputs as inputs
@@ -302,6 +315,8 @@ def transition(path,old_root,new_root,parent_dataset,dataset, *, finalized=False
                             'scripts/transition_historical_archive_execution.py'}) if finalized else CHANGES
     changed = {p for p in old_files.keys() | new_files.keys() if old_files.get(p)!=new_files.get(p)}
     event_changes={'scripts/prepared_historical_archive_v2.py','scripts/transition_historical_archive_execution.py'}
+    if decision is not None:
+        event_changes |= {'scripts/finalize_prepared_historical_news_events.py','scripts/audit_prepared_historical_archive_v2.py'}
     expected_changes=event_changes if active_events else CHANGES
     if active_events:
         valid_changes=bool(changed) and changed.issubset(event_changes)
@@ -327,17 +342,22 @@ def transition(path,old_root,new_root,parent_dataset,dataset, *, finalized=False
                     generation.get('plan_path')!=row[2] or generation.get('plan_sha256')!=row[3] or
                     hashlib.sha256(Path(row[2]).read_bytes()).hexdigest()!=row[3]):
                 raise ValueError('committed transition recovery proof mismatch')
+            if json.loads(Path(row[2]).read_bytes()).get('reviewed_event_resolution')!=decision:
+                raise ValueError('committed event review decision differs')
             return {'state':'complete','dataset_id':dataset,'code_digest':digest,'parent_dataset':parent_dataset,
                     'parent_digest':parent_digest,'plan_path':row[2],'plan_sha256':row[3],'archive':str(path),
                     'recovered_receipt':True}
         scopes=_prefix_snapshot(db) if finalized else None
+        if decision is not None:
+            api.validate_event_conflict_decision(db,decision)
         schema='historical-finalization-execution/v1' if finalized else ('historical-active-events-execution/v1' if active_events else 'historical-archive-execution-transition/v1')
         content=_encoded({'schema':schema,'archive':str(path),
                           'parent_report':before,'parent_generation':generation,'dataset_id':dataset,
                           'code_digest':digest,'parent_dataset':parent_dataset,'parent_digest':parent_digest,
                           'scopes':scopes,'event_cursor':json.loads(db.execute("SELECT value_json FROM archive_build_manifest WHERE key='events_v2'").fetchone()[0])['next_ordinal'] if active_events else None,
                           'old_code_root':str(old_root),'new_code_root':str(new_root),
-                          'changed_files':sorted(changed)})
+                          'changed_files':sorted(changed),
+                          **({'reviewed_event_resolution':decision} if decision is not None else {})})
         if plan.exists():
             if plan.read_text(encoding='utf-8')!=content:raise ValueError('different transition plan already exists')
         else:
@@ -345,7 +365,7 @@ def transition(path,old_root,new_root,parent_dataset,dataset, *, finalized=False
         hashed=hashlib.sha256(content.encode()).hexdigest()
         with api._transaction(db,check_capacity=False):
             result=(_apply_finalized(db,parent_dataset,parent_digest,dataset,digest,plan,hashed,scopes)
-                    if finalized else (_apply_active_events(db,parent_dataset,parent_digest,dataset,digest,plan,hashed)
+                    if finalized else (_apply_active_events(db,parent_dataset,parent_digest,dataset,digest,plan,hashed,reviewed_event_resolution=decision)
                                        if active_events else _apply(db,parent_dataset,parent_digest,dataset,digest,plan,hashed)))
     return {**result,'state':'complete','plan_path':str(plan),'plan_sha256':hashed,'archive':str(path)}
 
@@ -356,5 +376,6 @@ if __name__=='__main__':
     p.add_argument('--new-code',type=Path,required=True);p.add_argument('--parent-dataset',required=True);p.add_argument('--dataset',required=True)
     p.add_argument('--finalized-prefix',action='store_true')
     p.add_argument('--active-events',action='store_true')
+    p.add_argument('--reviewed-event-resolution',type=Path)
     a=p.parse_args()
-    print(json.dumps(transition(a.archive.resolve(strict=True),a.old_code.resolve(strict=True),a.new_code.resolve(strict=True),a.parent_dataset,a.dataset,finalized=a.finalized_prefix,active_events=a.active_events),ensure_ascii=False))
+    print(json.dumps(transition(a.archive.resolve(strict=True),a.old_code.resolve(strict=True),a.new_code.resolve(strict=True),a.parent_dataset,a.dataset,finalized=a.finalized_prefix,active_events=a.active_events,reviewed_event_resolution=a.reviewed_event_resolution),ensure_ascii=False))

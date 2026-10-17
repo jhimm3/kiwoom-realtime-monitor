@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.domain.order_contract import OrderIntent, OrderSide, OrderState, OrderType, order_event
+from kiwoom_monitor.domain.order_contract import AccountSnapshot, OrderIntent, OrderSide, OrderState, OrderType, order_event
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 
 
@@ -29,6 +29,34 @@ def _scoped_intent(intent_id: str, run_id: str, account_ref: str) -> OrderIntent
 
 
 class ExecutionRepositoryTests(unittest.TestCase):
+    def test_kst_snapshot_receipt_preserves_the_legacy_id_and_duplicate_noop(self):
+        import json
+        from kiwoom_monitor.domain.time_basis import KST
+        store = SQLiteQueryStore(Path(":memory:")); store.initialize(); self.addCleanup(store.close)
+        repository = ExecutionRepository(store)
+        snapshot = AccountSnapshot("account", 1000000, 0, {}, NOW)
+        self.assertTrue(repository.save_account_snapshot("mock", snapshot, NOW.astimezone(KST)))
+        self.assertFalse(repository.save_account_snapshot("mock", snapshot, NOW))
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            repository.save_account_snapshot("mock", snapshot, NOW.replace(tzinfo=None))
+        with store._connection() as connection:
+            rows = connection.execute(
+                "SELECT received_at,document_json FROM central_execution_account_snapshots").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], NOW.astimezone(KST).isoformat())
+        self.assertEqual(json.loads(rows[0][1])["received_at"], NOW.astimezone(KST).isoformat())
+
+    def test_runtime_lease_compares_instants_across_existing_utc_and_kst_rows(self):
+        from kiwoom_monitor.central_server.market_observations import KST
+        store = SQLiteQueryStore(Path(':memory:')); store.initialize(); self.addCleanup(store.close)
+        repository = ExecutionRepository(store)
+        self.assertTrue(repository.claim_runtime('mock', 'account', 'run', 'old', NOW, 60))
+        self.assertFalse(repository.claim_runtime('mock', 'account', 'run', 'new', NOW.astimezone(KST), 60))
+        self.assertTrue(repository.claim_runtime('mock', 'account', 'run', 'new',
+            (NOW + timedelta(seconds=61)).astimezone(KST), 60))
+        # Test the reverse representation too: neither offset may steal a live lease.
+        self.assertFalse(repository.claim_runtime('mock', 'account', 'run', 'old', NOW + timedelta(seconds=62), 60))
+
     def test_account_active_view_includes_eventless_queued_and_other_runs_without_writes(self):
         store = SQLiteQueryStore(Path(":memory:")); store.initialize(); self.addCleanup(store.close)
         repository = ExecutionRepository(store)

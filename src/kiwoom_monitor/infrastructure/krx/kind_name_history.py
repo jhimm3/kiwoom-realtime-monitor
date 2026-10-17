@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.time_basis import kst_today
+
 import html
 import re
 import sqlite3
@@ -70,7 +72,7 @@ class KindNameHistorySync:
 
     def sync(self, *, initial: bool, detail_limit: int = 12) -> int:
         self._get("/disclosure/details.do?method=searchDetailsMain")
-        today = date.today()
+        today = kst_today()
         ranges: list[tuple[date, date]] = []
         end = today
         years = 3 if initial else 1
