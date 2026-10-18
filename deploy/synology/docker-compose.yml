@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.10.17-research-input-retention-v2
+    image: kiwoom-monitor-server:2026.10.18-r3-clock-boundaries-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile

@@ -50,7 +50,7 @@ from kiwoom_monitor.central_server.database import (
     create_query_store,
 )
 from kiwoom_monitor.central_server.market_observations import (
-    bar_observation_key, daily_bar_observation, minute_bar_observation,
+    bar_observation_key, daily_bar_observation, market_state_observation, minute_bar_observation,
 )
 from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigrationError, CentralSchemaMigrationRunner
 from kiwoom_monitor.domain.market_data_contract import (
@@ -1749,6 +1749,37 @@ class CentralServerDatabaseTests(unittest.TestCase):
             values = store.load_dataset_snapshots("ranking", "5")
         self.assertEqual(1, len(values))
         self.assertEqual([2], values[0]["payload"]["items"])
+
+    def test_dataset_snapshot_saved_at_uses_store_clock_without_changing_observation(self) -> None:
+        fixed = datetime.fromisoformat("2030-01-02T03:04:05.123456+09:00")
+        observed_at = fixed - timedelta(seconds=30)
+        key = observed_at.isoformat()
+        for supplied in (fixed, fixed.replace(tzinfo=None), fixed.astimezone(UTC)):
+            with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as directory:
+                clock = Mock(return_value=supplied)
+                store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=clock)
+                store.initialize()
+                clock.reset_mock()
+                observations = [market_state_observation(subject, key, {"price": i}, observed_at)
+                                for i, subject in enumerate(("KOSPI", "KOSDAQ"))]
+                store.save_dataset_snapshots([
+                    ("market_state", observation.subject, key, {"price": i}, observation)
+                    for i, observation in enumerate(observations)
+                ])
+                clock.assert_called_once_with()
+                rows = {row["subject"]: row for row in store.load_dataset_snapshots("market_state")}
+                for i, observation in enumerate(observations):
+                    row = rows[observation.subject]
+                    self.assertEqual(fixed.timestamp(), row["saved_at"])
+                    self.assertEqual((key, {"price": i}), (row["snapshot_key"], row["payload"]))
+                    self.assertEqual(observation.metadata, store.load_market_data_metadata(
+                        observation.kind, observation.subject, key))
+                clock.reset_mock()
+                with patch.object(store, "_connection") as connection:
+                    store.save_dataset_snapshots([])
+                    clock.assert_not_called()
+                    connection.assert_not_called()
+                store.close()
 
     def test_dataset_snapshot_batch_is_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

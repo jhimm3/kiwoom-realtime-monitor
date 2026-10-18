@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server.database import PostgresQueryStore
-from kiwoom_monitor.central_server import database_datasets as datasets
 from kiwoom_monitor.central_server.market_observations import market_state_observation
 
 
@@ -66,12 +65,14 @@ class DatasetBatchPostgresTests(unittest.TestCase):
         self.store._connect = lambda: self.connection
 
     def test_distinct_keys_batch_snapshot_and_metadata_with_one_commit_and_same_saved_at(self):
-        with patch.object(datasets, 'time', return_value=123):
+        fixed = datetime.fromisoformat('2030-01-02T03:04:05.123456+09:00')
+        with patch.object(self.store, '_now_provider', return_value=fixed) as clock:
             self.store.save_dataset_snapshots(values())
+        clock.assert_called_once_with()
         sql = self.connection.probe.statements
         self.assertEqual(3, len(sql))
         self.assertEqual(10, len(sql[1][1]))
-        self.assertEqual((123, 123), (sql[1][1][3], sql[1][1][8]))
+        self.assertEqual((fixed.timestamp(), fixed.timestamp()), (sql[1][1][3], sql[1][1][8]))
         self.assertEqual(24, len(sql[2][1]))
         self.assertEqual((1, 0, True), (self.connection.commits, self.connection.rollbacks, self.connection.closed))
         self.assertEqual(['market-0','market-1'], [sql[1][1][i] for i in (1,6)])
@@ -81,9 +82,14 @@ class DatasetBatchPostgresTests(unittest.TestCase):
     def test_duplicate_snapshot_keys_keep_sequential_updates(self):
         batch = values()
         batch[1] = (*batch[0][:3], {'price': 99}, batch[0][4])
-        self.store.save_dataset_snapshots(batch)
+        fixed = datetime.fromisoformat('2030-01-02T03:04:05.123456+09:00')
+        with patch.object(self.store, '_now_provider', return_value=fixed) as clock:
+            self.store.save_dataset_snapshots(batch)
+        clock.assert_called_once_with()
         self.assertEqual(5, len(self.connection.probe.statements))
         self.assertIn('99', self.connection.probe.statements[3][1][-1])
+        self.assertEqual([fixed.timestamp()] * 2,
+                         [self.connection.probe.statements[i][1][3] for i in (1, 3)])
 
     def test_distinct_snapshots_with_shared_metadata_identity_keep_sequential_order(self):
         batch = values()
@@ -123,6 +129,16 @@ class DatasetBatchPostgresTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'metadata failure'):
             self.store.save_dataset_snapshots(values())
         self.assertEqual((0, 1, True), (self.connection.commits, self.connection.rollbacks, self.connection.closed))
+
+    def test_empty_batch_and_clock_failure_do_not_open_connection(self):
+        with patch.object(self.store, '_now_provider', side_effect=RuntimeError('clock failure')) as clock, \
+                patch.object(self.store, '_connect') as connect:
+            self.store.save_dataset_snapshots([])
+            clock.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, 'clock failure'):
+                self.store.save_dataset_snapshots(values())
+            clock.assert_called_once_with()
+            connect.assert_not_called()
 
     def test_chunk_boundary_keeps_one_commit(self):
         self.store.save_dataset_snapshots(values(1001, observation=False))

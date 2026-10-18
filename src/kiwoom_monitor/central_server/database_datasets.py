@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from threading import Event, Thread
-from time import monotonic, time
+from time import monotonic
 from typing import Any
 
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
@@ -55,7 +55,7 @@ class SQLiteDatasetStoreMixin:
     def save_dataset_snapshots(self, values: list[DatasetSnapshotWrite]) -> None:
         if not values:
             return
-        saved_at = time()
+        saved_at = self._now_provider().timestamp()
         with self._lock, self._connection() as connection:
             for kind, subject, snapshot_key, payload, observation in values:
                 connection.execute(
@@ -120,7 +120,7 @@ class PostgresDatasetStoreMixin:
                 operation="save_dataset_snapshots",
                 rows_attempted=len(values),
             )
-        saved_at = time()
+        saved_at = self._now_provider().timestamp()
         started_at = monotonic()
         serialized = [
             (kind, subject, snapshot_key, json.dumps(payload, ensure_ascii=False), payload, observation)

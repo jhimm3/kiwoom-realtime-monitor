@@ -38,7 +38,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 )
 
 
-SERVER_BUILD = "2026.10.17-research-input-retention-v2"
+SERVER_BUILD = "2026.10.18-r3-clock-boundaries-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -245,7 +245,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 top20_service.notify_daily_bars_changed(code, market)
 
         broker = CentralRestBroker(
-            kiwoom_client, store, MarketDataIngestor(store, on_daily_change=daily_bars_changed).ingest,
+            kiwoom_client, store, MarketDataIngestor(
+                store, now_provider=server_now, on_daily_change=daily_bars_changed,
+            ).ingest,
             ranking_reservation=True,
         )
         if active.account_identity_registry_enabled and not real_runtime_enabled:
@@ -280,6 +282,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         if active.autonomous_top20_enabled:
             top20_service = AutonomousTop20Service(
                 broker, realtime_hub, store,
+                now_provider=server_now,
                 minute_backfill_enabled=active.autonomous_top20_minute_backfill_enabled,
                 outbox_path=Path(active.top20_outbox_path),
                 on_membership_changed=lambda: context_changed("ranking"),

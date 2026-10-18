@@ -1478,8 +1478,6 @@ def market_read_contract_app(app_factory, database_path):
             stack.enter_context(patch("kiwoom_monitor.central_server.minute_bars.uuid.uuid4",
                                      side_effect=(uuid.UUID(int=value) for value in range(1, 100))))
             store.initialize()
-            for module in ("database_datasets",):
-                stack.enter_context(patch("kiwoom_monitor.central_server." + module + ".time", return_value=clock))
             base = {"code": "005930", "trading_date": "2026-09-14", "minute": "10:00", "open": 100,
                     "high": 110, "low": 90, "close": 105, "volume": 10, "trade_value_million_won": 20, "updated_at": 1.0}
             store.save_minute_bars([{**base, "market": "KRX"}, {**base, "market": "NXT", "volume": 5},
@@ -1599,7 +1597,8 @@ def market_dataset_contract_app(app_factory, database_path, *, configured):
     """Native snapshot/statistics storage; isolate background network producers only."""
     from datetime import date
     from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
-    store = SQLiteQueryStore(database_path)
+    fixture_clock = datetime.fromtimestamp(2000.0, timezone.utc)
+    store = SQLiteQueryStore(database_path, now_provider=lambda: fixture_clock)
     store.initialize()
     service = MagicMock(spec=AutonomousTop20Service)
     service.start = AsyncMock()
@@ -1609,6 +1608,7 @@ def market_dataset_contract_app(app_factory, database_path, *, configured):
     app_stores = []
 
     def owned_store(*args, **kwargs):
+        kwargs["now_provider"] = lambda: fixture_clock
         value = original_factory(*args, **kwargs)
         app_stores.append(value)
         return value
@@ -1620,8 +1620,7 @@ def market_dataset_contract_app(app_factory, database_path, *, configured):
         top20_outbox_path=str(database_path.with_suffix(".outbox")),
     )
     try:
-        with patch("kiwoom_monitor.central_server.database_datasets.time", return_value=2000.0), \
-                patch("kiwoom_monitor.central_server.database_top20_statistics.time", return_value=2000.0), \
+        with patch("kiwoom_monitor.central_server.database_top20_statistics.time", return_value=2000.0), \
                 patch("kiwoom_monitor.central_server.database_top20_statistics._top20_today", return_value=date(2026, 10, 10)), \
                 patch.dict(app_factory.__globals__, {"AutonomousTop20Service": constructor, "create_query_store": owned_store}), \
                 patch("kiwoom_monitor.central_server.app.CentralRestBroker.start", new_callable=AsyncMock), \
@@ -3084,20 +3083,74 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(jobs_before, jobs_after)
 
     def test_app_starts_with_kiwoom_and_autonomous_top20_enabled(self) -> None:
-        """Protect the NAS deployment combination that creates the persistent outbox."""
+        """Real app owners share the corrected clock; no producer/network startup."""
+        from kiwoom_monitor.central_server.rest_broker import BrokerResult
+        from kiwoom_monitor.domain.time_basis import as_kst
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
                 f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
                 kiwoom_app_key="app-key", kiwoom_secret_key="secret-key",
                 autonomous_top20_enabled=True,
                 autonomous_top20_minute_backfill_enabled=False,
+                market_event_collection_enabled=False, external_market_enabled=False,
+                news_naver_api_enabled=False,
                 top20_outbox_path=str(Path(directory) / "top20-outbox.json"),
             )
-
-            app = create_app(settings)
-
-        self.assertIsNotNone(app)
-        self.assertFalse(app.state.autonomous_top20_service._minute_backfill_enabled)
+            clock = [datetime(2026, 10, 19, 9)]  # Existing naive KST clock boundary.
+            with patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now",
+                       side_effect=lambda: clock[0]), patch(
+                    "kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.get_access_token",
+                    side_effect=AssertionError("composition_clock_must_not_request_kiwoom")):
+                app = create_app(settings)
+                service = app.state.autonomous_top20_service
+                self.assertIsNotNone(app)
+                self.assertFalse(service._minute_backfill_enabled)
+                store, broker = service._store, service._broker
+                try:
+                    async def exercise():
+                        observations = []
+                        # Both existing naive KST and an aware UTC instant must
+                        # render as KST, and the shared closure must stay dynamic.
+                        for current in (clock[0], datetime(2026, 10, 19, 0, 2, tzinfo=timezone.utc)):
+                            clock[0] = current
+                            expected = as_kst(current)
+                            broker._response_handler("ka10001", {"stk_cd": "005930"}, {"mac": "1000"})
+                            document = store.load_documents("stock_fundamentals", "005930")[0]["document"]
+                            broker._response_handler("ka10080", {"stk_cd": "005930", "tic_scope": "1"}, {
+                                "stk_min_pole_chart_qry": [{"cntr_tm": "20261019085900", "open_pric": "100",
+                                    "high_pric": "110", "low_pric": "90", "cur_prc": str(105 + expected.minute), "trde_qty": "10"}]})
+                            minute = store.load_minute_bars("005930", "2026-10-19", "KRX")[0]
+                            rows = [{"dt": "20261019", "tm": expected.strftime("%H%M%S"),
+                                     "stk_cd": f"{100000 + rank:06d}", "stk_nm": f"fixture-{rank}",
+                                     "bigd_rank": str(rank)} for rank in range(1, 21)]
+                            result = BrokerResult({"item_inq_rank": rows}, False, "")
+                            # Isolate only external response/catalog/subscription work;
+                            # run the actual clock consumers, RAM publication and DB writes.
+                            with patch.object(service, "_select_ranking_response", new=AsyncMock(
+                                    return_value=(result, rows, False, False))), patch.object(
+                                    service, "_schedule_market_catalog"), patch.object(
+                                    service, "_schedule_subscription_update"):
+                                codes = await service.refresh_ranking_once()
+                            live = service.latest_membership_snapshot()
+                            persisted = store.load_dataset_snapshots("top20_membership", "2026-10-19", limit=1)[0]
+                            observations.append((expected, document, minute, codes, live, persisted))
+                        return observations
+                    observations = asyncio.run(exercise())
+                    for expected, document, minute, codes, live, persisted in observations:
+                        with self.subTest(clock=expected.isoformat(), consumer="ingest-fundamentals"):
+                            self.assertEqual(expected.isoformat(), document["observed_at"])
+                        with self.subTest(clock=expected.isoformat(), consumer="ingest-minute"):
+                            self.assertEqual(expected.timestamp(), minute["updated_at"])
+                        with self.subTest(clock=expected.isoformat(), consumer="top20-projection"):
+                            self.assertEqual(20, len(codes))
+                            self.assertEqual(expected.timestamp(), live["saved_at"])
+                            # Ranking rows retain their existing naive KST key format.
+                            self.assertEqual(expected, as_kst(datetime.fromisoformat(live["payload"]["observed_at"])))
+                            self.assertEqual("persisted", live["persistence_state"])
+                            self.assertEqual(live["payload"], persisted["payload"])
+                            self.assertEqual(expected.timestamp(), persisted["saved_at"])
+                finally:
+                    store.close()
 
     def test_live_top20_endpoint_does_not_wait_for_database_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
