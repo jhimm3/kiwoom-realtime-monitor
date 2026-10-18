@@ -2,9 +2,11 @@
 
 ## 2026-10-18 R3-083 push·실제 CI 지연 원인 보완
 
-`c7a6cef`를 main에 커밋·push했다. 첫 전체 CI는320worker·463모듈·5576검사를 모두 실행했다. 이전1800초 timeout의 계좌검사는6.849초/8건 통과했고 native crash는 재발하지 않았다. Windows runner18분39초/전체workflow21분49초이며 실패1·오류3과 sealed 실패를 끝까지 수집했다. 확인된 구형 시계 fixture와 새 진행로그의 stdout 계약, sealed 실행 근거 전달만 보완했다. 후속 관련105건 통과, 제품/운영DB/주문/NAS변경0. 최종 실제 hosted 재검증은 [R3-083 정본](../REFACTOR_BACKLOG.md)의 말미에 갱신한다. 전체 CI 범위·기존 실패/안전 판정과 다음제품002+023은 유지한다.
+`c7a6cef`와 후속 `d5bec26`를 main에 커밋·push했고 [전체 CI39115204095](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39115204095)가 **7job 성공·15분38초**에 완료됐다. Windows320worker·463모듈·5577건 전부 통과, 계획/실행 ID·소스 동일·종료를 확인했다. 고정 fake시계로1800초 timeout되던 계좌 worker는3.518초/8건 통과했다. 구형 시계 fixture·stdout 계약·sealed 실행 근거 전달만 보완했고, native writer PID 종료 경합도 실제 관찰해 원래 restore fence를 유지한 채 검증했다. 최초 실패와 미실행269worker 기록, 전후 측정·잔여 한계는 [R3-083 정본](../REFACTOR_BACKLOG.md) 말미에 보존했다. 제품/운영DB/주문/NAS변경0, CI 전체 범위·안전 판정·다음제품002+023은 유지한다.
 
 ## 2026-10-18 R3-083 가드레일 최종 차단 검증
+
+아래는 push 전 로컬 검증 당시 이력이다. 후속 커밋과 실제 전체 CI 최종 결과는 바로 위 절과 R3-083 말미를 따른다.
 
 전수 재감사 없이 기존 구조/CI56건·성능 mutation4건·격리 CLI2건(19조건)을 통과했다. 정상 기능/정당 변경은 허용하고 금지 의존·cycle·DB/RAM I/O와 기존 비용 위반은 실패했다. 기존 CI 단위검사의 비활성화/실패무시 등6변이 검출 공백만 보완했다. [R3-083](../REFACTOR_BACKLOG.md#r3-083--개선된-책임실행-비용기능-연결의-퇴행-방지)에 자동/설계검토·잔여위험·측정 부담을 기록했다. 실제 push `2c3888f`의 가드 단계 성공은 확인했으나 조회 시 전체 CI는 진행 중이다. 새 검사 hosted·PR/의도 위반 hosted 실패는 미검증, 이번 commit/push·제품/운영 자료·배포·전체 회귀0이다. 다음 제품 작업002+023은 유지한다.
 
