@@ -1,3 +1,9 @@
+## 2026-10-18 R3-023 자동 보완 task 수명 시계 (로컬 미배포)
+
+로컬 제품·검사 `0abc062`에서 기존 JournalEnrichmentService에 query-client 시계를 지연 주입해 task 등록/시작/완료/부분/실패/불가/복구에 전달했다. 자동 분석은 등록/선별 batch와 각 started/completed/failed callback의 시각1회를 공유한다. 명시적 legacy 시각·상태/재시도·원본 task ID/hash는 보존하고 혼합 시간대 retry 비교를 실제 순간으로 통일했다. 관련9모듈 **106건/58.938초 통과**. 구조·26번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 영향 F01/F08/F10/F18/F22/F24와 책임 계약을 갱신했다.
+
+R3-023 전체는 **진행**이다. 이번 task 시계 선택 범위는 완료했고 다음은 연결 본문에서 확인한 `_history_received→upsert_history_sync(now 미전달)→비용 confirmed_at`과 `_backfill_failed→mark_bar_backfill(now 미전달)→backfill updated_at`이다. 두 업무 저장 receipt는 task 상태 시각과 별개로 남겼으며 운영 영향은 아직 미측정이다. 해당 caller/원자 저장/reader만 좁혀 확인하고 끝낸 task·Window/legacy/dataset/봉/setup/revision 경계는 재조사하지 않는다. 실제 키움/장중·운영DB/주문·외부 Drive·PostgreSQL·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. API 조립 전 시작 복구는 명시적 공통 KST fallback이며 동기화 완료가 아니다. 앱 전체 시계 통일·기능 전체 정상으로 확대하지 않는다.
+
 ## 2026-10-18 R3-023 판정 저장·revision 시계 (로컬 미배포)
 
 로컬 제품·검사 `2c4addf`에서 TradeAnalysisPreparationService.prepare의 기존 KST observed_at1회를 legacy/scoped 판정 저장2branch와 revision 생성에 그대로 전달했다. 일봉 수락·판정 updated_at·새 revision created_at은 같은 prepare 시계를 쓰고, 동일 입력의 기존 revision ID/hash·최초 created_at은 보존한다. 관련10모듈 **121건/68.202초 통과**. 구조·25번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 영향 F08/F10/F18/F22/F24와 책임 계약을 갱신했다.
