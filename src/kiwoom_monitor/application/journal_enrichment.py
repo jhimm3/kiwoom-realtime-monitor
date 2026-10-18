@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now, kst_wall_now
 
 import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
@@ -202,9 +202,18 @@ class JournalEnrichmentService:
     POLICY_VERSION = "journal-enrichment/v1"
     MAX_ATTEMPTS = 3
 
-    def __init__(self, repository: JournalEnrichmentRepository, owner: str) -> None:
+    def __init__(
+        self, repository: JournalEnrichmentRepository, owner: str, *,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
         self._repository = repository
         self._owner = owner
+        # Unbound startup/offline callers use the shared local KST fallback.
+        self._now = now_provider if now_provider is not None else kst_now
+
+    def _resolve_now(self, now: datetime | None) -> datetime:
+        # Explicit naive KST timestamps retain the legacy storage contract.
+        return now if now is not None else as_kst(self._now())
 
     def register(
         self,
@@ -232,18 +241,18 @@ class JournalEnrichmentService:
             origin_scope=account_scope,
             canonical_scope=canonical_scope,
         )
-        return self._repository.ensure_enrichment_task(task, now)
+        return self._repository.ensure_enrichment_task(task, self._resolve_now(now))
 
     def can_start(
         self, task: EnrichmentTask, now: datetime | None = None, *, force: bool = False,
     ) -> bool:
         if task.state in {"complete", "unavailable", "cancelled", "running"}:
             return False
-        current = now or kst_wall_now()
-        return force or task.next_retry_at is None or task.next_retry_at <= current
+        current = self._resolve_now(now)
+        return force or task.next_retry_at is None or as_kst(task.next_retry_at) <= as_kst(current)
 
     def start(self, task_id: str, now: datetime | None = None, *, force: bool = False) -> bool:
-        current = now or kst_wall_now()
+        current = self._resolve_now(now)
         task = self._repository.load_enrichment_task(task_id)
         if task is None or not self.can_start(task, current, force=force):
             return False
@@ -268,7 +277,7 @@ class JournalEnrichmentService:
         reason: str,
         now: datetime | None = None,
     ) -> bool:
-        current = now or kst_wall_now()
+        current = self._resolve_now(now)
         return self._repository.transition_enrichment_task(
             task_id,
             expected_states=("running",),
@@ -280,7 +289,7 @@ class JournalEnrichmentService:
         )
 
     def fail(self, task_id: str, error: str, now: datetime | None = None) -> bool:
-        current = now or kst_wall_now()
+        current = self._resolve_now(now)
         task = self._repository.load_enrichment_task(task_id)
         if task is None or task.state != "running":
             return False
@@ -305,13 +314,13 @@ class JournalEnrichmentService:
             task_id,
             expected_states=("running",),
             state="unavailable",
-            now=now or kst_wall_now(),
+            now=self._resolve_now(now),
             result=result or {},
             error=reason,
         )
 
     def recover_interrupted(self, now: datetime | None = None) -> int:
-        return self._repository.recover_running_enrichment_tasks(now or kst_wall_now())
+        return self._repository.recover_running_enrichment_tasks(self._resolve_now(now))
 
     def _finish(
         self,
@@ -325,7 +334,7 @@ class JournalEnrichmentService:
             task_id,
             expected_states=("running",),
             state=state,
-            now=now or kst_wall_now(),
+            now=self._resolve_now(now),
             result=result,
         )
 

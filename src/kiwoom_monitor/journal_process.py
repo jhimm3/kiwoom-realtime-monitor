@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now, kst_wall_now
 
 import argparse
 import json
@@ -128,8 +128,10 @@ class JournalWindow(QMainWindow):
         self._repo = JournalRepository(journal_db)
         self._journal_enrichment = JournalEnrichmentService(
             self._repo, f"journal-process:{os.getpid()}",
+            now_provider=lambda: self._query_client.server_now(),
         )
-        self._journal_enrichment.recover_interrupted()
+        # Recovery precedes API composition; it is an unsynchronized startup clock.
+        self._journal_enrichment.recover_interrupted(now=kst_now())
         self._history_enrichment_task_ids: dict[str, str] = {}
         self._backfill_enrichment_task_ids: dict[tuple[str, date], str] = {}
         self._backfill_enrichment_force = False
@@ -1120,7 +1122,8 @@ class JournalWindow(QMainWindow):
             return
         tasks: list[tuple[object, tuple[tuple[object, ...], ...]]] = []
         task_ids: dict[str, dict[str, str]] = {}
-        scheduled_day = as_kst(self._query_client.server_now()).date().isoformat() if self._all_episodes else ""
+        scheduled_at = as_kst(self._query_client.server_now()) if self._all_episodes else None
+        scheduled_day = scheduled_at.date().isoformat() if scheduled_at is not None else ""
         for episode in self._all_episodes:
             inputs = {
                 "fills": tuple(trade_fill_key(fill) for fill in episode.fills),
@@ -1129,6 +1132,7 @@ class JournalWindow(QMainWindow):
             group_tasks = {
                 kind: self._journal_enrichment.register(
                     "trade_group", episode.group_id, kind, inputs,
+                    now=scheduled_at,
                     account_scope=episode.summary.account_scope,
                 )
                 for kind in (
@@ -1139,7 +1143,7 @@ class JournalWindow(QMainWindow):
             eligible = {
                 kind: task.task_id
                 for kind, task in group_tasks.items()
-                if self._journal_enrichment.can_start(task)
+                if self._journal_enrichment.can_start(task, scheduled_at)
             }
             if not eligible:
                 continue
@@ -1169,13 +1173,18 @@ class JournalWindow(QMainWindow):
         worker.start()
 
     def _analysis_enrichment_started(self, group_id: str) -> None:
-        for task_id in self._analysis_enrichment_task_ids.get(group_id, {}).values():
-            self._journal_enrichment.start(task_id)
+        task_ids = self._analysis_enrichment_task_ids.get(group_id, {})
+        if not task_ids:
+            return
+        now = as_kst(self._query_client.server_now())
+        for task_id in task_ids.values():
+            self._journal_enrichment.start(task_id, now)
 
     def _analysis_enrichment_completed(self, group_id: str, prepared: object) -> None:
         task_ids = self._analysis_enrichment_task_ids.get(group_id, {})
         if not task_ids:
             return
+        now = as_kst(self._query_client.server_now())
         common_result = {
             "analysis_revision_id": str(getattr(prepared, "analysis_revision_id", "")),
             "snapshot_count": len(tuple(getattr(prepared, "entry_snapshots", ()))),
@@ -1183,14 +1192,14 @@ class JournalWindow(QMainWindow):
         }
         derived_task = task_ids.get("derived_analysis")
         if derived_task:
-            self._journal_enrichment.complete(derived_task, common_result)
+            self._journal_enrichment.complete(derived_task, common_result, now)
         daily_task = task_ids.get("daily_bars")
         daily_count = int(getattr(prepared, "daily_bar_count", 0))
         if daily_task:
             if daily_count:
-                self._journal_enrichment.complete(daily_task, {"bar_count": daily_count})
+                self._journal_enrichment.complete(daily_task, {"bar_count": daily_count}, now)
             else:
-                self._journal_enrichment.partial(daily_task, {"bar_count": 0}, "확정 일봉 대기")
+                self._journal_enrichment.partial(daily_task, {"bar_count": 0}, "확정 일봉 대기", now)
         market_task = task_ids.get("market_index")
         if market_task:
             cycles = tuple(getattr(prepared, "cycles", ()))
@@ -1206,10 +1215,10 @@ class JournalWindow(QMainWindow):
             else:
                 market_counts = {"kospi": 0, "kosdaq": 0}
             if all(market_counts.values()):
-                self._journal_enrichment.complete(market_task, market_counts)
+                self._journal_enrichment.complete(market_task, market_counts, now)
             else:
                 self._journal_enrichment.partial(
-                    market_task, market_counts, "시장지수 분봉 보완 대기",
+                    market_task, market_counts, "시장지수 분봉 보완 대기", now,
                 )
         snapshots = tuple(getattr(prepared, "entry_snapshots", ()))
         news_task = task_ids.get("post_trade_news")
@@ -1218,16 +1227,16 @@ class JournalWindow(QMainWindow):
                 self._journal_enrichment.complete(news_task, {
                     "snapshot_count": len(snapshots),
                     "news_item_count": sum(len(tuple(getattr(value, "news", ()))) for value in snapshots),
-                })
+                }, now)
             else:
                 self._journal_enrichment.unavailable(
-                    news_task, "실시간 진입 스냅샷 없음", {"snapshot_count": 0},
+                    news_task, "실시간 진입 스냅샷 없음", {"snapshot_count": 0}, now,
                 )
         investor_task = task_ids.get("investor_flow")
         if investor_task:
             if not snapshots:
                 self._journal_enrichment.unavailable(
-                    investor_task, "실시간 진입 스냅샷 없음", {"snapshot_count": 0},
+                    investor_task, "실시간 진입 스냅샷 없음", {"snapshot_count": 0}, now,
                 )
             else:
                 available = sum(
@@ -1236,15 +1245,19 @@ class JournalWindow(QMainWindow):
                 )
                 result = {"snapshot_count": len(snapshots), "available_count": available}
                 if available == len(snapshots):
-                    self._journal_enrichment.complete(investor_task, result)
+                    self._journal_enrichment.complete(investor_task, result, now)
                 else:
                     self._journal_enrichment.partial(
-                        investor_task, result, "외국인·기관 수급 보완 대기",
+                        investor_task, result, "외국인·기관 수급 보완 대기", now,
                     )
 
     def _analysis_enrichment_failed(self, group_id: str, message: str) -> None:
-        for task_id in self._analysis_enrichment_task_ids.get(group_id, {}).values():
-            self._journal_enrichment.fail(task_id, message)
+        task_ids = self._analysis_enrichment_task_ids.get(group_id, {})
+        if not task_ids:
+            return
+        now = as_kst(self._query_client.server_now())
+        for task_id in task_ids.values():
+            self._journal_enrichment.fail(task_id, message, now)
 
     def _analysis_enrichment_finished(self) -> None:
         worker = self._analysis_enrichment_worker

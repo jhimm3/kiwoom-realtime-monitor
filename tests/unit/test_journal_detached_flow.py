@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 from contextlib import closing
@@ -18,6 +18,107 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQuery
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
+    def test_analysis_task_signals_share_one_clock_per_batch_and_preserve_retry_state(self) -> None:
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+        from kiwoom_monitor.application.journal_enrichment import JournalEnrichmentService
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.presentation.journal_workers import AnalysisEnrichmentWorker
+
+        type(self)._application = QApplication.instance() or QApplication([])
+        app = type(self)._application
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            registered_at = as_kst(datetime(2030, 1, 2, 3, 0))
+            current = [registered_at]
+            clock = Mock(side_effect=lambda: current[0])
+            enrichment = JournalEnrichmentService(repository, "test-owner", now_provider=clock)
+            current_episode = group_trade_episodes((
+                TradeFill("1", "005930", "fixture", "매수", datetime(2026, 9, 9, 9, 10), 1, 100),
+                TradeFill("2", "005930", "fixture", "매도", datetime(2026, 9, 9, 9, 15), 1, 105),
+            ))[0]
+            finish_at = [registered_at + timedelta(minutes=2)]
+            failure = [False]
+
+            def prepare(*_args, **_kwargs):
+                current[0] = finish_at[0]
+                if failure[0]:
+                    raise RuntimeError("controlled analysis failure")
+                return SimpleNamespace(analysis_revision_id="revision-test", daily_bar_count=0,
+                                       cycles=(), entry_snapshots=(), research_links=())
+
+            owner = SimpleNamespace(_shutting_down=False, _analysis_enrichment_worker=None,
+                _query_client=SimpleNamespace(server_now=clock), _journal_enrichment=enrichment,
+                _repo=repository, _monitor_db=Path(directory) / "missing-monitor.sqlite3",
+                _all_episodes=(current_episode,), _AUTO_ANALYSIS_BATCH_SIZE=2,
+                _trade_analysis_preparer=SimpleNamespace(prepare=prepare), _active_strategy_pack=None,
+                _strategy_packs=(), _strategy_result_mode="together")
+            owner._analysis_enrichment_started = lambda group: JournalWindow._analysis_enrichment_started(owner, group)
+            owner._analysis_enrichment_completed = lambda group, value: JournalWindow._analysis_enrichment_completed(owner, group, value)
+            owner._analysis_enrichment_failed = lambda group, message: JournalWindow._analysis_enrichment_failed(owner, group, message)
+            owner._analysis_enrichment_finished = lambda: None
+            workers = []
+            try:
+                # Control launch; run the real worker body/signals in this thread. The other test uses a real QThread.
+                with patch.object(AnalysisEnrichmentWorker, "start") as launch:
+                    JournalWindow._schedule_analysis_enrichment(owner)
+                    self.assertEqual(1, clock.call_count)
+                    self.assertEqual(1, launch.call_count)
+                    workers.append(owner._analysis_enrichment_worker)
+                    first_tasks = {task.kind: task for task in repository.list_enrichment_tasks()}
+                    self.assertEqual(5, len(first_tasks))
+                    current[0] = registered_at + timedelta(minutes=1)
+                    clock.reset_mock()
+                    workers[0].run()
+                    self.assertEqual(2, clock.call_count)  # One started callback and one completed callback.
+                    tasks = {task.kind: task for task in repository.list_enrichment_tasks()}
+                    self.assertEqual({"daily_bars": "partial", "market_index": "partial",
+                                      "post_trade_news": "unavailable", "investor_flow": "unavailable",
+                                      "derived_analysis": "complete"}, {kind: task.state for kind, task in tasks.items()})
+                    due = finish_at[0] + timedelta(minutes=30)
+                    self.assertEqual(due, tasks["daily_bars"].next_retry_at)
+                    with closing(sqlite3.connect(repository._path)) as connection:
+                        rows = connection.execute("SELECT created_at,started_at,updated_at FROM journal_enrichment_tasks").fetchall()
+                    self.assertEqual([(registered_at.isoformat(), (registered_at + timedelta(minutes=1)).isoformat(),
+                                       finish_at[0].isoformat())] * 5, rows)
+
+                    current[0] = due - timedelta(microseconds=1)
+                    clock.reset_mock()
+                    JournalWindow._schedule_analysis_enrichment(owner)
+                    self.assertEqual(1, clock.call_count)
+                    self.assertEqual(1, launch.call_count)
+                    current[0] = due.astimezone(timezone.utc)
+                    clock.reset_mock()
+                    JournalWindow._schedule_analysis_enrichment(owner)
+                    self.assertEqual(1, clock.call_count)
+                    self.assertEqual(2, launch.call_count)
+                    self.assertEqual(2, len(owner._analysis_enrichment_task_ids[current_episode.group_id]))
+                    workers.append(owner._analysis_enrichment_worker)
+                    failure[0] = True
+                    finish_at[0] = due + timedelta(minutes=1)
+                    clock.reset_mock()
+                    workers[1].run()
+                    self.assertEqual(2, clock.call_count)
+                    after = {task.kind: task for task in repository.list_enrichment_tasks()}
+                    self.assertEqual(tasks["derived_analysis"], after["derived_analysis"])
+                    for kind in ("daily_bars", "market_index"):
+                        self.assertEqual(first_tasks[kind].task_id, after[kind].task_id)
+                        self.assertEqual("retryable_failed", after[kind].state)
+                        self.assertEqual(2, after[kind].attempts)
+                        self.assertEqual(finish_at[0] + timedelta(minutes=10), after[kind].next_retry_at)
+                        self.assertEqual("controlled analysis failure", after[kind].last_error)
+                    clock.reset_mock()
+                    JournalWindow._analysis_enrichment_started(owner, "missing")
+                    JournalWindow._analysis_enrichment_completed(owner, "missing", None)
+                    JournalWindow._analysis_enrichment_failed(owner, "missing", "ignored")
+                    clock.assert_not_called()
+            finally:
+                for worker in workers:
+                    worker.requestInterruption()
+                    self.assertTrue(worker.wait(3000))
+                    worker.deleteLater()
+                    app.sendPostedEvents(worker, QEvent.Type.DeferredDelete)
+
     def test_window_analysis_and_enrichment_share_current_client_daily_receipt(self) -> None:
         from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
         from PySide6.QtWidgets import QApplication
@@ -26,6 +127,8 @@ class JournalDetachedFlowTests(unittest.TestCase):
         from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
         from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
         from kiwoom_monitor.presentation.journal_workers import AnalysisEnrichmentWorker
+        from kiwoom_monitor.application.journal_enrichment import JournalEnrichmentService
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
 
         type(self)._application = QApplication.instance() or QApplication([])
         app = type(self)._application
@@ -41,8 +144,14 @@ class JournalDetachedFlowTests(unittest.TestCase):
                 )
             settings = QSettings(str(root / "journal.ini"), QSettings.Format.IniFormat)
             settings.setValue("auto_history_sync_enabled", False)
+            seed_service = JournalEnrichmentService(JournalRepository(journal), "previous-owner")
+            seed_time = datetime(2026, 9, 9, 9)
+            interrupted = seed_service.register("trade_group", "startup", "derived_analysis", {}, now=seed_time)
+            seed_service.start(interrupted.task_id, seed_time)
+            startup_time = as_kst(datetime(2026, 9, 10, 8))
             initial = Mock(return_value=as_kst(datetime(2030, 1, 2, 3, 4, 5)))
             with patch("kiwoom_monitor.journal_process.QSettings", return_value=settings), \
+                 patch("kiwoom_monitor.journal_process.kst_now", return_value=startup_time) as startup_clock, \
                  patch("kiwoom_monitor.journal_process.create_query_client", return_value=SimpleNamespace(server_now=initial)), \
                  patch.object(QTimer, "singleShot"):
                 window = JournalWindow(monitor, journal, root / "api.json")
@@ -54,6 +163,17 @@ class JournalDetachedFlowTests(unittest.TestCase):
             ))[0]
             worker = None
             try:
+                startup_clock.assert_called_once_with()
+                restored = window._repo.load_enrichment_task(interrupted.task_id)
+                self.assertEqual("retryable_failed", restored.state)
+                self.assertEqual(startup_time, restored.next_retry_at)
+                initial.reset_mock()
+                accepted = window._journal_enrichment.register("trade_group", "online", "derived_analysis", {})
+                self.assertEqual(1, initial.call_count)
+                with closing(sqlite3.connect(journal)) as connection:
+                    created_at = connection.execute("SELECT created_at FROM journal_enrichment_tasks WHERE task_id=?",
+                                                    (accepted.task_id,)).fetchone()[0]
+                self.assertEqual("2030-01-02T03:04:05+09:00", created_at)
                 initial.reset_mock()
                 window._show_trade_analysis(current_episode, ())
                 self.assertEqual(1, initial.call_count)
