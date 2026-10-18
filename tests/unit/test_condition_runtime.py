@@ -196,6 +196,7 @@ class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_receive_loop_applies_policy_without_second_connection(self):
         service = self.service
         complete = asyncio.Event()
+        static_registered = asyncio.Event()
 
         class Socket(_Socket):
             def __init__(self):
@@ -204,8 +205,15 @@ class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.changed = False
 
             async def send(self, raw):
-                await super().send(raw)
                 value = json.loads(raw)
+                is_static = value["trnm"] == "REG" and any(
+                    row["type"] == ["0s"] for row in value["data"])
+                if is_static:
+                    # Condition promotion can finish before the independent REG send.
+                    await complete.wait()
+                await super().send(raw)
+                if is_static:
+                    static_registered.set()
                 if value["trnm"] == "LOGIN":
                     self.responses.put_nowait({"trnm": "LOGIN", "return_code": 0})
                 elif value["trnm"] in {"REG","REMOVE"}:
@@ -240,7 +248,7 @@ class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 patch("kiwoom_monitor.central_server.realtime_collector.REALTIME_REG_INTERVAL_SECONDS", .01):
             receiving = asyncio.create_task(collector._receive("KRX"))
             try:
-                await asyncio.wait_for(complete.wait(), 3)
+                await asyncio.wait_for(asyncio.gather(complete.wait(), static_registered.wait()), 3)
                 self.assertEqual(1, connect.call_count)
                 static_rows = [row for packet in socket.messages if packet['trnm']=='REG'
                                for row in packet['data'] if row['type']==['0s']]
