@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-18 R3-023 일지/legacy: 기존 query-client→JournalWindow 날짜/분 확인·조회/수신→JournalBarRepository metadata/reader, CentralContentClient→legacy ledger writer, MainWindow dynamic clock→Drive v1/v2→SettingsBackup legacy stocks의 소유/호출 경계를 보완했다. 새 파일/계층·task·I/O지점0, 원일/partialNULL/확정metadata·archive·transaction은 보존. 로컬 `f72a85f`·관련14모듈 265건 통과. 다음 실제 TradeAnalysisPreparationService daily caller와 F·미검증은 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-journalwindowlegacy-수락-시각--2026-10-18)을 따른다.
+
 2026-10-18 R3-023 봉 관측: 기존 Ingestor/Collector/QueryStore provider를 central market_observations와 revision8caller에 인계한다. PC MinuteBarRepository gap/empty/index3메서드는 같은 transaction에서 한 번 받은 available_at을 local helper로 전달한다. 유효 epoch/명시 시각·원본·metadata/COMMIT→ACK·기존정상receipt정책 보존, 새owner/layer/SQL0. 관련12모듈 370건·로컬 4280ca5, 요약표정합화/영향F·잔여는 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-봉-관측-fallback품질-시각--2026-10-18)을 따른다.
 
 2026-10-18 R3-023 시계 후속: 기존 app.server_now→MarketDataIngestor/AutonomousTop20 constructor와 기존 QueryStore→SQLite/PG dataset saved_at을 연결했다. owner/파일 수·호출 깊이·transaction·epoch/원본 시각은 그대로이며 새 task/clock 조회는 없다. 관련6모듈 273건 통과/로컬 4e97fe1, F03/F08/F09/F10/F13·잔여 fallback은 [R3-023 정본](REFACTOR_BACKLOG.md#r3-023-시계-주입dataset-저장시각--2026-10-18)을 따른다.

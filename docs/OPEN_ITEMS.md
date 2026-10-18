@@ -1,5 +1,11 @@
 # 남은 작업 요약
 
+## 2026-10-18 R3-023 JournalWindow·legacy 수락 시각
+
+로컬 제품·검사 `f72a85f`에서 JournalWindow 현재 시각과 봉 receipt를 기존 query-client 시계에 연결하고, legacy 일지 수락 기록과 SettingsBackup 카탈로그 INSERT/UPDATE를 기존 서버 시계/KST로 저장하도록 보완했다. MainWindow→Drive v1/v2 복원에도 같은 동적 시계를 전달한다. 관련14모듈 **265건/167.970초 통과**. 구조·22번째 증분 원장·실행ID·소스 불변·worker/자식 종료·임시 정리를 확인했다. 영향 F01/F08/F10/F18/F22/F23/F24와 책임 계약을 갱신했다.
+
+R3-023 전체는 **진행**이다. 다음은 실제 온라인 `TradeAnalysisPreparationService.prepare`의 `import_monitor_daily_bars(monitor_db, code, episode.ended_at.date(), 250)` 미주입 caller(현재148행 부근)다. 이 서비스는 현재 provider가 없으며 기존4인자 Protocol/호환은 보존했다. 이미 끝낸 Window·legacy·constructor/dataset·봉 helper는 재조사하지 않는다. 실제 키움/장중·운영DB/주문·외부 Drive·PostgreSQL·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. startup/offline 공통 KST fallback과 원본/스키마 migration은 유지하며 앱 전체 시계 통일·기능 전체 정상으로 확대하지 않는다.
+
 ## 2026-10-18 R3-023 봉 관측 fallback·품질 시각
 
 요약표83행 중 상세 최신 상태와 다른 R3-002·023·083의3행을 `5c4814a`에서 먼저 동기화했다. 이후 로컬 제품 `4280ca5`에서 서버 봉 관측의 결측/invalid 시각을 기존 provider로 전달하고, PC gap·빈 분 확인·시장지수 metadata의 누락3경로에 기존 writer 시계를 배치당1회 전달했다. 관련12모듈 **370건/188.485초 통과**, 구조·21번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인했다.
