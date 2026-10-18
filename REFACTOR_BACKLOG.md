@@ -5,7 +5,7 @@
 
 ## 현재 작업과 이어가기
 
-- **추가 CI 시간 단축 진행(사용자 후속 요청):** 아래 d5bec26의 전체 성공은 보존한다. 반복 source inventory3회를 class 수명 안의 lazy1회로 줄여 관련5건23.090→7.850초를 확인했다. Windows 설치는 전체 lock을 유지한 `--no-compile`을 시험하며 설치+최초import+전체 시간을 새 hosted CI에서 비교한다. 관련48건 통과, 검사/ID/관측 창/격리·제품 소스 변경0. 최종 결과는083 말미에 갱신한다.
+- **추가 CI 시간 단축 진행:** `33ce833`의 실제 전체 CI39117108692를 끝까지 확인 중이다. 같은 full-lock 설치는84→46초로 줄었으나 전체 효과는 완료 결과로 판정한다. 다음 변경은 Windows 기존 worker를 두 독립 작업에서 실행하고 현재 전체 계획·연속 범위·소스/환경·전역 ID·종료와 두 job 성공을 기존 required 검증기에서 합류한다. 검사 삭제/시간 창 축소 없이 대기 시간 감소를 측정하며, 부분 결과는 전체 통과로 인정하지 않는다. 다음 제품002+023은 유지한다.
 
 - **R3-083 실제 CI 검증 완료:** 보강 `c7a6cef`와 확인된 CI fixture/출력·실행근거 후속 `d5bec26`를 main에 커밋·push했다. [후속 전체 CI39115204095](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39115204095)는 **전체7job 성공·15분38초**, Windows320worker·463모듈·5577건 전부 통과했다. 계좌 worker는 이전1800초 timeout→3.518초/8건 통과, native crash 재발0. 최초 실패/누락 기록과 남은 설계·운영 한계는083 말미에 보존했다. R3-083은 기반 최종 검증 완료/후속 R3별 계약 반영 **진행**이며 다음 제품002+023을 유지한다.
 
@@ -2204,3 +2204,15 @@ G01~G09의 코드 미독 조사는 종료했다. 추가 전체 재조사 없이 
 **설치 비용 시험:** d5 Windows pip wheel cache는 exact hit 약468MB, 다운로드0/198개 cached였다. 설치84초 중 package install 구간68.361초가 남아 다운로드 cache 추가로 해결할 근거가 없다. 기존 Windows 설치 명령에만 `--no-compile`을 추가해 전체 lock package는 유지하고 사용하지 않는 dependency의 사전 bytecode 생성을 생략해본다. 새 venv cache/step/job/profile/라이브러리는 추가하지 않는다. 최초 import가 이 비용을 일부 가져갈 수 있어 **설치만이 아닌 설치+전체 회귀 시간**으로 판단하고 효과가 없으면 되돌린다. 현재 pip 옵션 지원과 기존 workflow/실행기43건 통과는 확인했으나 hosted 시간 절감은 아직 미검증이다.
 
 관련 고유48건(audit5/runner43) 통과. 기존 TOP20 25/20초 관측 창·ON/OFF/반복·native ACK·독립DB·UI 수명 검증과 전체 coverage/timeout/실패 전파를 유지한다. 문서97a5695의 실행 소스는 이미 전체 통과한 d5와 같으므로 추가 코드의 새 전체 CI로 대체하며 취소 실행을 통과로 계산하지 않는다. 근거 `data/diagnostics/ci-speed-r3-083-20261018/inventory-optimization-report.md`, `inventory-optimization-verification.json`, `no-compile-option/`, `further-speed-review-record.json`. 제품/NAS/운영DB/주문 변경0, 다음 제품002+023 유지.
+
+
+#### 전체 범위를 유지한 Windows 병렬 실행 — 진행
+
+사용자의 추가 시간 단축 요청에 따라 기존320worker의 연속 두 구간을 별도 Windows runner에서 실행한다. 제품 코드와 각 worker 안의 모듈 묶음·순서·timeout·종료·실패 계속 수집은 유지한다. 과거 d5bec26의 worker 실측을 두 구간으로 나누면396.040초/349.611초로, 순차745.652초보다 짧을 것으로 예상되지만 실제 queue·중복 준비·합류 비용을 포함한 hosted 측정 전에는 단축 완료로 판단하지 않는다.
+
+- 실행기는 `all-local`의 선택적 `--shard-count 2 --shard-index 0|1`만 확장한다. 기본 PC 실행은 변하지 않으며 자동 전수 로컬 검사를 추가하지 않는다. 부분 결과는 `all-local-shard/passed_shard`로 명시하고 전체 검증기/요약기의 전체 통과로 취급하지 않는다.
+- 기존 `check_required_ci_results`가 현재 checkout의 full plan과 두 보고서의 정확한 범위·순서·source/commit/clean/manifest/catalog/runner/test file hash·lock 환경·발견/실행 ID·native 종료를 확인한다. 전역 중복 ID나 한쪽 누락·실패·timeout·누수·소스 변경은 실패한다. 두 job의 최종 성공도 별도로 요구해 artifact 생성 뒤 job 실패를 숨기지 않는다.
+- 기존 `Windows all-local regression` check와 required 소비 경로/`windows/run.json`을 유지한다. 합류 작업은 stdlib만 설치하고 정적 architecture/review를 각1회 유지하며 전체 dependency 설치를 반복하지 않는다. 원본 worker 로그는 두 shard artifact에 보존한다. 두 Windows VM 준비의 총 사용 시간 증가는 실제 결과와 함께 기록한다.
+- 현재 상태: 구현 및 정상/위반 회귀 준비 중. 이전33ce833 CI는 변경 전 immutable snapshot으로 끝까지 수집하고, 새 구현은 관련 로컬 검사 후 별도 커밋/push하여 실제 GitHub 실행을 검증한다. F08/F13/F24/F25의 CI 증거 전달 변경이며 해당 기능의 운영 수락을 승격하지 않는다.
+
+**관련 로컬 검증:** 기존 runner 프로필5모듈110건을 끝까지 실행해109통과/신규 interruption oracle1실패를 수집했다. 기존 Ctrl-C 종료130을 새 테스트가1로 잘못 묶은 기대값만 바로잡았으며 실행기 종료 계약은 유지했다. 영향을 받은 runner 모듈47건 재실행은 **47통과/16.731초**, worker/전체 자식 종료·누수0·TEMP제거를 확인했다. 다른4모듈63건의 최초 성공과 재실행을 구분하고 로컬 전수/최종110동일소스 통과라고 보고하지 않는다. 기존43메서드 보존+새4메서드, 기존2메서드 보강이며 정상 합류와 누락/중복/낡은 소스/실패/skip/종료 실패·잘못된 lock·전역 번호/기존 출력 덮어쓰기와9종 CI 변이를 검증한다. 관련 추가형 원장과 최초/재실행 결과는 `data/diagnostics/ci-speed-r3-083-20261018/windows-sharding-*`에 보존한다.

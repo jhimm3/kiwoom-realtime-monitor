@@ -586,6 +586,31 @@ def _planned_batches(
     return batches
 
 
+def _profile_workers(batches: Sequence[dict[str, Any]]) -> list[tuple[str, Sequence[str]]]:
+    workers: list[tuple[str, Sequence[str]]] = []
+    for batch in batches:
+        if batch["isolate_modules"]:
+            workers.extend((f"{batch['name']}:{module}", [module]) for module in batch["modules"])
+        else:
+            workers.append((batch["name"], batch["modules"]))
+    return workers
+
+
+def _all_local_shard_plan(
+    workers: Sequence[tuple[str, Sequence[str]]], *, index: int, count: int,
+) -> dict[str, Any]:
+    if type(index) is not int or type(count) is not int or count != 2 or index not in (0, 1):
+        raise ValueError("All-local shards require index 0 or 1 and count 2")
+    if len(workers) < count:
+        raise ValueError("All-local shards must each contain a worker")
+    encoded = json.dumps([[name, list(modules)] for name, modules in workers],
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return {"index": index, "count": count, "total_workers": len(workers),
+            "start": len(workers) * index // count,
+            "end": len(workers) * (index + 1) // count,
+            "plan_sha256": hashlib.sha256(encoded).hexdigest()}
+
+
 def _source_identity() -> dict[str, Any]:
     if str(SOURCE_ROOT) not in sys.path:
         sys.path.insert(0, str(SOURCE_ROOT))
@@ -789,6 +814,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", help="profile declared in tests/regression_profiles.json")
     parser.add_argument("--output", type=Path, help="new or not-yet-created directory for this run")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--shard-index", type=int, choices=(0, 1),
+                        help="run one contiguous half of all-local; requires --shard-count 2")
+    parser.add_argument("--shard-count", type=int, choices=(2,),
+                        help="split all-local into two independently contained worker ranges")
     parser.add_argument("--list", dest="list_only", action="store_true",
                         help="print a profile plan without running tests")
     parser.add_argument('--selection', type=Path, help='execute an existing current-source selective query; never all-local')
@@ -1037,6 +1066,8 @@ def summarize_run(report: dict) -> dict:
               'seconds': round(sum(worker.get('duration_seconds', 0) for worker in workers), 3),
               'source': report.get('code_tree_end', report.get('code_tree_start', {})).get('lf_sha256')}
     problems = []
+    if report.get('profile') == 'all-local-shard' or 'shard' in report:
+        problems.append({'kind': 'partial_shard', 'shard': report.get('shard')})
     all_ids = [identity for worker in workers for identity in worker.get('executed_test_ids', [])]
     if (not workers or report.get('missing_test_files') or report.get('selection_verified') is False
             or len(all_ids) != len(set(all_ids)) or not result['source']
@@ -1071,9 +1102,14 @@ def summarize_run(report: dict) -> dict:
 
 
 def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, base_ref: str = "",
-                     selection: dict | None = None, compact: bool = False) -> int:
+                     selection: dict | None = None, compact: bool = False,
+                     shard_index: int | None = None, shard_count: int | None = None) -> int:
     if timeout_seconds < 1:
         raise ValueError("--timeout-seconds must be positive")
+    sharded = shard_index is not None or shard_count is not None
+    if sharded and (profile != "all-local" or selection is not None or base_ref
+                    or shard_index is None or shard_count is None):
+        raise ValueError("Shard options require only --profile all-local and both shard arguments")
     output_path = output_path.resolve()
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite existing regression output: {output_path}")
@@ -1093,6 +1129,14 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
         batches = _planned_batches(manifest, profile)
     if not batches or any(not batch["modules"] for batch in batches):
         raise ValueError(f"Regression profile {profile!r} has no runnable tests")
+    full_workers = _profile_workers(batches)
+    shard = _all_local_shard_plan(full_workers, index=shard_index, count=shard_count) if sharded else None
+    workers = full_workers[shard["start"]:shard["end"]] if shard else full_workers
+    if shard:
+        batches = [{"name": name, "modules": list(modules), "isolate_modules": False}
+                   for name, modules in workers]
+    worker_start = shard["start"] if shard else 0
+    success_status = "passed_shard" if shard else "passed"
     output_path.mkdir(parents=True)
     test_paths = {
         module: ROOT / (module.replace(".", "/") + ".py")
@@ -1100,7 +1144,7 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
     }
     missing = [str(path) for path in test_paths.values() if not path.is_file()]
     summary: dict[str, Any] = {
-        "schema_version": 1, "profile": profile, "status": "incomplete",
+        "schema_version": 1, "profile": "all-local-shard" if shard else profile, "status": "incomplete",
         "base_ref": base_ref if profile == "related" else None,
         "environment": environment,
         "selection": selection,
@@ -1124,6 +1168,8 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
             for batch in batches
         ], "batch_results": [], "unrun_batches": [],
     }
+    if shard:
+        summary["shard"] = shard
 
     if missing:
         summary["status"] = "failed"
@@ -1137,13 +1183,6 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
     if selection is not None and selection['source']['lf_sha256'] != summary['code_tree_start']['lf_sha256']:
         raise ValueError('Source changed while validating selection; no worker started')
 
-    workers: list[tuple[str, Sequence[str]]] = []
-    for batch in batches:
-        if batch["isolate_modules"]:
-            workers.extend((f"{batch['name']}:{module}", [module]) for module in batch["modules"])
-        else:
-            workers.append((batch["name"], batch["modules"]))
-
     previous_failed = False
     interrupted = False
     summary["unrun_batches"] = [name for name, _ in workers]
@@ -1151,11 +1190,12 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
     )
     try:
-        for index, (name, modules) in enumerate(workers, start=1):
+        for offset, (name, modules) in enumerate(workers, start=1):
+            index = worker_start + offset
             result_path = output_path / f"worker-{index:03}.json"
             log_path = output_path / f"worker-{index:03}.log"
             if os.environ.get("GITHUB_ACTIONS") == "true":
-                print(json.dumps({"worker": index, "workers": len(workers),
+                print(json.dumps({"worker": index, "workers": len(full_workers),
                                   "name": name, "phase": "start"}), file=sys.stderr, flush=True)
             result = _run_process(modules=modules, result_path=result_path,
                                   log_path=log_path, timeout_seconds=timeout_seconds)
@@ -1166,14 +1206,14 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
             result["name"] = name
             result["modules"] = list(modules)
             summary["batch_results"].append(result)
-            summary["unrun_batches"] = [value[0] for value in workers[index:]]
+            summary["unrun_batches"] = [value[0] for value in workers[offset:]]
             (output_path / "run.json").write_text(
                 json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
             )
             if (result.get("timeout") or result.get("interrupted")
                     or not result.get("worker_exit_confirmed", False)
                     or not result.get("process_tree_exit_confirmed", False)):
-                summary["unrun_batches"] = [value[0] for value in workers[index:]]
+                summary["unrun_batches"] = [value[0] for value in workers[offset:]]
                 interrupted = bool(result.get("interrupted"))
                 break
             previous_failed = previous_failed or result["status"] == "failed"
@@ -1187,7 +1227,7 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
     elif previous_failed or "failed" in statuses:
         summary["status"] = "failed"
     elif len(summary["batch_results"]) == len(workers):
-        summary["status"] = "passed"
+        summary["status"] = success_status
     else:
         summary["status"] = "incomplete"
     summary["interrupted"] = interrupted
@@ -1210,18 +1250,24 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
     )
     print(json.dumps(summarize_run(summary) if compact else {
-        "status": summary["status"], "profile": profile,
+        "status": summary["status"], "profile": summary["profile"],
         "completed_workers": len(summary["batch_results"]),
         "unrun_workers": len(summary["unrun_batches"]),
         "tests_run": sum(item.get("test_count", 0) for item in summary["batch_results"]),
         "output": str(output_path),
     }, ensure_ascii=False))
-    return 130 if interrupted else 0 if summary["status"] == "passed" else 1
+    return 130 if interrupted else 0 if summary["status"] == success_status else 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    sharded = args.shard_index is not None or args.shard_count is not None
+    if sharded and (args.profile != "all-local" or args.shard_index is None or args.shard_count is None
+                    or args.selection or args.summarize or args.list_only or args._worker
+                    or args.check_test_catalog or args.check_new_test_modules
+                    or args._result_path is not None or args._modules or args.base_ref or args.fallback_ref):
+        parser.error("shard arguments require only --profile all-local and both shard options")
     if args.summarize:
         if args.selection or args.profile or args.list_only or args._worker:
             parser.error('--summarize cannot be combined with execution')
@@ -1281,7 +1327,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path = args.output or _next_run_path()
         if args.profile == "related":
             return _execute_profile(args.profile, args.timeout_seconds, output_path, base_ref=args.base_ref, compact=args.compact)
-        return _execute_profile(args.profile, args.timeout_seconds, output_path, compact=args.compact)
+        return _execute_profile(args.profile, args.timeout_seconds, output_path, compact=args.compact,
+                                **({'shard_index': args.shard_index, 'shard_count': args.shard_count}
+                                   if sharded else {}))
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Regression runner: {type(error).__name__}: {error}", file=sys.stderr)
         return 2

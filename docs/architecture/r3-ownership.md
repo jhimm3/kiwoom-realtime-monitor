@@ -147,7 +147,7 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 
 첫 명령은 제품 import/DB/네트워크 없이 소스 구문과 기존 영향 그래프를 검사한다. 콘솔은 실패 최대8개만, 상세는 지정 보고서에 보존한다. 나머지 명령은 기존 [선택 실행](../INCREMENTAL_TEST_REVIEW.md#선택적-조회실행-명령)을 재사용한다. 경계가 불명확한 `full_required`는 자동 전체 실행/부분 성공으로 바꾸지 않고 관련 소비자와 필요한 환경을 먼저 좁힌다. 단순 문서 수정에 기능 전체 검사를 요구하지 않는다.
 
-실행기 CLI의 stdout은 기존 단일 JSON 요약 계약이며 CI worker 진행 진단은 stderr를 사용한다. sealed native 실행은 기존 operator의 선택적 `--report`에서 같은 ID/source/result helper와 PG 보고 형식으로 기록하고, 선택된 job의 기존 artifact→required review에 전달한다. 별도 재실행·저장 owner·검사 체계를 만들지 않으며 실패/skip/누락·중복ID/소스 불일치나 기존 restore 안전 fence를 완화하지 않는다. 실제 hosted 결과와 미검증 범위는 [R3-083](../../REFACTOR_BACKLOG.md#r3-083--개선된-책임실행-비용기능-연결의-퇴행-방지) 말미에서 이어간다.
+실행기 CLI의 stdout은 기존 단일 JSON 요약 계약이며 CI worker 진행 진단은 stderr를 사용한다. Windows 전체 CI는 기존 worker를 두 독립 runner에서 실행할 수 있으나, 부분 결과는 전체 성공이 아니다. 기존 required 검증기가 현재 full plan·연속 범위·소스/환경·전역 ID·종료와 두 job 성공을 대조한 뒤 기존 단일 전체 보고서로 합류한다. worker 내부 격리·검사 범위·실패 수집은 유지하고 로컬 전수 실행을 추가하지 않는다. sealed native 실행은 기존 operator의 선택적 `--report`에서 같은 ID/source/result helper와 PG 보고 형식으로 기록하고, 선택된 job의 기존 artifact→required review에 전달한다. 별도 재실행·저장 owner·검사 체계를 만들지 않으며 실패/skip/누락·중복ID/소스 불일치나 기존 restore 안전 fence를 완화하지 않는다. 실제 hosted 결과와 미검증 범위는 [R3-083](../../REFACTOR_BACKLOG.md#r3-083--개선된-책임실행-비용기능-연결의-퇴행-방지) 말미에서 이어간다.
 
 | 확인 대상 | 자동 검사/관련 회귀 | 한계·사람이 확인할 내용 |
 | --- | --- | --- |

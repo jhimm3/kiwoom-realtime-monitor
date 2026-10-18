@@ -10,7 +10,7 @@ import time
 import tempfile
 import unittest
 import yaml
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -84,6 +84,200 @@ class RunRegressionTests(unittest.TestCase):
                 log_path=directory / "worker.log",
                 timeout_seconds=timeout,
             )
+
+    @contextmanager
+    def _windows_shard_fixture(self):
+        modules = ["tests.unit.test_kiwoom_rest_client", "tests.unit.test_central_rest_broker",
+                   "tests.unit.test_ranking_service", "tests.unit.test_ranking_schedule",
+                   "tests.unit.test_ranking_execution", "tests.unit.test_realtime_subscription"]
+        batches = [{"name": "core", "modules": modules[:2], "isolate_modules": False},
+                   {"name": "isolated", "modules": modules[2:5], "isolate_modules": True},
+                   {"name": "tail", "modules": modules[5:], "isolate_modules": False}]
+        source = {"files": 6, "lf_sha256": "f" * 64, "raw_sha256": "f" * 64}
+        dependencies = dict(line.split("==", 1) for line in
+            (run_regression.ROOT / "requirements.lock.txt").read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#"))
+        environment = {"platform": "Windows-fixture", "python": "3.13 fixture",
+                       "timezone": ["UTC", "UTC"], "locked_dependencies": dependencies}
+        git = {"commit": "test-commit", "working_tree_dirty": False}
+        membership = {name: set(modules) if name == "ci-required-windows" else set()
+                      for name in run_regression.CI_WINDOWS_PROFILES}
+        with ExitStack() as stack:
+            for name, value in (("_load_manifest", {}), ("_load_ci_groups", {}),
+                                ("_planned_batches", batches), ("_ci_membership", membership),
+                                ("_code_tree_identity", source), ("_git_metadata", git),
+                                ("_locked_environment", environment), ("_check_test_catalog", 0),
+                                ("_sha256", "a" * 64)):
+                stack.enter_context(patch.object(run_regression, name, return_value=value))
+            workers = run_regression._profile_workers(batches)
+            reports = []
+            for index in (0, 1):
+                shard = run_regression._all_local_shard_plan(workers, index=index, count=2)
+                selected = workers[shard["start"]:shard["end"]]
+                results = []
+                for number, (name, current_modules) in enumerate(selected, start=shard["start"] + 1):
+                    ids = [module + ".Fixture.test_ok" for module in current_modules]
+                    results.append({"name": name, "modules": list(current_modules), "status": "passed",
+                        "exit_code": 0, "worker_exit_confirmed": True, "process_tree_exit_confirmed": True,
+                        "source": {"verified": True}, "timeout": False, "interrupted": False,
+                        "leaked_descendants": False, "zero_test_modules": [],
+                        "failures": [], "errors": [], "skipped": [], "expected_failures": [],
+                        "unexpected_successes": [], "test_count": len(ids), "planned_test_count": len(ids),
+                        "planned_test_ids": ids, "executed_test_ids": ids,
+                        "module_test_counts": [{"module": module, "test_count": 1} for module in current_modules],
+                        "log": f"old/worker-{number:03}.log", "result": f"old/worker-{number:03}.json"})
+                reports.append({"schema_version": 1, "profile": "all-local-shard", "status": "passed_shard",
+                    "shard": shard, "git": git, "environment": environment,
+                    "missing_test_files": [], "unrun_batches": [], "interrupted": False,
+                    "source_modified_during_run": False, "code_tree_start": source, "code_tree_end": source,
+                    "profile_manifest_sha256": "a" * 64, "ci_catalog_sha256": "a" * 64,
+                    "runner_sha256": "a" * 64,
+                    "test_file_sha256": {module: "a" * 64 for _, group in selected for module in group},
+                    "started_at": f"2026-10-18T01:00:0{index}+00:00",
+                    "finished_at": f"2026-10-18T01:00:1{index}+00:00",
+                    "planned_batches": [{"name": name, "modules": list(group)} for name, group in selected],
+                    "batch_results": results})
+            yield reports, workers, batches
+
+    def test_windows_shards_merge_only_complete_current_disjoint_evidence(self) -> None:
+        with self._windows_shard_fixture() as (reports, workers, _):
+            merged = check_required_ci_results.merge_windows_shards(list(reversed(reports)), "test-commit")
+            self.assertEqual("passed", merged["status"])
+            self.assertEqual("all-local", merged["profile"])
+            self.assertNotIn("shard", merged)
+            self.assertEqual([name for name, _ in workers], [w["name"] for w in merged["batch_results"]])
+            self.assertEqual("passed", run_regression.summarize_run(merged)["status"])
+            with self.assertRaises(ValueError):
+                check_required_ci_results.validate_windows(reports[0], "test-commit")
+            cases = [
+                ("missing", lambda rows: rows.pop()),
+                ("duplicate-index", lambda rows: rows.__setitem__(1, copy.deepcopy(rows[0]))),
+                ("bool-index", lambda rows: rows[0]["shard"].__setitem__("index", False)),
+                ("range", lambda rows: rows[0]["shard"].__setitem__("end", 3)),
+                ("full-plan", lambda rows: rows[0]["shard"].__setitem__("plan_sha256", "bad")),
+                ("commit", lambda rows: rows[0]["git"].__setitem__("commit", "old")),
+                ("dirty", lambda rows: rows[0]["git"].__setitem__("working_tree_dirty", True)),
+                ("stale-source", lambda rows: rows[0].__setitem__("code_tree_end", {"lf_sha256": "e" * 64})),
+                ("environment", lambda rows: rows[0].__setitem__("environment", {"platform": "different"})),
+                ("manifest", lambda rows: rows[0].__setitem__("profile_manifest_sha256", "bad")),
+                ("runner", lambda rows: rows[0].__setitem__("runner_sha256", "bad")),
+                ("test-hash", lambda rows: rows[0].__setitem__("test_file_sha256", {})),
+                ("global-log-index", lambda rows: rows[1]["batch_results"][0].__setitem__("log", "worker-001.log")),
+                ("unrun", lambda rows: rows[0].__setitem__("unrun_batches", ["missing"])),
+                ("plan-order", lambda rows: rows[0]["planned_batches"].reverse()),
+                ("worker-order", lambda rows: rows[0]["batch_results"].reverse()),
+                ("IDs", lambda rows: rows[0]["batch_results"][0].__setitem__("executed_test_ids", [])),
+                ("discovery", lambda rows: rows[0]["batch_results"][0]["module_test_counts"].pop()),
+            ]
+            for field, value in (("status", "failed"), ("skipped", ["skipped"]),
+                                 ("process_tree_exit_confirmed", False), ("worker_exit_confirmed", False),
+                                 ("timeout", True), ("interrupted", True), ("leaked_descendants", True)):
+                cases.append((field, lambda rows, key=field, item=value:
+                              rows[0]["batch_results"][0].__setitem__(key, item)))
+            def duplicate_id(rows):
+                worker = rows[1]["batch_results"][0]
+                worker["planned_test_ids"] = worker["executed_test_ids"] = [
+                    rows[0]["batch_results"][0]["executed_test_ids"][0]]
+            cases.append(("duplicate-global-ID", duplicate_id))
+            def wrong_dependencies(rows):
+                for row in rows:
+                    row["environment"]["locked_dependencies"] = {"invented-package": "1"}
+            cases.append(("same-wrong-lock-map", wrong_dependencies))
+            for name, mutate in cases:
+                with self.subTest(mutation=name):
+                    changed = copy.deepcopy(reports)
+                    mutate(changed)
+                    with self.assertRaises(ValueError):
+                        check_required_ci_results.merge_windows_shards(changed, "test-commit")
+            with patch.object(run_regression, "_git_metadata", return_value={"commit": "different"}):
+                with self.assertRaises(ValueError):
+                    check_required_ci_results.merge_windows_shards(reports, "test-commit")
+
+    def test_windows_shard_merge_cli_refuses_partial_stale_and_existing_output(self) -> None:
+        with self._windows_shard_fixture() as (reports, _, _):
+            paths = [self.directory / f"shard-{index}.json" for index in (0, 1)]
+            for path, report in zip(paths, reports):
+                path.write_text(json.dumps(report), encoding="utf-8")
+            output = self.directory / "merged/run.json"
+            argv = ["check_required_ci_results", "--windows-shard", str(paths[0]),
+                    "--windows-shard", str(paths[1]), "--merge-windows", str(output)]
+            with patch.dict(os.environ, {"GITHUB_SHA": "test-commit"}), \
+                    patch.object(sys, "argv", argv), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(0, check_required_ci_results.main())
+                saved = output.read_bytes()
+                merged = json.loads(saved)
+                self.assertEqual(str(paths[0].parent / "worker-001.log"), merged["batch_results"][0]["log"])
+                self.assertEqual(1, check_required_ci_results.main())
+                self.assertEqual(saved, output.read_bytes())
+                output.unlink()
+                reports[1]["code_tree_end"] = {"lf_sha256": "bad"}
+                paths[1].write_text(json.dumps(reports[1]), encoding="utf-8")
+                self.assertEqual(1, check_required_ci_results.main())
+                self.assertFalse(output.exists())
+            with patch.object(sys, "argv", argv[0:3] + argv[-2:]), redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit):
+                    check_required_ci_results.main()
+
+    def test_all_local_shard_plan_and_cli_preserve_the_unsharded_contract(self) -> None:
+        workers = [("core", ["a", "b"]), ("one", ["c"]), ("two", ["d"]),
+                   ("three", ["e"]), ("four", ["f"])]
+        left = run_regression._all_local_shard_plan(workers, index=0, count=2)
+        right = run_regression._all_local_shard_plan(workers, index=1, count=2)
+        self.assertEqual((0, 2, 2, 5), (left["start"], left["end"], right["start"], right["end"]))
+        self.assertEqual(left["plan_sha256"], right["plan_sha256"])
+        for index, count in ((True, 2), (-1, 2), (2, 2), (0, True), (0, 1), (0, 3)):
+            with self.subTest(index=index, count=count), self.assertRaises(ValueError):
+                run_regression._all_local_shard_plan(workers, index=index, count=count)
+        with self.assertRaises(ValueError):
+            run_regression._all_local_shard_plan([], index=0, count=2)
+        pair = ["--shard-index", "1", "--shard-count", "2"]
+        with patch.object(run_regression, "_execute_profile", return_value=0) as execute:
+            self.assertEqual(0, run_regression.main(["--profile", "all-local", *pair]))
+            self.assertEqual(1, execute.call_args.kwargs["shard_index"])
+            self.assertEqual(2, execute.call_args.kwargs["shard_count"])
+            execute.reset_mock()
+            self.assertEqual(0, run_regression.main(["--profile", "core"]))
+            self.assertNotIn("shard_index", execute.call_args.kwargs)
+        for args in (["--profile", "all-local", "--shard-index", "0"],
+                     ["--profile", "core", *pair], ["--list", *pair],
+                     ["--selection", "fake.json", *pair], ["--summarize", "fake.json", *pair],
+                     ["--check-test-catalog", *pair], ["--check-new-test-modules", *pair],
+                     ["--_worker", *pair], ["--profile", "all-local", "--base-ref", "HEAD", *pair]):
+            with self.subTest(args=args), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                run_regression.main(args)
+
+    def test_shard_execution_keeps_global_workers_and_existing_lifecycle_gates(self) -> None:
+        with self._windows_shard_fixture() as (reports, _, _):
+            for mode in ("pass", "failure", "timeout", "interrupt", "unsafe", "source-change"):
+                output = self.directory / mode
+                observed = []
+                def run(**kwargs):
+                    observed.append(kwargs["result_path"].name)
+                    worker = copy.deepcopy(reports[1]["batch_results"][len(observed) - 1])
+                    if len(observed) == 1:
+                        if mode == "failure": worker["status"] = "failed"
+                        if mode == "timeout": worker.update(status="incomplete", timeout=True)
+                        if mode == "interrupt": worker.update(status="incomplete", interrupted=True)
+                        if mode == "unsafe": worker["process_tree_exit_confirmed"] = False
+                    return worker
+                before = reports[0]["code_tree_start"]
+                after = {**before, "lf_sha256": "e" * 64} if mode == "source-change" else before
+                with self.subTest(mode=mode), patch.object(run_regression, "_run_process", side_effect=run), \
+                        patch.object(run_regression, "_code_tree_identity", side_effect=(before, after)), \
+                        redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    code = run_regression._execute_profile("all-local", 5, output, shard_index=1, shard_count=2)
+                saved = json.loads((output / "run.json").read_text(encoding="utf-8"))
+                stopped = mode in {"timeout", "interrupt", "unsafe"}
+                self.assertEqual(["worker-003.json"] if stopped else
+                                 ["worker-003.json", "worker-004.json", "worker-005.json"], observed)
+                self.assertEqual(2 if stopped else 0, len(saved["unrun_batches"]))
+                self.assertEqual("all-local-shard", saved["profile"])
+                self.assertEqual(reports[1]["planned_batches"], saved["planned_batches"])
+                self.assertEqual(reports[1]["test_file_sha256"], saved["test_file_sha256"])
+                self.assertEqual("passed_shard" if mode == "pass" else
+                                 "failed" if mode == "failure" else "incomplete", saved["status"])
+                self.assertEqual(0 if mode == "pass" else 130 if mode == "interrupt" else 1, code)
+                self.assertNotEqual("passed", run_regression.summarize_run(saved)["status"])
 
     def test_profile_plan_runs_registered_modules_once_and_keeps_lifecycle_coverage(self) -> None:
         manifest = run_regression._load_manifest()
@@ -421,11 +615,36 @@ class RunRegressionTests(unittest.TestCase):
             self.assertIn(event, workflow['on'])
             self.assertIn(workflow['on'][event], ('', None, {}))
         job = workflow['jobs']['all-local']
-        self.assertNotIn('if', job)
+        self.assertEqual('Windows all-local regression', job['name'])
+        self.assertEqual('${{ always() }}', job['if'])
+        self.assertEqual(['windows-shards'], job['needs'])
         self.assertEqual('false', job.get('continue-on-error', 'false'))
+        shard_job = workflow['jobs']['windows-shards']
+        self.assertNotIn('if', shard_job)
+        self.assertEqual('false', shard_job.get('continue-on-error', 'false'))
+        self.assertEqual('false', shard_job['strategy']['fail-fast'])
+        self.assertEqual(['0', '1'], shard_job['strategy']['matrix']['shard'])
+        runners = [step for step in shard_job['steps']
+                   if 'python -m scripts.run_regression --profile all-local ' in step.get('run', '')]
+        self.assertEqual(1, len(runners))
+        self.assertNotIn('if', runners[0])
+        self.assertEqual('false', runners[0].get('continue-on-error', 'false'))
+        self.assertIn('--shard-count 2 --shard-index ${{ matrix.shard }}', runners[0]['run'])
+        self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', runners[0]['run'].splitlines())
+        merges = [step for step in job['steps'] if '--merge-windows ' in step.get('run', '')]
+        self.assertEqual(1, len(merges))
+        self.assertNotIn('if', merges[0])
+        self.assertEqual('false', merges[0].get('continue-on-error', 'false'))
+        self.assertEqual('${{ needs.windows-shards.result }}', merges[0]['env']['WINDOWS_SHARDS_RESULT'])
+        self.assertIn("if ($env:WINDOWS_SHARDS_RESULT -ne 'success') { exit 1 }", merges[0]['run'].splitlines())
+        self.assertEqual(2, merges[0]['run'].count('--windows-shard '))
+        self.assertIn('--merge-windows tmp/regression/ci-all-local/run.json', merges[0]['run'])
+        self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', merges[0]['run'].splitlines())
         steps = [step for step in job['steps']
                  if 'python -m scripts.check_architecture ' in step.get('run', '')]
         self.assertEqual(1, len(steps))
+        self.assertEqual(1, sum('python -m scripts.check_architecture ' in step.get('run', '')
+                                for item in workflow['jobs'].values() for step in item.get('steps', [])))
         step = steps[0]
         self.assertNotIn('if', step)
         self.assertEqual('false', step.get('continue-on-error', 'false'))
@@ -452,6 +671,10 @@ class RunRegressionTests(unittest.TestCase):
             'filtered_pr': original.replace('  pull_request:\n', '  pull_request:\n    paths: ["docs/**"]\n'),
             'missing_guard': original.replace('python -m scripts.check_architecture ', 'python -m scripts.other_check '),
             'ignored_required': original.replace('test "$WINDOWS_JOB" = success\n', 'test "$WINDOWS_JOB" = success || true\n'),
+            'missing_partition': original.replace('shard: [0, 1]', 'shard: [0]'),
+            'cancel_other_partition': original.replace('fail-fast: false', 'fail-fast: true'),
+            'ignored_partition_job': original.replace("if ($env:WINDOWS_SHARDS_RESULT -ne 'success') { exit 1 }",
+                                                     "if ($env:WINDOWS_SHARDS_RESULT -ne 'success') { exit 0 }"),
         }
         for name, mutated in mutations.items():
             with self.subTest(mutation=name):
@@ -463,8 +686,9 @@ class RunRegressionTests(unittest.TestCase):
         workflow = (run_regression.ROOT / ".github/workflows/dependency-regression.yml").read_text(encoding="utf-8")
         self._assert_architecture_ci_gate(workflow)
         full = workflow.split("  all-local:\n", 1)[1].split("\n  postgres-integration:", 1)[0]
-        self.assertNotIn("\n    if:", full)
-        self.assertIn("python -m scripts.run_regression --profile all-local", full)
+        shards = workflow.split("  windows-shards:\n", 1)[1].split("\n  all-local:", 1)[0]
+        self.assertIn("python -m scripts.run_regression --profile all-local", shards)
+        self.assertNotIn("python -m scripts.run_regression --profile all-local", full)
         self.assertNotIn("  windows-related:", workflow)
         self.assertNotIn("--profile related", workflow)
         self.assertIn("WINDOWS_JOB: ${{ needs['all-local'].result }}", workflow)
@@ -489,10 +713,19 @@ class RunRegressionTests(unittest.TestCase):
         # successful upstream job status alone cannot supply its discovery receipt.
         import yaml
         jobs = yaml.load(workflow, Loader=yaml.BaseLoader)['jobs']
-        installs = [step for step in jobs['all-local']['steps']
+        installs = [step for step in jobs['windows-shards']['steps']
                     if step.get('name') == 'Install locked test dependencies']
         self.assertEqual(1, len(installs))
         self.assertEqual('python -m pip install --no-compile -r requirements.lock.txt', installs[0]['run'])
+        self.assertFalse(any('pip install' in step.get('run', '') for step in jobs['all-local']['steps']))
+        shard_artifact = next(step for step in jobs['windows-shards']['steps']
+                              if step.get('uses', '').startswith('actions/upload-artifact'))
+        self.assertEqual('windows-regression-shard-${{ matrix.shard }}-${{ github.run_id }}',
+                         shard_artifact['with']['name'])
+        download = next(step for step in jobs['all-local']['steps']
+                        if step.get('uses', '').startswith('actions/download-artifact'))
+        self.assertEqual('windows-regression-shard-*-${{ github.run_id }}', download['with']['pattern'])
+        self.assertEqual('tmp/ci-shards', download['with']['path'])
         sealed = {step.get('name'): step for step in jobs['sealed-replay']['steps']}
         required = {step.get('name'): step for step in jobs['required-regression']['steps']}
         self.assertIn('--report tmp/regression/ci-sealed/v1-execution.json',
