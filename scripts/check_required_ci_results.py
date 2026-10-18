@@ -47,13 +47,11 @@ def validate_windows(windows: dict, commit: str | None) -> None:
     if windows.get("missing_test_files") or windows.get("unrun_batches") or windows.get("interrupted"):
         raise ValueError("Windows run omitted work")
     if profile == "related":
-        from scripts.select_ci_groups import related_modules_since
         if not windows.get("base_ref"):
             raise ValueError("Related Windows report has no comparison base")
-        modules = related_modules_since(windows["base_ref"])
-        if not modules:
-            raise ValueError("Related Windows report has no applicable modules")
-        planned_batches = [{"modules": modules}]
+        planned_batches = run_regression._planned_batches(
+            manifest, "related", base_ref=windows["base_ref"],
+        )
     else:
         planned_batches = run_regression._planned_batches(manifest, "all-local")
     planned = [m for batch in planned_batches for m in batch["modules"]]

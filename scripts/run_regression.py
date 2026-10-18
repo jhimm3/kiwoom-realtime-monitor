@@ -539,18 +539,26 @@ def _available_profiles(manifest: dict[str, Any]) -> list[str]:
     return ["core", *manifest["profiles"], "all-local", *CI_WINDOWS_PROFILES]
 
 
-def _planned_batches(manifest: dict[str, Any], profile: str) -> list[dict[str, Any]]:
+def _planned_batches(
+    manifest: dict[str, Any], profile: str, *, base_ref: str = "",
+) -> list[dict[str, Any]]:
     available = _available_profiles(manifest)
-    if profile not in available:
+    if profile not in available and profile != "related":
         raise ValueError(f"Unknown profile {profile!r}; choose from {', '.join(available)}")
 
-    if profile in CI_WINDOWS_PROFILES:
-        members = _ci_membership(manifest, _load_ci_groups())[profile]
+    if profile == "related" or profile in CI_WINDOWS_PROFILES:
+        if profile == "related":
+            from scripts.select_ci_groups import related_modules_since
+            members = set(related_modules_since(base_ref or "HEAD^"))
+        else:
+            members = _ci_membership(manifest, _load_ci_groups())[profile]
         selected = []
         for batch in _planned_batches(manifest, "all-local"):
             modules = [module for module in batch["modules"] if module in members]
             if modules:
                 selected.append({**batch, "modules": modules})
+        if profile == "related" and members - {m for batch in selected for m in batch["modules"]}:
+            raise ValueError("Related test modules are missing from the regression manifest")
         if not selected:
             raise ValueError(f"CI profile {profile!r} has no runnable tests")
         return selected
@@ -971,9 +979,8 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
         environment = _locked_environment()
     manifest = _load_manifest()
     if profile == "related":
-        from scripts.select_ci_groups import related_modules_since
         base_ref = base_ref or "HEAD^"
-        batches = [{"name": "related", "modules": related_modules_since(base_ref), "isolate_modules": False}]
+        batches = _planned_batches(manifest, profile, base_ref=base_ref)
     else:
         batches = _planned_batches(manifest, profile)
     if not batches or any(not batch["modules"] for batch in batches):

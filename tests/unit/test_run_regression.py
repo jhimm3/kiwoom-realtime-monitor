@@ -364,6 +364,22 @@ class RunRegressionTests(unittest.TestCase):
         self.assertEqual(["tests.unit.test_consumer"], select_ci_groups.related_test_modules(
             ["src/sample/value.py"], root))
 
+    def test_related_plan_keeps_existing_batch_order_and_worker_isolation(self) -> None:
+        manifest = {
+            "core_batches": [{"name": "core", "modules": ["tests.unit.test_a", "tests.unit.test_b"]}],
+            "profiles": {"extra": ["tests.unit.test_c", "tests.unit.test_d"]},
+        }
+        with patch.object(select_ci_groups, "related_modules_since",
+                          return_value=["tests.unit.test_d", "tests.unit.test_b"]):
+            self.assertEqual([
+                {"name": "core", "modules": ["tests.unit.test_b"], "isolate_modules": False},
+                {"name": "extra", "modules": ["tests.unit.test_d"], "isolate_modules": True},
+            ], run_regression._planned_batches(manifest, "related", base_ref="parent-commit"))
+        with patch.object(select_ci_groups, "related_modules_since",
+                          return_value=["tests.unit.test_unregistered"]):
+            with self.assertRaisesRegex(ValueError, "missing from the regression manifest"):
+                run_regression._planned_batches(manifest, "related", base_ref="parent-commit")
+
     def test_related_report_requires_its_exact_selected_modules_and_completed_workers(self) -> None:
         modules = ["tests.unit.test_run_regression"]
         windows = {
