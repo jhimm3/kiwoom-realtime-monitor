@@ -106,6 +106,52 @@ class CentralServerDatabaseTests(unittest.TestCase):
         store.save_minute_bars([value], observations=[(key, observation)])
         self.assertEqual(store.load_observation_revisions('minute_bar'), [first])
 
+    def test_bar_fallback_metadata_and_revision_preserve_clock_raw_value_and_transaction(self):
+        from kiwoom_monitor.domain.time_basis import as_kst
+        now = datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc)
+        for kind in ("minute", "daily"):
+            for updated in ("invalid", 0, 946684800.0):
+                with self.subTest(kind=kind, updated=updated):
+                    store = SQLiteQueryStore(Path(":memory:"), now_provider=lambda: now)
+                    self.addCleanup(store.close)
+                    store.initialize()
+                    value = {"trading_date": "2026-09-14", "minute": "10:00", "code": "005930",
+                        "market": "KRX", "open": 100, "high": 110, "low": 90, "close": 105,
+                        "volume": 10, "trade_value_million_won": 1, "updated_at": updated}
+                    statements = []
+                    connect = store._connect
+                    def traced_connect():
+                        connection = connect()
+                        connection.set_trace_callback(statements.append)
+                        return connection
+                    with patch.object(store, "_connect", side_effect=traced_connect), patch(
+                            "kiwoom_monitor.central_server.market_observations.kst_now",
+                            side_effect=AssertionError("native_writer_must_use_store_clock")):
+                        if kind == "minute":
+                            observation = minute_bar_observation(value, origin=ObservationOrigin.QUERY,
+                                completeness=DataCompleteness.COMPLETE, source="fixture",
+                                value_kind=DataValueKind.ESTIMATED, now_provider=store._now_provider)
+                            store.replace_minute_bars([value], observations=[(bar_observation_key(observation), observation)])
+                        else:
+                            observation = daily_bar_observation(value, completeness=DataCompleteness.COMPLETE,
+                                                                now_provider=store._now_provider)
+                            store.replace_daily_bars([value], observations=[(bar_observation_key(observation), observation)])
+                    self.assertEqual(1, statements.count("COMMIT"))
+                    self.assertEqual(1, sum(statement.startswith("BEGIN") for statement in statements))
+                    self.assertFalse(any(statement.startswith("ROLLBACK") for statement in statements))
+                    expected = as_kst(now) if updated == "invalid" else datetime.fromtimestamp(updated, ZoneInfo("Asia/Seoul"))
+                    loaded = store.load_market_data_metadata(observation.kind, observation.subject,
+                                                           bar_observation_key(observation))
+                    self.assertEqual(observation.metadata, loaded)
+                    self.assertEqual(expected, loaded.available_at)
+                    bars = store.load_minute_bars("005930", "2026-09-14", "KRX") if kind == "minute" else store.load_daily_bars("005930", "KRX")
+                    self.assertEqual(updated, bars[0]["updated_at"])
+                    if kind == "minute":
+                        revision = store.load_observation_revisions("minute_bar", "005930:KRX")[0]
+                        self.assertEqual(expected.astimezone(timezone.utc).isoformat(), revision["available_at"])
+                        self.assertEqual("2026-09-14T10:00:00+09:00", revision["payload"]["bar_start"])
+                        self.assertEqual(105, revision["payload"]["close"])
+
     def test_mock_lineage_statement_keeps_snapshot_during_concurrent_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lineage.sqlite3"

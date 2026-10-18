@@ -19,6 +19,7 @@ from kiwoom_monitor.central_server.realtime_hub import CapturedHubEvent, Realtim
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_observations import minute_bar_observation
 from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap, KST
+from kiwoom_monitor.domain.time_basis import as_kst
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness, DataUnit, DataValueKind, MarketDataMetadata, MarketDatasetKind, ObservationOrigin,
 )
@@ -238,14 +239,15 @@ class RealtimeGapQualityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
             Database(path).initialize()
-            repository = MinuteBarRepository(path)
+            repository = MinuteBarRepository(path, now_provider=lambda: self.now)
             repository.mark_gap_minutes({"005930": minutes})
             acknowledgements = []
-            writer = MarketCacheWriter(path)
+            checked_at = self.now + timedelta(seconds=1)
+            writer = MarketCacheWriter(path, now_provider=lambda: checked_at)
             def acknowledged(code, result):
                 with closing(sqlite3.connect(path)) as connection:
-                    self.assertEqual(("complete",), connection.execute(
-                        "SELECT completeness FROM market_data_observation_meta").fetchone())
+                    self.assertEqual(("complete", as_kst(checked_at).isoformat()), connection.execute(
+                        "SELECT completeness,available_at FROM market_data_observation_meta").fetchone())
                 acknowledgements.append(result)
             writer.history_quality_saved.connect(acknowledged, Qt.ConnectionType.DirectConnection)
             writer.start()

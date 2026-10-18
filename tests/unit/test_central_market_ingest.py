@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_ingest import (
@@ -11,7 +12,7 @@ from kiwoom_monitor.central_server.market_ingest import (
 )
 from kiwoom_monitor.central_server.market_observations import (
     bar_observation_key,
-    minute_bar_observation,
+    minute_bar_observation, daily_bar_observation,
 )
 from kiwoom_monitor.domain.market_data_contract import (
     CandidateUniverse,
@@ -24,6 +25,47 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 class MarketDataIngestorTests(unittest.TestCase):
+    def test_bar_observation_clock_fallback_is_lazy_and_preserves_original_epochs(self) -> None:
+        from kiwoom_monitor.domain.time_basis import as_kst
+        base = {"trading_date": "2026-09-14", "minute": "10:00", "code": "005930", "market": "KRX"}
+        for source_now in (datetime(2030, 1, 2, 3, 4, 5),
+                           datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc)):
+            for updated in ("missing", None, "invalid", float("nan"), float("inf"), 1e300, 0, "946684800"):
+                valid = updated in (0, "946684800")
+                expected = datetime.fromtimestamp(float(updated), timezone.utc).astimezone(as_kst(source_now).tzinfo) if valid else as_kst(source_now)
+                for kind in ("minute", "daily"):
+                    with self.subTest(clock=source_now.isoformat(), updated=str(updated), kind=kind):
+                        value = dict(base)
+                        if updated != "missing":
+                            value["updated_at"] = updated
+                        clock = Mock(return_value=source_now)
+                        with patch("kiwoom_monitor.central_server.market_observations.kst_now",
+                                   side_effect=AssertionError("injected_clock_must_be_used")):
+                            if kind == "minute":
+                                result = minute_bar_observation(value, origin=ObservationOrigin.QUERY,
+                                    completeness=DataCompleteness.COMPLETE, source="fixture",
+                                    value_kind=DataValueKind.ESTIMATED, now_provider=clock)
+                            else:
+                                result = daily_bar_observation(value, completeness=DataCompleteness.COMPLETE,
+                                                               now_provider=clock)
+                        self.assertEqual(expected, result.metadata.available_at)
+                        self.assertEqual(0 if valid else 1, clock.call_count)
+                        self.assertIs(value, result.value)
+                        self.assertEqual(as_kst(datetime(2026, 9, 14, 10) if kind == "minute"
+                                                else datetime(2026, 9, 14)), result.metadata.effective_at)
+        invalid_key = {**base, "trading_date": "invalid", "minute": "invalid"}
+        clock = Mock(return_value=datetime(2030, 1, 2, 3, 4, 5))
+        result = minute_bar_observation(invalid_key, origin=ObservationOrigin.QUERY,
+            completeness=DataCompleteness.COMPLETE, source="fixture", value_kind=DataValueKind.ESTIMATED,
+            now_provider=clock)
+        self.assertEqual(1, clock.call_count)
+        self.assertEqual(result.metadata.effective_at, result.metadata.available_at)
+        # Existing standalone/offline calls retain the common KST fallback.
+        with patch("kiwoom_monitor.central_server.market_observations.kst_now", clock):
+            standalone = daily_bar_observation(base, completeness=DataCompleteness.COMPLETE)
+        self.assertEqual(as_kst(clock.return_value), standalone.metadata.available_at)
+        self.assertEqual(2, clock.call_count)
+
     def test_basic_refresh_cutoff_uses_kst_and_does_not_expire_nxt_eligibility(self) -> None:
         before = datetime.fromisoformat("2026-10-01T06:59:59+09:00")
         after = datetime.fromisoformat("2026-10-01T07:00:00+09:00")

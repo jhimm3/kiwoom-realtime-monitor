@@ -1402,6 +1402,7 @@ class CentralRealtimeCollector:
                     completeness=DataCompleteness.IN_PROGRESS,
                     source="kiwoom-websocket-0B",
                     value_kind=DataValueKind.ACTUAL,
+                    now_provider=self._now_provider,
                 )
                 observations.append((bar_observation_key(observation), observation))
             self._inflight_minute_bars = minute_bars

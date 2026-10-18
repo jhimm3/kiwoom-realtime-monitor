@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from kiwoom_monitor.domain.time_basis import KST, as_kst
+from kiwoom_monitor.domain.time_basis import KST, as_kst, kst_now
 
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_AFTER_MARKET_EFFECTIVE_DATE,
@@ -109,16 +110,18 @@ def minute_bar_observation(
     completeness: DataCompleteness,
     source: str,
     value_kind: DataValueKind,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> MarketDataObservation[dict[str, Any]]:
     subject = _bar_subject(value)
     snapshot_key = f"{value['trading_date']}T{value['minute']}"
+    available_at = _bar_available_at(value, now_provider=now_provider)
     return MarketDataObservation(
         kind=MarketDatasetKind.MINUTE_BAR,
         subject=subject,
         value=value,
         metadata=MarketDataMetadata(
-            effective_at=snapshot_datetime(snapshot_key, _bar_available_at(value)),
-            available_at=_bar_available_at(value),
+            effective_at=snapshot_datetime(snapshot_key, available_at),
+            available_at=available_at,
             venue=trading_venue(value.get("market")),
             unit=DataUnit.UNKNOWN,
             value_kind=value_kind,
@@ -133,10 +136,12 @@ def minute_bar_observation(
 def minute_bar_revision_payload(
     value: dict[str, Any], *, window_closed: bool, capture_quality: str,
     finalization_source: str, operation_id: str = "",
+    now_provider: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     """현재 누적 봉을 연구 원장용의 명시적인 시간 계약으로 바꾼다."""
     bar_start = snapshot_datetime(
-        f"{value['trading_date']}T{value['minute']}", _bar_available_at(value)
+        f"{value['trading_date']}T{value['minute']}",
+        _bar_available_at(value, now_provider=now_provider),
     )
     session_window = session_window_at(bar_start, venue=str(value.get("market", "")))
     payload = {
@@ -173,8 +178,9 @@ def daily_bar_observation(
     value: dict[str, Any],
     *,
     completeness: DataCompleteness,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> MarketDataObservation[dict[str, Any]]:
-    available_at = _bar_available_at(value)
+    available_at = _bar_available_at(value, now_provider=now_provider)
     return MarketDataObservation(
         kind=MarketDatasetKind.DAILY_BAR,
         subject=_bar_subject(value),
@@ -212,8 +218,12 @@ def _bar_subject(value: dict[str, Any]) -> str:
     return f"{value['code']}:{value.get('market', '') or 'UNKNOWN'}"
 
 
-def _bar_available_at(value: dict[str, Any]) -> datetime:
+def _bar_available_at(
+    value: dict[str, Any], *, now_provider: Callable[[], datetime] | None = None,
+) -> datetime:
     try:
         return datetime.fromtimestamp(float(value["updated_at"]), tz=KST)
-    except (KeyError, TypeError, ValueError, OSError):
-        return datetime.now(KST)
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        # Explicit standalone/offline compatibility; app callers pass their
+        # existing corrected clock. A valid original epoch never samples it.
+        return as_kst((now_provider or kst_now)())

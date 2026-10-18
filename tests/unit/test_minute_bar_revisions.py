@@ -4,12 +4,13 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from kiwoom_monitor.application.research_replay import replay_krx_minute_bars
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_observations import (
     bar_observation_key,
-    minute_bar_observation,
+    minute_bar_observation, minute_bar_revision_payload,
 )
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness,
@@ -43,6 +44,26 @@ def _observation(value: dict[str, object]):
 
 
 class MinuteBarRevisionTests(unittest.TestCase):
+    def test_revision_payload_uses_injected_fallback_without_rewriting_bar_time_or_fields(self):
+        base = _delta("clock-fixture", price=105, volume=10,
+                      at=datetime(2026, 9, 12, 10, 0, 10, tzinfo=KST))
+        expected = minute_bar_revision_payload(base, window_closed=False, capture_quality="in_progress",
+                                              finalization_source="realtime_flush", operation_id="clock-fixture")
+        for updated in ("missing", None, "invalid", 0, base["updated_at"]):
+            with self.subTest(updated=updated):
+                value = dict(base)
+                if updated == "missing":
+                    value.pop("updated_at")
+                else:
+                    value["updated_at"] = updated
+                clock = Mock(return_value=datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc))
+                with patch("kiwoom_monitor.central_server.market_observations.kst_now",
+                           side_effect=AssertionError("revision_must_use_injected_clock")):
+                    payload = minute_bar_revision_payload(value, window_closed=False, capture_quality="in_progress",
+                        finalization_source="realtime_flush", operation_id="clock-fixture", now_provider=clock)
+                self.assertEqual(expected, payload)
+                self.assertEqual(0 if updated in (0, base["updated_at"]) else 1, clock.call_count)
+
     def test_deltas_are_merged_once_and_final_revision_uses_actual_close_time(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")

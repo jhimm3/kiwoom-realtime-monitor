@@ -8,7 +8,7 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from kiwoom_monitor.application.daily_high_service import DailyBar, DailyHighTargets
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
@@ -25,10 +25,65 @@ from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository i
     MarketDataMetadataRepository,
 )
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
-from kiwoom_monitor.infrastructure.persistence.local_bar_observations import local_minute_bar_observation
+from kiwoom_monitor.infrastructure.persistence.local_bar_observations import (
+    local_daily_bar_observation, local_minute_bar_observation,
+)
 
 
 class MinuteBarRepositoryTests(unittest.TestCase):
+    def test_local_observation_preserves_explicit_times_and_uses_shared_offline_fallback(self) -> None:
+        fixed = datetime.fromisoformat("2030-01-02T09:01:30+09:00")
+        minute = datetime(2030, 1, 2, 9)
+        fallback_path = "kiwoom_monitor.infrastructure.persistence.local_bar_observations.kst_now"
+        for supplied in (fixed, fixed.replace(tzinfo=None), fixed.astimezone(timezone.utc)):
+            with self.subTest(supplied=supplied), patch(fallback_path) as fallback:
+                observation = local_minute_bar_observation("A", minute, None,
+                    available_at=supplied, source="explicit", actual_trade_value=False)
+                daily = local_daily_bar_observation("A", minute.date(), None,
+                    available_at=supplied, source="explicit")
+                fallback.assert_not_called()
+                self.assertEqual(fixed, observation.metadata.available_at)
+                self.assertEqual(fixed, daily.metadata.available_at)
+                self.assertEqual(DataCompleteness.COMPLETE, observation.metadata.completeness)
+                self.assertEqual(DataCompleteness.IN_PROGRESS, daily.metadata.completeness)
+        with patch(fallback_path, return_value=fixed) as fallback:
+            observation = local_minute_bar_observation("A", minute, None,
+                source="offline", actual_trade_value=False)
+            daily = local_daily_bar_observation("A", minute.date(), None, source="offline")
+            self.assertEqual(2, fallback.call_count)
+            self.assertEqual(fixed, observation.metadata.available_at)
+            self.assertEqual(fixed, daily.metadata.available_at)
+
+    def test_gap_empty_and_market_index_metadata_use_one_injected_clock_per_batch(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        Database(path).initialize()
+        fixed = datetime.fromisoformat("2030-01-02T09:01:30+09:00")
+        minute = datetime(2030, 1, 2, 9)
+        clock = Mock(return_value=fixed.astimezone(timezone.utc))
+        repository = MinuteBarRepository(path, now_provider=clock)
+        with patch("kiwoom_monitor.infrastructure.persistence.local_bar_observations.kst_now",
+                   side_effect=AssertionError("app path used local fallback")):
+            repository.mark_gap_minutes({"A": (minute,), "B": (minute,)})
+            clock.assert_called_once_with()
+            clock.reset_mock()
+            self.assertEqual((minute,), repository.confirm_empty_minutes("A", (minute,)))
+            clock.assert_called_once_with()
+            clock.reset_mock()
+            repository.upsert_market_index_minutes({
+                (market, minute): (100., 101., 99., 100., 1.) for market in ("kospi", "kosdaq")})
+            clock.assert_called_once_with()
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual([
+                ("A", "2030-01-02T09:00", fixed.isoformat(), "complete"),
+                ("B", "2030-01-02T09:00", fixed.isoformat(), "missing"),
+                ("market:kosdaq", "2030-01-02T09:00", fixed.isoformat(), "in_progress"),
+                ("market:kospi", "2030-01-02T09:00", fixed.isoformat(), "in_progress"),
+            ], connection.execute("SELECT subject,observation_key,available_at,completeness "
+                                  "FROM market_data_observation_meta ORDER BY subject").fetchall())
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM minute_bars").fetchone()[0])
+            self.assertEqual(2, connection.execute("SELECT count(*) FROM market_index_minute_bars").fetchone()[0])
+
     def test_aware_injected_clock_compares_legacy_kst_minutes_without_changing_keys(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
         path = Path(directory) / "monitor.sqlite3"

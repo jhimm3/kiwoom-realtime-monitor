@@ -169,6 +169,7 @@ def _save_final_minute_revision_sqlite(
                 capture_quality=str(closure["capture_quality"]),
                 finalization_source=str(closure["finalization_source"]),
                 operation_id=str(closure["operation_id"]),
+                now_provider=now_provider,
             ),
             observation,
             now_provider=now_provider,
@@ -192,6 +193,7 @@ def _save_final_minute_revision_postgres(
                 capture_quality=str(closure["capture_quality"]),
                 finalization_source=str(closure["finalization_source"]),
                 operation_id=str(closure["operation_id"]),
+                now_provider=now_provider,
             ),
             observation,
             now_provider=now_provider,
@@ -981,6 +983,7 @@ class SQLiteMarketBarStoreMixin:
                             minute_bar_revision_payload(
                                 merged, window_closed=False, capture_quality="in_progress",
                                 finalization_source="realtime_flush", operation_id=operation_id,
+                                now_provider=self._now_provider,
                             ),
                             merged_observation,
                             now_provider=self._now_provider,
@@ -1065,6 +1068,7 @@ class SQLiteMarketBarStoreMixin:
                                 else observation.metadata.completeness.value
                             ),
                             finalization_source="query_response",
+                            now_provider=self._now_provider,
                         ),
                         observation,
                     )
@@ -1308,6 +1312,7 @@ class PostgresMarketBarStoreMixin:
                                     capture_quality=str(closure["capture_quality"]),
                                     finalization_source=str(closure["finalization_source"]),
                                     operation_id=operation_id,
+                                    now_provider=self._now_provider,
                                 ), observation,
                             ))
                     operation_rows.append((operation_id, operation_hash, self._now_provider()))
@@ -1481,6 +1486,7 @@ class PostgresMarketBarStoreMixin:
                             minute_bar_revision_payload(
                                 merged_bar, window_closed=False, capture_quality="in_progress",
                                 finalization_source="realtime_flush", operation_id=operation_id,
+                                now_provider=self._now_provider,
                             ), merged_observation,
                         ))
                 _save_postgres_metadata(cursor, merged_observations, multirow=True)
@@ -1567,6 +1573,7 @@ class PostgresMarketBarStoreMixin:
                                 minute_bar_revision_payload(
                                     merged_bar, window_closed=False, capture_quality="in_progress",
                                     finalization_source="realtime_flush", operation_id=operation_id,
+                                    now_provider=self._now_provider,
                                 ),
                                 merged_observation,
                              now_provider=self._now_provider):
@@ -1733,6 +1740,7 @@ class PostgresMarketBarStoreMixin:
                                     else observation.metadata.completeness.value
                                 ),
                                 finalization_source="query_response",
+                                now_provider=self._now_provider,
                             ),
                             observation,
                         )

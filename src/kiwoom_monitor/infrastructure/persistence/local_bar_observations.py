@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time
 
 from kiwoom_monitor.domain.market_data_contract import (
     CandidateUniverse,
@@ -15,9 +15,7 @@ from kiwoom_monitor.domain.market_data_contract import (
     ObservationOrigin,
     TradingVenue,
 )
-
-
-KST = timezone(timedelta(hours=9))
+from kiwoom_monitor.domain.time_basis import KST, as_kst, kst_now
 
 
 def local_minute_bar_observation(
@@ -33,8 +31,9 @@ def local_minute_bar_observation(
     origin: ObservationOrigin = ObservationOrigin.REALTIME,
     candidate_universe: CandidateUniverse = CandidateUniverse.UNKNOWN,
 ) -> MarketDataObservation[object]:
-    observed = _as_kst(available_at or datetime.now(KST))
-    effective = _as_kst(minute)
+    # Unbound legacy/offline callers use the shared local fallback.
+    observed = as_kst(available_at if available_at is not None else kst_now())
+    effective = as_kst(minute)
     state = completeness or (
         DataCompleteness.COMPLETE
         if effective.replace(second=0, microsecond=0) < observed.replace(second=0, microsecond=0)
@@ -70,7 +69,8 @@ def local_daily_bar_observation(
     origin: ObservationOrigin = ObservationOrigin.QUERY,
     completeness: DataCompleteness | None = None,
 ) -> MarketDataObservation[object]:
-    observed = _as_kst(available_at or datetime.now(KST))
+    # Unbound legacy/offline callers use the shared local fallback.
+    observed = as_kst(available_at if available_at is not None else kst_now())
     effective = datetime.combine(trading_day, time(), tzinfo=KST)
     complete = trading_day < observed.date() or (
         trading_day == observed.date() and observed.time() >= time(20)
@@ -91,9 +91,3 @@ def local_daily_bar_observation(
             candidate_universe=CandidateUniverse.UNKNOWN,
         ),
     )
-
-
-def _as_kst(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=KST)
-    return value.astimezone(KST)

@@ -38,7 +38,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 )
 
 
-SERVER_BUILD = "2026.10.18-r3-clock-boundaries-v1"
+SERVER_BUILD = "2026.10.18-r3-bar-clock-v1"
 logger = logging.getLogger(__name__)
 
 

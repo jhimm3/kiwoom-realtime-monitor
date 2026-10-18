@@ -164,6 +164,7 @@ class MarketDataIngestor:
                 completeness=completeness,
                 source="kiwoom-ka10080;trade_value=ohlcv_estimate",
                 value_kind=DataValueKind.ESTIMATED,
+                now_provider=self._now,
             )
             observations.append((bar_observation_key(observation), observation))
         prepare_ms = round((monotonic() - prepare_started) * 1000)
@@ -302,7 +303,7 @@ class MarketDataIngestor:
             completeness = _daily_completeness(
                 str(value["trading_date"]), str(value["market"]), now
             )
-            observation = daily_bar_observation(value, completeness=completeness)
+            observation = daily_bar_observation(value, completeness=completeness, now_provider=self._now)
             observations.append((bar_observation_key(observation), observation))
         try:
             changed = self._store.replace_daily_bars(values, observations=observations)
