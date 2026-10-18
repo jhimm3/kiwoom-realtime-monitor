@@ -58,6 +58,8 @@ class ExpandedDiagnosticTests(unittest.TestCase):
     def test_fixed_strength_boundaries_do_not_duplicate_or_drop_trades(self):
         self.assertEqual(['0~10bp', '10~25bp', '25~50bp', '50bp 이상'],
                          [diagnostic.strength_bucket(value) for value in (0, 10, 25, 50)])
+        self.assertEqual(["0~10bp", "10~25bp", "25~50bp", "50bp 이상"],
+                         [diagnostic.strength_bucket(value) for value in (9, 24, 49, 51)])
         with self.assertRaises(ValueError):
             diagnostic.strength_bucket(-1)
 

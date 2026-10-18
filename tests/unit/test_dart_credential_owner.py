@@ -387,7 +387,8 @@ class DartCredentialAPITests(unittest.TestCase):
             root = Path(directory)
             app = create_app(CentralServerSettings(f"sqlite:///{root / 'central.sqlite'}", "private-token",
                 credential_directory=str(root / "secrets"), dart_cache_path=str(root / "corp.json"),
-                dart_enabled=enabled, news_query_set_enabled=False, news_history_jobs_enabled=False))
+                dart_enabled=enabled, news_query_set_enabled=False, news_history_jobs_enabled=False,
+                news_naver_market_enabled=False))
             with TestClient(app, base_url="https://nas.test") as client:
                 headers = {"Authorization": "Bearer private-token"}
                 runtime = app.state.credential_runtime

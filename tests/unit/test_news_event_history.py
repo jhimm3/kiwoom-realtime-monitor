@@ -67,6 +67,9 @@ class NewsEventHistoryTests(unittest.IsolatedAsyncioTestCase):
             store.close()
             settings = CentralServerSettings(
                 f"sqlite:///{path}", "private-token", news_history_jobs_enabled=False,
+                autonomous_top20_enabled=False, market_event_collection_enabled=False,
+                news_naver_api_enabled=False, news_naver_stock_enabled=False,
+                news_naver_market_enabled=False, news_query_set_enabled=False,
             )
             with TestClient(create_app(settings)) as client:
                 self.assertEqual(401, client.get("/api/v1/news/history/event").status_code)
@@ -84,6 +87,7 @@ class NewsEventHistoryTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Authorization": "Bearer private-token"},
                 )
             self.assertEqual(event["event_revision_id"], response.json()["revisions"][0]["event_revision_id"])
+            self.assertEqual((200, 200, 200), (response.status_code, membership.status_code, body.status_code))
             self.assertEqual(event["event_id"], membership.json()["revisions"][0]["event_id"])
             self.assertEqual(event["article_revision_id"], body.json()["assessment"]["article_revision_id"])
             self.assertIn("core_sentences", body.json()["assessment"])
@@ -134,6 +138,9 @@ class NewsEventHistoryTests(unittest.IsolatedAsyncioTestCase):
             contract, _ = await self._record(
                 store, "테스트기업, 삼성전자와 500억원 공급계약 체결", identity="contract",
             )
+            unknown_mou, _ = await self._record(store, "테스트기업, 고객사와 공급 MOU 체결", identity="unknown-mou")
+            unknown_contract, _ = await self._record(store, "테스트기업, 고객사와 공급계약 체결", identity="unknown-contract")
+            self.assertNotEqual(unknown_mou["event_id"], unknown_contract["event_id"])
             store.close()
         self.assertEqual("POTENTIAL", mou["certainty"])
         self.assertEqual(mou["event_id"], contract["event_id"])

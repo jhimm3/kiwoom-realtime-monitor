@@ -214,6 +214,9 @@ class TradeSetupClassificationTests(unittest.TestCase):
         )
         result = classify_trade_setup(self._episode(at, 100, "NXT"), rows)
         self.assertFalse(any("장 시작 후 0분" in value for value in result.evidence))
+        early = classify_trade_setup(self._episode(at.replace(minute=5), 100, "NXT"), rows[:6])
+        self.assertIn("NXT 장 시작(08:00) 후 5분에 첫 매수했습니다.", early.evidence)
+        self.assertFalse(any("장 시작(08:00) 후" in value for value in result.evidence))
 
     def test_nxt_afternoon_is_not_mistaken_for_closing_bet(self) -> None:
         at = datetime(2026, 8, 29, 16, 0)

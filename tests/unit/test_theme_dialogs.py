@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QDialog
 
 from kiwoom_monitor.application.theme_preview import ThemeChange
-from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion
+from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion, ThemeSuggestion
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
@@ -230,6 +230,19 @@ class ThemePreviewDialogTests(unittest.TestCase):
 
         self.assertEqual(("호남개발",), decisions[0][2])
         self.assertEqual((), decisions[1][2])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "theme.sqlite3"
+            Database(path).initialize()
+            stocks = StockRepository(path)
+            for row in (first, second):
+                stocks.upsert(row.stock_code, row.stock_name)
+            repository = ThemeRepository(path)
+            repository.import_ai_theme_suggestions(tuple(ThemeSuggestion(row.stock_code, row.news_identity, row.raw_theme_name, row.evidence, row.confidence, row.provider, row.model, "body", row.analyzed_at) for row in (first, second)))
+            for suggestion, decision, names in decisions:
+                repository.review_ai_theme_suggestion(suggestion.key, approved=decision == "approved", theme_names=names)
+            reviewed = repository.list_ai_theme_suggestions("approved")
+            self.assertEqual(2, len(reviewed))
+            self.assertEqual({("호남개발",)}, {row.resolved_theme_names for row in reviewed})
         dialog.close()
 
 

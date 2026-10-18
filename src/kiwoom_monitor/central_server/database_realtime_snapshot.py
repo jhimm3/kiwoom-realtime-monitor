@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from time import monotonic, time
 from typing import Any
+from kiwoom_monitor.domain.time_basis import KST
 
 from .database_codec import _json_document
 
@@ -28,7 +29,7 @@ class SQLiteRealtimeSnapshotStoreMixin:
     def load_realtime_snapshots(self, codes: list[str]) -> list[dict[str, Any]]:
         placeholders = ",".join("?" for _ in codes)
         condition = f"item_key IN ({placeholders}) OR event_type='market_state'" if codes else "event_type='market_state'"
-        parameters: list[object] = [*codes, time() - 300]
+        parameters: list[object] = [*codes, self._now_provider().timestamp() - 300]
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 f"SELECT event_json FROM central_realtime_latest WHERE ({condition}) AND received_at>? "
@@ -85,7 +86,7 @@ class PostgresRealtimeSnapshotStoreMixin:
             cursor.execute(
                 "SELECT event_json FROM central_realtime_latest "
                 "WHERE (item_key=ANY(%s) OR event_type='market_state') AND received_at>%s "
-                "ORDER BY received_at", (codes, time() - 300),
+                "ORDER BY received_at", (codes, self._now_provider().timestamp() - 300),
             )
             rows = cursor.fetchall()
         return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
@@ -131,7 +132,7 @@ def _latest_market_cap_rows(
             "code": code,
             "market_cap_eok": market_cap,
             "observed_at": datetime.fromtimestamp(
-                received_at, timezone.utc,
+                received_at, KST,
             ).isoformat(),
         })
     return result

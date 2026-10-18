@@ -12,6 +12,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QSettings, Qt
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 from kiwoom_monitor.presentation.detached_chart_window import DetachedChartWindow
@@ -107,6 +108,14 @@ class DetachedChartWindowTests(unittest.TestCase):
             self.assertTrue(panel.chart._reference_fills)
             self.assertEqual((fill,), panel.chart._fills)
             self.assertFalse(panel.show_trades.isEnabled())
+            from kiwoom_monitor.presentation import journal_chart_widget
+            with patch.object(journal_chart_widget, "trade_marker_polygon", wraps=journal_chart_widget.trade_marker_polygon) as marker:
+                image = panel.chart.grab().toImage()
+                self.assertFalse(image.isNull())
+                marker.assert_not_called()
+                panel.chart.set_reference_fills(False)
+                panel.chart.grab()
+                self.assertGreater(marker.call_count, 0)
             window.close()
 
     def test_visual_settings_follow_shared_journal_background(self) -> None:
@@ -116,11 +125,13 @@ class DetachedChartWindowTests(unittest.TestCase):
             settings.setValue("detached_chart_color_grid", "#4A5560")
             settings.setValue("detached_chart_color_up", "#FF665E")
             settings.setValue("detached_chart_color_down", "#55A7FF")
+            settings.setValue("detached_chart_2_accent", "#abcdef")
             window = DetachedChartWindow(settings)
             window.configure("#FFFFFF", True, 0, 0, True, 1, "#111111", "#222222", "#333333", "#444444")
             self.assertTrue(all(panel.chart._background.name() == "#ffffff" for panel in window.panels))
             self.assertNotEqual("#4a5560", window.panels[1].chart._grid.name())
             self.assertNotEqual(window.panels[0].title_label.styleSheet(), window.panels[1].title_label.styleSheet())
+            self.assertIn("#abcdef", window.panels[2].title_label.styleSheet())
             self.assertEqual("DetachedChartPanel", window.panels[0].objectName())
             self.assertIn("QWidget#DetachedChartPanel", window.panels[0].styleSheet())
             self.assertIn("border:1px solid #BFC6CF", window.panels[0].styleSheet())
@@ -129,36 +140,6 @@ class DetachedChartWindowTests(unittest.TestCase):
             self.assertEqual(0, window.panel_layout.verticalSpacing())
             self.assertTrue(callable(window._export_current_view))
             window.close()
-
-    def test_settings_dialog_saves_selected_colors(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            settings = QSettings(str(Path(directory) / "charts.ini"), QSettings.Format.IniFormat)
-            dialog = DetachedChartSettingsDialog(settings)
-            dialog.colors["grid"].setText("#123456")
-            dialog.colors["background"].setText("#202020")
-            dialog.colors["holding"].setText("#80cbc4")
-            dialog.save(); settings.sync()
-            self.assertEqual("#123456", settings.value("detached_chart_color_grid"))
-            for index in range(6):
-                self.assertEqual("#202020", settings.value(f"detached_chart_{index}_background"))
-                self.assertEqual("#80cbc4", settings.value(f"detached_chart_{index}_holding"))
-            dialog.close()
-
-    def test_each_panel_saves_its_own_background_and_accent(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            settings = QSettings(str(Path(directory) / "charts.ini"), QSettings.Format.IniFormat)
-            dialog = DetachedChartPanelSettingsDialog(settings, 2, "#ffffff", "#112233")
-            dialog.edits["background"].setText("#202020"); dialog.edits["accent"].setText("#abcdef")
-            dialog.edits["holding"].setText("#80cbc4")
-            dialog.save(); settings.sync()
-            self.assertEqual("#202020", settings.value("detached_chart_2_background"))
-            self.assertEqual("#abcdef", settings.value("detached_chart_2_accent"))
-            self.assertEqual("#80cbc4", settings.value("detached_chart_2_holding"))
-            dialog._reset()
-            self.assertEqual("#ffffff", dialog.edits["background"].text())
-            self.assertEqual("#112233", dialog.edits["accent"].text())
-            self.assertEqual("#ffeb96", dialog.edits["holding"].text().lower())
-            dialog.close()
 
     def test_window_can_shrink_and_panels_are_inside_scroll_area(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -255,6 +236,10 @@ class DetachedChartWindowTests(unittest.TestCase):
 
             self.assertTrue(output.is_file())
             self.assertGreater(output.stat().st_size, 0)
+            image = QImage(str(output))
+            self.assertFalse(image.isNull())
+            self.assertGreater(image.width(), 0)
+            self.assertGreater(image.height(), 0)
             warning.assert_not_called()
             window.close()
 

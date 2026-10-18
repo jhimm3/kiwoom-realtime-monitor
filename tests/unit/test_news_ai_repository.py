@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kiwoom_monitor.application.news_analysis import assess_stock_news
+from kiwoom_monitor.domain.time_basis import KST
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.news_ai import (
     AINewsAnalysis, AICompanyImpact, AIRequestUsage, AIThemeCandidate, analysis_body_hash,
@@ -64,12 +67,28 @@ class NewsAIRepositoryTests(unittest.TestCase):
             self.assertEqual("경쟁 심화", shared.reason)
 
     def test_request_log_counts_one_batch_as_one_request(self) -> None:
+        class UtcHostDateTime(datetime):
+            def astimezone(self, tz=None):
+                return super().astimezone(UTC if tz is None else tz)
+
         with tempfile.TemporaryDirectory() as directory:
-            repository = NewsAIRepository(Path(directory) / "monitor.sqlite3")
+            path = Path(directory) / "monitor.sqlite3"
+            now = UtcHostDateTime(2026, 10, 18, 0, 30, tzinfo=KST)
+            repository = NewsAIRepository(path, now_provider=lambda: now)
+            # An earlier KST day belongs to its own usage budget, even though
+            # the simulated UTC host still sees October 17 for both requests.
+            NewsAIRepository(path, now_provider=lambda: now - timedelta(hours=1)).log_request(
+                "gemini", "flash-lite", "batch", 1, 1, AIRequestUsage(1, 2, 3),
+            )
             repository.log_request("gemini", "flash-lite", "batch", 10, 27, AIRequestUsage(66570, 4200, 70770))
 
             self.assertEqual(1, repository.daily_count())
             self.assertEqual((1, 66570, 4200, 70770), repository.daily_usage())
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    [("2026-10-17T23:30:00+09:00",), ("2026-10-18T00:30:00+09:00",)],
+                    connection.execute("SELECT requested_at FROM news_ai_requests ORDER BY id").fetchall(),
+                )
 
     def test_load_many_reads_saved_results_in_one_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

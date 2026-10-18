@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -10,9 +11,9 @@ from unittest.mock import patch
 
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
-from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
+from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AICompanyImpact, AIThemeCandidate
 from kiwoom_monitor.infrastructure.persistence.news_ai_backup import NewsAIBackupService
-from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
+from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository, news_identity
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.news_database import (
     initialize_news_database,
@@ -190,17 +191,43 @@ class NewsDatabaseTests(unittest.TestCase):
                 "공급계약", "100억원 계약", "https://example.com/1", "https://example.com/1",
                 datetime.now(UTC), assess_stock_news("회사", "공급계약", "100억원 계약"),
             )
+            analysis = AINewsAnalysis(
+                "요약", "긍정", 80, "이유", ("계약",), ("실행 위험",), "수주·계약",
+                (AICompanyImpact("회사", "긍정", 80, "이유"),),
+                (AIThemeCandidate("신규 산업", 84, "계약 근거"),),
+            )
             NewsAIRepository(source).save(
                 "000001", item, "gemini", "model", "hash",
-                AINewsAnalysis("요약", "긍정", 80, "이유", ("계약",), (), "수주·계약"),
+                analysis,
             )
+            expected = NewsAIRepository(source).load("000001", item)
 
             NewsAIBackupService(source).export_to(backup)
             restored = NewsAIBackupService(target).import_from(backup)
 
-            self.assertEqual(1, restored)
-            self.assertIsNotNone(NewsAIRepository(target).load("000001", item))
+            self.assertEqual(2, restored)  # Stock analysis and shared company impacts.
+            self.assertEqual(expected, NewsAIRepository(target).load("000001", item))
+            self.assertEqual(
+                NewsAIRepository(source).list_theme_suggestions(),
+                NewsAIRepository(target).list_theme_suggestions(),
+            )
+            self.assertEqual(
+                analysis.company_impacts,
+                NewsAIRepository(target).load_many("000002", (item,), "회사")[news_identity(item)].analysis.company_impacts,
+            )
             self.assertEqual((), StockNewsRepository(target).load("000001"))
+
+            # Older backups never contained candidates; importing one must not
+            # erase candidates already restored from a newer backup.
+            legacy = json.loads(backup.read_text(encoding="utf-8"))
+            for value in legacy["analyses"]:
+                value.pop("theme_candidates", None)
+            for version in (1, 2):
+                with self.subTest(legacy_version=version):
+                    legacy["version"] = version
+                    backup.write_text(json.dumps(legacy), encoding="utf-8")
+                    NewsAIBackupService(target).import_from(backup)
+                    self.assertEqual(expected, NewsAIRepository(target).load("000001", item))
 
 
 if __name__ == "__main__":

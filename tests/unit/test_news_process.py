@@ -42,7 +42,7 @@ class NewsProcessTests(unittest.TestCase):
 
         class Window:
             def set_stock(self, _code: str, _name: str, **kwargs: object) -> None:
-                calls.append(kwargs)
+                calls.append((_code, _name, kwargs))
 
         valid = {
             "code": "005930", "name": "삼성전자",
@@ -61,6 +61,7 @@ class NewsProcessTests(unittest.TestCase):
             "origin_scope": valid["origin_scope"],
         }))  # type: ignore[arg-type]
         self.assertEqual(1, len(calls))
+        self.assertEqual(("005930", "삼성전자"), calls[0][:2])
 
     def test_file_signature_changes_when_database_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -112,6 +113,20 @@ class NewsProcessTests(unittest.TestCase):
                 env=environment,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            def wait_visible(expected):
+                deadline = time.monotonic() + 5
+                state = {}
+                import psutil
+                while time.monotonic() < deadline:
+                    try:
+                        state = json.loads((root / 'news_window_state.json').read_text(encoding='utf-8'))
+                        owned = {process.pid, *(child.pid for child in psutil.Process(process.pid).children(recursive=True))}
+                        if state.get('visible') is expected and state.get('pid') in owned:
+                            return
+                    except (OSError, ValueError):
+                        pass
+                    time.sleep(.02)
+                self.fail(f'child visibility receipt: expected={expected} actual={state}')
             try:
                 deadline = time.monotonic() + 8
                 while not (root / "news.sqlite3").is_file() and time.monotonic() < deadline:
@@ -125,7 +140,7 @@ class NewsProcessTests(unittest.TestCase):
                     json.dumps({"request_id": 1, "action": "show", "code": "005930", "name": "삼성전자"}),
                     encoding="utf-8",
                 )
-                time.sleep(0.2)
+                wait_visible(True)
                 command_path.write_text(
                     json.dumps({
                         "request_id": 2, "action": "sync", "window_mode": "linked",
@@ -139,12 +154,12 @@ class NewsProcessTests(unittest.TestCase):
                     json.dumps({"request_id": 3, "action": "minimize"}),
                     encoding="utf-8",
                 )
-                time.sleep(0.15)
+                wait_visible(False)
                 command_path.write_text(
                     json.dumps({"request_id": 4, "action": "restore"}),
                     encoding="utf-8",
                 )
-                time.sleep(0.15)
+                wait_visible(True)
                 command_path.write_text(
                     json.dumps({"request_id": 5, "action": "shutdown"}),
                     encoding="utf-8",
@@ -152,8 +167,16 @@ class NewsProcessTests(unittest.TestCase):
                 self.assertEqual(0, process.wait(timeout=12))
             finally:
                 if process.poll() is None:
+                    import psutil
+                    children = psutil.Process(process.pid).children(recursive=True)
+                    for child in reversed(children):
+                        child.terminate()
                     process.terminate()
                     process.wait(timeout=5)
+                    _, alive = psutil.wait_procs(children, timeout=5)
+                    for child in alive:
+                        child.kill()
+                    psutil.wait_procs(alive, timeout=5)
 
 
 if __name__ == "__main__":

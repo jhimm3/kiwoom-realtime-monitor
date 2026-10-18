@@ -71,6 +71,7 @@ class AppRuntimeActions:
     """Apply the UI-owned caches and aggregator after the runtime is replaced."""
 
     apply_runtime: Callable[[dict[str, object]], None]
+    capture_state: Callable[[], Callable[[], None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,8 @@ class AppController(QObject):
         self.google_drive = GoogleDriveWorkerController(self)
         self.updates = UpdateWorkerController(self)
         self.market_cache_writer = (
-            MarketCacheWriter(monitor_database_path) if monitor_database_path is not None else None
+            MarketCacheWriter(monitor_database_path, now_provider=self.ranking_now)
+            if monitor_database_path is not None else None
         )
         self.entry_snapshot_writer = (
             EntrySnapshotWriter(journal_database_path, news_database_path,
@@ -588,23 +590,7 @@ class AppController(QObject):
         try:
             assert self._api_runtime_factory is not None
             runtime = self._api_runtime_factory()
-            self.ranking_loader = runtime.get("ranking_loader")  # type: ignore[assignment]
-            for controller, name in (
-                (self.realtime, "realtime_worker_factory"),
-                (self.minute_history, "minute_history_worker_factory"),
-                (self.fundamentals, "fundamentals_worker_factory"),
-                (self.daily_high, "daily_high_worker_factory"),
-                (self.historical_high, "historical_high_worker_factory"),
-                (self.nxt_eligibility, "nxt_eligibility_worker_factory"),
-            ):
-                controller.set_factory(runtime.get(name))  # type: ignore[arg-type]
-            if self.entry_snapshot_writer is not None:
-                self.entry_snapshot_writer.set_investor_loader(runtime.get("entry_investor_loader"))  # type: ignore[arg-type]
-                self.entry_snapshot_writer.set_program_loader(runtime.get("program_trade_loader"))  # type: ignore[arg-type]
-            self.market_data_client = runtime.get("market_data_client")
-            self.ranking_uses_local_fallback = False
-            self.realtime_subscription.reset()
-            actions.apply_runtime(runtime)
+            self._apply_api_runtime(runtime, actions)
         except Exception as error:
             self._api_reloading = False
             self._api_reload_stage = "idle"
@@ -616,6 +602,63 @@ class AppController(QObject):
         self.ranking_execution.end_priority_preparation()
         self.api_reload_completed.emit()
         self.start_initial_ranking()
+
+    def _apply_api_runtime(self, runtime: dict[str, object], actions: AppRuntimeActions) -> None:
+        controllers = (
+            (self.realtime, "realtime_worker_factory"),
+            (self.minute_history, "minute_history_worker_factory"),
+            (self.fundamentals, "fundamentals_worker_factory"),
+            (self.daily_high, "daily_high_worker_factory"),
+            (self.historical_high, "historical_high_worker_factory"),
+            (self.nxt_eligibility, "nxt_eligibility_worker_factory"),
+        )
+        previous = {
+            "ranking_loader": self.ranking_loader, "market_data_client": self.market_data_client,
+            **{name: controller._worker_factory for controller, name in controllers},
+        }
+        writer = self.entry_snapshot_writer
+        investor_cache = None
+        if writer is not None:
+            previous.update(entry_investor_loader=writer._investor_loader, program_trade_loader=writer._program_loader)
+            investor_cache = dict(writer._investor_cache)
+        old_fallback = self.ranking_uses_local_fallback
+        restore_view = actions.capture_state() if actions.capture_state is not None else None
+        try:
+            self.ranking_loader = runtime.get("ranking_loader")
+            for controller, name in controllers:
+                controller.set_factory(runtime.get(name))
+            if writer is not None:
+                writer.set_investor_loader(runtime.get("entry_investor_loader"))
+                writer.set_program_loader(runtime.get("program_trade_loader"))
+            self.market_data_client = runtime.get("market_data_client")
+            self.ranking_uses_local_fallback = False
+            actions.apply_runtime(runtime)
+        except Exception as error:
+            self.ranking_loader = previous["ranking_loader"]
+            self.market_data_client = previous["market_data_client"]
+            self.ranking_uses_local_fallback = old_fallback
+            failures = []
+            for controller, name in controllers:
+                try:
+                    controller.set_factory(previous[name])
+                except Exception as restore_error:
+                    failures.append(f"{name}: {restore_error}")
+            if writer is not None:
+                try:
+                    writer.set_investor_loader(previous["entry_investor_loader"])
+                    writer.set_program_loader(previous["program_trade_loader"])
+                    writer._investor_cache.update(investor_cache or {})
+                except Exception as restore_error:
+                    failures.append(f"entry_snapshot_writer: {restore_error}")
+            if restore_view is not None:
+                try:
+                    restore_view()
+                except Exception as restore_error:
+                    failures.append(f"view: {restore_error}")
+            if failures:
+                raise RuntimeError(f"{error}; runtime restore failed: {'; '.join(failures)}") from error
+            raise
+        self.realtime_subscription.reset()
 
     def flush_minute_cache(self) -> None:
         """실시간 체결을 1초 단위로 묶어 SQLite에 저장한다."""
@@ -709,12 +752,24 @@ class AppController(QObject):
                 prices, highs, market_caps, self.ranking_now().date(),
             )
             return
-        if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_prices"):
-            self.stock_lookup.update_last_prices(prices)
-        if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_market_caps"):
-            self.stock_lookup.update_last_market_caps(market_caps)
-        if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_intraday_highs"):
-            self.stock_lookup.update_intraday_highs(highs, self.ranking_now().date())
+        if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_price_cache"):
+            now = self.ranking_now()
+            try:
+                self.stock_lookup.update_price_cache(
+                    prices, highs, market_caps, now.date(), observed_at=now,
+                )
+            except Exception as error:
+                self.on_price_cache_failed(prices, highs, market_caps, now.date(), str(error))
+            return
+        try:
+            if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_prices"):
+                self.stock_lookup.update_last_prices(prices)
+            if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_market_caps"):
+                self.stock_lookup.update_last_market_caps(market_caps)
+            if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_intraday_highs"):
+                self.stock_lookup.update_intraday_highs(highs, self.ranking_now().date())
+        except Exception as error:
+            self.on_price_cache_failed(prices, highs, market_caps, self.ranking_now().date(), str(error))
 
     def on_price_cache_failed(
         self, prices: object, highs: object, market_caps: object,

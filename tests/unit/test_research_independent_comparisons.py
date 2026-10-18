@@ -11,7 +11,7 @@ from kiwoom_monitor.application.research_evaluation import build_independent_dev
 from kiwoom_monitor.application.research_splits import (
     DevelopmentPartitionSpec, ResearchEvaluationSpec, ResearchFoldSpec,
 )
-from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS
 import test_research_development_partitions as fixtures
 
 
@@ -195,7 +195,7 @@ class IndependentComparisonTests(unittest.TestCase):
         self.assertEqual('duplicate_run_reference', result.partitions[3].excluded_reason)
         self.assertFalse(any(row.status == 'INVALID' for row in result.partitions[:2]), result)
         self.assertEqual(before, repo.path.read_bytes())
-        self.assertEqual(27, repo.schema_version())
+        self.assertEqual(_MIGRATIONS[-1].version, repo.schema_version())
         json.dumps(result.to_dict())
         for values in ((), ('',), ('a',) * 201):
             with self.assertRaises(ValueError):

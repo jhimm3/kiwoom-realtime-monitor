@@ -149,6 +149,8 @@ class SymbolPartitionTests(unittest.TestCase):
             first, _ = self.execute(self.prepare(dataset), 'first')
             second, _ = self.execute(self.prepare(dataset, replace(self.partition, symbol_partition=symbol(1))), 'second')
         self.assertEqual(states[0], states[1]); self.assertNotEqual(first.run_id, second.run_id)
+        self.assertEqual([fixtures._execution().initial_cash_won] * 2, [state.cash_won for state in states])
+        self.assertTrue(all(state.position is None and state.pending_order is None for state in states))
 
     def test_peer_changes_affect_input_identity_context_is_shared_not_sealed(self):
         dataset = self.multi_symbol(); original = self.prepare(dataset); changed = deepcopy(dataset)

@@ -59,12 +59,14 @@ class ImageThemeOcrWorkerControllerTests(unittest.TestCase):
         worker.progress.emit("working")
         worker.completed.emit(("row",))
         worker.failed.emit("failed")
+        worker.running = False
         worker.finished.emit()
 
         self.assertEqual(["working"], progress)
         self.assertEqual([("row",)], completed)
         self.assertEqual(["failed"], failures)
         self.assertEqual([True], finished)
+        self.assertIsNone(controller.worker)
         self.assertEqual(QThread.Priority.LowPriority, worker.priority)
 
     def test_running_worker_is_reused_and_can_be_interrupted(self) -> None:

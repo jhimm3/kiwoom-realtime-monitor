@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from contextlib import closing
 
-from scripts.benchmark_news_classification import reference_label
+from scripts.benchmark_news_classification import reference_label, build_and_run
 
 
 class NewsClassificationBenchmarkTests(unittest.TestCase):
@@ -33,6 +39,31 @@ class NewsClassificationBenchmarkTests(unittest.TestCase):
             "SK하이닉스", "SK하이닉스 ETF 주간 리포트", "이번 주 가격 흐름을 정리했다", "",
         )
         self.assertNotEqual("HIGH", actual.confidence)
+        # The precise category/decision for generic reports is not a user-defined oracle.
+        # Independently verify the benchmark stores the real input and its result.
+        title = "SK하이닉스 ETF 주간 리포트"
+        description = "이번 주 가격 흐름을 정리했다"
+        body = "SK하이닉스 ETF 주간 가격 흐름을 정리했다."
+        document = {"title": title, "description": description, "original_link": "https://publisher.test/report", "published_at": "2026-10-18T09:00:00+09:00"}
+        records = [("history:article", {"stock_code": "000660", "identity": document["original_link"], "article_revision_id": "article-1", "document": document, "available_at": 1}), ("history:body", {"article_revision_id": "article-1", "body_revision_id": "body-1", "status": "fulltext", "body_text": body, "available_at": 2}), ("content:news_article", {"owner": "000660", "document": document}), ("content:news_watchlist", {"document": {"stock_code": "000660", "stock_name": "SK하이닉스"}})]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "benchmark.sqlite3"
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute("CREATE TABLE records(kind TEXT,payload_json TEXT)")
+                db.executemany("INSERT INTO records VALUES(?,?)", [(kind, json.dumps(value, ensure_ascii=False)) for kind, value in records])
+                source_before = db.execute("SELECT * FROM records").fetchall()
+            summary = build_and_run(path)
+            self.assertEqual((1, 1), (summary["total_items"], summary["candidate_items"]))
+            self.assertEqual(1, sum(summary["reference_counts"].values()))
+            with closing(sqlite3.connect(path)) as db:
+                self.assertEqual(source_before, db.execute("SELECT * FROM records").fetchall())
+                row = db.execute("SELECT title,description,raw_body_length,raw_body_hash,payload_json FROM news_audit_items").fetchone()
+                self.assertEqual((title, description, len(body), hashlib.sha256(body.encode()).hexdigest()), row[:4])
+                self.assertEqual(document["original_link"], json.loads(row[4])["identity"])
+                self.assertEqual(("body-1", "article-1", body), db.execute("SELECT body_revision_id,article_revision_id,clean_body_text FROM news_cleaned_bodies").fetchone())
+                self.assertEqual(1, db.execute("SELECT COUNT(*) FROM news_reference_labels").fetchone()[0])
+                self.assertEqual(1, db.execute("SELECT COUNT(*) FROM news_candidate_runs").fetchone()[0])
+
 
     def test_reference_drops_social_mou(self) -> None:
         actual = reference_label(

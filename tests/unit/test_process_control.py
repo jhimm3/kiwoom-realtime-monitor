@@ -60,6 +60,7 @@ class ProcessControlTests(unittest.TestCase):
     def test_json_command_replaces_target_without_leaving_temporary_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "window_command.json"
+            path.write_text('{"request_id": 1}', encoding="utf-8")
             write_json_command(path, {"request_id": 7, "name": "테스트"})
 
             self.assertEqual(
@@ -67,6 +68,10 @@ class ProcessControlTests(unittest.TestCase):
                 json.loads(path.read_text(encoding="utf-8")),
             )
             self.assertFalse(path.with_suffix(".tmp").exists())
+            with patch.object(Path, "replace", side_effect=OSError("publication failed")):
+                with self.assertRaisesRegex(OSError, "publication failed"):
+                    write_json_command(path, {"request_id": 8})
+            self.assertEqual(7, json.loads(path.read_text(encoding="utf-8"))["request_id"])
 
     def test_development_command_uses_module_entry_point(self) -> None:
         command = build_auxiliary_command(
@@ -106,6 +111,7 @@ class ProcessControlTests(unittest.TestCase):
         process.wait.assert_called_once_with(timeout=3.0)
         process.terminate.assert_not_called()
         process.kill.assert_not_called()
+        self.assertEqual([call.poll(), call.wait(timeout=3.0)], process.mock_calls)
 
     def test_stop_process_escalates_to_terminate_and_kill(self) -> None:
         process = Mock()
@@ -126,6 +132,10 @@ class ProcessControlTests(unittest.TestCase):
         self.assertEqual([call(timeout=2.0), call(timeout=1.0), call(timeout=1.0)], process.wait.call_args_list)
         process.terminate.assert_called_once_with()
         process.kill.assert_called_once_with()
+        self.assertEqual([
+            call.poll(), call.wait(timeout=2.0), call.terminate(),
+            call.wait(timeout=1.0), call.kill(), call.wait(timeout=1.0),
+        ], process.mock_calls)
 
     def test_command_channel_increments_and_writes_request_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -145,10 +155,12 @@ class ProcessControlTests(unittest.TestCase):
 
     def test_time_based_channel_keeps_ids_monotonic(self) -> None:
         channel = JsonCommandChannel(None, time_based_ids=True)
-        first = channel.advance()
-        second = channel.advance()
+        with patch("kiwoom_monitor.presentation.process_control.time.time_ns", side_effect=[100, 100, 50]):
+            first = channel.advance()
+            second = channel.advance()
+            third = channel.advance()
         self.assertGreater(first, 0)
-        self.assertGreater(second, first)
+        self.assertEqual((100, 101, 102), (first, second, third))
 
     def test_request_inbox_returns_each_request_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -202,6 +214,15 @@ class ProcessControlTests(unittest.TestCase):
         launch.assert_called_once_with(
             ["research"], Path("workspace"), below_normal_priority=True,
         )
+        from kiwoom_monitor.presentation.process_control import launch_auxiliary_process
+
+        with patch("kiwoom_monitor.presentation.process_control.subprocess.Popen",
+                   return_value=process) as popen:
+            launch_auxiliary_process(["research"], Path("workspace"), below_normal_priority=True)
+        expected_flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                          | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+        self.assertEqual(expected_flags, popen.call_args.kwargs["creationflags"])
+        self.assertEqual("workspace", popen.call_args.kwargs["cwd"])
 
     def test_process_manager_clears_process_after_stop(self) -> None:
         process = Mock()

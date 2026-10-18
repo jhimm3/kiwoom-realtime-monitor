@@ -307,7 +307,7 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         manual = ExecutionRepository(self.store)
         self.assertTrue(manual.claim_runtime(
             "mock", ACCOUNT_REF, "manual-run", "manual-owner",
-            datetime.now(timezone.utc), lease_seconds=60,
+            NOW, lease_seconds=60,
         ))
         runtime, _ = self._runtime()
         with self.assertRaisesRegex(RuntimeError, "another mock execution runtime"):
@@ -517,7 +517,7 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         )
         self.assertTrue(execution.claim_runtime(
             "mock", ACCOUNT_REF, runtime.run_id, runtime.owner_token,
-            datetime.now(timezone.utc), lease_seconds=60,
+            NOW + timedelta(seconds=1), lease_seconds=60,
         ))
         intent = OrderIntent(
             "intent-after-stop", runtime.run_id, "decision-after-stop", ACCOUNT_REF,
@@ -650,7 +650,7 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         ))
         self.assertTrue(execution.claim_runtime(
             "mock", ACCOUNT_REF, "replacement-run", "replacement-owner",
-            datetime.now(timezone.utc), lease_seconds=60,
+            NOW + timedelta(seconds=1), lease_seconds=60,
         ))
         with self.assertRaisesRegex(RuntimeError, "ownership was lost"):
             record_mock_automation_recovery(

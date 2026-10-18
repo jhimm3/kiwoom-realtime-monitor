@@ -62,6 +62,9 @@ class CentralSchemaMigrationTests(unittest.TestCase):
         self.assertIn("postgres_only(value JSONB)", sql)
         self.assertIn("VALUES(%s,%s,%s)", sql)
         self.assertNotIn("SQLITE ONLY", sql)
+        inserted = [params for query, params in cursor.queries if query.startswith("INSERT INTO central_schema_migrations")]
+        self.assertEqual((1, "baseline"), inserted[0][:2])
+        self.assertTrue(inserted[0][2].endswith("+09:00"))
 
     def test_non_contiguous_plan_is_rejected_before_sql(self) -> None:
         cursor = _RecordingCursor()

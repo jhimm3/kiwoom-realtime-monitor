@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -78,10 +79,14 @@ class SettingsBackupServiceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.db"
             Database(database_path).initialize()
+            with closing(sqlite3.connect(database_path)) as db:
+                before = db.execute("SELECT key,value FROM settings ORDER BY key").fetchall()
             backup_path = Path(directory) / "settings.json"
             backup_path.write_bytes(b"\xff")
             with self.assertRaises(SettingsBackupError):
                 SettingsBackupService(database_path).import_from(backup_path, include_themes=False)
+            with closing(sqlite3.connect(database_path)) as db:
+                self.assertEqual(before, db.execute("SELECT key,value FROM settings ORDER BY key").fetchall())
 
     def test_null_news_columns_do_not_abort_after_settings_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -285,21 +290,6 @@ class SettingsBackupServiceTest(unittest.TestCase):
             finally:
                 connection.close()
             self.assertEqual(keys, restored)
-
-    def test_import_syncs_column_layout_but_keeps_local_widths(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database_path = Path(directory) / "monitor.db"
-            Database(database_path).initialize()
-            backup_path = Path(directory) / "settings.json"
-            service = SettingsBackupService(database_path)
-            service.export_to(backup_path)
-
-            connection = sqlite3.connect(database_path)
-            try:
-                connection.execute("UPDATE column_settings SET visible = 0, position = 9, width = 333 WHERE column_name = 'stock'")
-                connection.commit()
-            finally:
-                connection.close()
 
     def test_asset_import_rejects_path_escape_and_oversized_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

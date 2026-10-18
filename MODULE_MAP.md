@@ -1,5 +1,27 @@
 # 현재 모듈 지도
 
+구조 퇴행 방지: [기능별 책임 계약](docs/architecture/r3-ownership.md#필요한-기능군부터-읽기)에서 관련 기능군만 선택한다. `scripts/check_architecture.py`는 기존 `select_ci_groups._dependency_graph`와 구조 계약의 정적 차이만 검사한다. native 비용·실패/종료·연결은 기존 기능 검사를 재사용하며, 도구 자체의 결함 주입 검사는 `tests/unit/test_architecture_guardrails.py`와 기존 runner/CI에 등록한다. 제품 owner·런타임 계층은 추가하지 않는다.
+
+2026-10-18 선택적 테스트 도구: 기존 `check_test_changes --query`가 Git 전후 정의·선택 범위와 관련 감사/후속 항목만 조회하고, `select_ci_groups.test_impact`의 기존 import 그래프가 직접/간접·fixture·리터럴 계약 소비자 및 불명확한 동적 의존성의 profile 확대 근거를 제공한다. `run_regression --selection`은 현재 소스/선정 재대조 후 기존 batch·worker/종료·로그 책임을 재사용하고 실제 모듈/ID 실행을 대조한다. `--summarize`/`--compact`는 저장된 결과에서 성공 수만 요약하고 실패 상세만 출력한다. 관리 경로이며 앱/NAS/주문 연결은 추가하지 않는다. [명령·외부 환경·한계](docs/INCREMENTAL_TEST_REVIEW.md#선택적-조회실행-명령).
+
+2026-10-18 감사깊이지도: 전체394모듈을과거근거와대조해 코드정밀완료25/부분175/정적만194로구분했다. [R3정본](REFACTOR_BACKLOG.md#394개-모듈-감사-깊이-대조--2026-10-18)과[모듈별본문·잔여JSON](docs/workstreams/refactor-module-coverage-20261018.json)에과거/추가scope·caller/consumer/실패·미검토함수를보존한다. 신규051~062대기,실제기능전체수락/운영검증아님. 다음은002+023의기존batch날짜실패계약이다.
+
+2026-10-18 증분 테스트 관리: `scripts/check_test_changes.py`는 감사 원문을 보존하면서 `tests/test_review_baseline.json.gz`의 기계 채택점과 `tests/test_review_changes.jsonl`의 변경 검토만 대조한다. 기존 `run_regression`의 등록·실행 경계를 재사용하고 계획/실행 ID를 Windows·Linux/PG 보고서에 남겨 현재 소스의 관련 검사 실행과 수를 확인한다. 앱·NAS·운영 DB·주문 경로와 분리한다. [Codex의 의미 검토·자동 검사·채택 전 변경/동적 suite 한계](docs/INCREMENTAL_TEST_REVIEW.md).
+
+2026-10-18 R3 2차 감사: [정본](REFACTOR_BACKLOG.md#2차-정밀-감사-결과--2026-10-18)의77개 세부경로에 실제caller→상태owner→native저장/소비→실패/동시/close를 기록했다. AppController/QueryStore/worker/runtime의 계층 필요성과 내부 책임을 별도 평가하고030~050을 등록했다. 기존제품구조변경0. 다음은002+023의원거래일실패재전달이며 기존batch/range구현을 보존한다.
+
+2026-10-18 R3-004: `MarketThemeShadowRuntime._market_minutes → CentralRealtimeCollector.load_live_minute_bars → 기존 SQLite/PG load_minute_bars`의 세 실행 경계를 유지하고 optional half-open 분 범위만 전달한다. Runtime의 기존10분 window/KST 거래일 교집합에 한해 사용하며 full-day API 기본값은 유지한다. 같은 bound로 동결 RAM delta/SQL을 제한하고 기존 native authority/op dedup/snapshot·cache/token·owned read/close·capture를 재사용한다. 고정 native9000→200/최종200행 동일·기능58건 통과다. 실제 PG/운영과 병행 뉴스3서명 때문에 남은 전체 source/audit1실패는 [R3 정본](REFACTOR_BACKLOG.md#r3-004--ram-shadow-분봉의-하루-전체-범위직렬-read)에 구분했다. 새 계층/파일/태스크/index 없음.
+
+2026-10-18 R3-002: `AppController.flush_price_cache → MarketCacheWriter._save_prices → StockRepository.update_price_cache → sqlite_transaction`에서 기존 가격·시총·고가/35일 정리를 한 transaction으로 처리한다. 실제 저장소의 writer 없는 경로도 동일 batch를 사용하고 legacy 개별 메서드는 같은 구현의 호환 진입점이다. controller의 `ranking_now`를 주입해 별도 시계 조회 없이 신규 timestamp를 KST로 저장한다. 20종목 연결/COMMIT3→1, 새 계층/파일/schema 없음. 최신 연결 검증·공유 시계 변경의 분봉 비교 보완과 미검증 범위는 [R3 정본](REFACTOR_BACKLOG.md#r3-002--한-가격-캐시-job의-다중-transaction)을 따른다.
+
+2026-10-18 검사별 의미 감사: CI 기준5,504개 ID를 개별 대조한 최초 감사 뒤, 사용자 요청으로 미반영 보강117건과 확인된 제품 오류를 수정했다. 일지의 실제 순간 비교, metadata 범위, 뉴스 백업/수락순서 페이지, 저장 실패/API 교체 복원과 기존 키움 시계의 writer·API·UI 소비 연결을 확인한다. NAS worker/runner 수정은 로컬 격리 검사이며 실제 NAS 적용과 구분한다. 해석 미결49건은 유지한다. [최초 개별 원장](docs/workstreams/test-case-review-20261018/README.md)·[후속 연결과 실행 범위](docs/workstreams/test-case-review-20261018/FOLLOWUP.md).
+
+2026-10-18 R3-001: `MainWindow._on_trade_tick → AppController.queue_minute_bar/flush_minute_cache → MarketCacheWriter._save_minute → MinuteBarRepository._upsert_many`의 기존 수명·저장 경계를 유지한다. `_upsert_many`는 같은 `BEGIN IMMEDIATE`에서 읽은 completeness/origin/source 한 벌을 권한/품질 판단에 공유하고, gap/empty coverage 검사와 같은 파일의 순수 predicate를 사용한다. 새 계층/파일·writer·schema·업무 시계·commit 경계가 없다. 20종목의 SELECT40→20·모든 값/metadata 동일·관련58건을 검증했다. [전체 감사·기능별 연결·다음 작업 정본](REFACTOR_BACKLOG.md).
+
+2026-10-18 순위표 저장값 복원 정리: `bootstrap.py`가 주입하는 기존 `StockRepository.load_ranking_cache`는 시장·현재가·당일고가·기본정보·당일 확인 NXT를 연결1회/SELECT2회로 읽고 `RankingStockCache`로 전달한다. `MainWindow._apply_ranking_view`는 이를 기존 RAM/표에 적용한다. 시장 분류만 필요한 고정 구성 종목은 다른 표시값에 섞지 않는다. 기본정보 변환은 같은 저장소 함수로 공유하며 일봉·역사적 신고가·writer/주문 책임과 부분 lookup 호환 경로는 유지한다. 새 서비스·파일·시계·저장 경로는 없다. 관련94건과 로컬 측정 범위는 [현재 상태](docs/CURRENT_STATUS.md#2026-10-18-순위표-저장값-복원의-반복-조회-정리)를 따른다.
+
+2026-10-18 테스트 정리: 기존 `run_regression`의 계획과 격리는 그대로 두고 manifest의 테마 색상 중복 등록을 제거했다. REST 간격 시험은 공개 request의 송신 시각, 뉴스 선택 시험은 실제 Qt 키 입력 후 저장 원문 표시를 검증한다. 혼합 offset의 현재 동기화 회귀는 `test_central_content_sync`가 소유하고 변환 도구8건은 `test_storage_time_kst_migration`에 남는다. 앱의 책임·호출 경로·Runtime/DB/주문 구조는 바뀌지 않았다. [현재 감사](docs/TEST_FINAL_QUALITY_AUDIT.md#2026-10-18-사용자-5개-기준에-따른-검사-정리).
+
 2026-10-18 연구1일 실제 수신 재생: `application/morning_market_brief.validate_output(..., research=True)`는 시각의 날짜만 있는 표기·시간대 미확인 설명을 원래 문자열로 보존하고 unknowns에 남긴다. 명확한 기준 날짜 이후 표기도 따로 표시하며 당시 버전으로 자동 확정하지 않는다. 기존 v4 시각 판정과 구조/참조 계약은 유지한다. `infrastructure/chatgpt_plan.research(..., stream_timeout=None)`는 이번 사용자 승인 단일 웹 요청에서 전체 스트림 기한을 없앨 수 있고 기본600초/일반180초·취소/오류 처리는 그대로다. 새 owner/수집기/DB/주문 경로는 없다. 실제 단일 응답·초기 실패·추가 호출0 재생은 [연구 프롬프트 기록](docs/workstreams/news-market-research-prompt.md#실제-1일-수신과-보존-재생)에 구분한다.
 
 2026-10-17 00 기준 연구 프롬프트: 기존 `application/morning_market_brief.py`의 DTO/스키마/검증 책임 안에서 `ResearchBriefOutput`, `render_research_prompt`, `validate_output(..., research=True)`, `research_feature_rows`를 추가했다. v4 기반 구조를 재사용하고 별도 연구 schema/source_mode·사건 변화·대상별 영향·추가 수치를 받으며, 설명 문장은 실행하지 않는다. 새 수집기/서비스/Runtime/저장소/주문 경로는 없다. 운영 설정·과거 batch·자동 연구 연결은 미적용이고 수집 STOP 유지다. [00 대응과 현재 범위](docs/workstreams/news-market-research-prompt.md).

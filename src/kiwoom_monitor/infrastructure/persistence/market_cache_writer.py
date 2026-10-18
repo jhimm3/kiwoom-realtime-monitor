@@ -13,6 +13,7 @@ from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+from kiwoom_monitor.domain.time_basis import kst_now
 
 
 class MarketCacheWriter(QThread):
@@ -28,9 +29,11 @@ class MarketCacheWriter(QThread):
     daily_high_failed = Signal(str, str)
     fundamentals_failed = Signal(str, str)
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, now_provider=None) -> None:
         super().__init__()
         self._database_path = database_path
+        # Standalone/offline tests may omit the app's existing broker clock.
+        self._now = now_provider or kst_now
         self._queue: Queue[tuple[object, ...]] = Queue()
 
     def enqueue_minute_bars(
@@ -82,9 +85,9 @@ class MarketCacheWriter(QThread):
         return self.wait(timeout_ms)
 
     def run(self) -> None:
-        minute_repository = MinuteBarRepository(self._database_path)
+        minute_repository = MinuteBarRepository(self._database_path, now_provider=self._now)
         stock_repository = StockRepository(self._database_path)
-        daily_repository = DailyBarRepository(self._database_path)
+        daily_repository = DailyBarRepository(self._database_path, now_provider=self._now)
         while not self.isInterruptionRequested() or not self._queue.empty():
             try:
                 job = self._queue.get(timeout=0.1)
@@ -163,9 +166,9 @@ class MarketCacheWriter(QThread):
         trade_date: date,
     ) -> None:
         try:
-            repository.update_last_prices(prices)
-            repository.update_last_market_caps(market_caps)
-            repository.update_intraday_highs(highs, trade_date)
+            repository.update_price_cache(
+                prices, highs, market_caps, trade_date, observed_at=self._now(),
+            )
         except Exception as error:
             self.price_failed.emit(prices, highs, market_caps, trade_date, str(error))
 

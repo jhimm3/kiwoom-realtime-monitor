@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,7 +45,12 @@ class LocalCentralServerProcessTests(unittest.TestCase):
             with patch.object(manager, "_is_ready", side_effect=[False, True]):
                 self.assertTrue(manager.start())
         command = popen.call_args.args[0]
-        self.assertEqual(["python-test", "-m", "kiwoom_monitor.central_server"], command[:3])
+        self.assertEqual(["python-test", "-m", "kiwoom_monitor.central_server", "--parent-pid", str(os.getpid())], command)
+        options = popen.call_args.kwargs
+        environment = options["env"]
+        self.assertEqual("sqlite:///" + (Path(directory) / "monitor.sqlite3").resolve().as_posix(), environment["KIWOOM_SERVER_DATABASE_URL"])
+        self.assertEqual(("secret", "127.0.0.1", "8787", "real", "app", "secret"), tuple(environment[key] for key in ("MONITOR_SERVER_ACCESS_TOKEN", "KIWOOM_SERVER_HOST", "KIWOOM_SERVER_PORT", "KIWOOM_ENVIRONMENT", "KIWOOM_APP_KEY", "KIWOOM_SECRET_KEY")))
+        self.assertEqual((subprocess.DEVNULL,) * 3, tuple(options[key] for key in ("stdin", "stdout", "stderr")))
 
     @patch("kiwoom_monitor.infrastructure.central_server_process.LocalApiConfig")
     @patch("kiwoom_monitor.infrastructure.central_server_process.subprocess.Popen")

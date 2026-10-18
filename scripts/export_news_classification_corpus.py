@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import sqlite3
 from datetime import UTC, datetime
@@ -49,11 +48,11 @@ class NewsCorpusExporter:
             raise ValueError(f"지원하지 않는 history kind: {kind}")
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
-        as_of: float | None = None
+        before_revision_id = ""
         while True:
             parameters: dict[str, object] = {"limit": self._page_size}
-            if as_of is not None:
-                parameters["as_of"] = as_of
+            if before_revision_id:
+                parameters["before_revision_id"] = before_revision_id
             page = self.get_json(f"/api/v1/news/history/{kind}", parameters)
             rows = page.get("revisions", [])
             if not isinstance(rows, list) or not rows:
@@ -67,17 +66,15 @@ class NewsCorpusExporter:
                     seen.add(identity)
                     result.append(row)
                     added += 1
-            available = [
-                float(row["available_at"])
-                for row in rows
-                if isinstance(row, dict) and row.get("available_at") is not None
-            ]
-            if len(rows) < self._page_size or not available:
+            if len(rows) < self._page_size:
                 break
-            next_as_of = math.nextafter(min(available), -math.inf)
-            if added == 0 or (as_of is not None and next_as_of >= as_of):
+            next_revision_id = next((
+                str(row[REVISION_KEYS[kind]]) for row in reversed(rows)
+                if isinstance(row, dict) and row.get(REVISION_KEYS[kind])
+            ), "")
+            if added == 0 or not next_revision_id or next_revision_id == before_revision_id:
                 raise RuntimeError(f"{kind} history 페이지가 진행되지 않습니다.")
-            as_of = next_as_of
+            before_revision_id = next_revision_id
         return result
 
     def content(self, collection: str) -> list[dict[str, Any]]:

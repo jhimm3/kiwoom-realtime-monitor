@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import datetime, timezone
 import unittest
 import sqlite3
 from pathlib import Path
@@ -14,10 +15,6 @@ from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigrati
 from kiwoom_monitor.domain.research_contract import THEME_BACKUP_FORMAT, THEME_BACKUP_VERSION
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
 
-try:
-    from fastapi.testclient import TestClient
-except ImportError:  # pragma: no cover - server extra가 없는 최소 개발 환경
-    TestClient = None  # type: ignore[assignment,misc]
 
 
 def _document(
@@ -122,10 +119,10 @@ class ThemeHistoryRepositoryTests(unittest.TestCase):
             late = _document(
                 created_at="2026-09-12T08:00:00+09:00", assignments=("000660",),
             )
-            with patch("kiwoom_monitor.central_server.database_documents.time", side_effect=[100.0, 101.0]):
+            with patch.object(store, "_now_provider", side_effect=[datetime.fromtimestamp(value,timezone.utc) for value in (100.,101.)]):
                 store.replace_documents("theme_metadata", _snapshot(current, origin="pc-a"))
             before_late = store.load_theme_snapshots(available_at=150.0)
-            with patch("kiwoom_monitor.central_server.database_documents.time", side_effect=[200.0, 201.0]):
+            with patch.object(store, "_now_provider", side_effect=[datetime.fromtimestamp(value,timezone.utc) for value in (200.,201.)]):
                 store.replace_documents("theme_metadata", _snapshot(late, origin="pc-b"))
             after_late = store.load_theme_snapshots()
             replay = store.load_theme_snapshots(available_at=150.0)
@@ -163,23 +160,23 @@ class ThemeHistoryRepositoryTests(unittest.TestCase):
         self.assertEqual("기본 테마", reloaded[0]["document"]["active_profile"])
 
 
-@unittest.skipIf(TestClient is None, "fastapi server extra is not installed")
-class ThemeHistoryApiTests(unittest.TestCase):
-    def test_history_endpoint_reports_unknown_before_first_snapshot(self) -> None:
+class ThemeHistoryApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_history_endpoint_reports_unknown_before_first_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
                 f"sqlite:///{Path(directory) / 'central.sqlite3'}", "private-token",
             )
             headers = {"Authorization": "Bearer private-token"}
-            with TestClient(create_app(settings)) as client:  # type: ignore[misc]
-                unknown = client.get(
+            import httpx
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(settings)), base_url="http://offline") as client:
+                unknown = await client.get(
                     "/api/v1/themes/history?as_of=0", headers=headers,
                 )
-                saved = client.put(
+                saved = await client.put(
                     "/api/v1/content/theme_metadata", headers=headers,
                     json={"documents": _snapshot(_document())},
                 )
-                known = client.get("/api/v1/themes/history", headers=headers)
+                known = await client.get("/api/v1/themes/history", headers=headers)
 
         self.assertEqual(200, unknown.status_code)
         self.assertFalse(unknown.json()["known"])

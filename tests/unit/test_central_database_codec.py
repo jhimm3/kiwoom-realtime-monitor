@@ -18,19 +18,31 @@ from kiwoom_monitor.central_server.database_codec import (
 
 class CentralDatabaseCodecTests(unittest.TestCase):
     def test_minute_bar_round_trip_preserves_contract_column_order(self) -> None:
-        value = {column: index for index, column in enumerate(MINUTE_BAR_COLUMNS)}
+        expected_columns = (
+            "trading_date", "minute", "code", "market", "open", "high", "low", "close",
+            "volume", "trade_value_million_won", "updated_at",
+        )
+        value = dict(zip(expected_columns, range(11), strict=True))
 
         row = bar_value_rows([value], minute=True)[0]
         restored = bar_result_rows([row], minute=True)[0]
 
-        self.assertEqual(tuple(value[column] for column in MINUTE_BAR_COLUMNS), row)
+        self.assertEqual(expected_columns, MINUTE_BAR_COLUMNS)
+        self.assertEqual(tuple(range(11)), row)
         self.assertEqual(value, restored)
 
     def test_daily_bar_round_trip_uses_daily_columns(self) -> None:
-        value = {column: index for index, column in enumerate(DAILY_BAR_COLUMNS)}
+        expected_columns = (
+            "trading_date", "code", "market", "open", "high", "low", "close", "volume",
+            "trade_value_million_won", "updated_at",
+        )
+        value = dict(zip(expected_columns, range(10), strict=True))
 
-        restored = bar_result_rows(bar_value_rows([value], minute=False), minute=False)
+        stored = bar_value_rows([value], minute=False)
+        restored = bar_result_rows(stored, minute=False)
 
+        self.assertEqual(expected_columns, DAILY_BAR_COLUMNS)
+        self.assertEqual([tuple(range(10))], stored)
         self.assertEqual([value], restored)
 
     def test_limit_and_offset_are_bounded_for_both_databases(self) -> None:

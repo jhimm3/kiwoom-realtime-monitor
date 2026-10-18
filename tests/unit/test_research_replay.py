@@ -37,6 +37,12 @@ class ResearchReplayTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(("005930",), first[0].codes)
         self.assertEqual(1, len(first))
+        mixed = [dict(values[0], available_at="2026-09-12T00:00:03+00:00"),
+                 dict(values[1], available_at="2026-09-12T09:00:01+09:00")]
+        ordered = replay_candidate_universe(mixed, as_of=cutoff, chronological=True)
+        self.assertEqual(["a", "b"], [frame.revision_id for frame in ordered])
+        self.assertEqual(ordered, replay_candidate_universe(reversed(mixed), as_of=cutoff, chronological=True))
+
 
     def test_naive_virtual_clock_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "timezone-aware"):

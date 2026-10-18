@@ -99,6 +99,13 @@ class CentralAccountQueryTests(unittest.IsolatedAsyncioTestCase):
                 api_id="kt00007", path="/api/dostk/acnt", body={"ord_dt": "20260912"},
                 batch_id=str(first["batch_id"]), page_index=1, next_key="cursor-1",
             )
+        for page_index, cursor in ((1, "wrong-cursor"), (2, "cursor-1")):
+            with self.subTest(page_index=page_index, cursor=cursor):
+                with self.assertRaisesRegex(ValueError, "CURSOR_MISMATCH"):
+                    await manager.query(
+                        api_id="kt00007", path="/api/dostk/acnt", body={"ord_dt": "20260913"},
+                        batch_id=str(first["batch_id"]), page_index=page_index, next_key=cursor,
+                    )
         self.assertEqual(1, len(broker.calls))
 
     async def test_binding_change_invalidates_unfinished_batch(self) -> None:

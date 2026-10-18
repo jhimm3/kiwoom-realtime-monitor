@@ -624,16 +624,14 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
             store.close()
 
     def test_source_diagnostics_api_is_authenticated(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-            from kiwoom_monitor.central_server.app import create_app
-            from kiwoom_monitor.central_server.config import CentralServerSettings
-        except ImportError:
-            self.skipTest("FastAPI test dependencies are unavailable")
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.config import CentralServerSettings
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
                 f"sqlite:///{Path(directory) / 'central.sqlite3'}", "private-token",
-                news_history_jobs_enabled=False,
+                news_history_jobs_enabled=False, news_query_set_enabled=False,
+                news_naver_market_enabled=False,
             )
             with TestClient(create_app(settings)) as client:
                 self.assertEqual(401, client.get("/api/v1/news/sources").status_code)

@@ -1,4 +1,5 @@
 import unittest
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,6 +24,10 @@ class Cursor:
         self.statements.append((sql, parameters))
         if self.fail_metadata and sql.startswith('INSERT INTO central_market_data_observation_meta'):
             raise RuntimeError('metadata failure')
+
+
+    def fetchone(self):
+        return None
 
 
 class Connection:
@@ -69,6 +74,9 @@ class DatasetBatchPostgresTests(unittest.TestCase):
         self.assertEqual((123, 123), (sql[1][1][3], sql[1][1][8]))
         self.assertEqual(24, len(sql[2][1]))
         self.assertEqual((1, 0, True), (self.connection.commits, self.connection.rollbacks, self.connection.closed))
+        self.assertEqual(['market-0','market-1'], [sql[1][1][i] for i in (1,6)])
+        self.assertEqual([{'price':0},{'price':1}], [json.loads(sql[1][1][i]) for i in (4,9)])
+        self.assertEqual(['market-0','market-1'], [sql[2][1][i] for i in (1,13)])
 
     def test_duplicate_snapshot_keys_keep_sequential_updates(self):
         batch = values()
@@ -85,11 +93,12 @@ class DatasetBatchPostgresTests(unittest.TestCase):
 
     def test_research_history_retains_per_row_append_order(self):
         batch = [('ranking', *row[1:]) for row in values()]
-        with patch.object(datasets, '_append_postgres_observation_revision') as append:
-            self.store.save_dataset_snapshots(batch)
-        self.assertEqual(2, append.call_count)
-        self.assertEqual(['market-0', 'market-1'], [c.args[2] for c in append.call_args_list])
-        self.assertEqual(5, len(self.connection.probe.statements))
+        self.store.save_dataset_snapshots(batch)
+        inserted = [p for sql,p in self.connection.probe.statements if sql.startswith('INSERT INTO central_observation_revisions')]
+        self.assertEqual(['market-0', 'market-1'], [row[7] for row in inserted])
+        self.assertEqual([{'price':0}, {'price':1}], [json.loads(row[-1]) for row in inserted])
+        self.assertTrue(all(row[6] == 'ranking' for row in inserted))
+        self.assertEqual(1, self.connection.commits)
 
     def test_cache_invalidation_stays_sequential_and_locked(self):
         batch = [('top20_index', '2020-01-01', f'key-{i}', {}, None) for i in range(2)]

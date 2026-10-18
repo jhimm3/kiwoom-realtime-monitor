@@ -135,6 +135,63 @@ class DelayedRankingProducer(DelayedProducer):
 
 
 class AppControllerTests(unittest.TestCase):
+    def test_price_writer_uses_current_loader_clock_and_shutdown_reloads_complete_cache(self):
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            repository = StockRepository(path)
+            repository.upsert("A", "A", "KOSPI")
+            repository.update_fundamentals("A", 900, 50)
+            old = datetime(2026, 10, 16, 9)
+            current = datetime(2026, 10, 16, 10)
+            controller = self.controller([], monitor_database_path=path,
+                                         ranking_loader=SimpleNamespace(server_now=lambda: old))
+            controller.start_market_cache_writer()
+            # The writer borrows the current loader, including after runtime replacement.
+            controller.ranking_loader = SimpleNamespace(server_now=lambda: current)
+            controller.queue_price_cache("A", price=100, high=110, market_cap=1000)
+            self.assertFalse(controller.request_close())
+            self.wait_until(controller.request_close)
+            self.assertFalse(controller.market_cache_writer.isRunning())
+            cached = repository.load_ranking_cache(("A",), ("A",), current.date())
+            self.assertEqual({"A": 100}, cached.last_prices)
+            self.assertEqual({"A": 110}, cached.intraday_highs)
+            self.assertEqual(1000, cached.fundamentals["A"].market_cap_eok)
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual("2026-10-16T10:00:00+09:00", con.execute(
+                    "SELECT last_price_updated_at FROM stocks").fetchone()[0])
+
+    def test_price_cache_without_writer_uses_same_transaction_and_restores_failed_batch(self):
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            repository = StockRepository(path)
+            repository.upsert("A", "A")
+            now = datetime(2026, 10, 16, 10)
+            controller = self.controller([], stock_lookup=repository,
+                                         ranking_loader=SimpleNamespace(server_now=lambda: now))
+            with closing(sqlite3.connect(path)) as con:
+                con.execute("CREATE TRIGGER fail_high BEFORE INSERT ON intraday_highs BEGIN SELECT RAISE(ABORT,'high fault'); END")
+                con.commit()
+            controller.queue_price_cache("A", price=100, high=110, market_cap=1000)
+            controller.flush_price_cache()
+            self.assertEqual({"A": 100}, controller.pending_prices)
+            self.assertEqual({"A": 110}, controller.pending_highs)
+            self.assertEqual({"A": 1000}, controller.pending_market_caps)
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual((None, None), con.execute("SELECT last_price,market_cap FROM stocks").fetchone())
+                con.execute("DROP TRIGGER fail_high")
+                con.commit()
+            controller.queue_price_cache("A", price=105)
+            controller.flush_price_cache()
+            self.assertFalse(controller.pending_prices or controller.pending_highs or controller.pending_market_caps)
+            self.assertEqual({"A": 105}, repository.load_last_prices(("A",)))
+            self.assertEqual({"A": 110}, repository.load_intraday_highs(("A",), now.date()))
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -251,6 +308,31 @@ class AppControllerTests(unittest.TestCase):
         )
         self.assertFalse(controller.pending_prices or controller.pending_highs or controller.pending_market_caps)
         self.assertFalse(controller.pending_minutes or controller.pending_market_minutes)
+
+    def test_writer_free_price_failure_preserves_all_values_and_retries_latest(self):
+        for failed_method in ("update_last_prices", "update_last_market_caps", "update_intraday_highs"):
+            with self.subTest(failed_method=failed_method):
+                saved = {}
+                lookup = Mock(spec=["update_last_prices", "update_last_market_caps", "update_intraday_highs"])
+                controller = self.controller([], stock_lookup=lookup,
+                    ranking_loader=SimpleNamespace(server_now=lambda: datetime(2026, 10, 6, 10, 0)))
+                controller.queue_price_cache("005930", price=100, high=110, market_cap=200.)
+                def fail(*args):
+                    controller.queue_price_cache("005930", price=103, high=113, market_cap=203.)
+                    raise OSError("injected fallback failure")
+                getattr(lookup, failed_method).side_effect = fail
+                controller.flush_price_cache()
+                self.assertEqual({"005930": 103}, controller.pending_prices)
+                self.assertEqual({"005930": 113}, controller.pending_highs)
+                self.assertEqual({"005930": 203.}, controller.pending_market_caps)
+                for method in ("update_last_prices", "update_last_market_caps", "update_intraday_highs"):
+                    getattr(lookup, method).side_effect = lambda values, *rest, method=method: saved.update({method: dict(values)})
+                controller.flush_price_cache()
+                self.assertEqual({"005930": 103}, saved["update_last_prices"])
+                self.assertEqual({"005930": 113}, saved["update_intraday_highs"])
+                self.assertEqual({"005930": 203.}, saved["update_last_market_caps"])
+                self.assertFalse(controller.pending_prices or controller.pending_highs or controller.pending_market_caps)
+                controller._stop_storage_timers()
 
     def test_queued_writer_failures_preserve_newer_values_and_close_does_not_restart_retry(self):
         now = datetime(2026, 10, 6, 10, 0)
@@ -744,7 +826,7 @@ class AppControllerTests(unittest.TestCase):
             controller = window._app_controller
             writer = controller.market_cache_writer
             controller.queue_price_cache("005930", price=71200)
-            with patch.object(StockRepository, "update_last_prices", side_effect=OSError("injected price save failure")) as save:
+            with patch.object(StockRepository, "update_price_cache", side_effect=OSError("injected price save failure")) as save:
                 for _ in range(2):
                     event = QCloseEvent()
                     window.closeEvent(event)
@@ -786,16 +868,16 @@ class AppControllerTests(unittest.TestCase):
                 entered, release = Event(), Event()
                 calls = []
                 repository_type = MinuteBarRepository if kind == "minute" else StockRepository
-                method = "upsert_many" if kind == "minute" else "update_last_prices"
+                method = "upsert_many" if kind == "minute" else "update_price_cache"
                 original = getattr(repository_type, method)
-                def save(repository, values):
+                def save(repository, values, *args, **kwargs):
                     calls.append(dict(values))
                     if len(calls) == 1:
                         entered.set()
                         if not release.wait(3):
                             raise TimeoutError("probe did not release old batch")
                         raise OSError("injected old batch failure")
-                    return original(repository, values)
+                    return original(repository, values, *args, **kwargs)
                 with patch.object(repository_type, method, save):
                     if kind == "minute":
                         controller.queue_minute_bar("005930", old)
@@ -956,6 +1038,7 @@ class AppControllerTests(unittest.TestCase):
             self.assertTrue(completed.is_set())
 
     def test_runtime_reload_waits_for_old_signals_then_replaces_resources_and_resets_view(self):
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         directory = temporary.name
@@ -977,12 +1060,16 @@ class AppControllerTests(unittest.TestCase):
         with patch.object(MainWindow, "_refresh_rankings") as refresh, \
                 patch.object(AppController, "schedule_next_ranking_refresh"), \
                 patch.object(AppController, "schedule_realtime_session_refresh"), \
-                patch.object(MainWindow, "_restore_environment_selector"):
+                patch.object(MainWindow, "_restore_environment_selector"), \
+                patch("kiwoom_monitor.presentation.main_window.QMessageBox.warning") as warning:
             window = MainWindow(database.settings, ranking_loader=old_loader,
                                 market_data_client=old_client, api_runtime_factory=factory)
             self.windows.append(window)
             controller = window._app_controller
-            controller.entry_snapshot_writer = Mock(isRunning=Mock(return_value=False))
+            writer = EntrySnapshotWriter(Path(directory) / "journal.sqlite3")
+            controller.entry_snapshot_writer = writer
+            self.enterContext(patch.object(writer, "set_investor_loader", wraps=writer.set_investor_loader))
+            self.enterContext(patch.object(writer, "set_program_loader", wraps=writer.set_program_loader))
             window._market_cap_reference_codes.add("005930")
             window._market_cap_reference_pending.add("005930")
             window._realtime_market_caps["005930"] = 100
@@ -1032,9 +1119,11 @@ class AppControllerTests(unittest.TestCase):
                 self.assertIs(factories[name], feature._worker_factory)
             controller.entry_snapshot_writer.set_investor_loader.assert_called_once_with(investor_loader)
             controller.entry_snapshot_writer.set_program_loader.assert_called_once_with(program_loader)
+            warning.assert_not_called()
             self.assertNotIn("_api_reloading", window.__dict__)
             self.assertNotIn("_ranking_loader", window.__dict__)
             self.assertNotIn("_market_data_client", window.__dict__)
+            warning.assert_not_called()
 
     def test_runtime_factory_failure_keeps_old_resources_and_ends_reload(self):
         temporary = tempfile.TemporaryDirectory()
@@ -1059,6 +1148,73 @@ class AppControllerTests(unittest.TestCase):
             self.assertIs(old_client, window._market_data_client)
             refresh.assert_not_called()
             factory.assert_called_once()
+
+    def test_partial_runtime_failure_restores_controller_factories_and_view(self):
+        from dataclasses import replace
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        database = Database(Path(temporary.name) / 'monitor.sqlite3'); database.initialize()
+        for boundary in ('worker_factory', 'view'):
+            with self.subTest(boundary=boundary):
+                old_loader, old_client = SimpleNamespace(server_now=lambda: datetime(2035,1,2,10,0)), object()
+                runtime = {'ranking_loader':SimpleNamespace(server_now=lambda: datetime(2036,1,2,10,0)), 'market_data_client':object(),
+                           'realtime_worker_factory':lambda codes: None, 'fundamentals_worker_factory':lambda codes:None, 'source_mode':'local'}
+                with patch.object(AppController, 'schedule_next_ranking_refresh'), \
+                     patch.object(AppController, 'schedule_realtime_session_refresh'), \
+                     patch('kiwoom_monitor.presentation.main_window.QMessageBox.warning'):
+                    minute_repository = MinuteBarRepository(database.settings.database_path)
+                    window = MainWindow(database.settings, ranking_loader=old_loader, market_data_client=old_client, minute_bar_repository=minute_repository,
+                                        api_runtime_factory=lambda: runtime)
+                    self.windows.append(window)
+                    controller=window._app_controller
+                    controller._initial_ranking_timer.stop()
+                    controller._api_reloading=True; controller._api_reload_stage='signals'
+                    old_factory=controller.realtime._worker_factory
+                    old_aggregator=window._minute_aggregator
+                    window._realtime_market_caps['005930']=123.
+                    original_apply=controller._runtime_actions.apply_runtime
+                    def fail_view(value):
+                        original_apply(value)
+                        raise RuntimeError('injected-view-failure')
+                    setter=controller.fundamentals.set_factory
+                    def fail_factory(value):
+                        if value is runtime.get('fundamentals_worker_factory'):
+                            raise RuntimeError('injected-factory-failure')
+                        setter(value)
+                    if boundary=='view':
+                        controller._runtime_actions=replace(controller._runtime_actions, apply_runtime=fail_view)
+                        controller._advance_api_reload()
+                    else:
+                        with patch.object(controller.fundamentals,'set_factory',side_effect=fail_factory):
+                            controller._advance_api_reload()
+                    self.assertIs(old_loader, controller.ranking_loader)
+                    self.assertIs(old_client, controller.market_data_client)
+                    self.assertIs(old_factory, controller.realtime._worker_factory)
+                    self.assertEqual({'005930':123.},window._realtime_market_caps)
+                    self.assertIs(old_aggregator,window._minute_aggregator)
+                    self.assertEqual(2035, minute_repository._now().year)
+                    self.assertFalse(controller.api_reloading)
+                    window.close()
+
+    def test_runtime_restore_failure_keeps_original_error_and_attempts_other_restore(self):
+        controller=self.controller([],ranking_loader=object(), market_data_client=object())
+        old_factory=controller.realtime._worker_factory
+        restored=[]
+        def fail_apply(runtime):
+            raise ValueError('original-view-error')
+        def fail_restore():
+            restored.append('view')
+            raise OSError('view-restore-error')
+        actions=AppRuntimeActions(apply_runtime=fail_apply,capture_state=lambda: fail_restore)
+        setter=controller.realtime.set_factory
+        new_factory=lambda codes:None
+        def fail_factory_restore(factory):
+            if factory is old_factory:
+                raise OSError('factory-restore-error')
+            setter(factory)
+        with patch.object(controller.realtime,'set_factory',side_effect=fail_factory_restore):
+            with self.assertRaisesRegex(RuntimeError,'original-view-error.*factory-restore-error.*view-restore-error'):
+                controller._apply_api_runtime({'ranking_loader':object(),'realtime_worker_factory':new_factory},actions)
+        self.assertEqual(['view'],restored)
 
     def test_close_cancels_runtime_replacement_and_queued_initial_ranking(self):
         temporary = tempfile.TemporaryDirectory()

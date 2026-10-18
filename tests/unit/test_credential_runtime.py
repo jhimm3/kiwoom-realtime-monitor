@@ -311,7 +311,8 @@ class CredentialAPITests(unittest.TestCase):
         root = Path(self.temporary.name)
         self.token, self.key = uuid.uuid4().hex, uuid.uuid4().hex
         self.app = create_app(CentralServerSettings(f"sqlite:///{root / 'central.sqlite'}", self.token,
-            credential_directory=str(root / "secrets"), autonomous_top20_enabled=False, market_event_collection_enabled=False))
+            credential_directory=str(root / "secrets"), autonomous_top20_enabled=False,
+            market_event_collection_enabled=False, news_naver_market_enabled=False))
         self.runtime = self.app.state.credential_runtime
         self.active = {}
         async def prepare(*_): return ValidatedCredential("UNVERIFIED")

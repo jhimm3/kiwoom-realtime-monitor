@@ -8,11 +8,14 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt, QRect
+from PySide6.QtGui import QImage, QPainter, QStandardItemModel
+from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QToolBar
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
@@ -39,6 +42,69 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_repository_receipts_follow_current_runtime_clock(self) -> None:
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.domain.time_basis import KST
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+        from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            minute, daily, theme = MinuteBarRepository(path), DailyBarRepository(path), ThemeRepository(path)
+            first = datetime(2030, 1, 2, 10, 0, tzinfo=KST)
+            loader = FakeRankingLoader()
+            loader.server_now = lambda: first
+            window = MainWindow(database.settings, loader, minute_bar_repository=minute,
+                                daily_bar_repository=daily, theme_store=theme)
+            try:
+                for observed in (first, first + timedelta(days=1)):
+                    # API reload replaces this same controller-owned loader.
+                    window._app_controller.ranking_loader = SimpleNamespace(server_now=lambda: observed)
+                    minute.upsert_top20_trade_value_index(observed.replace(tzinfo=None), 12., ("005930",))
+                    daily.mark_finalized(("005930",), observed.date())
+                    theme.set_theme_alias("구이름", "새이름")
+                    with closing(sqlite3.connect(path)) as connection:
+                        stored = connection.execute("SELECT updated_at FROM top20_trade_value_index WHERE trade_date=?", (observed.date().isoformat(),)).fetchone()[0]
+                        finalized = connection.execute("SELECT finalized_at FROM market_data_finalization_log WHERE trade_date=?", (observed.date().isoformat(),)).fetchone()[0]
+                        alias = connection.execute("SELECT updated_at FROM profile_theme_name_decisions WHERE source_name='구이름'").fetchone()[0]
+                    self.assertEqual((observed.isoformat(),) * 3, (stored, finalized, alias))
+            finally:
+                window.close()
+
+    def test_ranking_restores_repository_batch_and_refreshes_nxt_display(self) -> None:
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        database = Database(path)
+        database.initialize()
+        repository = StockRepository(path)
+        now = datetime(2026, 10, 16, 10, 0)
+        repository.upsert("005930", "삼성전자", "KOSPI")
+        repository.update_last_prices({"005930": 70000})
+        repository.update_intraday_highs({"005930": 71000}, now.date())
+        repository.update_fundamentals("005930", 2000000, 55.5, 72000, 500, 91000)
+        window = MainWindow(database.settings, FakeRankingLoader(), stock_lookup=repository)
+        window._ranking_now = lambda: now
+        with patch.object(repository, "load_ranking_cache", wraps=repository.load_ranking_cache) as load:
+            window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+        self.assertEqual(1, load.call_count)
+        self.assertEqual(now.date(), load.call_args.args[2])
+        self.assertEqual("KOSPI", window._stock_markets["005930"])
+        self.assertEqual(70000, window._current_prices["005930"])
+        self.assertEqual(71000, window._today_high_prices["005930"])
+        self.assertEqual(55.5, window._fundamentals["005930"].float_ratio_percent)
+        self.assertNotIn("005930", window._nxt_checked_codes)
+        for enabled in (True, False):
+            repository.update_nxt_enabled("005930", enabled, now.date().isoformat())
+            window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+            self.assertIn("005930", window._nxt_checked_codes)
+            self.assertEqual(enabled, "005930" in window._nxt_enabled_codes)
+            self.assertEqual(enabled, window._table.item(0, 1).data(Qt.ItemDataRole.UserRole + 2))
+        window.close()
+
     def test_google_drive_dirty_comparison_preserves_mixed_offset_instants(self):
         for local, uploaded, expected in (
             ('2026-10-16T14:00:00+09:00', '2026-10-16T06:00:00Z', False),
@@ -353,8 +419,10 @@ class MainWindowTest(unittest.TestCase):
     def test_settings_backup_import_confirmation_uses_main_window_as_parent(self) -> None:
         owner = SimpleNamespace()
         with patch("kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName", return_value=("backup.json", "")), \
-                patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question:
+                patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question, \
+                patch("kiwoom_monitor.presentation.main_window.SettingsBackupService") as service:
             MainWindow._import_settings_backup(owner)
+            service.assert_not_called()
         self.assertIs(owner, question.call_args.args[0])
 
     def test_settings_backup_import_applies_after_confirmation(self) -> None:
@@ -538,19 +606,31 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual({}, owner._realtime_market_caps)
 
     def test_api_reload_discards_late_ranking_response(self) -> None:
-        owner = SimpleNamespace(api_reloading=True)
+        owner = SimpleNamespace(api_reloading=True, ranking_execution=Mock(), _ranking_actions=Mock())
 
         AppController.handle_ranking_response(owner, (object(),))
 
         self.assertTrue(owner.api_reloading)
+        self.assertEqual([], owner.ranking_execution.mock_calls)
+        self.assertEqual([], owner._ranking_actions.mock_calls)
 
     def test_ranking_timer_does_not_fire_before_the_scheduled_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
-            window = MainWindow(database.settings)
+            window = MainWindow(database.settings, FakeRankingLoader())
 
             self.assertEqual(Qt.TimerType.PreciseTimer, window._ranking_timer.timerType())
+            controller = window._app_controller
+            controller._initial_ranking_timer.stop()
+            controller.ranking_execution._now = lambda: datetime(2035,1,2,9,0,29,900000)
+            fired = []
+            controller.ranking_requested.connect(lambda: fired.append(True))
+            controller.schedule_next_ranking_refresh()
+            self.assertGreaterEqual(window._ranking_timer.interval(), 350)
+            QTest.qWait(100)
+            self.assertEqual([], fired)
+            self.assertTrue(window._ranking_timer.isActive())
             window.close()
 
     def test_journal_news_relay_preserves_late_request_scope_after_account_switch(self) -> None:
@@ -1122,6 +1202,14 @@ class MainWindowTest(unittest.TestCase):
 
     def test_hover_marker_keeps_strong_blue_independent_of_row_selection_color(self) -> None:
         self.assertEqual("#0078d7", NxtMarkerDelegate.ACTIVE_MARKER_COLOR.name())
+        delegate = NxtMarkerDelegate()
+        model = QStandardItemModel(1,1)
+        for state in (QStyle.StateFlag.State_MouseOver, QStyle.StateFlag.State_MouseOver | QStyle.StateFlag.State_Selected):
+            option = QStyleOptionViewItem(); option.rect = QRect(0,0,80,24); option.state = state
+            image = QImage(80,24,QImage.Format.Format_ARGB32); image.fill(Qt.GlobalColor.white)
+            painter = QPainter(image)
+            delegate.paint(painter, option, model.index(0,0)); painter.end()
+            self.assertEqual('#0078d7', image.pixelColor(1,12).name())
 
     def test_delegate_remembers_only_the_clicked_cell_marker(self) -> None:
         delegate = NxtMarkerDelegate()
@@ -1129,6 +1217,17 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual((2, 4), delegate._selected_cell)
         delegate.set_selected_cell(None)
         self.assertIsNone(delegate._selected_cell)
+        model = QStandardItemModel(3,5)
+        delegate.set_selected_cell((2,4))
+        for row,column,active in ((2,4,True),(2,3,False),(1,4,False)):
+            option = QStyleOptionViewItem(); option.rect = QRect(0,0,80,24); option.state = QStyle.StateFlag.State_None
+            image = QImage(80,24,QImage.Format.Format_ARGB32); image.fill(Qt.GlobalColor.white)
+            painter=QPainter(image); delegate.paint(painter,option,model.index(row,column)); painter.end()
+            self.assertEqual(active, image.pixelColor(1,12).name() == '#0078d7')
+        delegate.set_selected_cell(None)
+        image.fill(Qt.GlobalColor.white)
+        painter=QPainter(image); delegate.paint(painter,option,model.index(2,4)); painter.end()
+        self.assertNotEqual('#0078d7', image.pixelColor(1,12).name())
 
     def test_rank_changed_highlight_default_duration_is_one_second(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

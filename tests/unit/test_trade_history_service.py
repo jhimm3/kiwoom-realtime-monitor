@@ -33,6 +33,10 @@ class TradeHistoryServiceTests(unittest.TestCase):
         self.assertEqual(("매도", "매수"), tuple(fill.side for fill in fills))
         self.assertEqual("005930", fills[0].stock_code)
         self.assertEqual("14:25:01", fills[0].filled_at.strftime("%H:%M:%S"))
+        self.assertEqual((5, 10), tuple(fill.quantity for fill in fills))
+        self.assertEqual((72_000, 70_000), tuple(fill.price for fill in fills))
+        self.assertEqual(("NXT", "KRX"), tuple(fill.market for fill in fills))
+        self.assertEqual(("보통", "시장가"), tuple(fill.order_type for fill in fills))
         self.assertEqual([("N", ""), ("Y", "next")], client.calls)
 
 

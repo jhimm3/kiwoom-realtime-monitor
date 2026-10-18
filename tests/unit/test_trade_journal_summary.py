@@ -69,11 +69,14 @@ class TradeJournalSummaryTests(unittest.TestCase):
         fills = (
             TradeFill("1", "005930", "삼성전자", "매수", datetime(2026, 8, 28, 9), 1, 100),
             TradeFill("2", "005930", "삼성전자", "매도", datetime(2026, 8, 28, 10), 1, 110),
-            TradeFill("3", "005930", "삼성전자", "매수", datetime(2026, 8, 28, 11), 1, 120),
+            TradeFill("3", "005930", "삼성전자", "매수", datetime(2026, 8, 29, 11), 1, 120),
         )
+        self.assertEqual(2, len(group_trade_episodes(fills)))
         overrides = {trade_fill_key(fill): "manual:test" for fill in fills}
         episodes = group_trade_episodes(fills, overrides)
         self.assertEqual(1, len(episodes))
+        self.assertEqual("manual:test", episodes[0].group_id)
+        self.assertEqual(fills, episodes[0].fills)
         self.assertEqual("manual", episodes[0].source)
 
     def test_auto_group_id_stays_stable_when_older_episode_is_added(self) -> None:

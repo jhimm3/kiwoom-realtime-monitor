@@ -92,6 +92,34 @@ jobs:
       - name: Install locked test dependencies
         run: python -m pip install -r requirements.lock.txt
 
+      - name: Check architecture deltas without product imports
+        env:
+          ARCHITECTURE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        shell: pwsh
+        run: |
+          $comparison = $env:ARCHITECTURE_BASE
+          if (-not $comparison -or $comparison -match '^0+$') { $comparison = 'HEAD^' }
+          python -m scripts.check_architecture --base-ref "$comparison" --report tmp/regression/architecture.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check incremental test reviews without running tests
+        env:
+          REVIEW_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: python -m scripts.check_test_changes --base-ref "$env:REVIEW_BASE" --report tmp/regression/test-review.json
+
+      - name: Record selective impact and related audit items
+        env:
+          REVIEW_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        shell: pwsh
+        run: |
+          python -m scripts.check_test_changes --query --base-ref "$env:REVIEW_BASE" --limit 5 --report tmp/regression/test-selection.json
+          if ($LASTEXITCODE -ne 0) {
+            $selection = Get-Content tmp/regression/test-selection.json -Raw | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 2 -or $selection.status -ne 'full_required') { exit 1 }
+            Write-Output 'Broad impact recorded; the existing comprehensive CI follows. No selective execution was accepted.'
+            $global:LASTEXITCODE = 0
+          }
+
       - name: Run complete local regression profile
         # Keep full coverage; measure the OS and runner scratch volumes before
         # the regression so elapsed-time changes can be compared on the same VM.
@@ -123,6 +151,18 @@ jobs:
         with:
           name: all-local-regression-${{ github.run_id }}
           path: tmp/regression/ci-all-local/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Preserve incremental review separately from existing result layout
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: incremental-test-review-${{ github.run_id }}
+          path: |
+            tmp/regression/test-review.json
+            tmp/regression/test-selection.json
+            tmp/regression/architecture.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -169,12 +209,13 @@ jobs:
           import json
           import unittest
           from pathlib import Path
-          from scripts.run_regression import _code_tree_identity
+          from scripts.run_regression import _code_tree_identity, _IdentityTestResult, _suite_test_ids
 
           modules = json.loads(Path("tests/ci_groups.json").read_text(encoding="utf-8"))["linux_required"]
           source_start = _code_tree_identity()
           loader = unittest.defaultTestLoader
-          runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
+          runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2, resultclass=_IdentityTestResult)
+          planned_ids, executed_ids, module_counts = [], [], []
           planned = 0
           ran = 0
           failures = errors = skipped = expected_failures = unexpected_successes = 0
@@ -187,7 +228,10 @@ jobs:
                   print(f"ERROR: no tests discovered for {module}")
                   continue
               planned += count
+              planned_ids.extend(_suite_test_ids(suite))
+              module_counts.append({"module": module, "test_count": count})
               result = runner.run(suite)
+              executed_ids.extend(result.executed_test_ids)
               ran += result.testsRun
               failures += len(result.failures)
               errors += len(result.errors)
@@ -205,7 +249,7 @@ jobs:
           )
           passed = bool(planned) and ran == planned and not any((
               failures, errors, skipped, expected_failures, unexpected_successes,
-          )) and source_start["lf_sha256"] == source_end["lf_sha256"]
+          )) and source_start["lf_sha256"] == source_end["lf_sha256"] and planned_ids == executed_ids and len(set(executed_ids)) == len(executed_ids)
           Path("tmp/regression/postgres").mkdir(parents=True, exist_ok=True)
           Path("tmp/regression/postgres/linux-unit.json").write_text(json.dumps({
               "status": "passed" if passed else "failed", "modules": modules,
@@ -213,6 +257,7 @@ jobs:
               "skipped": skipped, "expected_failures": expected_failures,
               "unexpected_successes": unexpected_successes,
               "source_start": source_start, "source_end": source_end,
+              "planned_test_ids": planned_ids, "executed_test_ids": executed_ids, "module_test_counts": module_counts,
           }, indent=2) + "\n", encoding="utf-8")
           if not passed:
               raise SystemExit(1)
@@ -493,6 +538,17 @@ jobs:
       - name: Confirm all required contracts ran on matching source
         shell: bash
         run: |
+          python -m scripts.run_regression --summarize tmp/ci-required/windows/run.json
           python -m scripts.check_required_ci_results --windows tmp/ci-required/windows/run.json \
             --linux tmp/ci-required/postgres/linux-unit.json \
             --postgres tmp/ci-required/postgres/required.json
+
+      - name: Confirm declared related tests actually ran
+        env:
+          REVIEW_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: >-
+          python -m scripts.check_test_changes --base-ref "$REVIEW_BASE"
+          --execution tmp/ci-required/windows/run.json
+          --execution tmp/ci-required/postgres/linux-unit.json
+          --execution tmp/ci-required/postgres/required.json
+          --report tmp/ci-required/test-review.json

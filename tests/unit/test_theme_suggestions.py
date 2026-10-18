@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +20,8 @@ class ThemeSuggestionTests(unittest.TestCase):
             Database(path).initialize()
             StockRepository(path).upsert("000001", "테스트기업", "KOSDAQ")
             repository = ThemeRepository(path)
+            now = datetime.fromisoformat("2030-01-01T15:00:01+00:00")
+            repository.set_now_provider(lambda: now)
             repository.replace_for_stock("000001", ("호남개발",))
             repository.set_theme_alias("호남클러스터", "호남개발")
             repository.import_ai_theme_suggestions((_suggestion("호남클러스터"),))
@@ -28,6 +32,11 @@ class ThemeSuggestionTests(unittest.TestCase):
             repository.review_ai_theme_suggestion(pending[0].key, approved=True)
             self.assertEqual(("호남개발",), repository.themes_for_stock("000001"))
             self.assertEqual("approved", repository.list_ai_theme_suggestions("approved")[0].status)
+            with closing(sqlite3.connect(path)) as connection:
+                reviewed = connection.execute("SELECT reviewed_at FROM profile_theme_suggestions").fetchone()[0]
+                decision = connection.execute("SELECT updated_at FROM profile_theme_name_decisions").fetchone()[0]
+            self.assertEqual("2030-01-02T00:00:01+09:00", reviewed)
+            self.assertEqual(reviewed, decision)
 
     def test_rejection_is_preserved_when_same_analysis_is_imported_again(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

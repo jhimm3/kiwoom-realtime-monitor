@@ -112,7 +112,7 @@ class DialogTests(unittest.TestCase):
         self.dialog._show_report(report)
         self.dialog._show_report({'run':None})
         self.dialog._show_report(report)
-        self.assertIn('확인 사실', self.dialog._report.toPlainText())
+        self.assertIn('사실 자료 · 모델 분류', self.dialog._report.toPlainText())
 
     def test_report_renders_facts_sources_and_escapes_untrusted_markup(self):
         value=result(); value['evidence_summary']='<script>bad</script>'
@@ -120,7 +120,7 @@ class DialogTests(unittest.TestCase):
             'provider':'chatgpt_plan','model':'gpt-6.1-sol','reasoning_effort':'high',
             'expires_at':(NOW+timedelta(hours=4)).timestamp()},'context':{'reason':'ok'}})
         text=self.dialog._report.toPlainText()
-        self.assertIn('US_SP500',text); self.assertIn('확인 사실',text)
+        self.assertIn('US_SP500',text); self.assertIn('사실 자료 · 모델 분류',text)
         self.assertIn('<script>bad</script>',text)
         self.assertIn('https://example.test/market',self.dialog._report.toHtml())
         self.assertIn('판단엔진 연결 전',text)
@@ -149,7 +149,7 @@ class DialogTests(unittest.TestCase):
         text = self.dialog._report.toPlainText()
         self.assertIn('누락·미확인 정보', text)
         self.assertIn(url, text)
-        self.assertIn('확인 사실', text)
+        self.assertIn('사실 자료 · 모델 분류', text)
         self.assertIn('모델이 반환한 연구 자료', text)
         self.assertIn('unread', text)
 

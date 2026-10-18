@@ -14,7 +14,7 @@ from kiwoom_monitor.infrastructure.central_content_client import CentralContentH
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
 from kiwoom_monitor.infrastructure.research_data_source import load_research_input, campaign_input_scope, write_frozen_research_bundle
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
-from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS
+from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS, RESEARCH_SCHEMA_VERSION
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigrationRunner
 from kiwoom_monitor.research_process import execute_campaign_cycle, discover_campaign_inputs
 from scripts.export_research_dataset import prepare_campaign_nas_input
@@ -163,7 +163,7 @@ class CampaignNasTests(unittest.TestCase):
         row = migrated.load_campaign_input_sources('old')[0]
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(before, connection.execute('SELECT * FROM research_campaign_input_sources').fetchone()[:len(before)])
-        self.assertEqual(27, migrated.schema_version())
+        self.assertEqual(RESEARCH_SCHEMA_VERSION, migrated.schema_version())
         self.assertEqual(0, row['nas_auto_prepare'])
         self.assertEqual('', row['nas_config_path'])
         self.assertEqual('', row['remote_signature'])
@@ -377,7 +377,7 @@ class RollingNasTests(unittest.TestCase):
         with closing(sqlite3.connect(old_path)) as connection:
             self.assertEqual(original, connection.execute('SELECT * FROM research_campaign_input_sources').fetchone())
             self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM research_campaign_rolling_empty_days').fetchone()[0])
-        self.assertEqual(27, migrated.schema_version())
+        self.assertEqual(RESEARCH_SCHEMA_VERSION, migrated.schema_version())
 
     def test_published_but_unregistered_day_is_recovered_before_cursor_advances(self):
         self.scan()

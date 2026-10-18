@@ -199,7 +199,8 @@ class RealCredentialOwnerTests(RealCredentialOwnerTestSupport):
         settings = CentralServerSettings(f"sqlite:///{self.root / 'app.sqlite'}", "private-token",
             credential_directory=str(self.root / "app-secrets"),
             account_identity_registry_enabled=True, account_identity_hmac_key="x" * 32,
-            autonomous_top20_enabled=False, market_event_collection_enabled=False)
+            autonomous_top20_enabled=False, market_event_collection_enabled=False,
+            news_query_set_enabled=False, news_naver_market_enabled=False)
         with patch("kiwoom_monitor.central_server.app.CentralRealtimeCollector.start", new=AsyncMock()):
             app = create_app(settings)
             with TestClient(app, base_url="https://nas.test") as client:

@@ -941,7 +941,9 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             broker = StaleRankingBroker()
-            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store, catalog_loader=lambda: (),
+            )
             with patch(
                 "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
                 new=AsyncMock(),
@@ -973,7 +975,9 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             broker = PartialRankingBroker()
-            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store, catalog_loader=lambda: (),
+            )
             with patch(
                 "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
                 new=AsyncMock(),
@@ -1007,7 +1011,9 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
             broker = ShortRankingBroker()
-            service = AutonomousTop20Service(broker, RealtimeHub(), store)
+            service = AutonomousTop20Service(
+                broker, RealtimeHub(), store, catalog_loader=lambda: (),
+            )
             with patch(
                 "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
                 new=AsyncMock(),

@@ -11,6 +11,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Protocol
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     StockPriceReference, TradeTick, ViEvent, parse_stock_price_references,
@@ -88,7 +89,7 @@ class MarketEventService:
         self, broker: CentralRestBroker, hub: RealtimeHub, store: MarketEventStore, *,
         exact_condition_name: str = "", condition_substring: str = "15%",
         condition_enabled: bool = True,
-        now_provider: Callable[[], datetime] = datetime.now,
+        now_provider: Callable[[], datetime] = kst_now,
     ) -> None:
         self._broker = broker
         self._hub = hub
@@ -105,7 +106,7 @@ class MarketEventService:
         self._clearing: set[str] = set()
         self._retry_after_clear = False
         self._condition_deadline = 0.0
-        self._now = now_provider
+        self._now = lambda: as_kst(now_provider())
         self._subscriber: RealtimeSubscriber | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._background: set[asyncio.Task[None]] = set()
@@ -850,7 +851,7 @@ class MarketEventService:
         document = {
             "stock_code": code, "session_id": session, "status": status,
             "upper_limit_price": self._upper_limits.get(code), "current_price": tick.current_price,
-            "high_price": tick.high_price, "effective_at": now, "available_at": time.time(),
+            "high_price": tick.high_price, "effective_at": now, "available_at": now,
             "source": "kiwoom-websocket-0B", "evidence": evidence,
         }
         key = _hash([code, session, status, document["upper_limit_price"]])
@@ -1021,30 +1022,31 @@ class MarketEventService:
     def _vi_value(self, event: ViEvent) -> dict[str, Any]:
         now = self._now()
         effective = _effective_text(now, event.trigger_time or event.release_time)
-        document = dict(asdict(event), effective_at=effective, received_at=time.time(), source="kiwoom-websocket-1h")
+        received_at = now.timestamp()
+        document = dict(asdict(event), effective_at=effective, received_at=received_at, source="kiwoom-websocket-1h")
         key = _hash([now.date().isoformat(), event.code, event.event_kind, event.vi_type, event.trigger_price,
                      event.trigger_time, event.release_time, event.trigger_count, event.exchange])
         return dict(document, stock_code=event.code, price=event.trigger_price, event_key=key,
-                    event_id=str(uuid.uuid5(uuid.NAMESPACE_URL, key)), available_at=time.time(), document=document)
+                    event_id=str(uuid.uuid5(uuid.NAMESPACE_URL, key)), available_at=received_at, document=document)
 
     def _backfill_vi_value(self, row: dict[str, Any]) -> dict[str, Any]:
         code = _stock_code(row.get("stk_cd"))
+        received_at = self._now().timestamp()
         document = {"stock_code": code, "event_kind": str(row.get("motn_tp", "UNKNOWN")),
                     "vi_type": str(row.get("vi_type", row.get("motn_cls", "UNKNOWN"))),
                     "price": _positive_int(row.get("motn_pric")), "direction": str(row.get("motn_drc", "")),
                     "trigger_count": _positive_int(row.get("motn_cnt")), "exchange": str(row.get("stex_tp", "")),
-                    "effective_at": str(row.get("motn_tm", "")) or None, "received_at": time.time(),
-                    "available_at": time.time(), "source": "kiwoom-rest-ka10054", "raw": row}
+                    "effective_at": str(row.get("motn_tm", "")) or None, "received_at": received_at,
+                    "available_at": received_at, "source": "kiwoom-rest-ka10054", "raw": row}
         key = _hash(["ka10054", code, row])
         return dict(document, event_key=key, event_id=str(uuid.uuid5(uuid.NAMESPACE_URL, key)),
                     document=document)
 
-    @staticmethod
-    def _revision(code: str, event_type: str, condition_name: str, condition_seq: str,
+    def _revision(self, code: str, event_type: str, condition_name: str, condition_seq: str,
                   session_id: str, effective_at: float, extra: dict[str, Any]) -> dict[str, Any]:
         document = {"stock_code": code, "event_type": event_type, "condition_name": condition_name,
                     "condition_seq": condition_seq, "session_id": session_id,
-                    "effective_at": effective_at, "available_at": time.time(), **extra}
+                    "effective_at": effective_at, "available_at": self._now().timestamp(), **extra}
         key = _hash([code, event_type, condition_name, condition_seq, session_id, extra])
         return dict(document, revision_key=key, revision_id=str(uuid.uuid5(uuid.NAMESPACE_URL, key)),
                     document=document)

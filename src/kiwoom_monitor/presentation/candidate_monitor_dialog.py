@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now, kst_now
 
 import threading
 import sqlite3
@@ -299,6 +299,11 @@ class CandidateMonitorDialog(QDialog):
         self._sync_polling_state()
         if self._operational_client is None:
             self._settings_status.setText("NAS 운영 설정 연결을 사용할 수 없습니다.")
+
+    def _now(self) -> datetime:
+        provider = getattr(self._content_client, "server_now", None)
+        current = provider() if callable(provider) else None
+        return as_kst(current) if isinstance(current, datetime) else kst_now()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -983,7 +988,7 @@ class CandidateMonitorDialog(QDialog):
                     raise ValueError("연구 DB와 진입 가설을 명시 선택하세요.")
                 request = persisted_stock_thesis_shadow_request_from_evidence(evidence,
                     run_id=run_id, thesis_id=thesis_id, thesis_policy_version=policy,
-                    leadership_venue=changes["leadership_venue"], decision_time=kst_now().isoformat())
+                    leadership_venue=changes["leadership_venue"], decision_time=self._now().isoformat())
                 if request.entry_thesis.theme_id not in changes["theme_ids"]:
                     raise ValueError("진입 가설의 테마를 관찰 대상에 포함하세요.")
                 return {**changes, "stock_thesis": {"evidence": evidence, "thesis_policy_version": policy}}
@@ -1116,7 +1121,7 @@ class CandidateMonitorDialog(QDialog):
             inference = h2["inferences"]
             expiry = decision["valid_until"] if decision else context["expires_at"]
             try:
-                expired = datetime.fromisoformat(expiry) <= kst_now()
+                expired = datetime.fromisoformat(expiry) <= self._now()
             except (ValueError, TypeError):
                 expired = True
             market_text = _ram_label(h1["inferences"].get("market_type", "UNKNOWN"))
@@ -1126,7 +1131,7 @@ class CandidateMonitorDialog(QDialog):
             if observation:
                 try:
                     change_expired = (not recorded and observation.get("observed_at") is not None
-                        and datetime.fromisoformat(observation["expires_at"]) <= kst_now())
+                        and datetime.fromisoformat(observation["expires_at"]) <= self._now())
                 except (ValueError, TypeError, KeyError):
                     change_expired = True
                 status = "STALE" if change_expired else observation["quality"]["status"]
@@ -1149,7 +1154,7 @@ class CandidateMonitorDialog(QDialog):
                 price = observation.get("price_trade_leadership")
                 if price:
                     try:
-                        price_expired = not recorded and price["quality"]["status"] == "COMPLETE" and datetime.fromisoformat(price["expires_at"]) <= kst_now()
+                        price_expired = not recorded and price["quality"]["status"] == "COMPLETE" and datetime.fromisoformat(price["expires_at"]) <= self._now()
                     except (ValueError, TypeError, KeyError):
                         price_expired = True
                     state = "UNKNOWN" if price_expired else price["state"]
@@ -1261,7 +1266,7 @@ class CandidateMonitorDialog(QDialog):
             facts = value['facts']
             if not isinstance(facts, list) or len(facts) > 200:
                 raise ValueError('비중 관측 종목 수 초과')
-            expired = not recorded and datetime.fromisoformat(value['valid_until']) <= kst_now()
+            expired = not recorded and datetime.fromisoformat(value['valid_until']) <= self._now()
             status = '자료 만료' if expired else {'BLOCKED':'계산 보류', 'CALCULATED':'계산됨'}.get(value['quality']['status'], '미확인')
             prefix = '최근 저장 · ' if recorded else ''
             resolution = '개별 0B 체결' if basis == '0B' else '과거 초봉 집계'
@@ -1317,7 +1322,7 @@ class CandidateMonitorDialog(QDialog):
             if cut.tzinfo is None or cut.utcoffset() is None:
                 raise ValueError("자료 판단 시각을 확인할 수 없습니다.")
             actions = result["actions"]
-            expired = live_account and datetime.fromisoformat(value["valid_until"]) <= kst_now()
+            expired = live_account and datetime.fromisoformat(value["valid_until"]) <= self._now()
             if not 2 <= len(actions) <= 5 or len({r["action"] for r in actions}) != len(actions):
                 raise ValueError("행동 비교 수가 허용 범위를 벗어납니다.")
             def number(value):

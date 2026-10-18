@@ -159,7 +159,7 @@ class NewsAIRepository:
         return tuple(result)
 
     def daily_count(self) -> int:
-        today = self._now().astimezone().date().isoformat()
+        today = as_kst(self._now()).date().isoformat()
         with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
                 "SELECT COUNT(*) FROM news_ai_requests WHERE substr(requested_at, 1, 10)=?", (today,)
@@ -172,12 +172,12 @@ class NewsAIRepository:
             connection.execute(
                 "INSERT INTO news_ai_requests(requested_at,provider,model,request_mode,event_count,article_count,input_tokens,output_tokens,total_tokens) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                (self._now().astimezone().isoformat(), provider, model, request_mode, event_count, article_count,
+                (as_kst(self._now()).isoformat(), provider, model, request_mode, event_count, article_count,
                  usage.input_tokens, usage.output_tokens, usage.total_tokens),
             )
 
     def daily_usage(self) -> tuple[int, int, int, int]:
-        today = self._now().astimezone().date().isoformat()
+        today = as_kst(self._now()).date().isoformat()
         with sqlite_read_connection(self._database_path) as connection:
             row = connection.execute(
                 "SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(total_tokens),0) "

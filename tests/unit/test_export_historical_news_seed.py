@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import unittest
 from unittest.mock import MagicMock,patch
@@ -78,6 +80,10 @@ class HistoricalSeedExportTests(unittest.TestCase):
                           ('["a2"]', 'support_only')], articles)
         self.assertEqual(1, report["tables"]["central_news_source_runs"])
         self.assertEqual(1, report["tables"]["central_documents"])
+        payload, digest = self.db.execute("SELECT payload_json,payload_hash FROM seed_rows WHERE table_name='central_news_article_revisions' AND row_key=?", ('["a1"]',)).fetchone()
+        self.assertEqual(_fixture()["central_news_article_revisions"][1], json.loads(payload))
+        self.assertEqual(hashlib.sha256(payload.encode("utf-8")).hexdigest(), digest)
+
 
     def test_missing_body_reference_blocks_export(self):
         data = _fixture()
@@ -94,6 +100,23 @@ class HistoricalSeedExportTests(unittest.TestCase):
     def test_closure_limit_fails_without_truncating(self):
         with self.assertRaisesRegex(ValueError, "max_rows"):
             FixtureExport(self.db, _fixture(), max_rows=2).run()
+        # The interrupted in-memory closure remains diagnostic partial evidence;
+        # publication owns transaction rollback and .partial-file cleanup.
+        self.assertEqual(2, self.db.execute("SELECT COUNT(*) FROM seed_rows").fetchone()[0])
+        from scripts.export_historical_news_seed import export_seed
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "seed.sqlite3"
+            source = MagicMock()
+            source.__enter__.return_value.cursor.return_value.__enter__.return_value.fetchone.return_value = ("fixture", "160000", "2026-10-18T09:00:00+09:00")
+            def limited(_source, destination, **kwargs):
+                return FixtureExport(destination, _fixture(), max_rows=kwargs["max_rows"])
+            with patch("psycopg.connect", return_value=source), patch("scripts.export_historical_news_seed.SeedExport", side_effect=limited):
+                with self.assertRaisesRegex(ValueError, "max_rows"):
+                    export_seed("fake-only", output, max_rows=2)
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_name(output.name + ".partial").exists())
+
+
 
     def test_query_failure_reports_stage_without_reference_ids(self):
         source=MagicMock()

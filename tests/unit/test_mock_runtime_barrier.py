@@ -41,12 +41,12 @@ class _Transport:
 
 class MockRuntimeBarrierTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.store = SQLiteQueryStore(Path(":memory:")); self.store.initialize()
+        self.store = SQLiteQueryStore(Path(":memory:"), now_provider=lambda: NOW); self.store.initialize()
         self.repository = ExecutionRepository(self.store)
         self.transport = _Transport()
         self.lifecycle = OrderLifecycle(self.repository, self.transport, now_provider=lambda: NOW)
         self.runtime = ExecutionRuntime(self.lifecycle, self.repository,
-            account_ref="account-1", run_id="run-1", owner_token="owner-1")
+            account_ref="account-1", run_id="run-1", owner_token="owner-1", now_provider=lambda: NOW)
         self.runtime.start()
         self.account = AccountSnapshot("account-1", 1_000_000, 0, {}, NOW)
         async def refresh(): return self.account
@@ -134,9 +134,9 @@ class MockRuntimeBarrierTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "RETIRED"): self.runtime.start()
         with self.assertRaises(RuntimeError): self.runtime.heartbeat()
         with self.assertRaises(RuntimeError): self.runtime.cancel("intent-1")
-        self.assertTrue(self.repository.claim_runtime("mock", "account-1", "run-1", "owner-2", datetime.now(timezone.utc)))
+        self.assertTrue(self.repository.claim_runtime("mock", "account-1", "run-1", "owner-2", NOW))
         self.assertFalse(self.runtime.stop())  # A repeated old stop must not release the new owner.
-        self.assertFalse(self.repository.claim_runtime("mock", "account-1", "run-1", "owner-3", datetime.now(timezone.utc)))
+        self.assertFalse(self.repository.claim_runtime("mock", "account-1", "run-1", "owner-3", NOW))
 
     async def test_stop_waits_for_reconcile_database_write(self):
         await asyncio.to_thread(self.runtime.submit, self.intent, self.account)

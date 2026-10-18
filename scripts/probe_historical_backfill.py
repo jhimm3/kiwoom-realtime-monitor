@@ -291,7 +291,7 @@ class _ArticleFetchPool:
 
     def snapshot(self) -> dict[str, object]:
         now = time.monotonic()
-        oldest = max(
+        oldest = min(
             self._started_at,
             key=self._started_at.__getitem__,
             default=None,

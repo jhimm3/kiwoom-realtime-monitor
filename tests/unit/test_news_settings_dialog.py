@@ -51,6 +51,23 @@ class NewsSettingsDialogTests(unittest.TestCase):
     def tearDown(self):
         dispose_dialogs()
 
+    def test_usage_display_uses_injected_kst_business_day(self):
+        from datetime import datetime
+        from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
+        from kiwoom_monitor.infrastructure.news_ai import AIRequestUsage
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime.fromisoformat("2030-01-01T15:00:01+00:00")
+            NewsAIRepository(root / "news.sqlite3", now_provider=lambda: now).log_request(
+                "gemini", "fixture", "single", 1, 1, AIRequestUsage(7, 3, 10),
+            )
+            dialog = NaverNewsSettingsDialog(LocalNaverNewsConfig(root / "news.env"),
+                database_path=root / "news.sqlite3", now_provider=lambda: now)
+            self.assertIn("API 요청 1회", dialog._ai_usage.text())
+            self.assertIn("입력 7", dialog._ai_usage.text())
+            self.assertIn("합계 10", dialog._ai_usage.text())
+            dialog.close()
+
     def test_nas_overlapping_settings_are_loaded_saved_and_mirrored_locally(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = LocalNaverNewsConfig(Path(directory) / "naver_news.dat")

@@ -14,6 +14,13 @@ from test_external_market_collector import _MemoryStore, _SyntheticCollector
 from qt_settings_test_support import dispose_dialogs
 
 
+OFFLINE_NEWS_SETTINGS = dict(
+    news_naver_api_enabled=False, news_naver_stock_enabled=False,
+    news_naver_market_enabled=False, news_query_set_enabled=False,
+    news_history_jobs_enabled=False,
+)
+
+
 class GatedCollector(_SyntheticCollector):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -233,7 +240,8 @@ class ExternalMarketSettingsAPITests(unittest.TestCase):
                 "kiwoom_monitor.central_server.app.YahooDelayedMarketCollector", _SyntheticCollector):
             database = f"sqlite:///{Path(directory) / 'central.sqlite'}"
             headers = {"Authorization": "Bearer token"}
-            app = create_app(CentralServerSettings(database, "token", external_market_enabled=False))
+            app = create_app(CentralServerSettings(database, "token", external_market_enabled=False,
+                                                  **OFFLINE_NEWS_SETTINGS))
             with TestClient(app) as client:
                 collector = app.state.external_market_collector
                 self.assertIsNone(collector._task)
@@ -252,7 +260,8 @@ class ExternalMarketSettingsAPITests(unittest.TestCase):
                     json={"expected_revision": 1, "external_market_enabled": False})
                 self.assertEqual(200, disabled.status_code)
                 self.assertIsNone(collector._task)
-            restarted = create_app(CentralServerSettings(database, "token", external_market_enabled=True))
+            restarted = create_app(CentralServerSettings(database, "token", external_market_enabled=True,
+                                                        **OFFLINE_NEWS_SETTINGS))
             with TestClient(restarted) as client:
                 self.assertFalse(client.get("/api/v1/settings/operations", headers=headers).json()["external_market_enabled"])
                 self.assertIsNone(restarted.state.external_market_collector._task)
@@ -260,7 +269,8 @@ class ExternalMarketSettingsAPITests(unittest.TestCase):
     def test_invalid_fields_and_missing_symbols_are_rejected_before_save(self):
         from fastapi.testclient import TestClient
         with tempfile.TemporaryDirectory() as directory:
-            app = create_app(CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token", external_market_symbols=""))
+            app = create_app(CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token",
+                                                  external_market_symbols="", **OFFLINE_NEWS_SETTINGS))
             headers = {"Authorization": "Bearer token"}
             with TestClient(app) as client:
                 for body in ({"external_market_enabled": True}, {"external_market_enabled": 1},
@@ -272,7 +282,8 @@ class ExternalMarketSettingsAPITests(unittest.TestCase):
     def test_apply_failure_is_pending_and_same_revision_can_recover(self):
         from fastapi.testclient import TestClient
         with tempfile.TemporaryDirectory() as directory:
-            app = create_app(CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token"))
+            app = create_app(CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token",
+                                                  **OFFLINE_NEWS_SETTINGS))
             headers = {"Authorization": "Bearer token"}
             with TestClient(app) as client:
                 with patch.object(app.state.external_market_collector, "update_operational_settings", new=AsyncMock(side_effect=RuntimeError("fake"))):
@@ -288,7 +299,8 @@ class ExternalMarketSettingsAPITests(unittest.TestCase):
     def test_save_failure_keeps_previous_runtime_and_revision(self):
         from fastapi.testclient import TestClient
         with tempfile.TemporaryDirectory() as directory:
-            app = create_app(CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token"))
+            app = create_app(CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token",
+                                                  **OFFLINE_NEWS_SETTINGS))
             headers = {"Authorization": "Bearer token"}
             with TestClient(app) as client:
                 collector = app.state.external_market_collector

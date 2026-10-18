@@ -90,9 +90,10 @@ class QueryStoreSourceTests(unittest.TestCase):
     def test_repository_aggregate_retains_all_inherited_protocol_methods(self) -> None:
         root = Path(__file__).resolve().parents[2]
         sources = method_sources(root)
-        self.assertEqual(107, len(sources["QueryStore"]))
-        self.assertEqual(111, sum(name != "__init__" for name in sources["SQLiteQueryStore"]))
-        self.assertEqual(113, sum(name != "__init__" for name in sources["PostgresQueryStore"]))
+        protocol = set(sources["QueryStore"])
+        self.assertTrue({"load_query", "load_mock_automation_lineage", "load_account_active_execution_intents"} <= protocol)
+        for backend in ("SQLiteQueryStore", "PostgresQueryStore"):
+            self.assertEqual(set(), protocol - set(sources[backend]))
         for backend in ("SQLiteQueryStore", "PostgresQueryStore"):
             self.assertEqual(
                 "src/kiwoom_monitor/central_server/database_execution.py",

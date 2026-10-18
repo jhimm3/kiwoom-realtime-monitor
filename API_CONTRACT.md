@@ -848,7 +848,7 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | --- | --- | --- |
 | `POST /api/v1/news/search` | `stock_code`, `stock_name`, 선택 `since`, 자동분석 옵션 | `stock_code`, 최신순 `items[]`(최대 1000) |
 | `POST /api/v1/news/analyze` | 종목, provider/model, `events[1..20]`, `article_count` | 중앙 AI 서비스 분석 문서. 공급자 429/5xx는 상태 코드를 보존한다. |
-| `GET /api/v1/news/history/{kind}` | `kind=article/body/ai/event/membership`, 선택 `target`, `identity`, Unix 초 `as_of`, `limit` | `known`, `kind`, `revisions[]`. 서버 가용시각 역순의 불변 이력 |
+| `GET /api/v1/news/history/{kind}` | `kind=article/body/ai/event/membership`, 선택 `target`, `identity`, Unix 초 `as_of`, `limit`, `before_revision_id` | `known`, `kind`, `revisions[]`. 서버 수락 순서(`accepted_sequence`) 역순의 불변 이력. 다음 페이지는 마지막 행의 해당 kind revision ID를 `before_revision_id`로 전달한다. `as_of`는 기존 가용시각 필터로 유지하며 페이지 경계로 시각을 빼지 않는다. |
 | `GET /api/v1/news/historical-archive/search` | Bearer 인증, 6자리 `stock_code`, `limit=1..200`, 선택 서명된 `cursor` | 봉인된 PC archive의 `dataset_id`, `items[]`, `next_cursor`. 현재 뉴스 목록과 분리. 미설정·미봉인·진단 일시정지 시 503, 잘못된 cursor는 400 |
 | `GET /api/v1/news/historical-archive/v2/search` | Bearer 인증, 6자리 `stock_code`, `limit=1..200`, 선택 서명된 `cursor` | v2 종목 목록. 본문은 목록에 포함하지 않으며 상세에서 정확 ID로 읽는다. v1 파일은 409 |
 | `GET /api/v1/news/historical-archive/v2/market` | Bearer 인증, 선택 `source=flash/world`, `limit=1..200`, 선택 서명된 `cursor` | v2 시황 목록. source 생략은 전체 목록이며 동일 identity는 한 번 표시한다. 실패 항목은 article/body ID가 null일 수 있다 |

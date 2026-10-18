@@ -94,6 +94,11 @@ class TradeStrategyCoordinatorTests(unittest.TestCase):
         self.assertEqual("눌림", normalize_setup_type_for_packs("눌림", (pack,)))
         self.assertIs(pack, strategy_pack_for_result(self.custom_result, (pack,)))
         self.assertIsNone(strategy_pack_for_result(self.custom_result, (manifest(enabled=False),)))
+        draft = manifest(status="draft")
+        # Selecting the display pack for an existing result is not automatic classification.
+        self.assertIs(draft, strategy_pack_for_result(self.custom_result, (draft,)))
+        unrelated = manifest(name="another-pack")
+        self.assertIsNone(strategy_pack_for_result(self.custom_result, (unrelated,)))
 
 
 if __name__ == "__main__":

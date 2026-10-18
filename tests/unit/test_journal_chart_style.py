@@ -74,11 +74,15 @@ class JournalChartStyleTests(unittest.TestCase):
         chart.set_trade_value_threshold(40); chart.set_daily_trade_value_threshold(1_000)
         chart.set_rows((("2026-08-28T09:00", 100, 110, 90, 105, 1, 50.0, "확정"),))
         self.assertEqual(40.0, chart._trade_value_threshold)
-        self.assertFalse(chart.grab().isNull())
+        with_threshold = chart.grab().toImage()
+        chart.set_trade_value_threshold(0)
+        self.assertNotEqual(with_threshold, chart.grab().toImage())
         chart.set_daily_rows((("2026-08-28", 100, 110, 90, 105, 1, 1_500.0, "확정"),))
         chart.set_interval("일봉")
         self.assertEqual(1_000.0, chart._daily_trade_value_threshold)
-        self.assertFalse(chart.grab().isNull())
+        with_threshold = chart.grab().toImage()
+        chart.set_daily_trade_value_threshold(0)
+        self.assertNotEqual(with_threshold, chart.grab().toImage())
 
     def test_moving_average_lines_have_independent_styles(self) -> None:
         chart = MinuteChart(); chart.resize(900, 420)
@@ -89,7 +93,11 @@ class JournalChartStyleTests(unittest.TestCase):
         ))
         self.assertEqual((True, "#ff00aa", 2.5), chart._moving_average_styles[5])
         self.assertEqual((False, "#0011ff", 1.0), chart._moving_average_styles[10])
-        self.assertFalse(chart.grab().isNull())
+        with_line = chart.grab().toImage()
+        chart.set_moving_average_styles({5: (False, "#ff00aa", 2.5), 10: (False, "#0011ff", 1.0)})
+        self.assertNotEqual(with_line, chart.grab().toImage())
+        chart.set_moving_average_styles({5: (True, "#00ffaa", 2.5), 10: (False, "#0011ff", 1.0)})
+        self.assertNotEqual(with_line, chart.grab().toImage())
 
     def test_chart_callouts_show_each_fill_and_close_change_separately(self) -> None:
         buy = TradeFill("1", "001210", "금호전기", "매수", datetime(2026, 8, 28, 9, 10, 5), 10, 1_000, "", "KRX")
@@ -150,6 +158,7 @@ class JournalChartStyleTests(unittest.TestCase):
         ))
         start, end = datetime(2026, 8, 28, 9, 0), datetime(2026, 8, 28, 9, 1)
         chart.set_drawing_style(3.5, "#008000", "#123456")
+        clean = chart.grab().toImage()
         chart._annotations.extend((
             ("선", start, 1_000.0, end, 1_015.0),
             ("가로선", start, 1_005.0, end, 1_005.0),
@@ -158,25 +167,28 @@ class JournalChartStyleTests(unittest.TestCase):
         self.assertEqual(3.5, chart._drawing_line_width)
         self.assertEqual("#008000", chart._rectangle_color.name())
         self.assertEqual("#123456", chart._line_color.name())
-        self.assertFalse(chart.grab().isNull())
+        self.assertNotEqual(clean, chart.grab().toImage())
         chart._selected_annotation = 1
         chart.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier))
         self.assertEqual(2, len(chart._annotations))
         chart.clear_annotations()
         self.assertEqual([], chart._annotations)
+        self.assertEqual(clean, chart.grab().toImage())
 
     def test_chart_text_annotation_uses_configured_style_and_can_be_deleted(self) -> None:
         chart = MinuteChart(); chart.resize(900, 420)
         chart.set_rows((("2026-08-28T09:00", 1_000, 1_010, 990, 1_005, 1, 1.0, "확정"),))
         chart.set_text_style("#123456", 18)
         moment = datetime(2026, 8, 28, 9, 0)
+        clean = chart.grab().toImage()
         chart._annotations.append(("텍스트", moment, 1_005.0, moment, 1_005.0, "돌파 확인"))
         self.assertEqual("#123456", chart._text_color.name())
         self.assertEqual(18, chart._text_size)
-        self.assertFalse(chart.grab().isNull())
+        self.assertNotEqual(clean, chart.grab().toImage())
         chart._selected_annotation = 0
         chart.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier))
         self.assertEqual([], chart._annotations)
+        self.assertEqual(clean, chart.grab().toImage())
 
     def test_chart_text_is_edited_inline_without_a_dialog(self) -> None:
         chart = MinuteChart(); chart.resize(900, 420)
@@ -219,7 +231,9 @@ class JournalChartStyleTests(unittest.TestCase):
             ("2026-08-28T09:01", 1_005, 1_020, 1_000, 1_010, 1, 1.0, "확정"),
         ))
         self.assertEqual(("돌파",), chart.setup_types())
-        self.assertFalse(chart.grab().isNull())
+        with_label = chart.grab().toImage()
+        chart.set_setup_types(())
+        self.assertNotEqual(with_label, chart.grab().toImage())
 
     def test_zoom_changes_screen_bar_count_and_allows_single_bar(self) -> None:
         chart = MinuteChart()

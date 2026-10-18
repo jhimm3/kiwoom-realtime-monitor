@@ -1,0 +1,274 @@
+[
+  {
+    "case_id": "tests.unit.test_central_server_app.CentralServerAppTests.test_news_job_claim_plan_api_requires_auth_and_postgres",
+    "baseline_id": "tests.unit.test_central_server_app.CentralServerAppTests.test_news_job_claim_plan_api_requires_auth_and_postgres",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_central_server_app.py",
+    "line": 2804,
+    "status": "reviewed",
+    "requirement": "AGENTS connected feature/lifecycle/API/storage preservation and existing corrected KST clock; DEVELOPMENT_GUARDRAILS.md native shutdown/transaction and credential-owner isolation; MODULE_MAP central server app composition and extracted public routers; API_CONTRACT.md existing authenticated released APIs.",
+    "production_evidence": [
+      "src/kiwoom_monitor/central_server/market_read_routes.py:create_market_live_read_router:47",
+      "src/kiwoom_monitor/central_server/market_read_routes.py:create_market_archive_read_router:218",
+      "src/kiwoom_monitor/central_server/diagnostic_read_routes.py:create_diagnostic_read_router:16",
+      "src/kiwoom_monitor/central_server/content_routes.py:create_content_router:56",
+      "src/kiwoom_monitor/central_server/news_read_routes.py:create_news_read_router:32",
+      "src/kiwoom_monitor/central_server/news_service_routes.py:create_news_search_router:49"
+    ],
+    "expectation_review": "Exactsubsetof diagnostic_read_responses baseline:unauthorized-news-job-claim-plan401 andsqlite-plan-unavailable501withPOSTGRES_DIAGNOSTIC_UNAVAILABLEfullbody; standalonedeletedwithoutdroppinganyexpectation.",
+    "decision": "retire",
+    "gap": "Tests using host time cover current-host behavior, not corrected-clock disagreement. Diagnostic2standalonecasesretiredbecausefullbaselinecoverssamehandler/inputs/result; simple arithmetic storage assertions kept where independent oracle is useful.",
+    "replacement_case_id": "tests.unit.test_central_server_app.CentralServerAppTests.test_diagnostic_read_responses_match_pre_extraction_baseline",
+    "cleanup_status": "implemented_and_replacement_check_passed",
+    "review_owner": "review_b",
+    "replacement_case_ids": [
+      "tests.unit.test_central_server_app.CentralServerAppTests.test_diagnostic_read_responses_match_pre_extraction_baseline"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_central_server_app.CentralServerAppTests.test_news_job_claim_readonly_analyze_api_requires_auth_and_postgres",
+    "baseline_id": "tests.unit.test_central_server_app.CentralServerAppTests.test_news_job_claim_readonly_analyze_api_requires_auth_and_postgres",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_central_server_app.py",
+    "line": 2816,
+    "status": "reviewed",
+    "requirement": "AGENTS connected feature/lifecycle/API/storage preservation and existing corrected KST clock; DEVELOPMENT_GUARDRAILS.md native shutdown/transaction and credential-owner isolation; MODULE_MAP central server app composition and extracted public routers; API_CONTRACT.md existing authenticated released APIs.",
+    "production_evidence": [
+      "src/kiwoom_monitor/central_server/market_read_routes.py:create_market_live_read_router:47",
+      "src/kiwoom_monitor/central_server/market_read_routes.py:create_market_archive_read_router:218",
+      "src/kiwoom_monitor/central_server/diagnostic_read_routes.py:create_diagnostic_read_router:16",
+      "src/kiwoom_monitor/central_server/content_routes.py:create_content_router:56",
+      "src/kiwoom_monitor/central_server/news_read_routes.py:create_news_read_router:32",
+      "src/kiwoom_monitor/central_server/news_service_routes.py:create_news_search_router:49"
+    ],
+    "expectation_review": "Exactsubsetof diagnostic_read_responses baseline:unauth401/SQLite501;fakeBODYsuccess/AI400andhelperonlyvalidBODY(orRULE)alreadycheckedtherewithactualresponse/DBhash. Standalonedeleted.",
+    "decision": "retire",
+    "gap": "Tests using host time cover current-host behavior, not corrected-clock disagreement. Diagnostic2standalonecasesretiredbecausefullbaselinecoverssamehandler/inputs/result; simple arithmetic storage assertions kept where independent oracle is useful.",
+    "replacement_case_id": "tests.unit.test_central_server_app.CentralServerAppTests.test_diagnostic_read_responses_match_pre_extraction_baseline",
+    "cleanup_status": "implemented_and_replacement_check_passed",
+    "review_owner": "review_b",
+    "replacement_case_ids": [
+      "tests.unit.test_central_server_app.CentralServerAppTests.test_diagnostic_read_responses_match_pre_extraction_baseline"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_detached_chart_window.DetachedChartWindowTests.test_each_panel_saves_its_own_background_and_accent",
+    "baseline_id": "tests.unit.test_detached_chart_window.DetachedChartWindowTests.test_each_panel_saves_its_own_background_and_accent",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_detached_chart_window.py",
+    "line": 147,
+    "status": "reviewed",
+    "requirement": "AGENTS.md 기능변경시실제화면·설정·소비경로동반확인; 현행 journal_process.py:_open_chart_settings:699/_configure_detached_charts:1716 본창공통설정과분리창공유가정본. 기존저장값호환및독립패널자료/표시역할유지.",
+    "production_evidence": [
+      "src/kiwoom_monitor/presentation/detached_chart_settings.py:DetachedChartPanelSettingsDialog.save:46",
+      "src/kiwoom_monitor/presentation/detached_chart_window.py:_open_settings:335",
+      "src/kiwoom_monitor/presentation/detached_chart_window.py:DetachedChartPanel.configure:91"
+    ],
+    "expectation_review": "현재생성경로없는개별전용대화상자의background/accent/holding저장·reset만검사했다. 본창공통설정이정본이며background/holding은렌더링미사용이다. 아직사용되는기존accent호환은현행visual_settings case에#abcdef저장→title표시검증으로옮겼다.",
+    "decision": "retire",
+    "gap": "화면에서사라진옛편집기검사제거. 기존설정값호환과현행표시검증은유지했다.",
+    "implementation_status": "test_removed_expired_purpose",
+    "review_owner": "review_a",
+    "replacement_case_ids": [
+      "tests.unit.test_detached_chart_window.DetachedChartWindowTests.test_visual_settings_follow_shared_journal_background"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_detached_chart_window.DetachedChartWindowTests.test_settings_dialog_saves_selected_colors",
+    "baseline_id": "tests.unit.test_detached_chart_window.DetachedChartWindowTests.test_settings_dialog_saves_selected_colors",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_detached_chart_window.py",
+    "line": 133,
+    "status": "reviewed",
+    "requirement": "AGENTS.md 기능변경시실제화면·설정·소비경로동반확인; 현행 journal_process.py:_open_chart_settings:699/_configure_detached_charts:1716 본창공통설정과분리창공유가정본. 기존저장값호환및독립패널자료/표시역할유지.",
+    "production_evidence": [
+      "src/kiwoom_monitor/presentation/detached_chart_settings.py:DetachedChartSettingsDialog.save:100",
+      "src/kiwoom_monitor/presentation/detached_chart_window.py:_open_settings:335",
+      "src/kiwoom_monitor/journal_process.py:_open_chart_settings:699"
+    ],
+    "expectation_review": "옛전용대화상자를직접만들어grid/background/holding키저장만검사했다. 현재앱은이대화상자를생성하지않고분리창버튼은부모공통설정을연다. background/holding은현재렌더링에서무시되며현행공유설정검사가대체한다.",
+    "decision": "retire",
+    "gap": "현재제품사용처없는옛전용설정저장목적종료. 제품class/저장자료는삭제하지않고담당테스트case만제거했다.",
+    "implementation_status": "test_removed_expired_purpose",
+    "review_owner": "review_a",
+    "replacement_case_ids": [
+      "tests.unit.test_detached_chart_window.DetachedChartWindowTests.test_visual_settings_follow_shared_journal_background"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_diagnostic_trace_deferred.DeferredTraceTests.test_host_and_container_headroom_both_gate_eight_gib_capture",
+    "baseline_id": "tests.unit.test_diagnostic_trace_deferred.DeferredTraceTests.test_host_and_container_headroom_both_gate_eight_gib_capture",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_diagnostic_trace_deferred.py",
+    "line": 412,
+    "status": "reviewed",
+    "requirement": "docs/NAS_RUNTIME_DIAGNOSTICS.md:73-79 및 docs/NAS_OPERATOR_COMMANDS.md:114의 지연 녹화 RAM8GiB/500만이벤트·본문/metadata fsync후공개·기존reader한도. AGENTS 실시간블로킹방지·실패수집/자료보존원칙.",
+    "production_evidence": [
+      "src/kiwoom_monitor/central_server/diagnostic_trace.py:start:124",
+      "src/kiwoom_monitor/central_server/diagnostic_trace.py:_deferred_memory_check:93",
+      "src/kiwoom_monitor/central_server/diagnostic_trace.py:_write:1602",
+      "src/kiwoom_monitor/central_server/diagnostic_trace.py:_persistence_cooldown:1617",
+      "src/kiwoom_monitor/central_server/diagnostic_trace.py:_hold_deferred:1711",
+      "src/kiwoom_monitor/central_server/diagnostic_trace.py:_drain:1752",
+      "src/kiwoom_monitor/central_server/diagnostic_trace_ram.py:Segment.rewind:82"
+    ],
+    "expectation_review": "host12GiB충분/container8GiB부족이면memoryheadroom오류를기대하던단일음성사례다.",
+    "decision": "retire",
+    "gap": "같은모듈test_eight_gib_budget_requires_one_gib_extra_on_host_and_container가같은cgroupv2reader로host/container각9GiB정확통과·각각1단위부족실패를독립검사하여이container부족단일사례를포함한다. 더강한양쪽경계검사를유지하고본중복검사만삭제했다.",
+    "related_validation": "data\\diagnostics\\test-case-review-20261018\\review-a-deferred-execution.json",
+    "implementation_status": "test_removed_duplicate",
+    "review_owner": "review_a",
+    "replacement_case_ids": [
+      "tests.unit.test_diagnostic_trace_deferred.DeferredTraceTests.test_eight_gib_budget_requires_one_gib_extra_on_host_and_container"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_nas_operator.NasOperatorTests.test_disk_parent_fix_grants_only_search_to_postgres_uid",
+    "baseline_id": "tests.unit.test_nas_operator.NasOperatorTests.test_disk_parent_fix_grants_only_search_to_postgres_uid",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_nas_operator.py",
+    "line": 1055,
+    "status": "reviewed",
+    "requirement": "docs/NAS_OPERATOR_COMMANDS.md: bounded passwordless worker and original approval compatibility; AGENTS.md NAS isolated test boundary/related-deploy tests; preserve original data/security and no arbitrary root authority; replay fixed source clocks are historical fixtures.",
+    "production_evidence": "scripts/nas_operator.py:validate_manifest(396),admit_source(428),fingerprint_matches(508),idle(528),validate_scoped_trace_manifest(565),Operator.docker(645),identities(830),fence(852),pause_operational_server(1030),resume_operational_server(1085),worker_argv(1124),run_job(1181),register(1409),deploy(1506),recover(1574),validate_args(1678); scripts/nas_operator_worker.py:run_tests(31),replay(130),recorder_capacity(189),main(219).",
+    "expectation_review": "Local permissions() arithmetic only demonstrates0700vs0711; never calls product and would pass if parent fchmod removed. Comprehensive run_job test covers actual fchmod invocation and mode probe.",
+    "decision": "retire",
+    "gap": "C032: pure local permission arithmetic is not product regression; run_job matrix verifies fchmod and FD-mode boundary, native Linux tests own actual IO.",
+    "review_owner": "review_c",
+    "replacement_case_ids": [
+      "tests.unit.test_nas_operator.NasOperatorTests.test_replay_job_drains_temporary_containers_before_resume_on_success_and_failure"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_news_analysis.NewsAnalysisTest.test_hot_stock_percentage_move_is_excluded",
+    "baseline_id": "tests.unit.test_news_analysis.NewsAnalysisTest.test_hot_stock_percentage_move_is_excluded",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_news_analysis.py",
+    "line": 260,
+    "status": "reviewed",
+    "requirement": "DEVELOPMENT_GUARDRAILS.md:73-78 news fulltext/relevance/materialevent,sourceextractivesummary,nonAI direction and targetcompany evidence; MODULE_MAP.md:227 newsanalysis ownership.",
+    "production_evidence": "application/news_analysis.py:18-253 category/directionpatterns,288-318 directbodyevidence,320-431extractive,434-477pricereaction,478-573assessment; infrastructure/naver_news.py:283-343 filters/provider,345-454claim/page/network; central_server/news_jobs.py:258-274 persists assessment/cores.",
+    "expectation_review": "DUPLICATE: sameHyundaihot-stock3percentfalltitle/noeventandidenticalfalse/reactionexpectationsas test_direct_percentage_drop_is_excluded_as_stock_reaction; punctuationonlydifference.",
+    "decision": "retire",
+    "gap": "Removed duplicate; retained direct_percentage_drop covers same Hyundai hot-stock no-event movement path and false/category result. Other market tags/business percentage distinctions remain.",
+    "review_owner": "review_c",
+    "replacement_case_ids": [
+      "tests.unit.test_news_analysis.NewsAnalysisTest.test_direct_percentage_drop_is_excluded_as_stock_reaction"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_postgres_access.PostgresAccessTests.test_external_market_roll_state_execute_failure_rolls_back",
+    "baseline_id": "tests.unit.test_postgres_access.PostgresAccessTests.test_external_market_roll_state_execute_failure_rolls_back",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_postgres_access.py",
+    "line": 1637,
+    "status": "reviewed",
+    "requirement": "DEVELOPMENT_GUARDRAILS.md:172-173 and docs/KIWOOM_STORAGE_WRITE_AUDIT.md PostgreSQL native transaction/connection ownership, no silent partial writes and diagnostics must not alter storage semantics; MODULE_MAP database responsibility split; AGENTS preserve original/legacy data and separate actual native PG acceptance.",
+    "production_evidence": [
+      "src/kiwoom_monitor/central_server/database_historical_news.py:claim_external_historical_news_job:95",
+      "src/kiwoom_monitor/central_server/database_historical_news.py:complete_external_historical_news_job:194",
+      "src/kiwoom_monitor/central_server/database_account_settings.py:PostgresAccountSettingsStoreMixin:309",
+      "src/kiwoom_monitor/central_server/database_news_revisions.py:PostgresNewsRevisionStoreMixin:111",
+      "src/kiwoom_monitor/central_server/database_documents.py:PostgresDocumentStoreMixin.upsert_documents:106",
+      "src/kiwoom_monitor/central_server/postgres_access.py:open_observed_connection:479"
+    ],
+    "expectation_review": "Samegenericregisteredupsertfail1pathasnews_sync; retiredstandalonemethod, originalWTIowner/CLV26/document/writerkindretainedinconsolidated3collectionsubTests.",
+    "decision": "retire",
+    "gap": "Fake native contexts prove adapter command/exit semantics, not actual PostgreSQL row locks or read/write persisted isolation. Consolidated 3 document failure methods into one 3-subTest method without dropping a collection.",
+    "replacement_case_id": "tests.unit.test_postgres_access.PostgresAccessTests.test_registered_document_execute_failure_rolls_back_each_collection",
+    "cleanup_status": "implemented_and_related_checks_passed",
+    "review_owner": "review_b",
+    "replacement_case_ids": [
+      "tests.unit.test_postgres_access.PostgresAccessTests.test_registered_document_execute_failure_rolls_back_each_collection"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_postgres_access.PostgresAccessTests.test_krx_trading_day_document_execute_failure_rolls_back",
+    "baseline_id": "tests.unit.test_postgres_access.PostgresAccessTests.test_krx_trading_day_document_execute_failure_rolls_back",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_postgres_access.py",
+    "line": 1620,
+    "status": "reviewed",
+    "requirement": "DEVELOPMENT_GUARDRAILS.md:172-173 and docs/KIWOOM_STORAGE_WRITE_AUDIT.md PostgreSQL native transaction/connection ownership, no silent partial writes and diagnostics must not alter storage semantics; MODULE_MAP database responsibility split; AGENTS preserve original/legacy data and separate actual native PG acceptance.",
+    "production_evidence": [
+      "src/kiwoom_monitor/central_server/database_historical_news.py:claim_external_historical_news_job:95",
+      "src/kiwoom_monitor/central_server/database_historical_news.py:complete_external_historical_news_job:194",
+      "src/kiwoom_monitor/central_server/database_account_settings.py:PostgresAccountSettingsStoreMixin:309",
+      "src/kiwoom_monitor/central_server/database_news_revisions.py:PostgresNewsRevisionStoreMixin:111",
+      "src/kiwoom_monitor/central_server/database_documents.py:PostgresDocumentStoreMixin.upsert_documents:106",
+      "src/kiwoom_monitor/central_server/postgres_access.py:open_observed_connection:479"
+    ],
+    "expectation_review": "Samegenericregisteredupsertfail1pathasnews_sync; retiredstandalonemethod, originalkrxowner/date/document/writerkindretainedinconsolidated3collectionsubTests.",
+    "decision": "retire",
+    "gap": "Fake native contexts prove adapter command/exit semantics, not actual PostgreSQL row locks or read/write persisted isolation. Consolidated 3 document failure methods into one 3-subTest method without dropping a collection.",
+    "replacement_case_id": "tests.unit.test_postgres_access.PostgresAccessTests.test_registered_document_execute_failure_rolls_back_each_collection",
+    "cleanup_status": "implemented_and_related_checks_passed",
+    "review_owner": "review_b",
+    "replacement_case_ids": [
+      "tests.unit.test_postgres_access.PostgresAccessTests.test_registered_document_execute_failure_rolls_back_each_collection"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_research_symbol_validation_dialog.SymbolValidationDialogTests.test_duplicate_launch_unpolled_exit_and_close_keep_owned_child",
+    "baseline_id": "tests.unit.test_research_symbol_validation_dialog.SymbolValidationDialogTests.test_duplicate_launch_unpolled_exit_and_close_keep_owned_child",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_research_symbol_validation_dialog.py",
+    "line": 151,
+    "status": "reviewed",
+    "requirement": "AGENTS actual connected UI/worker/results/lifecycle, frozen input preservation and no unnecessary repetition; docs/AI_TRADING_SYSTEM_REDESIGN.md independent development validation/role and current MODULE_MAP research process boundaries",
+    "production_evidence": "presentation/research_dialog.py:1285-1590; research_process.py:1954-1997,2001-2141; presentation/research_dialog.py:211-216,1181-1182,1206-1207; tests/unit/test_research_development_validation.py:22-40; tests/unit/test_research_symbol_validation.py:29-40",
+    "expectation_review": "Retired duplicate: grouped flag never affects shared _start/_launch/closeEvent owner branches. Retained developmentdialog duplicate-launch and nonblocking-close tests exercise those same branches; groupedresult functionality separately covered. Removed only this test, relevant3 passed2.705s.",
+    "decision": "retire",
+    "gap": "Offline research fixture and Qt UI/controlledworker integration; no actualNAS/liveAI/account execution or researchprofitability claim.",
+    "review_owner": "review_c",
+    "replacement_case_ids": [
+      "tests.unit.test_research_development_validation_dialog.DevelopmentValidationDialogTests.test_duplicate_launch_after_native_exit_before_poll_is_blocked",
+      "tests.unit.test_research_development_validation_dialog.DevelopmentValidationDialogTests.test_close_is_nonblocking_cancellation_and_poll_finishes_while_hidden"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_second_trade_storage.SecondTradeStorageTests.test_historical_archive_retry_does_not_double_count",
+    "baseline_id": "tests.unit.test_second_trade_storage.SecondTradeStorageTests.test_historical_archive_retry_does_not_double_count",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_second_trade_storage.py",
+    "line": 98,
+    "status": "reviewed",
+    "requirement": "AGENTS.md 저장 초봉 생산 중단·기존자료 보존 및 과거 비교/보존 경로 유지. 현 collector는 MinuteBarAccumulator만 생성/flush하며 기존 SQLite 초봉 upsert는 archive reader 호환을 위해 남음.",
+    "production_evidence": [
+      {
+        "file": "src/kiwoom_monitor/central_server/database_market_bars.py",
+        "symbol": "SQLiteMarketBarStoreMixin.save_second_trade_bars",
+        "line": 785
+      },
+      {
+        "file": "src/kiwoom_monitor/central_server/realtime_collector.py",
+        "symbol": "CentralRealtimeCollector._publish_parsed",
+        "line": 1129
+      }
+    ],
+    "expectation_review": "동일 module의 test_same_absolute_bar_retry_does_not_add_values_twice와 동일 _bar·동일 SQLite save 두번·동일8열 기대. archive.sqlite3라는 파일명/close 외 구별 입력·경로·계약이 없어 삭제하고 앞case로 보존.",
+    "decision": "retire",
+    "gap": null,
+    "review_owner": "root",
+    "replacement_case_ids": [
+      "tests.unit.test_second_trade_storage.SecondTradeStorageTests.test_same_absolute_bar_retry_does_not_add_values_twice"
+    ]
+  },
+  {
+    "case_id": "tests.unit.test_settings_backup.SettingsBackupServiceTest.test_import_syncs_column_layout_but_keeps_local_widths",
+    "baseline_id": "tests.unit.test_settings_backup.SettingsBackupServiceTest.test_import_syncs_column_layout_but_keeps_local_widths",
+    "baseline_executions": 1,
+    "file": "tests/unit/test_settings_backup.py",
+    "line": 289,
+    "status": "reviewed",
+    "requirement": "DEVELOPMENT_GUARDRAILS.md:135; MODULE_MAP.md:230-231 settings/theme/news credential-safe snapshot backup",
+    "production_evidence": "persistence/settings_backup.py:46-119,168-299,346-469; persistence/backup_file.write_json_backup",
+    "expectation_review": "body only initializes/exports/updates DB; no import invocation or assertion. Same layout/width contract actually exercised by test_export_then_import_restores_user_configuration; removed empty method.",
+    "decision": "retire",
+    "gap": "",
+    "review_owner": "review_c",
+    "replacement_case_ids": [
+      "tests.unit.test_settings_backup.SettingsBackupServiceTest.test_export_then_import_restores_user_configuration"
+    ]
+  }
+]

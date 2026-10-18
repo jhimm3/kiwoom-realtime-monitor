@@ -499,5 +499,9 @@ class HistoricalNewsPcJobsTests(unittest.TestCase):
                 nas_event.pop(key, None)
                 pc_event.pop(key, None)
             self.assertEqual(nas_event, pc_event)
+            self.assertEqual("SUPPLY_CONTRACT", pc_event["event_type"])
+            self.assertEqual("CONFIRMED", pc_event["certainty"])
+            self.assertEqual(100_000_000_000, pc_event["amount_won"])
+
             nas.close()
             pc.close()

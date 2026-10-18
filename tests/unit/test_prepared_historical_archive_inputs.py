@@ -137,6 +137,11 @@ class InputGenerationTests(unittest.TestCase):
         self.base()
         filename, digest = self.component('new')
         self.adopt()
+        with self.assertRaisesRegex(ValueError, 'unsupported component scope'):
+            inputs.stage_component(self.archive, filename, api.MARKET, digest,
+                                   component_id='wrong-scope', kind='supplement')
+        with closing(sqlite3.connect(self.archive)) as db:
+            self.assertEqual(0, db.execute('SELECT COUNT(*) FROM archive_input_components_v3').fetchone()[0])
         with closing(sqlite3.connect(self.archive)) as db, db:
             db.execute("CREATE TRIGGER break_binding BEFORE INSERT ON archive_input_bindings_v3 BEGIN SELECT RAISE(ABORT,'injected'); END")
         with self.assertRaisesRegex(sqlite3.IntegrityError, 'injected'):
@@ -155,12 +160,24 @@ class InputGenerationTests(unittest.TestCase):
     def test_full_audit_detects_binding_and_exclusion_tamper(self):
         self.base()
         filename, digest = self.component('new')
+        with closing(sqlite3.connect(self.archive)) as db, db:
+            metadata = dict(training_eligible=0, article_fetch_status='blocked', training_exclusion_reason='blocked')
+            db.execute('INSERT INTO archive_source_coverage_v2 VALUES(?,?,?,?,?)', (api.SEARCH, '005930', 'excluded', None, json.dumps(metadata)))
+            db.execute('INSERT INTO archive_source_history_v2 VALUES(?,?,?,?,?,?)', (api.SEARCH, 'news_articles', 'excluded', 'verified', api._json(metadata), inputs._hash(metadata)))
         self.adopt(); self.stage(filename, digest)
         inputs.stage_exclusions(self.archive); inputs.complete_adoption(self.archive)
         with closing(sqlite3.connect(self.archive)) as db, db:
+            original = db.execute('SELECT coverage_hash FROM archive_input_bindings_v3').fetchone()[0]
             db.execute("UPDATE archive_input_bindings_v3 SET coverage_hash='bad'")
         from scripts.audit_prepared_historical_archive_v2 import audit
         self.assertIn('input_binding_invalid', audit(self.archive)['blockers'])
+        with closing(sqlite3.connect(self.archive)) as db, db:
+            db.execute('UPDATE archive_input_bindings_v3 SET coverage_hash=?', (original,))
+        self.assertNotIn('input_binding_invalid', audit(self.archive)['blockers'])
+        with closing(sqlite3.connect(self.archive)) as db, db:
+            self.assertEqual(1, db.execute('SELECT COUNT(*) FROM archive_source_exclusions_v3').fetchone()[0])
+            db.execute("UPDATE archive_source_exclusions_v3 SET raw_hash='bad'")
+        self.assertIn('source_exclusion_evidence_invalid', audit(self.archive)['blockers'])
 
     def test_failed_supplement_repair_keeps_both_input_versions(self):
         self.base()

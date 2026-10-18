@@ -80,6 +80,18 @@ class MaterializeHistoricalNewsSeedTests(unittest.TestCase):
             materialize(self.seed, self.archive)
         self.assertFalse(self.archive.exists())
         self.assertFalse(self.archive.with_name(self.archive.name + ".partial").exists())
+        with closing(sqlite3.connect(self.seed)) as db, db:
+            payload = db.execute(
+                "SELECT payload_json FROM seed_rows WHERE table_name='central_news_body_revisions'"
+            ).fetchone()[0]
+            db.execute(
+                "UPDATE seed_rows SET payload_hash=? WHERE table_name='central_news_body_revisions'",
+                (hashlib.sha256(payload.encode("utf-8")).hexdigest(),),
+            )
+        with self.assertRaisesRegex(ValueError, "schema mismatch"):
+            materialize(self.seed, self.archive)
+        self.assertFalse(self.archive.exists())
+        self.assertFalse(self.archive.with_name(self.archive.name + ".partial").exists())
 
 
 if __name__ == "__main__":

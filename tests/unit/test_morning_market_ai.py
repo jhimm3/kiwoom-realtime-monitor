@@ -66,11 +66,19 @@ class ResearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rows[0]["document"]["usage_measured"])
 
     async def test_shared_daily_limit_blocks_before_external_request(self):
+        from datetime import datetime, timedelta
+        from kiwoom_monitor.domain.time_basis import KST
+        now = datetime(2035, 1, 2, 23, 59, tzinfo=KST)
+        self.service._now = lambda: now
         self.service._daily_limit=1
         with patch("kiwoom_monitor.infrastructure.news_ai.research_market",return_value=self.reply) as call:
             await self.research()
             with self.assertRaises(ValueError): await self.research()
-        self.assertEqual(call.call_count,1)
+            rows = self.store.load_documents('news_request_usage', owner='2035-01-02')
+            self.assertEqual(1, len(rows))
+            now += timedelta(minutes=2)
+            await self.research()
+        self.assertEqual(call.call_count,2)
 
     async def test_cancelled_reader_still_drains_owned_inference_on_account_change(self):
         import threading

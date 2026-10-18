@@ -55,12 +55,14 @@ class RealAccountReadsTests(support.RealCredentialOwnerTestSupport):
             self.assertEqual(5, len(target.client.account_calls))
 
     async def test_stale_binding_and_keyless_read_are_rejected_before_tr(self):
-        with self.assertRaisesRegex(CredentialOperationError, "PROFILE_RUNTIME_NOT_READY"):
-            await self.read()
-        await self.admitted()
-        for revision in (2, True):
-            with self.assertRaisesRegex(CredentialOperationError, "ACCOUNT_CONTEXT_MISMATCH"):
-                await self.read(revision=revision)
+        with patch.object(AccountClient, "request_with_continuation", side_effect=AssertionError("unexpected physical account TR")) as physical:
+            with self.assertRaisesRegex(CredentialOperationError, "PROFILE_RUNTIME_NOT_READY"):
+                await self.read()
+            await self.admitted()
+            for revision in (2, True):
+                with self.assertRaisesRegex(CredentialOperationError, "ACCOUNT_CONTEXT_MISMATCH"):
+                    await self.read(revision=revision)
+            physical.assert_not_called()
 
     async def test_cancelled_read_waiter_keeps_physical_read_owned_during_key_rotation(self):
         with patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient", AccountClient):
@@ -112,7 +114,10 @@ class RealAccountReadsTests(support.RealCredentialOwnerTestSupport):
         from kiwoom_monitor.central_server.app import create_app
         from kiwoom_monitor.central_server.config import CentralServerSettings
         app = create_app(CentralServerSettings(f"sqlite:///{self.root / 'api.sqlite'}", "token",
-            autonomous_top20_enabled=False, market_event_collection_enabled=False))
+            autonomous_top20_enabled=False, market_event_collection_enabled=False,
+            news_naver_market_enabled=False, news_naver_api_enabled=False,
+            news_naver_stock_enabled=False, news_query_set_enabled=False,
+            news_history_jobs_enabled=False))
         with TestClient(app) as client:
             for api in ACCOUNT_RECOVERY_ENDPOINTS:
                 response = client.post("/api/v1/kiwoom/query", headers={"Authorization": "Bearer token"},

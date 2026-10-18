@@ -42,6 +42,13 @@ class ResearchProcessTests(unittest.TestCase):
             path = root / "request.json"
             path.write_text(json.dumps(_request_document()), encoding="utf-8")
             request = load_research_process_request(path)
+            self.assertEqual(root / "dataset", request.dataset)
+            self.assertEqual(root / "output/research.sqlite3", request.database)
+            self.assertEqual(root / "output/runs", request.runs_dir)
+            original = _request_document()
+            self.assertEqual(original["strategy"], request.strategy.to_dict())
+            self.assertEqual(original["execution"]["cost_model"], request.execution.cost_model.to_dict())
+            self.assertEqual(original["evaluation"], {key: request.evaluation.to_dict()[key] for key in original["evaluation"]})
         self.assertEqual("rank_comparison", request.mode)
         self.assertTrue(request.strategy.rank_persistence_required)
         self.assertEqual("locked fixture", request.execution.cost_model.source)
@@ -55,6 +62,14 @@ class ResearchProcessTests(unittest.TestCase):
             path.write_text(json.dumps(_request_document()), encoding="utf-8")
             result = execute_process_request(load_research_process_request(path))
             manifest = Path(result["manifest"])
+            self.assertTrue(manifest.is_file())
+            document = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertTrue(document)
+            self.assertEqual(result["comparison"], document["comparison"])
+            for name in ("baseline_manifest", "variant_manifest"):
+                child = Path(document[name])
+                self.assertTrue(child.is_file())
+                self.assertTrue(json.loads(child.read_text(encoding="utf-8")))
         self.assertEqual("ok", result["status"])
         self.assertEqual("rank_comparison", result["kind"])
         self.assertEqual("INELIGIBLE", result["comparison_status"])
@@ -83,6 +98,7 @@ class ResearchProcessTests(unittest.TestCase):
                 execute_process_request(
                     load_research_process_request(path), cancel_path=cancel,
                 )
+            self.assertEqual([], list((root / "output/runs").rglob("manifest.json")))
 
     def test_limited_search_runs_to_budget_and_resume_does_not_duplicate_trials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

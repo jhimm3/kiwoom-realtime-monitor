@@ -6,10 +6,9 @@ from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 import getpass
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QDesktopServices
@@ -56,7 +55,6 @@ from kiwoom_monitor.application.historical_news_review_queue import (
 )
 
 
-_SEOUL = ZoneInfo("Asia/Seoul")
 _DECISIONS = (
     ("미검토", ""),
     ("관련", "relevant"),
@@ -68,13 +66,15 @@ _DECISIONS = (
 class HistoricalNewsReviewDialog(QDialog):
     """Review one immutable queue through a resumable working CSV."""
 
-    def __init__(self, research_dir: Path, parent=None, *, theme_repository: object | None = None) -> None:
+    def __init__(self, research_dir: Path, parent=None, *, theme_repository: object | None = None,
+                 now_provider=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("과거 뉴스 사람 검토")
         self.resize(1180, 720)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._research_dir = Path(research_dir)
         self._theme_repository = theme_repository
+        self._now = now_provider or kst_now
         self._queue: HistoricalNewsReviewQueue | None = None
         self._sheet_path: Path | None = None
         self._rows: list[dict[str, str]] = []
@@ -380,7 +380,7 @@ class HistoricalNewsReviewDialog(QDialog):
             "theme_names": self._themes.text().strip() if decision == "relevant" else "",
             "notes": self._notes.toPlainText().strip(),
             "reviewer": self._reviewer.text().strip() if decision else "",
-            "reviewed_at": datetime.now(_SEOUL).isoformat() if decision else "",
+            "reviewed_at": as_kst(self._now()).isoformat() if decision else "",
         }
         try:
             updated = update_historical_news_review_sheet_row(

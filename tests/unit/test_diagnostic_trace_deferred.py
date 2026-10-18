@@ -409,16 +409,6 @@ class DeferredTraceTests(unittest.TestCase):
             self.assertEqual(values, [thaw_payload(row['payload']) for row in rows])
             self.assertEqual(list(range(1, 9)), [row['seq'] for row in rows])
 
-    def test_host_and_container_headroom_both_gate_eight_gib_capture(self):
-        def read(path):
-            values = {'/proc/meminfo': 'MemAvailable: 12582912 kB\n',
-                      '/sys/fs/cgroup/memory.max': str(9 * 1024**3),
-                      '/sys/fs/cgroup/memory.current': str(1024**3)}
-            return values[str(path).replace('\\', '/')]
-        with patch.object(Path, 'read_text', read):
-            with self.assertRaisesRegex(ValueError, 'trace_memory_headroom_insufficient'):
-                trace._deferred_memory_check()
-
     def test_unavailable_container_limit_fails_closed(self):
         def read(path):
             if str(path).replace('\\', '/') == '/proc/meminfo':

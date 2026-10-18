@@ -648,15 +648,21 @@ class CentralRestBroker:
             raise ValueError("연속조회에는 next_key가 필요합니다.")
 
     def _wall_time(self) -> float:
-        return time.time() if self._source_wall_time is None else self._source_wall_time()
+        if self._source_wall_time is not None:
+            return self._source_wall_time()
+        provider = getattr(self._client, "server_now", None)
+        current = provider() if callable(provider) else None
+        if isinstance(current, datetime):
+            from kiwoom_monitor.domain.time_basis import as_kst
+            return as_kst(current).timestamp()
+        return datetime.now(KST).timestamp()
 
     def _fingerprint(self, api_id: str, path: str, body: dict[str, Any], cont_yn: str, next_key: str) -> str:
         parts = [self._namespace if self._credential_generation == 0 else
                  f"{self._namespace}:credential-generation:{self._credential_generation}",
                  api_id, path, body, cont_yn, next_key]
         if api_id == "ka10001":
-            current = (datetime.now(KST) if self._source_wall_time is None
-                       else datetime.fromtimestamp(self._wall_time(), KST))
+            current = datetime.fromtimestamp(self._wall_time(), KST)
             # Both RAM and persistent caches must exclude pre-refresh responses.
             parts.append(fundamentals_refresh_key(current.date(), current))
         raw = json.dumps(

@@ -149,6 +149,8 @@ class MinuteChartServiceTests(unittest.TestCase):
         self.assertEqual(1, bars[0].minute.minute)
         self.assertEqual(10, bars[0].minute.hour)
         self.assertEqual(110, bars[1].open_price)
+        self.assertEqual([(100, 110, 90, 105, 10), (110, 120, 100, 115, 20)],
+                         [(bar.open_price, bar.high_price, bar.low_price, bar.close_price, bar.volume) for bar in bars])
 
     def test_loads_a_second_page_when_ka10080_has_more_rows(self) -> None:
         class ContinuationClient:

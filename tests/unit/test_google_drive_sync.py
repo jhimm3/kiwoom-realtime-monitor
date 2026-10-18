@@ -35,6 +35,11 @@ class GoogleDriveSyncServiceTest(unittest.TestCase):
             media_upload.call_args.kwargs,
         )
 
+        self.assertEqual(b"x" * GoogleDriveSyncService.RESUMABLE_UPLOAD_THRESHOLD_BYTES, media_upload.call_args.args[0].getvalue())
+        with patch("googleapiclient.http.MediaIoBaseUpload", side_effect=lambda stream, **kwargs: (stream, kwargs), create=True) as media_upload:
+            GoogleDriveSyncService._media_upload(b"y" * (GoogleDriveSyncService.RESUMABLE_UPLOAD_THRESHOLD_BYTES - 1))
+        self.assertFalse(media_upload.call_args.kwargs["resumable"])
+
     def test_component_upload_failure_keeps_previous_manifest(self) -> None:
         class Request:
             def execute(self, **_kwargs) -> dict[str, object]:
@@ -472,7 +477,7 @@ class GoogleDriveSyncServiceTest(unittest.TestCase):
                     patch.object(service, "_find_sync_folder", return_value="folder"), \
                     patch.object(service, "_find_remote_file", side_effect=lambda _drive, _folder, name: ids.get(name)), \
                     patch("googleapiclient.http.MediaIoBaseDownload", Downloader), \
-                    patch("kiwoom_monitor.infrastructure.persistence.google_drive_sync.SettingsBackupService.import_from") as settings_import, \
+                    patch("kiwoom_monitor.infrastructure.persistence.google_drive_sync.SettingsBackupService.import_from_settings_and_themes") as settings_import, \
                     patch("kiwoom_monitor.infrastructure.persistence.google_drive_sync.NewsAIBackupService.import_from", side_effect=ValueError("invalid AI backup")) as ai_import:
                 with self.assertRaises(GoogleDriveSyncError):
                     service.download(target="both")
@@ -570,7 +575,7 @@ class GoogleDriveSyncServiceTest(unittest.TestCase):
                     patch.object(service, "_find_sync_folder", return_value="folder"), \
                     patch.object(service, "_find_remote_file", side_effect=lambda _drive, _folder, name: ids.get(name)), \
                     patch("googleapiclient.http.MediaIoBaseDownload", Downloader), \
-                    patch("kiwoom_monitor.infrastructure.persistence.google_drive_sync.SettingsBackupService.import_from") as settings_import, \
+                    patch("kiwoom_monitor.infrastructure.persistence.google_drive_sync.SettingsBackupService.import_from_settings_and_themes") as settings_import, \
                     patch("kiwoom_monitor.infrastructure.persistence.google_drive_sync.NewsAIBackupService.import_from") as ai_import:
                 with self.assertRaises(GoogleDriveSyncError):
                     service.download(target="both")

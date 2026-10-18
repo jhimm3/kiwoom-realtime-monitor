@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
@@ -50,6 +51,32 @@ class FakeCursor:
 
     def fetchone(self) -> tuple[object, ...] | None:
         return self.connection.rows[0] if self.connection.rows else None
+
+
+class DocumentAvailabilityClockTests(unittest.TestCase):
+    def test_news_availability_uses_injected_clock_after_table_lock(self):
+        from kiwoom_monitor.central_server.database_documents import _append_postgres_news_articles
+        clock = [100.0]
+        statements = []
+
+        class Cursor:
+            def execute(self, sql, parameters=()):
+                statements.append((sql, parameters))
+                if sql.startswith("LOCK TABLE"):
+                    clock[0] = 103.0  # Model completion of the existing blocking boundary.
+
+            def fetchone(self):
+                return None
+
+        _append_postgres_news_articles(Cursor(), [{
+            "owner": "005930", "key": "article", "document": {"title": "stored article"},
+        }], received_at=100.0,
+            now_provider=lambda: datetime.fromtimestamp(clock[0], timezone.utc))
+        article = next(values for sql, values in statements if sql.startswith("INSERT INTO central_news_article_revisions"))
+        self.assertEqual((100.0, 103.0), article[6:8])
+        job = next(values for sql, values in statements if sql.startswith("INSERT INTO central_news_jobs"))
+        self.assertEqual(article[0], job[1])
+        self.assertEqual((103.0, 103.0), (job[8], job[-1]))
 
 
 class FakeConnection:
@@ -724,9 +751,10 @@ class PostgresAccessTests(unittest.TestCase):
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw), \
                 patch("kiwoom_monitor.central_server.diagnostic_metrics.capture_session_token",
-                      side_effect=OSError("diagnostic unavailable")):
+                      side_effect=OSError("diagnostic unavailable")) as broken_capture:
             store.save_query("cache-key", "ka10081", time.time() + 60,
                              StoredQuery({}, False, ""))
+        broken_capture.assert_called()
         self.assertEqual(["INSERT", "DELETE"], [item[0] for item in raw.statements])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
 
@@ -735,9 +763,10 @@ class PostgresAccessTests(unittest.TestCase):
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw), \
                 patch("kiwoom_monitor.central_server.diagnostic_metrics.record_writer_transaction",
-                      side_effect=OSError("diagnostic unavailable")):
+                      side_effect=OSError("diagnostic unavailable")) as broken_metric:
             store.save_query("cache-key", "ka10081", time.time() + 60,
                              StoredQuery({}, False, ""))
+        broken_metric.assert_called_once()
         self.assertEqual(["INSERT", "DELETE"], [item[0] for item in raw.statements])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
 
@@ -1602,52 +1631,26 @@ class PostgresAccessTests(unittest.TestCase):
             samples = legacy["writer_transactions"][kind]["call_samples"]
             self.assertTrue(any(sample["db_call_id"] == call["call_id"] for sample in samples))
 
-    def test_news_sync_document_execute_failure_rolls_back(self) -> None:
-        store = PostgresQueryStore("unused")
-        raw = self._native_context_connection()
-        raw.fail_execute = 1
-        with patch.object(store, "_connect", return_value=raw):
-            with self.assertRaisesRegex(ValueError, "statement failed"):
-                store.upsert_documents("news_sync", [{
-                    "owner": "005930", "key": "latest", "document": {"checked_at": "2026-09-27"},
-                }])
-        self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
-        call = next(call for call in self._calls() if call["writer_kind"] == "document:news_sync")
-        self.assertEqual(("rolled_back", 1), (call["outcome"], call["rollbacks"]))
-
-    def test_krx_trading_day_document_execute_failure_rolls_back(self) -> None:
-        store = PostgresQueryStore("unused")
-        raw = self._native_context_connection()
-        raw.fail_execute = 1
-        with patch.object(store, "_connect", return_value=raw):
-            with self.assertRaisesRegex(ValueError, "statement failed"):
-                store.upsert_documents("krx_trading_day_observations", [{
-                    "owner": "2026-09-28", "key": "latest",
-                    "document": {"trading_date": "2026-09-28"},
-                }])
-        self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
-        call = next(
-            call for call in self._calls()
-            if call["writer_kind"] == "document:krx_trading_day_observations"
+    def test_registered_document_execute_failure_rolls_back_each_collection(self) -> None:
+        cases = (
+            ("news_sync", "005930", {"checked_at": "2026-09-27"}),
+            ("krx_trading_day_observations", "2026-09-28", {"trading_date": "2026-09-28"}),
+            ("external_market_roll_state", "WTI_FUTURES", {"active_contract": "CLV26.NYM"}),
         )
-        self.assertEqual(("rolled_back", 1), (call["outcome"], call["rollbacks"]))
-
-    def test_external_market_roll_state_execute_failure_rolls_back(self) -> None:
         store = PostgresQueryStore("unused")
-        raw = self._native_context_connection()
-        raw.fail_execute = 1
-        with patch.object(store, "_connect", return_value=raw):
-            with self.assertRaisesRegex(ValueError, "statement failed"):
-                store.upsert_documents("external_market_roll_state", [{
-                    "owner": "WTI_FUTURES", "key": "current",
-                    "document": {"active_contract": "CLV26.NYM"},
-                }])
-        self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
-        call = next(
-            call for call in self._calls()
-            if call["writer_kind"] == "document:external_market_roll_state"
-        )
-        self.assertEqual(("rolled_back", 1), (call["outcome"], call["rollbacks"]))
+        for collection, owner, document in cases:
+            with self.subTest(collection=collection):
+                raw = self._native_context_connection()
+                raw.fail_execute = 1
+                with patch.object(store, "_connect", return_value=raw):
+                    with self.assertRaisesRegex(ValueError, "statement failed"):
+                        store.upsert_documents(collection, [{
+                            "owner": owner, "key": "latest", "document": document,
+                        }])
+                self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
+                call = next(call for call in self._calls()
+                            if call["writer_kind"] == f"document:{collection}")
+                self.assertEqual(("rolled_back", 1), (call["outcome"], call["rollbacks"]))
 
     def test_two_observed_calls_do_not_share_connection_or_call_id(self) -> None:
         barrier = Barrier(2, timeout=5)

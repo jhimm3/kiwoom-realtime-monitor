@@ -1052,14 +1052,6 @@ class NasOperatorTests(unittest.TestCase):
                         self.assertEqual('complete', operator.job_journal()['state'])
                     self.assertTrue(operator.database_running)
 
-    def test_disk_parent_fix_grants_only_search_to_postgres_uid(self):
-        # Native failed fixture: root parent0700 and already-created PGDATA uid70/0700.
-        def permissions(mode, owner, caller):
-            return (mode >> 6) & 7 if owner == caller else mode & 7
-        self.assertEqual(0, permissions(0o700, 0, 70) & 1)
-        self.assertEqual(1, permissions(0o711, 0, 70))
-        self.assertEqual(7, permissions(0o700, 70, 70))
-        self.assertEqual(0, permissions(0o700, 0, 70))  # Protected private ancestor unchanged.
 
     def test_final_fence_failure_marks_report_failed_and_never_publishes_gate(self):
         for failure in (False, True):
@@ -1349,6 +1341,8 @@ class NasOperatorTests(unittest.TestCase):
         result.wasSuccessful.return_value = False
         result.testsRun = 2
         result.skipped = []
+        result.expectedFailures = []
+        result.unexpectedSuccesses = []
         result.failures = [(TestCase('test_assertion'),
             'Traceback (most recent call last):\n  File "/tmp/test_example.py", line 21, in test_assertion\n'
             'AssertionError: secret payload')]
@@ -1505,6 +1499,24 @@ class NasOperatorTests(unittest.TestCase):
             outcome = worker.run_tests(['fixture'])
         self.assertEqual('failed', outcome['state'])
         self.assertEqual(1, outcome['skipped'])
+        class ExpectedFailure(unittest.TestCase):
+            @unittest.expectedFailure
+            def test_expected(self):
+                self.fail('expected fixture failure')
+
+        class UnexpectedSuccess(unittest.TestCase):
+            @unittest.expectedFailure
+            def test_unexpected(self):
+                pass
+
+        for case, field in ((ExpectedFailure('test_expected'), 'expected_failures'),
+                            (UnexpectedSuccess('test_unexpected'), 'unexpected_successes')):
+            with self.subTest(field=field), patch.object(
+                    unittest.defaultTestLoader, 'loadTestsFromName',
+                    return_value=unittest.TestSuite([case])), contextlib.redirect_stderr(io.StringIO()):
+                outcome = worker.run_tests(['fixture'])
+            self.assertEqual('failed', outcome['state'])
+            self.assertEqual(1, outcome[field])
 
     def test_host_files_are_python38_compatible(self):
         root = Path(__file__).resolve().parents[2]

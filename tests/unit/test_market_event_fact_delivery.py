@@ -158,6 +158,8 @@ class MarketEventFactDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_count_backpressure_freezes_whole_event_before_midnight(self):
         self.service._fact_capacity = 1
+        from kiwoom_monitor.domain.time_basis import as_kst
+        original_instant = as_kst(self.now).timestamp()
         patcher, entered, release, attempts = self.held_save()
         with patcher:
             self.publish("005930", 120000)
@@ -174,6 +176,7 @@ class MarketEventFactDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["session_id"] == "2026-10-08" for row in rows))
         self.assertTrue(all(row["upper_limit_price"] == 130000 for row in rows))
         self.assertEqual(1, self.service._fact_high_water)
+        self.assertTrue(all(row['available_at'] == original_instant for row in rows))
 
     async def test_payload_budget_and_waiter_cancellation_do_not_retire_accepted_fact(self):
         patcher, entered, release, attempts = self.held_save()

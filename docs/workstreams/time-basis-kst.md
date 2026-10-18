@@ -1,5 +1,7 @@
 # 앱 전체 시각의 KST 통일
 
+2026-10-18 R3-002 로컬: 기존 PC 가격 cache writer에 AppController `ranking_now`를 주입하고 가격·시총·고가 신규 timestamp3필드를 한 job의 KST ISO(+09:00)로 저장한다. standalone/legacy clock 없는 진입점은 공통 KST fallback이며 키움 동기화로 보고하지 않는다. 기존 저장 자료는 변환하지 않는다. 후속 공유 시계 변경의 aware 현재 시각과 legacy naive KST 분봉 비교가 실제 writer/controller 검사에서 실패해 비교 시에만 `as_kst(bar.minute)`를 적용했다. 거래일/분 키는 보존한다. 현재 검증·실패 기록은 [R3-002](../../REFACTOR_BACKLOG.md#r3-002--한-가격-캐시-job의-다중-transaction)에 모으며 이 항목으로 전체 시계 감사 완료를 선언하지 않는다.
+
 2026-10-15 · 사용자 요청: 앱이 사용하는 시각 전체, 신규 저장과 기존 저장 자료를 KST로 통일한다. 표시만 바꾸는 작업으로 축소하지 않는다.
 
 ## 2026-10-17 기존 저장 경로 변환 완료

@@ -47,6 +47,9 @@ class FundamentalsWorkerControllerTests(unittest.TestCase):
         self.assertEqual([("005930", "fundamentals")], received)
         self.assertEqual(["failed"], failures)
         self.assertEqual([("005930", "000660")], completed)
+        worker.running = False
+        worker.finished.emit()
+        self.assertIsNone(controller.worker)
 
     def test_running_worker_is_reused_without_factory_call(self) -> None:
         worker = FakeFundamentalsWorker()

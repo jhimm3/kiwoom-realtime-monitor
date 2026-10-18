@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from unittest.mock import patch
 from pathlib import Path
 
 from kiwoom_monitor.application.breakout_strategy import default_shadow_breakout_config
@@ -334,7 +335,14 @@ class ResearchHypothesisCampaignTests(unittest.TestCase):
         )
         self.assertEqual('COMPLETED', cycle['cycle_outcome'])
 
-        generated = generate_next_campaign_hypotheses(repository, 'followup', claim)
+        original_report = repository.load_research_report
+        def with_oos(run_id):
+            report = original_report(run_id)
+            if report is None:
+                return None
+            return {**report, 'status': 'FINAL_SENTINEL', 'fold_reports': [*report['fold_reports'], {'name': 'final-sentinel', 'role': 'OOS', 'status': 'ELIGIBLE', 'net_realized_pnl_won': 999999, 'max_drawdown_won': 999999, 'closed_trade_count': 999, 'active_day_count': 999}]}
+        with patch.object(repository, 'load_research_report', side_effect=with_oos):
+            generated = generate_next_campaign_hypotheses(repository, 'followup', claim)
         self.assertEqual('generated', generated['status'], generated)
         self.assertEqual(2, generated['generated_count'])
         registered = repository.load_campaign_registered_hypotheses('followup')
@@ -344,6 +352,8 @@ class ResearchHypothesisCampaignTests(unittest.TestCase):
         self.assertEqual(1, len(expansion))
         self.assertEqual('GENERATED', expansion[0]['state'])
         self.assertNotIn('FINAL', json.dumps(expansion[0]['evidence']))
+        self.assertNotIn('final-sentinel', json.dumps(expansion[0]['evidence']))
+        self.assertNotIn('999999', json.dumps(expansion[0]['evidence']))
         # Simulate a crash after child registration but before the expansion commit.
         with closing(sqlite3.connect(repository.path)) as connection:
             connection.execute(

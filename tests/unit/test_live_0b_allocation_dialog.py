@@ -118,7 +118,16 @@ class LiveAllocationDialogTests(unittest.TestCase):
         self.assertNotIn('첫 관측 초의 마지막 수신가격',dialog._ram_table.item(0,3).toolTip())
 
     def test_expired_or_order_authorized_results_cannot_look_current(self):
-        dialog=self.dialog();value=self.receipt();value['valid_until']='2000-01-01T00:00:00+09:00'
+        from datetime import datetime, timedelta
+        from kiwoom_monitor.domain.time_basis import KST
+        from types import SimpleNamespace
+        dialog=self.dialog(); value=self.receipt()
+        now = datetime(2035, 1, 2, 10, 0, tzinfo=KST)
+        dialog._content_client = SimpleNamespace(server_now=lambda: now)
+        value['valid_until'] = (now + timedelta(seconds=1)).isoformat()
+        dialog._render_position_allocation({'position_allocation':value},recorded=False)
+        self.assertNotIn('자료 만료', dialog._ram_allocation_status.text())
+        now += timedelta(seconds=2)
         dialog._render_position_allocation({'position_allocation':value},recorded=False)
         self.assertIn('자료 만료',dialog._ram_allocation_status.text())
         value['order_authorized']=True

@@ -603,6 +603,8 @@ class JournalRepositoryTests(unittest.TestCase):
             self.assertEqual("실패", states[("000660", failed_day)].state)
             self.assertEqual("일시 오류", states[("000660", failed_day)].message)
             self.assertEqual("미조회", states[("035420", failed_day)].state)
+            for (code, day), state in states.items():
+                self.assertEqual(repository.bar_backfill_state(code, day), state)
 
     def test_bar_backfill_result_saves_only_target_day_and_confirms_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -619,6 +621,8 @@ class JournalRepositoryTests(unittest.TestCase):
             self.assertTrue(saved)
             self.assertEqual("확정", state.state)
             self.assertEqual(1, state.bar_count)
+            self.assertEqual((), repository.load_bars("005930", datetime(2026, 8, 27)))
+            self.assertEqual(1, len(repository.load_bars("005930", datetime(2026, 8, 28))))
 
     def test_empty_bar_backfill_result_records_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -674,6 +678,9 @@ class JournalRepositoryTests(unittest.TestCase):
                 repository.save_bar_backfill_result("005930", day, (bar,))
 
             self.assertEqual("미조회", repository.bar_backfill_state("005930", day).state)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM journal_minute_bars").fetchone()[0])
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM journal_bar_backfill").fetchone()[0])
 
     def test_backfill_candidates_are_based_on_saved_trade_dates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

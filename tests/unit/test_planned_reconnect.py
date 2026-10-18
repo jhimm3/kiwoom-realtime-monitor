@@ -282,7 +282,9 @@ class PlannedReconnectHTTPTests(unittest.TestCase):
              patch.object(CentralRealtimeCollector, "start", new=AsyncMock()):
             settings = CentralServerSettings(f"sqlite:///{Path(directory) / 'db.sqlite'}", "fake",
                 kiwoom_app_key="a1", kiwoom_secret_key="fake", autonomous_top20_enabled=False,
-                market_event_collection_enabled=False)
+                market_event_collection_enabled=False, news_naver_api_enabled=False,
+                news_naver_stock_enabled=False, news_naver_market_enabled=False,
+                news_query_set_enabled=False, news_history_jobs_enabled=False)
             app = create_app(settings)
             with TestClient(app, base_url="https://nas.test") as client:
                 collector = collectors[0]

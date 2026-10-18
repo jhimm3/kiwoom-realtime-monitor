@@ -282,6 +282,7 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
                 if sum(row.get("input_kind") == "logical_start" for row in self.events) == 2:
                     break
                 await asyncio.sleep(.002)
+            self.assertEqual(2, sum(row.get("input_kind") == "logical_start" for row in self.events))
             release.set()
             await asyncio.gather(first, peer)
             with self.assertRaisesRegex(ValueError, "mixed_shared_request"):

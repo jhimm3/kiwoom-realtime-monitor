@@ -1,5 +1,13 @@
 # 키움 저장 경로 감사 — 첫 계측 범위
 
+## R3-004 Shadow minute reader 범위 축소 (2026-10-18 로컬)
+
+기존 Runtime/Collector/native reader·query authority/op dedup/단일 snapshot과 owned read/close를 유지하며 선택적인 분 범위를 DB/RAM 양쪽에 전달했다. 새 저장소/writer/queue/task/registry kind/index·commit은 없다. 기존 명시 reader capture 목록/codec/서명 경로에서 bound와 과거 무범위 인자를 검증했다. 고정20종목 native9000→200행/최종200행 값·metadata 동일, 연결20/SELECT22 유지이며 기존 index의 minute 범위 탐색을 확인했다. 실제 PG/wait/운영 I/O는 미측정, 기능58건과 전체 정적 감사의 병행 뉴스-only1실패는 [R3-004](../REFACTOR_BACKLOG.md#r3-004--ram-shadow-분봉의-하루-전체-범위직렬-read)에 구분했다.
+
+## R3-002 PC 가격 캐시 transaction 통합 (2026-10-18 로컬)
+
+기존 AppController의1초 cache job·MarketCacheWriter queue/drain·StockRepository·`stocks`/`intraday_highs` 경로를 재사용한다. 가격/시총/고가와 기존35일 정리의 독립 transaction3개를 기존 `sqlite_transaction`1개로 통합했다. 20종목 fixture 연결/BEGIN/COMMIT3→1, SELECT0·반영60 유지이며 중간 오류는 전체 rollback한다. 새 writer/queue/registry kind/테이블·주문 경계는 없다. 키움 보정 `ranking_now`를 writer에 주입하고 신규 시각을 KST로 저장하며 standalone/offline fallback을 구분한다. native trigger 실패·commit 전후 프로세스 종료/재시작과 연결된 소비자 검증의 최신 결과는 [R3-002](../REFACTOR_BACKLOG.md#r3-002--한-가격-캐시-job의-다중-transaction)에 기록한다. 운영 PG/WAL/장중 wait·RAM queue crash 내구성 개선은 주장하지 않는다.
+
 ## 주도주 돌파 실행 근거 (2026-10-16 로컬)
 
 기존 Runner가 `central_documents`의 계좌별 `execution_leader_position_context`(진입 intent 키)와 `execution_leader_decisions`(decision 키)에 고정 진입 근거·0B 원문·운영 revision·규칙/context/실행 계약 지문을 보존한다. 0B callback은 RAM에만 전달하고 행동 승인 직전에 기존 `upsert_documents` writer를 호출한다. 별도 테이블·writer·주문 owner는 추가하지 않는다. 이 두 collection을 기존 execution 문서의 DB 관측 종류에 등록했다. 근거 저장은 각각 기존 문서 transaction이며 뒤따르는 주문 claim transaction이 lease/control과 저장 근거를 함께 재검증한다. 부분 저장/오류는 주문 승인을 대신하지 않는다. 운영 PG/WAL 지연 수락·데이터 변경 검증과는 별개다.

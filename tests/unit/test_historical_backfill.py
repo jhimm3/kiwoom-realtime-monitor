@@ -864,17 +864,34 @@ class HistoricalBackfillTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifact = root / "bars.ndjson"
-            artifact.write_text(
-                "\n".join(json.dumps(value) for value in (valid_page, invalid_page, summary)),
-                encoding="utf-8",
-            )
             database = root / "probe.sqlite3"
-            with self.assertRaisesRegex(ValueError, "unexpected Daishin provider"):
+            for records, error in (
+                ((valid_page, invalid_page, summary), "unexpected Daishin provider"),
+                ((valid_page,), "no summary record"),
+            ):
+                with self.subTest(error=error):
+                    artifact.write_text(
+                        "\n".join(json.dumps(value) for value in records), encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, error):
+                        import_daishin_backfill_ndjson(artifact, database)
+                    with closing(sqlite3.connect(database)) as connection:
+                        self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM market_bars").fetchone()[0])
+
+            # Existing imported data survives a later interrupted artifact;
+            # only that artifact's newly written page must roll back.
+            artifact.write_text(
+                "\n".join(json.dumps(value) for value in (valid_page, summary)), encoding="utf-8",
+            )
+            import_daishin_backfill_ndjson(artifact, database)
+            with closing(sqlite3.connect(database)) as connection:
+                original = connection.execute("SELECT * FROM market_bars").fetchall()
+            interrupted = {**valid_page, "code": "000660"}
+            artifact.write_text(json.dumps(interrupted), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "no summary record"):
                 import_daishin_backfill_ndjson(artifact, database)
             with closing(sqlite3.connect(database)) as connection:
-                count = connection.execute("SELECT COUNT(*) FROM market_bars").fetchone()[0]
-
-        self.assertEqual(0, count)
+                self.assertEqual(original, connection.execute("SELECT * FROM market_bars").fetchall())
 
 
 if __name__ == "__main__":

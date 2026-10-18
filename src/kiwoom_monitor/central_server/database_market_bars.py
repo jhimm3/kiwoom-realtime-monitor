@@ -802,10 +802,13 @@ class SQLiteMarketBarStoreMixin:
     def load_minute_bars(
         self, code: str, trading_date: str, market: str = "", *,
         realtime_deltas: list[dict[str, Any]] | None = None,
+        start_minute: str | None = None, end_minute: str | None = None,
     ) -> list[dict[str, Any]]:
         realtime_deltas = [value for value in (realtime_deltas or [])
                            if value['code'] == code and value['trading_date'] == trading_date
-                           and (not market or value['market'] == market)]
+                           and (not market or value['market'] == market)
+                           and (start_minute is None or value['minute'] >= start_minute)
+                           and (end_minute is None or value['minute'] < end_minute)]
         sql = (
             "SELECT b.trading_date,b.minute,b.code,b.market,b.open,b.high,b.low,b.close,b.volume,b.trade_value_million_won,b.updated_at,"
             "m.effective_at,m.available_at,m.venue,m.unit,m.value_kind,m.completeness,m.origin,m.source,m.candidate_universe "
@@ -817,6 +820,12 @@ class SQLiteMarketBarStoreMixin:
         if market:
             sql += " AND b.market=?"
             parameters.append(market)
+        if start_minute is not None:
+            sql += " AND b.minute>=?"
+            parameters.append(start_minute)
+        if end_minute is not None:
+            sql += " AND b.minute<?"
+            parameters.append(end_minute)
         sql += " ORDER BY b.minute"
         with self._lock, self._connection() as connection:
             if realtime_deltas:
@@ -1139,10 +1148,13 @@ class PostgresMarketBarStoreMixin:
     def load_minute_bars(
         self, code: str, trading_date: str, market: str = "", *,
         realtime_deltas: list[dict[str, Any]] | None = None,
+        start_minute: str | None = None, end_minute: str | None = None,
     ) -> list[dict[str, Any]]:
         realtime_deltas = [value for value in (realtime_deltas or [])
                            if value['code'] == code and value['trading_date'] == trading_date
-                           and (not market or value['market'] == market)]
+                           and (not market or value['market'] == market)
+                           and (start_minute is None or value['minute'] >= start_minute)
+                           and (end_minute is None or value['minute'] < end_minute)]
         from .postgres_access import DBWriterContext, open_observed_connection
 
         sql = (
@@ -1157,6 +1169,12 @@ class PostgresMarketBarStoreMixin:
         if market:
             sql += " AND b.market=%s"
             parameters.append(market)
+        if start_minute is not None:
+            sql += " AND b.minute>=%s"
+            parameters.append(start_minute)
+        if end_minute is not None:
+            sql += " AND b.minute<%s"
+            parameters.append(end_minute)
         sql += " ORDER BY b.minute"
         reader = DBWriterContext(
             writer_family="read.market_bars", writer_kind="minute_bar",

@@ -230,7 +230,8 @@ class GlobalCredentialsRouteTests(unittest.TestCase):
                 "kiwoom_monitor.central_server.ai_service.analyze_articles", FakeAI()) as ai:
             root = Path(directory)
             app = create_app(CentralServerSettings(f"sqlite:///{root / 'central.sqlite'}", "private-token",
-                credential_directory=str(root / "secrets"), news_query_set_enabled=False))
+                credential_directory=str(root / "secrets"), news_query_set_enabled=False,
+                news_naver_market_enabled=False))
             with TestClient(app, base_url="https://nas.test") as server:
                 requests = []
                 def send(request, timeout):

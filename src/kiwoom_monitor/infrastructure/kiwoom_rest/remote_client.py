@@ -340,7 +340,7 @@ class RemoteKiwoomRestClient:
         kind = "top20_membership" if query_type == "5" else "ranking"
         query = urlencode({
             "subject": (
-                datetime.now(timezone(timedelta(hours=9))).date().isoformat()
+                self.server_now().date().isoformat()
                 if query_type == "5" else query_type
             ),
             "limit": 1,

@@ -48,6 +48,11 @@ class AccountArchiveTests(unittest.TestCase):
         self.assertEqual(123.25, seed[0]['updated_at'])
         self.assertEqual(body, seed[0]['document_json'])
         self.assertEqual(key, seed[0]['document_key'])
+        document = seed[0]['document_json']
+        self.assertEqual(REF, document['scope']['account_ref'])
+        self.assertEqual(2, document['settings_revision'])
+        self.assertEqual(10000, document['recovery']['account']['available_cash_won'])
+        self.assertEqual({'005930': 3}, document['recovery']['account']['positions'])
 
     def test_new_input_and_other_owner_do_not_gain_initial_rows(self):
         row, key, _ = self.operation()
@@ -74,6 +79,11 @@ class AccountArchiveTests(unittest.TestCase):
         row.pop('payload')
         with self.assertRaises(ValueError):
             prepare_seed([], [row], maximum_bytes=LIMIT)
+        for field, value in (("payload", {"invalid": "frozen payload"}), ("codec_version", "invalid"), ("account_input_version", "invalid")):
+            row, _, _ = self.operation()
+            row[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                prepare_seed([], [row], maximum_bytes=LIMIT)
 
     def test_quota_scan_counts_only_regular_files_inside_valid_sessions(self):
         import tempfile
@@ -91,6 +101,23 @@ class AccountArchiveTests(unittest.TestCase):
             other.mkdir()
             (other / 'ignored').write_bytes(b'123456789')
             self.assertEqual((1, 7), _trace_storage_usage(root))
+            import os
+            from contextlib import contextmanager
+            from types import SimpleNamespace
+            from unittest.mock import patch
+            original_scandir = os.scandir
+            @contextmanager
+            def scandir(path):
+                with original_scandir(path) as entries:
+                    values = list(entries)
+                if Path(path) == root:
+                    values.append(SimpleNamespace(name='20261012T000001Z-123456789abc', path=str(other), is_dir=lambda follow_symlinks=True: follow_symlinks))
+                elif Path(path) == session:
+                    values.append(SimpleNamespace(is_file=lambda follow_symlinks=True: follow_symlinks, stat=lambda follow_symlinks=True: SimpleNamespace(st_size=999999)))
+                yield iter(values)
+            with patch('kiwoom_monitor.central_server.diagnostic_trace.os.scandir', scandir):
+                self.assertEqual((1, 7), _trace_storage_usage(root))
+
 
 
 if __name__ == '__main__':

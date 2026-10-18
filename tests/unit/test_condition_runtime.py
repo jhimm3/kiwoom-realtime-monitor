@@ -278,7 +278,8 @@ class ConditionOperationsAPITests(unittest.TestCase):
                 patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient", FakeClient), \
                 patch("kiwoom_monitor.central_server.app.CentralRealtimeCollector.start", new=AsyncMock()) as start:
             settings = CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token",
-                kiwoom_app_key="fake", kiwoom_secret_key="fake", autonomous_top20_enabled=False)
+                kiwoom_app_key="fake", kiwoom_secret_key="fake", autonomous_top20_enabled=False,
+                news_naver_market_enabled=False)
             app = create_app(settings)
             headers = {"Authorization": "Bearer token"}
             with TestClient(app) as client:
@@ -332,7 +333,9 @@ class ConditionOperationsAPITests(unittest.TestCase):
     def test_auth_strict_fields_unsupported_and_save_failure_leave_old_policy(self):
         from fastapi.testclient import TestClient
         with tempfile.TemporaryDirectory() as directory:
-            app = create_app(CentralServerSettings(f"sqlite:///{Path(directory) / 'central.sqlite'}", "token"))
+            app = create_app(CentralServerSettings(
+                f"sqlite:///{Path(directory) / 'central.sqlite'}", "token",
+                news_naver_market_enabled=False))
             headers = {"Authorization": "Bearer token"}
             with TestClient(app) as client:
                 self.assertEqual(401, client.put("/api/v1/settings/operations", json={"hot_cohort_condition_enabled": False}).status_code)

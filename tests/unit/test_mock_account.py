@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from kiwoom_monitor.domain.order_contract import OrderState
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import (
     KiwoomMockAccountReader,
+    KiwoomRealAccountReader,
     merge_order_snapshots,
     parse_account_snapshot,
     parse_filled_orders,
@@ -54,6 +55,32 @@ class _Broker:
 
 
 class MockAccountTests(unittest.TestCase):
+    def test_alphanumeric_stock_code_survives_mock_and_real_recovery_and_unit_fill(self):
+        class AlphaBroker(_Broker):
+            async def request(self, *args, **kwargs):
+                response = await super().request(*args, **kwargs)
+                for rows in response.payload.values():
+                    if isinstance(rows, list):
+                        for row in rows:
+                            if "stk_cd" in row:
+                                row["stk_cd"] = "A0039P0_AL"
+                return response
+
+        async def scenario():
+            for reader_type, environment in ((KiwoomMockAccountReader, "mock"), (KiwoomRealAccountReader, "real")):
+                with self.subTest(environment=environment):
+                    value = await reader_type(AlphaBroker(), environment=environment,
+                        account_ref="account", now_provider=lambda: NOW).read()
+                    self.assertEqual({"0039P0": 10}, value.account.positions)
+                    self.assertEqual({"0039P0"}, {order.symbol for order in value.orders})
+
+        asyncio.run(scenario())
+        snapshot = snapshot_from_order_execution(OrderExecution(
+            "7", "fill-1", "A0039P0_NX", "테스트", "매수", 70_000, 1,
+            "100203", "KRX", 3, 2, 1,
+        ), account_ref="account", as_of=NOW)
+        self.assertEqual("0039P0", snapshot.symbol)
+
     def test_optional_order_basis_reuses_existing_paged_responses_and_keeps_unknown_side_explicit(self):
         from kiwoom_monitor.domain.order_contract import OrderSide
         async def scenario():

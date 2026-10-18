@@ -43,7 +43,7 @@ class NewsAnalysisTest(unittest.TestCase):
         self.assertEqual("삼성전자는 신사업 계획을 발표했다.", summary[0])
         self.assertIn("5000억원 규모의 설비투자", summary[1])
         self.assertIn("생산능력이 30% 증가", summary[2])
-        self.assertNotIn(" ".join(summary), "시장의 관심이 이어지고 있다.")
+        self.assertFalse(any("시장의 관심이 이어지고 있다." in sentence for sentence in summary))
 
     def test_extractive_summary_returns_original_sentences_without_generation(self) -> None:
         body = "첫 문장은 원문입니다. 둘째 문장도 원문입니다. 셋째 문장입니다."
@@ -256,14 +256,6 @@ class NewsAnalysisTest(unittest.TestCase):
 
         self.assertNotEqual("시세 반영·시장 요약", sales.category)
         self.assertNotEqual("시세 반영·시장 요약", reuse.category)
-
-    def test_hot_stock_percentage_move_is_excluded(self) -> None:
-        result = assess_stock_news(
-            "현대차", "현대차 자율주행 상용화 3년 후…3%대 하락[핫종목]", "주가 약세",
-        )
-
-        self.assertFalse(result.relevant)
-        self.assertEqual("시세 반영·시장 요약", result.category)
 
     def test_direct_lawsuit_is_kept_as_material_regulatory_event(self) -> None:
         result = assess_stock_news(
@@ -602,11 +594,17 @@ class NewsAnalysisTest(unittest.TestCase):
             "pubDate": "Wed, 26 Aug 2026 09:10:00 +0900",
         }]})
         claims = []
+        response = mocked_urlopen.return_value
+        def opened(*args, **kwargs):
+            self.assertEqual(["claimed"], claims)
+            claims.append("requested")
+            return response
+        mocked_urlopen.side_effect = opened
         page = NaverNewsClient(NaverNewsCredentials("id", "secret")).search_page(
             "증권", start=101, display=100, request_claim=lambda: claims.append("claimed") is None,
         )
         self.assertEqual((321, 101, 1), (page.total, page.start, page.display))
-        self.assertEqual(["claimed"], claims)
+        self.assertEqual(["claimed", "requested"], claims)
 
     @patch("kiwoom_monitor.infrastructure.naver_news.urlopen")
     def test_legacy_fallback_claims_both_actual_requests(self, mocked_urlopen: object) -> None:

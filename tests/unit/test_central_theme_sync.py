@@ -15,6 +15,7 @@ class _Service:
         self.called = threading.Event()
         self.remote_completed_at = None
         self.applied = 0
+        self.upload_thread_id = None
 
     def load_theme_snapshot(self):
         return {"theme_profile": [], "theme_stock": [], "theme_metadata": []}, self.remote_completed_at
@@ -25,6 +26,7 @@ class _Service:
 
     def replace_themes(self, _path: Path) -> None:
         self.calls += 1
+        self.upload_thread_id = threading.get_ident()
         self.called.set()
 
 
@@ -75,6 +77,7 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
 
         self.assertTrue(service.called.wait(1.0))
         self.assertEqual(1, service.calls)
+        self.assertNotEqual(threading.get_ident(), service.upload_thread_id)
         dispatcher.close()
 
     def test_failed_upload_is_retried_and_clears_durable_pending_marker(self) -> None:

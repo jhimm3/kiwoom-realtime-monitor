@@ -50,9 +50,13 @@ def run_tests(names):
             test_id = 'unknown'
         failed_tests.append({'test_id': test_id[:256], 'error_type': exception_type,
                              'traceback_locations': frames[-8:]})
-    return {'state': 'passed' if result.wasSuccessful() and result.testsRun > 0 and not result.skipped else 'failed',
+    return {'state': 'passed' if (result.wasSuccessful() and result.testsRun > 0
+                                 and not result.skipped and not result.expectedFailures
+                                 and not result.unexpectedSuccesses) else 'failed',
             'tests': result.testsRun, 'skipped': len(result.skipped),
             'failures': len(result.failures), 'errors': len(result.errors),
+            'expected_failures': len(result.expectedFailures),
+            'unexpected_successes': len(result.unexpectedSuccesses),
             'failed_tests': failed_tests[:20], 'failed_tests_truncated': len(failed_tests) > 20}
 
 

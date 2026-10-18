@@ -615,6 +615,26 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _suite_test_ids(suite) -> list[str]:
+    return [identity for item in suite for identity in (
+        _suite_test_ids(item) if isinstance(item, unittest.TestSuite) else [item.id()])]
+
+
+class _IdentityTestResult(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.executed_test_ids: list[str] = []
+        self.passed_test_ids: list[str] = []
+
+    def startTest(self, test):
+        self.executed_test_ids.append(test.id())
+        super().startTest(test)
+
+    def addSuccess(self, test):
+        self.passed_test_ids.append(test.id())
+        super().addSuccess(test)
+
+
 def _worker(output_path: Path, modules: Sequence[str]) -> int:
     """Load and run a batch, then persist unittest's structured TestResult."""
     sys.path[:0] = [str(SOURCE_ROOT), str(ROOT), str(ROOT / "tests" / "unit")]
@@ -642,14 +662,18 @@ def _worker(output_path: Path, modules: Sequence[str]) -> int:
             result_document["planned_test_count"] += count
             loaded.append(suite)
         suite = unittest.TestSuite(loaded)
+        result_document['planned_test_ids'] = _suite_test_ids(suite)
         if suite.countTestCases() == 0:
             result_document["status"] = "incomplete"
             result_document["load_error"] = "No tests were discovered for this batch"
             return _write_worker_result(output_path, result_document, 2)
 
-        test_result = unittest.TextTestRunner(stream=sys.stdout, verbosity=2).run(suite)
+        test_result = unittest.TextTestRunner(stream=sys.stdout, verbosity=2,
+                                             resultclass=_IdentityTestResult).run(suite)
         has_unexpected_success = bool(test_result.unexpectedSuccesses)
         result_document.update({
+            'executed_test_ids': test_result.executed_test_ids,
+            'passed_test_ids': test_result.passed_test_ids,
             "test_count": test_result.testsRun,
             "failures": [_result_item(test, error) for test, error in test_result.failures],
             "errors": [_result_item(test, error) for test, error in test_result.errors],
@@ -667,6 +691,10 @@ def _worker(output_path: Path, modules: Sequence[str]) -> int:
             )
         if result_document["skipped"] or result_document["expected_failures"]:
             result_document["status"] = "incomplete"
+        if (len(set(result_document['planned_test_ids'])) != len(result_document['planned_test_ids'])
+                or result_document['planned_test_ids'] != result_document['executed_test_ids']):
+            result_document['status'] = 'failed'
+            result_document['load_error'] = 'Duplicate or mismatched planned/executed test IDs'
         return _write_worker_result(
             output_path, result_document,
             0 if result_document["status"] == "passed" else 1,
@@ -763,6 +791,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--list", dest="list_only", action="store_true",
                         help="print a profile plan without running tests")
+    parser.add_argument('--selection', type=Path, help='execute an existing current-source selective query; never all-local')
+    parser.add_argument('--summarize', type=Path, help='print compact existing run outcome; no execution')
+    parser.add_argument('--compact', action='store_true', help='summarize successes; show failed-test details only')
     parser.add_argument("--check-new-test-modules", action="store_true",
                         help="check all test routes, then compare new unit modules to a base ref")
     parser.add_argument("--check-test-catalog", action="store_true",
@@ -940,6 +971,9 @@ def _run_process(
         "test_count": worker_result.get("test_count", 0) if worker_result else 0,
         "planned_test_count": worker_result.get("planned_test_count", 0) if worker_result else 0,
         "module_test_counts": worker_result.get("module_test_counts", []) if worker_result else [],
+        "planned_test_ids": worker_result.get("planned_test_ids", []) if worker_result else [],
+        "executed_test_ids": worker_result.get("executed_test_ids", []) if worker_result else [],
+        "passed_test_ids": worker_result.get("passed_test_ids", []) if worker_result else [],
         "zero_test_modules": worker_result.get("zero_test_modules", []) if worker_result else [],
         "failures": worker_result.get("failures", []) if worker_result else [],
         "errors": worker_result.get("errors", []) if worker_result else [],
@@ -971,7 +1005,72 @@ def _locked_environment() -> dict[str, Any]:
             "timezone": list(time.tzname), "locked_dependencies": versions}
 
 
-def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, base_ref: str = "") -> int:
+def _selection_batches(selection: dict, manifest: dict) -> list[dict]:
+    """Recompute selection from the current diff; an edited/stale plan cannot omit tests."""
+    from scripts import check_test_changes, select_ci_groups
+    if selection.get('kind') != 'incremental_test_selection' or selection.get('version') != 1:
+        raise ValueError('Not an incremental test selection')
+    if selection.get('source', {}).get('lf_sha256') != _code_tree_identity()['lf_sha256']:
+        raise ValueError('Stale selection: current source differs; query again')
+    paths, previous = check_test_changes.changed_sources(ROOT, selection['base_ref'], selection['scope_filters'])
+    impact = select_ci_groups.test_impact(paths, ROOT, previous)
+    if paths != selection['changed_paths'] or impact['selected_modules'] != selection['selected_modules']:
+        raise ValueError('Selection changed or was edited; query again')
+    if impact['status'] in {'failed', 'full_required', 'no_tests'} or impact['external_modules']:
+        raise ValueError(f'Selection cannot run as a local subset: {impact["status"]}; external_modules={len(impact["external_modules"])}; see selection report')
+    members = set(impact['selected_modules'])
+    batches = [{**batch, 'modules': [module for module in batch['modules'] if module in members]}
+               for batch in _planned_batches(manifest, 'all-local')]
+    batches = [batch for batch in batches if batch['modules']]
+    if members != {module for batch in batches for module in batch['modules']}:
+        raise ValueError('Selected tests are missing from the existing local regression routes')
+    return batches
+
+
+def summarize_run(report: dict) -> dict:
+    workers = report.get('batch_results', [])
+    result = {'status': report.get('status', 'incomplete'),
+              'executed': sum(worker.get('test_count', 0) for worker in workers),
+              'passed': sum(len(worker['passed_test_ids']) if 'passed_test_ids' in worker else
+                            worker.get('test_count', 0) if worker.get('status') == 'passed' else 0 for worker in workers),
+              'seconds': round(sum(worker.get('duration_seconds', 0) for worker in workers), 3),
+              'source': report.get('code_tree_end', report.get('code_tree_start', {})).get('lf_sha256')}
+    problems = []
+    all_ids = [identity for worker in workers for identity in worker.get('executed_test_ids', [])]
+    if (not workers or report.get('missing_test_files') or report.get('selection_verified') is False
+            or len(all_ids) != len(set(all_ids)) or not result['source']
+            or report.get('code_tree_start', {}).get('lf_sha256') != result['source']):
+        problems.append({'kind': 'missing_or_changed_evidence', 'missing_test_files': report.get('missing_test_files'),
+                         'selection_verified': report.get('selection_verified')})
+    for worker in workers:
+        for kind in ('failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'):
+            for item in worker.get(kind, []):
+                problems.append({'kind': kind, **(item if isinstance(item, dict) else {'test': item}), 'log': worker.get('log')})
+        if (worker.get('status') != 'passed' or worker.get('timeout') or not worker.get('test_count')
+                or not worker.get('worker_exit_confirmed') or not worker.get('process_tree_exit_confirmed')
+                or worker.get('planned_test_ids') != worker.get('executed_test_ids')
+                or len(set(worker.get('executed_test_ids', []))) != worker.get('test_count')):
+            detail = {key: worker.get(key) for key in ('name', 'modules', 'timeout', 'load_error', 'execution_error',
+                       'result_error', 'exit_code', 'worker_exit_confirmed', 'process_tree_exit_confirmed', 'log')}
+            if not worker.get('failures') and not worker.get('errors') and worker.get('log'):
+                log = Path(worker['log'])
+                if log.is_file():
+                    from collections import deque
+                    with log.open(encoding='utf-8', errors='replace') as stream:
+                        detail['log_tail'] = ''.join(deque(stream, maxlen=30))
+            problems.append({'kind': 'worker', **detail})
+    if report.get('unrun_batches') or report.get('source_modified_during_run'):
+        problems.append({'kind': 'incomplete', 'unrun_batches': report.get('unrun_batches'),
+                         'source_modified_during_run': report.get('source_modified_during_run')})
+    if problems:
+        result['problems'] = problems
+        if result['status'] == 'passed':
+            result['status'] = 'incomplete'
+    return result
+
+
+def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, base_ref: str = "",
+                     selection: dict | None = None, compact: bool = False) -> int:
     if timeout_seconds < 1:
         raise ValueError("--timeout-seconds must be positive")
     output_path = output_path.resolve()
@@ -984,7 +1083,9 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
             raise ValueError("Full regression requires complete unit/integration routing")
         environment = _locked_environment()
     manifest = _load_manifest()
-    if profile == "related":
+    if selection is not None:
+        batches = _selection_batches(selection, manifest)
+    elif profile == "related":
         base_ref = base_ref or "HEAD^"
         batches = _planned_batches(manifest, profile, base_ref=base_ref)
     else:
@@ -1001,6 +1102,7 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
         "schema_version": 1, "profile": profile, "status": "incomplete",
         "base_ref": base_ref if profile == "related" else None,
         "environment": environment,
+        "selection": selection,
         "scope": {"windows_profiles": list(CI_WINDOWS_PROFILES),
                   "external_groups_not_run": ["linux_required", "postgres_required",
                       "postgres_extended", "sealed_extended", "operator_extended", "nas_operator_owned"]}
@@ -1031,6 +1133,9 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
         print(json.dumps({"status": "failed", "missing_test_files": missing}, ensure_ascii=False))
         return 1
 
+    if selection is not None and selection['source']['lf_sha256'] != summary['code_tree_start']['lf_sha256']:
+        raise ValueError('Source changed while validating selection; no worker started')
+
     workers: list[tuple[str, Sequence[str]]] = []
     for batch in batches:
         if batch["isolate_modules"]:
@@ -1057,7 +1162,8 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
             (output_path / "run.json").write_text(
                 json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
             )
-            if (result["status"] == "incomplete" or not result.get("worker_exit_confirmed", False)
+            if (result.get("timeout") or result.get("interrupted")
+                    or not result.get("worker_exit_confirmed", False)
                     or not result.get("process_tree_exit_confirmed", False)):
                 summary["unrun_batches"] = [value[0] for value in workers[index:]]
                 interrupted = bool(result.get("interrupted"))
@@ -1083,11 +1189,19 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
     )
     if summary["source_modified_during_run"]:
         summary["status"] = "incomplete"
+    if selection is not None:
+        actual_modules = {row['module'] for worker in summary['batch_results'] for row in worker['module_test_counts']}
+        expected_modules = set(selection['selected_modules'])
+        summary['selection_verified'] = actual_modules == expected_modules and all(
+            worker['planned_test_ids'] == worker['executed_test_ids'] and bool(worker['executed_test_ids'])
+            for worker in summary['batch_results']) and not summary['source_modified_during_run']
+        if not summary['selection_verified']:
+            summary['status'] = 'incomplete'
     summary["finished_at"] = _utc_now()
     (output_path / "run.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
     )
-    print(json.dumps({
+    print(json.dumps(summarize_run(summary) if compact else {
         "status": summary["status"], "profile": profile,
         "completed_workers": len(summary["batch_results"]),
         "unrun_workers": len(summary["unrun_batches"]),
@@ -1100,6 +1214,27 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.summarize:
+        if args.selection or args.profile or args.list_only or args._worker:
+            parser.error('--summarize cannot be combined with execution')
+        try:
+            report = json.loads(args.summarize.read_text(encoding='utf-8'))
+            result = summarize_run(report)
+            print(json.dumps(result, ensure_ascii=False))
+            return int(result['status'] != 'passed')
+        except (OSError, ValueError) as error:
+            print(json.dumps({'status': 'failed', 'reason': str(error)}))
+            return 2
+    if args.selection:
+        if args.profile or args.list_only or args.check_test_catalog or args.check_new_test_modules or args._worker:
+            parser.error('--selection cannot be combined with another execution/check mode')
+        try:
+            selection = json.loads(args.selection.read_text(encoding='utf-8'))
+            return _execute_profile('selected', args.timeout_seconds, args.output or _next_run_path(),
+                                    selection=selection, compact=True)
+        except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+            print(json.dumps({'status': 'failed', 'reason': str(error)}, ensure_ascii=False))
+            return 2
     if args._worker:
         if args._result_path is None or not args._modules:
             parser.error("worker mode requires a result path and at least one module")
@@ -1137,8 +1272,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         output_path = args.output or _next_run_path()
         if args.profile == "related":
-            return _execute_profile(args.profile, args.timeout_seconds, output_path, base_ref=args.base_ref)
-        return _execute_profile(args.profile, args.timeout_seconds, output_path)
+            return _execute_profile(args.profile, args.timeout_seconds, output_path, base_ref=args.base_ref, compact=args.compact)
+        return _execute_profile(args.profile, args.timeout_seconds, output_path, compact=args.compact)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Regression runner: {type(error).__name__}: {error}", file=sys.stderr)
         return 2

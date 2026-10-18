@@ -15,6 +15,7 @@ from kiwoom_monitor.infrastructure.historical_backfill import (
     ArticlePublicationResult,
     NaverHistoricalNewsItem,
     NAVER_HISTORICAL_SEARCH_PROVIDER,
+    fetch_article_publication,
 )
 from scripts.probe_historical_backfill import (
     _ArticleFetchPool,
@@ -34,7 +35,9 @@ class HistoricalNewsParallelFetchTests(unittest.TestCase):
             with self.subTest(host=host):
                 item = NaverHistoricalNewsItem("key", "001", "123", "office", "title", "summary",
                                               f"https://{host}/a", f"https://{host}/a", "", 1)
-                with patch("kiwoom_monitor.infrastructure.historical_backfill.urlopen") as opener:
+                with patch("kiwoom_monitor.infrastructure.historical_backfill.urlopen",
+                           side_effect=AssertionError("excluded publisher requested network")) as opener, \
+                        patch.dict(fetch_article_publication.__kwdefaults__, {"opener": opener}):
                     with _ArticleFetchPool(workers=2, article_delay=60, primary_only=True) as pool:
                         pool.submit(item)
                         result = list(pool.drain(wait=True))[0][1]
@@ -47,7 +50,9 @@ class HistoricalNewsParallelFetchTests(unittest.TestCase):
             "https://www.hankyung.com/article/123", "https://www.hankyung.com/article/123",
             "https://n.news.naver.com/a", 1,
         )
-        with patch("kiwoom_monitor.infrastructure.historical_backfill.urlopen") as opener:
+        with patch("kiwoom_monitor.infrastructure.historical_backfill.urlopen",
+                   side_effect=AssertionError("excluded publisher requested network")) as opener, \
+                patch.dict(fetch_article_publication.__kwdefaults__, {"opener": opener}):
             with _ArticleFetchPool(workers=32, article_delay=60, primary_only=True) as pool:
                 pool.submit(item)
                 results = list(pool.drain(wait=True))
@@ -161,20 +166,38 @@ class HistoricalNewsParallelFetchTests(unittest.TestCase):
 
     def test_search_timing_records_failed_attempt_and_shared_cooldown(self) -> None:
         attempts = []
+        starts = []
+        threads = []
         def fetcher(*_args, **_kwargs):
+            starts.append(time.monotonic())
+            threads.append(threading.get_ident())
             if not attempts:
                 attempts.append("failed")
                 raise HTTPError("https://s.search.naver.com", 429, "Too Many Requests", None, None)
             return SimpleNamespace(items=[])
         events = []
         job = SimpleNamespace(code="005930", query_text="삼성전자", target_date="2026-09-22")
-        with _SearchPagePool(workers=1, request_delay=0, fetcher=fetcher,
-                             throttle_delay=0, throttle_retries=1,
+        with _SearchPagePool(workers=2, request_delay=0, fetcher=fetcher,
+                             throttle_delay=.05, throttle_retries=1,
                              timing_observer=lambda *row: events.append(row)) as pool:
             pool.fetch_batch(job, [0])
-        self.assertEqual(["http_error", "ok"], [row[1] for row in events])
+            occupied, release = threading.Event(), threading.Event()
+            def hold_first_worker():
+                occupied.set(); release.wait(2)
+            blocker = pool._pool.submit(hold_first_worker)
+            try:
+                self.assertTrue(occupied.wait(1))
+                pool._limiter.defer(.05)
+                deferred_at = time.monotonic()
+                pool.fetch_batch(job, [1])
+                self.assertGreaterEqual(starts[2] - deferred_at, .045)
+                self.assertNotEqual(threads[0], threads[2])
+            finally:
+                release.set(); blocker.result(timeout=2)
+        self.assertEqual(["http_error", "ok", "ok"], [row[1] for row in events])
         self.assertEqual(429, events[0][5].code)
         self.assertIsNone(events[1][5])
+        self.assertGreaterEqual(starts[1] - starts[0], .045)
 
     def test_three_consecutive_original_timeouts_skip_only_articles_without_fallback(self) -> None:
         items = [NaverHistoricalNewsItem(
@@ -389,6 +412,24 @@ class HistoricalNewsParallelFetchTests(unittest.TestCase):
         self.assertEqual(1, snapshots[0]["active"])
         self.assertEqual(1, snapshots[0]["queued"])
         self.assertEqual("slow.example", snapshots[0]["oldest_host"])
+
+        release = threading.Event()
+        first, second = threading.Event(), threading.Event()
+        def slow(item):
+            (first if 'old' in item.original_url else second).set()
+            release.wait(2)
+            return 'done'
+        pool = _ArticleFetchPool(workers=2, article_delay=0, fetcher=slow)
+        try:
+            pool.submit(SimpleNamespace(original_url='https://old.example/one', portal_url=''))
+            self.assertTrue(first.wait(1))
+            pool.submit(SimpleNamespace(original_url='https://new.example/two', portal_url=''))
+            self.assertTrue(second.wait(1))
+            self.assertEqual(2, pool.snapshot()['active'])
+            self.assertEqual('old.example', pool.snapshot()['oldest_host'])
+        finally:
+            release.set()
+            pool.close()
 
     def test_search_pages_overlap_and_return_in_page_order(self) -> None:
         guard = threading.Lock()

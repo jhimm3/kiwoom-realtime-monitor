@@ -303,14 +303,19 @@ PUBLICATION_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contr
 @contextmanager
 def mock_publication_contract_app(app_factory, database_path):
     from kiwoom_monitor.application.research_implementation import research_implementation_hash
-    store = SQLiteQueryStore(database_path)
+    from kiwoom_monitor.central_server.database import create_query_store
+    fixed_now = datetime.fromtimestamp(1000.0,timezone(timedelta(hours=9)))
+    store = SQLiteQueryStore(database_path, now_provider=lambda: fixed_now)
     store.initialize()
     settings = CentralServerSettings(
         f"sqlite:///{database_path}", "private-token", autonomous_top20_enabled=False,
         market_event_collection_enabled=False, news_history_jobs_enabled=False,
+        news_query_set_enabled=False, news_naver_market_enabled=False,
     )
     try:
-        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=1000.0):
+        def fixed_store(*args, **kwargs):
+            return create_query_store(*args, **{**kwargs, 'now_provider':lambda: fixed_now})
+        with patch('kiwoom_monitor.central_server.app.create_query_store', side_effect=fixed_store):
             inputs = mock_specification_inputs(
                 store, scientific_hash=research_implementation_hash("krx-regular/v1"), publish_candidate=False,
             )
@@ -4003,9 +4008,11 @@ class MockUnfilledPairedInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_unselected_supplied_evidence_and_protection_episode_cannot_accept_population(self):
         self.unfilled_execution_policy=replace(self.unfilled_execution_policy,allow_supplied_paired_mock_evidence=False)
         self.rebuild_native_policy();await self.ready()
-        with self.assertRaises(ValueError):
-            self.runner.offer_unfilled_reprice_outcomes(root_intent_id=self.intent.intent_id,
-                managed_intent_id=self.intent.intent_id,population_ref='forbidden-protective',available_at=self.clock,outcomes=())
+        arguments = self.population_args()
+        self.assertTrue(arguments['outcomes'])
+        with self.assertRaisesRegex(ValueError, 'unfilled_population_not_admitted_or_out_of_scope'):
+            self.runner.offer_unfilled_reprice_outcomes(**arguments)
+        self.assertIsNone(self.runner._unfilled_population)
 
     async def test_restart_does_not_replay_empirical_population_or_cached_current_judgment(self):
         await self.ready();self.publish();await self.runner.run_once();await self.runner.close()

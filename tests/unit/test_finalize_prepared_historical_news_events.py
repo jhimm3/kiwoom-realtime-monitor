@@ -258,6 +258,11 @@ class FinalizePreparedHistoricalEventsTests(unittest.TestCase):
             with closing(sqlite3.connect(archive)) as db:
                 db.execute("UPDATE archive_event_builder_lease SET expires_at=0")
                 db.commit()
+            with closing(sqlite3.connect(archive)) as db:
+                current_owner = _acquire_run_lease(db)
+                _release_run_lease(db, stale_owner)
+                self.assertEqual(1, db.execute("SELECT COUNT(*) FROM archive_event_builder_lease").fetchone()[0])
+                _release_run_lease(db, current_owner)
             self.assertEqual(0, finalize(prepared, archive, digest)["remaining"])
             with closing(sqlite3.connect(archive)) as db:
                 _release_run_lease(db, stale_owner)

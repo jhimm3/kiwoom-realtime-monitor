@@ -189,6 +189,10 @@ class EventConflictRecoveryTests(unittest.TestCase):
         with patch.object(api,'_resolve_event',side_effect=ValueError('injected writer failure')):
             with self.assertRaisesRegex(ValueError,'injected'):
                 api.resolve_event_conflict(self.f.archive,self.decision_path)
+        with closing(sqlite3.connect(self.f.archive)) as db:
+            self.assertEqual(self.before,api._event_conflict_snapshot(db,self.key))
+            self.assertEqual(0,db.execute("SELECT ready FROM archive_event_ready_v2 WHERE identity='c-child'").fetchone()[0])
+            self.assertEqual(self.old_events,api._review_rows(db,'SELECT * FROM central_news_event_revisions ORDER BY accepted_sequence'))
 
     def test_fingerprint_failure_does_not_hide_a_later_reviewed_target(self):
         from scripts.audit_prepared_historical_archive_v2 import audit

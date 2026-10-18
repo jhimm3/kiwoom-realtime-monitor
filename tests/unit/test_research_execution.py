@@ -242,6 +242,16 @@ class ResearchExecutionTests(unittest.TestCase):
         self.assertEqual("ORDER_REJECTED", events[0].event_type)
         self.assertEqual("cash_reservation_exceeded", events[0].reason)
         self.assertEqual(0, engine.portfolio.reserved_cash_won)
+        gap_engine = PaperExecutionEngine(
+            "run-gap", replace(execution, initial_cash_won=15_000), _strategy(),
+        )
+        gap_engine.process_decision(_decision(), StrategyState(status="candidate", symbol="005930"))
+        self.assertEqual(10_000, gap_engine.portfolio.reserved_cash_won)
+        [cancelled] = gap_engine.process_bar(_bar(4, open_=2000, low=1999, high=2001))
+        self.assertEqual(("ORDER_CANCELLED", "fill_cash_exceeded"), (cancelled.event_type, cancelled.reason))
+        self.assertEqual(15_000, gap_engine.portfolio.cash_won)
+        self.assertEqual(0, gap_engine.portfolio.reserved_cash_won)
+        self.assertIsNone(gap_engine.portfolio.position)
 
     def test_same_bar_stop_and_target_uses_stop_and_keeps_optimistic_bound(self) -> None:
         engine = PaperExecutionEngine("run-1", _execution(), _strategy())

@@ -1066,7 +1066,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     app.include_router(operational_update_router)
 
     from .market_query_routes import create_market_query_router
-    app.include_router(create_market_query_router(store, authorize, broker, collector))
+    app.include_router(create_market_query_router(store, authorize, broker, collector, now_provider=server_now))
 
     app.include_router(create_account_query_router(
         authorize, AccountTarget, current_legacy_account_query, selected_account))

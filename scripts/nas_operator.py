@@ -789,7 +789,7 @@ class Operator:
                     'isolation_check', 'memory_limit', 'request_read',
                     'database_setup', 'test_or_replay'):
                 summary['failure_stage'] = outcome['failure_stage']
-            for key in ('state', 'tests', 'skipped', 'failures', 'errors', 'error_type',
+            for key in ('state', 'tests', 'skipped', 'failures', 'errors', 'expected_failures', 'unexpected_successes', 'error_type',
                         'memory_limit_bytes', 'cpu_affinity', 'failed_tests',
                         'failed_tests_truncated'):
                 value = outcome.get(key)

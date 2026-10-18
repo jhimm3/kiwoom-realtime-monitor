@@ -5,15 +5,20 @@ import logging
 from dataclasses import dataclass
 from time import monotonic, time
 from typing import Any, Protocol
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 
 logger = logging.getLogger("kiwoom_monitor.central_server.database")
 
 
 def _cache_wall_time(store) -> float:
-    # Only an owned replay store supplies this clock. Production stays unchanged.
+    # Keep replay expiry on its pinned clock; live expiry uses the same corrected
+    # clock as the broker that produced expires_at.
     provider = getattr(store, "_query_cache_wall_time", None)
-    return time() if provider is None else provider()
+    if provider is not None:
+        return provider()
+    now_provider = getattr(store, "_now_provider", None)
+    return as_kst(now_provider() if now_provider is not None else kst_now()).timestamp()
 
 
 @dataclass(frozen=True)

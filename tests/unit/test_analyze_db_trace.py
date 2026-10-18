@@ -76,6 +76,16 @@ class AnalyzeDbTraceTests(unittest.TestCase):
     def test_window_inventory_is_opt_in_and_rejects_unbounded_width(self):
         with self.assertRaisesRegex(ValueError, "window_seconds_out_of_bounds"):
             summarize(Path("unused"), window_seconds=3901)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.json").write_text(json.dumps({
+                "started_at": 100, "finished_at": 160, "chunks": [],
+                "trace_id": "empty", "state": "complete", "last_seq": 0, "bytes_written": 0,
+                "accepted": 0, "written": 0, "known_dropped": 0,
+            }), encoding="utf-8")
+            self.assertIsNone(summarize(root)["window_inventory"])
+            for width in (1, 3900):
+                self.assertIn("window_inventory", summarize(root, window_seconds=width))
 
 
 if __name__ == "__main__":

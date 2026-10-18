@@ -71,17 +71,19 @@ class CentralSettingsSyncTests(unittest.TestCase):
                 CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 INSERT INTO settings VALUES('window_x','50');
                 INSERT INTO settings VALUES('trade_value_1m_alert_eok','80');
+                INSERT INTO settings VALUES('trade_value_5m_alert_eok','200');
                 CREATE TABLE central_setting_versions(setting_key TEXT PRIMARY KEY,updated_at TEXT NOT NULL);
                 INSERT INTO central_setting_versions VALUES('window_x','2026-09-08T10:00:00+00:00');
                 INSERT INTO central_setting_versions VALUES('trade_value_1m_alert_eok','2026-09-08T10:00:00+00:00');
             """)
             connection.close()
             client = _Client()
+            client.remote["app_settings"] = [{"owner": "default", "key": "window_x", "document": {"key": "window_x", "value": "remote-local-only", "updated_at": "2026-09-08T10:00:00+00:00"}}]
 
             saved = CentralSettingsSyncService(client).sync(path)  # type: ignore[arg-type]
 
             self.assertEqual(1, saved)
-            self.assertEqual("trade_value_1m_alert_eok", client.remote["app_settings"][0]["key"])
+            self.assertEqual(["trade_value_1m_alert_eok"], [item["key"] for item in client.upsert_calls[0][1]])
 
     def test_empty_server_uses_first_pc_as_initial_shared_settings_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

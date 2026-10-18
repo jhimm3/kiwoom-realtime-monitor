@@ -181,5 +181,5 @@ class ResearchStorageCapacityTests(unittest.TestCase):
         self.assertEqual(0, after[-3])
         self.assertEqual(0, after[-2])
         self.assertEqual('', after[-1])
-        self.assertEqual(27, migrated.schema_version())
+        self.assertEqual(_MIGRATIONS[-1].version, migrated.schema_version())
         self.assertEqual((), migrated.load_campaign_storage_operations(self.source_id))

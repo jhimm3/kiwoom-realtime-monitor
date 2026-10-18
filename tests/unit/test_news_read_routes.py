@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import unittest
+import sqlite3
+import tempfile
+from contextlib import closing
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 
 from kiwoom_monitor.central_server.news_read_routes import create_news_read_router
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
 
 class MinimalNewsReadStore:
@@ -33,6 +38,37 @@ class MinimalNewsReadStore:
 
 
 class NewsReadRoutesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_revision_cursor_keeps_tied_rows_and_existing_as_of_filter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            try:
+                store.upsert_documents("news_article", [
+                    {"owner": "005930", "key": str(index), "document": {
+                        "identity": str(index), "title": f"title {index}",
+                        "published_at": "2026-10-18T00:00:00+09:00",
+                    }} for index in range(1005)
+                ])
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("UPDATE central_news_article_revisions SET available_at=10.0")
+                app = FastAPI()
+                app.include_router(create_news_read_router(store, lambda: None))
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+                    first = await client.get("/api/v1/news/history/article?limit=1000&as_of=10")
+                    rows = first.json()["revisions"]
+                    second = await client.get("/api/v1/news/history/article", params={
+                        "limit": 1000, "as_of": 10, "before_revision_id": rows[-1]["article_revision_id"],
+                    })
+                    older = await client.get("/api/v1/news/history/article?as_of=9")
+                self.assertEqual((200, 200, 200), (first.status_code, second.status_code, older.status_code))
+                self.assertEqual(1000, len(rows))
+                self.assertEqual(5, len(second.json()["revisions"]))
+                self.assertEqual(1005, len({value["article_revision_id"] for value in rows + second.json()["revisions"]}))
+                self.assertEqual([], older.json()["revisions"])
+            finally:
+                store.close()
+
     async def asyncSetUp(self) -> None:
         self.store = MinimalNewsReadStore()
 

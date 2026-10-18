@@ -4,7 +4,8 @@ Bar and dataset writers keep their caller-owned metadata SQL helpers separately.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from kiwoom_monitor.domain.time_basis import as_kst
 
 from kiwoom_monitor.domain.market_data_contract import (
     CoverageObservation, MarketDataMetadata, MarketDataObservation, MarketDatasetKind,
@@ -20,6 +21,16 @@ def _metadata_from_range_row(row: tuple[object, ...]) -> MarketDataMetadata:
     if metadata is None:
         raise ValueError("market metadata row is missing")
     return metadata
+
+
+def _metadata_time_key(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return as_kst(parsed).isoformat(timespec="microseconds")
+    except ValueError:
+        return None
 
 
 class SQLiteMarketMetadataStoreMixin:
@@ -49,12 +60,22 @@ class SQLiteMarketMetadataStoreMixin:
         self, kind: MarketDatasetKind, subject: str, start: datetime, end: datetime,
     ) -> list[CoverageObservation]:
         with self._lock, self._connection() as connection:
+            # Normalize for comparison only: keep canonical stored timestamps
+            # intact and retain microsecond precision (SQLite datetime rounds it).
+            connection.create_function("metadata_time_key", 1, _metadata_time_key, deterministic=True)
+            # A valid ISO offset is strictly less than 24 hours. This cheap raw
+            # prefilter avoids parsing a subject's entire retained history while
+            # the normalized predicate still decides exact inclusion/order.
+            lower = (as_kst(start).astimezone(UTC) - timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="microseconds")
+            upper = (as_kst(end).astimezone(UTC) + timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="microseconds")
             rows = connection.execute(
                 "SELECT observation_key,effective_at,available_at,venue,unit,value_kind,"
                 "completeness,origin,source,candidate_universe "
                 "FROM central_market_data_observation_meta WHERE dataset_kind=? AND subject=? "
-                "AND effective_at>=? AND effective_at<? ORDER BY effective_at",
-                (kind.value, subject, start.isoformat(), end.isoformat()),
+                "AND effective_at>=? AND effective_at<? "
+                "AND metadata_time_key(effective_at)>=? AND metadata_time_key(effective_at)<? "
+                "ORDER BY metadata_time_key(effective_at)",
+                (kind.value, subject, lower, upper, _metadata_time_key(start), _metadata_time_key(end)),
             ).fetchall()
         return [
             CoverageObservation(str(row[0]), _metadata_from_range_row(row))

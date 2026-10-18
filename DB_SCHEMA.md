@@ -1,5 +1,9 @@
 # 데이터베이스 스키마 지도
 
+2026-10-18 R3-004: 기존 중앙 `load_minute_bars`에 optional `start_minute` 포함/`end_minute` 제외 WHERE만 추가했다. 생략 시 기존 거래일 전체이며 저장 열/메타데이터·writer/transaction·index·schema version은 그대로다. 기존 `(code,trading_date,minute)` index의 범위 탐색을 재사용하고 같은 범위의 RAM delta/native query 권한·중복 방지를 보존한다. Shadow Runtime만 opt-in, 다른 API의 기본 조회 범위는 유지한다. [계약·검증·한계](REFACTOR_BACKLOG.md#r3-004--ram-shadow-분봉의-하루-전체-범위직렬-read).
+
+2026-10-18 R3-002: PC 기존 `stocks.last_price/last_price_updated_at`, `market_cap/circulating_market_cap/updated_at`, `intraday_highs.high_price/updated_at`를 같은 cache job transaction으로 저장한다. 신규 기록의 시각은 주입한 기존 키움 보정 시계를 KST ISO(+09:00)로 표현한다. `fundamentals_updated_at`·원래 거래일·고가 MAX/35일 정리는 유지한다. 기존 자료 변환·DDL/column/index/migration/schema version·새 writer는 없다. 개별 호환 저장도 같은 구현을 사용한다. [변경/검증/한계](REFACTOR_BACKLOG.md#r3-002--한-가격-캐시-job의-다중-transaction).
+
 mock_automation_risk_snapshot/v1 JSON에 optional owned_entry_prices=[[symbol, integer_moving_average_price], ...]를 추가한다. 상세 FILL·동일 run만 투영하고 빈 값은 생략해 기존 Risk hash/reader를 보존한다. 기존 collection/writer/ACK 사용, DDL/table/schema version 변경 없음. 기존 보호 요청/고정 workflow의 optional stop_loss proof는 원가/수량/정규 bps/최초 Collector ref·price·available_at을 포함하고 같은 QUEUED transaction에서 현재 Risk·candidate package에 대조한다. [73단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#73-승인된-collector-ram-가격의-즉시-종목-손절과-native-보호-exit)
 
 2026-10-14 원장 결과 게시 패킷과 optional source_publication 요약은 기존 Runner RAM 슬롯만 사용하며 checkpoint/central/research 원장에 새로 저장하지 않는다. 최초 별도 패킷만 기존 native mock automation control reader를 사용하고 중복 HTTP는 DB 0이다. 재시작 시 원래 출처 시각의 명시 재공급/현재 gate가 필요하며 가용시각을 갱신해 복구하지 않는다. 원주문 등록/출처 슬롯 전환은 같은 input lock으로 보호한다. 새 table/column/index/migration/writer/저장 책임 이동은 없다. [72단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#72-pc-native-원장-결과의-인증-게시와-기존-runner-ram-접수).

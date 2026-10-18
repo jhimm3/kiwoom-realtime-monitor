@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import threading
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,7 +67,7 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         self.store.initialize()
         self.hub = RealtimeHub()
         self.broker = _Broker()
-        self.now = [datetime(2026, 9, 11, 10, 0)]  # 금요일
+        self.now = [datetime(2026, 9, 11, 10, 0, tzinfo=timezone(timedelta(hours=9)))]  # 금요일 KST
         self.service = MarketEventService(
             self.broker, self.hub, self.store, now_provider=lambda: self.now[0],
         )
@@ -144,7 +144,7 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
                 # Metadata still owns the old snapshot and has not reached DB ACK.
                 await asyncio.wait_for(delete_started.wait(), 5)
                 self.assertFalse(delete_store_entered.is_set(), "signal write bypassed metadata state ownership")
-                self.now[0] = datetime(2026, 9, 12, 0, 1)
+                self.now[0] = datetime(2026, 9, 12, 0, 1, tzinfo=signal_time.tzinfo)
             finally:
                 release_metadata.set()
                 if deleting is not None:
@@ -166,7 +166,7 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.close_krx_session("2026-09-11")
         self.assertTrue(self.store.load_hot_cohort(active_only=True))
         # 월요일이 휴일이었다는 가정: 실제로 관측된 화요일 세션 종료 때만 만료된다.
-        self.now[0] = datetime(2026, 9, 15, 15, 30)
+        self.now[0] = datetime(2026, 9, 15, 15, 30, tzinfo=self.now[0].tzinfo)
         self.service.mark_krx_session_observed("2026-09-15")
         await self.service.close_krx_session("2026-09-15")
         self.assertFalse(self.store.load_hot_cohort(active_only=True))
@@ -178,11 +178,11 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.record_condition_signal("005930", "I", source="INITIAL")
         self.service.mark_krx_session_observed("2026-09-11")
         await self.service.close_observation_day("2026-09-11")
-        self.now[0] = datetime(2026, 9, 14, 15, 30)
+        self.now[0] = datetime(2026, 9, 14, 15, 30, tzinfo=self.now[0].tzinfo)
         self.service.mark_krx_session_observed("2026-09-14")
         await self.service.close_krx_regular_session("2026-09-14")
         self.assertTrue(self.store.load_hot_cohort(active_only=True))
-        self.now[0] = datetime(2026, 9, 14, 20, 0)
+        self.now[0] = datetime(2026, 9, 14, 20, 0, tzinfo=self.now[0].tzinfo)
         await self.service.close_observation_day("2026-09-14")
         self.assertFalse(self.store.load_hot_cohort(active_only=True))
 

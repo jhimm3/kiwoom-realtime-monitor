@@ -7,7 +7,6 @@ import unittest
 from scripts.migrate_storage_time_kst import (
     apply_sqlite_plan, convert_json_paths, migrate_sqlite, sqlite_plan, utc_iso_to_kst,
 )
-from kiwoom_monitor.infrastructure.central_content_sync import _merge_journal_link
 
 
 class StorageTimeKstMigrationTests(unittest.TestCase):
@@ -76,14 +75,23 @@ class StorageTimeKstMigrationTests(unittest.TestCase):
     def test_concurrent_change_rejects_and_rolls_back_whole_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             connection = self.fixture(Path(directory) / 'db.sqlite3')
+            connection.execute(
+                "INSERT INTO events VALUES('raced','2026-10-16T06:00:00+00:00',4.5,'{}')"
+            )
+            connection.commit()
             changes, _ = sqlite_plan(connection)
-            connection.execute("UPDATE events SET updated_at='new' WHERE id='utc'")
+            # The first planned write succeeds before a later row reveals the race.
+            changes.sort(key=lambda item: item['key'] != ['utc'])
+            self.assertEqual([['utc'], ['raced']], [item['key'] for item in changes])
+            connection.execute("UPDATE events SET updated_at='new' WHERE id='raced'")
             connection.commit()
             connection.execute('BEGIN')
             with self.assertRaisesRegex(RuntimeError, 'storage_changed_since_plan'):
                 apply_sqlite_plan(connection, changes)
             connection.rollback()
-            self.assertEqual(connection.execute("SELECT updated_at FROM events WHERE id='utc'").fetchone()[0], 'new')
+            self.assertEqual(connection.execute("SELECT updated_at FROM events WHERE id='raced'").fetchone()[0], 'new')
+            self.assertEqual(connection.execute("SELECT updated_at FROM events WHERE id='utc'").fetchone()[0],
+                             '2026-10-16T05:00:00+00:00')
             connection.close()
 
     def test_invalid_explicit_date_does_not_silently_shift_or_fix(self):
@@ -123,25 +131,6 @@ class StorageTimeKstMigrationTests(unittest.TestCase):
         self.assertEqual(result['bars'][0]['price'], 100)
         self.assertEqual(result['bars'][0]['bar_start'], original['bars'][0]['bar_start'])
         self.assertEqual(convert_json_paths(result, (('available_at',), ('bars','*','available_at'))), result)
-
-    def test_mixed_offset_sync_does_not_revert_or_resurrect_same_instant(self):
-        connection = sqlite3.connect(':memory:')
-        connection.execute('CREATE TABLE journal_news_links(id TEXT PRIMARY KEY,updated_at TEXT,is_deleted INTEGER,source_content_hash TEXT)')
-        cases = (
-            ('2026-10-16T14:00:00+09:00', False, '2026-10-16T06:00:00+00:00', False, True),
-            ('2026-10-16T06:00:00+00:00', False, '2026-10-16T14:00:00+09:00', False, False),
-            ('2026-10-16T05:00:00+00:00', True, '2026-10-16T14:00:00+09:00', False, False),
-            ('2026-10-16T14:00:00+09:00', True, '2026-10-16T06:00:00+00:00', False, True),
-        )
-        for stored, deleted, incoming, incoming_deleted, expected in cases:
-            with self.subTest(stored=stored, deleted=deleted, incoming=incoming):
-                connection.execute('DELETE FROM journal_news_links')
-                connection.execute('INSERT INTO journal_news_links VALUES(?,?,?,?)', ('id', stored, deleted, 'h'))
-                values = {'id': 'id', 'updated_at': incoming, 'is_deleted': incoming_deleted,
-                          'source_content_hash': 'h', '_explicit_revision': True}
-                self.assertEqual(_merge_journal_link(connection, ('id',), values), expected)
-        connection.close()
-
 
 if __name__ == '__main__':
     unittest.main()

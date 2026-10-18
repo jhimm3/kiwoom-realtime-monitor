@@ -112,6 +112,8 @@ class ThemeBackupServiceTest(unittest.TestCase):
                 connection.close()
             repository.select_profile("기본 테마")
             self.assertEqual(("반도체",), repository.themes_for_stock("005930"))
+            self.assertEqual("#123456", repository.color_for_theme("반도체"))
+            self.assertEqual("#654321", repository.color_for_stock_theme("005930", "반도체"))
             repository.select_profile("회사")
             self.assertEqual(("AI",), repository.themes_for_stock("005930"))
             self.assertEqual(("AI",), repository.resolve_theme_names("인공지능"))

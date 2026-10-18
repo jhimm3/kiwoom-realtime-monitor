@@ -159,12 +159,19 @@ class ResearchDataSourceTests(unittest.TestCase):
         self.addCleanup(store.close)
         start = datetime(2026, 9, 14, tzinfo=UTC)
         end = datetime(2026, 9, 15, tzinfo=UTC)
+        payload = {"query_type": "5", "items": [{"stk_cd": "005930", "rank": "1"}]}
+        key = "2026-09-14T09:00:00"
+        store.save_dataset_snapshot("ranking", "5", key, payload,
+            observation=ranking_observation("5", key, payload, datetime(2026, 9, 14, 9, tzinfo=KST), source="fixture"))
         legacy = CentralResearchDataSource(_StoreClient(store)).load(
             start, end, ("ranking",),
         )
         profiled = CentralResearchDataSource(_StoreClient(store)).load(
             start, end, ("ranking",), session_profile="krx-after/v1",
         )
+        self.assertEqual(1, len(legacy.observations))
+        self.assertEqual(legacy.observations, profiled.observations)
+        self.assertEqual(payload, legacy.observations[0]["payload"])
         self.assertNotIn("research_session_profile", legacy.manifest)
         self.assertEqual(
             "krx-after/v1", profiled.manifest["research_session_profile"]["profile"],

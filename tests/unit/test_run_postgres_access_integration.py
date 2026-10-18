@@ -96,8 +96,9 @@ class DedicatedPostgresUrlTests(unittest.TestCase):
             )
 
     def test_rejects_non_postgresql_url(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "not a PostgreSQL URL"):
-            _dedicated_url("sqlite:///monitor.db")
+        for value in ("sqlite:///monitor.db", "postgres-invalid://host/live", "postgresql+evil://host/live"):
+            with self.subTest(value=value), self.assertRaisesRegex(RuntimeError, "not a PostgreSQL URL"):
+                _dedicated_url(value)
 
     def test_accepts_explicit_diagnostic_url_without_live_database_url(self) -> None:
         target = "postgresql://user:secret@test-host:5432/kiwoom_monitor_diagnostic_test?sslmode=require"
@@ -108,7 +109,7 @@ class DedicatedPostgresUrlTests(unittest.TestCase):
             _explicit_dedicated_url("postgresql://user:secret@test-host/kiwoom_monitor")
 
     def test_explicit_url_rejects_invalid_driver_or_missing_host(self) -> None:
-        for value in ("sqlite:///monitor.db", "postgresql:///kiwoom_monitor_diagnostic_test"):
+        for value in ("sqlite:///monitor.db", "postgresql:///kiwoom_monitor_diagnostic_test", "postgres-invalid://host/kiwoom_monitor_diagnostic_test"):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(RuntimeError, "not a PostgreSQL URL"):
                     _explicit_dedicated_url(value)
@@ -132,6 +133,17 @@ class DedicatedPostgresUrlTests(unittest.TestCase):
             def test_contract(self) -> None:
                 self.fail("broken contract")
 
+        class Failed(unittest.TestCase):
+            def test_contract(self):
+                self.fail("fixture")
+        class Errored(unittest.TestCase):
+            def test_contract(self):
+                raise RuntimeError("fixture")
+        class UnexpectedSuccess(unittest.TestCase):
+            @unittest.expectedFailure
+            def test_contract(self):
+                pass
+
         connection = MagicMock()
         connection.__enter__.return_value.cursor.return_value.__enter__.return_value.fetchone.return_value = (
             "kiwoom_monitor_diagnostic_test",
@@ -139,7 +151,8 @@ class DedicatedPostgresUrlTests(unittest.TestCase):
         driver = SimpleNamespace(connect=MagicMock(return_value=connection))
         for cases, expected in (((), 1), ((Skipped("test_contract"),), 1),
                                 ((ExpectedFailure("test_contract"),), 1),
-                                ((Passing("test_contract"),), 0)):
+                                ((Failed("test_contract"),), 1), ((Errored("test_contract"),), 1),
+                                ((UnexpectedSuccess("test_contract"),), 1), ((Passing("test_contract"),), 0)):
             with self.subTest(cases=cases), patch.dict(sys.modules, {"psycopg": driver}), \
                     patch.dict("os.environ", {
                         "KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL":
@@ -150,7 +163,7 @@ class DedicatedPostgresUrlTests(unittest.TestCase):
                                  return_value=unittest.TestSuite(cases)), \
                     redirect_stderr(StringIO()), redirect_stdout(StringIO()):
                 self.assertEqual(expected, main())
-        self.assertEqual(4, driver.connect.call_count)
+        self.assertEqual(7, driver.connect.call_count)
 
 
 if __name__ == "__main__":

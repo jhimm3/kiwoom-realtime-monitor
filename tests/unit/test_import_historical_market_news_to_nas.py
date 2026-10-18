@@ -31,6 +31,9 @@ class HistoricalMarketNewsImportTests(unittest.TestCase):
             async def verify_requests() -> None:
                 app = create_app(CentralServerSettings(
                     f"sqlite:///{database}", "private-token",
+                    news_naver_api_enabled=False, news_naver_stock_enabled=False,
+                    news_naver_market_enabled=False, news_query_set_enabled=False,
+                    news_history_jobs_enabled=False,
                 ))
                 async with app.router.lifespan_context(app):
                     async with httpx.AsyncClient(

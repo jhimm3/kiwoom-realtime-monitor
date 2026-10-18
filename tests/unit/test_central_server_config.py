@@ -247,12 +247,14 @@ class DataSourceConfigTests(unittest.TestCase):
     def test_round_trip_personal_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = DataSourceConfig(Path(directory) / "server.json")
-            expected = DataSourceSettings("personal_server", "https://nas.example.test/", "token", True)
+            expected = DataSourceSettings("personal_server", "https://nas.example.test/", "token", True, True)
             config.save(expected)
             actual = config.load()
         self.assertEqual("https://nas.example.test", actual.server_url)
         self.assertEqual("personal_server", actual.mode)
         self.assertTrue(actual.local_fallback_enabled)
+        self.assertTrue(actual.parallel_validation_enabled)
+        self.assertEqual("token", actual.access_token)
 
     def test_round_trip_local_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

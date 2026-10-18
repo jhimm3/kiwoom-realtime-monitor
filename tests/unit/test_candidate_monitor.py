@@ -843,6 +843,8 @@ class SharedShadowDeliveryTests(unittest.TestCase):
                             and "central_observation_revisions" in sql for sql in statements)})
                     outputs.append(([call.args for call in writes.call_args_list],
                                     [monitor._state for monitor in monitors], store.load_shadow_candidates()))
+                    self.assertEqual(1, len(outputs[-1][2]["events"]))
+                    self.assertEqual("pullback_reacceleration", outputs[-1][2]["events"][0]["setup"])
                 store.close()
             self.assertEqual(outputs[0], outputs[1])
             self.assertEqual([2, 1], [report["source_reads"] for report in reports])
@@ -1538,7 +1540,7 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 settings = CentralServerSettings(database_url=f"sqlite:///{Path(directory) / 'app.sqlite3'}",
                     access_token="offline-test-only", kiwoom_app_key="offline-unused", kiwoom_secret_key="offline-unused",
                     autonomous_top20_enabled=False, market_event_collection_enabled=False, news_history_jobs_enabled=False,
-                    news_query_set_enabled=False, news_naver_api_enabled=False)
+                    news_query_set_enabled=False, news_naver_api_enabled=False, news_naver_market_enabled=False)
                 app = create_app(settings, market_theme_shadow_bindings=tuple((m, shadow_inputs()) for m in monitors))
                 collector, runtime = app.state.realtime_collector, app.state.market_theme_shadow_runtime
                 now = [datetime(2026, 9, 14, 9, tzinfo=timezone(timedelta(hours=9)))]
@@ -1769,7 +1771,7 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
                 settings = CentralServerSettings(database_url="sqlite:///:memory:", access_token="offline-token",
                     kiwoom_app_key="offline-unused", kiwoom_secret_key="offline-unused", autonomous_top20_enabled=False,
                     market_event_collection_enabled=False, news_history_jobs_enabled=False,
-                    news_query_set_enabled=False, news_naver_api_enabled=False)
+                    news_query_set_enabled=False, news_naver_api_enabled=False, news_naver_market_enabled=False)
                 with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store):
                     app = create_app(settings, market_theme_shadow_bindings=tuple((m, shadow_inputs()) for m in monitors))
                 collector, runtime = app.state.realtime_collector, app.state.market_theme_shadow_runtime
@@ -1779,8 +1781,9 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
                 document = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION,
                             **self.theme(now[0])["document"]}
                 value = {"owner": "default", "key": "full", "document": document}
-                with patch("kiwoom_monitor.central_server.database_documents.time", return_value=now[0].replace(second=19).timestamp()):
+                with patch.object(store, "_now_provider", return_value=now[0].replace(second=19)):
                     store.upsert_documents("theme_metadata", [value])
+                self.assertEqual(now[0].replace(second=19).timestamp(), store.load_theme_snapshots()[0]["available_at"])
                 entered, release = threading.Event(), threading.Event()
                 original = store.replace_documents
                 request = None
@@ -1803,7 +1806,7 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
                     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://offline") as client:
                         self.assertEqual(401, (await client.put("/api/v1/content/theme_metadata", json={"documents": [value]})).status_code)
                         with patch.object(store, "replace_documents", side_effect=write), \
-                             patch("kiwoom_monitor.central_server.database_documents.time", return_value=now[0].timestamp()):
+                             patch.object(store, "_now_provider", return_value=now[0]):
                             request = asyncio.create_task(client.put("/api/v1/content/theme_metadata",
                                 headers={"Authorization": "Bearer offline-token"}, json={"documents": [{**value, "document": changed}]}))
                             if mode == "cancelled":
@@ -1827,6 +1830,7 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
                             await self.wait_for(lambda: monitors[0].status["evaluations"] == 2)
                             self.assertEqual(2, runtime.status["theme_context_reads"])
                             self.assertIsNone(monitors[0]._last_offered.theme_membership)
+                            self.assertEqual(now[0].timestamp(), store.load_theme_snapshots()[0]["available_at"])
                 finally:
                     release.set()
                     if request:
@@ -2372,7 +2376,7 @@ class SelectedRamShadowRecordingTests(unittest.IsolatedAsyncioTestCase):
                 settings = CentralServerSettings(database_url=f"sqlite:///{Path(directory) / 'app.sqlite3'}",
                     access_token="offline-token", kiwoom_app_key="offline-unused", kiwoom_secret_key="offline-unused",
                     autonomous_top20_enabled=False, market_event_collection_enabled=False, news_history_jobs_enabled=False,
-                    news_query_set_enabled=False, news_naver_api_enabled=False)
+                    news_query_set_enabled=False, news_naver_api_enabled=False, news_naver_market_enabled=False)
                 monitor = MarketThemeShadowMonitor(theme_id="반도체", leadership_venue="KRX")
                 kwargs = {"market_theme_shadow_recording": True} if enabled else {}
                 store = SQLiteQueryStore(Path(directory) / "app.sqlite3")
@@ -2412,7 +2416,7 @@ class RamShadowSelectionTests(unittest.IsolatedAsyncioTestCase):
         settings = CentralServerSettings(database_url="sqlite:///:memory:", access_token="offline-token",
             kiwoom_app_key="offline-unused" if configured else "", kiwoom_secret_key="offline-unused" if configured else "",
             autonomous_top20_enabled=False, market_event_collection_enabled=False, news_history_jobs_enabled=False,
-            news_query_set_enabled=False, news_naver_api_enabled=False)
+            news_query_set_enabled=False, news_naver_api_enabled=False, news_naver_market_enabled=False)
         bindings = ((MarketThemeShadowMonitor(theme_id="반도체", leadership_venue="KRX"), shadow_inputs()),) if explicit else ()
         with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store):
             app = create_app(settings, market_theme_shadow_bindings=bindings)
@@ -2421,10 +2425,10 @@ class RamShadowSelectionTests(unittest.IsolatedAsyncioTestCase):
         if collector:
             collector._now_provider = lambda: now[0]
             collector._apply_trade_source_approval({("005930", "KRX"), ("000660", "KRX")}, now[0], reset_all=True)
+        store._now_provider = lambda: now[0]
         theme = OwnerContextShadowTests().theme(now[0])
         document = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION, **theme["document"]}
-        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=now[0].timestamp()):
-            store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": document}])
+        store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": document}])
         return app, store, now, collector
 
     async def cleanup_app(self, app, store):
@@ -2468,10 +2472,11 @@ class RamShadowSelectionTests(unittest.IsolatedAsyncioTestCase):
                         from kiwoom_monitor.domain.research_contract import THEME_BACKUP_FORMAT, THEME_BACKUP_VERSION
                         empty_theme = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION,
                             "active_profile": "default", "profiles": [{"name": "default", "stock_themes": []}]}
-                        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=now[0].timestamp()):
+                        with patch.object(store, "_now_provider", return_value=now[0]):
                             response = await client.put("/api/v1/content/theme_metadata", headers=headers,
                                 json={"documents": [{"owner": "default", "key": "full", "document": empty_theme}]})
                         self.assertEqual(200, response.status_code)
+                        self.assertEqual(now[0].timestamp(), store.load_theme_snapshots()[0]["available_at"])
                         await self.wait_for(lambda: runtime.status["theme_context_reads"] > before)
                         await self.wait_for(lambda: runtime._monitors[0]._last_offered.theme_membership is None)
                         response = await client.put(url, headers=headers, json={"expected_revision": 1, "leadership_venue": "NXT"})
@@ -4117,7 +4122,7 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
         runtime._retention=40
         collector._store=Mock()
         rows=value.market_minute_trade_inputs.rows
-        async def load(code,day,venue):return [{**row,'metadata':dict(row['metadata'])} for row in rows if row['code']==code and row['market']==venue]
+        async def load(code,day,venue,**bounds):return [{**row,'metadata':dict(row['metadata'])} for row in rows if row['code']==code and row['market']==venue]
         with patch.object(collector,'load_live_minute_bars',side_effect=load) as read, \
              patch('kiwoom_monitor.central_server.market_theme_shadow_monitor.compute_minute_trade_candidates',wraps=shadow_context.compute_minute_trade_candidates) as calculate:
             await runtime.start();helper.trades(collector,now)
@@ -4145,6 +4150,7 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
         await runtime.close();self.assertIsNone(runtime._market_minute_cache)
 
     async def test_minute_primary_uses_existing_sqlite_reader_without_writes_or_consumer_scaling(self):
+        from contextlib import contextmanager
         from tests.unit.test_market_research_features import MinuteMarketCandidateTests
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
         from kiwoom_monitor.central_server.market_observations import minute_bar_observation
@@ -4163,12 +4169,56 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
                     completeness=DataCompleteness.COMPLETE,source='kiwoom-websocket-0B',value_kind=DataValueKind.ACTUAL)
                 observations.append((row['trading_date']+'T'+row['minute'],observation))
             store.save_minute_bars([{key:value for key,value in row.items() if key!='metadata'} for row in raw.rows],observations=observations)
+            # A full-day read must fetch extra rows even when the runtime later
+            # filters them out. Keep the native cost oracle below that filter.
+            store.save_minute_bars([{**{key:value for key,value in row.items() if key!='metadata'},
+                'minute': f"09:{int(row['minute'][3:]) - 10:02d}"} for row in raw.rows])
+            native_rows = []
+            native_connection = store._connection
+
+            class CursorProbe:
+                def __init__(self, cursor, count_rows):
+                    self.cursor, self.count_rows = cursor, count_rows
+
+                def fetchall(self):
+                    rows = self.cursor.fetchall()
+                    if self.count_rows:
+                        native_rows.append(len(rows))
+                    return rows
+
+                def __getattr__(self, name):
+                    return getattr(self.cursor, name)
+
+            class ConnectionProbe:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def execute(self, sql, parameters=()):
+                    return CursorProbe(self.connection.execute(sql, parameters),
+                        sql.startswith('SELECT b.trading_date,b.minute,'))
+
+                def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+            @contextmanager
+            def counted_connection():
+                with native_connection() as connection:
+                    yield ConnectionProbe(connection)
+
+            with patch.object(store, '_connection', counted_connection):
+                # Positive control: real unbounded reads see all 400 seeded
+                # rows. An inactive counter cannot satisfy the runtime oracle.
+                for code in raw.member_codes:
+                    store.load_minute_bars(code, '2026-10-13', 'KRX')
+            self.assertEqual([20] * 20, native_rows)
+            native_rows.clear()
             before=path.read_bytes()
             helper=CollectorRamShadowRuntimeTests()
             now,hub,collector,monitors,runtime=helper.fixture(8,store=store,cleanup=False);now[0]=cut
             runtime._bindings=tuple((m,value) for m in monitors)
             try:
                 with patch.object(store,'load_minute_bars',wraps=store.load_minute_bars) as read, \
+                     patch.object(store,'_connection',counted_connection), \
                      patch.object(store,'save_minute_bars',side_effect=AssertionError('minute observer wrote bars')):
                     await runtime.start();await helper.wait_for(lambda:all(m.status['evaluations']==1 and m._market_changes_receipt is not None
                         and m._market_changes_receipt[1]['price_trade_leadership']['state']=='RETAINED' for m in monitors))
@@ -4176,10 +4226,48 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual('RETAINED',observed['price_trade_leadership']['state'])
                     self.assertEqual('CONFIRMED',observed['price_trade_leadership']['five_minute_confirmation']['status'])
                     self.assertEqual(20,read.call_count)
+                    self.assertEqual([10] * 20, native_rows)
                     for _ in range(100):runtime.latest_results
                     self.assertEqual(20,read.call_count);self.assertEqual(before,path.read_bytes())
                     await runtime.close();self.assertEqual(20,read.call_count)
+                    self.assertEqual([10] * 20, native_rows)
             finally:await runtime.close();store.close()
+
+    async def test_native_minute_window_matches_previous_filter_at_midnight_fence_and_utc_cut(self):
+        from kiwoom_monitor.central_server.market_observations import KST
+        helper = CollectorRamShadowRuntimeTests()
+        now, hub, collector, monitors, runtime = helper.fixture(2, cleanup=False)
+        self.addAsyncCleanup(runtime.close)
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'midnight.sqlite3', now_provider=lambda: now[0])
+            store.initialize()
+            collector._store = store
+            try:
+                values = []
+                for day in ('2026-10-12', '2026-10-13'):
+                    for minute in ('00:00', '00:01', '00:04', '00:05', '09:09', '09:10', '09:19', '09:20', '23:59'):
+                        for venue in ('KRX', 'NXT'):
+                            values.append(dict(trading_date=day, minute=minute, code='000001', market=venue,
+                                open=100, high=100, low=100, close=100, volume=1,
+                                trade_value_million_won=1, updated_at=1.0))
+                store.save_minute_bars(values)
+                for cut in ('2026-10-13T00:00:00+09:00', '2026-10-13T00:00:01+09:00',
+                            '2026-10-13T00:00:02+09:00', '2026-10-13T00:05:02+09:00',
+                            '2026-10-13T09:20:01+09:00', '2026-10-13T00:20:02+00:00'):
+                    decision = datetime.fromisoformat(cut)
+                    end = (decision - timedelta(seconds=2)).replace(second=0, microsecond=0)
+                    day = decision.astimezone(KST).date().isoformat()
+                    for venue in ('KRX', 'NXT'):
+                        key = (day, end, (('000001', venue),), None, None)
+                        full = store.load_minute_bars('000001', day, venue)
+                        expected = tuple(row for row in full if end - timedelta(minutes=10) <=
+                            datetime.fromisoformat(row['trading_date'] + 'T' + row['minute']).replace(tzinfo=KST) < end)
+                        rows, errors = await runtime._market_minutes({'decision_time': cut}, key=key)
+                        self.assertEqual({}, errors)
+                        self.assertEqual(expected, rows, (cut, venue))
+            finally:
+                collector._store = None
+                store.close()
 
     async def test_close_during_native_minute_read_drains_worker_before_returning(self):
         helper=CollectorRamShadowRuntimeTests();now,hub,collector,monitors,runtime=helper.fixture(2,cleanup=False)
@@ -4982,8 +5070,14 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual('NO_NEW_RISK',receipt['risk_disposition']);self.assertFalse(receipt['protection_required'])
 
     async def test_stale_native_risk_does_not_issue_new_protection_from_old_loss(self):
+        from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict,_sha256
         from kiwoom_monitor.central_server.market_theme_shadow_inputs import dynamic_allocation_inputs_from_ram
         runtime,_,_,_,observation,_=self.prepare();snapshot=runtime._snapshot()
+        loss=observation.risk_snapshot.to_dict();loss.pop('snapshot_id')
+        loss['daily_net_pnl_won']=-1000;loss['snapshot_id']=_sha256(loss)
+        observation=replace(observation,risk_snapshot=mock_automation_risk_snapshot_from_dict(loss))
+        current=dynamic_allocation_inputs_from_ram(runtime._allocation,snapshot,(),observation)
+        self.assertEqual('EXIT_REQUIRED',current['risk_disposition']);self.assertTrue(current['protection_required'])
         snapshot['decision_time']=(datetime.fromisoformat(snapshot['decision_time'])+timedelta(seconds=31)).isoformat()
         receipt=dynamic_allocation_inputs_from_ram(runtime._allocation,snapshot,(),observation)
         self.assertEqual('HALT_NEW_ORDERS',receipt['risk_disposition']);self.assertFalse(receipt['protection_required'])
@@ -5161,6 +5255,11 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
         selection={'version':'ram-shadow-selection/v1','revision':0,'enabled':True,'theme_ids':['반도체'],
             'leadership_venue':'KRX','recording':False,'position_allocation':document}
         self.assertEqual(document,validate_ram_shadow_selection(selection)['position_allocation'])
+        comparison,_=PositionAccountRamShadowTests().policy()
+        for request in comparison['requests']:request['account_ref']='another-account'
+        selection['position_comparison']=comparison
+        with self.assertRaisesRegex(ValueError,'one account'):validate_ram_shadow_selection(selection)
+        selection.pop('position_comparison')
         selection['leadership_venue']='NXT'
         with self.assertRaises(ValueError):validate_ram_shadow_selection(selection)
 

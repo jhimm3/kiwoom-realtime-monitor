@@ -17,7 +17,7 @@ TEST_DATABASE_NAME = "kiwoom_monitor_diagnostic_test"
 
 def _dedicated_url(live_url: str) -> str:
     parts = urlsplit(live_url)
-    if not parts.scheme.startswith("postgres") or not parts.netloc or not parts.path:
+    if parts.scheme not in {"postgres", "postgresql"} or not parts.netloc or not parts.path:
         raise RuntimeError("KIWOOM_SERVER_DATABASE_URL is not a PostgreSQL URL")
     if parts.path.lstrip("/") == TEST_DATABASE_NAME:
         raise RuntimeError("KIWOOM_SERVER_DATABASE_URL points at the diagnostic test DB")
@@ -27,7 +27,7 @@ def _dedicated_url(live_url: str) -> str:
 
 def _explicit_dedicated_url(database_url: str) -> str:
     parts = urlsplit(database_url)
-    if not parts.scheme.startswith("postgres") or not parts.netloc or not parts.path:
+    if parts.scheme not in {"postgres", "postgresql"} or not parts.netloc or not parts.path:
         raise RuntimeError("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL is not a PostgreSQL URL")
     if parts.path.lstrip("/") != TEST_DATABASE_NAME:
         raise RuntimeError("diagnostic DB URL must target kiwoom_monitor_diagnostic_test")
@@ -107,7 +107,7 @@ def main() -> int:
 
     root = Path(__file__).resolve().parents[1]
     _install_project_import_paths(root)
-    from scripts.run_regression import _code_tree_identity
+    from scripts.run_regression import _code_tree_identity, _IdentityTestResult, _suite_test_ids
 
     source_start = _code_tree_identity()
     names = list(arguments.test)
@@ -133,7 +133,8 @@ def main() -> int:
     if planned == 0 or any(count == 0 for count in discovered.values()):
         print(f"PostgreSQL integration: no tests discovered: {discovered}", file=sys.stderr)
         return 1
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    planned_ids = _suite_test_ids(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=_IdentityTestResult).run(suite)
     source_end = _code_tree_identity()
     complete = (
         result.wasSuccessful()
@@ -142,6 +143,8 @@ def main() -> int:
         and not result.expectedFailures
         and not result.unexpectedSuccesses
         and source_start["lf_sha256"] == source_end["lf_sha256"]
+        and planned_ids == result.executed_test_ids
+        and len(set(result.executed_test_ids)) == len(result.executed_test_ids)
     )
     if not complete:
         print(
@@ -161,6 +164,7 @@ def main() -> int:
             "group": arguments.ci_group or "explicit" if names else "postgres-access-default",
             "modules": list(discovered), "discovered": discovered,
             "planned": planned, "ran": result.testsRun,
+            "planned_test_ids": planned_ids, "executed_test_ids": result.executed_test_ids,
             "failures": len(result.failures), "errors": len(result.errors),
             "skipped": len(result.skipped), "expected_failures": len(result.expectedFailures),
             "unexpected_successes": len(result.unexpectedSuccesses),

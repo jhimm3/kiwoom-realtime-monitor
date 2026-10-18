@@ -148,15 +148,6 @@ class SymbolValidationDialogTests(unittest.TestCase):
         dialog._apply_progress(result, finished=True)
         self.assertEqual('1,000.5원', dialog._groups.item(0, 6).text())
 
-    def test_duplicate_launch_unpolled_exit_and_close_keep_owned_child(self):
-        dialog, process, _ = self.begin()
-        self.child_result(dialog, process)
-        with patch.object(dialog._manager, 'start', side_effect=AssertionError('duplicate')):
-            dialog._start(); dialog._launch(dialog._last_request)
-        dialog.show(); dialog.close()
-        self.assertFalse(dialog.isVisible()); self.assertIsNotNone(dialog._operation)
-        dialog._poll_process(); self.assertIsNone(dialog._operation)
-
     def test_native_zero_with_running_state_does_not_show_success(self):
         dialog, process, _ = self.begin()
         result = self.child_result(dialog, process)

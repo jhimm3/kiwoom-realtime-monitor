@@ -57,6 +57,15 @@ class KrxStockCatalogWorkerControllerTests(unittest.TestCase):
         self.assertTrue(controller.start(stocks, settings, **callbacks))
         self.assertTrue(controller.start(object(), object(), **callbacks))
         self.assertEqual([(stocks, settings)], calls)
+        self.assertTrue(controller.is_running)
+        worker.running = False
+        worker.finished.emit()
+        self.assertIsNone(controller.worker)
+        self.assertFalse(controller.is_running)
+        self.assertTrue(controller.start(stocks, settings, **callbacks))
+        self.assertIs(worker, controller.worker)
+        self.assertTrue(controller.is_running)
+        self.assertEqual(2, len(calls))
 
     def test_invalid_factory_reports_configuration_failure(self) -> None:
         failures: list[str] = []

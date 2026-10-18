@@ -149,23 +149,30 @@ class ExecutionRepositoryTests(unittest.TestCase):
         self.assertEqual(1, len(repository.events("intent-1")))
 
     def test_fill_evidence_fields_survive_repository_restart(self) -> None:
-        store = SQLiteQueryStore(Path(":memory:"))
-        store.initialize()
-        self.addCleanup(store.close)
-        repository = ExecutionRepository(store)
-        record = repository.create(_intent())
-        event = order_event(
-            "intent-1", "BROKER_FILL_AGGREGATE", OrderState.PARTIALLY_FILLED, NOW, NOW,
-            quantity=1, broker_as_of=NOW,
-        )
-        repository.apply(
-            record, event, filled_quantity=1, detailed_filled_quantity=0,
-            broker_reported_filled_quantity=1, last_broker_as_of=NOW,
-        )
-        loaded = repository.load("intent-1")
-        self.assertIsNotNone(loaded)
-        self.assertEqual(0, loaded.detailed_filled_quantity)
-        self.assertEqual(1, loaded.broker_reported_filled_quantity)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "execution.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            repository = ExecutionRepository(store)
+            record = repository.create(_intent())
+            event = order_event(
+                "intent-1", "BROKER_FILL_AGGREGATE", OrderState.PARTIALLY_FILLED, NOW, NOW,
+                quantity=1, broker_as_of=NOW,
+            )
+            repository.apply(
+                record, event, filled_quantity=1, detailed_filled_quantity=0,
+                broker_reported_filled_quantity=1, last_broker_as_of=NOW,
+            )
+            store.close()
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            self.addCleanup(store.close)
+            repository = ExecutionRepository(store)
+            loaded = repository.load("intent-1")
+            self.assertIsNotNone(loaded)
+            self.assertEqual(0, loaded.detailed_filled_quantity)
+            self.assertEqual(1, loaded.broker_reported_filled_quantity)
+            self.assertEqual(NOW, loaded.last_broker_as_of)
 
     def test_runtime_lease_blocks_another_owner_until_expiry(self) -> None:
         store = SQLiteQueryStore(Path(":memory:"))
@@ -229,6 +236,12 @@ class ExecutionRepositoryTests(unittest.TestCase):
             repository.account_events("real", "account-a")
         with self.assertRaises(ValueError):
             repository.account_events("mock", "account-a", after_sequence=-1)
+        for kwargs in ({"after_sequence": True}, {"limit": 0}, {"limit": 1001}, {"limit": True}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                repository.account_events("mock", "account-a", **kwargs)
+        with self.assertRaises(ValueError):
+            repository.account_events("mock", "")
+
 
 
 if __name__ == "__main__":

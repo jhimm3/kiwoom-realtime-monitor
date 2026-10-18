@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -104,6 +105,18 @@ class AICredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         await self.analyze(identity="new-article")
         self.assertEqual("gemini-new", self.fake.calls[-1][1])
         self.assertEqual("VERIFIED", self.service._credential_validation["gemini"])
+        from kiwoom_monitor.infrastructure.news_ai import analyze_articles, AIRequestUsage
+        cache_before = self.store.load_documents("news_ai", "005930", 20)
+        shared_before = self.store.load_documents("news_ai_shared", limit=20)
+        usage_before = self.store.load_documents("news_request_usage", limit=20)
+        malformed = '[{"id":1,"summary":"first"},{"id":1,"summary":"second"}]'
+        with patch("kiwoom_monitor.central_server.ai_service.analyze_articles", analyze_articles), patch("kiwoom_monitor.infrastructure.news_ai._gemini", return_value=(malformed, AIRequestUsage())):
+            with self.assertRaises(ValueError):
+                await self.service.analyze("005930", "삼성전자", "gemini", "model-old", [{"identity": "bad-a", "title": "첫 사건", "body": "첫 본문"}, {"identity": "bad-b", "title": "둘째 사건", "body": "둘째 본문"}], 2)
+        self.assertEqual(cache_before, self.store.load_documents("news_ai", "005930", 20))
+        self.assertEqual(shared_before, self.store.load_documents("news_ai_shared", limit=20))
+        self.assertEqual(usage_before, self.store.load_documents("news_request_usage", limit=20))
+
 
     async def test_received_request_pins_provider_model_key_before_body_preparation(self):
         from kiwoom_monitor.central_server.ai_service import _prepare_events
@@ -246,6 +259,12 @@ class AICredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.fake.calls))
 
     async def test_daily_limit_is_not_reset_by_key_rotation(self):
+        class HostUtcDateTime(datetime):
+            def astimezone(self, tz=None):
+                return super().astimezone(timezone.utc if tz is None else tz)
+        # The NAS host can use UTC while the injected application clock is KST.
+        from kiwoom_monitor.domain.time_basis import KST
+        self.service._now = lambda: HostUtcDateTime(2026, 10, 19, 0, 0, 1, tzinfo=KST)
         self.service.update_operational_settings(provider="none", model="", daily_limit=1)
         await self.analyze()
         operation = await self.ready()
@@ -254,6 +273,8 @@ class AICredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
             await self.analyze(identity="second")
         self.assertEqual(1, len(self.fake.calls))
         self.assertEqual(1, len(self.store.load_documents("news_request_usage", limit=10)))
+        [usage] = self.store.load_documents("news_request_usage", limit=10)
+        self.assertEqual("2026-10-19", usage["owner"])
 
     async def test_commit_failure_blocks_old_key_but_other_provider_remains_usable(self):
         operation = await self.ready()
@@ -334,7 +355,9 @@ class AICredentialAPITests(unittest.TestCase):
             "kiwoom_monitor.central_server.ai_service.analyze_articles", FakeAI()) as fake:
             root = Path(directory)
             app = create_app(CentralServerSettings(f"sqlite:///{root / 'central.sqlite'}", "private-token",
-                credential_directory=str(root / "secrets"), news_query_set_enabled=False))
+                credential_directory=str(root / "secrets"), news_query_set_enabled=False,
+                news_naver_api_enabled=False, news_naver_stock_enabled=False,
+                news_naver_market_enabled=False))
             with TestClient(app, base_url="https://nas.test") as client:
                 headers = {"Authorization": "Bearer private-token"}
                 runtime = app.state.credential_runtime

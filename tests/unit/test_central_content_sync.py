@@ -14,6 +14,7 @@ from kiwoom_monitor.infrastructure.central_content_client import (
 from kiwoom_monitor.infrastructure.central_content_sync import (
     CentralContentSyncService,
     _journal_news_link_key,
+    _merge_journal_link,
 )
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
@@ -675,6 +676,28 @@ class CentralContentSyncServiceTest(unittest.TestCase):
                         CentralContentSyncService(FailingCapabilityClient()).push(  # type: ignore[arg-type]
                             root / "missing-main", root / "missing-news",
                         )
+
+    def test_mixed_offset_sync_does_not_revert_or_resurrect_same_instant(self):
+        connection = sqlite3.connect(':memory:')
+        connection.execute('CREATE TABLE journal_news_links(id TEXT PRIMARY KEY,updated_at TEXT,is_deleted INTEGER,source_content_hash TEXT)')
+        cases = (
+            ('2026-10-16T14:00:00+09:00', False, '2026-10-16T06:00:00+00:00', False, True),
+            ('2026-10-16T06:00:00+00:00', False, '2026-10-16T14:00:00+09:00', False, False),
+            ('2026-10-16T05:00:00+00:00', True, '2026-10-16T14:00:00+09:00', False, False),
+            ('2026-10-16T14:00:00+09:00', True, '2026-10-16T06:00:00+00:00', False, True),
+        )
+        for stored, deleted, incoming, incoming_deleted, expected in cases:
+            with self.subTest(stored=stored, deleted=deleted, incoming=incoming):
+                connection.execute('DELETE FROM journal_news_links')
+                connection.execute('INSERT INTO journal_news_links VALUES(?,?,?,?)', ('id', stored, deleted, 'h'))
+                values = {'id': 'id', 'updated_at': incoming, 'is_deleted': incoming_deleted,
+                          'source_content_hash': 'h', '_explicit_revision': True}
+                self.assertEqual(_merge_journal_link(connection, ('id',), values), expected)
+                expected_row=(incoming, int(incoming_deleted), 'h') if expected else (stored, int(deleted), 'h')
+                self.assertEqual(expected_row,connection.execute(
+                    'SELECT updated_at,is_deleted,source_content_hash FROM journal_news_links WHERE id=?',('id',)
+                ).fetchone())
+        connection.close()
 
 
 if __name__ == "__main__":

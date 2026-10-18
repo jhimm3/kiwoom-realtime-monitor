@@ -55,7 +55,7 @@ class CentralRealtimeWorkerTests(unittest.TestCase):
             "trade_time": "101010", "future_field": "ignored",
         })
         self.assertIsInstance(tick, TradeTick)
-        self.assertEqual(70000, tick.current_price)
+        self.assertEqual(TradeTick("005930", 70000, None, None, 10, 70100, "101010"), tick)
 
     def test_switches_to_local_only_after_three_central_failures(self) -> None:
         class StopTest(Exception):
@@ -247,6 +247,8 @@ class CentralRealtimeWorkerTests(unittest.TestCase):
             DataSourceSettings("personal_server", "https://nas.example", "token"),
             ("005930",), validation_recorder=recorder,
         )
+        emitted = []
+        worker.trade_received.connect(emitted.append)
         event = {
             "type": "trade", "revision_id": "nas-r1",
             "payload": {
@@ -259,6 +261,8 @@ class CentralRealtimeWorkerTests(unittest.TestCase):
         self.assertEqual("trade", recorder.values[0][0])
         self.assertEqual("005930", recorder.values[0][1].code)
         self.assertIs(event, recorder.values[0][2])
+        self.assertEqual(1, len(emitted))
+        self.assertIs(recorder.values[0][1], emitted[0])
 
 
 if __name__ == "__main__":

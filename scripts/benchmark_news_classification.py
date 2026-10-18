@@ -9,6 +9,7 @@ import re
 import sqlite3
 import time
 from collections import Counter
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -166,7 +167,7 @@ def reference_label(stock_name: str, title: str, description: str, body: str) ->
 
 
 def build_and_run(database_path: Path) -> dict[str, Any]:
-    with sqlite3.connect(database_path) as connection:
+    with closing(sqlite3.connect(database_path)) as connection, connection:
         connection.row_factory = sqlite3.Row
         records = _records(connection)
         articles = records["history:article"]

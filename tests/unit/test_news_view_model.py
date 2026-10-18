@@ -72,7 +72,7 @@ class NewsViewModelTests(unittest.TestCase):
 
     def test_detail_and_related_articles_escape_untrusted_text(self) -> None:
         first = _item("대표 기사")
-        second = _item("<script>기사</script>", "https://example.com/?a=1&b=2")
+        second = _item("<script>기사</script>", "https://example.com/?a='quoted'&b=2")
         group = NewsEventGroup(first, (first, second))
 
         related = related_articles_html(group)
@@ -81,7 +81,15 @@ class NewsViewModelTests(unittest.TestCase):
         self.assertNotIn("<script>", related)
         self.assertIn("&lt;script&gt;", related)
         self.assertIn("관련 기사 2건", related)
+        self.assertIn("?a=&#x27;quoted&#x27;&amp;b=2", related)
         self.assertEqual("", detail)
+        stored = StoredAINewsAnalysis(AINewsAnalysis(
+            "<summary>", "<outlook>", 87, "<reason>", ("<positive>",), ("<negative>",), "<category>",
+        ), "<provider>", "<model>", datetime(2026, 10, 18, tzinfo=UTC))
+        detail = ai_detail_html(first, stored)
+        for field in ("summary", "outlook", "reason", "positive", "negative", "category", "provider", "model"):
+            self.assertIn(f"&lt;{field}&gt;", detail)
+            self.assertNotIn(f"<{field}>", detail)
 
     def test_nas_evidence_separates_rule_scores_from_ai_and_escapes_body(self) -> None:
         evidence = StoredNewsEvidence(
@@ -159,6 +167,11 @@ class NewsViewModelTests(unittest.TestCase):
         self.assertGreaterEqual(rendered.count("line-height:1.75"), 2)
         self.assertIn("&lt;태그&gt;", rendered)
         self.assertNotIn("<태그>", rendered)
+        sentences = ("첫 번째 문장입니다.", "두 번째 문장입니다.", "세 번째 문장입니다.",
+                     "네 번째 문장에는 &lt;태그&gt;가 있습니다.", "다섯 번째 문장입니다.")
+        self.assertEqual(sorted(rendered.index(sentence) for sentence in sentences),
+                         [rendered.index(sentence) for sentence in sentences])
+        self.assertTrue(all(rendered.count(sentence) == 1 for sentence in sentences))
 
 
 if __name__ == "__main__":

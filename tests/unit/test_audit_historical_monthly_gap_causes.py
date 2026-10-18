@@ -66,6 +66,22 @@ class MonthlyGapEvidenceTests(unittest.TestCase):
             self.assertEqual(1, report["counts"]["gaps_with_kiwoom_minute_reference"])
             self.assertEqual(0, report["counts"]["gaps_with_kiwoom_minute_inside"])
             self.assertEqual(0, report["gaps"][0]["kiwoom_minutes_strictly_inside_gap"])
+            with closing(sqlite3.connect(context)) as db, db:
+                db.execute("UPDATE historical_stock_fundamentals SET volume=101")
+            with closing(sqlite3.connect(kiwoom)) as db, db:
+                db.execute("INSERT INTO minute_bars VALUES('123456','2025-12-02','2025-12-02 09:05:00')")
+            changed = audit(gaps, market, context, kiwoom)
+            self.assertEqual(0, changed["counts"]["stock_days_exact_creon_volume"])
+            self.assertEqual(1, changed["counts"]["gaps_with_kiwoom_minute_inside"])
+            self.assertEqual(1, changed["gaps"][0]["kiwoom_minutes_strictly_inside_gap"])
+            with closing(sqlite3.connect(context)) as db, db:
+                db.execute("DELETE FROM historical_stock_fundamentals")
+            missing = audit(gaps, market, context, kiwoom)
+            self.assertEqual(0, missing["counts"]["stock_days_with_creon_daily"])
+            self.assertEqual(0, missing["counts"]["stock_days_exact_creon_volume"])
+            with closing(sqlite3.connect(market)) as db:
+                self.assertEqual([(40,), (60,)], db.execute("SELECT volume FROM market_bars ORDER BY bar_time").fetchall())
+
 
 
 if __name__ == "__main__":

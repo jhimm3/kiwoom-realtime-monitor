@@ -118,7 +118,7 @@ class DiagnosticRunTests(unittest.TestCase):
     def test_trace_api_forwards_deferred_deadline_and_guards_ram_held_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'diagnostic-workloads.json'
-            settings = CentralServerSettings(f'sqlite:///{Path(directory) / "monitor.sqlite3"}', 'private-token')
+            settings = CentralServerSettings(f'sqlite:///{Path(directory) / "monitor.sqlite3"}', 'private-token', news_naver_market_enabled=False)
             with patch.dict(os.environ, {'KIWOOM_DIAGNOSTIC_WORKLOAD_PATH': str(path)}):
                 client = TestClient(create_app(settings))  # No lifespan/network collectors.
                 try:
@@ -149,7 +149,7 @@ class DiagnosticRunTests(unittest.TestCase):
     def test_api_forwards_explicit_minute_scenario_and_rejects_unknown_recipe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "diagnostic-workloads.json"
-            settings = CentralServerSettings("postgresql://user:password@database/kiwoom_monitor", "private-token")
+            settings = CentralServerSettings("postgresql://user:password@database/kiwoom_monitor", "private-token", news_naver_market_enabled=False)
             from kiwoom_monitor.central_server.database import create_query_store
             store = create_query_store(f"sqlite:///{Path(directory) / 'monitor.sqlite3'}")
             with patch.dict(os.environ, {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(path)}), \
@@ -178,7 +178,7 @@ class DiagnosticRunTests(unittest.TestCase):
     def test_racing_trace_start_failure_does_not_disable_the_active_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "diagnostic-workloads.json"
-            settings = CentralServerSettings(f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token")
+            settings = CentralServerSettings(f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token", news_naver_market_enabled=False)
             with patch.dict(os.environ, {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(path)}):
                 with TestClient(create_app(settings)) as client:
                     session = _set_tool(path, True, 300)["diagnostic_tool"]["session_id"]
@@ -426,7 +426,7 @@ class DiagnosticRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "diagnostic-workloads.json"
             settings = CentralServerSettings(f"sqlite:///{Path(directory) / 'monitor.sqlite3'}",
-                                             "private-token")
+                                             "private-token", news_naver_market_enabled=False)
             with patch.dict(os.environ, {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(path)}):
                 with TestClient(create_app(settings)) as client:
                     headers = {"Authorization": "Bearer private-token"}
@@ -478,7 +478,7 @@ class DiagnosticRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "diagnostic-workloads.json"
             settings = CentralServerSettings(f"sqlite:///{Path(directory) / 'monitor.sqlite3'}",
-                                             "private-token")
+                                             "private-token", news_naver_market_enabled=False)
             with patch.dict(os.environ, {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(path)}):
                 with TestClient(create_app(settings)) as client:
                     headers = {"Authorization": "Bearer private-token"}
@@ -495,7 +495,7 @@ class DiagnosticRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "diagnostic-workloads.json"
             path.parent.joinpath("diagnostic-history.jsonl").write_text(
-                "".join(f'{{"event":{number}}}\n' for number in range(8)),
+                "".join(f'{{"event":{number}}}\n' for number in range(8)) + '{"event":',
                 encoding="utf-8")
             runs = DiagnosticRuns(path, lambda *_: {})
             self.assertEqual([7, 6, 5], [item["event"] for item in

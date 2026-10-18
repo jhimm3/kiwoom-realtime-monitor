@@ -83,6 +83,7 @@ class RealtimeCollectorStore(Protocol):
     def load_minute_bars(
         self, code: str, trading_date: str, market: str = "", *,
         realtime_deltas: list[dict[str, Any]] | None = None,
+        start_minute: str | None = None, end_minute: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def save_dataset_snapshots(
@@ -1305,7 +1306,8 @@ class CentralRealtimeCollector:
             logger.warning("계좌 이벤트 전달 실패: %s", event_type)
 
     async def load_live_minute_bars(
-        self, code: str, trading_date: str, market: str = "",
+        self, code: str, trading_date: str, market: str = "", *,
+        start_minute: str | None = None, end_minute: str | None = None,
     ) -> list[dict[str, Any]]:
         """Read persisted history plus a frozen copy of uncommitted RAM segments."""
         if self._store is None:
@@ -1314,12 +1316,17 @@ class CentralRealtimeCollector:
             *self._pending_minute_retries.values(), *self._inflight_minute_bars,
             *self._minute_bars.pending_bars(code, trading_date, market),
         ] if str(value['code']) == code and str(value['trading_date']) == trading_date
-            and (not market or str(value['market']) == market)]
+            and (not market or str(value['market']) == market)
+            and (start_minute is None or str(value['minute']) >= start_minute)
+            and (end_minute is None or str(value['minute']) < end_minute)]
+        read_options = {}
+        if start_minute is not None:
+            read_options['start_minute'] = start_minute
+        if end_minute is not None:
+            read_options['end_minute'] = end_minute
         if deltas:
-            return await owned_to_thread(
-                self._store.load_minute_bars, code, trading_date, market, realtime_deltas=deltas,
-            )
-        return await owned_to_thread(self._store.load_minute_bars, code, trading_date, market)
+            read_options['realtime_deltas'] = deltas
+        return await owned_to_thread(self._store.load_minute_bars, code, trading_date, market, **read_options)
 
     async def _save_snapshots(self) -> None:
         next_latest = _next_latest_checkpoint(self._now_provider().timestamp())

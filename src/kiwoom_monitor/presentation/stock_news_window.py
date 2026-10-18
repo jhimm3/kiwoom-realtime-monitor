@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 import logging
 import json
@@ -150,7 +150,7 @@ class StockNewsWindow(QDialog):
         self._config = LocalNaverNewsConfig(config_path)
         self._database_path = database_path
         self._repository = StockNewsRepository(database_path)
-        self._ai_repository = NewsAIRepository(database_path)
+        self._ai_repository = NewsAIRepository(database_path, now_provider=self._now)
         self._central_news_client: CentralNewsClient | None = None
         self._central_evidence_client: CentralNewsClient | None = None
         self._central_ai_client: CentralAIClient | None = None
@@ -519,7 +519,7 @@ class StockNewsWindow(QDialog):
             return
         requested_code = self._stock_code
         requested_name = self._stock_name
-        two_days_ago = kst_now() - timedelta(days=2)
+        two_days_ago = self._now() - timedelta(days=2)
         if self._central_news_client is not None or last_naver_check is None:
             naver_since = two_days_ago
         else:
@@ -1092,7 +1092,7 @@ class StockNewsWindow(QDialog):
             self._ai_repository.save(self._ai_stock_code, item, provider, model, str(body_hash), result)
             if self._ai_stock_code == self._stock_code:
                 self._ai_result_cache[news_identity(item)] = StoredAINewsAnalysis(
-                    result, provider, model, kst_now(), str(body_hash),
+                    result, provider, model, self._now(), str(body_hash),
                 )
         requests, input_tokens, output_tokens, total_tokens = self._ai_repository.daily_usage()
         self._status_label.setText(
@@ -1186,6 +1186,14 @@ class StockNewsWindow(QDialog):
         if url and not QDesktopServices.openUrl(QUrl(url)):
             QMessageBox.warning(self, "뉴스 원문", "기본 브라우저에서 기사를 열지 못했습니다.")
 
+    def _now(self) -> datetime:
+        for owner, name in ((self._central_news_client, "server_now"), (self._main_window, "_ranking_now")):
+            provider = getattr(owner, name, None)
+            current = provider() if callable(provider) else None
+            if isinstance(current, datetime):
+                return as_kst(current)
+        return kst_now()
+
     def _open_settings(self) -> None:
         if self._settings_dialog is not None and self._settings_dialog.isVisible():
             self._settings_dialog.raise_()
@@ -1195,6 +1203,7 @@ class StockNewsWindow(QDialog):
             dialog = NaverNewsSettingsDialog(
                 self._config, self, database_path=self._database_path,
                 operational_client=self._central_operational_client,
+                now_provider=self._now,
             )
         except (OSError, ValueError):
             QMessageBox.warning(self, "뉴스 API 설정", "저장된 뉴스 API 설정을 읽지 못했습니다. 설정 파일을 다시 만들어 주세요.")

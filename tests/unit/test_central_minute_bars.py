@@ -32,6 +32,9 @@ class MinuteBarAccumulatorTests(unittest.TestCase):
         self.assertEqual('partial',copy['capture_quality'])
         self.assertFalse(accumulator._open_windows[('2026-09-14','09:04','005930','KRX')])
         accumulator.reset_cumulative_sources({('005930','KRX')});self.assertFalse(accumulator._ram_closed)
+        self.assertTrue(accumulator.closed_observation_snapshot(
+            ('005930',), at=cut, approved_sources={('005930', 'KRX')},
+        ))
         accumulator.mark_capture_gap();self.assertFalse(accumulator._ram_closed)
 
     def test_live_copy_preserves_operation_id_without_consuming_pending_ticks(self) -> None:

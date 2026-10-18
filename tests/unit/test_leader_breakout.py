@@ -1262,7 +1262,8 @@ class LeaderBreakoutLiveApiTests(unittest.IsolatedAsyncioTestCase):
                     kiwoom_app_key="fixture", kiwoom_secret_key="fixture",
                     credential_directory=str(Path(temp)/"vault"), account_identity_registry_enabled=True,
                     account_identity_hmac_key="fixture-only-key-with-32-characters-minimum",
-                    autonomous_top20_enabled=False, market_event_collection_enabled=False))
+                    autonomous_top20_enabled=False, market_event_collection_enabled=False,
+                    news_query_set_enabled=False, news_naver_market_enabled=False))
                 self.assertIs(app.state.mock_automation_supervisor, supervisor)
                 collector = app.state.realtime_collector
                 collector._approved_trade_sources = {("005930", "KRX")}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,10 +26,10 @@ class NewsObservationHistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
             store.initialize()
-            with patch("kiwoom_monitor.central_server.database_documents.time", side_effect=[100.0, 101.0]):
+            with patch.object(store, "_now_provider", side_effect=[datetime.fromtimestamp(t,timezone.utc) for t in (100.,101.)]):
                 store.upsert_documents("news_article", _article())
             store.upsert_documents("news_article", _article())
-            with patch("kiwoom_monitor.central_server.database_documents.time", side_effect=[200.0, 201.0]):
+            with patch.object(store, "_now_provider", side_effect=[datetime.fromtimestamp(t,timezone.utc) for t in (200.,201.)]):
                 store.upsert_documents("news_article", _article("정정 제목", first_seen_at="2020-01-01"))
             history = store.load_news_history("article", target="005930", identity="article-1")
             past = store.load_news_history(

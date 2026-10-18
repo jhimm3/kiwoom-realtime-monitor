@@ -7,7 +7,7 @@ import time
 import unittest
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
@@ -433,7 +433,13 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 {"codes": ["005930"]},
             )
 
+            original_news = store.load_documents("news_article")
+            original_review = store.load_documents("journal_v2_reviews")
+            original_market = store.load_dataset_snapshots("top20_membership")
             breakdown = {item["category"]: item for item in store.storage_breakdown()}
+            self.assertEqual(original_news, store.load_documents("news_article"))
+            self.assertEqual(original_review, store.load_documents("journal_v2_reviews"))
+            self.assertEqual(original_market, store.load_dataset_snapshots("top20_membership"))
             store.close()
 
         self.assertEqual({"news", "market", "research", "account", "other"}, set(breakdown))
@@ -548,13 +554,27 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 "body_text": "삼성전자가 새 공급계약 체결을 발표했습니다.", "error": "",
             })
 
+            store.upsert_documents("news_article", [{
+                "owner": "005930", "key": "article-1", "collector_id": "naver",
+                "collection_scope": "watchlist", "document": {
+                    "stock_code": "005930", "stock_name": "Samsung",
+                    "title": "revised title", "description": "revised summary",
+                    "link": "https://n/1", "original_link": "https://o/1",
+                },
+            }])
+            latest = store.load_news_history("article", target="005930", limit=1)[0]
+            self.assertNotEqual(article["article_revision_id"], latest["article_revision_id"])
+            store.save_news_body_revision({"article_revision_id": latest["article_revision_id"],
+                "extractor_version": "test-v1", "status": "fulltext", "body_text": "old new-revision body", "error": ""})
+            store.save_news_body_revision({"article_revision_id": latest["article_revision_id"],
+                "extractor_version": "test-v2", "status": "fulltext", "body_text": "latest corrected body", "error": ""})
             loaded = store.load_stock_news_articles("005930")
             store.close()
 
         self.assertEqual(1, len(loaded))
-        self.assertEqual("첫 제목", loaded[0]["title"])
         self.assertEqual("fulltext", loaded[0]["_body_status"])
-        self.assertIn("새 공급계약", loaded[0]["_body_text"])
+        self.assertEqual("revised title", loaded[0]["title"])
+        self.assertEqual("latest corrected body", loaded[0]["_body_text"])
 
     def test_stock_news_page_query_orders_by_publication_not_ingestion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -852,12 +872,19 @@ class CentralServerDatabaseTests(unittest.TestCase):
     def test_sqlite_query_cache_round_trip_and_expiry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            now = datetime(2035, 1, 2, tzinfo=ZoneInfo("Asia/Seoul"))
+            store._now_provider = lambda: now
             store.initialize()
             value = StoredQuery({"return_code": 0}, True, "next")
-            store.save_query("valid", "ka10001", time.time() + 60, value)
-            store.save_query("expired", "ka10001", time.time() - 1, value)
+            store.save_query("valid", "ka10001", now.timestamp() + 60, value)
+            store.save_query("expired", "ka10001", now.timestamp() - 1, value)
             self.assertEqual(value, store.load_query("valid"))
             self.assertIsNone(store.load_query("expired"))
+            now += timedelta(seconds=60)
+            self.assertIsNone(store.load_query("valid"))
+            store._query_cache_wall_time = lambda: now.timestamp() - 60
+            self.assertEqual(value, store.load_query("valid"))
+            store.close()
 
     def test_store_factory_rejects_network_file_paths(self) -> None:
         with self.assertRaisesRegex(ValueError, "sqlite"):
@@ -866,16 +893,21 @@ class CentralServerDatabaseTests(unittest.TestCase):
     def test_realtime_snapshot_round_trip_filters_by_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            now = datetime(2035, 1, 2, tzinfo=ZoneInfo("Asia/Seoul"))
+            store._now_provider = lambda: now
             store.initialize()
             store.save_realtime_snapshots([
-                {"event_type": "trade", "item_key": "005930", "received_at": time.time(),
+                {"event_type": "trade", "item_key": "005930", "received_at": now.timestamp(),
                  "event": {"type": "trade", "payload": {"code": "005930"}}},
-                {"event_type": "trade", "item_key": "000660", "received_at": time.time(),
+                {"event_type": "trade", "item_key": "000660", "received_at": now.timestamp(),
                  "event": {"type": "trade", "payload": {"code": "000660"}}},
-                {"event_type": "market_state", "item_key": "kospi", "received_at": time.time(),
+                {"event_type": "market_state", "item_key": "kospi", "received_at": now.timestamp(),
                  "event": {"type": "market_state", "payload": {"market": "kospi"}}},
             ])
             events = store.load_realtime_snapshots(["005930"])
+            now += timedelta(seconds=300)
+            self.assertEqual([], store.load_realtime_snapshots(["005930"]))
+            store.close()
         self.assertEqual({"trade", "market_state"}, {event["type"] for event in events})
         self.assertNotIn("000660", str(events))
 
@@ -898,7 +930,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual([], fresh_events)
         self.assertEqual("005930", market_caps[0]["code"])
         self.assertEqual(4_321_000, market_caps[0]["market_cap_eok"])
-        self.assertIn("+00:00", market_caps[0]["observed_at"])
+        self.assertIn("+09:00", market_caps[0]["observed_at"])
 
     def test_minute_bar_upsert_and_market_filter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -914,6 +946,87 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(70200, krx[0]["close"])
         self.assertEqual(20, krx[0]["volume"])
         self.assertEqual(2, len(both))
+
+    def test_minute_range_preserves_metadata_overlay_authority_and_full_day_default(self) -> None:
+        now = datetime(2026, 10, 13, 10, 4, tzinfo=ZoneInfo('Asia/Seoul'))
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'range.sqlite3', now_provider=lambda: now)
+            self.addCleanup(store.close)
+            store.initialize()
+            values, observations = [], []
+            for day in ('2026-10-12', '2026-10-13'):
+                for market in ('KRX', 'NXT'):
+                    for minute in ('09:59', '10:00', '10:01', '10:02'):
+                        value = dict(trading_date=day, minute=minute, code='005930', market=market,
+                            open=100, high=100, low=100, close=100, volume=10,
+                            trade_value_million_won=1, updated_at=now.timestamp())
+                        observation = minute_bar_observation(value, origin=ObservationOrigin.REALTIME,
+                            completeness=DataCompleteness.COMPLETE, source='kiwoom-websocket-0B',
+                            value_kind=DataValueKind.ACTUAL)
+                        values.append(value)
+                        observations.append((bar_observation_key(observation), observation))
+            store.save_minute_bars(values, observations=observations)
+            authoritative = next(row for row in values if row['trading_date'] == '2026-10-13'
+                and row['market'] == 'KRX' and row['minute'] == '10:01')
+            observation = minute_bar_observation(authoritative, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE, source='kiwoom-ka10080', value_kind=DataValueKind.ACTUAL)
+            store.save_market_data_metadata(bar_observation_key(observation), observation)
+            deltas = [{**row, 'operation_id': 'range-' + str(index), 'volume': 3,
+                       'trade_value_million_won': 2, 'high': 110, 'close': 110}
+                      for index, row in enumerate(values)]
+            included = next(row for row in deltas if row['trading_date'] == '2026-10-13'
+                and row['market'] == 'KRX' and row['minute'] == '10:00')
+            deltas.append(dict(included))
+            for market in ('', 'KRX', 'NXT'):
+                full = store.load_minute_bars('005930', '2026-10-13', market, realtime_deltas=deltas)
+                for start, end in ((None, None), ('10:00', None), (None, '10:02'),
+                                   ('10:00', '10:02'), ('10:00', '10:00'), ('00:00', '00:01')):
+                    with self.subTest(market=market, start=start, end=end):
+                        expected = [row for row in full if (start is None or row['minute'] >= start)
+                            and (end is None or row['minute'] < end)]
+                        self.assertEqual(expected, store.load_minute_bars('005930', '2026-10-13', market,
+                            realtime_deltas=deltas, start_minute=start, end_minute=end))
+            bounded = store.load_minute_bars('005930', '2026-10-13', 'KRX', realtime_deltas=deltas,
+                start_minute='10:00', end_minute='10:02')
+            self.assertEqual([13, 10], [row['volume'] for row in bounded])
+            self.assertEqual('kiwoom-ka10080', bounded[1]['metadata']['source'])
+            store.save_minute_bars([included])  # Lost ACK: retry/inflight can still contain this operation.
+            after = store.load_minute_bars('005930', '2026-10-13', 'KRX', realtime_deltas=deltas,
+                start_minute='10:00', end_minute='10:02')
+            self.assertEqual([13, 10], [row['volume'] for row in after])
+            self.assertEqual([row for row in store.load_minute_bars('005930', '2026-10-13', 'KRX',
+                realtime_deltas=deltas) if '10:00' <= row['minute'] < '10:02'], after)
+
+    def test_postgres_minute_range_uses_bound_parameters_and_same_read_snapshot_for_overlay(self) -> None:
+        calls = []
+        class Cursor:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def execute(self, sql, parameters=None): calls.append((sql, parameters))
+            def fetchall(self): return []
+        class Connection:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def cursor(self): return Cursor()
+        store = PostgresQueryStore('postgresql://unused')
+        store._connect = lambda: Connection()
+        deltas = [dict(code='005930', trading_date='2026-10-13', market='KRX', minute=minute)
+            for minute in ('09:59', '10:00', '10:01', '10:02')]
+        with patch('kiwoom_monitor.central_server.database_market_bars._read_realtime_minute_overlay',
+                   return_value=[]) as overlay:
+            self.assertEqual([], store.load_minute_bars('005930', '2026-10-13', 'KRX',
+                realtime_deltas=deltas, start_minute='10:00', end_minute='10:02'))
+        self.assertEqual('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY', calls[0][0])
+        self.assertIn('b.market=%s AND b.minute>=%s AND b.minute<%s ORDER BY b.minute', calls[1][0])
+        self.assertEqual(['005930', '2026-10-13', 'KRX', '10:00', '10:02'], calls[1][1])
+        self.assertEqual(['10:00', '10:01'], [row['minute'] for row in overlay.call_args.args[2]])
+        self.assertTrue(overlay.call_args.kwargs['postgres'])
+        calls.clear()
+        self.assertEqual([], store.load_minute_bars('005930', '2026-10-13'))
+        self.assertEqual(1, len(calls))
+        self.assertNotIn('b.minute>=', calls[0][0])
+        self.assertNotIn('b.minute<', calls[0][0])
+        self.assertEqual(['005930', '2026-10-13'], calls[0][1])
 
     def test_sqlite_open_minute_0b_values_accumulate_as_provisional(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1448,6 +1561,14 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 observations.append((bar_observation_key(observation), observation))
 
             store.replace_daily_bars(values, observations=observations)
+            with store._connection() as connection:
+                self.assertEqual(900, connection.execute("SELECT COUNT(*) FROM central_daily_bars").fetchone()[0])
+                self.assertEqual(900, connection.execute("SELECT COUNT(*) FROM central_market_data_observation_meta WHERE dataset_kind='daily_bar'").fetchone()[0])
+            for index in (0, 79, 80, 899):
+                row = store.load_daily_bars(f"{index:06d}", "KRX", 1)[0]
+                self.assertEqual((105, index, index), (row['close'], row['volume'], row['trade_value_million_won']))
+                metadata = store.load_market_data_metadata(MarketDatasetKind.DAILY_BAR, f"{index:06d}:KRX", "2026-09-08")
+                self.assertEqual(observations[index][1].metadata, metadata)
             store.close()
 
         canonical = [sql for sql in traced_sql if sql.startswith("INSERT INTO central_daily_bars")]
@@ -1700,6 +1821,8 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 ("end", "ranking/5", 3),
             ):
                 effective = base + timedelta(minutes=offset)
+                if key == "included":
+                    effective = effective.astimezone(timezone(timedelta(hours=9)))
                 store.save_market_data_metadata(
                     key,
                     MarketDataObservation(
@@ -1714,14 +1837,27 @@ class CentralServerDatabaseTests(unittest.TestCase):
                     ),
                 )
 
-            loaded = store.load_market_data_metadata_range(
-                MarketDatasetKind.CANDIDATE_SET,
-                "ranking/5",
-                base,
-                base + timedelta(minutes=3),
-            )
+            for key, effective in (
+                ("start", base),
+                ("positive-offset", (base + timedelta(minutes=2)).astimezone(timezone(timedelta(hours=23, minutes=59)))),
+                ("negative-offset", (base + timedelta(minutes=2, microseconds=1)).astimezone(timezone(-timedelta(hours=23, minutes=59)))),
+                ("naive-kst", (base + timedelta(minutes=2, seconds=1)).astimezone(timezone(timedelta(hours=9))).replace(tzinfo=None)),
+                ("micro-before-end", base + timedelta(minutes=3, microseconds=-1)),
+                ("micro-after-end", base + timedelta(minutes=3, microseconds=1)),
+            ):
+                store.save_market_data_metadata(key, MarketDataObservation(
+                    MarketDatasetKind.CANDIDATE_SET, "ranking/5", None,
+                    MarketDataMetadata(effective, effective, completeness=DataCompleteness.COMPLETE),
+                ))
+            for zone in (UTC, timezone(timedelta(hours=9))):
+                loaded = store.load_market_data_metadata_range(
+                    MarketDatasetKind.CANDIDATE_SET, "ranking/5", base.astimezone(zone),
+                    (base + timedelta(minutes=3)).astimezone(zone),
+                )
+                self.assertEqual(["start", "included", "positive-offset", "negative-offset", "naive-kst", "micro-before-end"], [item.observation_key for item in loaded])
+            self.assertEqual(timedelta(hours=9), loaded[1].metadata.effective_at.utcoffset())
 
-        self.assertEqual(["included"], [item.observation_key for item in loaded])
+        self.assertEqual(["start", "included", "positive-offset", "negative-offset", "naive-kst", "micro-before-end"], [item.observation_key for item in loaded])
 
     def test_distinct_ranking_observation_times_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1792,6 +1928,13 @@ class CentralServerDatabaseTests(unittest.TestCase):
             store.upsert_documents("news_article", [
                 {"owner": "005930", "key": "https://news/1", "document": {"title": "updated"}},
             ])
+            # Cross the public reader default page size without relying on its limit.
+            store.upsert_documents("retention-fixture", [
+                {"owner": "owner", "key": f"item-{i:04}", "document": {"value": i}}
+                for i in range(1001)
+            ])
+            preserved = store.load_documents("retention-fixture", limit=2000)
+            self.assertEqual(set(range(1001)), {row["document"]["value"] for row in preserved})
             samsung = store.load_documents("news_article", "005930")
             all_news = store.load_documents("news_article")
         self.assertEqual("updated", samsung[0]["document"]["title"])
@@ -1801,21 +1944,21 @@ class CentralServerDatabaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
             store.initialize()
+            now = datetime(2035, 1, 2, tzinfo=ZoneInfo("Asia/Seoul"))
+            store._now_provider = lambda: now
+            first = now.timestamp()
             value = {"owner": "005930", "key": "article", "document": {"title": "same"}}
-            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=10.0):
-                store.upsert_documents("news_article", [value])
-            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=20.0):
-                store.upsert_documents("news_article", [value])
+            store.upsert_documents("news_article", [value])
+            now += timedelta(seconds=10)
+            store.upsert_documents("news_article", [value])
             unchanged = store.load_documents("news_article")[0]
-            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=30.0):
-                store.upsert_documents("news_article", [{
-                    **value, "document": {"title": "changed"},
-                }])
+            now += timedelta(seconds=10)
+            store.upsert_documents("news_article", [{**value, "document": {"title": "changed"}}])
             changed = store.load_documents("news_article")[0]
             store.close()
 
-        self.assertEqual(10.0, unchanged["updated_at"])
-        self.assertEqual(30.0, changed["updated_at"])
+        self.assertEqual(first, unchanged["updated_at"])
+        self.assertEqual(first + 20., changed["updated_at"])
 
     def test_postgres_query_cache_save_reports_slow_phase_timings(self) -> None:
         class Cursor:
@@ -2174,6 +2317,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
         class Cursor:
             def __init__(self) -> None:
                 self.sql = ""
+                self.rows = []
 
             def __enter__(self):
                 return self
@@ -2183,6 +2327,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
 
             def executemany(self, sql, _rows) -> None:
                 self.sql = sql
+                self.rows.extend(_rows)
 
         class Connection:
             def __init__(self, cursor) -> None:
@@ -2209,6 +2354,8 @@ class CentralServerDatabaseTests(unittest.TestCase):
             "central_documents.document_json IS DISTINCT FROM EXCLUDED.document_json",
             cursor.sql,
         )
+        self.assertEqual(("fixture", "owner", "key"), cursor.rows[0][:3])
+        self.assertEqual({"title": "same"}, json.loads(cursor.rows[0][-1]))
 
     def test_postgres_latest_market_cap_reads_persisted_trade_without_age_filter(self) -> None:
         class Cursor:
@@ -2400,7 +2547,7 @@ class SecondTradeShadowReaderTests(unittest.TestCase):
         document = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION,
                     "active_profile": "default", "profiles": [{"name": "default", "stock_themes": [
                         {"code": "005930", "theme": "반도체"}, {"code": "000660", "theme": "반도체"}]}]}
-        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=self.cut.timestamp() - 100):
+        with patch.object(self.store, "_now_provider", return_value=self.cut - timedelta(seconds=100)):
             self.store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": document}])
         payload = {"query_type": "5", "items": [{"stk_cd": "005930", "trde_prica": "100", "flu_rt": "1.0"},
                                                  {"stk_cd": "000660", "trde_prica": "50", "flu_rt": "0.5"}]}
@@ -2420,7 +2567,7 @@ class SecondTradeShadowReaderTests(unittest.TestCase):
         self.assertEqual("PARTIAL", result["leadership"]["quality"]["status"])
         self.assertFalse(result["order_authorized"])
         removed = {**document, "profiles": [{"name": "default", "stock_themes": []}]}
-        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=self.cut.timestamp() - 1):
+        with patch.object(self.store, "_now_provider", return_value=self.cut - timedelta(seconds=1)):
             self.store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": removed}])
         values = read_market_theme_shadow_inputs(self.store, decision_time=self.cut.isoformat(),
                                                theme_id="반도체", leadership_venue="KRX",leadership_parameters=parameters)

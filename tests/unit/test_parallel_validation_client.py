@@ -59,8 +59,29 @@ class ParallelValidationClientTests(unittest.TestCase):
             report = Path(directory) / "comparison.jsonl"
             central = FakeClient(({"price": 100, "return_msg": "ok"}, False, ""))
             local = FakeClient(({"price": 101, "return_msg": "different text"}, False, ""))
+            import threading
+            entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+            original = local.request_with_continuation
+            def delayed(*args, **kwargs):
+                entered.set()
+                release.wait(2)
+                return original(*args, **kwargs)
+            local.request_with_continuation = delayed
             client = ParallelValidationClient(central, local, report)
-            result = client.request_with_continuation("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
+            results = []
+            def request():
+                results.append(client.request_with_continuation("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"}))
+                returned.set()
+            caller = threading.Thread(target=request)
+            caller.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(returned.wait(.5))
+            finally:
+                release.set()
+                caller.join(2)
+            self.assertFalse(caller.is_alive())
+            result = results[0]
             self.assertEqual(100, result[0]["price"])
             client._jobs.join()
             row = json.loads(report.read_text(encoding="utf-8").strip())

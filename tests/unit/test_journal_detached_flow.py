@@ -166,9 +166,10 @@ class JournalDetachedFlowTests(unittest.TestCase):
             _start_daily_chart=lambda *args: requested.append(args),
         )
 
-        JournalWindow._show_selected_summary(owner)
+        with patch("kiwoom_monitor.journal_process.kst_today", return_value=date(2026, 9, 15)):
+            JournalWindow._show_selected_summary(owner)
 
-        self.assertEqual([("005930", date.today(), "history")], requested)
+        self.assertEqual([("005930", date(2026, 9, 15), "history")], requested)
 
     def test_backfill_result_refreshes_selected_chart_only_after_atomic_save(self) -> None:
         day = date(2026, 9, 8)
@@ -503,9 +504,10 @@ class JournalDetachedFlowTests(unittest.TestCase):
             ),
         )
 
-        JournalWindow._detached_source_changed(owner)
+        with patch("kiwoom_monitor.journal_process.kst_today", return_value=date(2026, 9, 15)):
+            JournalWindow._detached_source_changed(owner)
 
-        self.assertEqual([(code, date.today(), f"detached:{code}")], daily_requests)
+        self.assertEqual([(code, date(2026, 9, 15), f"detached:{code}")], daily_requests)
         self.assertEqual([(code, day, True)], minute_requests)
         self.assertIn((code, day), owner._compare_stock_requested)
 

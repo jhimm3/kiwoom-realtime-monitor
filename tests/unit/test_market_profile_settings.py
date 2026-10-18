@@ -38,12 +38,15 @@ def fixed_contract_clock(app_factory, clock):
         yield
 
 
-def contract_storage_hash(database_path):
+def contract_storage_hash(database_path, *, document_receipt_clock=None, observation_receipt_clock=None):
     """Require KST writes and compare all other bytes to the frozen UTC contract.
 
     Only these audited clock columns change representation. The native fixture
     stays untouched; normalizing its in-memory copy preserves the original
     baseline's checks of every row, identifier, value, and JSON/hash payload.
+    An explicit document_receipt_clock additionally asserts every document
+    receipt equals the injected clock before projecting only that column to
+    the old fixture's epoch clock in the in-memory comparison copy.
     """
     clock_columns = (
         ("central_schema_migrations", "applied_at"),
@@ -58,6 +61,15 @@ def contract_storage_hash(database_path):
     )
     with closing(sqlite3.connect(database_path)) as source, closing(sqlite3.connect(":memory:")) as copy:
         source.backup(copy)
+        if document_receipt_clock is not None:
+            expected_now, historical_now = document_receipt_clock
+            rows = copy.execute(
+                "SELECT collection,owner,document_key,updated_at FROM central_documents"
+            ).fetchall()
+            for collection, owner, key, received_at in rows:
+                if received_at != expected_now:
+                    raise AssertionError((collection, owner, key, "expected injected receipt clock", received_at, expected_now))
+            copy.execute("UPDATE central_documents SET updated_at=?", (historical_now,))
         for table, column in clock_columns:
             if column not in {row[1] for row in copy.execute(f"PRAGMA table_info({table})")}:
                 continue
@@ -70,8 +82,17 @@ def contract_storage_hash(database_path):
                 allowed = {0, 32400} if table == "central_credential_profiles" else {32400}
                 if at.tzinfo is None or at.utcoffset().total_seconds() not in allowed:
                     raise AssertionError((table, column, "expected aware KST clock write", value))
+                comparison_at = at
+                if observation_receipt_clock is not None and (table, column) in {
+                    ("central_observation_revisions", "received_at"),
+                    ("central_minute_bar_operations", "processed_at"),
+                }:
+                    expected_now, historical_now = observation_receipt_clock
+                    if at != expected_now:
+                        raise AssertionError((table, column, "expected injected observation clock", value, expected_now))
+                    comparison_at = historical_now
                 copy.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?",
-                             (at.astimezone(timezone.utc).isoformat(), value))
+                             (comparison_at.astimezone(timezone.utc).isoformat(), value))
         for snapshot_id, document in copy.execute(
                 "SELECT snapshot_id,document_json FROM central_execution_account_snapshots").fetchall():
             body = json.loads(document)
@@ -124,7 +145,6 @@ def account_settings_contract_app(app_factory, database_path, mode):
             stack.enter_context(patch("kiwoom_monitor.central_server.news_credentials.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.ai_credentials.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_account_settings.time", return_value=2000.0))
-            stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.dict(app_factory.__globals__, {"create_query_store": owned_store}))
             stack.enter_context(patch("kiwoom_monitor.central_server.real_runtime.RealCredentialOwner", return_value=real))
             stack.enter_context(patch("kiwoom_monitor.central_server.mock_runtime.MockCredentialOwner", return_value=mock))
@@ -520,7 +540,10 @@ class MarketProfileSettingsTests(unittest.TestCase):
         account = self.account()
         selected = self.choose(account["profile_id"])
         app = create_app(CentralServerSettings(f"sqlite:///{self.path}", "private-token",
-            autonomous_top20_enabled=False, market_event_collection_enabled=False))
+            autonomous_top20_enabled=False, market_event_collection_enabled=False,
+            news_naver_market_enabled=False, news_naver_api_enabled=False,
+            news_naver_stock_enabled=False, news_query_set_enabled=False,
+            news_history_jobs_enabled=False))
 
         async def verify_requests():
             async with app.router.lifespan_context(app):

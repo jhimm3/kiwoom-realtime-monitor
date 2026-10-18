@@ -5,6 +5,7 @@ import sqlite3
 import time
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -128,7 +129,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
             store.initialize()
-            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=100.0):
+            with patch.object(store, "_now_provider", return_value=datetime.fromtimestamp(100.0, timezone.utc)):
                 store.upsert_documents("news_article", _article())
             newer = _article("다른 종목 최신 기사")[0]
             newer["owner"] = "000660"
@@ -138,7 +139,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "identity": "article-2", "link": "https://news/2",
                 "original_link": "https://origin/2",
             }
-            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=200.0):
+            with patch.object(store, "_now_provider", return_value=datetime.fromtimestamp(200.0, timezone.utc)):
                 store.upsert_documents("news_article", [newer])
 
             selected = store.claim_news_jobs(priority_stock_code="005930", now=300.0)
@@ -150,7 +151,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
             store.initialize()
-            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=100.0):
+            with patch.object(store, "_now_provider", return_value=datetime.fromtimestamp(100.0, timezone.utc)):
                 store.upsert_documents("news_article", _article())
             newer = _article("다른 종목 최신 기사")[0]
             newer["owner"] = "000660"
@@ -160,7 +161,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "identity": "article-2", "link": "https://news/2",
                 "original_link": "https://origin/2",
             }
-            with patch("kiwoom_monitor.central_server.database_documents.time", return_value=200.0):
+            with patch.object(store, "_now_provider", return_value=datetime.fromtimestamp(200.0, timezone.utc)):
                 store.upsert_documents("news_article", [newer])
 
             claimed = store.claim_news_jobs(now=300.0)
@@ -205,13 +206,15 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                 store.upsert_documents("news_article", [item])
             active = 0
             peak = 0
+            fetched_urls = []
             lock = threading.Lock()
             overlapped = threading.Event()
             release = threading.Event()
 
-            def slow_fetch(*_args, **_kwargs):
+            def slow_fetch(url, **_kwargs):
                 nonlocal active, peak
                 with lock:
+                    fetched_urls.append(url)
                     active += 1
                     peak = max(peak, active)
                     if active >= 2:
@@ -232,6 +235,8 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(concurrent)
             self.assertGreaterEqual(peak, 2)
+            self.assertEqual(len(fetched_urls), len(set(fetched_urls)),
+                             "parallel lanes claimed the same article body twice")
             store.close()
 
     async def test_continuous_backlog_is_paced_and_does_not_starve_event_loop(self) -> None:

@@ -301,15 +301,17 @@ class DeferredHistoricalNewsTests(unittest.TestCase):
                 article_delay=0, prepare_workers=1,
             )
             with patch("scripts.probe_historical_backfill._fetch_primary_article",
-                       return_value=_result()) as fetch, patch(
-                "scripts.probe_historical_backfill.ConcurrentArticlePreparation"
-            ) as prepare_type:
-                prepare_type.return_value.__enter__.return_value = prepare_type.return_value
+                       return_value=_result()) as fetch:
                 self.assertEqual(0, _run_deferred_articles(args))
                 self.assertEqual(1, fetch.call_count)
-                self.assertEqual({"005930", "035720"}, {
-                    call.args[1] for call in prepare_type.return_value.submit.call_args_list
-                })
+            with closing(sqlite3.connect(args.prepared_output)) as prepared:
+                rows = prepared.execute("SELECT stock_code,state,article_json,body_json,rules_json FROM prepared_news ORDER BY stock_code").fetchall()
+            self.assertEqual(["005930", "035720"], [row[0] for row in rows])
+            self.assertEqual(["ready", "ready"], [row[1] for row in rows])
+            for code, _state, article, body, rules in rows:
+                self.assertEqual(code, json.loads(article)["stock_code"])
+                self.assertEqual("body text", json.loads(body)["body_text"])
+                self.assertEqual([code], [rule["target_id"] for rule in json.loads(rules)])
             with closing(sqlite3.connect(db)) as connection, connection:
                 self.assertEqual(2, connection.execute(
                     "SELECT COUNT(*) FROM news_backfill_jobs WHERE state='complete'"
@@ -493,14 +495,22 @@ class DeferredHistoricalNewsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "news.sqlite3"
             initialize_probe_database(db)
+            store_naver_historical_search_page(db, _page("005930"), deferred_job_key="legacy")
             with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute("UPDATE news_article_pipeline SET state='claimed',claim_token='legacy-token',claimed_at='2026-09-28T09:00:00+09:00'")
                 connection.execute("ALTER TABLE news_article_pipeline DROP COLUMN attempts")
+                old_rows = connection.execute("SELECT queue_id,job_key,code,state,claim_token,claimed_at FROM news_article_pipeline").fetchall()
             initialize_probe_database(db)
             with closing(sqlite3.connect(db)) as connection:
                 columns = {row[1] for row in connection.execute(
                     "PRAGMA table_info(news_article_pipeline)"
                 )}
+                new_rows = connection.execute("SELECT queue_id,job_key,code,state,claim_token,claimed_at FROM news_article_pipeline").fetchall()
+                attempts = connection.execute("SELECT attempts FROM news_article_pipeline").fetchall()
             self.assertIn("attempts", columns)
+            self.assertTrue(old_rows)
+            self.assertEqual(old_rows, new_rows)
+            self.assertEqual([(0,)] * len(old_rows), attempts)
 
 
 if __name__ == "__main__":

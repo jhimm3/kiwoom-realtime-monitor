@@ -2447,8 +2447,8 @@ def import_daishin_backfill_ndjson(
             payload = dict(record)
             payload["bars"] = selected
             saved_bars += _store_daishin_payload(connection, payload)
-    if not summary:
-        raise ValueError("Daishin backfill artifact has no summary record")
+        if not summary:
+            raise ValueError("Daishin backfill artifact has no summary record")
     return {
         "artifact": str(artifact_path.resolve()),
         "code": str(summary.get("code", "")),

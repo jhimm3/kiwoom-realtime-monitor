@@ -166,7 +166,7 @@ class CentralNewsService:
             return False
         return self._store.claim_news_request("watchlist", scope_limit=self._watchlist_request_limit,
             hard_limit=self._request_hard_limit,
-            budget_date=datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat())
+            budget_date=self._now().date().isoformat())
 
     async def pause_dart_credentials(self):
         async with self._lock:
@@ -524,7 +524,7 @@ class CentralNewsService:
                     claim = lambda: self._store.claim_news_request(
                         "watchlist", scope_limit=self._watchlist_request_limit,
                         hard_limit=self._request_hard_limit,
-                        budget_date=datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat(),
+                        budget_date=self._now().date().isoformat(),
                     )
                     found = await asyncio.to_thread(client.search, name, since=provider_since, request_claim=claim)
                 else:

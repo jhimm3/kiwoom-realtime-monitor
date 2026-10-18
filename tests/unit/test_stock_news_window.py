@@ -39,6 +39,25 @@ class StockNewsWindowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_ai_request_receipt_uses_existing_server_clock(self) -> None:
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.news_ai import AIRequestUsage
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "news.sqlite3")
+            try:
+                now = datetime.fromisoformat("2030-01-01T15:00:01+00:00")
+                window._central_news_client = SimpleNamespace(server_now=lambda: now)
+                window._ai_repository.log_request("gemini", "fixture", "single", 1, 1, AIRequestUsage())
+                with closing(sqlite3.connect(root / "news.sqlite3")) as connection:
+                    receipt = connection.execute("SELECT requested_at FROM news_ai_requests").fetchone()[0]
+                self.assertEqual("2030-01-02T00:00:01+09:00", receipt)
+                self.assertEqual(1, window._ai_repository.daily_count())
+            finally:
+                window._central_news_client = None
+                window.close()
+
     def test_ai_failure_is_reported_without_modal_message_box(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -407,23 +426,39 @@ class StockNewsWindowTests(unittest.TestCase):
             window.shutdown()
 
     def test_keyboard_current_cell_change_loads_evidence_for_new_row(self) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
-            first = StockNewsItem(
-                "첫 기사", "요약", "https://n/1", "https://o/1", datetime.now(UTC),
-                assess_stock_news("테스트기업", "첫 기사", "요약"),
-            )
-            window._visible_items = (first,)
-            window._visible_groups = (NewsEventGroup(first, (first,)),)
-            window._display_rows = (0,)
-            window._table.setRowCount(1)
+            self.addCleanup(window.shutdown)
+            window._stock_code = "005930"
+            window._central_evidence_client = SimpleNamespace()
+            items = tuple(StockNewsItem(
+                title, "search summary", f"https://n/{index}", f"https://o/{index}",
+                datetime(2026, 8, 29, tzinfo=UTC), assess_stock_news("company", title, "search summary"),
+            ) for index, title in enumerate(("first article", "second article")))
+            window._visible_items = items
+            window._visible_groups = tuple(NewsEventGroup(item, (item,)) for item in items)
+            window._display_rows = (0, 1)
+            for item, body in zip(items, ("first stored body", "second stored body")):
+                window._evidence_cache[window._evidence_key(item)] = (monotonic(), StoredNewsEvidence(
+                    news_identity(item), title=item.title, article_revision_id=item.title,
+                    body_status="fulltext", body_text=body,
+                ))
+            window._table.setRowCount(2)
+            window._table.setCurrentCell(0, 1)
+            self.assertIn("first stored body", window._detail.toPlainText())
 
-            with patch.object(window, "_schedule_evidence") as schedule:
-                window._table.setCurrentCell(0, 1)
+            QTest.keyClick(window._table, Qt.Key.Key_Down)
+            self.app.processEvents()
 
-            schedule.assert_called_once_with(first)
-            window.shutdown()
+            self.assertEqual(1, window._table.currentRow())
+            self.assertEqual(window._evidence_key(items[1]), window._selected_evidence_key)
+            self.assertIn("second article", window._detail.toPlainText())
+            self.assertIn("second stored body", window._detail.toPlainText())
+            self.assertNotIn("first stored body", window._detail.toPlainText())
 
     def test_background_refresh_preserves_selected_article_and_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

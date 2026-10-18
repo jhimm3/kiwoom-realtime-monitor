@@ -211,12 +211,11 @@ def create_market_archive_read_router(
     ) -> dict[str, object]:
         from .postgres_access import db_call_source
         from kiwoom_monitor.application.daily_bar_coverage import COLLECTION, choose_daily_coverage
-        from datetime import timedelta, timezone
         with db_call_source("api.market.daily_bars"):
             values = await asyncio.to_thread(store.load_daily_bars, code, market.upper(), limit)
             documents = await asyncio.to_thread(store.load_documents, COLLECTION, f"{code}:{market.upper()}", 2)
         coverage = choose_daily_coverage(values, documents, code=code, market=market.upper(),
-                                        query_basis_date=datetime.now(timezone(timedelta(hours=9))).date().isoformat())
+                                        query_basis_date=as_kst((now_provider or kst_now)()).date().isoformat())
         return {"code": code, "market": market.upper(), "bars": values, "coverage": coverage}
 
     @router.get("/api/v1/market/coverage", dependencies=[Depends(authorize)])

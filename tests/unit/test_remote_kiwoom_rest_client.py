@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -70,15 +70,21 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
             captured["url"] = request.full_url
             return Response({"snapshots": []})
 
-        result = RemoteKiwoomRestClient(
-            "https://nas.example.test", "secret", opener=opener,
-        ).load_stored_ranking("5")
+        client = RemoteKiwoomRestClient("https://nas.example.test", "secret", opener=opener)
+        class HostTomorrow(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 10, 16, 0, 0, 1, tzinfo=timezone(timedelta(hours=9)))
+        with patch("kiwoom_monitor.infrastructure.kiwoom_rest.remote_client.monotonic", return_value=100), patch(
+            "kiwoom_monitor.infrastructure.kiwoom_rest.remote_client.datetime", HostTomorrow,
+        ):
+            client._capture_server_clock(SimpleNamespace(headers={
+                "X-Kiwoom-Server-Time": "2026-10-15T23:59:59+09:00"}))
+            result = client.load_stored_ranking("5")
 
         self.assertEqual({"item_inq_rank": []}, result)
-        self.assertRegex(
-            captured["url"],
-            r"subject=\d{4}-\d{2}-\d{2}&limit=1&prefer_live=true$",
-        )
+        self.assertEqual("https://nas.example.test/api/v1/market/snapshots/top20_membership"
+                         "?subject=2026-10-15&limit=1&prefer_live=true", captured["url"])
 
     def test_loads_last_nas_0b_market_caps_without_kiwoom_query(self) -> None:
         captured = {}
@@ -204,6 +210,13 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
 
         self.assertEqual("19:59", rows[0]["minute"])
         self.assertTrue(complete)
+        for coverage in ({}, {"complete": False}, {"complete": "true"}, {"complete": 1}):
+            with self.subTest(coverage=coverage):
+                client = RemoteKiwoomRestClient("https://nas.example.test", "secret", opener=lambda *_args, **_kwargs: Response({"bars": [{"minute": "19:59"}], "coverage": coverage}))
+                rows, complete = client.load_stored_minute_bars_with_coverage("001210", "2026-09-14", "COMBINED")
+                self.assertEqual(({"minute": "19:59"},), rows)
+                self.assertFalse(complete)
+
 
     def test_matches_local_client_request_contract(self) -> None:
         captured = {}
@@ -220,7 +233,8 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
         self.assertEqual(({"return_code": 0}, True, "page2"), result)
         self.assertEqual("https://nas.example.test/api/v1/kiwoom/query", captured["url"])
         self.assertEqual("Bearer secret", captured["authorization"])
-        self.assertEqual("ka10080", captured["body"]["api_id"])
+        self.assertEqual({"api_id": "ka10080", "path": "/api/dostk/chart", "body": {"stk_cd": "005930"}, "cont_yn": "N", "next_key": ""}, captured["body"])
+        self.assertEqual(30.0, captured["timeout"])
 
     def test_loads_stored_candidate_flows_without_kiwoom_query(self) -> None:
         urls = []
@@ -253,14 +267,14 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
             period = "5" if "subject=5" in request.full_url else "20"
             return Response({"snapshots": [{
                 "snapshot_key": "latest",
-                "payload": {"items": [{"stk_cd": f"0000{period}"}]},
+                "payload": {"items": [{"stk_cd": f"{int(period):06d}"}]},
             }]})
 
         values = RemoteKiwoomRestClient(
             "https://nas.example.test", "secret", opener=opener,
         ).load_stored_new_highs((5, 20))
 
-        self.assertEqual({"00005"}, values[5])
+        self.assertEqual({"000005"}, values[5])
         self.assertEqual({"000020"}, values[20])
 
     def test_loads_stored_historical_high_document(self) -> None:
@@ -274,7 +288,7 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
             "https://nas.example.test", "secret", opener=opener,
         ).load_stored_historical_high("005930")
 
-        self.assertEqual(90000, value["price"])
+        self.assertEqual({"price": 90000, "first_year": 2020, "last_year": 2026, "occurred_on": "20260914", "evidence": []}, value)
 
     def test_loads_stored_stock_documents_and_market_index(self) -> None:
         def opener(request, **_kwargs):

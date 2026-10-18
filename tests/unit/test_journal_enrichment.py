@@ -93,6 +93,14 @@ class JournalEnrichmentTests(unittest.TestCase):
             start_at = self.now + timedelta(hours=attempt)
             self.assertTrue(self.service.start(task.task_id, start_at, force=True))
             self.assertTrue(self.service.fail(task.task_id, f"failure-{attempt}", start_at))
+            current = self.repository.load_enrichment_task(task.task_id)
+            if attempt < 3:
+                due = start_at + timedelta(minutes=5 * 2 ** (attempt - 1))
+                self.assertEqual(due, current.next_retry_at)
+                self.assertFalse(self.service.start(task.task_id, due - timedelta(microseconds=1)))
+                self.assertTrue(self.service.can_start(current, due))
+            else:
+                self.assertIsNone(current.next_retry_at)
 
         failed = self.repository.load_enrichment_task(task.task_id)
         self.assertEqual(3, failed.attempts)

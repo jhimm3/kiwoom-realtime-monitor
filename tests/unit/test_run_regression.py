@@ -84,20 +84,16 @@ class RunRegressionTests(unittest.TestCase):
                 timeout_seconds=timeout,
             )
 
-    def test_profile_plan_preserves_legacy_batches_and_adds_missing_lifecycle_modules(self) -> None:
+    def test_profile_plan_runs_registered_modules_once_and_keeps_lifecycle_coverage(self) -> None:
         manifest = run_regression._load_manifest()
         core = run_regression._planned_batches(manifest, "core")
         modules = [module for batch in core for module in batch["modules"]]
 
         self.assertEqual(["desktop-and-server", "journal-and-news"],
                          [batch["name"] for batch in core])
-        self.assertEqual(146, len(modules))
-        self.assertEqual(145, len(set(modules)))
-        self.assertEqual("97aed95abebce786ec2b07c947c565ed3e9136307f3a50218b7fc6d5de2117a3",
-                         run_regression._core_order_sha256(core))
-        self.assertEqual("tests.unit.test_main_window_layout", modules[86])
-        self.assertEqual("tests.unit.test_theme_color_repository", modules[87])
-        self.assertEqual("tests.unit.test_theme_color_repository", modules[145])
+        self.assertEqual([module for batch in manifest["core_batches"] for module in batch["modules"]], modules)
+        self.assertEqual(len(modules), len(set(modules)))
+        self.assertEqual(1, modules.count("tests.unit.test_theme_color_repository"))
         for module in ("tests.unit.test_dataset_batch_postgres",
                        "tests.unit.test_postgres_scope_locks",
                        "tests.unit.test_diagnostic_replay_sampling"):
@@ -112,10 +108,13 @@ class RunRegressionTests(unittest.TestCase):
         runner_modules = [module for batch in run_regression._planned_batches(
             manifest, "runner",
         ) for module in batch["modules"]]
-        self.assertEqual(["tests.unit.test_run_regression"], runner_modules)
+        self.assertEqual(["tests.unit.test_run_regression", "tests.unit.test_architecture_guardrails", "tests.unit.test_test_change_review",
+                          "tests.unit.test_selective_test_tools",
+                          "tests.unit.test_run_postgres_access_integration"], runner_modules)
 
         all_local = run_regression._planned_batches(manifest, "all-local")
         all_modules = [module for batch in all_local for module in batch["modules"]]
+        self.assertEqual(len(all_modules), len(set(all_modules)))
         self.assertEqual(1, all_modules.count("tests.unit.test_market_cache_writer"))
         self.assertEqual(1, all_modules.count("tests.unit.test_realtime_gap_quality"))
         self.assertIn("tests.unit.test_top20_program_shutdown", all_modules)
@@ -157,8 +156,7 @@ class RunRegressionTests(unittest.TestCase):
         self.assertFalse(membership["nas-operator-owned"] & set().union(*(
             members for group, members in membership.items() if group != "nas-operator-owned"
         )))
-        self.assertEqual((319, 139, 2), tuple(len(membership[name]) for name in
-                         run_regression.CI_WINDOWS_PROFILES))
+        self.assertTrue(all(membership[name] for name in run_regression.CI_WINDOWS_PROFILES))
         required = run_regression._planned_batches(manifest, "ci-required-windows")
         self.assertEqual(
             [batch["modules"] for batch in run_regression._planned_batches(manifest, "core")],
@@ -424,6 +422,18 @@ class RunRegressionTests(unittest.TestCase):
         self.assertIn("WINDOWS_JOB: ${{ needs['all-local'].result }}", workflow)
         self.assertIn('test "$WINDOWS_JOB" = success\n', workflow)
         self.assertIn("name: all-local-regression-${{ github.run_id }}", workflow)
+        # Multiple upload roots would nest run.json under ci-all-local/ and
+        # break the unchanged required job's windows/run.json download path.
+        self.assertIn("path: tmp/regression/ci-all-local/\n", full)
+        self.assertIn("--windows tmp/ci-required/windows/run.json", workflow)
+        self.assertNotIn("--report tmp/regression/ci-all-local/", full)
+        self.assertIn('--query --base-ref "$env:REVIEW_BASE" --limit 5', full)
+        self.assertIn("$selection.status -ne 'full_required'", full)
+        self.assertIn('--summarize tmp/ci-required/windows/run.json', workflow)
+        self.assertNotIn('--selection ', workflow)
+        self.assertEqual(1, full.count('python -m scripts.check_architecture '))
+        self.assertIn('--base-ref "$comparison" --report tmp/regression/architecture.json', full)
+        self.assertIn('tmp/regression/architecture.json', full.split('if: always()', 1)[1])
         sealed_build = workflow.split("      - name: Build exact checkout runtime image for isolated v2\n", 1)[1].split("      - name: Confirm installed", 1)[0]
         self.assertIn("tee tmp/regression/ci-sealed/build.log", sealed_build)
         self.assertNotIn("ci-operator/", sealed_build)
@@ -580,9 +590,13 @@ class RunRegressionTests(unittest.TestCase):
     def test_duplicate_requested_module_has_ordered_discovery_evidence(self) -> None:
         module = "tests.unit.regression_worker_fixtures"
         result = self._run_fixture("pass", modules=[module, module])
-        self.assertEqual("passed", result["status"])
+        self.assertEqual("failed", result["status"])
         self.assertEqual(2, result["test_count"])
         self.assertEqual(2, result["planned_test_count"])
+        identity = "tests.unit.regression_worker_fixtures.RegressionWorkerFixtureTests.test_selected_worker_outcome"
+        self.assertEqual([identity, identity], result["executed_test_ids"])
+        self.assertEqual(result["planned_test_ids"], result["executed_test_ids"])
+        self.assertIn("Duplicate", result["load_error"])
         self.assertEqual(
             [{"module": module, "test_count": 1}, {"module": module, "test_count": 1}],
             result["module_test_counts"],
@@ -753,6 +767,25 @@ class RunRegressionTests(unittest.TestCase):
         self.assertEqual("incomplete", summary["status"])
         self.assertEqual(["journal-and-news"], summary["unrun_batches"])
 
+    def test_safely_closed_nonpassing_batches_continue_but_timeout_and_interrupt_stop(self) -> None:
+        for status, cause, stop in (("failed", {}, False),
+                ("incomplete", {"skipped": [{"test": "fixture"}]}, False),
+                ("incomplete", {"zero_test_modules": ["fixture"]}, False),
+                ("incomplete", {"timeout": True}, True),
+                ("incomplete", {"interrupted": True}, True)):
+            with self.subTest(status=status, cause=cause):
+                output = self.directory / ("continue-" + str(len(list(self.directory.iterdir()))))
+                first = {"status": status, "worker_exit_confirmed": True,
+                    "process_tree_exit_confirmed": True, "test_count": 1, **cause}
+                passed = {"status": "passed", "worker_exit_confirmed": True,
+                    "process_tree_exit_confirmed": True, "test_count": 1}
+                with patch.object(run_regression, "_run_process", side_effect=[first, passed]) as run, redirect_stdout(StringIO()):
+                    self.assertNotEqual(0, run_regression._execute_profile("core", 5, output))
+                result = json.loads((output / "run.json").read_text(encoding="utf-8"))
+                self.assertEqual(1 if stop else 2, run.call_count)
+                self.assertEqual(["journal-and-news"] if stop else [], result["unrun_batches"])
+                self.assertEqual(first["status"], result["batch_results"][0]["status"])
+
     def test_result_written_before_nonzero_exit_does_not_count_as_passed(self) -> None:
         result = self._run_fixture("crash-after-result")
         self.assertEqual("failed", result["status"])
@@ -772,7 +805,7 @@ class RunRegressionTests(unittest.TestCase):
         def completed_batch(**_kwargs):
             summary = json.loads((output / "run.json").read_text(encoding="utf-8"))
             observations.append(summary["unrun_batches"])
-            return {"status": "passed", "worker_exit_confirmed": True,
+            return {"status": "failed" if len(observations) == 1 else "passed", "worker_exit_confirmed": True,
                     "process_tree_exit_confirmed": True, "test_count": 1}
 
         with patch.object(run_regression, "_run_process", side_effect=completed_batch), \
@@ -780,10 +813,10 @@ class RunRegressionTests(unittest.TestCase):
             exit_code = run_regression._execute_profile("core", 5, output)
 
         final = json.loads((output / "run.json").read_text(encoding="utf-8"))
-        self.assertEqual(0, exit_code)
+        self.assertEqual(1, exit_code)
         self.assertEqual(2, len(observations[0]))
         self.assertEqual(1, len(observations[1]))
-        self.assertEqual("passed", final["status"])
+        self.assertEqual("failed", final["status"])
         self.assertEqual([], final["unrun_batches"])
 
 

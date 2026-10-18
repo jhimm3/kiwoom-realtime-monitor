@@ -145,10 +145,15 @@ class NasCredentialsDialogTests(unittest.TestCase):
 
     def test_delete_requires_disconnected_profile_and_preserves_history_message(self):
         dialog = self.open()
+        self.assertFalse(dialog._delete_button.isEnabled())
         disconnected = {**self.profile, "disabled": True, "configured": False}
         dialog._profiles.setItemData(0, disconnected)
         dialog._refresh()
         self.assertTrue(dialog._delete_button.isEnabled())
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question, patch.object(self.client, "delete_account_profile") as delete:
+            dialog._delete_button.click()
+            delete.assert_not_called()
+            self.assertIn("이력", question.call_args.args[2])
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes), \
              patch.object(self.client, "delete_account_profile", return_value={
                  "provider": "kiwoom_mock", "profile_id": self.profile["profile_id"],
@@ -166,9 +171,12 @@ class NasCredentialsDialogTests(unittest.TestCase):
             return {"provider": "kiwoom_mock", "profile_id": profile_id, "label": label}
 
         with patch.object(QInputDialog, "getText", return_value=("단타 모의", True)), \
-             patch.object(self.client, "rename_account_profile", side_effect=rename) as request:
+             patch.object(self.client, "rename_account_profile", side_effect=rename) as request, \
+             patch.object(self.client, "prepare_mock") as prepare, patch.object(self.client, "apply") as apply:
             dialog._rename_button.click()
             wait_until(lambda: dialog._worker is None and "단타 모의" in dialog._profiles.currentText())
+            prepare.assert_not_called()
+            apply.assert_not_called()
 
         request.assert_called_once_with("nas-mock-default", 2, "단타 모의")
         self.assertTrue(dialog._monitor.isChecked())

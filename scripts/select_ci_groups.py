@@ -13,11 +13,137 @@ ROOT = Path(__file__).resolve().parents[1]
 GROUPS = ("windows_fast", "windows_long", "postgres", "sealed", "operator")
 
 
+def _module_name(path: str) -> str:
+    name = path.replace("\\", "/").removeprefix("src/").removesuffix(".py").replace("/", ".")
+    return name.removesuffix(".__init__")
+
+
+def _dependency_graph(root: Path, previous: dict[str, str] | None = None) -> tuple[dict, dict, dict]:
+    """Current and changed-before imports, literal lookups and unresolved dynamic imports."""
+    dependencies, dynamic, files = {}, {}, {}
+    sources = [(file.relative_to(root).as_posix(), file.read_text(encoding="utf-8-sig"))
+               for directory in ("src", "scripts", "tests") for file in (root / directory).rglob("*.py")]
+    sources += list((previous or {}).items())
+    for relative, text in sources:
+        module = _module_name(relative)
+        files[module] = relative
+        package = module if relative.endswith("/__init__.py") else module.rpartition(".")[0]
+        imports = dependencies.setdefault(module, set())
+        for node in ast.walk(ast.parse(text, filename=relative)):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if node.level:
+                    base = importlib.util.resolve_name("." * node.level + base, package)
+                imports.add(base)
+                imports.update(base + "." + alias.name for alias in node.names)
+            elif isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                if name in {"import_module", "__import__", "loadTestsFromName", "loadTestsFromNames", "loadTestsFromModule", "spec_from_file_location"} or (
+                        name == 'exec' and isinstance(node.func, ast.Name)):
+                    if name != "exec" and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        imports.add(node.args[0].value)
+                    else:
+                        dynamic.setdefault(module, set()).add(f"{relative}:{node.lineno}:{name}")
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                # Literal file fixtures/contracts are dependencies; arbitrary dotted
+                # strings in registration/selection tables are not Python imports.
+                value = node.value.replace("\\", "/")
+                if "\n" not in value and " " not in value and '/' in value and value.endswith(('.py', '.md', '.json')):
+                    imports.add(_module_name(value) if value.endswith('.py') else value)
+    return dependencies, dynamic, files
+
+
+def test_impact(paths: list[str], root: Path = ROOT, previous: dict[str, str] | None = None) -> dict:
+    """Explain selection; expand uncertain boundaries through existing profiles, never execute."""
+    dependencies, dynamic, files = _dependency_graph(root, previous)
+    manifest_path = root / "tests/regression_profiles.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    catalog_path = root / "tests/ci_groups.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8")) if catalog_path.exists() else {}
+    profiles = dict(manifest.get("profiles", {}))
+    profiles.update({f"core:{i}": batch["modules"] for i, batch in enumerate(manifest.get("core_batches", []))})
+    profiles.update({key: values for key, values in catalog.items()
+                     if isinstance(values, list) and any(str(v).startswith("tests.") for v in values)})
+    known = {module for values in profiles.values() for module in values}
+    tests = {module for module, file in files.items() if file.startswith("tests/") and Path(file).name.startswith("test_")
+             and (root / file).is_file()}
+    reasons, uncertain, affected, reached = {}, [], set(), set()
+    consumers = {}
+    for module, imports in dependencies.items():
+        for dependency in imports:
+            # from x import symbol may name a function/class, not another module.
+            target = dependency
+            while target not in dependencies and '.' in target and '/' not in target:
+                target = target.rpartition('.')[0]
+            consumers.setdefault(target, set()).add(module)
+    for path in paths:
+        seed = _module_name(path) if path.endswith('.py') else path
+        chains = {seed: [path]}
+        if path.endswith("/__init__.py") or Path(path).name == "conftest.py":
+            prefix = str(Path(path).parent).replace("\\", "/") + "/"
+            for module in tests:
+                if files[module].startswith(prefix):
+                    chains[module] = [path, module]
+        queue = list(chains)
+        for dependency in queue:
+            for module in sorted(consumers.get(dependency, [])):
+                if module not in chains:
+                    chains[module] = [*chains[dependency], module]
+                    queue.append(module)
+        affected.update(chains)
+        for module in tests & chains.keys():
+            reached.add(path)
+            reasons.setdefault(module, []).append("dependency: " + " -> ".join(chains[module]))
+    # Unknown runtime config/contract consumers cannot be proved by an import graph.
+    global_paths = [path for path in paths if not path.endswith((".py", ".md"))
+                    or Path(path).name in {"API_CONTRACT.md", "DB_SCHEMA.md"}]
+    if global_paths:
+        uncertain.append({"reason": "shared_config_or_contract", "paths": global_paths,
+                          "expansion": "all_registered_environments"})
+        for module in tests | known:
+            reasons.setdefault(module, []).append("shared configuration/contract: " + ", ".join(global_paths))
+    dynamic_candidates = set(affected)
+    if any(path.startswith(('src/', 'scripts/')) or (path.startswith('tests/') and
+           path.endswith('.py') and not Path(path).name.startswith('test_')) for path in paths):
+        # An unresolved dynamic test/runtime importer may consume changed code
+        # even without a static edge. Include its existing owner scope explicitly.
+        dynamic_candidates.update(module for module in dynamic if module.startswith(('tests.', 'kiwoom_monitor.')))
+    for module in sorted(dynamic_candidates):
+        if module not in dynamic:
+            continue
+        owners = [name for name, members in profiles.items() if module in members]
+        if not owners and not module.startswith("tests."):
+            owners = [name for name, members in profiles.items() if set(members) & reasons.keys()]
+        expansion = {test for name in owners for test in profiles[name]}
+        if not expansion:
+            expansion = tests | known
+        uncertain.append({"reason": "unresolved_dynamic_dependency", "locations": sorted(dynamic[module]),
+                          "expansion": owners or ["all_registered_environments"]})
+        for test in expansion:
+            reasons.setdefault(test, []).append("dynamic boundary expansion: " + module)
+    for path in paths:
+        if path.endswith(".py") and path not in reached:
+            uncertain.append({"reason": "no_proven_test_consumer", "paths": [path],
+                              "expansion": "all_registered_environments"})
+            for module in tests | known:
+                reasons.setdefault(module, []).append("unmapped changed Python: " + path)
+    external = {module: sorted(name for name, values in profiles.items() if module in values)
+                for module in reasons if not module.startswith("tests.unit.") or module in catalog.get("linux_required", [])}
+    unregistered = sorted(set(reasons) - known)
+    local_registered = {module for values in manifest.get('profiles', {}).values() for module in values}
+    local_registered.update(module for batch in manifest.get('core_batches', []) for module in batch['modules'])
+    full_required = bool(local_registered) and local_registered <= reasons.keys()
+    return {"selected_modules": sorted(reasons), "reasons": reasons, "uncertainties": uncertain,
+            "external_modules": external, "unregistered_modules": unregistered,
+            "status": "failed" if unregistered else "full_required" if full_required else
+                      "expanded" if uncertain else "selected" if reasons else "no_tests"}
+
+
 def related_test_modules(paths: list[str], root: Path = ROOT) -> list[str]:
-    """Follow current Python imports from changed files to their unit-test consumers."""
-    def module_name(path: str) -> str:
-        name = path.replace("\\", "/").removeprefix("src/").removesuffix(".py").replace("/", ".")
-        return name.removesuffix(".__init__")
+    """Legacy CI suggestion API; keep Linux tests separate from Windows callers."""
+    module_name = _module_name
 
     affected = {module_name(path) for path in paths if path.endswith(".py")}
     if any(path.startswith(".github/") or path in {
@@ -27,22 +153,7 @@ def related_test_modules(paths: list[str], root: Path = ROOT) -> list[str]:
     if any(path.startswith("deploy/") or path == "tests/ci_runtime.Dockerfile" for path in paths):
         affected.update({"tests.unit.test_nas_source_runtime", "tests.unit.test_source_runtime_deploy",
                          "tests.unit.test_central_deployment_check"})
-    dependencies: dict[str, set[str]] = {}
-    for directory in ("src", "scripts", "tests"):
-        for file in (root / directory).rglob("*.py"):
-            module = module_name(file.relative_to(root).as_posix())
-            package = module if file.name == "__init__.py" else module.rpartition(".")[0]
-            imports = set()
-            for node in ast.walk(ast.parse(file.read_text(encoding="utf-8-sig"))):
-                if isinstance(node, ast.Import):
-                    imports.update(alias.name for alias in node.names)
-                elif isinstance(node, ast.ImportFrom):
-                    base = node.module or ""
-                    if node.level:
-                        base = importlib.util.resolve_name("." * node.level + base, package)
-                    imports.add(base)
-                    imports.update(base + "." + alias.name for alias in node.names)
-            dependencies[module] = imports
+    dependencies, _, _ = _dependency_graph(root)
     while True:
         consumers = {module for module, imports in dependencies.items() if imports & affected}
         if consumers <= affected:

@@ -153,8 +153,7 @@
         "tests.unit.test_central_theme_sync",
         "tests.unit.test_central_sync_utils",
         "tests.unit.test_process_control",
-        "tests.unit.test_run_test_app_with_data",
-        "tests.unit.test_theme_color_repository"
+        "tests.unit.test_run_test_app_with_data"
       ]
     }
   ],
@@ -183,7 +182,11 @@
       "tests.unit.test_top20_execution_boundaries"
     ],
     "runner": [
-      "tests.unit.test_run_regression"
+      "tests.unit.test_run_regression",
+      "tests.unit.test_architecture_guardrails",
+      "tests.unit.test_test_change_review",
+      "tests.unit.test_selective_test_tools",
+      "tests.unit.test_run_postgres_access_integration"
     ],
     "news-api-contract": [
       "tests.unit.test_news_api_contract_baseline",
@@ -544,5 +547,5 @@
       "tests.unit.test_verify_prepared_historical_news_rules"
     ]
   },
-  "core_order_sha256": "97AED95ABEBCE786EC2B07C947C565ED3E9136307F3A50218B7FC6D5DE2117A3"
+  "core_order_sha256": "5E4EA6B03D183B782D2283CCE0A2DBF745509B021F1B4782424ACEBEADE0B982"
 }

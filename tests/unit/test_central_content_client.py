@@ -178,13 +178,15 @@ class CentralContentClientTests(unittest.TestCase):
 
         result = CentralContentClient(
             "https://nas.test", "token", opener=opener,
-        ).load_news_history("article", target="005930", identity="a", as_of=123.5, limit=3)
+        ).load_news_history("article", target="005930", identity="a", as_of=123.5, limit=3,
+                            before_revision_id="revision&2")
 
         self.assertTrue(result["known"])
         self.assertIn("/api/v1/news/history/article?", requests[0].full_url)
         self.assertIn("target=005930", requests[0].full_url)
         self.assertIn("identity=a", requests[0].full_url)
         self.assertIn("as_of=123.5", requests[0].full_url)
+        self.assertIn("before_revision_id=revision%262", requests[0].full_url)
 
     def test_news_history_url_encodes_stock_and_article_identity(self) -> None:
         requests = []

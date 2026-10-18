@@ -15,10 +15,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
 from kiwoom_monitor.application.minute_chart_service import MinuteChartService
-from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+from kiwoom_monitor.central_server.realtime_hub import CapturedHubEvent, RealtimeHub
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_observations import minute_bar_observation
-from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap
+from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap, KST
 from kiwoom_monitor.domain.market_data_contract import (
     DataCompleteness, DataUnit, DataValueKind, MarketDataMetadata, MarketDatasetKind, ObservationOrigin,
 )
@@ -35,8 +35,14 @@ from PySide6.QtWidgets import QApplication
 
 class RealtimeGapQualityTests(unittest.TestCase):
     def setUp(self):
-        self.minute = datetime.now().replace(second=0, microsecond=0) - timedelta(minutes=5)
+        self.minute = datetime(2026, 9, 14, 10, 0)
         self.now = self.minute + timedelta(minutes=5)
+        clock = patch(
+            "kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_wall_now",
+            return_value=self.now,
+        )
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def trade(self, price=100, minute=None):
         minute = minute or self.minute
@@ -62,7 +68,9 @@ class RealtimeGapQualityTests(unittest.TestCase):
         aggregator.ingest(first, self.minute)
         for tick in (first, lost, retained):
             control.ingest(tick, self.minute)
-        hub.publish({"type": "trade", "payload": asdict(lost)})
+        lost_event = CapturedHubEvent({"type": "trade", "payload": asdict(lost)})
+        lost_event.published_at = self.now.replace(tzinfo=KST)
+        hub.publish(lost_event)
         hub.publish({"type": "trade", "payload": asdict(retained)})
         gap = RealtimeGap.parse(subscriber.take_gap(subscriber.dropped_events).document())
         self.assertIsNotNone(gap)

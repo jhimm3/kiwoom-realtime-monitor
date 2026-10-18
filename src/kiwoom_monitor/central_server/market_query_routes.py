@@ -3,6 +3,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol, TYPE_CHECKING
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 from .market_ingest import fundamentals_document_is_current, nxt_eligibility_document_is_current
 from .market_observations import KST
@@ -25,6 +26,7 @@ class MarketQueryStore(Protocol):
 def create_market_query_router(
     store: MarketQueryStore, authorize: Callable[..., None],
     broker: "CentralRestBroker | None", collector: "CentralRealtimeCollector | None",
+    *, now_provider: Callable[[], datetime] = kst_now,
 ) -> "APIRouter":
     """Preserve archive-first reads, account-query exclusion and reconnect fencing."""
     from fastapi import APIRouter, Depends, HTTPException
@@ -46,7 +48,7 @@ def create_market_query_router(
             raise HTTPException(400, detail="ACCOUNT_QUERY_SCOPE_REQUIRED")
         if query.cont_yn == "N":
             archived = await asyncio.to_thread(
-                _stored_market_response, store, query.api_id, query.body,
+                _stored_market_response, store, query.api_id, query.body, now_provider=now_provider,
             )
             if archived is not None:
                 return {
@@ -79,6 +81,7 @@ def create_market_query_router(
 
 def _stored_market_response(
     store: Any, api_id: str, body: dict[str, Any],
+    *, now_provider: Callable[[], datetime] | None = None,
 ) -> dict[str, Any] | None:
     """완료 차트와 최신 종목 문서를 키움 TR보다 먼저 재사용한다."""
     if api_id in {"ka10001", "ka10100"}:
@@ -90,7 +93,7 @@ def _stored_market_response(
         values = store.load_documents(collection, code, 1) if code else []
         if values:
             document = values[0].get("document", {})
-            checked_at = datetime.now(KST)
+            checked_at = as_kst((now_provider or kst_now)())
             if api_id == "ka10001" and not fundamentals_document_is_current(
                 document, checked_at.date(), checked_at=checked_at,
             ):

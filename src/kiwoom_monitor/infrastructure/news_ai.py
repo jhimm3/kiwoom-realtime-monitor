@@ -307,7 +307,13 @@ def _parse_many(text: str, expected: int) -> tuple[AINewsAnalysis, ...]:
     values = json.loads(match.group(0))
     if not isinstance(values, list) or len(values) != expected:
         raise ValueError(f"AI 일괄 판정 결과 수가 요청과 다릅니다({len(values) if isinstance(values, list) else 0}/{expected}).")
-    ordered = sorted(values, key=lambda value: int(value.get("id", 0)))
+    try:
+        ids = [value["id"] for value in values]
+        if sorted(ids) != list(range(1, expected + 1)):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("AI 일괄 판정 결과의 id가 요청 사건과 일치하지 않습니다.") from None
+    ordered = sorted(values, key=lambda value: value["id"])
     return tuple(_parse_value(value) for value in ordered)
 
 

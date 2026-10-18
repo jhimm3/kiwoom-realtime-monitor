@@ -393,15 +393,29 @@ class MockCandidateFileWorkflowTests(unittest.TestCase):
         self.assertEqual([], self.content.mock_calls)
 
     def test_dialog_stop_requests_interruption_and_drains_owned_worker(self):
+        from PySide6.QtCore import QThread
+        import threading
+        entered, stopped = threading.Event(), threading.Event()
+        class Worker(QThread):
+            def run(self):
+                entered.set()
+                while not self.isInterruptionRequested():
+                    self.msleep(1)
+                stopped.set()
         dialog = MockAutomationCandidateDialog(self.content, PROFILE, self.binding)
         self.addCleanup(dialog.deleteLater)
-        worker = Mock()
-        worker.isRunning.return_value = True
+        worker = Worker(dialog)
         dialog._worker = worker
-        dialog.stop()
-        worker.requestInterruption.assert_called_once()
-        worker.wait.assert_called_once_with()
-        dialog._worker = None
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            dialog.stop()
+            self.assertTrue(stopped.is_set())
+            self.assertFalse(worker.isRunning())
+        finally:
+            worker.requestInterruption()
+            worker.wait(2000)
+            dialog._worker = None
 
     def test_real_dialog_thread_freezes_missing_criteria_without_loading_dataset(self):
         spec = self.document['package']['candidate_spec']

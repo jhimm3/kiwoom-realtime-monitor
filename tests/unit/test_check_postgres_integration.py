@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from scripts.check_postgres_integration import (
     _A4B_COLLECTIONS,
@@ -142,7 +143,10 @@ class CheckPostgresIntegrationTests(unittest.TestCase):
         values = _a4b_content_documents(
             "integration-test", account_ref, datetime(2026, 9, 13, tzinfo=UTC),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "kiwoom_monitor.central_server.market_news_sources.MarketFeedNewsCollector.start",
+            new=AsyncMock(),
+        ):
             statuses, mismatch = asyncio.run(
                 _exercise_a4b_content_api(
                     f"sqlite:///{Path(directory) / 'central.sqlite3'}", values,

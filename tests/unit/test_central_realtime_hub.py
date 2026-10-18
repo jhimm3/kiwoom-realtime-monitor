@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from kiwoom_monitor.central_server.app import create_app
 from kiwoom_monitor.central_server.config import CentralServerSettings
@@ -45,11 +46,13 @@ class RealtimeHubTests(unittest.TestCase):
     def test_websocket_requires_token_and_accepts_subscription(self) -> None:
         settings = CentralServerSettings(
             database_url="sqlite:///:memory:", access_token="server-token",
+            news_naver_market_enabled=False,
         )
         with TestClient(create_app(settings)) as client:
-            with self.assertRaises(Exception):
+            with self.assertRaises(WebSocketDisconnect) as denied:
                 with client.websocket_connect("/api/v1/realtime"):
                     pass
+            self.assertEqual(4401, denied.exception.code)
             with client.websocket_connect("/api/v1/realtime?token=server-token") as websocket:
                 self.assertEqual("ready", websocket.receive_json()["type"])
                 websocket.send_json({"type": "subscribe", "codes": ["005930"], "nxt_codes": []})

@@ -8,9 +8,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import httpx
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
 
 from kiwoom_monitor.application.breakout_strategy import default_shadow_breakout_config
 from kiwoom_monitor.application.market_session_schedule import research_session_profile_document
@@ -105,7 +105,7 @@ def _policy(package: MockAutomationCandidatePackage, **changes) -> MockAutomatio
     return MockAutomationEligibilityPolicy(**values)
 
 
-class MockAutomationCandidateTests(unittest.TestCase):
+class MockAutomationCandidateTests(unittest.IsolatedAsyncioTestCase):
     def test_package_policy_and_receipt_round_trip_with_distinct_hashes(self) -> None:
         package = _package()
         policy = _policy(package)
@@ -204,7 +204,7 @@ class MockAutomationCandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             eligibility_receipt_from_dict(conflicting)
 
-    def test_authenticated_api_publishes_without_starting_orders(self) -> None:
+    async def test_authenticated_api_publishes_without_starting_orders(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "central.sqlite3"
             store = SQLiteQueryStore(path); store.initialize()
@@ -230,38 +230,38 @@ class MockAutomationCandidateTests(unittest.TestCase):
                 "eligibility_receipt": receipt.to_dict(),
             }
             app = create_app(CentralServerSettings(f"sqlite:///{path}", "private-token"))
-            with patch("kiwoom_monitor.application.research_implementation.research_implementation_hash", return_value="a" * 64), \
-                    TestClient(app) as client:
-                self.assertEqual(401, client.post(
-                    "/api/v1/research/mock-automation-candidates", json=body,
-                ).status_code)
-                response = client.post(
-                    "/api/v1/research/mock-automation-candidates", json=body,
-                    headers={"Authorization": "Bearer private-token"},
-                )
-                duplicate = client.post(
-                    "/api/v1/research/mock-automation-candidates", json=body,
-                    headers={"Authorization": "Bearer private-token"},
-                )
-                listed = client.get(
-                    f"/api/v1/research/mock-automation-candidates/{ACCOUNT_REF}",
-                    params={"credential_profile_id": "nas-mock-default"},
-                    headers={"Authorization": "Bearer private-token"},
-                )
-                wrong_profile = client.get(
-                    f"/api/v1/research/mock-automation-candidates/{ACCOUNT_REF}",
-                    params={"credential_profile_id": "wrong-profile"},
-                    headers={"Authorization": "Bearer private-token"},
-                )
-                capability = client.get(
-                    "/api/v1/capabilities",
-                    headers={"Authorization": "Bearer private-token"},
-                )
-                conflict = client.post(
-                    "/api/v1/research/mock-automation-candidates",
-                    json={**body, "account_ref": "00000000-0000-0000-0000-000000000000"},
-                    headers={"Authorization": "Bearer private-token"},
-                )
+            with patch("kiwoom_monitor.application.research_implementation.research_implementation_hash", return_value="a" * 64):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://offline") as client:
+                    self.assertEqual(401, (await client.post(
+                        "/api/v1/research/mock-automation-candidates", json=body,
+                    )).status_code)
+                    response = await client.post(
+                        "/api/v1/research/mock-automation-candidates", json=body,
+                        headers={"Authorization": "Bearer private-token"},
+                    )
+                    duplicate = await client.post(
+                        "/api/v1/research/mock-automation-candidates", json=body,
+                        headers={"Authorization": "Bearer private-token"},
+                    )
+                    listed = await client.get(
+                        f"/api/v1/research/mock-automation-candidates/{ACCOUNT_REF}",
+                        params={"credential_profile_id": "nas-mock-default"},
+                        headers={"Authorization": "Bearer private-token"},
+                    )
+                    wrong_profile = await client.get(
+                        f"/api/v1/research/mock-automation-candidates/{ACCOUNT_REF}",
+                        params={"credential_profile_id": "wrong-profile"},
+                        headers={"Authorization": "Bearer private-token"},
+                    )
+                    capability = await client.get(
+                        "/api/v1/capabilities",
+                        headers={"Authorization": "Bearer private-token"},
+                    )
+                    conflict = await client.post(
+                        "/api/v1/research/mock-automation-candidates",
+                        json={**body, "account_ref": "00000000-0000-0000-0000-000000000000"},
+                        headers={"Authorization": "Bearer private-token"},
+                    )
             self.assertEqual((200, "saved", False), (
                 response.status_code, response.json()["status"], response.json()["orders_started"],
             ))
@@ -273,7 +273,11 @@ class MockAutomationCandidateTests(unittest.TestCase):
             self.assertEqual(409, conflict.status_code)
             self.assertTrue(capability.json()["capabilities"]["mock_automation_candidate_publish_v1"])
             self.assertTrue(capability.json()["capabilities"]["mock_automation_candidate_read_v1"])
-
+            check=SQLiteQueryStore(path)
+            with check._connection() as connection:
+                for table in ('central_execution_intents','central_execution_events','central_execution_runtime_leases'):
+                    self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM '+table).fetchone()[0])
+            check.close()
 
 if __name__ == "__main__":
     unittest.main()

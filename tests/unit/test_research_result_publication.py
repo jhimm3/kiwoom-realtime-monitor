@@ -84,6 +84,8 @@ class ResultPublicationTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 rp._write_result(self.path, {'state': 'new'})
         replace.assert_called_once(); sleep.assert_not_called()
+        self.assertEqual({'state': 'old'}, json.loads(self.path.read_text()))
+        self.assertEqual([], list(self.root.glob('*.tmp')))
 
 
 if __name__ == '__main__':

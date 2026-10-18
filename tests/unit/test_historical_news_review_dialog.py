@@ -31,6 +31,8 @@ from kiwoom_monitor.application.historical_news_review_queue import (
     write_historical_news_review_queue,
 )
 from kiwoom_monitor.presentation.historical_news_review_dialog import HistoricalNewsReviewDialog
+from kiwoom_monitor.presentation.research_dialog import ResearchDialog
+from kiwoom_monitor.domain.time_basis import KST
 
 
 class _Themes:
@@ -68,9 +70,12 @@ class HistoricalNewsReviewDialogTests(unittest.TestCase):
             sheet = research_dir / "historical-news-review-work" / "priority.csv"
             export_historical_news_review_sheet(queue, sheet)
 
-            dialog = HistoricalNewsReviewDialog(
+            research = ResearchDialog(
                 research_dir, theme_repository=_Themes(),
+                now_provider=lambda: datetime(2026, 9, 24, 0, 30, tzinfo=KST),
             )
+            research._show_historical_news_review()
+            dialog = research._historical_news_review_dialog
             self.assertEqual(1, dialog._table.rowCount())
             self.assertEqual("검토 0/1", dialog._progress.text())
             self.assertGreaterEqual(dialog._profile.findText("기본 테마"), 0)
@@ -85,7 +90,7 @@ class HistoricalNewsReviewDialogTests(unittest.TestCase):
             row = load_historical_news_review_sheet(queue, sheet)[0]
             self.assertEqual("relevant", row["human_decision"])
             self.assertEqual("기본 테마", row["theme_profile_name"])
-            self.assertTrue(row["reviewed_at"].endswith("+09:00"))
+            self.assertEqual("2026-09-24T00:30:00+09:00", row["reviewed_at"])
             self.assertEqual("검토 1/1", dialog._progress.text())
 
             with patch(
@@ -96,6 +101,8 @@ class HistoricalNewsReviewDialogTests(unittest.TestCase):
             self.assertEqual(1, len(outputs))
             self.assertIn("model_weight_training_ready", outputs[0].read_text(encoding="utf-8"))
             dialog.deleteLater()
+            research.stop()
+            research.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_creates_event_split_from_latest_frozen_decisions(self) -> None:

@@ -14,6 +14,7 @@ from kiwoom_monitor.domain.order_contract import (
     OrderState,
     OrderSide,
 )
+from kiwoom_monitor.domain.ranking import normalize_stock_code
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import OrderExecution
 
 
@@ -443,8 +444,8 @@ def _rows(payload: dict[str, Any], key: str, columns: tuple[str, ...]) -> tuple[
 
 
 def _symbol(raw: object) -> str:
-    value = str(raw or "").strip().removeprefix("A").removesuffix("_NX").removesuffix("_AL")
-    if len(value) != 6 or not value.isdigit():
+    value = normalize_stock_code(raw)
+    if len(value) != 6 or not all("0" <= char <= "9" or "A" <= char <= "Z" for char in value):
         raise ValueError("broker row contains an invalid domestic stock code")
     return value
 

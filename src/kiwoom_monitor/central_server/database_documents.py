@@ -5,8 +5,10 @@ import json
 import logging
 import sqlite3
 import uuid
+from datetime import datetime
 from time import monotonic, time
-from typing import Any
+from typing import Any, Callable
+from kiwoom_monitor.domain.time_basis import kst_now
 
 from kiwoom_monitor.domain.news_observation import (
     ARTICLE_BODY_EXTRACTOR_VERSION,
@@ -32,7 +34,7 @@ class SQLiteDocumentStoreMixin:
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         if not values:
             return
-        now = time()
+        now = self._now_provider().timestamp()
         with self._lock, self._connection() as connection:
             connection.executemany(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
@@ -42,15 +44,15 @@ class SQLiteDocumentStoreMixin:
                 document_value_rows(collection, values, now),
             )
             if collection == "theme_metadata":
-                _append_sqlite_theme_snapshot(connection, values, received_at=now)
+                _append_sqlite_theme_snapshot(connection, values, received_at=now, now_provider=self._now_provider)
             elif collection == "news_article":
-                _append_sqlite_news_articles(connection, values, received_at=now)
+                _append_sqlite_news_articles(connection, values, received_at=now, now_provider=self._now_provider)
         if collection == "news_article":
             _notify_news_job_wakeup(self)
 
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         """컬렉션 전체를 한 트랜잭션에서 현재 스냅샷으로 교체한다."""
-        now = time()
+        now = self._now_provider().timestamp()
         rows = document_value_rows(collection, values, now)
         with self._lock, self._connection() as connection:
             connection.execute("DELETE FROM central_documents WHERE collection=?", (collection,))
@@ -60,7 +62,7 @@ class SQLiteDocumentStoreMixin:
                     "VALUES(?,?,?,?,?)", rows,
                 )
             if collection == "theme_metadata":
-                _append_sqlite_theme_snapshot(connection, values, received_at=now)
+                _append_sqlite_theme_snapshot(connection, values, received_at=now, now_provider=self._now_provider)
 
     def load_documents(
         self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
@@ -107,7 +109,7 @@ class PostgresDocumentStoreMixin:
         if not values:
             return
         started_at = monotonic()
-        now = time()
+        now = self._now_provider().timestamp()
         writer = None
         observed_kinds = {
             "news_article": "document:news_article",
@@ -270,9 +272,9 @@ class PostgresDocumentStoreMixin:
                 if affected is not None and affected >= 0:
                     document_affected_rows = int(affected)
             if collection == "theme_metadata":
-                _append_postgres_theme_snapshot(cursor, values, received_at=now)
+                _append_postgres_theme_snapshot(cursor, values, received_at=now, now_provider=self._now_provider)
             elif collection == "news_article":
-                _append_postgres_news_articles(cursor, values, received_at=now)
+                _append_postgres_news_articles(cursor, values, received_at=now, now_provider=self._now_provider)
         if collection == "news_article":
             _notify_news_job_wakeup(self)
         from .diagnostic_metrics import record_writer_transaction
@@ -284,7 +286,7 @@ class PostgresDocumentStoreMixin:
 
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         """컬렉션 전체를 한 트랜잭션에서 현재 스냅샷으로 교체한다."""
-        now = time()
+        now = self._now_provider().timestamp()
         rows = document_value_rows(collection, values, now)
         db_connection = self._connect
         if collection in {"theme_profile", "theme_stock", "theme_metadata"}:
@@ -306,7 +308,7 @@ class PostgresDocumentStoreMixin:
                     "VALUES(%s,%s,%s,%s,%s)", rows,
                 )
             if collection == "theme_metadata":
-                _append_postgres_theme_snapshot(cursor, values, received_at=now)
+                _append_postgres_theme_snapshot(cursor, values, received_at=now, now_provider=self._now_provider)
 
     def load_documents(
         self, collection: str, owner: str = "", limit: int = 1000, offset: int = 0,
@@ -396,6 +398,7 @@ def _theme_snapshot_source(values: list[dict[str, Any]]) -> ThemeSnapshotSource 
 
 def _append_sqlite_theme_snapshot(
     connection: sqlite3.Connection, values: list[dict[str, Any]], *, received_at: float,
+    now_provider: Callable[[], datetime] = kst_now,
 ) -> None:
     source = _theme_snapshot_source(values)
     if source is None:
@@ -412,7 +415,7 @@ def _append_sqlite_theme_snapshot(
         "origin_device,revision_of,document_json) VALUES(?,?,?,?,?,?,?,?,?)",
         (
             uuid.uuid4().hex, source.profile_id, source.content_hash, source.effective_at,
-            received_at, time(), source.origin_device,
+            received_at, now_provider().timestamp(), source.origin_device,
             str(previous[0]) if previous is not None else None,
             json.dumps(source.document, ensure_ascii=False, separators=(",", ":")),
         ),
@@ -421,6 +424,7 @@ def _append_sqlite_theme_snapshot(
 
 def _append_postgres_theme_snapshot(
     cursor: Any, values: list[dict[str, Any]], *, received_at: float,
+    now_provider: Callable[[], datetime] = kst_now,
 ) -> None:
     source = _theme_snapshot_source(values)
     if source is None:
@@ -440,7 +444,7 @@ def _append_postgres_theme_snapshot(
         "origin_device,revision_of,document_json) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             uuid.uuid4().hex, source.profile_id, source.content_hash, source.effective_at,
-            received_at, time(), source.origin_device,
+            received_at, now_provider().timestamp(), source.origin_device,
             str(previous[0]) if previous is not None else None,
             json.dumps(source.document, ensure_ascii=False, separators=(",", ":")),
         ),
@@ -478,6 +482,7 @@ def _article_source(value: dict[str, Any]) -> tuple[str, str, dict[str, Any], st
 
 def _append_sqlite_news_articles(
     connection: sqlite3.Connection, values: list[dict[str, Any]], *, received_at: float,
+    now_provider: Callable[[], datetime] = kst_now,
 ) -> None:
     for value in values:
         stock, identity, document, collector, scope = _article_source(value)
@@ -494,23 +499,25 @@ def _append_sqlite_news_articles(
         ).fetchone()
         if same_source is not None:
             continue
-        revision_id, available_at = uuid.uuid4().hex, time()
+        revision_id = uuid.uuid4().hex
+        accepted_at = now_provider().timestamp()
         connection.execute(
             "INSERT INTO central_news_article_revisions("
             "article_revision_id,stock_code,identity,content_hash,collector_id,published_at,"
             "received_at,available_at,collection_scope,revision_of,document_json) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (revision_id, stock, identity, content_hash, collector, document.get("published_at"),
-             received_at, available_at, scope, str(previous[0]) if previous else None,
+             received_at, accepted_at, scope, str(previous[0]) if previous else None,
              json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
         )
         _insert_sqlite_news_job(
             connection, revision_id, stock, stock, "BODY", content_hash,
-            ARTICLE_BODY_EXTRACTOR_VERSION, document, available_at,
+            ARTICLE_BODY_EXTRACTOR_VERSION, document, accepted_at,
         )
 
 
-def _append_postgres_news_articles(cursor: Any, values: list[dict[str, Any]], *, received_at: float) -> None:
+def _append_postgres_news_articles(cursor: Any, values: list[dict[str, Any]], *, received_at: float,
+                                   now_provider: Callable[[], datetime] = kst_now) -> None:
     cursor.execute("LOCK TABLE central_news_article_revisions IN SHARE ROW EXCLUSIVE MODE")
     for value in values:
         stock, identity, document, collector, scope = _article_source(value)
@@ -528,17 +535,18 @@ def _append_postgres_news_articles(cursor: Any, values: list[dict[str, Any]], *,
         )
         if cursor.fetchone() is not None:
             continue
-        revision_id, available_at = uuid.uuid4().hex, time()
+        revision_id = uuid.uuid4().hex
+        accepted_at = now_provider().timestamp()
         cursor.execute(
             "INSERT INTO central_news_article_revisions("
             "article_revision_id,stock_code,identity,content_hash,collector_id,published_at,"
             "received_at,available_at,collection_scope,revision_of,document_json) "
             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (revision_id, stock, identity, content_hash, collector, document.get("published_at"),
-             received_at, available_at, scope, str(previous[0]) if previous else None,
+             received_at, accepted_at, scope, str(previous[0]) if previous else None,
              json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
         )
         _insert_postgres_news_job(
             cursor, revision_id, stock, stock, "BODY", content_hash,
-            ARTICLE_BODY_EXTRACTOR_VERSION, document, available_at,
+            ARTICLE_BODY_EXTRACTOR_VERSION, document, accepted_at,
         )

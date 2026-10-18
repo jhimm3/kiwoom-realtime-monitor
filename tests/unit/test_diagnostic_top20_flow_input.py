@@ -169,12 +169,13 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
                 with capture_events(events):
                     service = AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW)
                     first = asyncio.create_task(service._capture_candidate_investor_flow(CODE, DAY))
-                    await asyncio.to_thread(client.entered.wait, 2)
+                    self.assertTrue(await asyncio.to_thread(client.entered.wait, 2))
                     second = asyncio.create_task(service._capture_candidate_investor_flow(CODE, DAY))
                     for _ in range(100):
                         if any(link["receipt"]["shared"] for link in broker._flow_inflight.values()):
                             break
                         await asyncio.sleep(.001)
+                    self.assertTrue(any(link["receipt"]["shared"] for link in broker._flow_inflight.values()))
                     client.release.set()
                     await asyncio.gather(first, second)
                     await broker.request("ka10045", "/api/dostk/mrkcond", {"stk_cd": "000660", "end_dt": "20261007"})
@@ -316,7 +317,7 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
             try:
                 with capture_events(events):
                     task = asyncio.create_task(AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW)._capture_candidate_investor_flow(CODE, DAY))
-                    await asyncio.to_thread(client.entered.wait, 2)
+                    self.assertTrue(await asyncio.to_thread(client.entered.wait, 2))
                     task.cancel()
                     with self.assertRaises(asyncio.CancelledError):
                         await task

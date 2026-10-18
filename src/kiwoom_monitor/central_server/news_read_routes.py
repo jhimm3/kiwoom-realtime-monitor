@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 class NewsReadStore(Protocol):
     def load_news_history(
         self, kind: str, *, target: str = "", identity: str = "",
-        available_at: float | None = None, limit: int = 100,
+        available_at: float | None = None, limit: int = 100, before_revision_id: str = "",
     ) -> list[dict[str, Any]]: ...
 
     def load_document(
@@ -40,12 +40,14 @@ def create_news_read_router(
         stock_code: str = Query(default="", max_length=20),
         as_of: float | None = Query(default=None, ge=0.0),
         limit: int = Query(default=100, ge=1, le=1000),
+        before_revision_id: str = Query(default="", max_length=200),
     ) -> dict[str, object]:
         if kind not in {"article", "body", "ai", "event", "membership"}:
             raise HTTPException(status_code=404, detail="지원하지 않는 뉴스 이력 종류입니다.")
+        cursor = {"before_revision_id": before_revision_id} if before_revision_id else {}
         values = await asyncio.to_thread(
             store.load_news_history, kind, target=target, identity=identity,
-            available_at=as_of, limit=limit,
+            available_at=as_of, limit=limit, **cursor,
         )
         result = {"kind": kind, "target": target, "as_of": as_of,
                   "known": bool(values), "revisions": values}

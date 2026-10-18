@@ -21,9 +21,9 @@ from kiwoom_monitor.infrastructure.persistence.research_repository import (
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigrationRunner
 
 
-def _hypotheses(seed: int = 11):
+def _hypotheses(seed: int = 11, *, scope: str = "campaign:test-campaign"):
     return generate_research_hypotheses(HypothesisGenerationRequest(
-        research_scope_id="campaign:test-campaign",
+        research_scope_id=scope,
         family_id=BREAKOUT_FAMILY_ID,
         factor_allowlist=("rolling_high_breakout/v1", "rank_persistence/v1"),
         baseline_parameters=default_shadow_breakout_config().to_dict(),
@@ -52,10 +52,10 @@ class ResearchHypothesisRepositoryTests(unittest.TestCase):
             self.assertEqual(27, repository.schema_version())
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual(
-                    "existing",
+                    ("existing", "now", "{}"),
                     connection.execute(
-                        "SELECT experiment_id FROM research_search_experiments"
-                    ).fetchone()[0],
+                        "SELECT experiment_id,created_at,spec_json FROM research_search_experiments"
+                    ).fetchone(),
                 )
 
     def test_ordered_batch_persists_parent_lineage_and_is_idempotent(self) -> None:
@@ -88,6 +88,10 @@ class ResearchHypothesisRepositoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "parent"):
                 repository.save_research_hypotheses(tuple(reversed(hypotheses)))
             self.assertEqual((), repository.load_research_hypotheses())
+            unrelated = _hypotheses(scope="campaign:missing-parent")
+            with self.assertRaisesRegex(ValueError, "parent"):
+                repository.save_research_hypotheses((hypotheses[0], unrelated[1]))
+            self.assertEqual((), repository.load_research_hypotheses())
 
     def test_family_filter_and_limit_are_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -105,8 +109,14 @@ class ResearchHypothesisRepositoryTests(unittest.TestCase):
                 repository.load_research_hypotheses(limit=0)
 
     def test_schema_constant_matches_migration_tail(self) -> None:
-        self.assertEqual(27, RESEARCH_SCHEMA_VERSION)
-        self.assertEqual(27, _MIGRATIONS[-1].version)
+        self.assertEqual(list(range(1, RESEARCH_SCHEMA_VERSION + 1)), [migration.version for migration in _MIGRATIONS])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.sqlite3"
+            ResearchRepository(path)
+            with closing(sqlite3.connect(path)) as connection:
+                versions = [row[0] for row in connection.execute(
+                    "SELECT version FROM research_schema_migrations ORDER BY version")]
+            self.assertEqual(list(range(1, RESEARCH_SCHEMA_VERSION + 1)), versions)
 
 
 if __name__ == "__main__":

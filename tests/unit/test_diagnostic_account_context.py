@@ -531,12 +531,20 @@ class AccountContextTests(unittest.TestCase):
         settings.__enter__.return_value = settings
         settings.fetchone.side_effect = [(1, 1, False), (1, False)]
         reader.__enter__.return_value = reader
-        reader.fetchmany.return_value = []
+        native = self.enterContext(self.source._connection())
+        active = {}
+        def select(statement):
+            statement = statement.replace('octet_length(document_json::text)', 'length(CAST(document_json AS BLOB))')
+            active['cursor'] = native.execute(statement)
+        reader.execute.side_effect = select
+        reader.fetchmany.side_effect = lambda size: active['cursor'].fetchmany(size)
         connection.cursor.side_effect = lambda **options: reader if options.get('name') else settings
         store._connect = MagicMock(return_value=connection)
         value = context.read_account_context(store, self.projection, source_release='fixture')
         self.assertEqual('repeatable_read_read_only', value['isolation'])
-        self.assertEqual(0, value['row_count'])
+        self.assertEqual(4, value['row_count'])
+        expected = self.capsule()
+        self.assertEqual(expected['tables'], value['tables'])
         self.assertIn('REPEATABLE READ, READ ONLY', settings.execute.call_args_list[0].args[0])
         self.assertIn({'name': 'recorded_account_context'}, [call.kwargs for call in connection.cursor.call_args_list])
         for call in reader.fetchmany.call_args_list:
@@ -605,3 +613,23 @@ class AccountContextTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'requires_restored_v1'):
                 lease.seal(account_context=value)
             apply.assert_not_called()
+
+        # Real SQLite transaction checks rollback of native context INSERTs.
+        # PostgreSQL schema/DDL acceptance remains a separate integration check.
+        target = self.store('failed-seal')
+        original_apply = context._apply_account_context
+        with target._connection() as native:
+            lease.connection.transaction.side_effect = lambda: native
+            cursor.fetchone.return_value = (baseline._hash(parent), parent)
+            def apply_then_fail(unused_cursor, document, **options):
+                original_apply(SQLiteProjectionCursor(native.cursor()), document, **options)
+                self.assertGreater(native.execute('SELECT COUNT(*) FROM central_account_registry').fetchone()[0], 0)
+                raise RuntimeError('injected-after-context-inserts')
+            with patch.object(lease, '_maintenance'), patch.object(lease, '_lock_tables'), \
+                 patch.object(lease, '_baseline_row', return_value=None), patch.object(lease, '_schema', return_value='schema'), \
+                 patch.object(lease, '_tables_digest', return_value={}), patch.object(lease, '_sequences', return_value={}), \
+                 patch.object(context, '_apply_account_context', side_effect=apply_then_fail):
+                with self.assertRaisesRegex(RuntimeError, 'injected-after-context-inserts'):
+                    lease.seal(account_context=value)
+            for table in context.COLUMNS:
+                self.assertEqual(0, native.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0])

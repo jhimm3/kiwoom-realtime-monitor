@@ -30,6 +30,7 @@ def automation_http_contract_app(app_factory, database_path, configured):
     settings = CentralServerSettings(f"sqlite:///{database_path}", "private-token",
         kiwoom_environment="mock", autonomous_top20_enabled=False,
         market_event_collection_enabled=False, news_history_jobs_enabled=False,
+        news_naver_market_enabled=False,
         credential_directory=str(database_path.parent / "vault") if configured else "",
         account_identity_registry_enabled=configured, account_identity_hmac_key=secrets.token_hex(32))
     if not configured:

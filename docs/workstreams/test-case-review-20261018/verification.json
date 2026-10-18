@@ -1,0 +1,9 @@
+{
+  "baseline_case_coverage": 5504,
+  "pending": 0,
+  "duplicate_ids": 0,
+  "root_passed_modules": 27,
+  "root_test_files_changed_after_latest_pass": [],
+  "archive_readback_verified": true,
+  "no_full_test_execution": true
+}

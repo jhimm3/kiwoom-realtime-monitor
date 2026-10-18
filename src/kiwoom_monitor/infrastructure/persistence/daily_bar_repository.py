@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_today, kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 
 import sqlite3
 from dataclasses import replace
@@ -23,8 +23,12 @@ from kiwoom_monitor.infrastructure.persistence.market_data_metadata_schema impor
 
 
 class DailyBarRepository:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, now_provider=None) -> None:
         self._path = path
+        self.set_now_provider(now_provider or (lambda: kst_wall_now()))
+
+    def set_now_provider(self, now_provider) -> None:
+        self._now = lambda: as_kst(now_provider())
 
     def load_targets(self, codes: tuple[str, ...]) -> dict[str, DailyHighTargets]:
         if not codes:
@@ -50,7 +54,7 @@ class DailyBarRepository:
         result = {}
         for code, bars in grouped.items():
             targets = DailyHighTargets.from_daily_bars(
-                tuple(bars[:250]), as_of=kst_today(), include_high_250=False,
+                tuple(bars[:250]), as_of=self._now().date(), include_high_250=False,
             )
             result[code] = replace(targets,
                 high_5_price=max(bar.high_price for bar in bars[:5]) if len(bars) >= 5 else None,
@@ -106,9 +110,10 @@ class DailyBarRepository:
         connection = sqlite3.connect(self._path)
         try:
             self._ensure_unconfirmed_table(connection)
+            finalized_at = self._now().isoformat()
             connection.executemany(
-                "INSERT OR REPLACE INTO market_data_finalization_log(trade_date,stock_code) VALUES (?,?)",
-                ((trade_date.isoformat(), code) for code in codes),
+                "INSERT OR REPLACE INTO market_data_finalization_log(trade_date,stock_code,finalized_at) VALUES (?,?,?)",
+                ((trade_date.isoformat(), code, finalized_at) for code in codes),
             )
             connection.executemany(
                 "DELETE FROM market_data_unconfirmed_log WHERE trade_date=? AND stock_code=?",
@@ -126,10 +131,10 @@ class DailyBarRepository:
         try:
             self._ensure_unconfirmed_table(connection)
             connection.execute(
-                "INSERT INTO market_data_unconfirmed_log(trade_date,stock_code,missing_parts,attempts) VALUES(?,?,?,?) "
+                "INSERT INTO market_data_unconfirmed_log(trade_date,stock_code,missing_parts,attempts,updated_at) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(trade_date,stock_code) DO UPDATE SET missing_parts=excluded.missing_parts, "
-                "attempts=excluded.attempts, updated_at=CURRENT_TIMESTAMP",
-                (trade_date.isoformat(), code, ",".join(missing_parts), int(attempts)),
+                "attempts=excluded.attempts, updated_at=excluded.updated_at",
+                (trade_date.isoformat(), code, ",".join(missing_parts), int(attempts), self._now().isoformat()),
             )
             connection.commit()
         finally:
@@ -200,7 +205,7 @@ class DailyBarRepository:
                 "OR COALESCE(daily_bars.open_price, -1) != COALESCE(excluded.open_price, -1) OR COALESCE(daily_bars.low_price, -1) != COALESCE(excluded.low_price, -1) OR COALESCE(daily_bars.volume, -1) != COALESCE(excluded.volume, -1)",
                 rows,
             )
-            available_at = observed_at or kst_wall_now()
+            available_at = as_kst(observed_at) if observed_at is not None else self._now()
             for bar in targets.daily_bars[:250]:
                 trading_day = date.fromisoformat(
                     f"{bar.trade_date[:4]}-{bar.trade_date[4:6]}-{bar.trade_date[6:]}"

@@ -215,7 +215,7 @@ class CentralAIService:
                     raise ChatGPTPlanError(self._plan_failure or status["pause_code"])
                 if int(status.get("generation", 0)) != credential.revision:
                     raise ChatGPTPlanError("not_connected")
-            owner = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+            owner = as_kst(self._now()).date().isoformat()
             used = await asyncio.to_thread(self._store.load_documents, "news_request_usage", owner, 10_000)
             if self._daily_limit > 0 and len(used) >= self._daily_limit:
                 raise ValueError("NAS AI 일일 요청 상한에 도달했습니다.")
@@ -302,7 +302,7 @@ class CentralAIService:
                 if provider == "chatgpt_plan" and self._plan_failure:
                     from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
                     raise ChatGPTPlanError(self._plan_failure)
-                usage_owner = self._now().astimezone().date().isoformat()
+                usage_owner = as_kst(self._now()).date().isoformat()
                 if self._daily_limit > 0:
                     used = await asyncio.to_thread(
                         self._store.load_documents, "news_request_usage", usage_owner, 10_000,

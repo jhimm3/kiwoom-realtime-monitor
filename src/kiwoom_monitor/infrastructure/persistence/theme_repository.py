@@ -6,6 +6,7 @@ from datetime import datetime
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Callable
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
 from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion, ThemeSuggestion
@@ -14,13 +15,17 @@ from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion,
 class ThemeRepository:
     """Profile-scoped themes stored alongside the shared stock catalog."""
 
-    def __init__(self, path: Path, profile_name: str = "기본 테마") -> None:
+    def __init__(self, path: Path, profile_name: str = "기본 테마", *, now_provider=None) -> None:
         self._path = path
+        self.set_now_provider(now_provider or kst_now)
         self._profile_name = profile_name.strip() or "기본 테마"
         self._change_callback: Callable[[], None] | None = None
         self._stock_color_cache: dict[tuple[str, str], str] | None = None
         self._ensure_active_profile()
         self._merge_case_insensitive_themes()
+
+    def set_now_provider(self, now_provider) -> None:
+        self._now = lambda: as_kst(now_provider())
 
     @property
     def active_profile(self) -> str:
@@ -487,9 +492,9 @@ class ThemeRepository:
                             (profile_id, stock_code, name),
                         )
                 connection.execute(
-                    "UPDATE profile_theme_suggestions SET status=?,reviewed_theme_names=?,reviewed_at=CURRENT_TIMESTAMP "
+                    "UPDATE profile_theme_suggestions SET status=?,reviewed_theme_names=?,reviewed_at=? "
                     "WHERE profile_id=? AND stock_code=? AND news_identity=? AND raw_theme_name=? COLLATE NOCASE",
-                    ("approved" if approved else "rejected", json.dumps(clean, ensure_ascii=False),
+                    ("approved" if approved else "rejected", json.dumps(clean, ensure_ascii=False), self._now().isoformat(),
                      profile_id, stock_code, news_identity, raw_theme_name),
                 )
         finally:
@@ -690,18 +695,17 @@ class ThemeRepository:
         values = sorted((first.strip(), second.strip()), key=lambda value: value.casefold())
         return values[0], values[1]
 
-    @staticmethod
     def _insert_name_decision(
-        connection: sqlite3.Connection, profile_id: int, kind: str,
+        self, connection: sqlite3.Connection, profile_id: int, kind: str,
         source: str, target: str, decision_source: str,
     ) -> None:
         connection.execute(
             "INSERT INTO profile_theme_name_decisions("
             "profile_id,decision_kind,source_name,target_name,decision_source,updated_at) "
-            "VALUES(?,?,?,?,?,CURRENT_TIMESTAMP) "
+            "VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(profile_id,decision_kind,source_name,target_name) DO UPDATE SET "
-            "decision_source=excluded.decision_source,updated_at=CURRENT_TIMESTAMP",
-            (profile_id, kind, source.strip(), target.strip(), decision_source.strip() or "user"),
+            "decision_source=excluded.decision_source,updated_at=excluded.updated_at",
+            (profile_id, kind, source.strip(), target.strip(), decision_source.strip() or "user", self._now().isoformat()),
         )
 
     def _record_alias(

@@ -1,0 +1,34 @@
+{
+  "baseline_commit": "6cf3d4c83845c6a7ee0a1ad5b5bc0a6a5bafb373",
+  "baseline_ci_run": 39091008148,
+  "baseline_ci_executions": 5516,
+  "reviewed_unique_cases": 5504,
+  "pending": 0,
+  "overlap": 0,
+  "owners": {
+    "root": 1201,
+    "review_a": 989,
+    "review_b": 1721,
+    "review_c": 1593
+  },
+  "decisions": {
+    "retain": 5208,
+    "strengthen": 216,
+    "unresolved": 49,
+    "retire": 12,
+    "fix_expectation": 19
+  },
+  "test_case_retired": 12,
+  "additional_prior_duplicate_executions_removed": 12,
+  "related_passed_unique_cases": 1086,
+  "related_passed_by_owner": {
+    "root": 550,
+    "review_a": 223,
+    "review_b": 87,
+    "review_c": 226
+  },
+  "not_full_test_execution": true,
+  "this_audit_product_edits": false,
+  "concurrent_work_excluded": "Other tasks change product sources/tests/docs in same workspace, including ranking cache and later minute-bar repository work. Those are not this audit changes or baseline5504 completeness proof.",
+  "scope": "5504 case semantic review complete; 49 requirement interpretations unresolved and product gaps separately recorded. No CI, NAS, commit, push, live order or production DB operation."
+}

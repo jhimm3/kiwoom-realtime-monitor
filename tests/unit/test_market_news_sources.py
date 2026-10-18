@@ -12,7 +12,7 @@ from kiwoom_monitor.infrastructure.naver_stock_market_news import parse_page
 
 
 class MarketFeedNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_market_feed_can_stop_without_disabling_stock_news(self) -> None:
+    async def test_disabled_market_feed_does_not_fetch(self) -> None:
         calls = []
         collector = MarketFeedNewsCollector(
             object(), enabled=False,

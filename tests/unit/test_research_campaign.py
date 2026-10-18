@@ -54,7 +54,7 @@ class ResearchCampaignTests(unittest.TestCase):
         self.assertEqual(900, ResearchCampaignPolicy().retry_seconds(100000))
 
     def test_schema_default_state_and_idempotent_creation_survive_restart(self):
-        self.assertEqual(27, RESEARCH_SCHEMA_VERSION)
+        self.assertEqual(RESEARCH_SCHEMA_VERSION, self.repo.schema_version())
         self.assertFalse(self.repo.create_campaign('c', '연구', ResearchCampaignPolicy()))
         restored = ResearchRepository(self.path).load_campaign('c')
         self.assertEqual('PAUSED', restored['desired_state'])
@@ -128,15 +128,22 @@ class ResearchCampaignTests(unittest.TestCase):
         self.assertEqual('PAUSED', self.repo.load_campaign('c')['operational_state'])
 
     def test_retry_then_unexecuted_hypothesis_then_new_data_priority(self):
-        self.enqueue('new', source_kind='new_data')
+        new_data = self.enqueue('new', source_kind='new_data')
         hypothesis = self.enqueue('hypothesis')
-        self.enqueue('other')
+        other = self.enqueue('other')
         first = self.claim()
         self.assertEqual(hypothesis, first['job_id'])
         self.assertTrue(self.finish(first, 'INTERRUPTED'))
         retry = self.claim(seconds=2)
         self.assertEqual(hypothesis, retry['job_id'])
         self.assertEqual(0, self.repo.load_campaign_jobs('c')[1]['failure_count'])
+        self.completed_search(hypothesis)
+        self.assertTrue(self.finish(retry, 'COMPLETED', seconds=3))
+        next_hypothesis = self.claim(seconds=4)
+        self.assertEqual(other, next_hypothesis['job_id'])
+        self.completed_search(other)
+        self.assertTrue(self.finish(next_hypothesis, 'COMPLETED', seconds=5))
+        self.assertEqual(new_data, self.claim(seconds=6)['job_id'])
 
     def test_failure_backoff_and_limit_are_separate_from_user_interruptions(self):
         self.repo.revise_campaign_policy('c', ResearchCampaignPolicy(max_attempts=2), expected_revision=1)
@@ -271,7 +278,7 @@ class ResearchCampaignTests(unittest.TestCase):
             before_job = connection.execute('SELECT * FROM research_search_jobs').fetchone()
             before_attempt = connection.execute('SELECT * FROM research_trial_attempts').fetchone()
         migrated = ResearchRepository(path)
-        self.assertEqual(27, migrated.schema_version())
+        self.assertEqual(RESEARCH_SCHEMA_VERSION, migrated.schema_version())
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(before_job, connection.execute('SELECT * FROM research_search_jobs').fetchone())
             self.assertEqual(before_attempt, connection.execute('SELECT * FROM research_trial_attempts').fetchone())

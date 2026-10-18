@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 import sqlite3
 import threading
@@ -66,6 +66,18 @@ _V2_SPECS = (
     _TableSpec("journal_v2_research_links", "journal_research_links", ("link_id",), "created_at"),
 )
 _ACCOUNT_SCOPED_TABLES = frozenset(spec.table for spec in _V2_SPECS)
+
+
+def _compare_revision(left: object, right: object) -> int:
+    # Legacy offset-free journal values denote KST. Preserve their original
+    # bytes/identity, but do not order different timezone representations as text.
+    left_order, right_order = str(left), str(right)
+    try:
+        left_order = as_kst(datetime.fromisoformat(left_order.replace("Z", "+00:00")))
+        right_order = as_kst(datetime.fromisoformat(right_order.replace("Z", "+00:00")))
+    except ValueError:
+        left_order, right_order = str(left), str(right)
+    return (left_order > right_order) - (left_order < right_order)
 
 
 class CentralJournalSyncService:
@@ -224,10 +236,10 @@ class CentralJournalSyncService:
                         legacy_source = (*legacy_source[:-1], "CONFLICT")
                     CentralJournalSyncService._record_legacy_source(connection, legacy_source)
                     continue
-            if local is not None and str(dict(local).get(spec.version, "")) >= str(incoming[spec.version]):
+            if local is not None and _compare_revision(dict(local).get(spec.version, ""), incoming[spec.version]) >= 0:
                 if (
                     legacy_source is not None
-                    and str(dict(local).get(spec.version, "")) == str(incoming[spec.version])
+                    and _compare_revision(dict(local).get(spec.version, ""), incoming[spec.version]) == 0
                     and CentralJournalSyncService._normalized_hash(dict(local))
                     != CentralJournalSyncService._normalized_hash(incoming)
                 ):
@@ -316,7 +328,7 @@ class CentralJournalSyncService:
                 "SELECT updated_at FROM journal_sync_states WHERE collection=? AND owner=? AND document_key=?",
                 (collection, owner, document_key),
             ).fetchone()
-            if local is not None and str(local[0]) >= updated_at:
+            if local is not None and _compare_revision(local[0], updated_at) >= 0:
                 continue
             CentralJournalSyncService._record_sync_state(
                 connection, collection, document_key, document,
@@ -345,7 +357,7 @@ class CentralJournalSyncService:
             local = connection.execute(
                 f"SELECT {spec.version} FROM {spec.table} WHERE {where}{scope_clause}", key_values,
             ).fetchone()
-            if local is not None and str(local[0]) > str(deleted_at):
+            if local is not None and _compare_revision(local[0], deleted_at) > 0:
                 CentralJournalSyncService._record_sync_state(
                     connection, str(collection), str(document_key), {
                         "origin_broker": str(broker), "origin_environment": str(environment),
@@ -370,7 +382,7 @@ class CentralJournalSyncService:
             "WHERE collection=? AND owner=? AND document_key=?",
             (spec.collection, owner, document_key),
         ).fetchone()
-        return bool(row and bool(row[0]) and str(row[1]) >= value_updated_at)
+        return bool(row and bool(row[0]) and _compare_revision(row[1], value_updated_at) >= 0)
 
     @staticmethod
     def _record_sync_state(

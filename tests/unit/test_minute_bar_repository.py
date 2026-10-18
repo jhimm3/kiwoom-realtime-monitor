@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,9 +25,147 @@ from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository i
     MarketDataMetadataRepository,
 )
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+from kiwoom_monitor.infrastructure.persistence.local_bar_observations import local_minute_bar_observation
 
 
 class MinuteBarRepositoryTests(unittest.TestCase):
+    def test_aware_injected_clock_compares_legacy_kst_minutes_without_changing_keys(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        Database(path).initialize()
+        now = datetime(2026, 10, 16, 1, 1, 30, tzinfo=timezone.utc)
+        repository = MinuteBarRepository(path, now_provider=lambda: now)
+        bars = tuple(MinuteOhlcv(datetime(2026, 10, 16, 10, minute),
+                                 100, 105, 99, 104, 20, 1.25) for minute in (0, 1))
+        for with_metadata in (False, True):
+            code = "metadata" if with_metadata else "plain"
+            values = tuple(replace(bar, metadata=local_minute_bar_observation(
+                code, bar.minute, bar, available_at=now,
+                source="kiwoom-websocket-0B", actual_trade_value=True,
+                origin=ObservationOrigin.REALTIME,
+                completeness=DataCompleteness.IN_PROGRESS).metadata)
+                if with_metadata else bar for bar in bars)
+            repository.upsert_many({code: values})
+            metadata = MarketDataMetadataRepository(path)
+            for bar, expected in zip(bars, (DataCompleteness.COMPLETE, DataCompleteness.IN_PROGRESS)):
+                self.assertEqual(expected, metadata.load(
+                    MarketDatasetKind.MINUTE_BAR, code,
+                    bar.minute.isoformat(timespec="minutes")).completeness)
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual([
+                ("2026-10-16", code, bar.minute.isoformat(timespec="minutes"), 104, 20)
+                for code in ("metadata", "plain") for bar in bars
+            ], connection.execute("SELECT trade_date,stock_code,minute,close_price,volume "
+                                  "FROM minute_bars ORDER BY stock_code,minute").fetchall())
+
+    def test_live_batch_reads_each_metadata_row_once_inside_the_writer_transaction(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        Database(path).initialize()
+        now = datetime(2026, 10, 16, 10, 0, 30)
+        minute = now.replace(second=0)
+        bars = {f"{index:06d}": (MinuteOhlcv(minute, 100, 105, 99, 104, 20, 1.25),)
+                for index in range(1, 21)}
+        statements: list[str] = []
+        real_connect = sqlite3.connect
+
+        def traced_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.sqlite3.connect",
+                   side_effect=traced_connect), patch(
+                       "kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_wall_now",
+                       return_value=now):
+            MinuteBarRepository(path).upsert_many(bars)
+        self.assertEqual("BEGIN IMMEDIATE", statements[0])
+        self.assertEqual("COMMIT", statements[-1])
+        selects = [sql for sql in statements if sql.startswith("SELECT ")]
+        self.assertEqual(20, len(selects))
+        with closing(real_connect(path)) as connection:
+            self.assertEqual([(104, 20, 1.25)] * 20, connection.execute(
+                "SELECT close_price,volume,trade_value_eok FROM minute_bars ORDER BY stock_code"
+            ).fetchall())
+            self.assertEqual(20, connection.execute(
+                "SELECT COUNT(*) FROM market_data_observation_meta "
+                "WHERE completeness='in_progress' AND origin='realtime' AND source='kiwoom-websocket-0B'"
+            ).fetchone()[0])
+
+    def test_live_write_reuses_authority_without_losing_partial_missing_or_same_batch_updates(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        Database(path).initialize()
+        now = datetime(2026, 10, 16, 10, 1, 30)
+        minute = now.replace(minute=0, second=0)
+        key = minute.isoformat(timespec="minutes")
+        repository = MinuteBarRepository(path)
+        original = MinuteOhlcv(minute, 100, 105, 99, 104, 20, 1.25)
+        cases = [("query", DataCompleteness.COMPLETE, ObservationOrigin.QUERY, "kiwoom-ka10080", True),
+                 ("backfill", DataCompleteness.COMPLETE, ObservationOrigin.BACKFILLED, "backfill", True),
+                 ("nas", DataCompleteness.COMPLETE, ObservationOrigin.REALTIME, "NAS:kiwoom-websocket-0B", True),
+                 ("local", DataCompleteness.COMPLETE, ObservationOrigin.REALTIME, "kiwoom-websocket-0B", False),
+                 ("partial", DataCompleteness.PARTIAL, ObservationOrigin.QUERY, "kiwoom-ka10080", False),
+                 ("missing", DataCompleteness.MISSING, ObservationOrigin.REALTIME, "kiwoom-websocket-0B", False)]
+        metadata = MarketDataMetadataRepository(path)
+        with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_wall_now", return_value=now):
+            repository.upsert_many({code: (original,) for code, *_ in cases})
+            for code, state, origin, source, _protected in cases:
+                metadata.save(key, local_minute_bar_observation(
+                    code, minute, original, available_at=now, source=source,
+                    actual_trade_value=True, completeness=state, origin=origin))
+            replacement = replace(original, close_price=102, volume=30)
+            repository.upsert_many({code: (replacement,) for code, *_ in cases})
+            # A trusted first entry changes metadata before the duplicate key is processed.
+            trusted = local_minute_bar_observation(
+                "same", minute, original, available_at=now, source="kiwoom-ka10080",
+                actual_trade_value=False, completeness=DataCompleteness.COMPLETE,
+                origin=ObservationOrigin.QUERY)
+            repository.upsert_many({"same": (replace(original, metadata=trusted.metadata), replacement)})
+        with closing(sqlite3.connect(path)) as connection:
+            values = dict(connection.execute("SELECT stock_code,close_price FROM minute_bars"))
+        for code, state, origin, source, protected in cases:
+            with self.subTest(code=code):
+                saved = metadata.load(MarketDatasetKind.MINUTE_BAR, code, key)
+                self.assertEqual(104 if protected else 102, values[code])
+                self.assertEqual(state if protected else DataCompleteness.PARTIAL
+                                 if state in {DataCompleteness.PARTIAL, DataCompleteness.MISSING}
+                                 else DataCompleteness.COMPLETE, saved.completeness)
+                self.assertEqual(origin if protected else ObservationOrigin.REALTIME, saved.origin)
+        self.assertEqual(104, values["same"])
+        self.assertEqual(ObservationOrigin.QUERY, metadata.load(MarketDatasetKind.MINUTE_BAR, "same", key).origin)
+
+    def test_live_batch_failure_rolls_back_previous_metadata_and_retry_keeps_one_row_per_key(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        Database(path).initialize()
+        repository = MinuteBarRepository(path)
+        now = datetime(2026, 10, 16, 10, 0, 30)
+        bar = MinuteOhlcv(now.replace(second=0), 100, 105, 99, 104, 20, 1.25)
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import upsert_market_data_metadata
+        calls = 0
+
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("second metadata failed")
+            return upsert_market_data_metadata(*args, **kwargs)
+
+        with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_wall_now", return_value=now):
+            with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.upsert_market_data_metadata",
+                       side_effect=fail_second), self.assertRaisesRegex(RuntimeError, "second metadata failed"):
+                repository.upsert_many({"A": (bar,), "B": (bar,)})
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual((0, 0), (connection.execute("SELECT COUNT(*) FROM minute_bars").fetchone()[0],
+                                         connection.execute("SELECT COUNT(*) FROM market_data_observation_meta").fetchone()[0]))
+            repository.upsert_many({"A": (bar,), "B": (bar,)})
+            repository.upsert_many({"A": (bar,), "B": (bar,)})
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual([(104, 20)] * 2, connection.execute(
+                "SELECT close_price,volume FROM minute_bars ORDER BY stock_code").fetchall())
+            self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM market_data_observation_meta").fetchone()[0])
+
     @patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_wall_now",
            return_value=datetime(2026, 9, 10, 10, 15, 30))
     def test_open_0b_snapshot_replaces_provisional_bar_without_double_accumulating(self, clock) -> None:
@@ -287,9 +425,8 @@ class MinuteBarRepositoryTests(unittest.TestCase):
                 "kospi", (("2026-09-08T00:00", 1.0, 1.0, 1.0, 1.0, 1, 200.0),),
             )
 
-            with patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_today",
-                       return_value=date(2026, 9, 9)):
-                _hourly, comparisons = repository.load_top20_statistics(30)
+            repository.set_now_provider(lambda: datetime(2026,9,9))
+            _hourly, comparisons = repository.load_top20_statistics(30)
 
         row = next(value for value in comparisons if value[0].isoformat() == "2026-09-08")
         self.assertEqual((15.0, 200.0), (row[1], row[2]))
@@ -360,7 +497,7 @@ class MinuteBarRepositoryTests(unittest.TestCase):
     def test_top20_market_split_is_repaired_from_korean_krx_market_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"; Database(path).initialize()
-            repository = MinuteBarRepository(path); minute = datetime(2026, 9, 2, 9, 1)
+            repository = MinuteBarRepository(path, now_provider=lambda: datetime(2026,9,3,10,0)); minute = datetime(2026, 9, 2, 9, 1)
             connection = sqlite3.connect(path)
             try:
                 connection.executemany(
@@ -377,7 +514,14 @@ class MinuteBarRepositoryTests(unittest.TestCase):
                 connection.close()
             repository.upsert_top20_trade_value_index(minute, 15.0, ("005930", "196170"))
 
+            repository.load_top20_statistics(30)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM top20_statistics_daily_cache WHERE trade_date='2026-09-02'").fetchone()[0])
             self.assertEqual(repository.repair_top20_market_splits(), 1)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM top20_statistics_daily_cache WHERE trade_date='2026-09-02'").fetchone()[0])
+                self.assertIn('+09:00', connection.execute('SELECT updated_at FROM top20_trade_value_index').fetchone()[0])
+            repository.load_top20_statistics(30)
             loaded = repository.load_recent_top20_trade_value_index(10)
 
             self.assertEqual(loaded[0][4:7], (10.0, 5.0, 0.0))

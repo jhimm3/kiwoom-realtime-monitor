@@ -60,6 +60,8 @@ class TestNewsAi(unittest.TestCase):
           {"id":1,"summary":"첫째","category":"수주·계약","outlook":"긍정","confidence":80,"reason":"계약","positive_evidence":[],"negative_evidence":[]},
           {"id":2,"summary":"둘째","category":"공시·규제","outlook":"혼재","confidence":70,"reason":"변경","positive_evidence":[],"negative_evidence":[]}
         ]"""
+        import json
+        response = json.dumps(list(reversed(json.loads(response))), ensure_ascii=False)
         with patch("kiwoom_monitor.infrastructure.news_ai._gemini", return_value=(response, AIRequestUsage(1200, 300, 1500))) as request:
             results, usage = analyze_articles(
                 NewsAISettings("gemini", "key", "model"), "테스트기업",
@@ -70,6 +72,14 @@ class TestNewsAi(unittest.TestCase):
         assert [result.summary for result in results] == ["첫째", "둘째"]
         assert usage == AIRequestUsage(1200, 300, 1500)
 
+
+        for ids in ((1, 1), (1, 3), (0, 2)):
+            malformed = json.loads(response)
+            for row, identifier in zip(malformed, ids):
+                row["id"] = identifier
+            with self.subTest(ids=ids), patch("kiwoom_monitor.infrastructure.news_ai._gemini", return_value=(json.dumps(malformed), AIRequestUsage())):
+                with self.assertRaises(ValueError):
+                    analyze_articles(NewsAISettings("gemini", "key", "model"), "테스트기업", (("첫 기사", "첫 본문"), ("둘째 기사", "둘째 본문")))
 
     def test_ai_prompt_requires_the_selected_stock_perspective(self) -> None:
         response = '[{"id":1,"summary":"직접 관계 없음","category":"기타 증권뉴스","outlook":"판단 자료 부족","confidence":90,"reason":"단순 나열","positive_evidence":[],"negative_evidence":[]}]'
@@ -89,8 +99,8 @@ class TestNewsAi(unittest.TestCase):
         from urllib.error import HTTPError
 
         error = HTTPError("https://ai.test", 429, "limited", {}, None)
-        with patch("kiwoom_monitor.infrastructure.news_ai.urlopen", side_effect=error), \
-                patch("kiwoom_monitor.infrastructure.news_ai.time.sleep"):
+        with patch("kiwoom_monitor.infrastructure.news_ai.urlopen", side_effect=error) as request, \
+                patch("kiwoom_monitor.infrastructure.news_ai.time.sleep") as sleep:
             try:
                 _request("https://ai.test", {}, {})
             except NewsAIProviderError as raised:
@@ -98,3 +108,19 @@ class TestNewsAi(unittest.TestCase):
                 assert "호출 한도" in str(raised)
             else:
                 raise AssertionError("NewsAIProviderError가 발생해야 합니다.")
+
+        assert request.call_count == 3
+        assert [call.args[0] for call in sleep.call_args_list] == [1.0, 2.0]
+        for retry_after, delay in (("0", 1.0), ("99", 5.0)):
+            error = HTTPError("https://ai.test", 429, "limited", {"Retry-After": retry_after}, None)
+            with patch("kiwoom_monitor.infrastructure.news_ai.urlopen", side_effect=error) as request, patch("kiwoom_monitor.infrastructure.news_ai.time.sleep") as sleep:
+                with self.assertRaises(NewsAIProviderError):
+                    _request("https://ai.test", {}, {})
+                assert request.call_count == 3
+                assert [call.args[0] for call in sleep.call_args_list] == [delay, delay]
+        error = HTTPError("https://ai.test", 401, "unauthorized", {}, None)
+        with patch("kiwoom_monitor.infrastructure.news_ai.urlopen", side_effect=error) as request, patch("kiwoom_monitor.infrastructure.news_ai.time.sleep") as sleep:
+            with self.assertRaises(HTTPError):
+                _request("https://ai.test", {}, {})
+            assert request.call_count == 1
+            sleep.assert_not_called()

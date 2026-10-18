@@ -27,6 +27,7 @@ class NewsAIBackupService:
             columns = (
                 "stock_code", "identity", "provider", "model", "summary", "category", "outlook",
                 "confidence", "reason", "positive_evidence", "negative_evidence", "body_hash", "analyzed_at",
+                "theme_candidates",
             )
             rows = connection.execute(
                 f"SELECT {','.join(columns)} FROM stock_news_ai ORDER BY analyzed_at"
@@ -102,6 +103,15 @@ class NewsAIBackupService:
                             str(item.get("analyzed_at", kst_now().isoformat())),
                         )
                         for item in valid
+                    ],
+                )
+                # Older backups lack candidates and must retain any already
+                # present in the destination database.
+                connection.executemany(
+                    "UPDATE stock_news_ai SET theme_candidates=? WHERE stock_code=? AND identity=?",
+                    [
+                        (str(item["theme_candidates"]), str(item["stock_code"]), str(item["identity"]))
+                        for item in valid if "theme_candidates" in item
                     ],
                 )
                 connection.executemany(

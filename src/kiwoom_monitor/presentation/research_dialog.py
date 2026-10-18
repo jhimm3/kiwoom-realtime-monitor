@@ -66,13 +66,15 @@ def _record_research_operation_owner(files: Mapping[str, Path], process: object,
 class ResearchDialog(QDialog):
     """고정 JSON 요청을 낮은 우선순위의 별도 프로세스에서 실행한다."""
 
-    def __init__(self, state_dir: Path, parent=None, *, theme_repository: object | None = None) -> None:
+    def __init__(self, state_dir: Path, parent=None, *, theme_repository: object | None = None,
+                 now_provider=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("전략 연구")
         self.resize(880, 480)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._state_dir = Path(state_dir)
         self._theme_repository = theme_repository
+        self._now_provider = now_provider
         self._settings = QSettings("KiwoomMonitor", "ResearchDialog")
         self._manager = AuxiliaryProcessManager()
         self._result_path = self._state_dir / "last_research_result.json"
@@ -203,6 +205,7 @@ class ResearchDialog(QDialog):
         if self._historical_news_review_dialog is None:
             self._historical_news_review_dialog = HistoricalNewsReviewDialog(
                 self._state_dir, self, theme_repository=self._theme_repository,
+                now_provider=self._now_provider,
             )
         self._historical_news_review_dialog.show()
         self._historical_news_review_dialog.raise_()

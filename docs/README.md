@@ -8,6 +8,8 @@
 |---|---|
 | 실행 소스·배포 release·검증 결과 | [현재 상태](CURRENT_STATUS.md) |
 | 미완료·운영 확인·사용자 보류 | [남은 작업](OPEN_ITEMS.md) |
+| 실행 비용·구조·기능 연결 감사와 다음 리팩토링 | [R3 백로그](../REFACTOR_BACKLOG.md) — “다음”은 현재/다음 ID와 관련 코드부터 확인 |
+| 새 기능·수정의 책임/계약·비용·연결 검사 | [R3 기능별 책임 계약](architecture/r3-ownership.md#필요한-기능군부터-읽기) — 관련 기능군만 선택, 전체 감사 반복 없음 |
 | 제품 방향과 개발 순서 | [개발 로드맵](../FUTURE_DEVELOPMENT_ROADMAP.md) |
 | 전체 목표 설계·재조립/신규 개발 비교 | [AI Trading Intelligence 전체 설계](AI_TRADING_SYSTEM_REDESIGN.md) — 선택을 위한 설계안, 현재 구현과 구분 |
 | 원래 종합 명세와 현재 개발 방향 대조 | [2026-10-14 종합 명세 대조 감사](AI_TRADING_INTEGRATION_ALIGNMENT_AUDIT_20261014.md) — 정책별 자료·가격·모델 지원·순자산·비상정지와 미완료 범위 |
@@ -34,6 +36,7 @@ DB 관계도의 NAS 카탈로그는 **2026-10-01 실측 snapshot**이다. 최신
 | 목적 | 문서 |
 |---|---|
 | 기능 보존 절차와 현재 검증 공백 | [기능 보존 검증](DEPENDENCY_REFACTOR_VERIFICATION_PLAN.md) · [CI 계약과 최종 테스트 감사](TEST_FINAL_QUALITY_AUDIT.md) |
+| 감사 이후 변경분의 테스트 관리 | [증분 검토·원장·실행/CI 확인](INCREMENTAL_TEST_REVIEW.md) |
 | DB 연결·transaction 보존 | [DB 리팩터링 기준선](db_refactoring/README.md) · [공통 DB 접근/관측](COMMON_DB_ACCESS_OBSERVABILITY_REVIEW.md) |
 | writer 등록과 저장 경로 | [저장 경로 감사](KIWOOM_STORAGE_WRITE_AUDIT.md) |
 | 부하 후보와 외부 입력 수명 | [전체 부하 감사](WHOLE_APP_LOAD_OPTIMIZATION_REVIEW.md) · [외부 입력 lifecycle 감사](EXTERNAL_INPUT_LIFECYCLE_AUDIT.md) |

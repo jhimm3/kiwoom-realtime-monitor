@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from kiwoom_monitor.application.historical_high_service import HistoricalHighCache, HistoricalHighEvidence, HistoricalHighService, HistoricalHighTarget
 
@@ -158,11 +159,12 @@ class HistoricalHighServiceTests(unittest.TestCase):
                 return {"stk_mth_pole_chart_qry": [{"dt": "20241002", "high_pric": "17880"}]}, False, ""
 
         client = Client()
-        target = HistoricalHighService(client).load("003350")
+        with patch('kiwoom_monitor.application.historical_high_service.kst_today', return_value=date(2030,1,2)):
+            target = HistoricalHighService(client).load("003350")
 
         self.assertEqual(17_880, target.price)
         monthly_body = next(body for api_id, body in client.bodies if api_id == "ka10083")
-        self.assertEqual(date.today().strftime("%Y%m%d"), monthly_body["base_dt"])
+        self.assertEqual("20300102", monthly_body["base_dt"])
 
     def test_source_as_of_is_used_for_adjustment_chart_requests(self) -> None:
         class Client:

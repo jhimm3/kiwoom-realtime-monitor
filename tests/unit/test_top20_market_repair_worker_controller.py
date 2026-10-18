@@ -53,6 +53,15 @@ class Top20MarketRepairWorkerControllerTests(unittest.TestCase):
         self.assertTrue(controller.start(repository))  # type: ignore[arg-type]
         self.assertTrue(controller.start(object()))  # type: ignore[arg-type]
         self.assertEqual([repository], calls)
+        self.assertTrue(controller.is_running)
+        worker.running = False
+        worker.finished.emit()
+        self.assertIsNone(controller.worker)
+        self.assertFalse(controller.is_running)
+        self.assertTrue(controller.start(repository))
+        self.assertIs(worker, controller.worker)
+        self.assertTrue(controller.is_running)
+        self.assertEqual(2, len(calls))
 
     def test_invalid_factory_rejects_start(self) -> None:
         failures: list[str] = []

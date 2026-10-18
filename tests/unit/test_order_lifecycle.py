@@ -594,6 +594,12 @@ class OrderLifecycleTests(unittest.TestCase):
         expired = lifecycle.submit("intent-1", _account())
         self.assertEqual(OrderState.REJECTED, expired.state)
         self.assertEqual(0, transport.submit_calls)
+        wrong_account_intent = replace(_intent(), intent_id="wrong-account")
+        lifecycle.queue(wrong_account_intent)
+        wrong_account = lifecycle.submit(wrong_account_intent.intent_id, _account("account-2"))
+        self.assertEqual(OrderState.REJECTED, wrong_account.state)
+        self.assertEqual("account mismatch", self.repository.events(wrong_account_intent.intent_id)[-1]["reason"])
+        self.assertEqual(0, transport.submit_calls)
 
     def test_distinct_same_second_fills_are_deduplicated_by_execution_id(self) -> None:
         transport = _Transport()

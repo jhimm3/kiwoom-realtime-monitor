@@ -49,7 +49,7 @@ class NaverNewsSettingsDialog(QDialog):
     def __init__(self, config: LocalNaverNewsConfig, parent: QWidget | None = None,
                  *, database_path: Path | None = None, section: str = "news",
                  operational_client: CentralOperationalSettingsClient | None = None,
-                 chatgpt_auth: ChatGPTAuth | None = None) -> None:
+                 chatgpt_auth: ChatGPTAuth | None = None, now_provider=None) -> None:
         super().__init__(parent)
         self._config = config
         self._operational_client = operational_client
@@ -192,7 +192,7 @@ class NaverNewsSettingsDialog(QDialog):
         ai_guide.setWordWrap(True)
         usage_text = "오늘 앱 기록: 아직 API 요청 통계를 확인할 수 없습니다."
         if database_path is not None:
-            requests, input_tokens, output_tokens, total_tokens = NewsAIRepository(database_path).daily_usage()
+            requests, input_tokens, output_tokens, total_tokens = NewsAIRepository(database_path, now_provider=now_provider).daily_usage()
             usage_text = (
                 f"오늘 앱 기록: API 요청 {requests}회 · 입력 {input_tokens:,} · "
                 f"출력 {output_tokens:,} · 합계 {total_tokens:,} 토큰"

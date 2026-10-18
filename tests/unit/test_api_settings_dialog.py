@@ -149,6 +149,9 @@ class ApiSettingsDialogTests(unittest.TestCase):
                 }
                 dialog._load_nas_operational_settings()
                 wait_until(lambda: dialog._operations_worker is None)
+                dialog.show()
+                wait_until(lambda: dialog._operations_worker is None)
+                self.assertTrue(dialog.isVisible())
                 dialog._nas_ai_daily_limit.setValue(21)
                 client.save.side_effect = RuntimeError("revision conflict")
                 dialog._validate_and_accept()
@@ -156,6 +159,7 @@ class ApiSettingsDialogTests(unittest.TestCase):
             client.save.assert_called_once_with({"ai_daily_limit": 21})
             self.assertEqual(21, dialog._nas_ai_daily_limit.value())
             self.assertIn("revision conflict", dialog._nas_operations_status.text())
+            self.assertTrue(dialog.isVisible())
 
     def test_local_server_mode_fills_safe_local_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

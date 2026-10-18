@@ -551,6 +551,12 @@ class MainWindow(QMainWindow):
             ranking_loader=ranking_loader, api_runtime_factory=api_runtime_factory,
             market_data_client=market_data_client,
         )
+        for repository in (minute_bar_repository, daily_bar_repository, theme_store):
+            bind_clock = getattr(repository, "set_now_provider", None)
+            if callable(bind_clock):
+                # The controller reads the currently applied API runtime, so
+                # settings reloads also change the clock used by these stores.
+                bind_clock(self._app_controller.ranking_now)
         self._fundamentals: dict[str, StockFundamentals] = {}
         self._realtime_upper_limits: dict[str, int] = {}
         self._daily_highs: dict[str, DailyHighTargets] = {}
@@ -599,7 +605,8 @@ class MainWindow(QMainWindow):
             if candidate_client is not None else None
         )
         self._research_dialog = (
-            ResearchDialog(research_data_dir, self, theme_repository=self._theme_store) if research_data_dir is not None else None
+            ResearchDialog(research_data_dir, self, theme_repository=self._theme_store,
+                           now_provider=self._app_controller.ranking_now) if research_data_dir is not None else None
         )
         self._mock_automation_dialog = (
             MockAutomationDialog(
@@ -1076,7 +1083,7 @@ class MainWindow(QMainWindow):
             start_nxt_eligibility=self._start_nxt_eligibility_loading,
             start_catalog=self._start_daily_krx_catalog_sync,
         ))
-        self._app_controller.configure_runtime(AppRuntimeActions(apply_runtime=self._apply_api_runtime_view))
+        self._app_controller.configure_runtime(AppRuntimeActions(apply_runtime=self._apply_api_runtime_view, capture_state=self._capture_api_runtime_view))
         self._app_controller.ranking_started.connect(self._on_ranking_started)
         self._app_controller.ranking_finished.connect(self._on_ranking_worker_finished)
         self._app_controller.ranking_failed.connect(self._on_ranking_failed)
@@ -1208,6 +1215,7 @@ class MainWindow(QMainWindow):
                 database_path=self._news_window.database_path,
                 section="connections",
                 operational_client=operational_client,
+                now_provider=self._app_controller.ranking_now,
             )
         except (OSError, ValueError):
             QMessageBox.warning(self, "뉴스 API 설정", "저장된 뉴스 API 설정을 읽지 못했습니다. 설정 파일을 다시 만들어 주세요.")
@@ -2266,6 +2274,18 @@ class MainWindow(QMainWindow):
     def _on_api_reload_started(self) -> None:
         self._set_api_status("API: 설정 적용 중…", "#B36B00")
 
+    def _capture_api_runtime_view(self):
+        names = ("_market_cap_reference_codes", "_market_cap_reference_pending", "_realtime_market_caps", "_minute_history_codes")
+        previous = {name: (getattr(self, name), getattr(self, name).copy()) for name in names}
+        route, aggregator = self._active_api_route, self._minute_aggregator
+        def restore():
+            self._active_api_route, self._minute_aggregator = route, aggregator
+            for name, (original, contents) in previous.items():
+                original.clear()
+                original.update(contents)
+                setattr(self, name, original)
+        return restore
+
     def _apply_api_runtime_view(self, runtime: dict[str, object]) -> None:
         source_mode = str(runtime.get("source_mode", ""))
         self._active_api_route = "local" if source_mode == "local" else "central_waiting"
@@ -2642,21 +2662,33 @@ class MainWindow(QMainWindow):
         self._ranked_stock_names.clear()
         self._visible_theme_frequency = visible_theme_frequency(stocks, self._themes)
         self._prepare_top20_trade_value_index(codes, self._ranking_now())
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_markets"):
-            self._stock_markets.update(self._stock_lookup.load_markets(self._top20_realtime_codes(codes)))
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_last_prices"):
-            self._current_prices.update(self._stock_lookup.load_last_prices(codes))
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_intraday_highs"):
-            self._today_high_prices.update(self._stock_lookup.load_intraday_highs(codes, self._ranking_now().date()))
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_fundamentals"):
-            self._fundamentals.update(self._stock_lookup.load_fundamentals(codes))
+        saved_nxt: dict[str, bool] = {}
+        if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_ranking_cache"):
+            cached = self._stock_lookup.load_ranking_cache(
+                codes, self._top20_realtime_codes(codes), self._ranking_now().date(),
+            )
+            self._stock_markets.update(cached.markets)
+            self._current_prices.update(cached.last_prices)
+            self._today_high_prices.update(cached.intraday_highs)
+            self._fundamentals.update(cached.fundamentals)
+            saved_nxt = cached.nxt_enabled
+        else:
+            # Partial lookups used by embedded/offline consumers keep their existing contract.
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_markets"):
+                self._stock_markets.update(self._stock_lookup.load_markets(self._top20_realtime_codes(codes)))
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_last_prices"):
+                self._current_prices.update(self._stock_lookup.load_last_prices(codes))
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_intraday_highs"):
+                self._today_high_prices.update(self._stock_lookup.load_intraday_highs(codes, self._ranking_now().date()))
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_fundamentals"):
+                self._fundamentals.update(self._stock_lookup.load_fundamentals(codes))
+            if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_nxt_enabled"):
+                saved_nxt = self._stock_lookup.load_nxt_enabled(codes, self._ranking_now().strftime("%Y-%m-%d"))
         self._load_cached_daily_highs(codes)
         self._load_cached_historical_highs(codes)
-        if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_nxt_enabled"):
-            saved_nxt = self._stock_lookup.load_nxt_enabled(codes, self._ranking_now().strftime("%Y-%m-%d"))
-            self._nxt_checked_codes.update(saved_nxt)
-            self._nxt_enabled_codes.update(code for code, enabled in saved_nxt.items() if enabled)
-            self._nxt_enabled_codes.difference_update(code for code, enabled in saved_nxt.items() if not enabled)
+        self._nxt_checked_codes.update(saved_nxt)
+        self._nxt_enabled_codes.update(code for code, enabled in saved_nxt.items() if enabled)
+        self._nxt_enabled_codes.difference_update(code for code, enabled in saved_nxt.items() if not enabled)
         self._start_market_cap_reference_loading(codes)
         use_ranking_price = self._is_after_hours_data_pause()
         for row, stock in enumerate(stocks):

@@ -34,6 +34,16 @@ class KiwoomRestClientTests(unittest.TestCase):
         self.assertIsNone(real._last_request_at)
         self.assertIsNone(mock._last_request_at)
 
+        with patch("kiwoom_monitor.infrastructure.kiwoom_rest.client.time.monotonic", return_value=100.), patch("kiwoom_monitor.infrastructure.kiwoom_rest.client.time.sleep") as sleep:
+            real._wait_for_request_slot()
+            mock._wait_for_request_slot()
+            sleep.assert_not_called()
+            real._wait_for_request_slot()
+            self.assertAlmostEqual(.2, sleep.call_args.args[0])
+            mock._wait_for_request_slot()
+            self.assertAlmostEqual(1., sleep.call_args.args[0])
+            self.assertEqual(2, sleep.call_count)
+
     def test_reuses_an_unexpired_token(self) -> None:
         requests = []
 
@@ -88,11 +98,27 @@ class KiwoomRestClientTests(unittest.TestCase):
             client.get_access_token()
 
     def test_waits_for_configured_request_interval(self) -> None:
-        client = KiwoomRestClient(KiwoomSettings("key", "secret", "mock"), request_interval_seconds=2.0)
-        client._last_request_at = 100.0
-        with patch("kiwoom_monitor.infrastructure.kiwoom_rest.client.time.monotonic", side_effect=(101.25, 101.25)), patch("kiwoom_monitor.infrastructure.kiwoom_rest.client.time.sleep") as sleep:
-            client._wait_for_request_slot()
-        sleep.assert_called_once_with(0.75)
+        clock = [100.0]
+        sent = []
+
+        def opener(request, timeout):
+            sent.append((clock[0], request.get_header("Api-id")))
+            return FakeResponse({"token": "test-token", "expires_dt": "20260815090000", "items": []})
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        client = KiwoomRestClient(
+            KiwoomSettings("key", "secret", "mock"), opener=opener,
+            clock=lambda: datetime(2026, 8, 14, tzinfo=UTC), request_interval_seconds=2.0,
+        )
+        with patch("kiwoom_monitor.infrastructure.kiwoom_rest.client.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("kiwoom_monitor.infrastructure.kiwoom_rest.client.time.sleep", side_effect=advance):
+            client.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "1"})
+            clock[0] += 0.75
+            client.request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "1"})
+
+        self.assertEqual([(100.0, None), (102.0, "ka00198"), (104.0, "ka00198")], sent)
 
     def test_retries_when_the_remote_host_resets_the_connection(self) -> None:
         responses = iter(

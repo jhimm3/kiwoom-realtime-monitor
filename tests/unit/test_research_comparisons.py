@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from kiwoom_monitor.application.research_evaluation import build_research_comparison
@@ -94,9 +95,14 @@ class ResearchComparisonTests(unittest.TestCase):
             repository = ResearchRepository(Path(directory) / "research.sqlite3")
             for run_id in ("base", "variant"):
                 repository.start_run(run_id, {}, {})
+            with self.assertRaisesRegex(ValueError, "completed"):
+                repository.save_research_comparison(comparison)
+            for run_id in ("base", "variant"):
                 repository.finish_run(run_id, f"hash-{run_id}")
             self.assertTrue(repository.save_research_comparison(comparison))
             self.assertFalse(repository.save_research_comparison(comparison))
+            with self.assertRaisesRegex(ValueError, "immutable"):
+                repository.save_research_comparison(replace(comparison, status="INELIGIBLE"))
             loaded = repository.load_research_comparison(comparison.comparison_id)
         self.assertEqual(comparison.comparison_id, loaded["comparison_id"])
 

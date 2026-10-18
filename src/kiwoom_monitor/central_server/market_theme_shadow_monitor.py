@@ -998,10 +998,16 @@ class MarketThemeShadowRuntime:
         end, wanted = key[1:3]
         if self._market_minute_cache is not None and self._market_minute_cache[0] == key:
             return self._market_minute_cache[1:]
+        day_start = datetime.fromisoformat(key[0]).replace(tzinfo=timezone(timedelta(hours=9)))
+        # Intersect the existing datetime window with the requested KST day.
+        # At midnight the two-second fence can still end in the previous day.
+        start_minute = max(end - timedelta(minutes=10), day_start).astimezone(day_start.tzinfo).strftime('%H:%M')
+        end_minute = max(end, day_start).astimezone(day_start.tzinfo).strftime('%H:%M')
         rows, errors = [], {}
         for code, venue in wanted:
             try:
-                loaded = await self._collector.load_live_minute_bars(code, key[0], venue)
+                loaded = await self._collector.load_live_minute_bars(code, key[0], venue,
+                    start_minute=start_minute, end_minute=end_minute)
                 self._market_minute_reads += 1
                 for row in loaded or ():
                     at = datetime.fromisoformat(f"{row['trading_date']}T{row['minute']}").replace(tzinfo=timezone(timedelta(hours=9)))

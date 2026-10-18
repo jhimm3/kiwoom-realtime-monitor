@@ -112,6 +112,7 @@ class CentralContentClient:
     def load_news_history(
         self, kind: str, *, target: str = "", identity: str = "",
         as_of: float | None = None, limit: int = 100, stock_code: str = "",
+        before_revision_id: str = "",
     ) -> dict[str, Any]:
         query: dict[str, object] = {
             "target": target, "identity": identity, "limit": max(1, min(limit, 1000)),
@@ -120,6 +121,8 @@ class CentralContentClient:
             query["as_of"] = max(0.0, float(as_of))
         if stock_code:
             query["stock_code"] = stock_code
+        if before_revision_id:
+            query["before_revision_id"] = before_revision_id
         return self._request("GET", f"/api/v1/news/history/{kind}?{urlencode(query)}")
 
     def claim_historical_news_job(self, stage: str,

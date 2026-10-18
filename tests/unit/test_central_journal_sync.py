@@ -405,11 +405,15 @@ class CentralJournalSyncServiceTests(unittest.TestCase):
             path = Path(temporary) / "journal.sqlite3"
             connection = sqlite3.connect(path)
             connection.execute("CREATE TABLE journal_settings(setting_key TEXT PRIMARY KEY,value_json TEXT,updated_at TEXT)")
+            connection.execute("INSERT INTO journal_settings VALUES(?,?,?)", (
+                "personal_trade_rules", '["old"]', "2026-09-08T10:00:00+09:00",
+            ))
+            connection.commit()
             connection.close()
             client = _Client()
             client.remote["journal_settings"] = [{
                 "owner": "default", "key": "personal_trade_rules",
-                "document": {"setting_key": "personal_trade_rules", "value_json": "[\"rule\"]", "updated_at": "2026-09-08T10:00:00"},
+                "document": {"setting_key": "personal_trade_rules", "value_json": "[\"rule\"]", "updated_at": "2026-09-08T02:00:00Z"},
             }]
 
             CentralJournalSyncService(client).sync(path)  # type: ignore[arg-type]
@@ -419,6 +423,41 @@ class CentralJournalSyncServiceTests(unittest.TestCase):
                 "SELECT value_json FROM journal_settings WHERE setting_key='personal_trade_rules'"
             ).fetchone()[0])
             connection.close()
+
+    def test_mixed_offset_tombstones_compare_instants_without_resurrection(self) -> None:
+        for value_at, deletion_at, deleted, undelete in (
+            ("2026-09-08T10:00:00+09:00", "2026-09-08T02:00:00Z", True, False),
+            ("2026-09-08T02:00:00Z", "2026-09-08T10:00:00+09:00", False, False),
+            ("2026-09-08T02:00:00Z", "2026-09-08T10:00:00+09:00", False, True),
+            ("2026-09-08T10:00:00", "2026-09-08T01:00:00Z", True, False),
+        ):
+            with self.subTest(value_at=value_at, deletion_at=deletion_at), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "journal.sqlite3"
+                JournalRepository(path)
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("INSERT INTO journal_settings VALUES(?,?,?)", ("strategy_packs", '["kept"]', value_at))
+                    connection.execute(
+                        "INSERT INTO journal_sync_states(collection,owner,document_key,origin_broker,origin_environment,origin_account_ref,canonical_account_ref,is_deleted,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        ("journal_settings", "legacy", "strategy_packs", "legacy", "unknown", "legacy-unassigned", "legacy-unassigned", 1, deletion_at),
+                    )
+                client = _Client()
+                client.remote["journal_settings"] = [{"owner": "default", "key": "strategy_packs", "document": {
+                    "setting_key": "strategy_packs", "value_json": '["kept"]', "updated_at": value_at,
+                }}]
+                # A newer remote non-deletion must also replace an older state.
+                if undelete:
+                    client.remote["journal_sync_states"] = [{"owner": "legacy", "key": "strategy_packs", "document": {
+                        "collection": "journal_settings", "owner": "legacy", "document_key": "strategy_packs",
+                        "is_deleted": False, "updated_at": value_at,
+                    }}]
+                for _ in range(2):
+                    CentralJournalSyncService(client).sync(path)
+                    with closing(sqlite3.connect(path)) as connection:
+                        row = connection.execute("SELECT value_json,updated_at FROM journal_settings WHERE setting_key='strategy_packs'").fetchone()
+                        state = connection.execute("SELECT is_deleted,updated_at FROM journal_sync_states WHERE collection='journal_settings' AND owner='legacy' AND document_key='strategy_packs'").fetchone()
+                    self.assertEqual(None if deleted else ('["kept"]', value_at), row)
+                    self.assertEqual(int(deleted), state[0])
+                    self.assertEqual(deletion_at if deleted else value_at, state[1])
 
     def test_fills_reviews_and_entry_snapshots_are_uploaded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

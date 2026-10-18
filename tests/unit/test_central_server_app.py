@@ -245,7 +245,7 @@ async def capture_realtime_asgi_contract(app_factory, database_path, with_collec
     from kiwoom_monitor.central_server.realtime_hub import RealtimeSubscriber
 
     records, tasks, calls = [], [], []
-    store = SQLiteQueryStore(database_path)
+    store = SQLiteQueryStore(database_path, now_provider=lambda: datetime.fromtimestamp(2000.0, KST))
     store.initialize()
     fresh = {"type": "trade", "payload": {"code": "005930", "current_price": 70000}}
     market = {"type": "market_state", "payload": {"market": "kospi"}}
@@ -295,7 +295,6 @@ async def capture_realtime_asgi_contract(app_factory, database_path, with_collec
         with ExitStack() as stack:
             stack.enter_context(patch.dict(app_factory.__globals__, {"create_query_store": lambda *a, **k: store,
                 "CentralRealtimeCollector": lambda *a, **k: Collector()}))
-            stack.enter_context(patch("kiwoom_monitor.central_server.database_realtime_snapshot.time", return_value=2000.0))
             settings = CentralServerSettings(f"sqlite:///{database_path}", "private-token",
                 kiwoom_app_key="controlled-key" if with_collector else "",
                 kiwoom_secret_key="controlled-secret" if with_collector else "",
@@ -397,7 +396,6 @@ def diagnostic_run_contract_app(app_factory, database_path, mode):
     try:
         with ExitStack() as stack:
             stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
-            stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.object(workloads, "control_path", return_value=control_path if mode != "absent" else None))
             stack.enter_context(patch.object(sampling, "read_host_snapshot", side_effect=host))
             stack.enter_context(patch.object(sampling, "read_postgres_snapshot", side_effect=postgres))
@@ -688,7 +686,7 @@ def capture_diagnostic_read_http_contract(client, app, store, request_store, con
         assert status == response.status_code, (name, status, response.status_code, response.text)
         assert before == snapshot(), (name, "diagnostic read changed application database")
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
-                      "body": response.json(), "storage_hash": contract_storage_hash(database_path)})
+                      "body": response.json(), "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0))})
         return response.json()
     paths = ("resources", "workloads", "market-bar-saves", "writers", "db-calls",
              "news-job-claim-plan", "news-job-claim-readonly-analyze")
@@ -940,7 +938,6 @@ def operations_contract_app(app_factory, database_path, configured):
         with ExitStack() as stack:
             stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_shadow_state.datetime", FixedNow))
-            stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.dict(app_factory.__globals__, {"create_query_store": owned_store,
                 "CentralRestBroker": MagicMock(return_value=broker), "MarketEventService": MagicMock(return_value=services["condition"]),
                 "YahooDelayedMarketCollector": MagicMock(return_value=services["external"])}))
@@ -988,8 +985,15 @@ def capture_operations_http_contract(client, app, store, request_store, services
         if method == "GET" or status in {401, 409, 422}:
             assert before == after, (name, "rejected/read request changed storage")
         current = app.state.candidate_monitor
+        # App-owned writes now use the shared broker clock. Compare the actual
+        # receipt before projecting only that field to the historical fixture.
+        receipt_now = datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp()
+        stored = store.load_documents("server_operational_settings", "global", 1)
+        for value in stored:
+            assert value["updated_at"] == receipt_now, (name, value["updated_at"], receipt_now)
+            value["updated_at"] = 2000.0
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
-            "storage_hash": contract_storage_hash(database_path), "stored": store.load_documents("server_operational_settings", "global", 1),
+            "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(receipt_now, 2000.0)), "stored": stored,
             "events": list(events), "candidate_index": next((i for i, monitor in enumerate(monitors) if monitor is current), None)})
         return response.json()
 
@@ -1193,7 +1197,7 @@ def market_query_contract_app(app_factory, database_path, *, configured):
             value = datetime(2026, 10, 10, 3, tzinfo=timezone.utc)
             return value.astimezone(tz) if tz else value
 
-    store = SQLiteQueryStore(database_path)
+    store = SQLiteQueryStore(database_path, now_provider=lambda: datetime(2026, 10, 10, 3, tzinfo=timezone.utc))
     broker = MagicMock(spec=CentralRestBroker)
     broker.start, broker.close = AsyncMock(), AsyncMock()
     broker.request = AsyncMock(return_value=BrokerResult({"source": "broker", "value": 9}, True, "cursor-2", True))
@@ -1215,7 +1219,6 @@ def market_query_contract_app(app_factory, database_path, *, configured):
                 stack.enter_context(patch(f"kiwoom_monitor.central_server.{module}.datetime", FixedNow))
             stack.enter_context(patch("kiwoom_monitor.central_server.database_observation_writes.datetime", FixedNow))
             stack.enter_context(patch("uuid.uuid4", side_effect=(uuid.UUID(int=value) for value in range(1, 1000))))
-            stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.dict(app_factory.__globals__, {"create_query_store": owned_store,
                 "CentralRestBroker": MagicMock(return_value=broker)}))
             stack.enter_context(patch("kiwoom_monitor.central_server.realtime_collector.CentralRealtimeCollector.start", new_callable=AsyncMock))
@@ -1276,7 +1279,7 @@ def capture_market_query_http_contract(client, app, store, broker, request_store
         if stored_hash() != before:
             raise AssertionError((name, "HTTP query changed native archive"))
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
-            "storage_hash": contract_storage_hash(database_path), "store_calls": {key: [(call.args, call.kwargs) for call in spy.call_args_list]
+            "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0)), "store_calls": {key: [(call.args, call.kwargs) for call in spy.call_args_list]
                                                        for key, spy in spies.items()},
             "broker_calls": [(call.args, call.kwargs) for call in broker.request.call_args_list] if broker is not None else []})
 
@@ -1328,7 +1331,7 @@ def capture_market_query_http_contract(client, app, store, broker, request_store
 def market_event_contract_app(app_factory, database_path, *, configured):
     """Native event history/current cohort; isolate existing network producers only."""
     from kiwoom_monitor.central_server.market_events import MarketEventService
-    store = SQLiteQueryStore(database_path)
+    store = SQLiteQueryStore(database_path, now_provider=lambda: datetime(2026, 10, 10, 3, tzinfo=timezone.utc))
     service = MagicMock(spec=MarketEventService) if configured else None
     app_stores = []
     original_factory = app_factory.__globals__["create_query_store"]
@@ -1352,7 +1355,6 @@ def market_event_contract_app(app_factory, database_path, *, configured):
     try:
         with ExitStack() as stack:
             stack.enter_context(fixed_contract_clock(app_factory, FixedNow))
-            stack.enter_context(patch("kiwoom_monitor.central_server.database_documents.time", return_value=2000.0))
             stack.enter_context(patch.dict(app_factory.__globals__, {
                 "MarketEventService": MagicMock(return_value=service), "create_query_store": owned_store,
             }))
@@ -1425,7 +1427,7 @@ def capture_market_event_http_contract(client, store, service, database_path, re
             raise AssertionError((name, "condition document query arguments", documents.call_args_list))
         cases.append({"name": name, "request": {"path": path, "params": params, "authenticated": authenticated},
             "status": response.status_code, "headers": {k: response.headers[k] for k in ("content-type", "content-length")},
-            "body": response.json(), "database_sha256": contract_storage_hash(database_path), "runtime_calls": runtime_calls,
+            "body": response.json(), "database_sha256": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0)), "runtime_calls": runtime_calls,
             "store_calls": {key: [{"args": call.args, "kwargs": call.kwargs} for call in spy.call_args_list]
                             for key, spy in (("history", history), ("current", current), ("condition", documents))}})
 
@@ -1457,7 +1459,7 @@ def market_read_contract_app(app_factory, database_path):
     from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
     from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
     from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
-    store = SQLiteQueryStore(database_path)
+    store = SQLiteQueryStore(database_path, now_provider=lambda: datetime.fromtimestamp(clock, KST))
     at = datetime(2026, 9, 14, 10, 4, 40, tzinfo=KST)
     clock = datetime(2026, 9, 14, 16, tzinfo=KST).timestamp()
 
@@ -1476,7 +1478,7 @@ def market_read_contract_app(app_factory, database_path):
             stack.enter_context(patch("kiwoom_monitor.central_server.minute_bars.uuid.uuid4",
                                      side_effect=(uuid.UUID(int=value) for value in range(1, 100))))
             store.initialize()
-            for module in ("database_documents", "database_datasets"):
+            for module in ("database_datasets",):
                 stack.enter_context(patch("kiwoom_monitor.central_server." + module + ".time", return_value=clock))
             base = {"code": "005930", "trading_date": "2026-09-14", "minute": "10:00", "open": 100,
                     "high": 110, "low": 90, "close": 105, "volume": 10, "trade_value_million_won": 20, "updated_at": 1.0}
@@ -1533,13 +1535,19 @@ def capture_market_read_http_contract(client, app, store, collectors, database_p
 
     def request(name, path, *, authenticated=True, **params):
         before = stored_hash()
-        normalized_before = contract_storage_hash(database_path)
+        receipt_clock = datetime(2026, 9, 14, 16, tzinfo=KST)
+        historical_observation_clock = datetime(2026, 10, 10, 3, tzinfo=timezone.utc)
+        normalized_before = contract_storage_hash(database_path,
+            document_receipt_clock=(receipt_clock.timestamp(), receipt_clock.timestamp()),
+            observation_receipt_clock=(receipt_clock, historical_observation_clock))
         response = client.get("/api/v1/market/" + path, params=params,
             headers={"Authorization": "Bearer private-token"} if authenticated else {})
         assert before == stored_hash(), (name, "market read changed native storage")
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
                       "body": response.json(), "stored_before": normalized_before,
-                      "stored_after": contract_storage_hash(database_path)})
+                      "stored_after": contract_storage_hash(database_path,
+                          document_receipt_clock=(receipt_clock.timestamp(), receipt_clock.timestamp()),
+                          observation_receipt_clock=(receipt_clock, historical_observation_clock))})
 
     common = {"code": "005930", "trading_date": "2026-09-14"}
     paths = {"minute-bars": common, "recent-minute-bars": {"code": "005930", "end_date": "2026-09-14", "trading_days": 2},
@@ -1726,8 +1734,13 @@ def content_contract_app(app_factory, database_path):
     )
     ids = itertools.count(1)
     clock = [1000.0]
+    class ContentClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime.fromtimestamp(clock[0], KST)
+            return value.astimezone(tz) if tz else value
     try:
-        with patch("kiwoom_monitor.central_server.database_documents.time", side_effect=lambda: clock[0]), \
+        with patch.dict(app_factory.__globals__, {"datetime": ContentClock}), \
                 patch("uuid.uuid4", side_effect=lambda: uuid.UUID(int=next(ids))):
             yield app_factory(settings), store, clock
     finally:
@@ -2371,6 +2384,12 @@ class CentralServerAppTests(unittest.TestCase):
             for insertion in news_additions["route_insertions"]:
                 position = case["route_order"].index(insertion["before"])
                 case["route_order"][position:position] = insertion["paths"]
+            # The optional revision cursor fixes tied-time export pagination;
+            # all pre-existing parameters, auth and response schemas remain exact.
+            case["schema"]["paths"]["/api/v1/news/history/{kind}"]["get"]["parameters"].insert(-1, {
+                "name": "before_revision_id", "in": "query", "required": False,
+                "schema": {"type": "string", "maxLength": 200, "default": "", "title": "Before Revision Id"},
+            })
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -2582,6 +2601,9 @@ class CentralServerAppTests(unittest.TestCase):
         # minute rows; every existing value, auth response and storage hash stays checked.
         for case in expected["cases"]:
             body = case["body"]
+            if isinstance(body, dict) and "market_caps" in body:
+                for value in body["market_caps"]:
+                    value["observed_at"] = datetime.fromisoformat(value["observed_at"]).astimezone(KST).isoformat()
             if isinstance(body, dict) and "bars" in body and "daily" not in case["name"] and "external" not in case["name"]:
                 for row in body["bars"]:
                     row["metadata"] = {"completeness": "unconfirmed"}
@@ -2800,43 +2822,6 @@ class CentralServerAppTests(unittest.TestCase):
                 self.assertEqual(400, client.get(endpoint,
                     params={"start": now - 10, "end": now, "mode": "invalid"},
                     headers=headers).status_code)
-
-    def test_news_job_claim_plan_api_requires_auth_and_postgres(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            settings = CentralServerSettings(
-                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
-            )
-            with TestClient(create_app(settings)) as client:
-                endpoint = "/api/v1/diagnostics/news-job-claim-plan"
-                self.assertEqual(401, client.get(endpoint).status_code)
-                response = client.get(endpoint, headers={"Authorization": "Bearer private-token"})
-        self.assertEqual(501, response.status_code)
-        self.assertEqual("POSTGRES_DIAGNOSTIC_UNAVAILABLE", response.json()["detail"])
-
-    def test_news_job_claim_readonly_analyze_api_requires_auth_and_postgres(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            settings = CentralServerSettings(
-                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
-            )
-            with TestClient(create_app(settings)) as client:
-                endpoint = "/api/v1/diagnostics/news-job-claim-readonly-analyze"
-                self.assertEqual(401, client.get(endpoint).status_code)
-                response = client.get(endpoint, headers={"Authorization": "Bearer private-token"})
-        self.assertEqual(501, response.status_code)
-        self.assertEqual("POSTGRES_DIAGNOSTIC_UNAVAILABLE", response.json()["detail"])
-        with tempfile.TemporaryDirectory() as directory:
-            settings = CentralServerSettings(
-                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
-            )
-            result = {"mode": "read_only_analyze_without_row_lock", "nodes": []}
-            with patch.object(SQLiteQueryStore, "analyze_news_job_claim_read_only",
-                              create=True, return_value=result) as analyze:
-                with TestClient(create_app(settings)) as client:
-                    headers = {"Authorization": "Bearer private-token"}
-                    self.assertEqual(result, client.get(endpoint, headers=headers).json())
-                    self.assertEqual(400, client.get(endpoint, params={"stage": "AI"},
-                                                     headers=headers).status_code)
-            analyze.assert_called_once_with("BODY")
 
     def test_diagnostic_status_reads_master_and_children_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4219,7 +4204,8 @@ class CentralServerAppTests(unittest.TestCase):
             store.initialize()
             store.upsert_documents("market_data_coverage", [{
                 "owner": "2026-09-10:005930:KRX", "key": "complete",
-                "document": {"kind": "minute", "rows": 0, "as_of": "2026-09-10"},
+                "document": {"kind": "minute", "rows": 0, "as_of": "2026-09-10",
+                             "window_closed": True, "session_finalized": True},
             }])
             result = _archived_chart_response(
                 store, "ka10080", {"stk_cd": "005930", "base_dt": "20260910"},
@@ -4233,7 +4219,8 @@ class CentralServerAppTests(unittest.TestCase):
             store.initialize()
             store.upsert_documents("market_data_coverage_daily", [{
                 "owner": "000660:NXT", "key": "complete",
-                "document": {"kind": "daily", "rows": 0, "as_of": "2026-09-09"},
+                "document": {"kind": "daily", "rows": 0, "as_of": "2026-09-09",
+                             "window_closed": True, "session_finalized": True},
             }])
 
             result = _archived_chart_response(
@@ -4275,7 +4262,8 @@ class CentralServerAppTests(unittest.TestCase):
             }])
             store.upsert_documents("market_data_coverage_daily", [{
                 "owner": "005930:KRX", "key": "complete",
-                "document": {"kind": "daily", "rows": 1, "as_of": "2026-09-10"},
+                "document": {"kind": "daily", "rows": 1, "as_of": "2026-09-10",
+                             "window_closed": True, "session_finalized": True},
             }])
             result = _archived_chart_response(
                 store, "ka10081", {"stk_cd": "005930", "base_dt": "20260911"},
@@ -4379,11 +4367,36 @@ class CentralServerAppTests(unittest.TestCase):
         store.load_documents.return_value = [{"document": {
             "observed_at": "2026-10-01T06:59:59+09:00", "payload": {"mac": "1000"},
         }}]
-        clock = MagicMock()
-        clock.now.return_value = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
-        with patch.dict(_stored_market_response.__globals__, {"datetime": clock}):
-            self.assertIsNone(_stored_market_response(store, "ka10001", {"stk_cd": "005930"}))
-            self.assertIsNotNone(_stored_market_response(store, "ka10100", {"stk_cd": "005930"}))
+        now = datetime.fromisoformat("2026-10-01T07:00:00+09:00")
+        self.assertIsNone(_stored_market_response(store, "ka10001", {"stk_cd": "005930"}, now_provider=lambda: now))
+        self.assertIsNotNone(_stored_market_response(store, "ka10100", {"stk_cd": "005930"}, now_provider=lambda: now))
+
+    def test_market_http_cache_and_daily_coverage_follow_injected_clock(self) -> None:
+        from fastapi import FastAPI
+        from kiwoom_monitor.central_server.market_query_routes import create_market_query_router
+        from kiwoom_monitor.central_server.market_read_routes import create_market_archive_read_router
+        from kiwoom_monitor.application.daily_bar_coverage import DailySourceWindow
+        now = datetime.fromisoformat("2030-01-02T00:00:01+09:00")
+        window = DailySourceWindow("2030-01-02", "2030-01-01")
+        window.add_page({"stk_dt_pole_chart_qry": [{"date": "20300101", "open_pric": "100", "high_pric": "110", "low_pric": "90", "cur_prc": "105", "trde_qty": "10", "trde_prica": "5"}]}, False, "")
+        evidence = window.evidence(code="005930", market="KRX", scope="final", checked_at=now.isoformat())
+        store = MagicMock()
+        store.load_daily_bars.return_value = window.rows
+        store.load_documents.side_effect = lambda collection, *_: [{"document": evidence if collection == "daily_bar_history_coverage" else {
+            "observed_at": "2030-01-01T15:00:00Z", "payload": {"mac": "1000", "nxtEnable": "Y"},
+        }}]
+        app = FastAPI()
+        app.include_router(create_market_query_router(store, lambda: None, None, None, now_provider=lambda: now))
+        app.include_router(create_market_archive_read_router(store, lambda: None, now_provider=lambda: now))
+        with TestClient(app) as client:
+            for api_id in ("ka10001", "ka10100"):
+                response = client.post("/api/v1/kiwoom/query", json={"api_id": api_id, "path": "/api/dostk/stkinfo", "body": {"stk_cd": "005930"}})
+                self.assertEqual(200, response.status_code)
+                self.assertTrue(response.json()["archive_hit"])
+            response = client.get("/api/v1/market/daily-bars?code=005930&market=KRX")
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.json()["coverage"]["collection_verified"])
+        self.assertEqual("2030-01-02", response.json()["coverage"]["query_basis_date"])
 
     def test_content_api_upserts_and_loads_news(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

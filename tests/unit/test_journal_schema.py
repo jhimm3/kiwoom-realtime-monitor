@@ -51,11 +51,21 @@ class JournalSchemaTests(unittest.TestCase):
             path = Path(directory) / "journal.sqlite3"
 
             initialize_journal_database(path)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute(
+                    "INSERT INTO journal_settings VALUES(?,?,?)",
+                    ("kept", '{"value":7}', "2026-10-18T09:00:00+09:00"),
+                )
+                connection.commit()
             initialize_journal_database(path)
 
             with closing(sqlite3.connect(path)) as connection:
                 count = connection.execute("SELECT count(*) FROM trade_fills").fetchone()[0]
+                kept = connection.execute(
+                    "SELECT value_json,updated_at FROM journal_settings WHERE setting_key='kept'"
+                ).fetchone()
             self.assertEqual(0, count)
+            self.assertEqual(('{"value":7}', "2026-10-18T09:00:00+09:00"), kept)
 
     def test_version_8_fixture_adds_execution_projection_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

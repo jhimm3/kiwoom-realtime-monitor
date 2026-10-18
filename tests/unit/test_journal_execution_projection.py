@@ -154,8 +154,9 @@ class JournalExecutionProjectionTests(unittest.TestCase):
         ])
         self.repository.project_execution_event_page(first, NOW)
         conflict = _page(self.scope, 1, [
+            _event(self.scope, 2, "FILL", execution_id="fill-new", quantity=1),
             _event(
-                self.scope, 2, "FILL", source_event_id="event-conflict",
+                self.scope, 3, "FILL", source_event_id="event-conflict",
                 run_id="run-new", execution_id="fill-a", quantity=2,
             ),
         ])

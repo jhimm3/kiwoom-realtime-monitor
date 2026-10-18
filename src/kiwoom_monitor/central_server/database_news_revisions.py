@@ -51,10 +51,11 @@ class SQLiteNewsRevisionStoreMixin:
                 )
 
     def load_news_history(self, kind: str, *, target: str = "", identity: str = "",
-                          available_at: float | None = None, limit: int = 100) -> list[dict[str, Any]]:
+                          available_at: float | None = None, limit: int = 100,
+                          before_revision_id: str = "") -> list[dict[str, Any]]:
         with self._lock, self._connection() as connection:
             return _load_sqlite_news_history(
-                connection, kind, target, identity, available_at, limit,
+                connection, kind, target, identity, available_at, limit, before_revision_id,
             )
 
     def load_latest_news_body(self, article_revision_id: str) -> dict[str, Any] | None:
@@ -156,7 +157,8 @@ class PostgresNewsRevisionStoreMixin:
                 )
 
     def load_news_history(self, kind: str, *, target: str = "", identity: str = "",
-                          available_at: float | None = None, limit: int = 100) -> list[dict[str, Any]]:
+                          available_at: float | None = None, limit: int = 100,
+                          before_revision_id: str = "") -> list[dict[str, Any]]:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         context = DBWriterContext(
@@ -167,7 +169,7 @@ class PostgresNewsRevisionStoreMixin:
         )
         with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
             return _load_postgres_news_history(
-                cursor, kind, target, identity, available_at, limit,
+                cursor, kind, target, identity, available_at, limit, before_revision_id,
             )
 
     def load_latest_news_body(self, article_revision_id: str) -> dict[str, Any] | None:
@@ -591,7 +593,8 @@ def _postgres_possible_related(cursor: Any, stock_code: str, event_id: str, iden
 
 
 def _news_history_query(kind: str, placeholder: str, target: str, identity: str,
-                        available_at: float | None, limit: int) -> tuple[str, list[object]]:
+                        available_at: float | None, limit: int,
+                        before_revision_id: str = "") -> tuple[str, list[object]]:
     if kind == "article":
         sql = ("SELECT article_revision_id,stock_code,identity,content_hash,collector_id,published_at,"
                "received_at,available_at,collection_scope,revision_of,document_json "
@@ -629,6 +632,17 @@ def _news_history_query(kind: str, placeholder: str, target: str, identity: str,
     if available_at is not None:
         sql += f" AND available_at<={placeholder}"
         parameters.append(float(available_at))
+    if before_revision_id:
+        table, revision_column = {
+            "article": ("central_news_article_revisions", "article_revision_id"),
+            "body": ("central_news_body_revisions", "body_revision_id"),
+            "ai": ("central_news_ai_revisions", "analysis_revision_id"),
+            "event": ("central_news_event_revisions", "event_revision_id"),
+            "membership": ("central_news_event_membership_revisions", "membership_revision_id"),
+        }[kind]
+        sql += (f" AND accepted_sequence<(SELECT accepted_sequence FROM {table} "
+                f"WHERE {revision_column}={placeholder})")
+        parameters.append(before_revision_id)
     sql += f" ORDER BY accepted_sequence DESC LIMIT {placeholder}"
     parameters.append(bounded_limit(limit, 1000))
     return sql, parameters
@@ -665,14 +679,16 @@ def _decode_news_history(kind: str, rows: list[tuple[object, ...]]) -> list[dict
 
 
 def _load_sqlite_news_history(connection: sqlite3.Connection, kind: str, target: str,
-                              identity: str, available_at: float | None, limit: int) -> list[dict[str, Any]]:
-    sql, parameters = _news_history_query(kind, "?", target, identity, available_at, limit)
+                              identity: str, available_at: float | None, limit: int,
+                              before_revision_id: str = "") -> list[dict[str, Any]]:
+    sql, parameters = _news_history_query(kind, "?", target, identity, available_at, limit, before_revision_id)
     return _decode_news_history(kind, connection.execute(sql, parameters).fetchall())
 
 
 def _load_postgres_news_history(cursor: Any, kind: str, target: str, identity: str,
-                                available_at: float | None, limit: int) -> list[dict[str, Any]]:
-    sql, parameters = _news_history_query(kind, "%s", target, identity, available_at, limit)
+                                available_at: float | None, limit: int,
+                                before_revision_id: str = "") -> list[dict[str, Any]]:
+    sql, parameters = _news_history_query(kind, "%s", target, identity, available_at, limit, before_revision_id)
     cursor.execute(sql, parameters)
     return _decode_news_history(kind, cursor.fetchall())
 

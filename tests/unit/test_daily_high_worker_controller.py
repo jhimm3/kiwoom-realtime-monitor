@@ -42,11 +42,13 @@ class DailyHighWorkerControllerTests(unittest.TestCase):
         )
         worker.received.emit("005930", "targets")
         worker.failed.emit("failed")
+        worker.running = False
         worker.finished.emit()
 
         self.assertEqual([("005930", "targets")], received)
         self.assertEqual(["failed"], failures)
         self.assertEqual([("005930", "000660")], finished)
+        self.assertIsNone(controller.worker)
 
     def test_running_worker_is_reused_without_factory_call(self) -> None:
         worker = FakeDailyHighWorker()

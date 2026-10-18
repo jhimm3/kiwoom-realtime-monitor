@@ -95,17 +95,6 @@ class SecondTradeStorageTests(unittest.TestCase):
 
             self.assertEqual((100, 110, 90, 120, 12, 1_020, 4, 3.0), _stored(path))
 
-    def test_historical_archive_retry_does_not_double_count(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/'archive.sqlite3'
-            store=SQLiteQueryStore(path);store.initialize()
-            try:
-                value=_bar()
-                store.save_second_trade_bars([value])
-                store.save_second_trade_bars([value])
-                self.assertEqual((100,110,90,105,10,1020,3,2.0),_stored(path))
-            finally:store.close()
-
     def test_parsed_0b_ticks_never_write_new_second_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

@@ -24,6 +24,18 @@ class UpdateHelperTest(unittest.TestCase):
             with self.assertRaises(UpdateError):
                 _safe_relative(value)
 
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "app"
+            target.mkdir()
+            outside = root / "outside.txt"
+            outside.write_text("preserved", encoding="utf-8")
+            archive = root / "escape.zip"
+            self._create_archive(archive, {"../outside.txt": "overwritten"})
+            with self.assertRaises(UpdateError):
+                apply_archives((archive,), target)
+            self.assertEqual("preserved", outside.read_text(encoding="utf-8"))
+
     def test_manifest_rejects_changed_file_outside_staging(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staging = Path(directory)

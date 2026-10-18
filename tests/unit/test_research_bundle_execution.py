@@ -120,7 +120,7 @@ class BundleExecutionTests(unittest.TestCase):
             self.assertFalse(any(event.event_type == 'FILL' for event in events))
             self.assertTrue(any(event.reason == 'session_boundary_before_fill' for event in events))
 
-    def test_profiles_are_checked_before_creating_outputs_and_legacy_day_still_loads(self):
+    def test_bundle_reader_rejects_wrong_profile_and_legacy_day_still_loads(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             relative = child(root, date(2026, 9, 14), rows_for(date(2026, 9, 14)))

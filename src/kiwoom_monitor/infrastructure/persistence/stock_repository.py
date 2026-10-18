@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sqlite3
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from difflib import get_close_matches
 from pathlib import Path
 
@@ -9,9 +10,61 @@ from kiwoom_monitor.application.historical_high_service import HistoricalHighCac
 from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
 from kiwoom_monitor.infrastructure.persistence.stock_aliases import seed_known_stock_aliases
 from kiwoom_monitor.infrastructure.krx.kind_name_history import KindNameHistorySync
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
+from kiwoom_monitor.infrastructure.persistence.sqlite_connections import sqlite_transaction
+
+
+@dataclass(frozen=True)
+class RankingStockCache:
+    markets: dict[str, str]
+    last_prices: dict[str, int]
+    intraday_highs: dict[str, int]
+    fundamentals: dict[str, StockFundamentals]
+    nxt_enabled: dict[str, bool]
+
 
 class StockRepository:
     def __init__(self, path: Path) -> None: self._path = path
+
+    def load_ranking_cache(
+        self, codes: tuple[str, ...], market_codes: tuple[str, ...], trade_date: date,
+    ) -> RankingStockCache:
+        """Restore ranking values in one connection; keep market-only members separate."""
+        all_codes = tuple(dict.fromkeys((*codes, *market_codes)))
+        if not all_codes:
+            return RankingStockCache({}, {}, {}, {}, {})
+        placeholders = ",".join("?" for _ in all_codes)
+        con = sqlite3.connect(self._path)
+        try:
+            rows = con.execute(
+                f"SELECT code,market,last_price,market_cap,float_ratio,high_250_price,"
+                f"float_shares,upper_limit_price,nxt_enabled,nxt_checked_at "
+                f"FROM stocks WHERE code IN ({placeholders})", all_codes,
+            ).fetchall()
+            # Highs may exist before a stock is registered in the catalog.
+            high_rows = con.execute(
+                f"SELECT stock_code,high_price FROM intraday_highs "
+                f"WHERE trade_date=? AND stock_code IN ({','.join('?' for _ in codes)})",
+                (trade_date.isoformat(), *codes),
+            ).fetchall() if codes else []
+        finally:
+            con.close()
+        visible = set(codes)
+        markets = set(market_codes)
+        visible_rows = [row for row in rows if str(row[0]) in visible]
+        return RankingStockCache(
+            markets={str(row[0]): str(row[1]).strip().upper()
+                     for row in rows if str(row[0]) in markets},
+            last_prices={str(row[0]): int(row[2]) for row in visible_rows
+                         if row[2] is not None and int(row[2]) > 0},
+            intraday_highs={str(code): int(price) for code, price in high_rows
+                            if int(price) > 0},
+            fundamentals=_fundamentals_by_code(
+                [(row[0], *row[3:8]) for row in visible_rows]
+            ),
+            nxt_enabled={str(row[0]): bool(row[8]) for row in visible_rows
+                         if row[8] is not None and row[9] == trade_date.isoformat()},
+        )
 
     @staticmethod
     def _remember_renames(con: sqlite3.Connection, stocks: tuple[tuple[str, str, str], ...]) -> None:
@@ -331,15 +384,7 @@ class StockRepository:
             ).fetchall()
         finally:
             con.close()
-        return {
-            str(code): StockFundamentals(
-                float(market_cap), float(float_ratio), int(high_price) if high_price else None,
-                int(float_shares) if float_shares else None,
-                int(upper_limit_price) if upper_limit_price else None,
-            )
-            for code, market_cap, float_ratio, high_price, float_shares, upper_limit_price in rows
-            if float(market_cap) > 0 and float(float_ratio) >= 0
-        }
+        return _fundamentals_by_code(rows)
 
     def load_nxt_enabled(self, codes: tuple[str, ...], today: str) -> dict[str, bool]:
         if not codes:
@@ -395,41 +440,52 @@ class StockRepository:
         return {str(code): int(price) for code, price in rows if price is not None and int(price) > 0}
 
     def update_last_prices(self, prices: dict[str, int]) -> None:
-        """실시간 체결로 받은 마지막 현재가를 묶어서 저장한다."""
-        values = tuple((int(price), code) for code, price in prices.items() if code and int(price) > 0)
-        if not values:
-            return
-        con = sqlite3.connect(self._path)
-        try:
-            con.executemany(
-                "UPDATE stocks SET last_price=?, last_price_updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                values,
-            )
-            con.commit()
-        finally:
-            con.close()
+        """Standalone/legacy entry; the app's writer uses its injected broker clock."""
+        now = kst_now()
+        self.update_price_cache(prices, {}, {}, now.date(), observed_at=now)
 
     def update_last_market_caps(self, market_caps: dict[str, float]) -> None:
-        """마지막 0B 시가총액을 저장하되 기본정보 확인 시각은 갱신하지 않는다."""
-        values = tuple(
-            (float(market_cap), float(market_cap), code)
-            for code, market_cap in market_caps.items()
-            if code and float(market_cap) > 0
-        )
-        if not values:
+        """Standalone/legacy entry; preserve the fundamentals confirmation time."""
+        now = kst_now()
+        self.update_price_cache({}, {}, market_caps, now.date(), observed_at=now)
+
+    def update_price_cache(
+        self, prices: dict[str, int], highs: dict[str, int],
+        market_caps: dict[str, float], trade_date: date, *, observed_at: datetime,
+    ) -> None:
+        """Commit one existing cache job atomically, including its high-price cleanup."""
+        price_rows = tuple((int(price), code) for code, price in prices.items()
+                           if code and int(price) > 0)
+        cap_rows = tuple((float(cap), float(cap), code) for code, cap in market_caps.items()
+                         if code and float(cap) > 0)
+        high_rows = tuple((trade_date.isoformat(), code, int(price)) for code, price in highs.items()
+                          if code and int(price) > 0)
+        if not (price_rows or cap_rows or high_rows):
             return
-        con = sqlite3.connect(self._path)
-        try:
-            con.executemany(
-                "UPDATE stocks SET market_cap=?, "
-                "circulating_market_cap=CASE WHEN float_ratio IS NULL "
-                "THEN circulating_market_cap ELSE ? * float_ratio / 100 END, "
-                "updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                values,
-            )
-            con.commit()
-        finally:
-            con.close()
+        updated_at = as_kst(observed_at).isoformat()
+        with sqlite_transaction(self._path) as con:
+            if price_rows:
+                con.executemany(
+                    "UPDATE stocks SET last_price=?, last_price_updated_at=? WHERE code=?",
+                    ((price, updated_at, code) for price, code in price_rows),
+                )
+            if cap_rows:
+                con.executemany(
+                    "UPDATE stocks SET market_cap=?, "
+                    "circulating_market_cap=CASE WHEN float_ratio IS NULL "
+                    "THEN circulating_market_cap ELSE ? * float_ratio / 100 END, "
+                    "updated_at=? WHERE code=?",
+                    ((cap, circulating, updated_at, code) for cap, circulating, code in cap_rows),
+                )
+            if high_rows:
+                con.executemany(
+                    "INSERT INTO intraday_highs(trade_date,stock_code,high_price,updated_at) VALUES (?,?,?,?) "
+                    "ON CONFLICT(trade_date,stock_code) DO UPDATE SET "
+                    "high_price=MAX(intraday_highs.high_price,excluded.high_price),updated_at=excluded.updated_at",
+                    ((*row, updated_at) for row in high_rows),
+                )
+                con.execute("DELETE FROM intraday_highs WHERE trade_date<?",
+                            ((trade_date - timedelta(days=35)).isoformat(),))
 
     def load_intraday_highs(self, codes: tuple[str, ...], trade_date: date) -> dict[str, int]:
         if not codes:
@@ -446,21 +502,8 @@ class StockRepository:
         return {str(code): int(price) for code, price in rows if int(price) > 0}
 
     def update_intraday_highs(self, prices: dict[str, int], trade_date: date) -> None:
-        values = tuple((trade_date.isoformat(), code, int(price)) for code, price in prices.items() if code and int(price) > 0)
-        if not values:
-            return
-        con = sqlite3.connect(self._path)
-        try:
-            con.executemany(
-                "INSERT INTO intraday_highs(trade_date,stock_code,high_price) VALUES (?,?,?) "
-                "ON CONFLICT(trade_date,stock_code) DO UPDATE SET "
-                "high_price=MAX(intraday_highs.high_price,excluded.high_price),updated_at=CURRENT_TIMESTAMP",
-                values,
-            )
-            con.execute("DELETE FROM intraday_highs WHERE trade_date<?", ((trade_date - timedelta(days=35)).isoformat(),))
-            con.commit()
-        finally:
-            con.close()
+        """Standalone/legacy entry; retain the caller's original trading date."""
+        self.update_price_cache({}, prices, {}, trade_date, observed_at=kst_now())
 
     def load_new_highs(self, periods: tuple[int, ...]) -> dict[int, set[str]]:
         if not periods:
@@ -523,3 +566,16 @@ class StockRepository:
             or cached[code][3] is None
             or str(cached[code][4] or "")[:10] != today
         )
+
+
+def _fundamentals_by_code(rows: list[tuple]) -> dict[str, StockFundamentals]:
+    return {
+        str(code): StockFundamentals(
+            float(market_cap), float(float_ratio), int(high_price) if high_price else None,
+            int(float_shares) if float_shares else None,
+            int(upper_limit_price) if upper_limit_price else None,
+        )
+        for code, market_cap, float_ratio, high_price, float_shares, upper_limit_price in rows
+        if market_cap is not None and float_ratio is not None
+        and float(market_cap) > 0 and float(float_ratio) >= 0
+    }

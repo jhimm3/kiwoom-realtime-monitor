@@ -3,8 +3,10 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from contextlib import closing
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from kiwoom_monitor.domain.time_basis import KST
 
 from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 
@@ -93,11 +95,30 @@ class DailyBarRepositoryTests(unittest.TestCase):
                 "finalized_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(trade_date,stock_code))"
             )
             connection.commit(); connection.close()
-            repository = DailyBarRepository(path)
+            now = datetime(2026, 8, 28, 20, 5, tzinfo=KST)
+            repository = DailyBarRepository(path, now_provider=lambda: now)
             repository.mark_finalized(("001210",), date(2026, 8, 28))
             self.assertEqual(
                 {"001210"}, repository.finalized_codes(("001210", "005930"), date(2026, 8, 28)),
             )
+            repository.mark_unconfirmed("005930", date(2026, 8, 28), ("daily",), 1)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    ("2026-08-28T20:05:00+09:00",),
+                    connection.execute("SELECT updated_at FROM market_data_unconfirmed_log").fetchone(),
+                )
+            now += timedelta(minutes=1)
+            repository.set_now_provider(lambda: now)
+            repository.mark_unconfirmed("005930", date(2026, 8, 28), ("daily", "minute"), 2)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    [("2026-08-28", "001210", "2026-08-28T20:05:00+09:00")],
+                    connection.execute("SELECT trade_date,stock_code,finalized_at FROM market_data_finalization_log").fetchall(),
+                )
+                self.assertEqual(
+                    [("daily,minute", 2, "2026-08-28T20:06:00+09:00")],
+                    connection.execute("SELECT missing_parts,attempts,updated_at FROM market_data_unconfirmed_log").fetchall(),
+                )
 
     def test_finds_only_codes_missing_the_expected_latest_bar(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

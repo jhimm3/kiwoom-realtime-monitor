@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -50,15 +51,18 @@ class TestCollectHistoricalMarketContext(unittest.TestCase):
              "close": 90000, "volume": 1, "trading_value": 2}
             for day in ("2026-09-21", "2026-09-22")
         ])
+        before = raw.read_bytes()
         count, _digest = collector.import_raw(
             database, raw, kind="stock_daily", code="005930",
             target=collector.target_dates(reference, "005930"),
         )
         assert count == 1
+        self.assertEqual(before, raw.read_bytes())
+        self.assertEqual(hashlib.sha256(before.decode("utf-8-sig").replace("\r\n", "\n").encode("utf-8")).hexdigest(), _digest)
         with closing(sqlite3.connect(database)) as connection:
             assert connection.execute(
-                "SELECT trade_date,float_shares,raw_file FROM historical_stock_fundamentals"
-            ).fetchone() == ("2026-09-21", 5846278608, str(raw))
+                "SELECT trade_date,market_cap_raw,float_shares,close,volume,trading_value_raw,raw_file FROM historical_stock_fundamentals"
+            ).fetchone() == ("2026-09-21", 100, 5846278608, 90000, 1, 2, str(raw))
 
 
     def test_seeds_adjustments_only_for_candidate_codes_and_deduplicates_events(self) -> None:
@@ -209,7 +213,13 @@ class TestCollectHistoricalMarketContext(unittest.TestCase):
                 ])
         database = self.tmp_path / "context.sqlite3"
         collector.initialize(database, reference)
+        with closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute("INSERT INTO historical_stock_fundamentals VALUES('fixture','500029','2026-09-21',100,10,90,1,2,'preserved.ndjson','old')")
+            connection.execute("INSERT INTO historical_stock_adjustments VALUES('fixture','500029','2026-09-21',20,500,100,'2026-09-20','2026-09-21','preserved.ndjson','old')")
+            evidence = {table: connection.execute('SELECT * FROM ' + table).fetchall() for table in ('historical_stock_fundamentals', 'historical_stock_adjustments')}
+        collector.initialize(database, reference)
         with closing(sqlite3.connect(database)) as connection:
+            self.assertEqual(evidence, {table: connection.execute('SELECT * FROM ' + table).fetchall() for table in evidence})
             with connection:
                 connection.execute(
                     "INSERT INTO context_jobs(kind,code,state,attempts,error,updated_at) "

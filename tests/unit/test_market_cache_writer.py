@@ -4,11 +4,11 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from time import perf_counter
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, Qt
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
 from kiwoom_monitor.application.daily_high_service import DailyBar, DailyHighTargets
@@ -17,6 +17,62 @@ from kiwoom_monitor.infrastructure.persistence.market_cache_writer import Market
 
 
 class MarketCacheWriterTests(unittest.TestCase):
+    def test_price_job_rolls_back_all_values_on_last_write_failure_then_same_writer_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("INSERT INTO stocks(code,name,last_price,market_cap,float_ratio) VALUES('A','A',90,900,50)")
+                connection.execute("CREATE TRIGGER fail_high BEFORE INSERT ON intraday_highs BEGIN SELECT RAISE(ABORT,'high fault'); END")
+                connection.commit()
+            now = datetime(2026, 10, 16, 1, tzinfo=timezone.utc)
+            writer = MarketCacheWriter(path, now_provider=lambda: now)
+            failures = []
+            writer.price_failed.connect(lambda *values: failures.append(values), Qt.ConnectionType.DirectConnection)
+            payload = ({"A": 100}, {"A": 110}, {"A": 1000.}, date(2026, 10, 16))
+            writer.start()
+            writer.enqueue_price_cache(*payload)
+            self.assertTrue(writer.stop_and_drain())
+            self.assertEqual(1, len(failures))
+            self.assertEqual(payload, failures[0][:-1])
+            self.assertIn("high fault", failures[0][-1])
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual((90, 900), connection.execute("SELECT last_price,market_cap FROM stocks").fetchone())
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM intraday_highs").fetchone()[0])
+                connection.execute("DROP TRIGGER fail_high")
+                connection.commit()
+            writer.start()
+            writer.enqueue_price_cache(*payload)
+            self.assertTrue(writer.stop_and_drain())
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual((100, 1000, "2026-10-16T10:00:00+09:00"), connection.execute(
+                    "SELECT last_price,market_cap,last_price_updated_at FROM stocks").fetchone())
+                self.assertEqual((110, "2026-10-16T10:00:00+09:00"), connection.execute(
+                    "SELECT high_price,updated_at FROM intraday_highs").fetchone())
+            self.assertEqual(1, len(failures))
+
+    def test_price_enqueue_returns_while_sqlite_is_locked_and_drain_preserves_whole_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            with closing(sqlite3.connect(path)) as con:
+                con.execute("INSERT INTO stocks(code,name,float_ratio) VALUES('A','A',50)")
+                con.commit()
+            now = datetime(2026, 10, 16, 10)
+            writer = MarketCacheWriter(path, now_provider=lambda: now)
+            writer.start()
+            with closing(sqlite3.connect(path)) as blocker:
+                blocker.execute("BEGIN IMMEDIATE")
+                started = perf_counter()
+                writer.enqueue_price_cache({"A": 100}, {"A": 110}, {"A": 1000.}, now.date())
+                self.assertLess(perf_counter() - started, 0.5)
+                blocker.rollback()
+            self.assertTrue(writer.stop_and_drain())
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual((100, 1000, 500), con.execute(
+                    "SELECT last_price,market_cap,circulating_market_cap FROM stocks").fetchone())
+                self.assertEqual([(110,)], con.execute("SELECT high_price FROM intraday_highs").fetchall())
+
     def test_fundamentals_write_does_not_block_gui_caller(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "monitor.sqlite3"
@@ -71,9 +127,9 @@ class MarketCacheWriterTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute("INSERT INTO stocks(code,name) VALUES (?,?)", ("005930", "삼성전자"))
                 connection.commit()
-            writer = MarketCacheWriter(path)
-            writer.start()
             now = datetime(2026, 9, 15, 10, 31)
+            writer = MarketCacheWriter(path, now_provider=lambda: now)
+            writer.start()
             targets = DailyHighTargets.from_daily_bars((
                 DailyBar("20260914", 71000, 100.0, 70500, 70000, 69500, 1000),
             ), as_of=now.date())
@@ -87,8 +143,12 @@ class MarketCacheWriterTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 stock = connection.execute("SELECT high_250_price FROM stocks WHERE code='005930'").fetchone()
                 bar = connection.execute("SELECT high_price FROM daily_bars WHERE stock_code='005930'").fetchone()
+                metadata = connection.execute(
+                    "SELECT available_at FROM market_data_observation_meta WHERE dataset_kind='minute_bar'"
+                ).fetchone()
             self.assertEqual((None,), stock)  # Unverified one-row cache must not replace adjusted high
             self.assertEqual((71000,), bar)
+            self.assertEqual(("2026-09-15T10:31:00+09:00",), metadata)
             self.assertFalse((path.parent / "logs" / "developer_checks").exists())
 
     def test_history_batch_is_saved_before_success_signal(self) -> None:
@@ -98,8 +158,18 @@ class MarketCacheWriterTests(unittest.TestCase):
             Database(path).initialize()
             minute = datetime(2026, 9, 14, 10, 30)
             saved: list[str] = []
+            committed_at_signal = []
             writer = MarketCacheWriter(path)
             writer.history_saved.connect(saved.append)
+
+            def observe_commit(_code: str) -> None:
+                with closing(sqlite3.connect(path)) as connection:
+                    committed_at_signal.append((
+                        connection.execute("SELECT close_price FROM minute_bars").fetchone(),
+                        connection.execute("SELECT bar_count FROM minute_history_sync_log").fetchone(),
+                    ))
+
+            writer.history_saved.connect(observe_commit, Qt.ConnectionType.DirectConnection)
             writer.start()
             writer.enqueue_history_bars(
                 "005930",
@@ -122,6 +192,7 @@ class MarketCacheWriterTests(unittest.TestCase):
             self.assertEqual((70500,), bar)
             self.assertEqual((1,), sync)
             self.assertEqual(["005930"], saved)
+            self.assertEqual([((70500,), (1,))], committed_at_signal)
 
     def test_stop_drains_minute_and_price_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

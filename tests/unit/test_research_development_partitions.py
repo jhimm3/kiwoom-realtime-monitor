@@ -324,6 +324,14 @@ class DevelopmentPartitionTests(unittest.TestCase):
         self.assertEqual(1, engine.call_count)
         self.assertEqual({self.day, next_day}, {datetime.fromisoformat(row['available_at']).astimezone(KST).date() for row in prepared.observations})
         self.assertIsNotNone(json.loads(result.output_manifest.read_text())['final_portfolio']['position'])
+        events = repo.load_execution_events(result.run_id)
+        first_fills = [event for event in events if event['event_type'] == 'FILL' and event['occurred_at'].startswith(self.day.isoformat())]
+        next_marks = [event for event in events if event['event_type'] == 'MARK' and event['occurred_at'].startswith(next_day.isoformat())]
+        self.assertTrue(first_fills)
+        self.assertTrue(next_marks)
+        self.assertEqual({first_fills[-1]['cash_after_won']}, {event['cash_after_won'] for event in next_marks})
+        self.assertEqual({first_fills[-1]['position_quantity_after']}, {event['position_quantity_after'] for event in next_marks})
+
 
     def test_cancel_during_partition_validation_prevents_any_run_write(self):
         prepared = self.prepare()

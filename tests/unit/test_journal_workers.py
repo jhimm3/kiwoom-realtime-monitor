@@ -24,10 +24,14 @@ class JournalWorkerTests(unittest.TestCase):
         class Service:
             def load_today(self, code, target):
                 self.called = (code, target)
-                return (SimpleNamespace(minute=datetime(2026, 9, 8, 15, 29)),)
+                return (SimpleNamespace(minute=datetime(2026, 9, 8, 15, 29)),
+                        SimpleNamespace(minute=datetime(2026, 9, 8, 20, 0)))
         service = Service(); received = []
         worker = ConfirmWorker(service, "005930", date(2026, 9, 8))
-        worker.completed.connect(lambda *values: received.append(values)); worker.run()
+        worker.completed.connect(lambda *values: received.append(values))
+        with mock.patch("kiwoom_monitor.presentation.journal_workers.kst_wall_now",
+                        return_value=datetime(2026, 9, 8, 20, 0)):
+            worker.run()
         self.assertEqual("005930", service.called[0])
         self.assertEqual("after_close_confirmed", received[0][3])
         self.assertEqual(1, len(received[0][1]))

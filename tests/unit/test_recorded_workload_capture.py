@@ -81,6 +81,30 @@ class NativeStore:
 
 
 class RecordedCaptureTests(unittest.TestCase):
+    def test_native_minute_range_and_legacy_full_day_arguments_survive_capture_and_replay(self):
+        store = SQLiteQueryStore(Path(':memory:'))
+        store.initialize()
+        self.addCleanup(store.close)
+        with capture(store_inputs=True, collector_inputs=False) as session:
+            with capture_owner('shadow', 'minute:source', 'minute:actor'):
+                self.assertEqual([], store.load_minute_bars('005930', '2026-10-13', 'KRX',
+                    start_minute='10:00', end_minute='10:10'))
+                self.assertEqual([], store.load_minute_bars('005930', '2026-10-13'))
+            trace.stop()
+            manifest, events = trace.recorded_events(session['trace_id'])
+        self.assertEqual(0, manifest['input_rejected'])
+        starts = [row for row in events if row['event_type'] == 'operation_start'
+            and row['method'] == 'load_minute_bars']
+        self.assertEqual(2, len(starts))
+        arguments = [thaw_payload(row['payload']) for row in starts]
+        self.assertEqual(('10:00', '10:10'), (arguments[0]['start_minute'], arguments[0]['end_minute']))
+        self.assertEqual((None, None), (arguments[1]['start_minute'], arguments[1]['end_minute']))
+        for values in arguments:
+            self.assertEqual([], store.load_minute_bars(**values))
+        # Prior captures have no new optional fields and remain valid native calls.
+        self.assertEqual([], store.load_minute_bars(code='005930', trading_date='2026-10-13',
+            market='KRX', realtime_deltas=None))
+
     def test_mixed_market_capture_preserves_order_fields_and_omissions_across_bounded_groups(self):
         now = datetime(2026, 10, 7, 1, tzinfo=timezone.utc)
         collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(), lambda: now)

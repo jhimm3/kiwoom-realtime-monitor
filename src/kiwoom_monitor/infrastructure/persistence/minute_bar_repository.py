@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_today, kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 
 import sqlite3
 import json
@@ -38,8 +38,12 @@ TOP20_REGULAR_END_EXCLUSIVE = "15:31"
 class MinuteBarRepository:
     """앱을 다시 열어도 당일 분봉 이력을 이어 쓸 수 있게 한다."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, now_provider=None) -> None:
         self._path = path
+        self.set_now_provider(now_provider or (lambda: kst_wall_now()))
+
+    def set_now_provider(self, now_provider) -> None:
+        self._now = lambda: as_kst(now_provider())
 
     def upsert_bars(self, code: str, bars: tuple[MinuteOhlcv, ...]) -> None:
         if not code or not bars:
@@ -73,30 +77,30 @@ class MinuteBarRepository:
             # between the check and the canonical bar upsert.
             connection.execute("BEGIN IMMEDIATE")
             writable_rows = []
-            available_at = kst_wall_now()
+            available_at = self._now()
             for code, bars in bars_by_code.items():
                 if not code:
                     continue
                 for bar in bars:
                     observation_key = bar.minute.isoformat(timespec="minutes")
-                    if source == "kiwoom-websocket-0B" and _has_complete_minute_authority(
-                        connection, code, observation_key,
-                    ):
+                    # Both authority and quality use the same row under the
+                    # writer lock; do not read it again for a writable 0B bar.
+                    previous = connection.execute(
+                        "SELECT completeness,origin,source FROM market_data_observation_meta "
+                        "WHERE dataset_kind=? AND subject=? AND observation_key=?",
+                        (MarketDatasetKind.MINUTE_BAR.value, code, observation_key),
+                    ).fetchone()
+                    if source == "kiwoom-websocket-0B" and _is_complete_minute_authority(previous):
                         continue
                     metadata = bar.metadata
                     if metadata is not None:
                         source_for_bar, origin_for_bar = metadata.source, metadata.origin
                         state = metadata.completeness
-                        if state == DataCompleteness.IN_PROGRESS and metadata.source == "kiwoom-websocket-0B" and bar.minute < available_at.replace(second=0, microsecond=0):
+                        if state == DataCompleteness.IN_PROGRESS and metadata.source == "kiwoom-websocket-0B" and as_kst(bar.minute) < available_at.replace(second=0, microsecond=0):
                             state = DataCompleteness.COMPLETE
                     else:
                         source_for_bar, origin_for_bar = source, origin
-                        state = DataCompleteness.COMPLETE if bar.minute < available_at.replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS
-                    previous = connection.execute(
-                        "SELECT completeness,origin FROM market_data_observation_meta "
-                        "WHERE dataset_kind=? AND subject=? AND observation_key=?",
-                        (MarketDatasetKind.MINUTE_BAR.value, code, observation_key),
-                    ).fetchone()
+                        state = DataCompleteness.COMPLETE if as_kst(bar.minute) < available_at.replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS
                     trusted = state == DataCompleteness.COMPLETE and (origin_for_bar in {ObservationOrigin.QUERY, ObservationOrigin.BACKFILLED}
                         or origin_for_bar == ObservationOrigin.REALTIME and source_for_bar == "NAS:kiwoom-websocket-0B")
                     if previous and previous[0] in {"partial", "missing"} and not trusted:
@@ -151,7 +155,7 @@ class MinuteBarRepository:
             for code, minutes in minutes_by_code.items():
                 if code.startswith("market:") and not minutes:
                     # Legacy count-only gaps cannot identify the missing index minute.
-                    now = kst_wall_now().replace(second=0, microsecond=0)
+                    now = self._now().replace(tzinfo=None, second=0, microsecond=0)
                     retained = connection.execute(
                         "SELECT minute FROM market_index_minute_bars WHERE market=? AND trade_date=?",
                         (code[7:], now.date().isoformat()),
@@ -290,9 +294,8 @@ class MinuteBarRepository:
                     ((day,) for day in affected),
                 )
 
-    @staticmethod
     def _replace_market_index_minutes(
-        connection: sqlite3.Connection,
+        self, connection: sqlite3.Connection,
         rows: dict[tuple[str, datetime], tuple[float, float, float, float, float | None]],
     ) -> None:
         values = tuple(
@@ -309,7 +312,8 @@ class MinuteBarRepository:
         for (market, minute), value in rows.items():
             observation = local_minute_bar_observation(f"market:{market}", minute, value,
                 source="kiwoom-ka20005", actual_trade_value=False, origin=ObservationOrigin.QUERY,
-                completeness=DataCompleteness.COMPLETE if minute < kst_wall_now().replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS)
+                available_at=self._now(),
+                completeness=DataCompleteness.COMPLETE if as_kst(minute) < self._now().replace(second=0, microsecond=0) else DataCompleteness.IN_PROGRESS)
             upsert_market_data_metadata(connection, minute.isoformat(timespec="minutes"), observation)
 
     @staticmethod
@@ -342,7 +346,7 @@ class MinuteBarRepository:
                 "minute,trade_date,trade_value_eok,stock_codes,stock_count,capture_state,"
                 "kospi_trade_value_eok,kosdaq_trade_value_eok,unknown_trade_value_eok,"
                 "kospi_stock_count,kosdaq_stock_count,unknown_stock_count,updated_at"
-                ",cohort_segments) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?) "
+                ",cohort_segments) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(minute) DO UPDATE SET "
                 "trade_value_eok=excluded.trade_value_eok,stock_codes=excluded.stock_codes,"
                 "stock_count=excluded.stock_count,capture_state=excluded.capture_state,"
@@ -353,7 +357,7 @@ class MinuteBarRepository:
                 "kosdaq_stock_count=excluded.kosdaq_stock_count,"
                 "unknown_stock_count=excluded.unknown_stock_count,"
                 "cohort_segments=excluded.cohort_segments,"
-                "updated_at=CURRENT_TIMESTAMP",
+                "updated_at=excluded.updated_at",
                 (
                     minute.isoformat(timespec="minutes"), minute.date().isoformat(),
                     float(trade_value_eok), json.dumps(stock_codes, ensure_ascii=False),
@@ -361,7 +365,7 @@ class MinuteBarRepository:
                     float(kospi_trade_value_eok), float(kosdaq_trade_value_eok),
                     float(unknown_trade_value_eok), int(kospi_stock_count),
                     int(kosdaq_stock_count), int(unknown_stock_count),
-                    json.dumps(cohort_segments, ensure_ascii=False),
+                    self._now().isoformat(), json.dumps(cohort_segments, ensure_ascii=False),
                 ),
             )
             connection.execute(
@@ -449,7 +453,7 @@ class MinuteBarRepository:
         tuple[tuple[date, float, float, float], ...],
     ]:
         """완료된 날짜는 저장된 일별 집계를 읽고 당일만 원자료로 계산한다."""
-        today = kst_today()
+        today = self._now().date()
         first = today - timedelta(days=max(1, int(days)) - 1)
         calendar = [(first + timedelta(days=offset)).isoformat() for offset in range((today - first).days + 1)]
         connection = sqlite3.connect(self._path)
@@ -480,7 +484,7 @@ class MinuteBarRepository:
     ) -> dict[str, dict[str, object]]:
         if not days:
             return {}
-        today = kst_today().isoformat()
+        today = self._now().date().isoformat()
         cached = {
             str(day): json.loads(str(raw)) for day, raw in connection.execute(
                 "SELECT trade_date,summary_json FROM top20_statistics_daily_cache "
@@ -559,6 +563,7 @@ class MinuteBarRepository:
         """과거 합계 기록을 저장된 구성 종목·분봉·시장 정보로 다시 분리한다."""
         connection = sqlite3.connect(self._path)
         repaired = 0
+        repaired_dates: set[str] = set()
         try:
             rows = connection.execute(
                 "SELECT minute,trade_value_eok,stock_codes FROM top20_trade_value_index "
@@ -594,6 +599,11 @@ class MinuteBarRepository:
                     (*amounts, *counts, str(minute)),
                 )
                 repaired += 1
+                repaired_dates.add(str(minute)[:10])
+            connection.executemany(
+                "DELETE FROM top20_statistics_daily_cache WHERE trade_date=?",
+                ((day,) for day in repaired_dates),
+            )
             connection.commit()
         finally:
             connection.close()
@@ -643,6 +653,10 @@ def _has_complete_minute_authority(
         "WHERE dataset_kind=? AND subject=? AND observation_key=?",
         (MarketDatasetKind.MINUTE_BAR.value, code, observation_key),
     ).fetchone()
+    return _is_complete_minute_authority(row)
+
+
+def _is_complete_minute_authority(row: tuple | None) -> bool:
     return bool(
         row
         and str(row[0]) == DataCompleteness.COMPLETE.value

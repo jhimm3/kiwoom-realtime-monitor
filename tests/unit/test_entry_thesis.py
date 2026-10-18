@@ -774,7 +774,7 @@ class NativePositionOutcomeReaderTests(unittest.TestCase):
         args = [sys.executable, str(Path(__file__).resolve().parents[2]/'scripts/preview_market_theme_shadow.py'),
             '--input',str(directory/'comparison.json'),'--research-db',str(self.path),
             '--position-outcome-selection',str(directory/'selection.json'),'--position-outcome-role','TRAIN']
-        result = subprocess.run(args,capture_output=True,text=True,encoding='utf-8',env={**os.environ,'PYTHONUTF8':'1'})
+        result = subprocess.run(args,capture_output=True,text=True,encoding='utf-8',timeout=60,env={**os.environ,'PYTHONUTF8':'1'})
         self.assertEqual(0,result.returncode,result.stderr)
         parsed = json.loads(result.stdout)
         actual_receipt = parsed.pop('position_outcome_source')
@@ -784,7 +784,7 @@ class NativePositionOutcomeReaderTests(unittest.TestCase):
         self.assertFalse(parsed['order_authorized'])
         document['outcomes'] = native_document['outcomes']
         (directory/'comparison.json').write_text(json.dumps(document),encoding='utf-8')
-        invalid = subprocess.run(args,capture_output=True,text=True,encoding='utf-8')
+        invalid = subprocess.run(args,capture_output=True,text=True,encoding='utf-8',timeout=60)
         self.assertEqual(2,invalid.returncode)
         self.assertIn('empty outcomes',invalid.stderr)
 
@@ -1728,7 +1728,7 @@ class PersistedThesisShadowTests(unittest.TestCase):
 class StockThesisSourceCheckTests(unittest.TestCase):
     def setUp(self):
         from unittest.mock import patch
-        from datetime import datetime
+        from datetime import datetime, timedelta
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
         from kiwoom_monitor.domain.research_contract import THEME_BACKUP_FORMAT, THEME_BACKUP_VERSION
         from kiwoom_monitor.application.theme_leadership import second_trade_points_from_rows, theme_memberships_from_snapshot
@@ -1744,9 +1744,10 @@ class StockThesisSourceCheckTests(unittest.TestCase):
         document = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION,
                     "active_profile": "default", "profiles": [{"name": "default", "stock_themes": [
                         {"code": "005930", "theme": "반도체"}, {"code": "000660", "theme": "반도체"}]}]}
-        with patch("kiwoom_monitor.central_server.database_documents.time", return_value=cut.timestamp() - 600):
+        with patch.object(self.store, "_now_provider", return_value=cut - timedelta(seconds=600)):
             self.store.upsert_documents("theme_metadata", [{"owner": "default", "key": "full", "document": document}])
         [self.snapshot] = self.store.load_theme_snapshots()
+        self.assertEqual(cut.timestamp() - 600, self.snapshot["available_at"])
         self.rows = [{"trading_date": DAY, "trade_second": f"09:00:{second:02}", "code": code, "market": "KRX",
                       "open": price, "high": price, "low": price, "close": price,
                       "volume": max(1, value // price), "trade_value_won": value, "trade_count": 1,
@@ -2543,9 +2544,15 @@ class NativeUnfilledOutcomeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'duplicate'):
             self.read([selection,selection])
         from kiwoom_monitor.application.research_execution import UnfilledResearchAction
-        from datetime import datetime
-        with self.assertRaises(ValueError):
-            UnfilledResearchAction('WAIT','005930','BUY',True,1000,1100,10,datetime.now(),'case','population')
+        from kiwoom_monitor.application.research_evaluation import read_unfilled_action_outcomes
+        from unittest.mock import Mock
+        load = Mock(side_effect=AssertionError('invalid horizon must not read source'))
+        with self.assertRaisesRegex(ValueError,'bounded mock/KRX minute source'):
+            read_unfilled_action_outcomes(load,[selection],decision_time=self.cut,horizon_seconds=0,
+                population_ref='native-population',symbol='005930')
+        load.assert_not_called()
+        with self.assertRaisesRegex(ValueError,'quantity/price'):
+            UnfilledResearchAction('WAIT','005930','BUY',True,1000,1100,10,self.cut,'case','population')
 
     def test_readonly_snapshot_budget_and_final_overlap_precede_event_values(self):
         from unittest.mock import patch

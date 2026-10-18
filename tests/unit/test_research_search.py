@@ -306,6 +306,8 @@ class ResearchSearchTests(unittest.TestCase):
         self.assertEqual(40, cards[0].max_drawdown_won)
         self.assertEqual(8, cards[0].closed_trade_count)
         self.assertEqual("weekly approval", cards[0].holdout_access_reason)
+        self.assertEqual(3, cards[0].active_day_count)
+        self.assertEqual("2026-09-13T00:00:00+00:00", cards[0].holdout_accessed_at)
 
     def test_selection_constraints_keep_original_metrics_and_mark_ineligible(self) -> None:
         outcome = apply_selection_constraints(

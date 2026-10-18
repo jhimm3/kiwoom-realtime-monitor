@@ -17,6 +17,8 @@ class PreparedHistoricalSearchProjectionTests(unittest.TestCase):
     def test_publication_sort_matches_existing_utc_interpretation(self) -> None:
         self.assertEqual(_publication("2026-09-01T00:00:00+00:00"),
                          _publication("2026-09-01T00:00:00"))
+        self.assertEqual(_publication("2026-09-01T00:00:00+00:00"),
+                         _publication("2026-09-01T09:00:00+09:00"))
         self.assertEqual((1, 0), _publication("not-a-date"))
 
     @staticmethod

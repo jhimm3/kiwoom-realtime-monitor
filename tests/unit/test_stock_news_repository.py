@@ -28,7 +28,8 @@ class StockNewsRepositoryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "monitor.sqlite3"
             Database(path).initialize()
-            repository = StockNewsRepository(path)
+            now = datetime(2026, 10, 18, 9, tzinfo=UTC)
+            repository = StockNewsRepository(path, now_provider=lambda: now)
             item = StockNewsItem(
                 "삼성전자 공급계약 수주",
                 "영업이익 증가 기대",
@@ -41,9 +42,13 @@ class StockNewsRepositoryTest(unittest.TestCase):
             self.assertEqual(1, repository.upsert("005930", (item,)))
             self.assertEqual(0, repository.upsert("005930", (item,)))
             self.assertTrue(repository.recently_checked("005930", 180))
+            now += timedelta(seconds=179)
+            self.assertTrue(repository.recently_checked("005930", 180))
+            now += timedelta(seconds=1)
+            self.assertFalse(repository.recently_checked("005930", 180))
             self.assertIsNone(repository.last_naver_checked_at("005930"))
 
-            checked_at = datetime.now(UTC)
+            checked_at = now
             repository.upsert("005930", (), naver_checked_at=checked_at)
             self.assertEqual(checked_at, repository.last_naver_checked_at("005930"))
 
@@ -106,8 +111,10 @@ class StockNewsRepositoryTest(unittest.TestCase):
     def test_unlink_keeps_tombstone_and_explicit_relink_advances_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "news.sqlite3"
-            repository = StockNewsRepository(path)
+            now = datetime(2026, 10, 18, 0, 0, tzinfo=UTC)
+            repository = StockNewsRepository(path, now_provider=lambda: now)
             repository.set_journal_link("g", "005930", "article", True)
+            now += timedelta(seconds=1)
             repository.set_journal_link("g", "005930", "article", False)
             with closing(sqlite3.connect(path)) as connection:
                 deleted = connection.execute(
@@ -116,13 +123,15 @@ class StockNewsRepositoryTest(unittest.TestCase):
             self.assertEqual(1, deleted[2])
             self.assertEqual(set(), repository.journal_linked_identities("g", "005930"))
 
+            now += timedelta(seconds=1)
             repository.set_journal_link("g", "005930", "article", True)
             with closing(sqlite3.connect(path)) as connection:
                 restored = connection.execute(
                     "SELECT linked_at,updated_at,is_deleted FROM journal_news_links"
                 ).fetchone()
             self.assertEqual(deleted[0], restored[0])
-            self.assertGreaterEqual(restored[1], deleted[1])
+            self.assertEqual(now, datetime.fromisoformat(restored[1]))
+            self.assertGreater(datetime.fromisoformat(restored[1]), datetime.fromisoformat(deleted[1]))
             self.assertEqual(0, restored[2])
 
 

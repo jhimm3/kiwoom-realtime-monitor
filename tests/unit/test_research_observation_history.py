@@ -88,6 +88,10 @@ class ResearchObservationHistoryTests(unittest.TestCase):
                 observation=_observation("5", key, first, datetime(2026, 9, 12, 9, 0, tzinfo=KST)),
             )
             with closing(sqlite3.connect(path)) as connection:
+                metadata_before = connection.execute(
+                    "SELECT * FROM central_market_data_observation_meta"
+                ).fetchall()
+                self.assertEqual(1, len(metadata_before))
                 connection.execute(
                     "CREATE TRIGGER reject_observation_revision BEFORE INSERT ON "
                     "central_observation_revisions BEGIN SELECT RAISE(ABORT, 'forced failure'); END"
@@ -101,6 +105,10 @@ class ResearchObservationHistoryTests(unittest.TestCase):
                 )
             revisions = store.load_observation_revisions("ranking", "5")
             latest = store.load_dataset_snapshots("ranking", "5")
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(metadata_before, connection.execute(
+                    "SELECT * FROM central_market_data_observation_meta"
+                ).fetchall())
             store.close()
 
         self.assertEqual(1, len(revisions))
