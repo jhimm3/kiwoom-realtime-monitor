@@ -473,12 +473,15 @@ class StockRepository:
                     ((price, updated_at, code) for price, code in price_rows),
                 )
             if cap_rows:
+                # Price receipts still advance; unchanged cap values have no new content timestamp.
                 con.executemany(
                     "UPDATE stocks SET market_cap=?, "
                     "circulating_market_cap=CASE WHEN float_ratio IS NULL "
                     "THEN circulating_market_cap ELSE ? * float_ratio / 100 END, "
-                    "updated_at=? WHERE code=?",
-                    ((cap, circulating, updated_at, code) for cap, circulating, code in cap_rows),
+                    "updated_at=? WHERE code=? AND (market_cap IS NOT ? OR "
+                    "(float_ratio IS NOT NULL AND circulating_market_cap IS NOT (? * float_ratio / 100)))",
+                    ((cap, circulating, updated_at, code, cap, circulating)
+                     for cap, circulating, code in cap_rows),
                 )
             if high_rows:
                 con.executemany(

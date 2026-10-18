@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, Qt
 
@@ -18,6 +19,71 @@ from kiwoom_monitor.infrastructure.persistence.market_cache_writer import Market
 
 
 class MarketCacheWriterTests(unittest.TestCase):
+    def test_repeated_market_cap_jobs_skip_row_changes_but_preserve_price_receipts_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            original_connect = sqlite3.connect
+            generic_time = "2026-10-15T16:00:00+09:00"
+            price_time = "2026-10-15T15:30:00+09:00"
+            fundamentals_time = "2026-10-15T15:00:00+09:00"
+            with closing(original_connect(path)) as connection:
+                connection.execute(
+                    "INSERT INTO stocks(code,name,last_price,market_cap,circulating_market_cap,float_ratio,"
+                    "updated_at,last_price_updated_at,fundamentals_updated_at) VALUES('A','A',100,1000,500,50,?,?,?)",
+                    (generic_time, price_time, fundamentals_time),
+                )
+                connection.commit()
+
+            writes = []
+
+            class TracedConnection(sqlite3.Connection):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.statements = []
+                    self.set_trace_callback(self.statements.append)
+
+                def close(self):
+                    # SQL attempts and affected rows are distinct; a no-match UPDATE contributes zero.
+                    # Read total_changes before close; it does not measure physical disk/WAL writes.
+                    writes.append((self.total_changes, tuple(self.statements)))
+                    super().close()
+
+            def connect(*args, **kwargs):
+                return original_connect(*args, factory=TracedConnection, **kwargs)
+
+            failures = []
+            writer = MarketCacheWriter(path)
+            restarted = MarketCacheWriter(path)
+            for current in (writer, restarted):
+                current.price_failed.connect(lambda *values: failures.append(values), Qt.ConnectionType.DirectConnection)
+            # Every stop drains the real queue; phase two restarts the same QThread,
+            # and phase three creates a fresh writer/repository without an acknowledgement cache.
+            for index, (current, prices) in enumerate(((writer, {}), (writer, {"A": 100}), (restarted, {}))):
+                observed_at = as_kst(datetime(2026, 10, 16, 10, index))
+                with patch("kiwoom_monitor.infrastructure.persistence.stock_repository.sqlite3.connect", connect):
+                    current.enqueue_price_cache(prices, {}, {"A": 1000.}, observed_at.date(), observed_at=observed_at)
+                    current.start()
+                    self.assertTrue(current.stop_and_drain())
+                self.assertEqual([], failures)
+                self.assertEqual(index + 1, len(writes))
+                changes, statements = writes[-1]
+                normalized = tuple(sql.strip().upper() for sql in statements)
+                self.assertEqual(1, sum(sql.startswith("UPDATE STOCKS SET MARKET_CAP=") for sql in normalized))
+                self.assertEqual(1 if prices else 0, sum(sql.startswith("UPDATE STOCKS SET LAST_PRICE=") for sql in normalized))
+                self.assertEqual(0, sum(sql.startswith("SELECT") for sql in normalized))
+                self.assertEqual(1, normalized.count("BEGIN"))
+                self.assertEqual(1, normalized.count("COMMIT"))
+                self.assertEqual(0, normalized.count("ROLLBACK"))
+                self.assertEqual(1 if prices else 0, changes)
+                if prices:
+                    price_time = observed_at.isoformat()
+                with closing(original_connect(path)) as connection:
+                    self.assertEqual((100, 1000., 500., generic_time, price_time, fundamentals_time), connection.execute(
+                        "SELECT last_price,market_cap,circulating_market_cap,updated_at,"
+                        "last_price_updated_at,fundamentals_updated_at FROM stocks WHERE code='A'",
+                    ).fetchone())
+
     def test_price_job_rolls_back_all_values_on_last_write_failure_then_same_writer_retries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

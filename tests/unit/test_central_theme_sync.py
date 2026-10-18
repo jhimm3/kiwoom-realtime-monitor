@@ -4,9 +4,18 @@ import threading
 import tempfile
 import time
 import unittest
+import sqlite3
+from contextlib import closing
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
+from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
 from kiwoom_monitor.infrastructure.central_theme_sync import CentralThemeSyncDispatcher
+from kiwoom_monitor.infrastructure.persistence.database import Database
+from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
 
 
 class _Service:
@@ -46,6 +55,90 @@ class _FailService(_Service):
 
 
 class CentralThemeSyncDispatcherTests(unittest.TestCase):
+    def test_cap_noop_allows_remote_import_but_theme_and_catalog_edits_keep_conflict(self) -> None:
+        first = datetime.fromisoformat("2030-01-02T09:00:00+09:00")
+        received = datetime.fromisoformat("2030-01-02T09:00:01+09:00")
+        for edit in ("cap_only", "theme", "catalog"):
+            with self.subTest(edit=edit), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                Database(path).initialize()
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO stocks(code,name,market,last_price,last_price_updated_at,"
+                        "market_cap,float_ratio,circulating_market_cap,fundamentals_updated_at,"
+                        "updated_at) VALUES('000001','fixture','KOSPI',100,?,1000,50,500,?,?)",
+                        (first.isoformat(), first.isoformat(), first.isoformat()),
+                    )
+                themes = ThemeRepository(path, now_provider=lambda: first)
+                backup = ThemeBackupService(path)
+                revision = backup.revision()
+                before_document = backup.export_document()
+                before_document.pop("created_at")
+                remote = backup.export_document()
+                remote["profiles"].append({
+                    "name": "원격에서 추가", "themes": [], "stock_themes": [],
+                    "theme_name_decisions": [], "theme_suggestions": [],
+                })
+                observed = {}
+
+                class Client:
+                    mutated = False
+
+                    def load_all(self, collection, **_kwargs):
+                        if not self.mutated:
+                            self.mutated = True
+                            StockRepository(path).update_price_cache(
+                                {}, {}, {"000001": 1000.0}, first.date(), observed_at=received,
+                            )
+                            observed["cap_revision"] = backup.revision()
+                            document = backup.export_document()
+                            document.pop("created_at")
+                            observed["cap_document"] = document
+                            if edit == "theme":
+                                themes.create_profile("사용자가 편집")
+                            elif edit == "catalog":
+                                StockRepository(path).upsert("000001", "사용자 이름", "KOSDAQ")
+                            observed["edited_revision"] = backup.revision()
+                        return [{"document": remote, "updated_at": 101.0}] if collection == "theme_metadata" else []
+
+                    def replace(self, *_args, **_kwargs):
+                        raise AssertionError("newer remote snapshot must use the import path")
+
+                marker = Path(directory) / ".theme-pending"
+                marker.write_text("100.0", encoding="utf-8")
+                dispatcher = CentralThemeSyncDispatcher(
+                    CentralContentSyncService(Client()), path, pending_path=marker,
+                )  # type: ignore[arg-type]
+                try:
+                    # Keep the actual revision fence/import; only suppress asynchronous retries.
+                    with patch.object(dispatcher, "_schedule_locked") as schedule, patch(
+                        "kiwoom_monitor.infrastructure.central_theme_sync.time.time", return_value=101.0,
+                    ):
+                        result = dispatcher.flush_pending()
+                    self.assertEqual(revision, observed["cap_revision"])
+                    self.assertEqual(before_document, observed["cap_document"])
+                    profiles = {profile["name"] for profile in backup.export_document()["profiles"]}
+                    if edit == "cap_only":
+                        self.assertEqual(revision, observed["edited_revision"])
+                        self.assertTrue(result)
+                        self.assertEqual(0, schedule.call_count)
+                        self.assertFalse(marker.exists())
+                        self.assertIn("원격에서 추가", profiles)
+                    else:
+                        self.assertNotEqual(revision, observed["edited_revision"])
+                        self.assertFalse(result)
+                        self.assertEqual(1, schedule.call_count)
+                        self.assertTrue(marker.exists())
+                        self.assertNotIn("원격에서 추가", profiles)
+                        if edit == "theme":
+                            self.assertIn("사용자가 편집", profiles)
+                        else:
+                            with closing(sqlite3.connect(path)) as connection:
+                                self.assertEqual(("사용자 이름", "KOSDAQ"), connection.execute(
+                                    "SELECT name,market FROM stocks WHERE code='000001'").fetchone())
+                finally:
+                    dispatcher.close()
+
     def test_edit_during_remote_load_is_not_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / ".theme-pending"

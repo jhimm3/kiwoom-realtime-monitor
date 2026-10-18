@@ -18,6 +18,76 @@ from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
 
 
 class StockRepositoryTests(unittest.TestCase):
+    def test_market_cap_noop_repairs_derived_values_and_preserves_receipt_consumers(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        Database(path).initialize()
+        # Current ratios may arrive after the last market-cap receipt. NULL has no estimate.
+        initial = (("A", 1000, 50, 500), ("B", 900, 25, 225), ("C", 1000, 55, 500),
+                   ("D", 1000, 50, None), ("E", None, 50, 99), ("F", 1000, None, 321),
+                   ("G", 1000, 0, None), ("H", 900, None, None), ("I", 888, 50, 444),
+                   ("J", 1000, None, None))
+        with closing(sqlite3.connect(path)) as con, con:
+            con.executemany(
+                "INSERT INTO stocks(code,name,market,last_price,last_price_updated_at,market_cap,"
+                "float_ratio,circulating_market_cap,updated_at,fundamentals_updated_at,high_250_price,upper_limit_price) "
+                "VALUES(?,?,'KOSPI',100,'original-price',?,?,?,'original-content','2026-10-19 00:00:00',200,150)",
+                ((code, code, cap, ratio, circulating) for code, cap, ratio, circulating in initial),
+            )
+        now = datetime(2026, 10, 19, 1, tzinfo=timezone.utc)
+        receipt = "2026-10-19T10:00:00+09:00"
+        repository = StockRepository(path)
+        codes = tuple(row[0] for row in initial)
+        caps = {code: 1000 for code in codes if code != "I"}
+        caps.update({"missing": 1000, "": 1000, "I": 0})
+        changes, statements = [], []
+        real_connect = sqlite3.connect
+
+        class MeasuredConnection(sqlite3.Connection):
+            def close(current):
+                changes.append(current.total_changes)
+                super().close()
+
+        def connect(*args, **kwargs):
+            current = real_connect(*args, factory=MeasuredConnection, **kwargs)
+            current.set_trace_callback(statements.append)
+            return current
+
+        with patch("sqlite3.connect", side_effect=connect) as connections:
+            repository.update_price_cache({}, {}, caps, now.date(), observed_at=now)
+        self.assertEqual(1, connections.call_count)
+        self.assertEqual([6], changes)
+        self.assertEqual(10, sum(sql.startswith("UPDATE") for sql in statements))
+        self.assertEqual(1, statements.count("COMMIT"))
+        self.assertFalse(any(sql.startswith("SELECT") for sql in statements))
+        with closing(real_connect(path)) as con:
+            self.assertEqual([
+                ("A", 1000, 500, "original-content"), ("B", 1000, 250, receipt),
+                ("C", 1000, 550, receipt), ("D", 1000, 500, receipt), ("E", 1000, 500, receipt),
+                ("F", 1000, 321, "original-content"), ("G", 1000, 0, receipt),
+                ("H", 1000, None, receipt), ("I", 888, 444, "original-content"),
+                ("J", 1000, None, "original-content"),
+            ], con.execute("SELECT code,market_cap,circulating_market_cap,updated_at FROM stocks ORDER BY code").fetchall())
+            self.assertEqual([("2026-10-19 00:00:00", "original-price")] * 10,
+                con.execute("SELECT fundamentals_updated_at,last_price_updated_at FROM stocks ORDER BY code").fetchall())
+
+        # A reopened owner has no RAM ACK/cache: another identical cap batch is still a no-op.
+        repository = StockRepository(path)
+        changes.clear()
+        with patch("sqlite3.connect", side_effect=connect):
+            repository.update_price_cache({}, {}, caps, now.date(), observed_at=datetime(2026, 10, 19, 11))
+        self.assertEqual([0], changes)
+        repository.update_price_cache({"A": 100}, {}, {}, now.date(), observed_at=datetime(2026, 10, 19, 11))
+        with closing(real_connect(path)) as con:
+            self.assertEqual(("original-content", "2026-10-19T11:00:00+09:00"), con.execute(
+                "SELECT updated_at,last_price_updated_at FROM stocks WHERE code='A'").fetchone())
+        self.assertEqual(dict.fromkeys(codes, 100), repository.load_last_prices(codes))
+        for values in (repository.load_fundamentals(codes), repository.load_ranking_cache(codes, codes, now.date()).fundamentals):
+            self.assertEqual({"A": (1000, 50), "B": (1000, 25), "C": (1000, 55), "D": (1000, 50),
+                              "E": (1000, 50), "G": (1000, 0), "I": (888, 50)},
+                             {code: (value.market_cap_eok, value.float_ratio_percent) for code, value in values.items()})
+        self.assertEqual(("F", "H", "J"), repository.fundamentals_to_refresh(codes, "2026-10-19"))
+
     def test_price_cache_uses_one_transaction_and_keeps_field_and_date_contracts(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
         path = Path(directory) / "monitor.sqlite3"
@@ -286,15 +356,18 @@ StockRepository(Path(database)).update_price_cache({'A':100},{'A':110},{'A':1000
                 )
                 connection.commit()
 
-            repository.update_last_market_caps({"005930": 4_200_000.0})
+            with patch("kiwoom_monitor.infrastructure.persistence.stock_repository.kst_now", return_value=datetime(2030, 1, 2, 10)):
+                repository.update_last_market_caps({"005930": 4_200_000.0})
+            with patch("kiwoom_monitor.infrastructure.persistence.stock_repository.kst_now", return_value=datetime(2030, 1, 2, 11)):
+                repository.update_last_market_caps({"005930": 4_200_000.0})
 
             with closing(sqlite3.connect(database_path)) as connection:
                 saved = connection.execute(
-                    "SELECT market_cap,circulating_market_cap,fundamentals_updated_at "
+                    "SELECT market_cap,circulating_market_cap,fundamentals_updated_at,updated_at "
                     "FROM stocks WHERE code=?",
                     ("005930",),
                 ).fetchone()
-            self.assertEqual((4_200_000.0, 2_310_000.0, "2026-09-20 08:00:00"), saved)
+            self.assertEqual((4_200_000.0, 2_310_000.0, "2026-09-20 08:00:00", "2030-01-02T10:00:00+09:00"), saved)
 
     def test_blank_market_update_preserves_catalog_market(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
