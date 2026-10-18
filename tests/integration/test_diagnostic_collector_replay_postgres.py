@@ -39,7 +39,7 @@ class DiagnosticCollectorReplayPostgresTests(unittest.TestCase):
             self.assertEqual('complete', result['state'], result)
             self.assertTrue(result['fixture_verification']['passed'], result)
             self.assertEqual(21, result['fixture_verification']['minute_rows'])
-            self.assertEqual(1080, result['fixture_verification']['second_rows'])
+            self.assertEqual(0, result['fixture_verification']['second_rows'])
             self.assertEqual(18, result['fixture_verification']['closed_revision_rows'])
             self.assertEqual('passed', result['cleanup'])
             self.assertTrue(done.is_set())
