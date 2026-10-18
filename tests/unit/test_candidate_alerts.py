@@ -230,7 +230,7 @@ class RamShadowDialogTests(unittest.TestCase):
                 beep.assert_not_called()
             finally:
                 dialog.stop(); dialog.deleteLater()
-                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                QCoreApplication.sendPostedEvents(dialog, QEvent.Type.DeferredDelete)
                 self.app.processEvents()
 
     def test_price_candidate_and_lookup_expire_independently(self):

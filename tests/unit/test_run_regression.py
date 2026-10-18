@@ -9,6 +9,7 @@ import shutil
 import time
 import tempfile
 import unittest
+import yaml
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -412,8 +413,55 @@ class RunRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Windows tests were not executed"):
                 check_required_ci_results.validate(None, linux, postgres, "test-commit", base_ref="parent-commit")
 
+    def _assert_architecture_ci_gate(self, text: str) -> None:
+        # BaseLoader preserves GitHub's "on" key and scalar expressions. This
+        # validates this existing workflow contract, not arbitrary Actions YAML.
+        workflow = yaml.load(text, Loader=yaml.BaseLoader)
+        for event in ('push', 'pull_request'):
+            self.assertIn(event, workflow['on'])
+            self.assertIn(workflow['on'][event], ('', None, {}))
+        job = workflow['jobs']['all-local']
+        self.assertNotIn('if', job)
+        self.assertEqual('false', job.get('continue-on-error', 'false'))
+        steps = [step for step in job['steps']
+                 if 'python -m scripts.check_architecture ' in step.get('run', '')]
+        self.assertEqual(1, len(steps))
+        step = steps[0]
+        self.assertNotIn('if', step)
+        self.assertEqual('false', step.get('continue-on-error', 'false'))
+        self.assertEqual('pwsh', step['shell'])
+        self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', step['run'].splitlines())
+        required = workflow['jobs']['required-regression']
+        self.assertIn('all-local', required['needs'])
+        self.assertEqual('${{ always() }}', required['if'])
+        self.assertEqual('false', required.get('continue-on-error', 'false'))
+        self.assertEqual("${{ needs['all-local'].result }}", required['env']['WINDOWS_JOB'])
+        upstream = required['steps'][0]
+        self.assertNotIn('if', upstream)
+        self.assertEqual('false', upstream.get('continue-on-error', 'false'))
+        self.assertIn('test "$WINDOWS_JOB" = success', upstream['run'].splitlines())
+
+    def test_architecture_ci_gate_rejects_disabled_or_ignored_failure_mutations(self) -> None:
+        original = (run_regression.ROOT / '.github/workflows/dependency-regression.yml').read_text(encoding='utf-8')
+        self._assert_architecture_ci_gate(original)
+        marker = '      - name: Check architecture deltas without product imports\n'
+        mutations = {
+            'disabled_step': original.replace(marker, marker + '        if: false\n'),
+            'ignored_failure': original.replace(marker, marker + '        continue-on-error: true\n'),
+            'zero_exit': original.replace('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', 'if ($LASTEXITCODE -ne 0) { exit 0 }'),
+            'filtered_pr': original.replace('  pull_request:\n', '  pull_request:\n    paths: ["docs/**"]\n'),
+            'missing_guard': original.replace('python -m scripts.check_architecture ', 'python -m scripts.other_check '),
+            'ignored_required': original.replace('test "$WINDOWS_JOB" = success\n', 'test "$WINDOWS_JOB" = success || true\n'),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertNotEqual(original, mutated)
+                with self.assertRaises(AssertionError):
+                    self._assert_architecture_ci_gate(mutated)
+
     def test_github_ci_keeps_full_regression_without_duplicate_related_run(self) -> None:
         workflow = (run_regression.ROOT / ".github/workflows/dependency-regression.yml").read_text(encoding="utf-8")
+        self._assert_architecture_ci_gate(workflow)
         full = workflow.split("  all-local:\n", 1)[1].split("\n  postgres-integration:", 1)[0]
         self.assertNotIn("\n    if:", full)
         self.assertIn("python -m scripts.run_regression --profile all-local", full)
@@ -779,8 +827,14 @@ class RunRegressionTests(unittest.TestCase):
                     "process_tree_exit_confirmed": True, "test_count": 1, **cause}
                 passed = {"status": "passed", "worker_exit_confirmed": True,
                     "process_tree_exit_confirmed": True, "test_count": 1}
-                with patch.object(run_regression, "_run_process", side_effect=[first, passed]) as run, redirect_stdout(StringIO()):
+                console = StringIO()
+                with patch.object(run_regression, "_run_process", side_effect=[first, passed]) as run, \
+                        patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), redirect_stdout(console):
                     self.assertNotEqual(0, run_regression._execute_profile("core", 5, output))
+                events = [json.loads(line) for line in console.getvalue().splitlines()]
+                self.assertEqual(["start", "complete"] * run.call_count,
+                                 [event["phase"] for event in events if "phase" in event])
+                self.assertEqual(first["status"], events[1]["status"])
                 result = json.loads((output / "run.json").read_text(encoding="utf-8"))
                 self.assertEqual(1 if stop else 2, run.call_count)
                 self.assertEqual(["journal-and-news"] if stop else [], result["unrun_batches"])

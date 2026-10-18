@@ -13,6 +13,7 @@ from unittest.mock import patch
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_events import MarketEventService
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+from kiwoom_monitor.domain.time_basis import as_kst
 from tests.unit.test_market_events import _Broker
 
 
@@ -98,7 +99,7 @@ class MarketEventWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current["last_signal_at"], self.service._cohort["005930"]["last_signal_at"])
         for code in ("005930", "000660"):
             row = self.service._cohort[code]
-            self.assertEqual(invocation.timestamp(), row["last_signal_at"])
+            self.assertEqual(as_kst(invocation).timestamp(), row["last_signal_at"])
             self.assertEqual("2026-10-08", row["entry_session"])
             self.assertEqual("condition", row["condition_name"])
         history = self.store.load_market_event_history("cohort", code="005930")

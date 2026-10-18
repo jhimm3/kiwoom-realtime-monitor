@@ -241,7 +241,9 @@ class ScopedAccountAPITests(unittest.TestCase):
 
     def test_legacy_real_query_and_explicit_main_real_query_keep_default_binding(self):
         root = Path(self.temp.name)
-        with patch("kiwoom_monitor.infrastructure.kiwoom_rest.account_identity.KiwoomAccountIdentityReader.verify",
+        # A frozen ranking-boundary clock would keep the real market broker's
+        # lower-priority account query reserved forever. Keep this clock quiet.
+        with patch(__name__ + ".NOW", NOW.replace(second=10)), patch("kiwoom_monitor.infrastructure.kiwoom_rest.account_identity.KiwoomAccountIdentityReader.verify",
             new=AsyncMock(return_value=VerifiedAccountIdentity("kiwoom", AccountEnvironment.REAL, "f" * 64, NOW))), patch(
             "kiwoom_monitor.central_server.app.CentralRealtimeCollector.start", new=AsyncMock()):
             app = create_app(CentralServerSettings(f"sqlite:///{root / 'main.sqlite'}", "private-token",

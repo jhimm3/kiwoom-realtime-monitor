@@ -824,6 +824,7 @@ def _run_process(
     environment["PYTHONPATH"] = os.pathsep.join(pythonpath)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment["PYTHONUTF8"] = "1"
+    environment["PYTHONFAULTHANDLER"] = "1"
 
     command = [sys.executable, "-u", str(Path(__file__).resolve()), "--_worker",
                "--_result-path", str(result_path), "--_modules", *modules]
@@ -1153,8 +1154,15 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
         for index, (name, modules) in enumerate(workers, start=1):
             result_path = output_path / f"worker-{index:03}.json"
             log_path = output_path / f"worker-{index:03}.log"
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                print(json.dumps({"worker": index, "workers": len(workers),
+                                  "name": name, "phase": "start"}), flush=True)
             result = _run_process(modules=modules, result_path=result_path,
                                   log_path=log_path, timeout_seconds=timeout_seconds)
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                print(json.dumps({"worker": index, "name": name, "phase": "complete",
+                                  "status": result["status"], "seconds": result.get("duration_seconds"),
+                                  "tests": result.get("test_count", 0)}), flush=True)
             result["name"] = name
             result["modules"] = list(modules)
             summary["batch_results"].append(result)
