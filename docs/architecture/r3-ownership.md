@@ -75,6 +75,8 @@
 <a id="shadow"></a>
 ## 공유 판단과 Shadow — F11/F12/F13
 
+**005 기준선 입력/비용 계약.** 승인0B callback은 RAM에만 입력하고 기존 monitor worker가 정책 prior window를 조회한다. query end=cut.floor, start=max(end-window,현재KSTday00:00)이며 기존 cache (cut-2초).floor/commit token은 별도로 유지한다. 빈 교집합/미설정/subminute는 read0, full-day API 기본값·native authority/원본은 그대로다. native metadata는 기존 codec에서 completeness/value_kind/source/원래available_at(epoch)4필드로 복사해 순수helper에 인계한다. flat/research 입력·미확인 metadata/미래 availability 의미와 source/cut/stop·pending·주문불가를 유지한다. 같은 정규화 full-day 대비 reference/observation은 동일하나 기존 raw native UNAVAILABLE→COMPLETE는 명시 연결 복구다. 기존 candidate/leader/nativeDB/0B·QueryStore 검사와004의 raw native 비용 회귀를 재사용하고 실제PG/장중 수락은 구분한다.
+
 **현재 책임.** `research_families`는 지원 Family/config/evaluator의 등록 경계다. 순수 evaluator는 제공된 입력과 상태로 판단하며 직접 수집·DB·UI·주문을 소유하지 않는다. CandidateMonitor는 observation cursor/page와 후보 평가·checkpoint를, 0B 후보 경로는 실제 RAM trade 입력을, MarketThemeShadowRuntime은 공통 관측 선택·dispatch·결과 RAM/선별 기록·조회 수명을 소유한다.
 
 **상태·실패·공식 경계.** Family registry/evaluator와 기존 monitor의 page/run 메서드, RAM runtime의 게시/조회 경계를 쓴다. 같은 관측의 불변 frame 변환은 재사용하되 정책 판단·cursor·실패/pending·저장 ACK를 합치지 않는다. 결과는 native Shadow/checkpoint 저장소와 API/관찰창으로 전달한다. Runtime이 가진 작업·lock·drain을 재사용하며 UI 조회 때문에 재수집/재실행하거나 결과 TTL을 연장하지 않는다.
@@ -200,4 +202,6 @@ wall time·WAL/디스크 쓰기·실제 PG/장중 지연은 위 호출·행 수�
 
 2026-10-18 최종 검증: 실제 CLI19조건과 현재 workflow pwsh의 정상0/위반1, 기존 비용 검사의 SELECT20→40/반환200→400 거절과 복원 재통과를 확인했다. CI 단위검사는 비활성화/오류무시·누락·필터6변이를 검증한다. `d5bec26`의 [실제 전체 CI](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39115204095)는7job 성공·Windows5577건과 sealed native 보고서의 최종 source/ID 대조까지 통과했다. 실제 PR/의도적 위반 push 실패·운영 전체 수락은 별도다. 불필요한 순수 relay의 실익/모든 helper I/O/동일 지점 반복/미등록 고빈도·수명은 자동 완전 판정하지 않는다. PC 정적7.082초·추가 CI변이 본문0.116초, hosted 신규3worker·50건4.287초는 해당 범위의 관찰값이고 정확한 토큰 비용은 미측정이다. 현재 근거와 남은 범위는 R3-083 말미를 따른다.
 
-R3-083이 이 체계의 진행 원장이다. 다른 R3 개선을 중단시키는 별도 선행 전면 정리는 아니다. 각 개선이 끝날 때 관련 owner/공식 경계·비용/실패 계약·F 원장을 좁혀 반영하며 다음 구현은 기존002+023 순서를 유지한다. 최종 종료에는 책임 계약의 현재 구현 일치, 개선된 고빈도 경로의 재현 비용/중복·실패/종료 검증, 구조 위반 시 실패/정당 변경 시 통과, 자동 CI 연결 및 실제 실행 결과 확인을 포함한다. 문서·로컬 검사 완료와 hosted CI/운영 환경 수락은 분리한다.
+R3-083이 이 체계의 진행 원장이다. 다른 R3 개선을 중단시키는 별도 선행 전면 정리는 아니다. 각 개선이 끝날 때 관련 owner/공식 경계·비용/실패 계약·F 원장을 좁혀 반영하며 초기 구현 순서는002+023이었고 현재 다음010·006/008 보류는 REFACTOR_BACKLOG 정본을 따른다. 최종 종료에는 책임 계약의 현재 구현 일치, 개선된 고빈도 경로의 재현 비용/중복·실패/종료 검증, 구조 위반 시 실패/정당 변경 시 통과, 자동 CI 연결 및 실제 실행 결과 확인을 포함한다. 문서·로컬 검사 완료와 hosted CI/운영 환경 수락은 분리한다.
+
+**R3-005 비용 기준(2026-10-19).** 고정20종목450분의 native 반환9000→100, SELECT/연결 각20·봉쓰기0/같은key추가read0. 진단11조건·PG SQL fake계약과 현재 관련 실행은 정본005를 따른다. 정책 window를 바꾸면 필요한 bound와 native 반환/같은 결과를 함께 갱신하며 미정 window를 임의 기본값으로 채우지 않는다.

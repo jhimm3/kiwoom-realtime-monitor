@@ -1,5 +1,13 @@
 # 남은 작업 요약
 
+## 2026-10-19 R3-005 기준선 분봉 범위·native 입력 연결
+
+로컬 제품·검사 `4841f7a`에서 기존 CandidateMonitor의 정책 기준선 조회를 현재 KST 거래일과 정책 window의 교집합으로 제한했다. SQL은 cut.floor 기준 start 포함/end 제외이며 기존 (cut-2초).floor/commit token 캐시는 그대로다. 빈 교집합·미설정·subminute는 조회하지 않는다. 실제 native 반환의 nested metadata는 기존 codec로 품질/출처/가용시각4필드에 연결해, 정상 완결봉도 UNAVAILABLE이던 입력 연결을 복구했다. 20종목×450분 fixture의 실제 native 반환9,000→100(5분×20), SELECT20·연결20 유지/분봉 쓰기0이다. 같은 cache key의 추가 read0/commit token 변경 뒤 추가20이다. 정상 native UNAVAILABLE→COMPLETE는 연결 복구에 따른 의도한 동작 변화이고, 이를 포함한 정규화 full-day oracle와 bounded reference/observation hash는11조건에서 동일하다. 관련5모듈 **361건/127.269초 통과**. 구조·29번째 증분 검토/실행 ID·소스 불변·worker/자식 종료·임시 정리를 확인했다.
+
+R3-005는 **검증 완료(로컬 native·PG SQL 계약 범위)**다. 백로그 요약·상세와 F12(직접)/F08·F24(관련 경계), 책임·저장소 계약을 갱신했다. 다음 미보류 대기 항목은 **R3-010(불변 승인 문서 조회·저장·재조회)**이다. 앞선 R3-006/008은 기존 근거대로 보류, 007/009는 검증 완료를 유지한다. 실제 PG wait 근거 없이 pool/새 계층을 만들거나 완료 항목·전수 감사를 다시 시작하지 않는다.
+
+이번 push/GitHub CI·NAS 배포·로컬 전수 회귀·실제 키움/장중·운영 DB/주문·실제 PostgreSQL/외부 네트워크 수락은 미실행이다. PG는 기존 실제 SQL 생성·인자/decoder의 fake-connection 계약으로만 검증했다. 분봉으로 가짜 틱을 만들거나 미정 매매 조건/주문 승인을 추가하지 않았고 F 부모의 부분/확인불가 상태는 유지한다.
+
 ## 2026-10-18 R3-003 동일 시총 쓰기 제거·가격 확인시각 보존
 
 로컬 제품·검사 `622c2d9`에서 기존 StockRepository.update_price_cache의 시총 UPDATE에 null-safe 조건만 추가했다. 시총과 현재 DB 유통비율로 계산한 유통시총이 모두 같으면 행/일반 updated_at을 보존하며, 후행 비율·NULL/0 파생값 보정은 수행한다. 같은 가격의 last_price_updated_at과 기본정보 당일 gate는 유지한다. 동일 시총20종목의 SQLite 반영행20→0, UPDATE시도20·연결1·SELECT0·BEGIN1·COMMIT1은 그대로다. 같은 가격20개의 후속 확인시각 갱신/반영20은 유지한다. 물리 I/O·WAL/lock wait·실제 장중 지연은 미측정이다. 관련8모듈 **165건/101.115초 통과**. 구조·28번째 증분 검토/실행 ID·소스 불변·worker/자식 종료·임시 정리를 확인했다.

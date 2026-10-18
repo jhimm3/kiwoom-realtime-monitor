@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-19 R3-005: 기존 CandidateMonitor worker→native load_minute_bars를 정책 window/currentKSTday half-open 범위로 제한한다. SQL cut.floor와 기존2초 cachefence는분리, native metadata는 기존codec로4필드/원래available epoch만인계한다. flat/research/reader API·source/token/close·pending/주문경계는유지. native9000→100/SELECT20·연결20유지, 관련5모듈 361건·로컬 `4841f7a`. F12/F08/F24·동작복구와 범위동등성 분리·다음010은 [R3 정본](REFACTOR_BACKLOG.md#r3-005-기준선-분봉-범위native-입력-연결-완료--2026-10-19)을 따른다.
+
 2026-10-18 R3-003: 기존 MainWindow RAM/queue→AppController dispatch/retry→MarketCacheWriter/native fallback→StockRepository 단일 transaction에서 cap/현재 비율 파생값이 같은 행만 UPDATE 생략. last_price_updated_at은 같은 가격도 수신 확인, fundamentals_updated_at은 기존 당일 gate를 유지한다. 새 owner/계층/SELECT0, samecap 반영20→0/SQL시도20·COMMIT1유지. actual theme import/CAS·writer/reader/수명 관련8모듈 165건/로컬 `622c2d9`. 다음005·F06/F10/F22/F24·029잔여는 [정본](REFACTOR_BACKLOG.md#r3-003-동일-시총-쓰기확인시각-계약-완료--2026-10-18)을 따른다.
 
 2026-10-18 R3-023 등록 코드범위 완료: 기존 JournalWindow의 history 계좌 검증→client 수락시각1회→비용 confirmed_at/commit→task·설정·reload, backfill 실패시각1회→updated_at/commit→task fail에 연결했다. 원체결/봉/정산일·scope·SQL/transaction/owner·계층 수는 보존한다. history 시계 오류는 저장 전 기존 실패 callback으로 처리한다. 로컬 `4ac627a`·관련10모듈 128건 통과. F08/F18/F22/F24·오류 경계·운영 미검증은 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-history-비용backfill-실패-시각--2026-10-18)을 따른다. 다음 R3-003이며 앞선023 문단은 당시 이력이다.
