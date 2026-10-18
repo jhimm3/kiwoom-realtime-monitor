@@ -678,6 +678,55 @@ class DocumentLeaderBreakoutTests(unittest.TestCase):
         monitor.observe_trade(trade(900,at=at),at,source='source:1',approved=False)
         self.assertFalse(monitor.quality['document_baseline_observations'])
 
+    def test_bounded_store_rows_preserve_full_day_reference_and_observation(self):
+        from kiwoom_monitor.application.leader_breakout import document_breakout_reference, document_breakout_observation
+        for seconds in (60, 120):
+            for offset in (0, 3):
+                for quality in ('complete', 'missing', 'future_receipt'):
+                    with self.subTest(seconds=seconds, offset=offset, quality=quality):
+                        cut = AT + timedelta(seconds=offset)
+                        rows = [{**self.native_rows()[0], 'minute': '09:07', 'high': 9000}, *self.native_rows()]
+                        if quality == 'missing':
+                            rows = [row for row in rows if row['minute'] != '09:09']
+                        elif quality == 'future_receipt':
+                            rows = [{**row, 'available_at': (cut + timedelta(seconds=1)).timestamp()}
+                                    if row['minute'] == '09:09' else row for row in rows]
+                        original = deepcopy(rows)
+                        start = '09:09' if seconds == 60 else '09:08'
+
+                        def bounded(code, day, market, *, start_minute=None, end_minute=None):
+                            self.assertEqual(('005930', '2026-10-16', 'KRX', start, '09:10'),
+                                             (code, day, market, start_minute, end_minute))
+                            return [dict(row) for row in rows if start_minute <= row['minute'] < end_minute]
+
+                        store = Mock()
+                        store.load_minute_bars.side_effect = bounded
+                        draft = self.draft(seconds)
+                        monitor = CandidateMonitor(store, draft, poll_seconds=1, universe_max_age_seconds=90,
+                                                   now_provider=lambda: cut)
+                        monitor._leader_accepting = True
+                        monitor.observe_trade(trade(990, at=cut), cut, source='scope:1', approved=True)
+                        monitor.run_once()
+                        observed_at = cut + timedelta(milliseconds=100)
+                        monitor.observe_trade(trade(1010, at=observed_at), observed_at, source='scope:1', approved=True)
+                        store.load_minute_bars.assert_called_once_with(
+                            '005930', '2026-10-16', 'KRX', start_minute=start, end_minute='09:10')
+                        full_reference = document_breakout_reference(draft, rows, symbol='005930',
+                            decision_time=observed_at.isoformat(), mode='0B')
+                        item = monitor._document_inputs['005930']
+                        full_observation = document_breakout_observation(draft, full_reference,
+                            **{key: item[key] for key in ('price', 'observed_at', 'available_at', 'input_ref',
+                                                        'previous', 'source', 'turnover_won')}, mode='0B')
+                        actual = monitor.quality['document_baseline_observations'][0]
+                        self.assertEqual(full_reference, actual['reference'])
+                        self.assertEqual(full_reference['reference_ref'], actual['reference']['reference_ref'])
+                        self.assertEqual(full_reference['input_refs_hash'], actual['reference']['input_refs_hash'])
+                        self.assertEqual(full_observation, actual)
+                        self.assertEqual(1000 if quality == 'complete' else None, actual['reference']['reference_price'])
+                        self.assertEqual(seconds // 60 if quality == 'complete' else 0, actual['reference']['input_count'])
+                        self.assertFalse(actual['order_authorized'])
+                        self.assertEqual(original, rows)
+
     def test_live_document_scope_and_state_are_bounded_and_null_window_never_reads_db(self):
         store=Mock();monitor=CandidateMonitor(store,self.draft(None),poll_seconds=1,universe_max_age_seconds=90)
         monitor._leader_accepting=True
@@ -736,12 +785,15 @@ class DocumentLeaderBreakoutTests(unittest.TestCase):
         monitor.observe_trade(trade(990,at=at),at,source='s',approved=True)
         monitor.run_once();monitor.run_once()
         self.assertEqual(1,store.load_minute_bars.call_count)
+        store.load_minute_bars.assert_called_with('005930','2026-10-16','KRX',start_minute='09:08',end_minute='09:10')
         token[0]='two';monitor.run_once()
         self.assertEqual(2,store.load_minute_bars.call_count)
+        store.load_minute_bars.assert_called_with('005930','2026-10-16','KRX',start_minute='09:08',end_minute='09:10')
         at+=timedelta(seconds=1)
         monitor.observe_trade(trade(990,at=at,code='000660'),at,source='s',approved=True)
         entered=threading.Event();release=threading.Event()
-        def block(*args):
+        def block(*args, **kwargs):
+            self.assertEqual({'start_minute':'09:08','end_minute':'09:10'},kwargs)
             entered.set();self.assertTrue(release.wait(5));return self.native_rows()
         store.load_minute_bars.side_effect=block
         token[0]='three'
@@ -1315,12 +1367,16 @@ class LeaderBreakoutLiveApiTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(first._leader_accepting)
                         self.assertEqual("BLOCKED", app.state.candidate_monitor.quality["status"])
                         baseline = app.state.candidate_monitor
-                        with patch.object(store,'load_minute_bars',return_value=DocumentLeaderBreakoutTests().native_rows()):
+                        with patch.object(store,'load_minute_bars',return_value=DocumentLeaderBreakoutTests().native_rows()) as baseline_read:
                             for price in (990,1010):
                                 clock[0] += timedelta(milliseconds=1)
                                 collector._publish_parsed({'trnm':'REAL','data':[{'type':'0B','item':'005930',
                                     'values':{'20':'091000','10':str(price),'14':'100','15':'1','13':str(2000+price)}}]})
                                 baseline.run_once()
+                        self.assertTrue(baseline_read.call_count)
+                        for call in baseline_read.call_args_list:
+                            self.assertEqual(('005930','2026-10-16','KRX'),call.args)
+                            self.assertEqual({'start_minute':'09:08','end_minute':'09:10'},call.kwargs)
                         baseline_page=(await client.get('/api/v1/research/candidates',headers=headers)).json()
                         self.assertTrue(baseline_page['quality']['document_baseline_observations'][0]['observed_price_cross'])
                         self.assertFalse(baseline_page['quality']['document_baseline_observations'][0]['order_authorized'])

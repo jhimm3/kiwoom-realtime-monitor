@@ -5525,5 +5525,125 @@ class AllocationModelPublicationTests(unittest.IsolatedAsyncioTestCase):
         send.assert_called_once_with('POST','/api/v1/research/ram-shadow/allocation-models',packet)
 
 
+class DocumentReferenceRangeTests(unittest.TestCase):
+    def test_native_document_ranges_preserve_day_cut_and_original_quality_evidence(self):
+        from kiwoom_monitor.application.leader_breakout import document_leader_breakout_policy, document_breakout_reference
+        from kiwoom_monitor.domain.time_basis import as_kst
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'document.sqlite3')
+            store.initialize()
+            self.addCleanup(store.close)
+            values, observations = [], []
+            for day in ('2026-10-15', '2026-10-16'):
+                for minute in ('00:00', '00:01', '00:02', '09:07', '09:08', '09:09', '09:10', '23:58', '23:59'):
+                    value = dict(trading_date=day, minute=minute, code='005930', market='KRX',
+                        open=100, high=99999 if minute == '09:10' else 1000, low=90, close=100,
+                        volume=1, trade_value_million_won=1,
+                        updated_at=datetime.fromisoformat(day+'T00:00:00+09:00').timestamp())
+                    if minute == '09:09':
+                        value['updated_at'] = datetime.fromisoformat(day+'T09:10:01+09:00').timestamp()
+                    query = minute == '09:08'
+                    observation = minute_bar_observation(value,
+                        origin=ObservationOrigin.QUERY if query else ObservationOrigin.REALTIME,
+                        completeness=DataCompleteness.PARTIAL if minute == '09:07' else DataCompleteness.COMPLETE,
+                        source='kiwoom-ka10080' if query else 'kiwoom-websocket-0B',
+                        value_kind=DataValueKind.ESTIMATED if query else DataValueKind.ACTUAL)
+                    values.append(value);observations.append((day+'T'+minute, observation))
+            store.save_minute_bars(values, observations=observations)
+            full = store.load_minute_bars('005930', '2026-10-16', 'KRX')
+            original = deepcopy(full)
+            # Independently adapt the existing native transport contract for the unbounded oracle.
+            unbounded = [{**row, **{key: row['metadata'][key] for key in ('completeness','value_kind','source')},
+                          'available_at': datetime.fromisoformat(row['metadata']['available_at']).timestamp()} for row in full]
+            cases = ((120, '00:00:00', None), (120, '00:01:00', ('00:00','00:01')),
+                     (120, '00:02:00', ('00:00','00:02')), (86400, '00:02:01', ('00:00','00:02')),
+                     (120, '09:10:00', ('09:08','09:10')), (120, '09:10:01', ('09:08','09:10')),
+                     (120, '09:10:02', ('09:08','09:10')), (60, '23:59:03', ('23:58','23:59')),
+                     (None, '09:10:03', None), (30, '09:10:03', None))
+            for seconds, clock, bounds in cases:
+                for utc in (False, True):
+                    with self.subTest(seconds=seconds, clock=clock, utc=utc):
+                        at = datetime.fromisoformat('2026-10-16T'+clock+'+09:00')
+                        received = at.astimezone(timezone.utc) if utc else at
+                        draft = document_leader_breakout_policy()
+                        policy = replace(draft, reference_level={**draft.reference_level, 'window_seconds': seconds})
+                        monitor = CandidateMonitor(store, policy, poll_seconds=1, universe_max_age_seconds=90)
+                        monitor._leader_accepting = True
+                        payload = dict(code='005930', market='KRX', trade_time=at.strftime('%H%M%S'),
+                                       current_price=1001, cumulative_trade_value=100)
+                        with patch.object(store, 'load_minute_bars', side_effect=AssertionError('0B callback DB read')):
+                            monitor.observe_trade(payload, received, source='native-fixture', approved=True)
+                        expected = document_breakout_reference(policy, unbounded, symbol='005930', decision_time=at, mode='0B')
+                        with patch.object(store, 'load_minute_bars', wraps=store.load_minute_bars) as read:
+                            monitor._refresh_document_observations()
+                        if bounds:
+                            read.assert_called_once_with('005930','2026-10-16','KRX', start_minute=bounds[0],end_minute=bounds[1])
+                        else:
+                            read.assert_not_called()
+                        actual = monitor.quality['document_baseline_observations'][0]
+                        self.assertEqual(expected, actual['reference'])
+                        self.assertFalse(actual['order_authorized'])
+                        if seconds == 120 and clock in ('00:02:00','09:10:01','09:10:02'):
+                            self.assertEqual(('COMPLETE',1000,2), (expected['quality'],expected['reference_price'],expected['input_count']))
+                        if clock == '09:10:00':
+                            self.assertEqual('UNAVAILABLE', expected['quality'])  # A future receipt is still unavailable.
+                        self.assertEqual(as_kst(at).date().isoformat(), monitor._document_inputs['005930']['available_at'][:10])
+            self.assertEqual(original, store.load_minute_bars('005930','2026-10-16','KRX'))
+
+    def test_range_read_failure_retry_and_inflight_replacement_keep_publication_fences(self):
+        from kiwoom_monitor.application.leader_breakout import document_leader_breakout_policy
+
+        at = datetime.fromisoformat('2026-10-16T09:10:03+09:00')
+        draft = document_leader_breakout_policy()
+        policy = replace(draft, reference_level={**draft.reference_level,'window_seconds':60})
+        payload = dict(code='005930',market='KRX',trade_time='091003',current_price=1001,cumulative_trade_value=100)
+        row = dict(trading_date='2026-10-16',minute='09:09',code='005930',market='KRX',high=1000,
+                   completeness='complete',value_kind='actual',source='kiwoom-websocket-0B',available_at=at.timestamp()-1)
+        for replacement in ('source','cut','stop','read_failure','commit'):
+            with self.subTest(replacement=replacement):
+                store = Mock();token = [1]
+                monitor = CandidateMonitor(store,policy,poll_seconds=1,universe_max_age_seconds=90)
+                monitor._leader_accepting = True
+                monitor.set_minute_commit_provider(lambda:token[0])
+                monitor.observe_trade(payload,at,source='original',approved=True)
+
+                def read(*args, **kwargs):
+                    if replacement == 'source':
+                        monitor.observe_trade(payload,at+timedelta(seconds=1),source='replaced',approved=True)
+                    elif replacement == 'cut':
+                        later = at+timedelta(minutes=1)
+                        monitor.observe_trade({**payload,'trade_time':later.strftime('%H%M%S')},later,source='original',approved=True)
+                    elif replacement == 'stop':
+                        monitor._leader_accepting = False
+                    elif replacement == 'read_failure':
+                        raise OSError('controlled native read failure')
+                    else:
+                        token[0] = 2
+                    return [row]
+
+                store.load_minute_bars.side_effect = read
+                if replacement == 'read_failure':
+                    with self.assertRaisesRegex(OSError,'controlled native read failure'):
+                        monitor._refresh_document_observations()
+                    self.assertNotIn('005930', monitor._document_references)
+                    store.load_minute_bars.side_effect = None;store.load_minute_bars.return_value = [row]
+                    monitor._refresh_document_observations()
+                    self.assertEqual(2,store.load_minute_bars.call_count)
+                    self.assertEqual('COMPLETE', monitor._document_references['005930'][1]['quality'])
+                else:
+                    monitor._refresh_document_observations()
+                    if replacement == 'commit':
+                        self.assertEqual(1,monitor._document_references['005930'][0][-1])
+                        store.load_minute_bars.side_effect = None;store.load_minute_bars.return_value = [row]
+                        monitor._refresh_document_observations()
+                        monitor._refresh_document_observations()
+                        self.assertEqual(2,store.load_minute_bars.call_count)
+                        self.assertEqual(2,monitor._document_references['005930'][0][-1])
+                    else:
+                        self.assertFalse(monitor.quality['document_baseline_observations'])
+                        self.assertFalse(any('baseline_observation' in decision[0] for decision in monitor._leader_pending))
+
+
 if __name__ == "__main__":
     unittest.main()

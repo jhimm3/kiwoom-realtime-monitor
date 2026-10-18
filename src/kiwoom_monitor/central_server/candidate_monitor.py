@@ -48,6 +48,7 @@ from kiwoom_monitor.application.research_replay import (
     replay_candidate_universe,
     replay_krx_minute_bars,
 )
+from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_from_document
 
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,28 @@ class CandidateMonitor:
             cached = self._document_references.get(symbol)
             if cached is None or cached[0] != key:
                 seconds = self._leader_policy.reference_level['window_seconds']
-                rows = self._store.load_minute_bars(symbol,cut.date().isoformat(),'KRX') if seconds and seconds%60 == 0 else ()
+                if seconds and seconds % 60 == 0:
+                    # Reference selection uses cut.floor, independently of the cache's close fence.
+                    window_end = cut.replace(second=0, microsecond=0)
+                    window_start = max(window_end - timedelta(seconds=seconds),
+                                       window_end.replace(hour=0, minute=0))
+                    rows = self._store.load_minute_bars(
+                        symbol, cut.date().isoformat(), 'KRX',
+                        start_minute=window_start.strftime('%H:%M'),
+                        end_minute=window_end.strftime('%H:%M'),
+                    ) if window_start < window_end else ()
+                    reference_rows = []
+                    for row in rows:
+                        if isinstance(row.get('metadata'), dict):
+                            metadata = market_metadata_from_document(row['metadata'])
+                            row = {**row, 'completeness': metadata.completeness.value,
+                                   'value_kind': metadata.value_kind.value, 'source': metadata.source,
+                                   'available_at': (as_kst(metadata.available_at).timestamp()
+                                                    if metadata.available_at is not None else None)}
+                        reference_rows.append(row)
+                    rows = reference_rows
+                else:
+                    rows = ()
                 reference = document_breakout_reference(self._leader_policy,rows,symbol=symbol,
                     decision_time=cut.isoformat(),mode='0B')
                 cached = (key,reference)
