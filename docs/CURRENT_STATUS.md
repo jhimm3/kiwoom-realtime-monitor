@@ -1,5 +1,11 @@
 # 현재 상태 요약
 
+## 2026-10-18 R3-023 판정 저장·revision 시계
+
+로컬 제품·검사 `2c4addf`에서 TradeAnalysisPreparationService.prepare의 기존 KST observed_at1회를 legacy/scoped 판정 저장2branch와 revision 생성에 그대로 전달했다. 일봉 수락·판정 updated_at·새 revision created_at은 같은 prepare 시계를 쓰고, 동일 입력의 기존 revision ID/hash·최초 created_at은 보존한다. 관련10모듈 **121건/68.202초 통과**. 구조·25번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 영향 F08/F10/F18/F22/F24와 책임 계약을 갱신했다.
+
+R3-023 전체는 **진행**이다. 이번 판정/revision caller는 완료했고 다음은 기존 원장에 남긴 자동 보완 task 등록/시작/완료/실패의 현재시각 인계다. JournalWindow의 해당 caller→JournalEnrichmentService→상태 저장/reader·재시도/중단 범위만 좁혀 확인한다. 이미 끝낸 Window/legacy/dataset/봉/일봉복사/setup/revision 경계는 재조사하지 않는다. 실제 키움/장중·운영DB/주문·외부 Drive·PostgreSQL·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. startup/offline 공통 KST fallback과 원본/canonical 경계는 보존하며 앱 전체 시계 통일·기능 전체 정상으로 확대하지 않는다.
+
 ## 2026-10-18 R3-023 사후분석 일봉 복사 시계
 
 로컬 제품·검사 `442a83e`에서 JournalWindow가 기존 query-client의 보정 시계를 TradeAnalysisPreparationService에 지연 전달하도록 연결했다. 서비스는 prepare마다 한 번 받은 KST observed_at을 기존 일봉 복사 API로 전달한다. 수동 사후분석과 자동 AnalysisEnrichmentWorker가 같은 preparer를 소비한다. 관련9모듈 **102건/52.764초 통과**. 구조·24번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 영향 F08/F10/F18/F22/F24와 책임 계약을 갱신했다.

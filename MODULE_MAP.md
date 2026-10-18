@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-18 R3-023 판정/revision: 기존 JournalWindow query-client→prepare의 observed_at1회→daily import/legacy·scoped setup now/revision now를 공유한다. 기존 원자 저장·계좌/provenance·원일/분류입력·hash/ID·동일 revision 최초시각 보존, 새 owner/layer/SQL/transaction/시계샘플0. 로컬 `2c4addf`·관련10모듈 121건 통과. 다음 task수명 시각과 F·미검증은 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-판정-저장revision-시계--2026-10-18)을 따른다.
+
 2026-10-18 R3-023 사후분석 일봉: 기존 JournalWindow query-client→지연 now_provider→TradeAnalysisPreparationService.prepare(수동/자동 같은 인스턴스)→monitor read-only import observed_at→journal daily metadata/reader로 연결했다. base_day/250·원본/effective_at·분류/revision 입력·transaction 보존, 새owner/layer/SQL/I/O지점0. 로컬 `442a83e`·관련9모듈 102건 통과. 다음 setup/revision receipt와 F·미검증은 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-사후분석-일봉-복사-시계--2026-10-18)을 따른다.
 
 2026-10-18 R3-023 일지/legacy: 기존 query-client→JournalWindow 날짜/분 확인·조회/수신→JournalBarRepository metadata/reader, CentralContentClient→legacy ledger writer, MainWindow dynamic clock→Drive v1/v2→SettingsBackup legacy stocks의 소유/호출 경계를 보완했다. 새 파일/계층·task·I/O지점0, 원일/partialNULL/확정metadata·archive·transaction은 보존. 로컬 `f72a85f`·관련14모듈 265건 통과. 다음 실제 TradeAnalysisPreparationService daily caller와 F·미검증은 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-journalwindowlegacy-수락-시각--2026-10-18)을 따른다.
