@@ -551,7 +551,7 @@ class MainWindow(QMainWindow):
             ranking_loader=ranking_loader, api_runtime_factory=api_runtime_factory,
             market_data_client=market_data_client,
         )
-        for repository in (minute_bar_repository, daily_bar_repository, theme_store):
+        for repository in (minute_bar_repository, daily_bar_repository, theme_store, google_drive_sync):
             bind_clock = getattr(repository, "set_now_provider", None)
             if callable(bind_clock):
                 # The controller reads the currently applied API runtime, so

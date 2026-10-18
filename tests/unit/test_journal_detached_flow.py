@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
+from pathlib import Path
+from contextlib import closing
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from kiwoom_monitor.domain.time_basis import as_kst
 from kiwoom_monitor.journal_process import JournalWindow
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import TradeReview, group_trade_episodes
@@ -149,6 +153,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
             set_rows=lambda _rows: None, focus_time=lambda _time: None,
         )
         owner = SimpleNamespace(
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _summary_table=SimpleNamespace(currentRow=lambda: 0, item=lambda _row, _column: item),
             _active_episode=None,
             _load_active_review=lambda: None,
@@ -166,8 +171,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
             _start_daily_chart=lambda *args: requested.append(args),
         )
 
-        with patch("kiwoom_monitor.journal_process.kst_today", return_value=date(2026, 9, 15)):
-            JournalWindow._show_selected_summary(owner)
+        JournalWindow._show_selected_summary(owner)
 
         self.assertEqual([("005930", date(2026, 9, 15), "history")], requested)
 
@@ -175,10 +179,12 @@ class JournalDetachedFlowTests(unittest.TestCase):
         day = date(2026, 9, 8)
         bars = (SimpleNamespace(minute=datetime(2026, 9, 8, 9, 1)),)
         calls: list[object] = []
+        checked_at = datetime(2030, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
         owner = SimpleNamespace(
+            _query_client=SimpleNamespace(server_now=lambda: checked_at),
             _repo=SimpleNamespace(
                 save_bar_backfill_result=lambda code, saved_day, saved_bars, checked_at, **options: calls.append(
-                    (code, saved_day, saved_bars, isinstance(checked_at, datetime), options)
+                    (code, saved_day, saved_bars, checked_at, options)
                 ) or True,
             ),
             _selected_history_code="005930",
@@ -191,9 +197,206 @@ class JournalDetachedFlowTests(unittest.TestCase):
         JournalWindow._backfill_received(owner, "005930", day, bars)
 
         self.assertEqual(
-            ("005930", day, bars, True, {"coverage_complete": True}), calls[0],
+            ("005930", day, bars, as_kst(checked_at), {"coverage_complete": True}), calls[0],
         )
         self.assertEqual(("refresh", "005930", True), calls[1])
+
+    def test_bar_receipts_reach_native_metadata_and_preserve_selected_day(self):
+        from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        expected = as_kst(datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc))
+        host = datetime(2031, 1, 2, 12, 34, 56)
+        for kind in ("backfill", "daily", "refresh", "detached"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                monitor = root / "monitor.sqlite3"
+                Database(monitor).initialize()
+                repository = JournalRepository(root / "journal.sqlite3")
+                day = expected.date() if kind == "refresh" else date(2026, 9, 8)
+                minute = datetime.combine(day, datetime.min.time()).replace(hour=10)
+                bar = MinuteOhlcv(minute, 100, 110, 90, 105, 10, 1.0)
+                MinuteBarRepository(monitor, now_provider=lambda: expected).upsert_bars("005930", (bar,))
+                source_now = (expected.replace(tzinfo=None) if kind in {"backfill", "refresh"}
+                              else datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc))
+                clock = Mock(return_value=source_now)
+                base = {"_repo": repository, "_monitor_db": monitor,
+                        "_query_client": SimpleNamespace(server_now=clock),
+                        "_selected_history_code": "", "_selected_history_range": None,
+                        "_status": SimpleNamespace(setText=lambda text: None)}
+                with patch("kiwoom_monitor.journal_process.kst_wall_now", return_value=host), patch(
+                        "kiwoom_monitor.infrastructure.persistence.journal_bar_repository.kst_wall_now", return_value=host), patch(
+                        "kiwoom_monitor.journal_process.QTableWidgetItem", side_effect=lambda text: text):
+                    if kind == "backfill":
+                        JournalWindow._backfill_received(SimpleNamespace(**base), "005930", day, (bar,))
+                    elif kind == "daily":
+                        JournalWindow._daily_chart_received(SimpleNamespace(**base,
+                            _apply_daily_chart_rows=lambda *args, **kwargs: None),
+                            "005930", ((day.isoformat(), 100, 110, 90, 105, 10, 1.0),), "history")
+                    elif kind == "refresh":
+                        table = SimpleNamespace(setRowCount=lambda *args: None,
+                                                setItem=lambda *args: None, scrollToBottom=lambda: None)
+                        JournalWindow.refresh(SimpleNamespace(**base, _live_code="005930", _table=table,
+                                                              _chart=SimpleNamespace(set_rows=lambda rows: None)))
+                    else:
+                        episode = SimpleNamespace(summary=SimpleNamespace(stock_code="000660"),
+                                                  started_at=minute, ended_at=minute)
+                        detached = SimpleNamespace(selected_stock_codes=lambda: ("005930",),
+                                                   selected_index_markets=lambda: (), set_data=lambda *args: None)
+                        JournalWindow._sync_detached_charts(SimpleNamespace(**base, _active_episode=episode,
+                            _detached_chart_window=detached, _load_selected_chart_rows=lambda: (),
+                            _history_chart=SimpleNamespace(setup_types=lambda: ())))
+                daily = kind == "daily"
+                key = day.isoformat() if daily else minute.isoformat(timespec="minutes")
+                metadata = MarketDataMetadataRepository(root / "journal.sqlite3").load(
+                    MarketDatasetKind.DAILY_BAR if daily else MarketDatasetKind.MINUTE_BAR, "005930", key)
+                table_name = "journal_daily_bars" if daily else "journal_minute_bars"
+                with closing(sqlite3.connect(root / "journal.sqlite3")) as connection:
+                    stored = connection.execute("SELECT trade_date,confirmed_at FROM " + table_name).fetchall()
+                self.assertEqual(1, clock.call_count)
+                self.assertIsNotNone(metadata)
+                self.assertEqual(expected, metadata.available_at)
+                self.assertEqual(day.isoformat(), stored[0][0])
+                self.assertEqual("2030-01-02T03:04:05+09:00" if kind in {"backfill", "daily"} else None,
+                                 stored[0][1])
+                effective = datetime.combine(day, datetime.min.time()) if daily else minute
+                self.assertEqual(as_kst(effective), metadata.effective_at)
+                if not daily:
+                    row = repository.load_bars("005930", minute)[0]
+                    self.assertEqual((100, 110, 90, 105, 10, 1.0), row[1:7])
+                    self.assertEqual("after_close_confirmed" if kind == "backfill" else "realtime_partial", row[7])
+
+    def test_open_minute_gate_and_daily_copy_use_the_current_client_clock(self):
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        expected = as_kst(datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc))
+        host = datetime(2031, 1, 2, 12, 34, 56)
+        with self.subTest(kind="open"), tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            requests = []
+            clock = Mock(return_value=expected.astimezone(timezone.utc))
+            owner = SimpleNamespace(_query_client=SimpleNamespace(server_now=clock), _repo=repository, _live_code="",
+                _chart=SimpleNamespace(clear_annotations=lambda: None, clear_daily_rows=lambda: None),
+                _title=SimpleNamespace(setText=lambda text: None), refresh=lambda: None, _worker=None,
+                _start_bar_confirmation=lambda code, day, **kwargs: requests.append(("minute", day)),
+                _live_interval=SimpleNamespace(currentText=lambda: "일봉"),
+                _start_daily_chart=lambda code, day, target: requests.append(("daily", day)))
+            JournalWindow.set_stock(owner, "005930", "fixture")
+            with closing(sqlite3.connect(path)) as connection:
+                row = connection.execute("SELECT trade_date,last_opened_at FROM journal_stocks").fetchone()
+            self.assertEqual(("2030-01-02", "2030-01-02T03:04:05+09:00"), row)
+            self.assertEqual([("minute", date(2030, 1, 2)), ("daily", date(2030, 1, 2))], requests)
+            self.assertEqual(1, clock.call_count)
+        with self.subTest(kind="minute-gate"):
+            current = [expected]
+            clock = Mock(side_effect=lambda: current[0].astimezone(timezone.utc))
+            confirmed = Mock()
+            owner = SimpleNamespace(_query_client=SimpleNamespace(server_now=clock), _live_code="005930",
+                                    _last_confirmed_minute="", confirm_completed_bars=confirmed)
+            counts = []
+            for moment in (expected.replace(second=2), expected.replace(second=3), expected.replace(second=4),
+                           expected.replace(minute=5, second=1), expected.replace(minute=5, second=3)):
+                current[0] = moment
+                JournalWindow._confirm_on_new_minute(owner)
+                counts.append(confirmed.call_count)
+            self.assertEqual([0, 1, 1, 1, 2], counts)
+            self.assertEqual("203001020305", owner._last_confirmed_minute)
+            self.assertEqual(5, clock.call_count)
+        with self.subTest(kind="daily-copy"), tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor = root / "monitor.sqlite3"
+            Database(monitor).initialize()
+            repository = JournalRepository(root / "journal.sqlite3")
+            with closing(sqlite3.connect(monitor)) as connection:
+                connection.executemany(
+                    "INSERT INTO daily_bars(stock_code,trade_date,open_price,high_price,low_price,close_price,volume,trade_value_eok) "
+                    "VALUES('005930',?,100,110,90,105,10,1)", [("2026-09-08",), ("2030-01-02",), ("2031-01-02",)])
+                connection.commit()
+            # The four-argument repository entry keeps its standalone fallback.
+            with patch("kiwoom_monitor.infrastructure.persistence.journal_bar_repository.kst_wall_now", return_value=host):
+                self.assertEqual(1, repository.import_monitor_daily_bars(monitor, "005930", date(2026, 9, 8)))
+            metadata_repository = MarketDataMetadataRepository(root / "journal.sqlite3")
+            self.assertEqual(as_kst(host), metadata_repository.load(
+                MarketDatasetKind.DAILY_BAR, "005930", "2026-09-08").available_at)
+            current = [expected]
+            clock = Mock(side_effect=lambda: current[0].astimezone(timezone.utc))
+            minute = datetime(2026, 9, 8, 10)
+            owner = SimpleNamespace(_query_client=SimpleNamespace(server_now=clock), _repo=repository, _monitor_db=monitor,
+                _active_episode=SimpleNamespace(summary=SimpleNamespace(stock_code="000660"), started_at=minute, ended_at=minute),
+                _detached_chart_window=SimpleNamespace(selected_stock_codes=lambda: ("005930",),
+                                                     selected_index_markets=lambda: (), set_data=lambda *args: None),
+                _load_selected_chart_rows=lambda: (), _history_chart=SimpleNamespace(setup_types=lambda: ()))
+            JournalWindow._sync_detached_charts(owner)
+            with closing(sqlite3.connect(root / "journal.sqlite3")) as connection:
+                rows = connection.execute("SELECT trade_date,confirmed_at FROM journal_daily_bars ORDER BY trade_date").fetchall()
+            self.assertEqual([("2026-09-08", "2030-01-02T03:04:05+09:00"),
+                              ("2030-01-02", "2030-01-02T03:04:05+09:00")], rows)
+            self.assertEqual(expected, metadata_repository.load(
+                MarketDatasetKind.DAILY_BAR, "005930", "2026-09-08").available_at)
+            self.assertEqual(1, clock.call_count)
+            # A direct chart request still queries its explicit historical day.
+            current[0] = expected.replace(minute=5)
+            owner._daily_chart_worker = SimpleNamespace(isRunning=lambda: True)
+            owner._pending_daily_chart = None
+            owner._apply_daily_chart_rows = Mock()
+            JournalWindow._start_daily_chart(owner, "005930", date(2026, 9, 8), "history")
+            self.assertEqual(("005930", date(2026, 9, 8), "history"), owner._pending_daily_chart)
+            self.assertEqual(expected.replace(minute=5), metadata_repository.load(
+                MarketDatasetKind.DAILY_BAR, "005930", "2026-09-08").available_at)
+            self.assertEqual(2, clock.call_count)
+
+    def test_live_import_keeps_legacy_lookup_day_and_protects_confirmed_metadata(self):
+        from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor = root / "monitor.sqlite3"
+            Database(monitor).initialize()
+            minute = datetime(2026, 9, 8, 10)
+            original = MinuteOhlcv(minute, 100, 110, 90, 105, 10, 1.0)
+            MinuteBarRepository(monitor, now_provider=lambda: as_kst(minute)).upsert_bars("005930", (original,))
+            repository = JournalRepository(root / "journal.sqlite3")
+            host = datetime(2031, 1, 2, 12, 34, 56)
+            with patch("kiwoom_monitor.infrastructure.persistence.journal_bar_repository.kst_wall_now", return_value=host):
+                self.assertEqual(1, repository.import_live_bars(monitor, "005930", minute))
+            metadata_repository = MarketDataMetadataRepository(root / "journal.sqlite3")
+            key = minute.isoformat(timespec="minutes")
+            legacy = metadata_repository.load(MarketDatasetKind.MINUTE_BAR, "005930", key)
+            self.assertEqual(as_kst(host), legacy.available_at)
+            received_at = as_kst(datetime(2030, 1, 2, 3, 4, 5))
+            statements = []
+            real_connect = sqlite3.connect
+            def traced_connect(*args, **kwargs):
+                connection = real_connect(*args, **kwargs)
+                connection.set_trace_callback(statements.append)
+                return connection
+            with patch("sqlite3.connect", side_effect=traced_connect):
+                self.assertEqual(1, repository.import_live_bars(monitor, "005930", minute, observed_at=received_at))
+            self.assertEqual(1, statements.count("COMMIT"))
+            self.assertEqual(1, sum(sql.startswith("BEGIN") for sql in statements))
+            updated = metadata_repository.load(MarketDatasetKind.MINUTE_BAR, "005930", key)
+            self.assertEqual(received_at, updated.available_at)
+            self.assertEqual(as_kst(minute), updated.effective_at)
+            checked_at = as_kst(datetime(2026, 9, 8, 10, 1))
+            confirmed = MinuteOhlcv(minute, 100, 120, 90, 115, 20, 2.0)
+            repository.upsert_bars("005930", (confirmed,), "api_confirmed", checked_at)
+            before = metadata_repository.load(MarketDatasetKind.MINUTE_BAR, "005930", key)
+            repository.import_live_bars(monitor, "005930", minute, observed_at=received_at)
+            self.assertEqual(before, metadata_repository.load(MarketDatasetKind.MINUTE_BAR, "005930", key))
+            self.assertEqual((100, 120, 90, 115, 20, 2.0, "api_confirmed"), repository.load_bars("005930", minute)[0][1:])
+            with closing(sqlite3.connect(root / "journal.sqlite3")) as connection:
+                self.assertEqual(checked_at.isoformat(timespec="seconds"), connection.execute(
+                    "SELECT confirmed_at FROM journal_minute_bars").fetchone()[0])
 
     def test_history_result_uses_one_repository_write_before_refresh(self) -> None:
         fills = (SimpleNamespace(order_no="1", origin_scope=LEGACY_ACCOUNT_SCOPE),)
@@ -201,6 +404,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
         calls: list[tuple[str, object, object]] = []
         statuses: list[str] = []
         owner = SimpleNamespace(
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _repo=SimpleNamespace(
                 upsert_history_sync=lambda saved_fills, saved_costs, *, account_scope: calls.append(
                     ("save", saved_fills, saved_costs, account_scope)
@@ -227,6 +431,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
         fills = (SimpleNamespace(order_no="1", origin_scope=LEGACY_ACCOUNT_SCOPE),)
         statuses: list[str] = []
         owner = SimpleNamespace(
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _repo=SimpleNamespace(upsert_history_sync=lambda *_args, **_kwargs: None),
             _journal_settings=SimpleNamespace(setValue=lambda *_args: None),
             _status=SimpleNamespace(setText=statuses.append),
@@ -247,6 +452,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
         fills = (SimpleNamespace(order_no="1", origin_scope=mock_scope),)
         statuses: list[str] = []
         owner = SimpleNamespace(
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _history_expected_scope=mock_scope,
             _selected_account_scope=lambda: mock_scope,
             _repo=SimpleNamespace(upsert_history_sync=lambda *_args, **_kwargs: None),
@@ -406,8 +612,9 @@ class JournalDetachedFlowTests(unittest.TestCase):
                 return True
 
         owner = SimpleNamespace(
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _repo=SimpleNamespace(
-                import_monitor_daily_bars=lambda *_args: 0,
+                import_monitor_daily_bars=lambda *_args, **_kwargs: 0,
                 load_daily_bars=lambda *_args: (),
             ),
             _monitor_db="monitor.sqlite3",
@@ -491,6 +698,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
         daily_requests: list[tuple[str, object, str]] = []
         minute_requests: list[tuple[str, object, bool]] = []
         owner = SimpleNamespace(
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _detached_chart_window=SimpleNamespace(selected_stock_codes=lambda: (code,)),
             _active_episode=SimpleNamespace(started_at=started, ended_at=ended),
             _compare_stock_requested={(code, day)},
@@ -504,8 +712,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
             ),
         )
 
-        with patch("kiwoom_monitor.journal_process.kst_today", return_value=date(2026, 9, 15)):
-            JournalWindow._detached_source_changed(owner)
+        JournalWindow._detached_source_changed(owner)
 
         self.assertEqual([(code, date(2026, 9, 15), f"detached:{code}")], daily_requests)
         self.assertEqual([(code, day, True)], minute_requests)

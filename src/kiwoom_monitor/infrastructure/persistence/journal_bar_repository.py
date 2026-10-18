@@ -213,7 +213,10 @@ class JournalBarRepositoryMixin:
             *row[1:], "daily_confirmed",
         ) for row in reversed(rows))
 
-    def import_monitor_daily_bars(self, monitor_path: Path, code: str, base_day: date, limit: int = 250) -> int:
+    def import_monitor_daily_bars(
+        self, monitor_path: Path, code: str, base_day: date, limit: int = 250, *,
+        observed_at: datetime | None = None,
+    ) -> int:
         if not monitor_path.is_file():
             return 0
         uri = monitor_path.resolve().as_uri() + "?mode=ro"
@@ -227,16 +230,17 @@ class JournalBarRepositoryMixin:
                 (code, base_day.isoformat(), limit),
             ).fetchall()
         converted = tuple((datetime.combine(date.fromisoformat(str(row[0])), time()).isoformat(timespec="minutes"), *row[1:]) for row in reversed(rows))
-        self.upsert_daily_bars(code, converted)
+        self.upsert_daily_bars(code, converted, observed_at)
         return len(converted)
 
     def upsert_bars(self, code: str, bars: tuple[MinuteOhlcv, ...], source: str, confirmed_at: datetime | None = None,
-                    *, preserve_confirmed: bool = False) -> None:
+                    *, preserve_confirmed: bool = False, available_at: datetime | None = None) -> None:
         if not bars:
             return
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
-                self._upsert_bars(connection, code, bars, source, confirmed_at, preserve_confirmed)
+                self._upsert_bars(connection, code, bars, source, confirmed_at, preserve_confirmed,
+                                  available_at=available_at)
 
     def save_bar_backfill_result(
         self,
@@ -282,6 +286,7 @@ class JournalBarRepositoryMixin:
         source: str,
         confirmed_at: datetime | None,
         preserve_confirmed: bool,
+        *, available_at: datetime | None = None,
     ) -> None:
         rows = [(
             bar.minute.date().isoformat(), code, bar.minute.isoformat(timespec="minutes"),
@@ -312,7 +317,7 @@ class JournalBarRepositoryMixin:
             incoming_source = "realtime_partial" if bar.metadata is not None and not bar.metadata.is_complete else source
             preserve_previous = preserve_confirmed or incoming_source == "realtime_partial"
             saved_source, saved_at = preserved.get(key, (incoming_source, None)) if preserve_previous else (incoming_source, None)
-            effective_available_at = confirmed_at or kst_wall_now()
+            effective_available_at = available_at or confirmed_at or kst_wall_now()
             if saved_at:
                 try:
                     effective_available_at = datetime.fromisoformat(str(saved_at))
@@ -350,8 +355,13 @@ class JournalBarRepositoryMixin:
                 preserve_complete=preserve_confirmed,
             )
 
-    def import_live_bars(self, monitor_path: Path, code: str, now: datetime) -> int:
-        """메인 DB를 읽기 전용으로 짧게 열어 실시간 봉을 일지 DB로 복사한다."""
+    def import_live_bars(
+        self, monitor_path: Path, code: str, now: datetime, *, observed_at: datetime | None = None,
+    ) -> int:
+        """now의 거래일을 복사하며 observed_at은 metadata 수신 시각에만 쓴다.
+
+        미주입 standalone 호출의 기존 확인열·공통 KST fallback은 유지한다.
+        """
         if not monitor_path.is_file():
             return 0
         uri = monitor_path.resolve().as_uri() + "?mode=ro"
@@ -362,7 +372,7 @@ class JournalBarRepositoryMixin:
                 (now.date().isoformat(), code),
             ).fetchall()
         bars = tuple(MinuteOhlcv(datetime.fromisoformat(row[0]), *map(int, row[1:6]), trade_value_eok_override=float(row[6] or 0)) for row in rows)
-        self.upsert_bars(code, bars, "realtime_partial", preserve_confirmed=True)
+        self.upsert_bars(code, bars, "realtime_partial", preserve_confirmed=True, available_at=observed_at)
         return len(bars)
 
     def load_bars(self, code: str, now: datetime) -> tuple[tuple[object, ...], ...]:

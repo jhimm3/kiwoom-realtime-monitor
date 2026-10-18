@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now, kst_wall_now
 
 import json
 import os
@@ -11,7 +11,7 @@ import tempfile
 from base64 import b64decode, b64encode
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from kiwoom_monitor.infrastructure.naver_news import (
     LocalNaverNewsConfig,
@@ -45,8 +45,11 @@ class SettingsBackupService:
         ("data/near_high_sounds", frozenset({".wav", ".mp3", ".ogg", ".m4a"}), 5 * 1024 * 1024),
     )
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, now_provider: Callable[[], datetime] | None = None) -> None:
         self._database_path = database_path
+        # Receipt clock for newly accepted legacy catalog rows. Archive
+        # timestamps are not rewritten; startup restores have no API clock yet.
+        self._now_provider = now_provider or kst_now
 
     def export_to(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True, *, connection: sqlite3.Connection | None = None) -> None:
         owns_connection = connection is None
@@ -302,11 +305,11 @@ class SettingsBackupService:
                      if key in self.THEME_SETTING_KEYS and key not in excluded_setting_keys),
                 )
 
-    @staticmethod
     def _apply_legacy_themes(
-        connection: sqlite3.Connection, document: dict[str, Any],
+        self, connection: sqlite3.Connection, document: dict[str, Any],
     ) -> None:
         stock_catalog = document.get("stock_catalog", [])
+        imported_at = None
         if isinstance(stock_catalog, list):
             for item in stock_catalog:
                 if not isinstance(item, dict):
@@ -315,10 +318,12 @@ class SettingsBackupService:
                 name = str(item.get("name", "")).strip()
                 market = str(item.get("market", "")).strip()
                 if len(code) == 6 and code.isalnum() and name:
+                    if imported_at is None:
+                        imported_at = as_kst(self._now_provider()).isoformat(timespec="seconds")
                     connection.execute(
-                        "INSERT INTO stocks(code,name,market) VALUES(?,?,?) "
+                        "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,?) "
                         "ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,"
-                        "updated_at=CURRENT_TIMESTAMP", (code, name, market),
+                        "updated_at=excluded.updated_at", (code, name, market, imported_at),
                     )
         connection.execute("DELETE FROM stock_themes")
         connection.execute("DELETE FROM themes")

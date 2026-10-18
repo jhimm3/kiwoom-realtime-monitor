@@ -58,12 +58,17 @@ class GoogleDriveSyncService:
         key for key in DEFAULT_SETTINGS if not is_shared_setting(key)
     )
 
-    def __init__(self, database_path: Path, news_database_path: Path | None = None) -> None:
+    def __init__(self, database_path: Path, news_database_path: Path | None = None, *, now_provider=None) -> None:
         self._database_path = database_path
         self._data_dir = database_path.parent
         self._news_database_path = news_database_path or database_path.parent / "news.sqlite3"
         self._client_path = self._data_dir / "google_drive_client.json"
         self._token_path = self._data_dir / "google_drive_token.dat"
+        self.set_now_provider(now_provider)
+
+    def set_now_provider(self, now_provider) -> None:
+        # MainWindow binds its existing dynamic runtime clock; startup tools do not.
+        self._now_provider = now_provider or kst_now
 
     @property
     def configured(self) -> bool:
@@ -253,7 +258,7 @@ class GoogleDriveSyncService:
                         _, done = downloader.next_chunk()
                     ai_source = Path(directory) / self.NEWS_AI_REMOTE_NAME
                     ai_source.write_bytes(buffer.getvalue())
-                settings_backup = SettingsBackupService(self._database_path)
+                settings_backup = SettingsBackupService(self._database_path, now_provider=self._now_provider)
                 if ai_source is not None:
                     NewsAIBackupService.validate_file(ai_source)
                 settings_source = next(
@@ -515,7 +520,7 @@ class GoogleDriveSyncService:
                         "Google Drive 복원 자료를 검증해 보관했습니다. 앱을 정상 종료하고 다시 시작하면 "
                         f"복원이 적용됩니다. (작업 {operation_id[:8]})",
                     )
-                SettingsBackupService(self._database_path).import_from_settings_and_themes(
+                SettingsBackupService(self._database_path, now_provider=self._now_provider).import_from_settings_and_themes(
                     settings_path, themes_path, self.LOCAL_ONLY_SETTINGS,
                     include_column_widths=False,
                 )

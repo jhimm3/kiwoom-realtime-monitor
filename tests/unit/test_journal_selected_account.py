@@ -1,7 +1,7 @@
 import os
 import unittest
 import uuid
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 from threading import Event, get_ident
@@ -31,6 +31,7 @@ class JournalSelectedAccountTests(unittest.TestCase):
 
     def owner(self, selected=None):
         return SimpleNamespace(_history_expected_scope=self.scope,
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _selected_account_scope=lambda: selected or self.scope,
             _repo=SimpleNamespace(upsert_history_sync=Mock()), _history_enrichment_failed=Mock(),
             _journal_settings=SimpleNamespace(setValue=Mock()), _status=SimpleNamespace(setText=Mock()),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import as_kst, kst_now
+from kiwoom_monitor.domain.time_basis import as_kst
 
 import sqlite3
 import threading
@@ -188,8 +188,7 @@ class CentralJournalSyncService:
             connection.close()
         return saved
 
-    @staticmethod
-    def _merge_remote(connection: sqlite3.Connection, spec: _TableSpec,
+    def _merge_remote(self, connection: sqlite3.Connection, spec: _TableSpec,
                       values: list[dict[str, Any]], *,
                       sync_states_enabled: bool = False) -> None:
         columns = tuple(str(row[1]) for row in connection.execute(f"PRAGMA table_info({spec.table})"))
@@ -221,7 +220,7 @@ class CentralJournalSyncService:
                 continue
             if sync_states_enabled and CentralJournalSyncService._remote_value_is_deleted(
                     connection, spec, document_key, document, str(incoming[spec.version])):
-                CentralJournalSyncService._record_legacy_source(connection, legacy_source)
+                self._record_legacy_source(connection, legacy_source)
                 continue
             where = " AND ".join(f"{key}=?" for key in spec.keys)
             local = connection.execute(
@@ -234,7 +233,7 @@ class CentralJournalSyncService:
                 if local_is_v2 != incoming_is_v2:
                     if legacy_source is not None:
                         legacy_source = (*legacy_source[:-1], "CONFLICT")
-                    CentralJournalSyncService._record_legacy_source(connection, legacy_source)
+                    self._record_legacy_source(connection, legacy_source)
                     continue
             if local is not None and _compare_revision(dict(local).get(spec.version, ""), incoming[spec.version]) >= 0:
                 if (
@@ -244,7 +243,7 @@ class CentralJournalSyncService:
                     != CentralJournalSyncService._normalized_hash(incoming)
                 ):
                     legacy_source = (*legacy_source[:-1], "CONFLICT")
-                CentralJournalSyncService._record_legacy_source(connection, legacy_source)
+                self._record_legacy_source(connection, legacy_source)
                 continue
             names = tuple(incoming)
             updates = tuple(name for name in names if name not in spec.keys)
@@ -254,7 +253,7 @@ class CentralJournalSyncService:
                 + ",".join(f"{name}=excluded.{name}" for name in updates)
             )
             connection.execute(sql, tuple(incoming[name] for name in names))
-            CentralJournalSyncService._record_legacy_source(connection, legacy_source)
+            self._record_legacy_source(connection, legacy_source)
             if sync_states_enabled:
                 CentralJournalSyncService._record_sync_state(
                     connection, spec.collection, document_key, document, False,
@@ -446,8 +445,8 @@ class CentralJournalSyncService:
             (source[0], source[3], source[6], source[7]),
         ).fetchone() is not None
 
-    @staticmethod
     def _record_legacy_source(
+        self,
         connection: sqlite3.Connection,
         source: tuple[str, str, str, str, str, str, str, str, str] | None,
     ) -> None:
@@ -458,7 +457,7 @@ class CentralJournalSyncService:
             "source_collection,source_owner,source_key,source_content_hash,source_observed_at,"
             "source_modified_at,target_collection,target_key,status,imported_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (*source, kst_now().isoformat()),
+            (*source, as_kst(self._client.server_now()).isoformat()),
         )
 
     @staticmethod

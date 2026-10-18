@@ -5,8 +5,9 @@ import tempfile
 import threading
 import unittest
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 from kiwoom_monitor.infrastructure.central_journal_sync import (
     CentralJournalSyncRunner,
@@ -29,12 +30,79 @@ class _Client:
     def load_all(self, collection: str) -> list[dict[str, object]]:
         return list(self.remote.get(collection, []))
 
+    def server_now(self) -> datetime:
+        return datetime.fromisoformat("2030-01-02T09:01:30+09:00")
+
     def upsert(self, collection: str, documents: list[dict[str, object]]) -> int:
         self.remote.setdefault(collection, []).extend(documents)
         return len(documents)
 
 
 class CentralJournalSyncServiceTests(unittest.TestCase):
+    def test_legacy_import_receipt_uses_client_clock_and_seen_revision_keeps_original_receipt(self) -> None:
+        fixed = datetime.fromisoformat("2030-01-02T09:01:30+09:00")
+        for supplied in (fixed, fixed.replace(tzinfo=None), fixed.astimezone(timezone.utc)):
+            with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "journal.sqlite3"
+                JournalRepository(path)
+                client = _Client()
+                clock = Mock(return_value=supplied)
+                client.server_now = clock
+                client.remote["journal_group_overrides"] = [{
+                    "owner": "default", "key": "fill-1", "updated_at": 123.0,
+                    "document": {"fill_key": "fill-1", "group_id": "manual:one",
+                                 "updated_at": "2026-09-13T10:00:00"},
+                }]
+                service = CentralJournalSyncService(client)  # type: ignore[arg-type]
+                service.sync(path)
+                clock.assert_called_once_with()
+                with closing(sqlite3.connect(path)) as connection:
+                    expected = (
+                        "journal_group_overrides", "default", "fill-1",
+                        "c80abef4114403b0f135160ee1fb3314b0b77898a41ef472d167bceb6de2edcc",
+                        "123.0", "2026-09-13T10:00:00", "journal_group_overrides",
+                        "fill-1", "IMPORTED", fixed.isoformat(),
+                    )
+                    self.assertEqual([expected], connection.execute(
+                        "SELECT source_collection,source_owner,source_key,source_content_hash,"
+                        "source_observed_at,source_modified_at,target_collection,target_key,status,"
+                        "imported_at FROM journal_legacy_imports").fetchall())
+                    self.assertEqual(("manual:one", "2026-09-13T10:00:00"), connection.execute(
+                        "SELECT group_id,updated_at FROM trade_group_overrides").fetchone())
+                clock.reset_mock()
+                clock.side_effect = AssertionError("seen source must retain its receipt")
+                service.sync(path)
+                clock.assert_not_called()
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual([(fixed.isoformat(),)], connection.execute(
+                        "SELECT imported_at FROM journal_legacy_imports").fetchall())
+
+    def test_legacy_import_receipt_failure_rolls_back_target_then_retry_uses_client_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "journal.sqlite3"
+            JournalRepository(path)
+            client = _Client()
+            client.server_now = Mock(side_effect=RuntimeError("clock failure"))
+            client.remote["journal_group_overrides"] = [{
+                "owner": "default", "key": "fill-1",
+                "document": {"fill_key": "fill-1", "group_id": "manual:one",
+                             "updated_at": "2026-09-13T10:00:00"},
+            }]
+            service = CentralJournalSyncService(client)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(RuntimeError, "clock failure"):
+                service.sync(path)
+            with closing(sqlite3.connect(path)) as connection:
+                for table in ("trade_group_overrides", "journal_legacy_imports"):
+                    self.assertEqual(0, connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+            client.server_now.side_effect = None
+            client.server_now.return_value = datetime.fromisoformat("2030-01-02T09:01:30+09:00")
+            service.sync(path)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(("2030-01-02T09:01:30+09:00",), connection.execute(
+                    "SELECT imported_at FROM journal_legacy_imports").fetchone())
+                self.assertEqual(("manual:one",), connection.execute(
+                    "SELECT group_id FROM trade_group_overrides").fetchone())
+
     def test_same_document_key_real_and_mock_tombstones_coexist(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "journal.sqlite3"

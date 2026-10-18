@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_today, kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 
 import argparse
 import json
@@ -288,8 +288,10 @@ class JournalWindow(QMainWindow):
 
         history_page = QWidget(); history_layout = QVBoxLayout(history_page)
         filters = QHBoxLayout()
-        self._from_date = QDateEdit(QDate.currentDate().addDays(-7)); self._from_date.setCalendarPopup(True)
-        self._to_date = QDateEdit(QDate.currentDate()); self._to_date.setCalendarPopup(True)
+        today = as_kst(self._query_client.server_now()).date()
+        current_date = QDate(today.year, today.month, today.day)
+        self._from_date = QDateEdit(current_date.addDays(-7)); self._from_date.setCalendarPopup(True)
+        self._to_date = QDateEdit(current_date); self._to_date.setCalendarPopup(True)
         self._from_date.dateChanged.connect(self.reload_history); self._to_date.dateChanged.connect(self.reload_history)
         self._stock_filter = QLineEdit(); self._stock_filter.setPlaceholderText("종목명·코드 검색")
         self._stock_filter.setMaximumWidth(150); self._stock_filter.textChanged.connect(self._apply_history_filters)
@@ -859,14 +861,14 @@ class JournalWindow(QMainWindow):
             self._chart.clear_annotations()
         self._live_code, self._live_name = code, name
         self._chart.clear_daily_rows()
-        now = kst_wall_now(); self._repo.remember_stock(code, name, now)
+        now = as_kst(self._query_client.server_now()); self._repo.remember_stock(code, name, now)
         self._title.setText(f"{name} ({code}) · 장중 매매일지")
         self.refresh()
         chart_rows = self._repo.load_chart_bars(code, now)
         if len({str(row[0])[:10] for row in chart_rows}) < 2 and (self._worker is None or not self._worker.isRunning()):
-            self._start_bar_confirmation(code, kst_today(), include_previous=True)
+            self._start_bar_confirmation(code, now.date(), include_previous=True)
         if self._live_interval.currentText() == "일봉":
-            self._start_daily_chart(code, kst_today(), "live")
+            self._start_daily_chart(code, now.date(), "live")
 
     def sync_history(self) -> None:
         if self._history_worker is not None:
@@ -902,11 +904,11 @@ class JournalWindow(QMainWindow):
         if not self._auto_history_sync_enabled or not self._api_ready:
             return False
         # KRX·NXT의 20:00 전체 거래 종료 뒤 여유를 두고 당일 체결을 확인한다.
-        now = kst_wall_now()
+        now = as_kst(self._query_client.server_now())
         if now.time() < time(20, 5):
             return False
         # 창이 날짜를 넘겨 열린 채로 있어도 생성 당시 QDate 선택값에 묶이지 않는다.
-        end = kst_today()
+        end = now.date()
         start = end - timedelta(days=7)
         target_ref = f"{start.isoformat()}:{end.isoformat()}"
         inputs = {"start": start.isoformat(), "end": end.isoformat(), "api": "kt00007+kt00015"}
@@ -989,8 +991,9 @@ class JournalWindow(QMainWindow):
                     )
                 else:
                     self._journal_enrichment.complete(cost_task_id, {"cost_count": len(costs)})
-            if kst_wall_now().time() >= time(20, 5) and not cost_error and (mock_account or costs or not fills):
-                self._journal_settings.setValue("last_history_sync_day", kst_today().isoformat())
+            received_at = as_kst(self._query_client.server_now())
+            if received_at.time() >= time(20, 5) and not cost_error and (mock_account or costs or not fills):
+                self._journal_settings.setValue("last_history_sync_day", received_at.date().isoformat())
             if cost_error:
                 status = f"체결 {len(fills)}건 저장 · 비용조회 실패(다음에 재시도)"
             elif mock_account:
@@ -1115,10 +1118,11 @@ class JournalWindow(QMainWindow):
             return
         tasks: list[tuple[object, tuple[tuple[object, ...], ...]]] = []
         task_ids: dict[str, dict[str, str]] = {}
+        scheduled_day = as_kst(self._query_client.server_now()).date().isoformat() if self._all_episodes else ""
         for episode in self._all_episodes:
             inputs = {
                 "fills": tuple(trade_fill_key(fill) for fill in episode.fills),
-                "scheduled_day": kst_today().isoformat(),
+                "scheduled_day": scheduled_day,
             }
             group_tasks = {
                 kind: self._journal_enrichment.register(
@@ -1350,7 +1354,7 @@ class JournalWindow(QMainWindow):
         return summarize_episode_bar_state(tuple(loaded[task].state for task in tasks))
 
     def _backfill_tasks(self, *, failed_only: bool = False, all_saved: bool = False) -> tuple[tuple[str, date], ...]:
-        cutoff = history_backfill_cutoff(kst_wall_now())
+        cutoff = history_backfill_cutoff(as_kst(self._query_client.server_now()))
         candidates = (
             self._repo.bar_backfill_candidates(cutoff) if all_saved else
             tuple(sorted({(fill.stock_code, fill.filled_at.date()) for fill in self._visible_fills if fill.filled_at.date() < cutoff}, key=lambda value: (value[1], value[0])))
@@ -1430,7 +1434,7 @@ class JournalWindow(QMainWindow):
             return
         task_id = getattr(self, "_backfill_enrichment_task_ids", {}).get((code, day))
         if not self._repo.save_bar_backfill_result(
-            code, day, bars, kst_wall_now(), coverage_complete=coverage_complete,
+            code, day, bars, as_kst(self._query_client.server_now()), coverage_complete=coverage_complete,
         ):
             if task_id:
                 state = self._repo.bar_backfill_state(code, day)
@@ -1476,7 +1480,7 @@ class JournalWindow(QMainWindow):
     def _refresh_backfill_table(self, *args: object) -> None:
         if not hasattr(self, "_backfill_table"):
             return
-        states = self._repo.list_bar_backfill_states(kst_today() + timedelta(days=1))
+        states = self._repo.list_bar_backfill_states(as_kst(self._query_client.server_now()).date() + timedelta(days=1))
         selected = self._backfill_filter.currentText()
         if selected != "전체":
             states = tuple(value for value in states if value.state == selected)
@@ -1577,7 +1581,7 @@ class JournalWindow(QMainWindow):
         if self._history_interval.currentText() == "일봉" or self._dual_history_chart.isChecked():
             # 일봉의 끝은 매매 종료일이 아니라 현재 조회 가능한 최신 거래일이다.
             # 매매일은 아래 focus_time의 기준으로만 사용한다.
-            self._start_daily_chart(summary.stock_code, kst_today(), "history")
+            self._start_daily_chart(summary.stock_code, as_kst(self._query_client.server_now()).date(), "history")
 
     def _request_previous_chart_day(self, code: str, day: date) -> None:
         """분봉 상단의 전일 종가와 연속 차트를 위해 직전 거래일을 한 번만 보완한다."""
@@ -1677,7 +1681,7 @@ class JournalWindow(QMainWindow):
         self._apply_history_chart_state(interval, self._history_chart)
         self._focus_selected_history()
         if interval == "일봉" and self._selected_history_code and self._selected_history_day is not None:
-            self._start_daily_chart(self._selected_history_code, kst_today(), "history")
+            self._start_daily_chart(self._selected_history_code, as_kst(self._query_client.server_now()).date(), "history")
 
     def _toggle_dual_history_chart(self, enabled: bool) -> None:
         self._show_dual_history_chart = bool(enabled)
@@ -1692,7 +1696,7 @@ class JournalWindow(QMainWindow):
             self._history_daily_chart.set_setup_types(self._history_chart.setup_types())
         self._apply_history_chart_state("일봉", self._history_daily_chart)
         if self._selected_history_code and self._selected_history_day is not None:
-            self._start_daily_chart(self._selected_history_code, kst_today(), "history")
+            self._start_daily_chart(self._selected_history_code, as_kst(self._query_client.server_now()).date(), "history")
 
     def _open_detached_charts(self) -> None:
         if self._detached_chart_window is None:
@@ -1711,7 +1715,7 @@ class JournalWindow(QMainWindow):
         self._configure_detached_charts(); self._sync_detached_charts()
         self._detached_chart_window.show(); self._detached_chart_window.raise_(); self._detached_chart_window.activateWindow()
         if self._selected_history_code and self._selected_history_day is not None:
-            self._start_daily_chart(self._selected_history_code, kst_today(), "history")
+            self._start_daily_chart(self._selected_history_code, as_kst(self._query_client.server_now()).date(), "history")
 
     def _configure_detached_charts(self) -> None:
         if self._detached_chart_window is None: return
@@ -1729,16 +1733,21 @@ class JournalWindow(QMainWindow):
         if episode is None:
             self._detached_chart_window.set_data(None, (), (), ()); return
         minute_rows = self._load_selected_chart_rows()
-        latest_day = kst_today()
+        observed_at = as_kst(self._query_client.server_now())
+        latest_day = observed_at.date()
         daily_rows = self._repo.load_daily_bars(episode.summary.stock_code, latest_day)
         custom_rows: dict[str, tuple[tuple[object, ...], ...]] = {}
-        for code in self._detached_chart_window.selected_stock_codes():
+        selected_codes = self._detached_chart_window.selected_stock_codes()
+        for code in selected_codes:
             try:
-                self._repo.import_live_bars(self._monitor_db, code, datetime.combine(episode.ended_at.date(), time()))
+                self._repo.import_live_bars(
+                    self._monitor_db, code, datetime.combine(episode.ended_at.date(), time()),
+                    observed_at=observed_at,
+                )
             except (OSError, sqlite3.Error):
                 pass
             custom_rows[code] = self._repo.load_chart_bars_range(code, episode.started_at.date(), episode.ended_at.date())
-            try: self._repo.import_monitor_daily_bars(self._monitor_db, code, latest_day, 250)
+            try: self._repo.import_monitor_daily_bars(self._monitor_db, code, latest_day, 250, observed_at=observed_at)
             except (OSError, sqlite3.Error): pass
             custom_rows[f"daily:{code}"] = self._repo.load_daily_bars(code, latest_day)
         index_rows = {
@@ -1772,7 +1781,7 @@ class JournalWindow(QMainWindow):
                     continue
                 # 이전 조회가 빈 응답/실패로 끝났다면 사용자가 다시 선택했을 때 재시도한다.
                 self._compare_stock_requested.discard(key)
-            self._start_daily_chart(code, kst_today(), f"detached:{code}")
+            self._start_daily_chart(code, as_kst(self._query_client.server_now()).date(), f"detached:{code}")
             if self._worker is None or not self._worker.isRunning():
                 self._compare_stock_requested.add(key)
                 self._status.setText(f"비교 종목 분봉 보완 중 · {code}")
@@ -1848,19 +1857,20 @@ class JournalWindow(QMainWindow):
     def _live_interval_changed(self, interval: str) -> None:
         self._chart.set_interval(interval)
         if interval == "일봉" and self._live_code:
-            self._start_daily_chart(self._live_code, kst_today(), "live")
+            self._start_daily_chart(self._live_code, as_kst(self._query_client.server_now()).date(), "live")
 
     def _start_daily_chart(self, code: str, day: date, target: str) -> None:
         request = (code, day, target)
+        observed_at = as_kst(self._query_client.server_now())
         try:
-            self._repo.import_monitor_daily_bars(self._monitor_db, code, day, 250)
+            self._repo.import_monitor_daily_bars(self._monitor_db, code, day, 250, observed_at=observed_at)
         except (OSError, sqlite3.Error):
             pass
         cached = self._repo.load_daily_bars(code, day)
         if cached:
             self._apply_daily_chart_rows(code, cached, target, refresh_analysis=False)
             # 과거 복기용 일봉이 충분히 저장돼 있으면 같은 API를 반복 호출하지 않는다.
-            if should_reuse_cached_daily_chart(target, day, len(cached), today=kst_today()):
+            if should_reuse_cached_daily_chart(target, day, len(cached), today=observed_at.date()):
                 self._status.setText(f"저장된 일봉 {len(cached)}개 표시")
                 return
         if self._daily_chart_worker is not None and self._daily_chart_worker.isRunning():
@@ -1876,7 +1886,7 @@ class JournalWindow(QMainWindow):
     def _daily_chart_received(self, code: str, rows: object, target: str) -> None:
         if not isinstance(rows, tuple):
             return
-        self._repo.upsert_daily_bars(code, rows)
+        self._repo.upsert_daily_bars(code, rows, as_kst(self._query_client.server_now()))
         self._apply_daily_chart_rows(code, rows, target, refresh_analysis=True)
         self._status.setText(f"일봉 {len(rows)}개 확인")
 
@@ -2164,9 +2174,11 @@ class JournalWindow(QMainWindow):
     def refresh(self) -> None:
         if not self._live_code:
             return
-        now = kst_wall_now()
+        observed_at = as_kst(self._query_client.server_now())
+        # Existing journal chart minutes and UI comparisons use naive KST.
+        now = observed_at.replace(tzinfo=None)
         try:
-            self._repo.import_live_bars(self._monitor_db, self._live_code, now)
+            self._repo.import_live_bars(self._monitor_db, self._live_code, now, observed_at=observed_at)
             rows = self._repo.load_bars(self._live_code, now)
             chart_rows = self._repo.load_chart_bars(self._live_code, now)
         except Exception:
@@ -2194,7 +2206,7 @@ class JournalWindow(QMainWindow):
     def _confirm_on_new_minute(self) -> None:
         if not self._live_code:
             return
-        now = kst_wall_now()
+        now = as_kst(self._query_client.server_now()).replace(tzinfo=None)
         key = now.strftime("%Y%m%d%H%M")
         if now.second >= 3 and key != self._last_confirmed_minute:
             self._last_confirmed_minute = key

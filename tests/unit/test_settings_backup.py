@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from contextlib import closing
+from datetime import datetime, timezone
 import sqlite3
 import tempfile
 import unittest
 from base64 import b64encode
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupError, SettingsBackupService
@@ -21,6 +22,54 @@ from kiwoom_monitor.infrastructure.naver_news import (
 
 
 class SettingsBackupServiceTest(unittest.TestCase):
+    def test_legacy_catalog_receipt_uses_one_clock_and_preserves_archive(self) -> None:
+        fixed = datetime.fromisoformat("2030-01-02T03:04:05+09:00")
+        for supplied in (fixed, fixed.replace(tzinfo=None), fixed.astimezone(timezone.utc)):
+            with self.subTest(clock=supplied), tempfile.TemporaryDirectory() as directory:
+                db = Path(directory) / "monitor.db"
+                Database(db).initialize()
+                with closing(sqlite3.connect(db)) as connection:
+                    connection.execute("INSERT INTO stocks(code,name,updated_at) VALUES('005930','old','2000-01-01')")
+                    connection.commit()
+                document = {"format": SettingsBackupService.FORMAT, "version": 1,
+                    "created_at": "1999-01-01T00:00:00+09:00", "stock_catalog": [
+                        {"code": "005930", "name": "restored", "market": "KOSPI"},
+                        {"code": "000660", "name": "new", "market": "KOSPI"}],
+                    "themes": [], "stock_themes": [], "aliases": []}
+                path = Path(directory) / "legacy.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                clock = Mock(return_value=supplied)
+                service = SettingsBackupService(db, now_provider=clock)
+                service.import_from(path, include_settings=False)
+                clock.assert_called_once_with()
+                with closing(sqlite3.connect(db)) as connection:
+                    rows = connection.execute("SELECT code,name,updated_at FROM stocks ORDER BY code").fetchall()
+                self.assertEqual([("000660", "new", fixed.isoformat()),
+                                  ("005930", "restored", fixed.isoformat())], rows)
+                self.assertEqual(document, json.loads(path.read_text(encoding="utf-8")))
+                clock.reset_mock()
+                document["stock_catalog"] = [{"code": "bad", "name": "ignored"}]
+                path.write_text(json.dumps(document), encoding="utf-8")
+                service.import_from(path, include_settings=False)
+                clock.assert_not_called()
+
+    def test_legacy_restore_clock_failure_rolls_back_prior_settings_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "monitor.db"
+            Database(db).initialize()
+            with closing(sqlite3.connect(db)) as connection:
+                before = connection.execute("SELECT key,value FROM settings ORDER BY key").fetchall()
+            path = Path(directory) / "legacy.json"
+            path.write_text(json.dumps({"format": SettingsBackupService.FORMAT, "version": 1,
+                "settings": {"decimal_strength": "3"}, "stock_catalog": [
+                    {"code": "005930", "name": "fixture", "market": "KOSPI"}]}), encoding="utf-8")
+            service = SettingsBackupService(db, now_provider=Mock(side_effect=RuntimeError("clock failed")))
+            with self.assertRaisesRegex(RuntimeError, "clock failed"):
+                service.import_from(path)
+            with closing(sqlite3.connect(db)) as connection:
+                self.assertEqual(before, connection.execute("SELECT key,value FROM settings ORDER BY key").fetchall())
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM stocks").fetchone()[0])
+
     def test_settings_and_themes_export_share_caller_snapshot_without_closing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             snapshot_database = Path(directory) / "snapshot.sqlite3"

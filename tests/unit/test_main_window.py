@@ -42,6 +42,26 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_drive_legacy_restore_clock_is_bound_to_current_runtime(self) -> None:
+        from kiwoom_monitor.domain.time_basis import as_kst
+        from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
+        current = [datetime.fromisoformat("2030-01-02T03:04:05+09:00")]
+        loader = FakeRankingLoader()
+        loader.server_now = lambda: current[0]
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            drive = GoogleDriveSyncService(database.settings.database_path)
+            window = MainWindow(database.settings, loader, google_drive_sync=drive)
+            try:
+                self.assertEqual(as_kst(current[0]), drive._now_provider())
+                current[0] = datetime.fromisoformat("2030-01-01T18:06:07+00:00")
+                self.assertEqual(as_kst(current[0]), drive._now_provider())
+            finally:
+                window.close()
+                window.deleteLater()
+                QApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+
     def test_aware_runtime_execution_signal_reaches_snapshot_with_kst_pressure_boundaries(self) -> None:
         from collections import deque
         from datetime import timezone

@@ -14,6 +14,53 @@ from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupSe
 
 
 class GoogleDriveSyncServiceTest(unittest.TestCase):
+    def test_v1_and_v2_legacy_restore_use_bound_clock_in_native_catalog(self) -> None:
+        import sqlite3
+        from contextlib import closing
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        fixed = datetime.fromisoformat("2030-01-02T03:04:05+09:00")
+        content = json.dumps({"format": SettingsBackupService.FORMAT, "version": 1,
+            "created_at": "1999-01-01", "stock_catalog": [
+                {"code": "005930", "name": "fixture", "market": "KOSPI"}]}).encode()
+        for version in (1, 2):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                Database(path).initialize()
+                service = GoogleDriveSyncService(path, now_provider=Mock(side_effect=AssertionError("old clock")))
+                clock = Mock(return_value=fixed.astimezone(timezone.utc))
+                service.set_now_provider(clock)
+                remote = {"themes-id": content}
+                remote["manifest-id"] = json.dumps({"format": service.BUNDLE_FORMAT, "version": 2,
+                    "generation": "clock-generation", "components": {"themes": {
+                        "file_id": "themes-id", "name": service.THEMES_REMOTE_NAME,
+                        "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}}}).encode()
+                class Downloader:
+                    def __init__(self, buffer, file_id):
+                        self.buffer, self.file_id = buffer, file_id
+                    def next_chunk(self):
+                        self.buffer.write(remote[self.file_id])
+                        return None, True
+                drive = SimpleNamespace(files=lambda: SimpleNamespace(get_media=lambda *, fileId: fileId))
+                def find(_drive, _folder, name):
+                    if name == service.MANIFEST_REMOTE_NAME:
+                        return "manifest-id" if version == 2 else None
+                    return "themes-id" if name == service.THEMES_REMOTE_NAME else None
+                with patch.object(service, "_drive_service", return_value=drive), \
+                        patch.object(service, "_find_sync_folder", return_value="folder"), \
+                        patch.object(service, "_find_remote_file", side_effect=find), \
+                        patch.object(service, "_download_remote_bytes", side_effect=lambda _drive, key: remote[key]), \
+                        patch("googleapiclient.http.MediaIoBaseDownload", Downloader):
+                    result = service.download(target="themes")
+                self.assertEqual("completed", result.status)
+                clock.assert_called_once_with()
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual(("fixture", fixed.isoformat()), connection.execute(
+                        "SELECT name,updated_at FROM stocks WHERE code='005930'").fetchone())
+                self.assertEqual(content, remote["themes-id"])
+
     def test_large_backup_upload_uses_resumable_chunks(self) -> None:
         from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
 
