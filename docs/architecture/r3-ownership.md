@@ -36,6 +36,8 @@
 
 **미해결.** 이 순서가 존재한다고 모든 worker 종료가 검증된 것은 아니다. R3-030/031의 entry writer, 032의 별도 thread, 042의 owner/Runner 교체, 066의 real account close 등은 원장의 개별 실패 계약으로 처리한다.
 
+**002·023 후속 계약.** 가격 실패도 같은 Controller에서 원 batch context와 최신 dispatch 순서를 관리한다. 실패 retry가 남으면 writer 유무와 무관하게 ready를 반환하지 않고 기존 명시적 close 재시도를 사용한다. 별도 ACK 신호/저장 owner를 추가하지 않는다. 다른 worker 종료 수락과 이 좁은 검증을 구분한다.
+
 **관련 검사.** [AppController](../../tests/unit/test_app_controller.py), [모의 runtime 교체 장벽](../../tests/unit/test_mock_runtime_barrier.py), [strict restore](../../tests/unit/test_strict_restore.py). 변경한 worker의 late signal·실패·교체·재시작도 해당 검사에 연결한다.
 
 <a id="ranking"></a>
@@ -57,6 +59,10 @@
 **상태·실패·공식 경계.** PC는 `queue_minute_bar/queue_price_cache`, writer의 `enqueue_*`/`stop_and_drain`을 쓴다. native bar/metadata·가격 transaction은 repository/store가 수행한다. 저장 중 batch와 새 pending을 구분하고 실패 복원이 더 최신 값을 덮지 않게 한다. query/history → writer commit ACK → aggregator의 generation별 복구 확인 순서를 유지한다. 화면은 기존 display/live-bar read를 사용하고 저장 조회를 실시간 원본 수집으로 복제하지 않는다. 직접/NAS 전환은 실제 구독 승인과 조회 성공을 소비한다.
 
 **미해결.** R3-001/004의 metadata 중복 read·range 개선은 승계한다. lock 안 저장 대기/동일 flush(035/036), sender 정리(037), page/recent read 비용(038/039), outbox 읽기 실패(065), 장후 coverage 반복(078)은 개별 후속이다. 같은 계층을 합치는 것으로 종료·ACK 문제를 해결했다고 하지 않는다.
+
+**가격 batch의 날짜·재시도 계약.** 기존 tick/history caller의 `observed_at`은 high의 수신 거래일에 사용하고 pending high는 `(date, code)`별 MAX다. 가격/시총은 개별 tick 정밀시각이 아닌 기존 batch 단위이며 최초 dispatch/enqueue 때 고정한 시각을 재시도에 보존한다. normal batch는 같은 FIFO writer와 Repository에서 연결/BEGIN/COMMIT1·SELECT0으로 처리하며 여러 날짜 high도 같은 transaction에 들어간다.
+
+`price_failed`는5인자이고4번째 object가 `trade_date/observed_at/receipt` context다. 실제 Controller receiver를 동반 변경했고 legacy date/object와 flat-high 입력도 유지한다. origin metadata가 없는 legacy 실패에서 순서/최초시각을 복원했다고 주장하지 않는다. Controller의 field/code별 최신 dispatch metadata와 unique pending field/day별 retry를 재사용하며 실패 횟수별 이력을 추가하지 않는다. UI에서 늦게 받은 실패가 더 최신 가격/시총을 덮지 않게 하되, high는 같은날 MAX·다른날 분리를 지킨다.
 
 **관련 검사.** [MarketCacheWriter](../../tests/unit/test_market_cache_writer.py), [분봉 저장소](../../tests/unit/test_minute_bar_repository.py), [Collector](../../tests/unit/test_central_realtime_collector.py), [AutonomousTop20](../../tests/unit/test_autonomous_top20.py). 최종 값뿐 아니라 단위/metadata·gap 세대·저장 실패·late ACK·drain과 변경한 DB 호출 수를 확인한다.
 
@@ -106,6 +112,8 @@
 
 <a id="journal-sync"></a>
 ## 일지·편집·동기화 — F22 및 F18 소비
+
+**023 시각 비교 경계.** MainWindow는 기존 체결 signal을 받아 압력 snapshot을 enqueue한다. 표본/기한을 `as_kst`로 비교하고 결측 gap은 결측으로 다룬다. 기존60초 경계·gap만료를 유지하며 실제 저장/원장은 기존 writer owner가 소유한다. finalization의5분 retry·최대2회도 같은 시각 정규화로 유지한다. 관련 native 전체 일지/운영 계좌 수락을 뜻하지 않는다.
 
 **현재 책임.** EntrySnapshotWriter는 체결 스냅샷과 수급/프로그램 보완 queue, journal 저장소는 account scope·원본/provenance·분석 revision을 소유한다. JournalWindow는 history/query·그룹 편집·복기·차트/분석의 UI와 worker 수명을 조정한다. ThemeRepository는 프로필 테마 원본·사용자 승인/편집을 소유하고 OCR/추출/preview는 적용 전 제안 경계다.
 
@@ -170,7 +178,7 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 | 범위 | 현재 정상 기준과 oracle | 재사용 위치 |
 | --- | --- | --- |
 | R3-001 live metadata | 20종목 native SELECT20, BEGIN IMMEDIATE/COMMIT 경계와 값/metadata·rollback/retry | `test_minute_bar_repository.MinuteBarRepositoryTests.test_live_batch_reads_each_metadata_row_once_inside_the_writer_transaction` 및 같은 파일의 authority/실패 검사 |
-| R3-002 price batch | 연결/BEGIN/COMMIT 각1, SELECT0; empty/partial·전체 rollback·retry·process exit | `test_stock_repository.StockRepositoryTests.test_price_cache_uses_one_transaction_and_keeps_field_and_date_contracts`와 같은 파일의 실패 검사. 원거래일 실패 재전달023은 미해결 |
+| R3-002 price batch | 연결/BEGIN/COMMIT 각1, SELECT0; empty/partial·전체 rollback·retry·process exit | `test_stock_repository.StockRepositoryTests.test_price_cache_uses_one_transaction_and_keeps_field_and_date_contracts`와 같은 파일의 실패 검사. 원거래일·원batch시각/latefailure·명시종료128건 검증. 복수날짜도1transaction은 `test_two_high_dates_share_one_transaction_without_cross_day_max_or_extra_reads`가 보호한다. 넓은023시계 잔여는 별도 |
 | R3-004 RAM minute | 20종목/400행 중 실제 native 반환200행(`[10]*20`); 무제한 양성 대조400행(`[20]*20`), 8소비자/100회 조회/close에 추가 read0·native 무쓰기 | `test_candidate_monitor.CrossThemeH1SharingTests.test_minute_primary_uses_existing_sqlite_reader_without_writes_or_consumer_scaling` 기존 검사 보강. 과거9000→200 측정과 이번400→200 fixture는 구분 |
 | 미해결 반복 비용/정합성 | R3-038/039/041, 063~082 등의 반례는 개선 목표이며 정상 budget으로 승인하지 않음 | 기존 R3 항목의 재현/완료 기준에서 수정 후 관련 비용 검사를 선택·승격 |
 

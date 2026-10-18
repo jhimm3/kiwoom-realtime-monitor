@@ -532,3 +532,12 @@ v5는 시간을 늘린 복원 재시도가 아니다. 고정 v4 결과 canonical
 카탈로그 결과는 전체 public table/index 개수와 invalid index 개수, 고정5테이블의 존재·heap/total 크기·reltuples 추정치·인덱스 개수다. 추정치는 실제 행 수가 아니며 물리 크기만으로 COPY 완료를 증명하지 않는다. 이미 종료된 v4 backend의 과거 wait를 새 PG 상태로 복원할 수 없다고 명시한다. 개별 SQL5초, 진단300초 한도 후 별도 정리 시간을 두며 소유 label/image/ID가 확인된 임시 컨테이너만 정리한다. 실패도 전체 안전 요약을 출력하고 원문 로그는 관리자 경로에 유지한다. diagnostic_complete는 복원/유효 백업 수락을 뜻하지 않는다.
 
 로컬12건은 실패/오류/skip0으로 통과했다. 부모/원본 변경 시 기동 차단, 기존 마운트 거절, 실패 시 정리, 카탈로그 읽기 전용/시간 제한, 실제 생성 함수에 복원/초기화 호출 없음, TOC 필수 항목, 비밀 비노출과 유효 백업 판정 금지를 검사했다. 최초1건은 Windows fixture가 Linux 경로 문자열과 달라 실패했고 실패 원장은 local-verification-before-platform-fixture.json에 보존한 뒤 fixture만 플랫폼 Path 표현으로 맞췄다. NAS Python/셸 구문·파일 hash도 통과했다. 실행 경로는 `/volume1/docker/kiwoom-monitor/artifacts/clock-recovery-20261016-v5-diagnostic/diagnose.sh`, Python SHA256 `4f19c1512e6a3cd078e616acb01f286f8ef407854884b017d14cbcc59185626b`, 셸은 `3672455bb27eb92b52eb98034bd0526c88f777264cd393ea7b6b983d57c6e107`이다. 관리자 인증 실행 대기이며 실제 세부 진단·후속 복원과5테이블 검증·역사 시각 보정은 남는다. 제품 소스·운영 설정·commit/push·새 CI 변경은 없다.
+
+
+## 2026-10-18 R3-002·023 선택 경계 보완
+
+로컬커밋 `c0cf7ce`에서 가격 실패 batch의 원거래일/최초dispatch시각과 최신peer·같은날고가MAX/다른날분리·명시close를 보완했다. high caller는 이미 받은 시각을 전달하고, retry가 저장시각을 새로 만들지 않는다. 가격/시총의 개별tick 정밀시각이라는 새계약은 추가하지 않았다. 원originmetadata가없는 legacy콜은 그 한계를 보존한다.
+
+finalization retry와 체결시점pressure는 `datetime.min`을 결측값으로 비교하지 않고 존재시각만 기존 `as_kst`로 정규화한다. 정확5분/최대2회·60초표본/gap만료의 기존 의미를 유지했다. 실제 controller signal→snapshot enqueue와 native SQLite/종료를 포함한5모듈128건/동일전후5조건·실행ID/구조가드 통과다. 새제품 CI·PG·NAS·장중·실계좌는 미검증이다.
+
+스냅샷 stale cutoff는 이미store provider로 연결돼있음을 현재본문으로 정정했다. app의 Ingestor/AutonomousTop20 생성시계 누락, dataset saved_at, 결측봉 fallback/legacySQL 잔여는 이 작업으로 완료되지 않았다. 다음 범위·F연결·전후수치와 실패기록 정본은 [R3-023 및 후속 원장](../../REFACTOR_BACKLOG.md#r3-023--시계-연결의-남은-host-fallback)을 따른다.

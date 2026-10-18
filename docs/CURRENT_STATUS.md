@@ -1,5 +1,11 @@
 # 현재 상태 요약
 
+## 2026-10-18 R3-002·023 후속 로컬 검증
+
+문서eef5563의 [후속 CI39119680966](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39119680966)은9job/13분1초·Windows5581건으로 통과했다. 이후 제품 로컬커밋 `c0cf7ce`에서 가격 retry의 원일·원batch시각/최신값·고가MAX/실패종료 보존과 두 naive/aware 비교 경계를 병렬 보완했다. 관련5모듈 **128건 통과**, 동일native 전후5조건·구조가드·18번째증분원장/실행ID 대조를 확인했다. 정상 batch의 연결/COMMIT1·SELECT0·기존3owner를 유지했다. [백로그](../REFACTOR_BACKLOG.md)의 F04/F06/F08/F10/F18/F22/F23/F24와 책임계약을 갱신했다.
+
+R3-002는 이번 선택범위 로컬 검증 완료, R3-023은 constructor provider·dataset saved_at/legacy 잔여 때문에 진행이다. 다음은023의남은 작은 시계 연결이며002를 재조사/재구현하지 않는다. F06의 별도 당일RAM gate 후보는033에 보존했다. 새제품 push/CI·전수로컬·NAS/PG·실계좌는 미실행이다.
+
 **추가 CI 단축 검증 완료(2026-10-18):** `a325e31`을main에push한 [실제 CI39118437411](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39118437411)이9job전체성공/13분59초였다. Windows320worker·463모듈·5581고유ID가현재전체계획/source/lock/종료·두shardjob성공과일치했고원래required까지통과했다. 직전33의20분10초보다6분11초단축, 빠른d5의15분38초대비1분39초단축이다. Windows총VM job시간은19분19초→22분54초로늘었으며환경편차/토큰·실제요금미측정한계는 [R3-083](../REFACTOR_BACKLOG.md) 말미에기록했다. F08/F13/F24/F25도같이갱신했다. 제품소스·DB·주문·NAS변경0/다음제품002+023유지. 이결과기록후속문서와검증된코드CI를구분한다.
 
 ## 2026-10-18 R3-083 push·실제 CI 지연 원인 보완
