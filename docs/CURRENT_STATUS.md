@@ -1,5 +1,13 @@
 # 현재 상태 요약
 
+## 2026-10-18 R3-023 history 비용·backfill 실패 시각 / 등록 코드범위 완료
+
+로컬 제품·검사 `4ac627a`에서 `_history_received`의 기존 수신 시각1회를 계좌 검증 후 저장 전에 얻어 `upsert_history_sync(now)`의 비용 confirmed_at과 후속 task/설정에 공유했다. `_backfill_failed`도 기존 client 시각1회를 `mark_bar_backfill(now)`의 updated_at과 저장 성공 후 task 실패에 전달한다. 원체결·정산일·봉 값/일자·계좌 범위·기존 transaction/상태·재시도 정책은 보존했다. 관련10모듈 **128건/81.536초 통과**. 구조·27번째 증분 원장/실행 ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 F08/F18/F22/F24와 책임 계약을 함께 갱신했다.
+
+R3-023은 **검증 완료(등록된 정밀 코드감사·로컬 관련검증 범위)**다. 기존 등록 잔여인 history 비용·backfill 실패 receipt2곳까지 완료했으며, 초기/직전 단계 잔여 기록은 당시 이력이다. 앱 전체 시계 통일이나 모든 운영 분기 실행 완료를 뜻하지 않는다. 다음 제품 작업은 **R3-003(동일 시총·가격 UPDATE와 확인시각 의미)**이다. 기존 측정·백로그에서 이어가며 R1/R2·001/002/004/023과 전체 감사를 반복하지 않는다. R3-033 등 별도 미결은 유지하고 새 차단 요인은 없다.
+
+이번 push/GitHub CI·NAS 배포·로컬 전수 회귀·실제 키움/장중·운영 DB/주문·PostgreSQL·외부 동기화 수락은 미실행이다. API 조립 전 startup/offline KST fallback과 기존 저장자료 전환·운영 수락은 별도 time-basis 범위이며 키움 동기화 완료로 표시하지 않는다.
+
 ## 2026-10-18 R3-023 자동 보완 task 수명 시계
 
 로컬 제품·검사 `0abc062`에서 기존 JournalEnrichmentService에 query-client 시계를 지연 주입해 task 등록/시작/완료/부분/실패/불가/복구에 전달했다. 자동 분석은 등록/선별 batch와 각 started/completed/failed callback의 시각1회를 공유한다. 명시적 legacy 시각·상태/재시도·원본 task ID/hash는 보존하고 혼합 시간대 retry 비교를 실제 순간으로 통일했다. 관련9모듈 **106건/58.938초 통과**. 구조·26번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 영향 F01/F08/F10/F18/F22/F24와 책임 계약을 갱신했다.
