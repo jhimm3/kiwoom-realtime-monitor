@@ -244,10 +244,10 @@ jobs:
           cache-dependency-path: requirements.lock.txt
       - run: python -m pip install -r requirements.lock.txt
       - name: Check test registration
-        run: python scripts/run_regression.py --check-new-test-modules --base-ref "$env:CI_BASE_REF"
+        run: python -m scripts.run_regression --check-new-test-modules --base-ref "$env:CI_BASE_REF"
       - name: Run changed tests and their source consumers
         run: >-
-          python scripts/run_regression.py --profile related
+          python -m scripts.run_regression --profile related
           --base-ref "$env:CI_BASE_REF"
           --timeout-seconds 1800 --output tmp/regression/ci-related
       - name: Preserve related test results

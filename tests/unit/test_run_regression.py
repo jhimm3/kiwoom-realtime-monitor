@@ -404,6 +404,7 @@ class RunRegressionTests(unittest.TestCase):
         self.assertIn("needs: [select-extended]", related)
         self.assertNotIn("all-local", related)
         self.assertIn("--profile related", related)
+        self.assertIn("python -m scripts.run_regression --profile related", related)
         self.assertNotIn("REGRESSION_BASE_REF:", related)
         self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.mode == 'comprehensive'", workflow)
         self.assertNotIn('test "$WINDOWS_JOB" = success\n', workflow)
