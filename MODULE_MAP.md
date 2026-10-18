@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-18 R3-003: 기존 MainWindow RAM/queue→AppController dispatch/retry→MarketCacheWriter/native fallback→StockRepository 단일 transaction에서 cap/현재 비율 파생값이 같은 행만 UPDATE 생략. last_price_updated_at은 같은 가격도 수신 확인, fundamentals_updated_at은 기존 당일 gate를 유지한다. 새 owner/계층/SELECT0, samecap 반영20→0/SQL시도20·COMMIT1유지. actual theme import/CAS·writer/reader/수명 관련8모듈 165건/로컬 `622c2d9`. 다음005·F06/F10/F22/F24·029잔여는 [정본](REFACTOR_BACKLOG.md#r3-003-동일-시총-쓰기확인시각-계약-완료--2026-10-18)을 따른다.
+
 2026-10-18 R3-023 등록 코드범위 완료: 기존 JournalWindow의 history 계좌 검증→client 수락시각1회→비용 confirmed_at/commit→task·설정·reload, backfill 실패시각1회→updated_at/commit→task fail에 연결했다. 원체결/봉/정산일·scope·SQL/transaction/owner·계층 수는 보존한다. history 시계 오류는 저장 전 기존 실패 callback으로 처리한다. 로컬 `4ac627a`·관련10모듈 128건 통과. F08/F18/F22/F24·오류 경계·운영 미검증은 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-history-비용backfill-실패-시각--2026-10-18)을 따른다. 다음 R3-003이며 앞선023 문단은 당시 이력이다.
 
 2026-10-18 R3-023 task 수명: 기존 Window→JournalEnrichmentService의 implicit current를기존 client에연결하고callback마다시계1회를공유한다. 명시legacy now/원래task·ID/상태/retry/원본은보존, 비교만as_kst순간기준이다. query-client전startuprecover는명시KSTfallback으로순서유지. 기존owner/SQL·스키마/계층·task수동일, 공통시각resolver내부호출만추가. 로컬 `0abc062`·관련9모듈 106건 통과. 다음history비용/backfill실패receipt와F·미검증은 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-자동-보완-task-수명-시계--2026-10-18)을 따른다.

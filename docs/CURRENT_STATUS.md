@@ -1,5 +1,13 @@
 # 현재 상태 요약
 
+## 2026-10-18 R3-003 동일 시총 쓰기 제거·가격 확인시각 보존
+
+로컬 제품·검사 `622c2d9`에서 기존 StockRepository.update_price_cache의 시총 UPDATE에 null-safe 조건만 추가했다. 시총과 현재 DB 유통비율로 계산한 유통시총이 모두 같으면 행/일반 updated_at을 보존하며, 후행 비율·NULL/0 파생값 보정은 수행한다. 같은 가격의 last_price_updated_at과 기본정보 당일 gate는 유지한다. 동일 시총20종목의 SQLite 반영행20→0, UPDATE시도20·연결1·SELECT0·BEGIN1·COMMIT1은 그대로다. 같은 가격20개의 후속 확인시각 갱신/반영20은 유지한다. 물리 I/O·WAL/lock wait·실제 장중 지연은 미측정이다. 관련8모듈 **165건/101.115초 통과**. 구조·28번째 증분 검토/실행 ID·소스 불변·worker/자식 종료·임시 정리를 확인했다.
+
+R3-003은 **검증 완료(로컬)**다. 백로그 요약·상세와 F06/F10/F22/F24·책임/시각 계약을 갱신했다. 다음은 **R3-005(0B 후보 기준선의 일전체 분봉 read)**다. 기존 항목과 R3-004 reader 범위에서 이어가며 전체 감사·완료한001/002/003/004/023은 반복하지 않는다. R3-029의 가격 receipt와 테마 revision 결합·R3-033 RAM gate 등 별도 미결은 유지한다. 새 차단 요인은 없다.
+
+이번 push/GitHub CI·NAS 배포·로컬 전수 회귀·실제 키움/장중·운영 DB/주문·PostgreSQL·다중PC/외부 동기화 수락은 미실행이다. F 부모의 부분 연결/확인 불가를 전체 정상으로 승격하지 않는다.
+
 ## 2026-10-18 R3-023 history 비용·backfill 실패 시각 / 등록 코드범위 완료
 
 로컬 제품·검사 `4ac627a`에서 `_history_received`의 기존 수신 시각1회를 계좌 검증 후 저장 전에 얻어 `upsert_history_sync(now)`의 비용 confirmed_at과 후속 task/설정에 공유했다. `_backfill_failed`도 기존 client 시각1회를 `mark_bar_backfill(now)`의 updated_at과 저장 성공 후 task 실패에 전달한다. 원체결·정산일·봉 값/일자·계좌 범위·기존 transaction/상태·재시도 정책은 보존했다. 관련10모듈 **128건/81.536초 통과**. 구조·27번째 증분 원장/실행 ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 F08/F18/F22/F24와 책임 계약을 함께 갱신했다.

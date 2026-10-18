@@ -1,5 +1,7 @@
 # 데이터베이스 스키마 지도
 
+2026-10-18 R3-003: 기존 stocks cap UPDATE는 market_cap 또는 현재 float_ratio 기반 circulating_market_cap이 다를 때만 반영한다. ratioNULL은 기존 파생값 보존/ratio0은0으로 보정하며, 같은 cap/파생값은 shared updated_at을 보존한다. 같은 가격 수신의 last_price_updated_at 갱신과 fundamentals_updated_at 당일 gate는 유지한다. 이 cap write 계약으로 shared updated_at을 모든 경로의 전용 변경시각/신선도 시각으로 재정의하지 않는다. 기존 단일 transaction·고가 날짜/MAX/cleanup·KST 인계·schema version/DDL/column/index는 그대로다. [검증·위험·029잔여](REFACTOR_BACKLOG.md#r3-003-동일-시총-쓰기확인시각-계약-완료--2026-10-18).
+
 2026-10-18 R3-004: 기존 중앙 `load_minute_bars`에 optional `start_minute` 포함/`end_minute` 제외 WHERE만 추가했다. 생략 시 기존 거래일 전체이며 저장 열/메타데이터·writer/transaction·index·schema version은 그대로다. 기존 `(code,trading_date,minute)` index의 범위 탐색을 재사용하고 같은 범위의 RAM delta/native query 권한·중복 방지를 보존한다. Shadow Runtime만 opt-in, 다른 API의 기본 조회 범위는 유지한다. [계약·검증·한계](REFACTOR_BACKLOG.md#r3-004--ram-shadow-분봉의-하루-전체-범위직렬-read).
 
 2026-10-18 R3-002: PC 기존 `stocks.last_price/last_price_updated_at`, `market_cap/circulating_market_cap/updated_at`, `intraday_highs.high_price/updated_at`를 같은 cache job transaction으로 저장한다. 신규 기록의 시각은 주입한 기존 키움 보정 시계를 KST ISO(+09:00)로 표현한다. `fundamentals_updated_at`·원래 거래일·고가 MAX/35일 정리는 유지한다. 기존 자료 변환·DDL/column/index/migration/schema version·새 writer는 없다. 개별 호환 저장도 같은 구현을 사용한다. [변경/검증/한계](REFACTOR_BACKLOG.md#r3-002--한-가격-캐시-job의-다중-transaction).
