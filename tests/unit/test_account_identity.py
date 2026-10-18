@@ -171,6 +171,12 @@ class AccountIdentityTests(unittest.IsolatedAsyncioTestCase):
             first = store.register_account_scope_alias(value)
             second = store.register_account_scope_alias({**value, "verified_at": NOW.isoformat()})
             self.assertEqual(first, second)
+            self.assertEqual("2026-09-13T10:02:00+09:00", first["verified_at"])
+            with store._connection() as connection:
+                self.assertEqual(NOW.isoformat(), connection.execute(
+                    "SELECT verified_at FROM central_account_scope_aliases WHERE origin_account_ref=?",
+                    (origin_ref,),
+                ).fetchone()[0])
             with self.assertRaisesRegex(ValueError, "immutable"):
                 store.register_account_scope_alias({
                     **value, "canonical_account_ref": str(uuid.uuid4()),

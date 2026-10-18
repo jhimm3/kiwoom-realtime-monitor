@@ -1365,9 +1365,9 @@ class PostgresStorageBoundaryTests(unittest.TestCase):
             source="kiwoom-ka10080;trade_value=ohlcv_estimate",
             value_kind=DataValueKind.ESTIMATED,
         )
-        def fail_after_insert(cursor, sources, latest_by_key, *, execute_seconds=None):
+        def fail_after_insert(cursor, sources, latest_by_key, *, execute_seconds=None, now_provider=None):
             _insert_postgres_observation_revisions_batch(
-                cursor, sources, latest_by_key, execute_seconds=execute_seconds,
+                cursor, sources, latest_by_key, execute_seconds=execute_seconds, now_provider=now_provider,
             )
             raise RuntimeError("revision write failed")
 

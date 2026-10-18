@@ -365,7 +365,7 @@ jobs:
         run: |
           docker build --label "com.kiwoom.ci-source=$GITHUB_SHA" \
             -f tests/ci_runtime.Dockerfile -t kiwoom-ci-runtime:local . \
-            2>&1 | tee tmp/regression/ci-operator/build.log
+            2>&1 | tee tmp/regression/ci-sealed/build.log
           docker pull postgres:17-alpine
           docker image inspect kiwoom-ci-runtime:local --format '{{.Id}}' > tmp/regression/ci-sealed/image-id
           docker image inspect postgres:17-alpine --format '{{.Id}}' > tmp/regression/ci-sealed/postgres-image-id

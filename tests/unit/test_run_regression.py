@@ -408,6 +408,9 @@ class RunRegressionTests(unittest.TestCase):
         self.assertNotIn("REGRESSION_BASE_REF:", related)
         self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.mode == 'comprehensive'", workflow)
         self.assertNotIn('test "$WINDOWS_JOB" = success\n', workflow)
+        sealed_build = workflow.split("      - name: Build exact checkout runtime image for isolated v2\n", 1)[1].split("      - name: Confirm installed", 1)[0]
+        self.assertIn("tee tmp/regression/ci-sealed/build.log", sealed_build)
+        self.assertNotIn("ci-operator/", sealed_build)
 
     def test_new_test_modules_must_be_registered_but_existing_exclusions_are_unchanged(self) -> None:
         base_paths = [

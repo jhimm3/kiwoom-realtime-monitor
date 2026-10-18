@@ -788,7 +788,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(register) for _ in range(2)]
             saved = [future.result(timeout=60) for future in futures]
-        self.assertEqual([alias, alias], saved)
+        expected_alias = {**alias, "verified_at": datetime.fromisoformat(observed_at).astimezone(KST).isoformat()}
+        self.assertEqual([expected_alias, expected_alias], saved)
         with self.assertRaisesRegex(ValueError, "immutable"):
             self.store.register_account_scope_alias({**alias, "binding_revision": 999})
         with self.assertRaisesRegex(ValueError, "chains"):

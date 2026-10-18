@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from kiwoom_monitor.domain.time_basis import as_kst
+
 
 def _account_registry_scope(value: dict[str, Any]) -> tuple[str, str]:
     broker = str(value.get("broker", ""))
@@ -110,6 +112,7 @@ def _account_scope_alias_values(value: dict[str, Any]) -> tuple[object, ...]:
 
 
 def _account_scope_alias_row(origin_account_ref: str, row: tuple[object, ...]) -> dict[str, Any]:
+    verified_at = row[5] if isinstance(row[5], datetime) else datetime.fromisoformat(str(row[5]))
     return {
         "origin_account_ref": origin_account_ref,
         "canonical_account_ref": str(row[0]),
@@ -117,7 +120,7 @@ def _account_scope_alias_row(origin_account_ref: str, row: tuple[object, ...]) -
         "environment": str(row[2]),
         "credential_profile_id": str(row[3]),
         "binding_revision": int(row[4]),
-        "verified_at": row[5].isoformat() if isinstance(row[5], datetime) else str(row[5]),
+        "verified_at": as_kst(verified_at).isoformat(),
         "verification_method": str(row[6]),
     }
 
@@ -278,7 +281,7 @@ class SQLiteAccountIdentityStoreMixin:
                 "binding_revision,verified_at,verification_method) VALUES(?,?,?,?,?,?,?,?)",
                 _account_scope_alias_values(document),
             )
-        return document
+        return _account_scope_alias_row(document["origin_account_ref"], _account_scope_alias_values(document)[1:])
 
     def resolve_account_scope(self, broker: str, environment: str, account_ref: str) -> dict[str, Any]:
         scope = _scope_document(broker, environment, account_ref)
@@ -417,7 +420,7 @@ class PostgresAccountIdentityStoreMixin:
                 "binding_revision,verified_at,verification_method) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                 _account_scope_alias_values(document),
             )
-        return document
+        return _account_scope_alias_row(document["origin_account_ref"], _account_scope_alias_values(document)[1:])
 
     def resolve_account_scope(self, broker: str, environment: str, account_ref: str) -> dict[str, Any]:
         scope = _scope_document(broker, environment, account_ref)
