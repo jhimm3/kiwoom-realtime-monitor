@@ -3,12 +3,14 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import closing
 from unittest.mock import Mock, patch
 
 from kiwoom_monitor.domain.time_basis import as_kst
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.application.strategy_pack import default_strategy_pack
 from kiwoom_monitor.application.journal_enrichment import journal_research_link
 from kiwoom_monitor.application.trade_analysis_preparation_service import TradeAnalysisPreparationService
@@ -22,6 +24,7 @@ class FakeRepository:
         self.import_error = import_error
         self.imported: list[tuple[Path, str, object, int, datetime | None]] = []
         self.saved_setups: list[tuple[str, TradeSetupClassification, str]] = []
+        self.saved_setup_times: list[datetime | None] = []
         self.saved_overrides: list[tuple[str, int, str]] = []
         self.stored_setup: tuple[TradeSetupClassification, str] | None = None
         self.overrides: dict[int, str] = {}
@@ -58,6 +61,7 @@ class FakeRepository:
     def save_trade_analysis_setup(self, group_id: str, setup: TradeSetupClassification,
                                   legacy_override=None, now=None) -> None:
         self.saved_setups.append((group_id, setup, ""))
+        self.saved_setup_times.append(now)
         if legacy_override is not None:
             self.saved_overrides.append((group_id, *legacy_override))
 
@@ -106,6 +110,8 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
         self.assertEqual(1, len(repository.analysis_revisions))
         self.assertEqual(result.analysis_revision_id, repository.analysis_revisions[0].revision_id)
         self.assertEqual("trade-analysis/v2", repository.analysis_revisions[0].analysis_version)
+        self.assertEqual([as_kst(clock.return_value)], repository.saved_setup_times)
+        self.assertEqual(as_kst(clock.return_value), repository.analysis_revisions[0].created_at)
 
     def test_loads_explicit_research_links_without_guessing_a_decision(self) -> None:
         repository = FakeRepository()
@@ -153,6 +159,8 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
                 self.assertEqual(1, result.daily_bar_count)
                 self.assertEqual(1, len(repository.saved_setups))
                 self.assertEqual(1, len(repository.analysis_revisions))
+                self.assertEqual([as_kst(clock.return_value)], repository.saved_setup_times)
+                self.assertEqual(as_kst(clock.return_value), repository.analysis_revisions[0].created_at)
                 self.assertEqual((Path("monitor.sqlite3"), "000001", episode().ended_at.date(), 250,
                                   as_kst(clock.return_value)), repository.imported[0])
                 clock.assert_called_once_with()
@@ -224,6 +232,111 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
                 self.assertEqual("trade-analysis/v2", revisions[0].analysis_version)
                 snapshots.assert_called_once_with("000001", episode().started_at, episode().ended_at)
                 clock.assert_called_once_with()
+
+    def test_native_setup_and_revision_share_receipt_preserve_scope_and_revision_identity(self):
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+
+        origin = AccountScope("kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111")
+        canonical = AccountScope("kiwoom", AccountEnvironment.MOCK, "22222222-2222-4222-8222-222222222222")
+        other = AccountScope("kiwoom", AccountEnvironment.MOCK, "33333333-3333-4333-8333-333333333333")
+        cases = (
+            (LEGACY_ACCOUNT_SCOPE, None, datetime(2030, 1, 2, 3, 4, 5)),
+            (origin, canonical, datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc)),
+        )
+        for scope, effective, source_now in cases:
+            with self.subTest(scope=scope.account_ref), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "journal.sqlite3"
+                repository = JournalRepository(path)
+                current = group_trade_episodes(tuple(
+                    replace(fill, origin_scope=scope, canonical_scope=effective) for fill in episode().fills
+                ))[0]
+                original = TradeSetupClassification("기타", 1, ("original",))
+                seed_time = datetime(2026, 9, 9, 10)
+                repository.save_trade_setup(
+                    current.group_id, original, "추격매수", now=seed_time,
+                    account_scope=scope, canonical_scope=effective,
+                )
+                clock = Mock(return_value=source_now)
+                service = TradeAnalysisPreparationService(
+                    repository, Path(directory) / "missing-monitor.sqlite3",
+                    lambda *_args: (), lambda *_args: (), now_provider=clock,
+                )
+                args = dict(active_pack=default_strategy_pack(), strategy_packs=(), result_mode="together")
+                with patch("kiwoom_monitor.infrastructure.persistence.journal_trade_repository.kst_wall_now",
+                           return_value=datetime(2031, 1, 2, 12, 34, 56)) as repository_host, \
+                     patch("kiwoom_monitor.application.journal_enrichment.kst_wall_now",
+                           return_value=datetime(2031, 1, 2, 12, 34, 56)) as revision_host:
+                    # Failure of the last migration write rolls back the automatic setup and manual override too.
+                    with closing(sqlite3.connect(path)) as connection:
+                        connection.execute("CREATE TRIGGER reject_sync BEFORE INSERT ON journal_sync_states "
+                                           "BEGIN SELECT RAISE(ABORT, 'sync rejected'); END")
+                    with self.assertRaisesRegex(sqlite3.IntegrityError, "sync rejected"):
+                        service.prepare(current, (), **args)
+                    clock.assert_called_once_with()
+                    self.assertEqual((original, "추격매수"), repository.load_trade_setup(current.group_id, effective or scope))
+                    self.assertEqual({}, repository.load_trade_setup_cycle_overrides(current.group_id, effective or scope))
+                    self.assertEqual((), repository.load_journal_analysis_revisions(current.group_id, effective or scope))
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual((seed_time.isoformat(),), connection.execute(
+                            "SELECT updated_at FROM trade_setup_classifications").fetchone())
+                        self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM journal_sync_states").fetchone()[0])
+                        connection.execute("DROP TRIGGER reject_sync")
+
+                    clock.reset_mock()
+                    result = service.prepare(current, (), **args)
+                    clock.assert_called_once_with()
+                    receipt = as_kst(source_now)
+                    scope_values = (scope.broker, scope.environment.value, scope.account_ref,
+                                    (effective or scope).account_ref)
+                    with closing(sqlite3.connect(path)) as connection:
+                        columns = "origin_broker,origin_environment,origin_account_ref,canonical_account_ref"
+                        self.assertEqual((receipt.isoformat(), "", *scope_values), connection.execute(
+                            "SELECT updated_at,manual_type," + columns + " FROM trade_setup_classifications").fetchone())
+                        self.assertEqual((receipt.isoformat(), 0, "주도주 돌파", *scope_values), connection.execute(
+                            "SELECT updated_at,cycle_index,manual_type," + columns + " FROM trade_setup_cycle_overrides").fetchone())
+                        collection = "journal_cycle_overrides" if scope == LEGACY_ACCOUNT_SCOPE else "journal_v2_cycle_overrides"
+                        owner = "legacy" if scope == LEGACY_ACCOUNT_SCOPE else scope.account_ref
+                        self.assertEqual((receipt.isoformat(), collection, owner, current.group_id + "|0", 0, *scope_values),
+                                         connection.execute("SELECT updated_at,collection,owner,document_key,is_deleted," + columns
+                                                            + " FROM journal_sync_states").fetchone())
+                    saved_setup, manual_type = repository.load_trade_setup(current.group_id, effective or scope)
+                    self.assertEqual((result.overall_setup.setup_type, result.overall_setup.confidence, result.overall_setup.evidence),
+                                     (saved_setup.setup_type, saved_setup.confidence, saved_setup.evidence))
+                    self.assertEqual("", manual_type)
+                    first = repository.load_journal_analysis_revisions(current.group_id, effective or scope)[0]
+                    self.assertEqual(result.analysis_revision_id, first.revision_id)
+                    self.assertEqual(receipt, first.created_at)
+                    self.assertEqual(scope, first.origin_scope)
+                    self.assertEqual(effective or scope, first.effective_scope)
+                    self.assertIsNone(repository.load_trade_setup(current.group_id, other))
+                    self.assertEqual((), repository.load_journal_analysis_revisions(current.group_id, other))
+
+                    # The next receipt updates setup time; immutable analysis inputs keep the first revision time.
+                    clock.return_value = receipt + timedelta(hours=1)
+                    clock.reset_mock()
+                    repeated = service.prepare(current, (), **args)
+                    clock.assert_called_once_with()
+                    self.assertEqual(first.revision_id, repeated.analysis_revision_id)
+                    self.assertEqual((first,), repository.load_journal_analysis_revisions(current.group_id, effective or scope))
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual((clock.return_value.isoformat(),), connection.execute(
+                            "SELECT updated_at FROM trade_setup_classifications").fetchone())
+                        self.assertEqual((receipt.isoformat(),), connection.execute(
+                            "SELECT updated_at FROM trade_setup_cycle_overrides").fetchone())
+
+                    clock.return_value += timedelta(hours=1)
+                    clock.reset_mock()
+                    changed = service.prepare(current, (("2026-09-09T09:10", 1000, 1100, 900, 1010, 100, 1., "api_confirmed"),), **args)
+                    clock.assert_called_once_with()
+                    revisions = repository.load_journal_analysis_revisions(current.group_id, effective or scope)
+                    self.assertEqual(2, len(revisions))
+                    self.assertEqual(first, revisions[0])
+                    self.assertEqual(changed.analysis_revision_id, revisions[1].revision_id)
+                    self.assertNotEqual(first.revision_id, revisions[1].revision_id)
+                    self.assertNotEqual(first.input_fingerprint, revisions[1].input_fingerprint)
+                    self.assertEqual(clock.return_value, revisions[1].created_at)
+                    repository_host.assert_not_called()
+                    revision_host.assert_not_called()
 
     def test_cycle_classification_failure_does_not_clear_legacy_manual_type(self) -> None:
         class FailingPack:

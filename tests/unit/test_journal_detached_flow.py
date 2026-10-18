@@ -61,6 +61,14 @@ class JournalDetachedFlowTests(unittest.TestCase):
                 first = MarketDataMetadataRepository(journal).load(
                     MarketDatasetKind.DAILY_BAR, "005930", "2026-09-09")
                 self.assertEqual(as_kst(datetime(2030, 1, 2, 3, 4, 5)), first.available_at)
+                first_revision = window._repo.load_journal_analysis_revisions(current_episode.group_id)[0]
+                self.assertEqual(initial.return_value, first_revision.created_at)
+                with closing(sqlite3.connect(journal)) as connection:
+                    setup_at = connection.execute(
+                        "SELECT updated_at FROM trade_setup_classifications WHERE group_id=?",
+                        (current_episode.group_id,),
+                    ).fetchone()[0]
+                self.assertEqual("2030-01-02T03:04:05+09:00", setup_at)
 
                 # The already-created preparer must resolve the current client again.
                 updated = Mock(return_value=datetime(2030, 1, 2, 18, 6, 7, tzinfo=timezone.utc))
@@ -87,7 +95,15 @@ class JournalDetachedFlowTests(unittest.TestCase):
                 self.assertEqual(first.effective_at, second.effective_at)
                 with closing(sqlite3.connect(journal)) as connection:
                     rows = connection.execute("SELECT trade_date,close_price,confirmed_at FROM journal_daily_bars").fetchall()
+                    setup_at = connection.execute(
+                        "SELECT updated_at FROM trade_setup_classifications WHERE group_id=?",
+                        (current_episode.group_id,),
+                    ).fetchone()[0]
                 self.assertEqual([("2026-09-09", 105, "2030-01-03T03:06:07+09:00")], rows)
+                self.assertEqual("2030-01-03T03:06:07+09:00", setup_at)
+                revisions = window._repo.load_journal_analysis_revisions(current_episode.group_id)
+                self.assertEqual((first_revision,), revisions)
+                self.assertEqual(first_revision.revision_id, received[0][1].analysis_revision_id)
             finally:
                 if worker is not None:
                     worker.requestInterruption()

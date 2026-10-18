@@ -199,10 +199,12 @@ class TradeAnalysisPreparationService:
         if account_scope == LEGACY_ACCOUNT_SCOPE:
             self._repository.save_trade_analysis_setup(
                 episode.group_id, overall_setup, selection.legacy_override,
+                now=observed_at,
             )
         else:
             self._repository.save_trade_analysis_setup(
                 episode.group_id, overall_setup, selection.legacy_override,
+                now=observed_at,
                 account_scope=origin_scope, canonical_scope=canonical_scope,
             )
 
@@ -264,7 +266,7 @@ class TradeAnalysisPreparationService:
                 "cycle_types": tuple(value.setup_type for value in cycle_setups),
                 "selected_types": selection.selected_types,
             },
-            account_scope=origin_scope, canonical_scope=canonical_scope,
+            now=observed_at, account_scope=origin_scope, canonical_scope=canonical_scope,
         )
         revision_saver = getattr(self._repository, "save_journal_analysis_revision", None)
         if callable(revision_saver):
