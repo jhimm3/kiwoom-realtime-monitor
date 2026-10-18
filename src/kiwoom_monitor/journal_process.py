@@ -966,8 +966,9 @@ class JournalWindow(QMainWindow):
                     and account_scope != expected_scope
                 ):
                     raise ValueError("선택한 계좌와 키움 응답 계좌가 달라 저장하지 않았습니다.")
+                received_at = as_kst(self._query_client.server_now())
                 self._repo.upsert_history_sync(
-                    fills, costs, account_scope=account_scope,
+                    fills, costs, now=received_at, account_scope=account_scope,
                 )
                 if account_scope is not None:
                     refresh_accounts = getattr(self, "_refresh_account_choices", None)
@@ -979,23 +980,22 @@ class JournalWindow(QMainWindow):
             enrichment_task_ids = getattr(self, "_history_enrichment_task_ids", {})
             fill_task_id = enrichment_task_ids.get("fills")
             if fill_task_id:
-                self._journal_enrichment.complete(fill_task_id, {"fill_count": len(fills)})
+                self._journal_enrichment.complete(fill_task_id, {"fill_count": len(fills)}, received_at)
             cost_task_id = enrichment_task_ids.get("costs")
             mock_account = expected_scope.environment.value == "mock"
             if cost_task_id:
                 if cost_error:
-                    self._journal_enrichment.fail(cost_task_id, str(cost_error))
+                    self._journal_enrichment.fail(cost_task_id, str(cost_error), received_at)
                 elif mock_account:
                     self._journal_enrichment.complete(
-                        cost_task_id, {"cost_count": 0, "source": "estimated"},
+                        cost_task_id, {"cost_count": 0, "source": "estimated"}, received_at,
                     )
                 elif fills and not costs:
                     self._journal_enrichment.partial(
-                        cost_task_id, {"cost_count": 0}, "체결 비용 정산 대기",
+                        cost_task_id, {"cost_count": 0}, "체결 비용 정산 대기", received_at,
                     )
                 else:
-                    self._journal_enrichment.complete(cost_task_id, {"cost_count": len(costs)})
-            received_at = as_kst(self._query_client.server_now())
+                    self._journal_enrichment.complete(cost_task_id, {"cost_count": len(costs)}, received_at)
             if received_at.time() >= time(20, 5) and not cost_error and (mock_account or costs or not fills):
                 self._journal_settings.setValue("last_history_sync_day", received_at.date().isoformat())
             if cost_error:
@@ -1467,10 +1467,11 @@ class JournalWindow(QMainWindow):
 
     def _backfill_failed(self, code: str, day: object, message: str) -> None:
         if isinstance(day, date):
-            self._repo.mark_bar_backfill(code, day, "실패", message)
+            failed_at = as_kst(self._query_client.server_now())
+            self._repo.mark_bar_backfill(code, day, "실패", message, now=failed_at)
             task_id = getattr(self, "_backfill_enrichment_task_ids", {}).get((code, day))
             if task_id:
-                self._journal_enrichment.fail(task_id, message)
+                self._journal_enrichment.fail(task_id, message, failed_at)
 
     def _backfill_completed(self, success: int, failed: int) -> None:
         prefix = "자동 " if self._automatic_backfill_running else ""

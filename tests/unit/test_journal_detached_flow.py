@@ -18,6 +18,101 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQuery
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
+    def test_backfill_failure_shares_receipt_with_native_status_and_retry(self) -> None:
+        from kiwoom_monitor.application.journal_enrichment import JournalEnrichmentService
+        from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+
+        day, code = date(2026, 9, 9), "005930"
+        for receipt in (datetime(2030, 1, 2, 3, 4, 5), datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc)):
+            with self.subTest(receipt=receipt), tempfile.TemporaryDirectory() as directory:
+                repository = JournalRepository(Path(directory) / "journal.sqlite3")
+                bar = MinuteOhlcv(datetime(2026, 9, 9, 10), 100, 110, 90, 105, 20)
+                repository.upsert_bars(code, (bar,), "realtime_partial")
+                original_bars = repository.load_chart_bars_range(code, day, day)
+                service_clock = Mock(side_effect=AssertionError("explicit receipt must win"))
+                service = JournalEnrichmentService(repository, "backfill-owner", now_provider=service_clock)
+                task = service.register("stock_day", "2026-09-09:005930", "minute_bars", {}, now=as_kst(datetime(2026, 9, 10, 9)))
+                service.start(task.task_id, as_kst(datetime(2026, 9, 10, 9, 1)))
+                running = repository.load_enrichment_task(task.task_id)
+                clock = Mock(return_value=receipt)
+                owner = SimpleNamespace(_query_client=SimpleNamespace(server_now=clock), _repo=repository,
+                    _journal_enrichment=service, _backfill_enrichment_task_ids={(code, day): task.task_id})
+                message = "controlled failure " + "x" * 510
+                failure_order = []
+                original_fail = service.fail
+
+                def fail_after_commit(task_id, error, now):
+                    # A separate connection/reader must see status before the task transition.
+                    state = repository.bar_backfill_state(code, day)
+                    self.assertEqual(("실패", 1, message[:500]), (state.state, state.bar_count, state.message))
+                    self.assertEqual(running, repository.load_enrichment_task(task_id))
+                    failure_order.append("committed-status-before-task")
+                    return original_fail(task_id, error, now)
+
+                with patch.object(service, "fail", side_effect=fail_after_commit), \
+                     patch("kiwoom_monitor.infrastructure.persistence.journal_bar_repository.kst_wall_now", side_effect=AssertionError("no host receipt")):
+                    JournalWindow._backfill_failed(owner, code, day, message)
+                clock.assert_called_once_with()
+                service_clock.assert_not_called()
+                self.assertEqual(["committed-status-before-task"], failure_order)
+                expected = as_kst(receipt)
+                with closing(sqlite3.connect(repository._path)) as connection:
+                    row = connection.execute("SELECT * FROM journal_bar_backfill").fetchone()
+                    task_times = connection.execute("SELECT created_at,started_at,updated_at FROM journal_enrichment_tasks WHERE task_id=?", (task.task_id,)).fetchone()
+                self.assertEqual((day.isoformat(), code, "실패", message[:500], expected.isoformat(timespec="seconds")), row)
+                self.assertEqual(("2026-09-10T09:00:00+09:00", "2026-09-10T09:01:00+09:00", expected.isoformat()), task_times)
+                failed = repository.load_enrichment_task(task.task_id)
+                self.assertEqual(("retryable_failed", 1, expected + timedelta(minutes=5), message),
+                    (failed.state, failed.attempts, failed.next_retry_at, failed.last_error))
+                self.assertEqual((running.task_id, running.input_fingerprint, running.origin_scope),
+                    (failed.task_id, failed.input_fingerprint, failed.origin_scope))
+                self.assertEqual("", failed.owner)  # Existing transition releases the running owner.
+                self.assertEqual(original_bars, repository.load_chart_bars_range(code, day, day))
+                clock.reset_mock()
+                JournalWindow._backfill_failed(owner, code, "not-a-date", message)
+                clock.assert_not_called()
+                # A late failure with no mapped task still records its own status only.
+                owner._backfill_enrichment_task_ids = {}
+                JournalWindow._backfill_failed(owner, "000660", day, "unmapped")
+                clock.assert_called_once_with()
+                self.assertEqual("unmapped", repository.bar_backfill_state("000660", day).message)
+                self.assertEqual(failed, repository.load_enrichment_task(task.task_id))
+
+    def test_backfill_receipt_or_storage_failure_preserves_rows_and_running_task(self) -> None:
+        from kiwoom_monitor.application.journal_enrichment import JournalEnrichmentService
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+
+        day, code = date(2026, 9, 9), "005930"
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.sqlite3")
+            old = as_kst(datetime(2026, 9, 10, 9))
+            repository.mark_bar_backfill(code, day, "실패", "previous", now=old)
+            service = JournalEnrichmentService(repository, "backfill-owner", now_provider=Mock(side_effect=AssertionError("no resample")))
+            task = service.register("stock_day", "2026-09-09:005930", "minute_bars", {}, now=old)
+            service.start(task.task_id, old)
+            running = repository.load_enrichment_task(task.task_id)
+            clock = Mock(side_effect=OSError("clock unavailable"))
+            owner = SimpleNamespace(_query_client=SimpleNamespace(server_now=clock), _repo=repository,
+                _journal_enrichment=service, _backfill_enrichment_task_ids={(code, day): task.task_id})
+            with closing(sqlite3.connect(repository._path)) as connection:
+                original = connection.execute("SELECT * FROM journal_bar_backfill").fetchall()
+            with patch.object(service, "fail", wraps=service.fail) as fail:
+                with self.assertRaisesRegex(OSError, "clock unavailable"):
+                    JournalWindow._backfill_failed(owner, code, day, "new failure")
+                fail.assert_not_called()
+                clock.side_effect = None
+                clock.return_value = as_kst(datetime(2030, 1, 2, 3, 4, 5))
+                with closing(sqlite3.connect(repository._path)) as connection, connection:
+                    connection.execute("CREATE TRIGGER deny_backfill BEFORE INSERT ON journal_bar_backfill BEGIN SELECT RAISE(ABORT, 'controlled backfill rollback'); END")
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "controlled backfill rollback"):
+                    JournalWindow._backfill_failed(owner, code, day, "new failure")
+                fail.assert_not_called()
+            self.assertEqual(2, clock.call_count)
+            with closing(sqlite3.connect(repository._path)) as connection:
+                self.assertEqual(original, connection.execute("SELECT * FROM journal_bar_backfill").fetchall())
+            self.assertEqual(running, repository.load_enrichment_task(task.task_id))
+
     def test_analysis_task_signals_share_one_clock_per_batch_and_preserve_retry_state(self) -> None:
         from PySide6.QtCore import QEvent
         from PySide6.QtWidgets import QApplication
@@ -622,7 +717,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
         owner = SimpleNamespace(
             _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _repo=SimpleNamespace(
-                upsert_history_sync=lambda saved_fills, saved_costs, *, account_scope: calls.append(
+                upsert_history_sync=lambda saved_fills, saved_costs, *, now, account_scope: calls.append(
                     ("save", saved_fills, saved_costs, account_scope)
                 ),
             ),
