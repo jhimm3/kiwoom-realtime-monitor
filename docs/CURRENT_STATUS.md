@@ -1,5 +1,7 @@
 # 현재 상태 요약
 
+**추가 CI 단축 검증 완료(2026-10-18):** `a325e31`을main에push한 [실제 CI39118437411](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39118437411)이9job전체성공/13분59초였다. Windows320worker·463모듈·5581고유ID가현재전체계획/source/lock/종료·두shardjob성공과일치했고원래required까지통과했다. 직전33의20분10초보다6분11초단축, 빠른d5의15분38초대비1분39초단축이다. Windows총VM job시간은19분19초→22분54초로늘었으며환경편차/토큰·실제요금미측정한계는 [R3-083](../REFACTOR_BACKLOG.md) 말미에기록했다. F08/F13/F24/F25도같이갱신했다. 제품소스·DB·주문·NAS변경0/다음제품002+023유지. 이결과기록후속문서와검증된코드CI를구분한다.
+
 ## 2026-10-18 R3-083 push·실제 CI 지연 원인 보완
 
 `c7a6cef`와 후속 `d5bec26`를 main에 커밋·push했고 [전체 CI39115204095](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39115204095)가 **7job 성공·15분38초**에 완료됐다. Windows320worker·463모듈·5577건 전부 통과, 계획/실행 ID·소스 동일·종료를 확인했다. 고정 fake시계로1800초 timeout되던 계좌 worker는3.518초/8건 통과했다. 구형 시계 fixture·stdout 계약·sealed 실행 근거 전달만 보완했고, native writer PID 종료 경합도 실제 관찰해 원래 restore fence를 유지한 채 검증했다. 최초 실패와 미실행269worker 기록, 전후 측정·잔여 한계는 [R3-083 정본](../REFACTOR_BACKLOG.md) 말미에 보존했다. 제품/운영DB/주문/NAS변경0, CI 전체 범위·안전 판정·다음제품002+023은 유지한다.
