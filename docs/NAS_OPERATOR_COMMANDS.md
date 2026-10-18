@@ -22,7 +22,7 @@ Git 전체 이력에서 4개 파일의 전체 바이트를 runtime 계약으로 
 
 이 제한을 제거하는 helper와 source 런처 자체의 최초 교체는 기존 `nas_operator_install.py --update`로 수행한다. 기존 갱신 journal/백업·실패 복구를 사용해 고정 helper·런처와 기존 설정의 `runner_sha256`만 갱신한다. 새 권한/명령/운영 계층 없이 원래 회수 백업, 운영 source 선택, DB/서버와 runtime 계약 파일을 보존한다. 이후 같은 의존성·DDL의 코드 배포는 기존 무암호 test/deploy/rollback 경로를 쓴다. 런처 교체 및 NAS Linux/실운영 검증 전까지는 로컬 수정 완료와 운영 반영을 구분한다.
 
-NAS 배포·커밋·push 전에는 수정 코드와 연결된 기능의 관련 테스트를 수행한다. `all-local` 전수 회귀는 사용자 명시 요청이 있을 때만 실행하며 관련 검사나 배포의 필수 조건으로 추가하지 않는다.
+NAS 배포·커밋·push 전에는 수정 코드와 연결된 기능의 관련 테스트를 수행한다. PC·NAS의 `all-local` 전수 회귀는 사용자 명시 요청이 있을 때만 실행하며 관련 검사나 배포의 필수 조건으로 추가하지 않는다. 별도로 GitHub CI는 전체 검사를 유지한다(2026-10-18 사용자 정정).
 
 갱신 실측 보완: 최초 묶음의 NAS Linux 관련96건은 통과했으나 실제 교체 전에 `helper_update_target_mode_invalid`로 중단됐다. 공유 `runner.py`의 실제 mode는0777/소유UID1026이고 root helper는0644였다. updater가 모든 대상에0600/0644만 허용한 가정이 원인이다. 기존 mode를 그대로 백업·교체·복구하도록 이 제한을 제거했고 실제0777에서 성공 및 probe/fence 실패 복구를 확인하는 Linux fixture로 고쳤다. root helper/config의 기존 보호 경로·설치 승인 mode/내용 검사와 runtime runner 내용 검사는 유지한다. 기존 공유 권한을 바꿔 절차에 맞추거나 새 권한·게이트를 추가하지 않는다. 실패 전후 설치 helper/runner 바이트와 운영 active release가 동일함을 확인했다.
 

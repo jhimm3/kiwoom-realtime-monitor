@@ -414,16 +414,16 @@ class RunRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Windows tests were not executed"):
                 check_required_ci_results.validate(None, linux, postgres, "test-commit", base_ref="parent-commit")
 
-    def test_automatic_related_ci_does_not_depend_on_manual_full_regression(self) -> None:
+    def test_github_ci_keeps_full_regression_without_duplicate_related_run(self) -> None:
         workflow = (run_regression.ROOT / ".github/workflows/dependency-regression.yml").read_text(encoding="utf-8")
-        related = workflow.split("  windows-related:\n", 1)[1].split("\n  postgres-extended:", 1)[0]
-        self.assertIn("needs: [select-extended]", related)
-        self.assertNotIn("all-local", related)
-        self.assertIn("--profile related", related)
-        self.assertIn("python -m scripts.run_regression --profile related", related)
-        self.assertNotIn("REGRESSION_BASE_REF:", related)
-        self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.mode == 'comprehensive'", workflow)
-        self.assertNotIn('test "$WINDOWS_JOB" = success\n', workflow)
+        full = workflow.split("  all-local:\n", 1)[1].split("\n  postgres-integration:", 1)[0]
+        self.assertNotIn("\n    if:", full)
+        self.assertIn("python -m scripts.run_regression --profile all-local", full)
+        self.assertNotIn("  windows-related:", workflow)
+        self.assertNotIn("--profile related", workflow)
+        self.assertIn("WINDOWS_JOB: ${{ needs['all-local'].result }}", workflow)
+        self.assertIn('test "$WINDOWS_JOB" = success\n', workflow)
+        self.assertIn("name: all-local-regression-${{ github.run_id }}", workflow)
         sealed_build = workflow.split("      - name: Build exact checkout runtime image for isolated v2\n", 1)[1].split("      - name: Confirm installed", 1)[0]
         self.assertIn("tee tmp/regression/ci-sealed/build.log", sealed_build)
         self.assertNotIn("ci-operator/", sealed_build)
@@ -507,11 +507,22 @@ class RunRegressionTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, result["temporary_directory"])
 
     def test_observed_checkout_cannot_be_selected_as_fixture_temp(self) -> None:
-        with patch.dict(os.environ, {"LOCALAPPDATA": str(run_regression.ROOT / "tmp")}):
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(run_regression.ROOT / "tmp"),
+                                     "RUNNER_TEMP": str(run_regression.ROOT / "tmp")}):
             result = self._run_fixture("pass")
         self.assertEqual("failed", result["status"])
         self.assertIn("outside the observed checkout", result["execution_error"])
         self.assertIsNone(result["worker_pid"])
+
+    def test_github_worker_uses_runner_scratch_outside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="github-scratch-") as directory:
+            scratch = Path(directory) / "runner-scratch"
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_TEMP": str(scratch)}):
+                result = self._run_fixture("pass")
+            self.assertEqual("passed", result["status"])
+            self.assertEqual(scratch / "kiwoom-regression", Path(result["temporary_directory"]).parent)
+            self.assertEqual("removed", result["temporary_state"])
+            self.assertTrue(result["process_tree_exit_confirmed"])
 
     def test_windows_child_directory_reader_keeps_native_publication_fail_closed(self) -> None:
         import ctypes

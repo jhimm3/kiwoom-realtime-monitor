@@ -64,6 +64,7 @@ class ScopedAccountAPITests(unittest.TestCase):
         for item in self.patches: item.start()
         self.app = create_app(CentralServerSettings(f"sqlite:///{root / 'central.sqlite'}", "private-token",
             credential_directory=str(root / "secrets"), account_identity_registry_enabled=True,
+            news_naver_market_enabled=False,
             account_identity_hmac_key="x" * 32, autonomous_top20_enabled=False, market_event_collection_enabled=False))
         self.client = TestClient(self.app, base_url="https://nas.test"); self.client.__enter__()
         self.headers = {"Authorization": "Bearer private-token"}
@@ -245,6 +246,7 @@ class ScopedAccountAPITests(unittest.TestCase):
             "kiwoom_monitor.central_server.app.CentralRealtimeCollector.start", new=AsyncMock()):
             app = create_app(CentralServerSettings(f"sqlite:///{root / 'main.sqlite'}", "private-token",
                 credential_directory=str(root / "main-secrets"), account_identity_registry_enabled=True,
+                news_naver_market_enabled=False,
                 account_identity_hmac_key="x" * 32, kiwoom_app_key="fake-real-key", kiwoom_secret_key="fake-real-secret",
                 autonomous_top20_enabled=False, market_event_collection_enabled=False))
             with TestClient(app, base_url="https://nas.test") as client:

@@ -815,11 +815,17 @@ def _run_process(
             raise FileExistsError(f"Refusing to reuse a worker result: {result_path}")
         # Workspace observers briefly open new children. On Windows even a
         # FILE_SHARE_DELETE reader pins the containing directory against rename.
-        # Keep fixture I/O outside the observed checkout; logs remain in --output.
-        local_appdata = os.environ.get("LOCALAPPDATA", "")
-        if not local_appdata or not Path(local_appdata).is_absolute():
-            raise ValueError("LOCALAPPDATA must identify an absolute Windows user directory")
-        temporary_root = (Path(local_appdata) / "Temp" / "kiwoom-regression").resolve()
+        # Keep fixture I/O outside the observed checkout; GitHub's own scratch
+        # volume is separate from that checkout and from the Windows OS disk.
+        if environment.get("GITHUB_ACTIONS") == "true":
+            temp_variable = "RUNNER_TEMP"
+            temp_parent = Path(environment.get(temp_variable, ""))
+        else:
+            temp_variable = "LOCALAPPDATA"
+            temp_parent = Path(environment.get(temp_variable, "")) / "Temp"
+        if not temp_parent.is_absolute():
+            raise ValueError(f"{temp_variable} must identify an absolute Windows temporary directory")
+        temporary_root = (temp_parent / "kiwoom-regression").resolve()
         if temporary_root.is_relative_to(ROOT.resolve()):
             raise ValueError("Regression fixture temp must be outside the observed checkout")
         temporary_directory = temporary_root / uuid.uuid4().hex

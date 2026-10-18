@@ -32,9 +32,9 @@ AI와 사람이 이 저장소를 수정할 때 아래 규칙을 기본 계약으
 
 전수 회귀는 **동일 소스로 끝까지 실행 → 실패·오류를 한 목록으로 수집 → 원인 확인·수정 → 실패 검사와 관련 회귀 재실행** 순서를 따른다. 일반 테스트 실패로 나머지 검사를 중단하거나 실행 도중 코드를 수정하지 않는다. 최초 기록·재실행 결과·미실행 범위를 구분하고 안전상 중단 조건은 [AGENTS.md](AGENTS.md#전수-회귀의-실행과-오류-수집)를 따른다. 부분 재검증을 전수 통과로 대체하지 않는다.
 
-2026-10-16 사용자 정정: NAS 배포·커밋·push 전에는 수정된 코드의 caller→저장/조회→후속 소비자/API/UI 등 연결된 기능에 직접 관련된 테스트를 실행한다. 전수 회귀(`all-local`)와 그 보고서 대조를 자동 실행하거나 배포·커밋·push의 필수 조건으로 삼지 않는다. 전수 회귀는 사용자가 명시적으로 요청할 때만 실행한다. 이후 실행 소스를 수정하면 이전 보고서를 현재 통과로 재사용하지 않는다. Linux·실제 PostgreSQL·봉인 replay·operator 등 다른 환경의 검증 여부와 미검증 범위는 별도로 보고한다. CI 전용 실패는 실제 실패 단계의 로그·artifact를 먼저 감사하고 기존 검사를 중복 추가하거나 판정 조건을 낮추지 않는다.
+2026-10-16 사용자 정정: NAS 배포·커밋·push 전에는 수정된 코드의 caller→저장/조회→후속 소비자/API/UI 등 연결된 기능에 직접 관련된 테스트를 실행한다. PC·NAS에서 전수 회귀(`all-local`)와 그 보고서 대조를 자동 실행하거나 배포·커밋·push의 필수 조건으로 삼지 않는다. 2026-10-18 사용자 정정에 따라 **GitHub CI는 전체 검사를 유지한다.** PC·NAS의 전수 회귀는 사용자가 명시적으로 요청할 때만 실행한다. 이후 실행 소스를 수정하면 이전 보고서를 현재 통과로 재사용하지 않는다. Linux·실제 PostgreSQL·봉인 replay·operator 등 다른 환경의 검증 여부와 미검증 범위는 별도로 보고한다. CI 전용 실패는 실제 실패 단계의 로그·artifact와 작업별 소요 시간을 먼저 감사하고 기존 검사를 중복 추가하거나 판정 조건을 낮추지 않는다.
 
-Windows 회귀의 fixture 임시 자료는 기존 Runner가 `%LOCALAPPDATA%/Temp/kiwoom-regression/<고유 worker ID>`에 격리한다. 관찰되는 checkout 아래의 임시 자식 핸들과 directory rename이 경합하므로 `--output/temp`나 상속된 workspace TEMP를 사용하지 않는다. 실행 소스는 현재 checkout, 로그·결과는 지정 output에 유지하며 TEMP/TMP/TMPDIR는 같은 worker 경로다. 통과 및 전체 프로세스 종료 확인 후에만 소유한 임시 경로를 제거한다. 실패·중단 자료는 보고서의 `temporary_directory`에 보존하며 접근 거부 재시도나 성공 판정 완화로 대체하지 않는다.
+Windows PC 회귀의 fixture 임시 자료는 기존 Runner가 `%LOCALAPPDATA%/Temp/kiwoom-regression/<고유 worker ID>`에 격리한다. GitHub Actions에서는 checkout 밖의 기존 `RUNNER_TEMP/kiwoom-regression/<고유 worker ID>`를 사용해 CI 작업 디스크를 재사용한다. 관찰되는 checkout 아래의 임시 자식 핸들과 directory rename이 경합하므로 `--output/temp`나 상속된 workspace TEMP를 사용하지 않는다. 실행 소스는 현재 checkout, 로그·결과는 지정 output에 유지하며 TEMP/TMP/TMPDIR는 같은 worker 경로다. 통과 및 전체 프로세스 종료 확인 후에만 소유한 임시 경로를 제거한다. 실패·중단 자료는 보고서의 `temporary_directory`에 보존하며 접근 거부 재시도나 성공 판정 완화로 대체하지 않는다.
 
 1. NAS 모드의 모든 Kiwoom REST 조회는 `CentralRestBroker`를 통과한다. 새 직접 HTTP 호출로 중앙 큐를 우회하지 않는다.
 2. `ka00198` 실시간 종목조회순위가 대기 중인 분봉·일봉·역사 백필보다 항상 높은 우선순위를 갖게 한다.

@@ -49,6 +49,7 @@ class NasCredentialsUIIntegrationTests(unittest.TestCase):
             root = Path(directory)
             app = create_app(CentralServerSettings(f"sqlite:///{root / 'central.sqlite'}", "private-token",
                 credential_directory=str(root / "secrets"), account_identity_registry_enabled=True,
+                news_naver_market_enabled=False,
                 account_identity_hmac_key="x" * 32, autonomous_top20_enabled=False, market_event_collection_enabled=False))
             with TestClient(app, base_url="https://nas.test") as server:
                 requests = []

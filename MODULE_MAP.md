@@ -54,7 +54,7 @@ TOP20 관측 변화는 기존 `application/market_research_features.py`의 순�
 
 2026-10-15 직접 검색 아침 시황: `application/morning_market_brief.py`(프롬프트·v4 엄격 DTO/근거/시간/참조 계약), `central_server/morning_market_brief.py`(예약·claim·drain·저장·인증 API), `presentation/morning_market_brief_dialog.py`(결과/편집·이전 계약 보존). 기존 ChatGPT 전송과 중앙 AI 요청 소유를 사용한다. 새 판단 엔진/전달 계층 없이 기존3파일을 유지한다. C1의 실제 장전 입력 adapter는 미연결이며 매매/주문 정책은 보존한다. [00·① 연결 계약](docs/workstreams/morning-market-brief-alignment.md) · [현재 범위와 상태](docs/workstreams/morning-market-brief.md).
 
-Windows 회귀의 임시 자료 격리는 기존 `scripts/run_regression.py::_run_process`가 소유한다. 현재 checkout의 실행 소스와 기존 Windows Job 프로세스 종료 경계를 유지하고 fixture만 사용자 AppData Temp의 worker별 경로에 둔다. 로그/결과는 기존 output, 실패 임시 자료의 위치/상태는 같은 worker 보고서다. 새 수집기·DB·Manager·주문 경로는 없다. 실제 worker 환경과 실패 보존, 공유 읽기 핸들의 native 게시 차단은 기존 `test_run_regression`과 worker fixture에서 검증한다.
+Windows 회귀의 임시 자료 격리는 기존 `scripts/run_regression.py::_run_process`가 소유한다. 현재 checkout의 실행 소스와 기존 Windows Job 프로세스 종료 경계를 유지하고 PC fixture는 사용자 AppData Temp, GitHub fixture는 checkout 밖의 기존 RUNNER_TEMP 아래 worker별 경로에 둔다. 로그/결과는 기존 output, 실패 임시 자료의 위치/상태는 같은 worker 보고서다. 새 수집기·DB·Manager·주문 경로는 없다. 실제 worker 환경과 실패 보존, 공유 읽기 핸들의 native 게시 차단은 기존 `test_run_regression`과 worker fixture에서 검증한다.
 
 R4 v2 행동별 추가 자료는 기존 position_target 정책 DTO/입력 adapter/행동 선택 함수에서 처리하고 UI와 기존 selected record가 후보별 결측을 전달한다. 상위 비중의 가중치0 소비자는 Runtime이 이미 가진 typed ThemeMembership을 같은 allocation adapter 호출로 넘겨 점수 구성요소의 lease와 위험 소속을 분리한다. 기존 owner/collector/writer와 hot 호출 깊이는 유지한다. A03의 과거 Paper 정책→현재 native 모델 지원은 [설계 재검토](docs/AI_TRADING_SYSTEM_REDESIGN.md#a03-설계-재검토) 대상이다.
 

@@ -144,10 +144,6 @@ def main() -> int:
     else:
         result = select([], args.mode)
     result["base_ref"] = args.base_ref
-    base = args.base_ref or "HEAD^"
-    result["windows_modules"] = related_modules_since(base)
-    result["groups"]["windows_fast"] = bool(result["windows_modules"])
-    result["groups"]["windows_long"] = False  # Related modules run once, independently of all-local.
     result["head"] = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                              cwd=ROOT, text=True).strip()
     args.report.parent.mkdir(parents=True, exist_ok=True)

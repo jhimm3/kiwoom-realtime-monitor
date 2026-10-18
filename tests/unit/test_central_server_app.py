@@ -1951,6 +1951,16 @@ def capture_research_read_http_contract(client, store, monitors):
 
 class CentralServerAppTests(unittest.TestCase):
 
+    def setUp(self):
+        # These HTTP/storage tests use stored news. Collection itself is covered
+        # with explicit feed fixtures in test_market_news_sources.
+        collector = patch(
+            "kiwoom_monitor.central_server.market_news_sources.MarketFeedNewsCollector._collect",
+            new_callable=AsyncMock,
+        )
+        collector.start()
+        self.addCleanup(collector.stop)
+
     def test_health_document_preserves_instant_and_renders_in_kst(self):
         from kiwoom_monitor.central_server.contracts import health_document
         document = health_document(datetime(2026, 10, 15, 5, 21, 3, tzinfo=timezone.utc))
