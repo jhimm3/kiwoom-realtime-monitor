@@ -489,6 +489,10 @@ class RunRegressionTests(unittest.TestCase):
         # successful upstream job status alone cannot supply its discovery receipt.
         import yaml
         jobs = yaml.load(workflow, Loader=yaml.BaseLoader)['jobs']
+        installs = [step for step in jobs['all-local']['steps']
+                    if step.get('name') == 'Install locked test dependencies']
+        self.assertEqual(1, len(installs))
+        self.assertEqual('python -m pip install --no-compile -r requirements.lock.txt', installs[0]['run'])
         sealed = {step.get('name'): step for step in jobs['sealed-replay']['steps']}
         required = {step.get('name'): step for step in jobs['required-regression']['steps']}
         self.assertIn('--report tmp/regression/ci-sealed/v1-execution.json',

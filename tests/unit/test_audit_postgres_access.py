@@ -8,6 +8,15 @@ from scripts.audit_postgres_access import audit_direct_connections, inventory
 
 
 class PostgresDirectConnectionAuditTests(unittest.TestCase):
+    @classmethod
+    def repository_inventory(cls) -> dict:
+        # These three checks only read the same immutable checkout inventory.
+        # Keep mutated temporary-root fixtures independent of this class result.
+        if "_repository_inventory" not in cls.__dict__:
+            cls._repository_inventory = inventory(Path(__file__).resolve().parents[2])
+            cls.addClassCleanup(delattr, cls, "_repository_inventory")
+        return cls._repository_inventory
+
     def test_new_or_stale_callsite_requires_review(self) -> None:
         site = {"file": "src/example.py", "owner": "Store._connect", "call": "psycopg.connect"}
 
@@ -22,16 +31,14 @@ class PostgresDirectConnectionAuditTests(unittest.TestCase):
         self.assertEqual(1, stale["stale_approvals"][0]["approved_count"])
 
     def test_repository_direct_connections_match_reviewed_manifest(self) -> None:
-        root = Path(__file__).resolve().parents[2]
-
-        result = inventory(root)
+        result = self.repository_inventory()
 
         self.assertEqual("pass", result["direct_connection_guard"]["status"])
         self.assertEqual([], result["direct_connection_guard"]["unapproved_sites"])
         self.assertEqual([], result["direct_connection_guard"]["stale_approvals"])
 
     def test_news_writer_audit_follows_document_module_helpers(self) -> None:
-        result = inventory(Path(__file__).resolve().parents[2])
+        result = self.repository_inventory()
         rows = {row["function"]: row for row in result["postgres_store_methods"]}
 
         for method in ("save_news_body_revision", "save_news_source_page",
@@ -42,7 +49,7 @@ class PostgresDirectConnectionAuditTests(unittest.TestCase):
                 self.assertIn("central_news_jobs", row["reachable_literal_tables_candidates"])
 
     def test_dataset_writer_audit_follows_observation_helper_chain(self) -> None:
-        result = inventory(Path(__file__).resolve().parents[2])
+        result = self.repository_inventory()
         rows = {row["function"]: row for row in result["postgres_store_methods"]}
         row = rows["PostgresQueryStore.save_dataset_snapshots"]
         self.assertIn("_append_postgres_observation_revision", row["reachable_local_helpers"])

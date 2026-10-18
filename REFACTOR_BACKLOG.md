@@ -5,6 +5,8 @@
 
 ## 현재 작업과 이어가기
 
+- **추가 CI 시간 단축 진행(사용자 후속 요청):** 아래 d5bec26의 전체 성공은 보존한다. 반복 source inventory3회를 class 수명 안의 lazy1회로 줄여 관련5건23.090→7.850초를 확인했다. Windows 설치는 전체 lock을 유지한 `--no-compile`을 시험하며 설치+최초import+전체 시간을 새 hosted CI에서 비교한다. 관련48건 통과, 검사/ID/관측 창/격리·제품 소스 변경0. 최종 결과는083 말미에 갱신한다.
+
 - **R3-083 실제 CI 검증 완료:** 보강 `c7a6cef`와 확인된 CI fixture/출력·실행근거 후속 `d5bec26`를 main에 커밋·push했다. [후속 전체 CI39115204095](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39115204095)는 **전체7job 성공·15분38초**, Windows320worker·463모듈·5577건 전부 통과했다. 계좌 worker는 이전1800초 timeout→3.518초/8건 통과, native crash 재발0. 최초 실패/누락 기록과 남은 설계·운영 한계는083 말미에 보존했다. R3-083은 기반 최종 검증 완료/후속 R3별 계약 반영 **진행**이며 다음 제품002+023을 유지한다.
 
 - **2026-10-18 구조 퇴행 방지 기반 적용(R3-083):** [기능별 책임 계약](docs/architecture/r3-ownership.md)과 source-site/계층·cycle delta 검사·기존 비용 회귀·CI 연결을 추가했다. R3 감사·개선은 계속하며 다음 제품 구현은 아래 **R3-002+023** 순서다. 기계 채택 목록은 기존 결함/타 작업의 승인이나 리팩토링 종료가 아니다. 최종 종료 체크리스트는083에 둔다.
@@ -2194,3 +2196,11 @@ G01~G09의 코드 미독 조사는 종료했다. 추가 전체 재조사 없이 
 - 근거: `data/diagnostics/ci-speed-r3-083-20261018/verification.json`, `followup-run-final.json`, `followup-jobs-final.json`, `followup-required-review.json`, `followup-required.log`, `followup-sealed/REPORT.md`와 native JSON/log, `followup-windows/final-summary.json`·원문 artifact. 관련 커밋 `c7a6cef`, `d5bec26`. 이 결과 문서는 위 검증된 코드를 바꾸지 않는 별도 기록이다. 실제 PR 생성/의도적 위반 push·NAS/운영 DB/주문/배포 수락은 이번에도 미실행이다.
 
 **현재/다음/잔여:** 이번 요청의 R3-083 차단·정상 허용·실제 CI 연결 검증과 CI 지연 보완은 완료했다. 전체 R3 구현 완료를 뜻하지 않아083 상태는 진행을 유지하며 다음 제품 작업002+023을 계속한다. 후속 각 R3 완료 때 관련 owner·비용 budget·실패/종료 계약과 F행을 함께 좁힌다. 얇은 relay의 실익/중복 책임·간접 I/O/동일 지점 반복·미등록 고빈도·검증되지 않은 실패/복구/운영은 여전히 설계 검토·관련 실행 검증 대상이다. 새 주기 감사/중복 회귀/문서 전독 의무0, 정확한 토큰 비용은 미측정이다.
+
+#### 추가 CI 시간 단축 — 2026-10-18 후속 요청
+
+**확정 중복 제거:** `test_audit_postgres_access`의 실제 checkout inventory가 세 검사에서 동일 입력으로3회 실행됐다. baseline5건23.090초 중 ROOT inventory22.694초(7.688/7.661/7.345), 변형 temp fixture1회0.034초로 실측했다. 실제root 세 소비자는 읽기만 하므로 같은 unittest class 수명에서 필요할 때1회 계산하고 class cleanup으로 버린다. 가짜 입력만 선택하면 큰 분석을 시작하지 않고 변형 temp fixture는 기존 독립 분석을 유지한다. 전역/영속 cache·새 분석 계층·알고리즘 변경0. 후속5건7.850초(**15.240초/66.0% 절감**), ROOT3→1/누적7.507초·temp1 유지, fake-only ROOT0/변형-only ROOT0+temp1을 확인했다. 모든5개 ID/기존 assertion AST 동일, 최종 suite teardown 후 캐시 삭제·worker/자식 종료/skip0을 검증했다. 초기 nested-suite cleanup 관찰 위치 오류는 보존하고 실제 최종 종료 관찰로 구분했다.
+
+**설치 비용 시험:** d5 Windows pip wheel cache는 exact hit 약468MB, 다운로드0/198개 cached였다. 설치84초 중 package install 구간68.361초가 남아 다운로드 cache 추가로 해결할 근거가 없다. 기존 Windows 설치 명령에만 `--no-compile`을 추가해 전체 lock package는 유지하고 사용하지 않는 dependency의 사전 bytecode 생성을 생략해본다. 새 venv cache/step/job/profile/라이브러리는 추가하지 않는다. 최초 import가 이 비용을 일부 가져갈 수 있어 **설치만이 아닌 설치+전체 회귀 시간**으로 판단하고 효과가 없으면 되돌린다. 현재 pip 옵션 지원과 기존 workflow/실행기43건 통과는 확인했으나 hosted 시간 절감은 아직 미검증이다.
+
+관련 고유48건(audit5/runner43) 통과. 기존 TOP20 25/20초 관측 창·ON/OFF/반복·native ACK·독립DB·UI 수명 검증과 전체 coverage/timeout/실패 전파를 유지한다. 문서97a5695의 실행 소스는 이미 전체 통과한 d5와 같으므로 추가 코드의 새 전체 CI로 대체하며 취소 실행을 통과로 계산하지 않는다. 근거 `data/diagnostics/ci-speed-r3-083-20261018/inventory-optimization-report.md`, `inventory-optimization-verification.json`, `no-compile-option/`, `further-speed-review-record.json`. 제품/NAS/운영DB/주문 변경0, 다음 제품002+023 유지.
