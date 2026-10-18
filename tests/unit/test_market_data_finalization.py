@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from kiwoom_monitor.application.market_data_finalization import (
     FinalizationScope,
     evaluate_finalization_outcome,
     finalization_candidates,
+    finalization_retry_allowed,
     finalization_target_date,
     minute_bars_complete,
 )
@@ -64,6 +65,24 @@ class MarketDataFinalizationTests(unittest.TestCase):
             (),
             finalization_candidates(("WAIT", "DONE"), now, target, set(), {}, attempts, waits),
         )
+
+    def test_aware_and_legacy_kst_retry_maps_keep_five_minute_boundary(self) -> None:
+        now = datetime.fromisoformat("2026-10-16T20:05:00+09:00")
+        target, code = now.date(), "005930"
+        self.assertEqual((code,), finalization_candidates((code,), now, target, set(), {}, {}, {}))
+        outcome = evaluate_finalization_outcome({code}, set(), set(), target, {(target, code): 1}, now)
+        self.assertEqual(now + timedelta(minutes=5), outcome.retry_at)
+        for deadline in (outcome.retry_at, outcome.retry_at.replace(tzinfo=None),
+                         outcome.retry_at.astimezone(timezone.utc)):
+            for clock in (outcome.retry_at, outcome.retry_at.replace(tzinfo=None),
+                          outcome.retry_at.astimezone(timezone.utc)):
+                with self.subTest(deadline=deadline, clock=clock):
+                    retry_after = {(target, code): deadline}
+                    self.assertFalse(finalization_retry_allowed(
+                        target, code, clock - timedelta(microseconds=1), {}, retry_after))
+                    self.assertTrue(finalization_retry_allowed(target, code, clock, {}, retry_after))
+                    self.assertFalse(finalization_retry_allowed(
+                        target, code, clock, {(target, code): 2}, retry_after))
 
     def test_minute_completion_uses_last_completed_market_bar(self) -> None:
         target = date(2026, 9, 8)

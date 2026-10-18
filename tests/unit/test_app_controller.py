@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from contextlib import closing
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -19,6 +19,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThread, QTimer, Q
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication
 
+from kiwoom_monitor.domain.time_basis import as_kst
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
@@ -179,9 +180,9 @@ class AppControllerTests(unittest.TestCase):
                 con.commit()
             controller.queue_price_cache("A", price=100, high=110, market_cap=1000)
             controller.flush_price_cache()
-            self.assertEqual({"A": 100}, controller.pending_prices)
-            self.assertEqual({"A": 110}, controller.pending_highs)
-            self.assertEqual({"A": 1000}, controller.pending_market_caps)
+            self.assertEqual({"A": 100}, self.price_retry_values(controller, 0))
+            self.assertEqual({(now.date(), "A"): 110}, self.price_retry_values(controller, 1))
+            self.assertEqual({"A": 1000}, self.price_retry_values(controller, 2))
             with closing(sqlite3.connect(path)) as con:
                 self.assertEqual((None, None), con.execute("SELECT last_price,market_cap FROM stocks").fetchone())
                 con.execute("DROP TRIGGER fail_high")
@@ -191,6 +192,155 @@ class AppControllerTests(unittest.TestCase):
             self.assertFalse(controller.pending_prices or controller.pending_highs or controller.pending_market_caps)
             self.assertEqual({"A": 105}, repository.load_last_prices(("A",)))
             self.assertEqual({"A": 110}, repository.load_intraday_highs(("A",), now.date()))
+
+    def test_price_failure_keeps_original_day_timestamp_and_bounded_retry_through_close(self):
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        original = as_kst(datetime(2026, 10, 19, 23, 59, 58))
+        for offset, high in ((4, None), (4, 90), (1, 115)):
+            with self.subTest(offset=offset, high=high), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                Database(path).initialize()
+                repository = StockRepository(path)
+                repository.upsert("A", "A")
+                now = [original]
+                controller = self.controller([], stock_lookup=repository,
+                    ranking_loader=SimpleNamespace(server_now=lambda: now[0]))
+                with closing(sqlite3.connect(path)) as con:
+                    con.execute("CREATE TRIGGER fail_high BEFORE INSERT ON intraday_highs BEGIN SELECT RAISE(ABORT,'high fault'); END")
+                    con.commit()
+                controller.queue_price_cache("A", price=100, high=120, market_cap=1000)
+                for _ in range(4):
+                    # No writer: synchronous failure must also hold the close boundary.
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    self.assertEqual(1, len(controller._price_cache_retries))
+                    context = next(iter(controller._price_cache_retries.values()))[3]
+                    self.assertEqual(original, context["observed_at"])
+                    self.assertEqual(1, context["receipt"])
+                with closing(sqlite3.connect(path)) as con:
+                    self.assertEqual((None, None), con.execute("SELECT last_price,market_cap FROM stocks").fetchone())
+                    con.execute("DROP TRIGGER fail_high")
+                    con.commit()
+                now[0] = original + timedelta(seconds=offset)
+                # Replacing the API clock must not change the retained job's timestamp.
+                controller.ranking_loader = SimpleNamespace(server_now=lambda: now[0])
+                if high is not None:
+                    controller.queue_price_cache("A", price=90, high=high, market_cap=900)
+                self.assertFalse(controller.request_close())
+                self.wait_until(controller.request_close)
+                with closing(sqlite3.connect(path)) as con:
+                    rows = con.execute("SELECT trade_date,high_price FROM intraday_highs ORDER BY trade_date").fetchall()
+                    stock = con.execute("SELECT last_price,last_price_updated_at,market_cap,updated_at FROM stocks").fetchone()
+                expected = [(original.date().isoformat(), 120)]
+                if high is not None and now[0].date() != original.date():
+                    expected.append((now[0].date().isoformat(), high))
+                self.assertEqual(expected, rows)
+                timestamp = (original if high is None else now[0]).isoformat()
+                self.assertEqual((100 if high is None else 90, timestamp,
+                                  1000 if high is None else 900, timestamp), stock)
+                self.assertFalse(controller._price_cache_retries)
+                self.assertLessEqual(len(controller._price_cache_latest), 3)
+
+    def test_midnight_high_batch_and_late_native_failure_preserve_day_latest_peer_and_clock(self):
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        original = as_kst(datetime(2026, 10, 19, 23, 59, 58))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = StockRepository(path)
+            for code in ("A", "B"):
+                repository.upsert(code, code)
+            now = [original]
+            controller = self.controller([], monitor_database_path=path,
+                ranking_loader=SimpleNamespace(server_now=lambda: now[0]))
+            # Two days queued before the first flush remain one normal writer job.
+            controller.queue_price_cache("A", high=120, observed_at=original)
+            now[0] = original + timedelta(seconds=4)
+            controller.queue_price_cache("A", high=90, observed_at=now[0])
+            controller.flush_price_cache()
+            controller.start_market_cache_writer()
+            self.assertTrue(controller.market_cache_writer.stop_and_drain())
+            self.assertEqual({"A": 120}, repository.load_intraday_highs(("A",), original.date()))
+            self.assertEqual({"A": 90}, repository.load_intraday_highs(("A",), now[0].date()))
+            # Clear only this isolated fixture so the first failed 120 is absent from storage.
+            with closing(sqlite3.connect(path)) as con:
+                con.execute("DELETE FROM intraday_highs")
+                con.execute("CREATE TRIGGER fail_high BEFORE INSERT ON intraday_highs BEGIN SELECT RAISE(ABORT,'queued high fault'); END")
+                con.commit()
+            failed, peer, retried = Event(), Event(), Event()
+            calls = []
+            save = StockRepository.update_price_cache
+            def observed(repo, prices, highs, caps, trade_date, **kwargs):
+                number = len(calls) + 1
+                calls.append((dict(prices), dict(highs), dict(caps), kwargs["observed_at"]))
+                try:
+                    save(repo, prices, highs, caps, trade_date, **kwargs)
+                except Exception:
+                    failed.set()
+                    raise
+                else:
+                    (peer if number == 2 else retried).set()
+            try:
+                with patch.object(StockRepository, "update_price_cache", observed):
+                    now[0] = original
+                    controller.queue_price_cache("A", price=100, high=120, market_cap=1000)
+                    controller.queue_price_cache("B", price=80, high=85, market_cap=800)
+                    controller.flush_price_cache()
+                    controller.market_cache_writer.start()
+                    self.assertTrue(failed.wait(3))
+                    with closing(sqlite3.connect(path)) as con:
+                        con.execute("DROP TRIGGER fail_high")
+                        con.commit()
+                    now[0] = original + timedelta(seconds=1)
+                    controller.queue_price_cache("A", price=90, high=115, market_cap=900)
+                    controller.flush_price_cache()
+                    self.assertTrue(peer.wait(3))
+                    # A real worker emitted the old failure; GUI handling follows the new COMMIT.
+                    self.app.processEvents()
+                    controller.flush_price_cache()
+                    self.assertTrue(retried.wait(3))
+                    self.assertTrue(controller.market_cache_writer.stop_and_drain())
+                self.assertEqual({"B": 80}, calls[-1][0])
+                self.assertEqual({"B": 800}, calls[-1][2])
+                self.assertEqual(original, calls[-1][3])
+                with closing(sqlite3.connect(path)) as con:
+                    self.assertEqual([("A", 90, (original + timedelta(seconds=1)).isoformat(), 900),
+                                      ("B", 80, original.isoformat(), 800)], con.execute(
+                        "SELECT code,last_price,last_price_updated_at,market_cap FROM stocks ORDER BY code").fetchall())
+                self.assertEqual({"A": 120, "B": 85}, repository.load_intraday_highs(("A", "B"), original.date()))
+                self.assertFalse(controller._price_cache_retries)
+            finally:
+                self.assertTrue(controller.market_cache_writer.stop_and_drain())
+                controller._stop_storage_timers()
+
+    def test_legacy_date_only_price_failure_is_not_discarded_by_receipt_metadata(self):
+        now = datetime(2026, 10, 20, 0, 0, 2)
+        old_day = date(2026, 10, 19)
+        for supplied_day in (old_day, object()):
+            with self.subTest(supplied_day=supplied_day):
+                writer = CapturingCacheWriter()
+                with patch("kiwoom_monitor.presentation.app_controller.MarketCacheWriter", return_value=writer):
+                    controller = self.controller([], monitor_database_path=Path("unused.sqlite3"),
+                        ranking_loader=SimpleNamespace(server_now=lambda: now))
+                controller.queue_price_cache("A", price=100, high=120, market_cap=1000)
+                controller.flush_price_cache()
+                # A legacy emitter cannot identify the dispatch sequence. Retain
+                # its values rather than treating receipt zero as stale evidence.
+                controller.on_price_cache_failed({"A": 100}, {"A": 120}, {"A": 1000},
+                                                 supplied_day, "legacy failure")
+                self.assertEqual({"A": 100}, self.price_retry_values(controller, 0))
+                expected_day = old_day if isinstance(supplied_day, date) else now.date()
+                self.assertEqual({(expected_day, "A"): 120}, self.price_retry_values(controller, 1))
+                controller.flush_price_cache()
+                self.assertEqual(2, writer.enqueue_price_cache.call_count)
+                self.assertEqual(expected_day, writer.enqueue_price_cache.call_args.args[3])
+                self.assertEqual(0, writer.enqueue_price_cache.call_args.kwargs["receipt"])
+                controller._stop_storage_timers()
+
+    @staticmethod
+    def price_retry_values(controller, field):
+        return {key: value for batch in controller._price_cache_retries.values()
+                for key, value in batch[field].items()}
 
     @classmethod
     def setUpClass(cls):
@@ -301,7 +451,8 @@ class AppControllerTests(unittest.TestCase):
         self.assertFalse(writer.enqueue_minute_bars.called)
         self.wait_until(lambda: writer.enqueue_minute_bars.called and writer.enqueue_price_cache.called)
         writer.enqueue_price_cache.assert_called_once_with(
-            {"005930": 103, "000660": 90}, {"005930": 103}, {"005930": 202.}, now.date(),
+            {"005930": 103, "000660": 90}, {(now.date(), "005930"): 103}, {"005930": 202.}, now.date(),
+            observed_at=as_kst(now), receipt=1,
         )
         writer.enqueue_minute_bars.assert_called_once_with(
             {("005930", now): latest}, {("KOSPI", now): (2500., 2510., 2495., 2495., 12.)},
@@ -323,7 +474,7 @@ class AppControllerTests(unittest.TestCase):
                 getattr(lookup, failed_method).side_effect = fail
                 controller.flush_price_cache()
                 self.assertEqual({"005930": 103}, controller.pending_prices)
-                self.assertEqual({"005930": 113}, controller.pending_highs)
+                self.assertEqual({(date(2026, 10, 6), "005930"): 113}, controller.pending_highs)
                 self.assertEqual({"005930": 203.}, controller.pending_market_caps)
                 for method in ("update_last_prices", "update_last_market_caps", "update_intraday_highs"):
                     getattr(lookup, method).side_effect = lambda values, *rest, method=method: saved.update({method: dict(values)})
@@ -341,7 +492,8 @@ class AppControllerTests(unittest.TestCase):
         writer = CapturingCacheWriter()
         with patch("kiwoom_monitor.presentation.app_controller.MarketCacheWriter", return_value=writer):
             controller = self.controller([], monitor_database_path=Path("unused.sqlite3"),
-                                         minute_bar_repository=Mock())
+                                         minute_bar_repository=Mock(),
+                                         ranking_loader=SimpleNamespace(server_now=lambda: now))
         controller.queue_price_cache("005930", price=103, high=104, market_cap=202.)
         controller.queue_minute_bar("005930", latest)
         controller.queue_market_index("KOSPI", now, 2510., 12.)
@@ -359,9 +511,10 @@ class AppControllerTests(unittest.TestCase):
         producer.wait(1000)
         # A worker-thread signal must remain queued until the GUI handles it.
         self.assertNotIn("000660", controller.pending_prices)
-        self.wait_until(lambda: "000660" in controller.pending_prices)
-        self.assertEqual({"005930": 103, "000660": 90}, controller.pending_prices)
-        self.assertEqual({"005930": 104}, controller.pending_highs)
+        self.wait_until(lambda: "000660" in self.price_retry_values(controller, 0))
+        self.assertEqual({"005930": 103}, controller.pending_prices)
+        self.assertEqual({"000660": 90}, self.price_retry_values(controller, 0))
+        self.assertEqual({(now.date(), "005930"): 104}, controller.pending_highs)
         self.assertEqual({"005930": 202.}, controller.pending_market_caps)
         self.assertEqual(latest, controller.pending_minutes[("005930", now)])
         self.assertEqual(old, controller.pending_minutes[("000660", now)])
@@ -402,7 +555,7 @@ class AppControllerTests(unittest.TestCase):
                 self.assertEqual(200., window._realtime_market_caps["005930"])
                 self.assertEqual(2500., window._latest_market_state["KOSPI"]["index"])
                 self.assertEqual({"005930": 71000}, controller.pending_prices)
-                self.assertEqual({"005930": 71200}, controller.pending_highs)
+                self.assertEqual({(now.date(), "005930"): 71200}, controller.pending_highs)
                 self.assertEqual(71000, controller.pending_minutes[("005930", now)].close_price)
                 self.assertEqual(12., controller.pending_market_minutes[("KOSPI", now)][4])
                 window._trade_tick_flush_timer.stop()
@@ -832,7 +985,8 @@ class AppControllerTests(unittest.TestCase):
                     window.closeEvent(event)
                     self.assertFalse(event.isAccepted())
                     self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
-                    self.assertEqual({"005930": 71200}, controller.pending_prices)
+                    self.assertEqual({"005930": 71200}, self.price_retry_values(controller, 0))
+                    self.assertEqual(1, len(controller._price_cache_retries))
                     self.assertFalse(writer.isRunning())
                     self.assertFalse(controller.price_cache_timer.isActive())
                 self.assertEqual(2, save.call_count)
@@ -902,7 +1056,7 @@ class AppControllerTests(unittest.TestCase):
                         self.assertFalse(releaser.is_alive())
                     self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
                     expected = {("000660", now): old} if kind == "minute" else {"000660": 90}
-                    pending = controller.pending_minutes if kind == "minute" else controller.pending_prices
+                    pending = controller.pending_minutes if kind == "minute" else self.price_retry_values(controller, 0)
                     self.assertEqual(expected, pending)
                     query = ("SELECT close_price,volume FROM minute_bars WHERE stock_code='005930'"
                         if kind == "minute" else "SELECT last_price FROM stocks WHERE code='005930'")

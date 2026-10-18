@@ -42,6 +42,55 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_aware_runtime_execution_signal_reaches_snapshot_with_kst_pressure_boundaries(self) -> None:
+        from collections import deque
+        from datetime import timezone
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import OrderExecution
+        now = datetime.fromisoformat("2026-10-16T10:15:10+09:00")
+        current = [now]
+        loader = FakeRankingLoader()
+        loader.server_now = lambda: current[0]
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, loader)
+            snapshots = []
+            writer = SimpleNamespace(isRunning=lambda: True, enqueue=snapshots.append)
+            execution = OrderExecution("order", "fill", "005930", "삼성전자", "매수", 110, 1, "101510")
+            try:
+                self.assertEqual(now, window._ranking_now())
+                with patch.object(MainWindow, "_entry_snapshot_writer", property(lambda owner: writer)):
+                    window._realtime_worker_controller.order_executed.emit(execution)
+                    self.assertEqual(1, len(snapshots))
+                    self.assertEqual(now, snapshots[-1].executed_at)
+                    self.assertEqual(0, snapshots[-1].orderbook["buy_execution_volume"])
+                    self.assertIsNone(snapshots[-1].orderbook["buy_share_percent"])
+                    window._realtime_pressure[execution.code] = deque((
+                        (now - timedelta(seconds=61), 999),
+                        ((now - timedelta(seconds=60)).replace(tzinfo=None), 10),
+                        (now - timedelta(seconds=30), -5),
+                        ((now - timedelta(seconds=20)).astimezone(timezone.utc), 5),
+                    ))
+                    window._realtime_worker_controller.order_executed.emit(execution)
+                    pressure = dict(snapshots[-1].orderbook)
+                    self.assertEqual((15, 5, 75.0), (pressure["buy_execution_volume"],
+                        pressure["sell_execution_volume"], pressure["buy_share_percent"]))
+                    deadline = now + timedelta(seconds=60)
+                    for recovery_until in (deadline, deadline.replace(tzinfo=None),
+                                           deadline.astimezone(timezone.utc)):
+                        current[0] = deadline - timedelta(microseconds=1)
+                        window._pressure_gap_until[execution.code] = recovery_until
+                        window._realtime_worker_controller.order_executed.emit(execution)
+                        self.assertFalse(snapshots[-1].orderbook["available"])
+                        self.assertIsNone(snapshots[-1].orderbook["buy_execution_volume"])
+                        current[0] = deadline
+                        window._realtime_worker_controller.order_executed.emit(execution)
+                        self.assertTrue(snapshots[-1].orderbook.get("available", True))
+                        self.assertEqual(pressure, snapshots[1].orderbook)
+                    self.assertEqual(8, len(snapshots))
+            finally:
+                window.close()
+
     def test_repository_receipts_follow_current_runtime_clock(self) -> None:
         import sqlite3
         from contextlib import closing
@@ -519,26 +568,30 @@ class MainWindowTest(unittest.TestCase):
         editor.close()
 
     def test_price_cache_flush_includes_latest_realtime_market_cap(self) -> None:
+        from kiwoom_monitor.domain.time_basis import as_kst
         queued = []
         writer = SimpleNamespace(
-            enqueue_price_cache=lambda *args: queued.append(args),
+            enqueue_price_cache=lambda *args, **kwargs: queued.append((args, kwargs)),
         )
         now = datetime(2026, 9, 21, 10, 15)
-        owner = SimpleNamespace(
-            pending_prices={"005930": 71_000},
-            pending_highs={"005930": 72_000},
-            pending_market_caps={"005930": 4_200_000.0},
-            market_cache_writer=writer,
-            ranking_now=lambda: now,
-        )
+        owner = AppController()
+        def dispose_owner() -> None:
+            owner.deleteLater()
+            QCoreApplication.sendPostedEvents(owner, QEvent.Type.DeferredDelete)
+        self.addCleanup(dispose_owner)
+        owner.pending_prices = {"005930": 71_000}
+        owner.pending_highs = {"005930": 72_000}
+        owner.pending_market_caps = {"005930": 4_200_000.0}
+        owner.market_cache_writer = writer
+        owner.ranking_now = lambda: now
 
         AppController.flush_price_cache(owner)
 
         self.assertEqual(
-            [(
-                {"005930": 71_000}, {"005930": 72_000},
+            [((
+                {"005930": 71_000}, {(now.date(), "005930"): 72_000},
                 {"005930": 4_200_000.0}, now.date(),
-            )],
+            ), {"observed_at": as_kst(now), "receipt": 1})],
             queued,
         )
         self.assertEqual({}, owner.pending_prices)
@@ -948,7 +1001,8 @@ class MainWindowTest(unittest.TestCase):
         owner.pending_minutes = {("005930", old_minute): newer_bar}
         owner.pending_prices = {"005930": 102}
         owner.pending_market_caps = {"005930": 2_100_000.0}
-        owner.pending_highs = {"005930": 103}
+        owner.pending_highs = {(new_minute.date(), "005930"): 103}
+        owner.ranking_now = lambda: new_minute
         owner.minute_cache_timer = minute_timer
         owner.price_cache_timer = Timer()
 
@@ -973,11 +1027,22 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(newer_bar, owner.pending_minutes[("005930", old_minute)])
         self.assertIn(("000660", new_minute), owner.pending_minutes)
         self.assertIn(("kospi", old_minute), owner.pending_market_minutes)
-        self.assertEqual({"005930": 102, "000660": 203}, owner.pending_prices)
-        self.assertEqual({"005930": 103, "000660": 204}, owner.pending_highs)
+        self.assertEqual({"005930": 102}, owner.pending_prices)
+        self.assertEqual({(new_minute.date(), "005930"): 103}, owner.pending_highs)
+        self.assertEqual({"005930": 2_100_000.0}, owner.pending_market_caps)
+        self.assertEqual(1, len(owner._price_cache_retries))
+        prices, highs, market_caps, context = next(iter(owner._price_cache_retries.values()))
+        self.assertEqual({"000660": 203}, prices)
+        self.assertEqual({(new_minute.date(), "000660"): 204}, highs)
+        self.assertEqual({"000660": 900_000.0}, market_caps)
+        self.assertEqual(new_minute.date(), context["trade_date"])
+        self.assertEqual(new_minute, context["observed_at"].replace(tzinfo=None))
+        self.assertEqual({"005930": 102, "000660": 203}, {**prices, **owner.pending_prices})
+        self.assertEqual({(new_minute.date(), "005930"): 103, (new_minute.date(), "000660"): 204},
+                         {**highs, **owner.pending_highs})
         self.assertEqual(
             {"005930": 2_100_000.0, "000660": 900_000.0},
-            owner.pending_market_caps,
+            {**market_caps, **owner.pending_market_caps},
         )
         self.assertEqual(1, minute_timer.started)
         self.assertEqual(1, owner.price_cache_timer.started)

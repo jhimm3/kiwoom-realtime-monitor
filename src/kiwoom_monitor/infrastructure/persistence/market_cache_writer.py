@@ -13,7 +13,7 @@ from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
-from kiwoom_monitor.domain.time_basis import kst_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 
 class MarketCacheWriter(QThread):
@@ -47,12 +47,14 @@ class MarketCacheWriter(QThread):
             self._queue.put(("minute", dict(bars), dict(market_bars)))
 
     def enqueue_price_cache(
-        self, prices: dict[str, int], highs: dict[str, int],
+        self, prices: dict[str, int], highs: dict[str | tuple[date, str], int],
         market_caps: dict[str, float], trade_date: date,
+        *, observed_at: datetime | None = None, receipt: int = 0,
     ) -> None:
         if prices or highs or market_caps:
             self._queue.put(
-                ("price", dict(prices), dict(highs), dict(market_caps), trade_date)
+                ("price", dict(prices), dict(highs), dict(market_caps), trade_date,
+                 as_kst(observed_at if observed_at is not None else self._now()), receipt)
             )
 
     def enqueue_history_bars(
@@ -96,7 +98,7 @@ class MarketCacheWriter(QThread):
             if job[0] == "minute":
                 self._save_minute(minute_repository, job[1], job[2])
             elif job[0] == "price":
-                self._save_prices(stock_repository, job[1], job[2], job[3], job[4])
+                self._save_prices(stock_repository, job[1], job[2], job[3], job[4], job[5], job[6])
             elif job[0] == "history":
                 self._save_history(minute_repository, job[1], job[2], job[3], job[4], job[5])
             elif job[0] == "gap":
@@ -161,16 +163,21 @@ class MarketCacheWriter(QThread):
         self,
         repository: StockRepository,
         prices: dict[str, int],
-        highs: dict[str, int],
+        highs: dict[str | tuple[date, str], int],
         market_caps: dict[str, float],
         trade_date: date,
+        observed_at: datetime | None = None,
+        receipt: int = 0,
     ) -> None:
+        observed_at = as_kst(observed_at if observed_at is not None else self._now())
         try:
             repository.update_price_cache(
-                prices, highs, market_caps, trade_date, observed_at=self._now(),
+                prices, highs, market_caps, trade_date, observed_at=observed_at,
             )
         except Exception as error:
-            self.price_failed.emit(prices, highs, market_caps, trade_date, str(error))
+            self.price_failed.emit(prices, highs, market_caps,
+                                   {"trade_date": trade_date, "observed_at": observed_at,
+                                    "receipt": receipt}, str(error))
 
     def _save_history(
         self, repository: MinuteBarRepository, code: str,

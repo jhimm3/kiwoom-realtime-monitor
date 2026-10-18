@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 
 import logging
 import time
@@ -175,7 +175,10 @@ class AppController(QObject):
         self.minute_bar_repository = minute_bar_repository
         self.stock_lookup = stock_lookup
         self.pending_prices: dict[str, int] = {}
-        self.pending_highs: dict[str, int] = {}
+        self.pending_highs: dict[tuple[date, str], int] = {}
+        self._price_cache_receipt = 0
+        self._price_cache_latest: dict[tuple[str, str], tuple[int, date, object]] = {}
+        self._price_cache_retries: dict[tuple[int, datetime], tuple[dict, dict, dict, dict]] = {}
         self.pending_market_caps: dict[str, float] = {}
         self.pending_minutes: dict[tuple[str, datetime], MinuteOhlcv] = {}
         self.pending_minute_gaps: dict[str, tuple[datetime, ...]] = {}
@@ -734,59 +737,125 @@ class AppController(QObject):
         logger.warning("분봉 누락 품질 저장 실패: %s", message)
 
     def flush_price_cache(self) -> None:
-        """체결마다 저장하지 않고 짧게 묶어 마지막 현재가만 보존한다."""
-        if (
-            not self.pending_prices
-            and not self.pending_highs
-            and not self.pending_market_caps
-        ):
-            return
-        prices = self.pending_prices
-        highs = self.pending_highs
-        market_caps = self.pending_market_caps
-        self.pending_prices = {}
-        self.pending_highs = {}
-        self.pending_market_caps = {}
+        """Dispatch one normal batch; retain failed jobs' original clock and high dates."""
+        jobs = list(self._price_cache_retries.values())
+        self._price_cache_retries.clear()
+        normal = None
+        if self.pending_prices or self.pending_highs or self.pending_market_caps:
+            observed_at = as_kst(self.ranking_now())
+            self._price_cache_receipt += 1
+            context = {"trade_date": observed_at.date(), "observed_at": observed_at,
+                       "receipt": self._price_cache_receipt}
+            normal = (self.pending_prices,
+                      {(key if isinstance(key, tuple) else (observed_at.date(), key)): value
+                       for key, value in self.pending_highs.items()},
+                      self.pending_market_caps, context)
+            self.pending_prices, self.pending_highs, self.pending_market_caps = {}, {}, {}
+            for field, values in zip(("price", "high", "cap"), normal[:3]):
+                for key, value in values.items():
+                    day, code = key if field == "high" else (observed_at.date(), key)
+                    self._price_cache_latest[field, code] = (self._price_cache_receipt, day, value)
+        for prices, highs, market_caps, context in jobs:
+            prices, highs, market_caps = self._price_cache_uncovered(prices, highs, market_caps, context)
+            if prices or highs or market_caps:
+                self._dispatch_price_cache(prices, highs, market_caps, context)
+        if normal is not None:
+            self._dispatch_price_cache(*normal)
+
+    def _dispatch_price_cache(self, prices: dict, highs: dict, market_caps: dict,
+                              context: dict) -> None:
         if self.market_cache_writer is not None:
             self.market_cache_writer.enqueue_price_cache(
-                prices, highs, market_caps, self.ranking_now().date(),
+                prices, highs, market_caps, context["trade_date"],
+                observed_at=context["observed_at"], receipt=context["receipt"],
             )
             return
-        if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_price_cache"):
-            now = self.ranking_now()
-            try:
-                self.stock_lookup.update_price_cache(
-                    prices, highs, market_caps, now.date(), observed_at=now,
-                )
-            except Exception as error:
-                self.on_price_cache_failed(prices, highs, market_caps, now.date(), str(error))
-            return
         try:
-            if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_prices"):
-                self.stock_lookup.update_last_prices(prices)
-            if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_market_caps"):
-                self.stock_lookup.update_last_market_caps(market_caps)
-            if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_intraday_highs"):
-                self.stock_lookup.update_intraday_highs(highs, self.ranking_now().date())
+            if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_price_cache"):
+                self.stock_lookup.update_price_cache(
+                    prices, highs, market_caps, context["trade_date"],
+                    observed_at=context["observed_at"],
+                )
+            else:
+                # Legacy lookups retain their existing individual method contracts.
+                if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_prices"):
+                    self.stock_lookup.update_last_prices(prices)
+                if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_last_market_caps"):
+                    self.stock_lookup.update_last_market_caps(market_caps)
+                if self.stock_lookup is not None and hasattr(self.stock_lookup, "update_intraday_highs"):
+                    grouped: dict[date, dict[str, int]] = {}
+                    for (day, code), value in highs.items():
+                        grouped.setdefault(day, {})[code] = value
+                    for day, values in grouped.items():
+                        self.stock_lookup.update_intraday_highs(values, day)
         except Exception as error:
-            self.on_price_cache_failed(prices, highs, market_caps, self.ranking_now().date(), str(error))
+            self.on_price_cache_failed(prices, highs, market_caps, context, str(error))
+
+    def _price_cache_uncovered(self, prices: dict, highs: dict, market_caps: dict,
+                               context: dict) -> tuple[dict, dict, dict]:
+        result = []
+        for field, values, pending in (("price", prices, self.pending_prices),
+                                       ("high", highs, self.pending_highs),
+                                       ("cap", market_caps, self.pending_market_caps)):
+            retained = {}
+            for key, value in values.items():
+                day, code = key if field == "high" else (context["trade_date"], key)
+                latest = self._price_cache_latest.get((field, code))
+                # Legacy date-only failures carry no ordering receipt. Pending
+                # values still take precedence, but dispatch order is unknowable.
+                newer = context["receipt"] > 0 and latest is not None and latest[0] > context["receipt"]
+                covered = newer and (field != "high" or latest[1] == day and latest[2] >= value)
+                pending_value = pending.get(key)
+                if not covered and (pending_value is None or field == "high" and pending_value < value):
+                    retained[key] = value
+            result.append(retained)
+        return tuple(result)
 
     def on_price_cache_failed(
         self, prices: object, highs: object, market_caps: object,
-        _trade_date: object, message: str,
+        trade_date: object, message: str,
     ) -> None:
-        prices = self._shutdown_failed_values("pending_prices", prices)
-        highs = self._shutdown_failed_values("pending_highs", highs)
-        market_caps = self._shutdown_failed_values("pending_market_caps", market_caps)
-        if isinstance(prices, dict):
-            self.pending_prices = {**prices, **self.pending_prices}
-        if isinstance(highs, dict):
-            self.pending_highs = {**highs, **self.pending_highs}
-        if isinstance(market_caps, dict):
-            self.pending_market_caps = {
-                **market_caps, **self.pending_market_caps,
-            }
-        if not self.closing and not self.price_cache_timer.isActive():
+        if isinstance(trade_date, dict):
+            context = trade_date
+        else:
+            # Old five-argument emitters may provide only a date (or no usable date).
+            observed_at = as_kst(self.ranking_now())
+            context = {"trade_date": trade_date if isinstance(trade_date, date) else observed_at.date(),
+                       "observed_at": observed_at, "receipt": 0}
+        prices = dict(prices) if isinstance(prices, dict) else {}
+        highs = {(key if isinstance(key, tuple) else (context["trade_date"], key)): value
+                 for key, value in highs.items()} if isinstance(highs, dict) else {}
+        market_caps = dict(market_caps) if isinstance(market_caps, dict) else {}
+        prices, highs, market_caps = self._price_cache_uncovered(prices, highs, market_caps, context)
+        key = (context["receipt"], context["observed_at"])
+        previous = self._price_cache_retries.get(key)
+        if previous is not None:
+            prices = {**previous[0], **prices}
+            highs = {**previous[1], **{k: max(v, previous[1].get(k, v)) for k, v in highs.items()}}
+            market_caps = {**previous[2], **market_caps}
+        if prices or highs or market_caps:
+            self._price_cache_retries[key] = (prices, highs, market_caps, context)
+        # Coalesce by field/code and day/code, never by failure-attempt count.
+        winners = {}
+        for batch_key, batch in self._price_cache_retries.items():
+            for field, values in enumerate(batch[:3]):
+                for item, value in values.items():
+                    identity = (field, item)
+                    rank = (value, batch[3]["receipt"]) if field == 1 else (batch[3]["receipt"],)
+                    if identity not in winners or rank >= winners[identity][0]:
+                        winners[identity] = (rank, batch_key)
+        retained_batches = {}
+        for batch_key, batch in self._price_cache_retries.items():
+            retained = []
+            for field, values in enumerate(batch[:3]):
+                retained.append({item: value for item, value in values.items()
+                                 if winners[field, item][1] == batch_key})
+            if any(retained):
+                retained_batches[batch_key] = (*retained, batch[3])
+        self._price_cache_retries = retained_batches
+        if self.closing and self._price_cache_retries:
+            self._shutdown_cache_failed = True
+        elif not self.closing and self._price_cache_retries and not self.price_cache_timer.isActive():
             self.price_cache_timer.start()
         logger.warning("현재가 캐시 저장 실패: %s", message)
 
@@ -808,11 +877,13 @@ class AppController(QObject):
         self._start_writer("market_cache_writer")
 
     def queue_price_cache(self, code: str, *, price: int | None = None,
-                          high: int | None = None, market_cap: float | None = None) -> None:
+                          high: int | None = None, market_cap: float | None = None,
+                          observed_at: datetime | None = None) -> None:
         if price is not None:
             self.pending_prices[code] = price
         if high is not None:
-            self.pending_highs[code] = high
+            key = (as_kst(observed_at if observed_at is not None else self.ranking_now()).date(), code)
+            self.pending_highs[key] = max(high, self.pending_highs.get(key, high))
         if market_cap is not None:
             self.pending_market_caps[code] = market_cap
         if not self.closing and not self.price_cache_timer.isActive():
@@ -886,12 +957,12 @@ class AppController(QObject):
             return True
         if self._shutdown_stage == "cache_failed":
             writer = self.market_cache_writer
-            assert writer is not None
-            if writer.isRunning():
+            if writer is not None and writer.isRunning():
                 return False
             # A fresh user close request retries the same stopped writer and RAM
             # buffers; producers stay stopped and normal save timers stay off.
-            writer.start()
+            if writer is not None:
+                writer.start()
             self._drain_writers()
             if not self._running_writers():
                 self._shutdown_stage = "writer_signals"
@@ -928,7 +999,7 @@ class AppController(QObject):
             self._shutdown_timer.start(0)
             return False
         self._complete_shutdown(notify=False)
-        return True
+        return self._shutdown_stage == "ready"
 
     def _stop_timers(self) -> None:
         self._stop_storage_timers()
@@ -965,7 +1036,6 @@ class AppController(QObject):
         # Keep only this final batch, not an unbounded history of cache writes.
         self._shutdown_cache_batch = {
             name: dict(getattr(self, name)) for name in (
-                "pending_prices", "pending_highs", "pending_market_caps",
                 "pending_minutes", "pending_market_minutes", "pending_minute_gaps",
             )
         }
@@ -1006,9 +1076,10 @@ class AppController(QObject):
     def _complete_shutdown(self, *, notify: bool) -> None:
         actions = self._shutdown_actions
         assert actions is not None
-        if self._shutdown_cache_failed and self.market_cache_writer is not None and (
-            self.pending_prices or self.pending_highs or self.pending_market_caps
-            or self.pending_minutes or self.pending_market_minutes or self.pending_minute_gaps
+        if self._price_cache_retries or (
+            self._shutdown_cache_failed and self.market_cache_writer is not None and (
+                self.pending_minutes or self.pending_market_minutes or self.pending_minute_gaps
+            )
         ):
             self._shutdown_stage = "cache_failed"
             self.shutdown_progress.emit(

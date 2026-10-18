@@ -450,7 +450,7 @@ class StockRepository:
         self.update_price_cache({}, {}, market_caps, now.date(), observed_at=now)
 
     def update_price_cache(
-        self, prices: dict[str, int], highs: dict[str, int],
+        self, prices: dict[str, int], highs: dict[str | tuple[date, str], int],
         market_caps: dict[str, float], trade_date: date, *, observed_at: datetime,
     ) -> None:
         """Commit one existing cache job atomically, including its high-price cleanup."""
@@ -458,8 +458,11 @@ class StockRepository:
                            if code and int(price) > 0)
         cap_rows = tuple((float(cap), float(cap), code) for code, cap in market_caps.items()
                          if code and float(cap) > 0)
-        high_rows = tuple((trade_date.isoformat(), code, int(price)) for code, price in highs.items()
-                          if code and int(price) > 0)
+        high_rows = []
+        for key, price in highs.items():
+            day, code = key if isinstance(key, tuple) else (trade_date, key)
+            if code and int(price) > 0:
+                high_rows.append((day.isoformat(), code, int(price)))
         if not (price_rows or cap_rows or high_rows):
             return
         updated_at = as_kst(observed_at).isoformat()

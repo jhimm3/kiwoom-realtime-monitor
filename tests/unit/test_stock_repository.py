@@ -60,6 +60,29 @@ class StockRepositoryTests(unittest.TestCase):
         self.assertEqual({"A": 104, "B": 90}, repository.load_last_prices(("A", "B")))
         self.assertEqual({"A": 120, "orphan": 250}, repository.load_intraday_highs(("A", "orphan"), date(2026, 10, 16)))
 
+    def test_two_high_dates_share_one_transaction_without_cross_day_max_or_extra_reads(self) -> None:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        Database(path).initialize()
+        repository = StockRepository(path)
+        repository.upsert("A", "A")
+        statements = []
+        real_connect = sqlite3.connect
+        def traced_connect(*args, **kwargs):
+            con = real_connect(*args, **kwargs)
+            con.set_trace_callback(statements.append)
+            return con
+        with patch("sqlite3.connect", side_effect=traced_connect) as connect:
+            repository.update_price_cache({"A": 90},
+                {(date(2026, 10, 19), "A"): 120, (date(2026, 10, 20), "A"): 90},
+                {"A": 900}, date(2026, 10, 20), observed_at=datetime(2026, 10, 20, 0, 0, 2))
+        self.assertEqual(1, connect.call_count)
+        self.assertEqual(1, statements.count("COMMIT"))
+        self.assertEqual(1, sum(sql.startswith("BEGIN") for sql in statements))
+        self.assertFalse(any(sql.startswith("SELECT") for sql in statements))
+        self.assertEqual({"A": 120}, repository.load_intraday_highs(("A",), date(2026, 10, 19)))
+        self.assertEqual({"A": 90}, repository.load_intraday_highs(("A",), date(2026, 10, 20)))
+
     def test_empty_or_filtered_price_cache_skips_database_and_partial_batches_preserve_other_values(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
         path = Path(directory) / "monitor.sqlite3"
@@ -68,7 +91,7 @@ class StockRepositoryTests(unittest.TestCase):
         now = datetime(2026, 10, 16, 10)
         repository.upsert("A", "A")
         with patch("sqlite3.connect") as connect:
-            repository.update_price_cache({"": 1, "A": 0}, {"A": -1}, {"A": 0}, now.date(), observed_at=now)
+            repository.update_price_cache({"": 1, "A": 0}, {"A": -1, (now.date(), ""): 1}, {"A": 0}, now.date(), observed_at=now)
             connect.assert_not_called()
         repository.update_price_cache({"A": 100}, {}, {}, now.date(), observed_at=now)
         repository.update_price_cache({}, {"A": 110}, {}, now.date(), observed_at=now)

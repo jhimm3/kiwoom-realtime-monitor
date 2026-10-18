@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
+from kiwoom_monitor.domain.time_basis import as_kst
 
 from .market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
 
@@ -47,7 +48,9 @@ def finalization_retry_allowed(
     retry_after: Mapping[tuple[date, str], datetime],
 ) -> bool:
     key = (target, code)
-    return attempts.get(key, 0) < MAX_FINALIZATION_ATTEMPTS and now >= retry_after.get(key, datetime.min)
+    retry_at = retry_after.get(key)
+    return (attempts.get(key, 0) < MAX_FINALIZATION_ATTEMPTS
+            and (retry_at is None or as_kst(now) >= as_kst(retry_at)))
 
 
 def finalization_candidates(

@@ -10,6 +10,7 @@ from time import perf_counter
 
 from PySide6.QtCore import QCoreApplication, Qt
 
+from kiwoom_monitor.domain.time_basis import as_kst
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
 from kiwoom_monitor.application.daily_high_service import DailyBar, DailyHighTargets
 from kiwoom_monitor.infrastructure.persistence.database import Database
@@ -30,19 +31,23 @@ class MarketCacheWriterTests(unittest.TestCase):
             failures = []
             writer.price_failed.connect(lambda *values: failures.append(values), Qt.ConnectionType.DirectConnection)
             payload = ({"A": 100}, {"A": 110}, {"A": 1000.}, date(2026, 10, 16))
-            writer.start()
             writer.enqueue_price_cache(*payload)
+            writer._now = lambda: datetime(2026, 10, 17, 1, tzinfo=timezone.utc)
+            writer.start()
             self.assertTrue(writer.stop_and_drain())
             self.assertEqual(1, len(failures))
-            self.assertEqual(payload, failures[0][:-1])
+            self.assertEqual(payload[:3], failures[0][:3])
+            self.assertEqual({"trade_date": payload[3], "observed_at": as_kst(now), "receipt": 0},
+                             failures[0][3])
             self.assertIn("high fault", failures[0][-1])
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual((90, 900), connection.execute("SELECT last_price,market_cap FROM stocks").fetchone())
                 self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM intraday_highs").fetchone()[0])
                 connection.execute("DROP TRIGGER fail_high")
                 connection.commit()
+            context = failures[0][3]
+            writer.enqueue_price_cache(*payload, observed_at=context["observed_at"], receipt=context["receipt"])
             writer.start()
-            writer.enqueue_price_cache(*payload)
             self.assertTrue(writer.stop_and_drain())
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual((100, 1000, "2026-10-16T10:00:00+09:00"), connection.execute(

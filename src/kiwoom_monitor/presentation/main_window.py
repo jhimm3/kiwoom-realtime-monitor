@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_today, kst_wall_now, kst_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_today, kst_wall_now, kst_now
 
 import logging
 import os
@@ -3077,7 +3077,7 @@ class MainWindow(QMainWindow):
                 previous_high = self._today_high_prices.get(tick.code, 0)
                 if tick.high_price > previous_high:
                     self._today_high_prices[tick.code] = tick.high_price
-                    self._app_controller.queue_price_cache(tick.code, high=tick.high_price)
+                    self._app_controller.queue_price_cache(tick.code, high=tick.high_price, observed_at=observed_at)
             self._ensure_today_minute_bar_storage(observed_at)
             bar = self._minute_aggregator.ingest(tick, observed_at)
             if bar is not None:
@@ -3856,11 +3856,19 @@ class MainWindow(QMainWindow):
 
     def _execution_pressure_at_entry(self, code: str, now: datetime) -> dict[str, object]:
         pressure = self._realtime_pressure.get(code, deque())
+        now = as_kst(now)
         cutoff = now - timedelta(seconds=60)
-        buy_volume = sum(volume for observed, volume in pressure if observed >= cutoff and volume > 0)
-        sell_volume = sum(abs(volume) for observed, volume in pressure if observed >= cutoff and volume < 0)
+        buy_volume = sell_volume = 0
+        for observed, volume in pressure:
+            if as_kst(observed) < cutoff:
+                continue
+            if volume > 0:
+                buy_volume += volume
+            elif volume < 0:
+                sell_volume += abs(volume)
         total = buy_volume + sell_volume
-        if now < self._pressure_gap_until.get(code, datetime.min):
+        recovery_until = self._pressure_gap_until.get(code)
+        if recovery_until is not None and now < as_kst(recovery_until):
             return {"source": "0B_execution_flow", "window_seconds": 60, "available": False,
                     "completeness": "partial", "recovery_until": self._pressure_gap_until[code].isoformat(),
                     "buy_execution_volume": None, "sell_execution_volume": None, "buy_share_percent": None}
@@ -4033,7 +4041,7 @@ class MainWindow(QMainWindow):
             previous_high = self._today_high_prices.get(code, 0)
             if restored_high > previous_high:
                 self._today_high_prices[code] = restored_high
-                self._app_controller.queue_price_cache(code, high=restored_high)
+                self._app_controller.queue_price_cache(code, high=restored_high, observed_at=now)
         stored = self._minute_bar_repository is None
         if stored and generation is not None:
             self._minute_aggregator.confirm_history_saved(code, generation, tuple(bar.minute for bar in bars))
