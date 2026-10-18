@@ -76,6 +76,15 @@ Protocol 99개 method, PostgreSQL 104개, SQLite 103개, 확인된 store referen
 초기 연결 검토 때만 사용한다. 이 검사는 Python AST만 읽으므로 앱 import, DB 접속,
 SQL 실행이나 실제 route/backend 실행 여부는 증명하지 않는다.
 
+2026-10-18 CI에서 발견한 소비자 차이는 별도 after 원장으로 확인한 뒤 해당
+연결만 검토해 기준선에 반영했다. 사용자 요청의 초봉 저장 중단·분봉 연구 복구에
+따라 collector의 초봉 저장과 시장/테마의 초봉 읽기 두 곳을 제외하고, 분봉 읽기와
+과거 분봉 대조·주도주 관측 저장·모의 판단/진입 근거 저장 일곱 참조를 반영했다.
+CandidateMonitor의 조회·저장은 기존 run_once worker에서, 모의 판단 저장은
+기존 drain_thread_call에서 실행된다. 두 과거 자료 대조 참조는 미분류 후보로
+유지했다. store signature·helper 전달 경로·receiver 승인 목록은 변경하지 않았다.
+기존 원장은 Git 이력에 보존하며, 이 검토는 운영 DB 실행 검증을 뜻하지 않는다.
+
 ## 이번에 코드로 확인한 연결
 
 | 기능 | 입력/호출 책임자 | 저장과 조회 연결 | 보존할 의미 |

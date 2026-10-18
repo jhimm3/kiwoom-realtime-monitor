@@ -2118,17 +2118,6 @@
       "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py",
       "read_market_theme_shadow_inputs",
       "store",
-      "load_second_trade_bars",
-      "direct_call",
-      "store.load_second_trade_bars",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py",
-      "read_market_theme_shadow_inputs",
-      "store",
       "load_theme_snapshots",
       "direct_call",
       "store.load_theme_snapshots",
@@ -3504,17 +3493,6 @@
       "src/kiwoom_monitor/central_server/realtime_collector.py",
       "CentralRealtimeCollector._flush_snapshot_cycle",
       "self._store",
-      "save_second_trade_bars",
-      "callable_argument",
-      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/realtime_collector.py",
-      "CentralRealtimeCollector._flush_snapshot_cycle",
-      "self._store",
       "upsert_documents",
       "callable_argument",
       "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
@@ -4621,6 +4599,83 @@
       "",
       "",
       "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/candidate_monitor.py",
+      "CandidateMonitor._refresh_document_observations",
+      "self._store",
+      "load_minute_bars",
+      "direct_call",
+      "self._store.load_minute_bars",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/candidate_monitor.py",
+      "CandidateMonitor.run_once",
+      "self._store",
+      "save_shadow_evaluation",
+      "direct_call",
+      "self._store.save_shadow_evaluation",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py",
+      "read_market_theme_shadow_inputs",
+      "store",
+      "load_minute_bars",
+      "direct_call",
+      "store.load_minute_bars",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py",
+      "read_minute_stock_thesis_source_check",
+      "store",
+      "load_minute_bars",
+      "direct_call",
+      "store.load_minute_bars",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py",
+      "read_minute_stock_thesis_source_check",
+      "store",
+      "load_theme_snapshots",
+      "direct_call",
+      "store.load_theme_snapshots",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_runner.py",
+      "MockAutomationRunner._run_leader_page",
+      "self._store",
+      "upsert_documents",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_runner.py",
+      "MockAutomationRunner._run_leader_page",
+      "self._store",
+      "upsert_documents",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [

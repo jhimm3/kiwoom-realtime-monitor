@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
@@ -166,9 +167,11 @@ class MinuteTradeValueTests(unittest.TestCase):
 
         self.assertIsNotNone(aggregator.ingest(tick(120, 5, "100059"), now))
 
-    def test_does_not_duplicate_the_in_progress_rest_minute(self) -> None:
+    @patch("kiwoom_monitor.application.minute_trade_value.kst_wall_now",
+           return_value=datetime(2026, 9, 10, 10, 15, 30))
+    def test_does_not_duplicate_the_in_progress_rest_minute(self, clock) -> None:
         aggregator = MinuteTradeValueAggregator()
-        current_minute = datetime.now().replace(second=0, microsecond=0)
+        current_minute = clock.return_value.replace(second=0, microsecond=0)
         previous_minute = current_minute - timedelta(minutes=1)
         aggregator.seed(
             "005930",

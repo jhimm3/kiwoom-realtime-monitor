@@ -28,12 +28,14 @@ from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import Minu
 
 
 class MinuteBarRepositoryTests(unittest.TestCase):
-    def test_open_0b_snapshot_replaces_provisional_bar_without_double_accumulating(self) -> None:
+    @patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_wall_now",
+           return_value=datetime(2026, 9, 10, 10, 15, 30))
+    def test_open_0b_snapshot_replaces_provisional_bar_without_double_accumulating(self, clock) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
             Database(path).initialize()
             repository = MinuteBarRepository(path)
-            minute = datetime.now().replace(second=0, microsecond=0)
+            minute = clock.return_value.replace(second=0, microsecond=0)
 
             repository.upsert_many({
                 "005930": (MinuteOhlcv(minute, 100, 105, 99, 104, 20, 1.25),),
@@ -110,12 +112,14 @@ class MinuteBarRepositoryTests(unittest.TestCase):
         self.assertEqual(ObservationOrigin.QUERY, metadata.origin)
         self.assertEqual(DataValueKind.ESTIMATED, metadata.value_kind)
 
-    def test_realtime_and_query_minute_bars_store_distinct_observation_meaning(self) -> None:
+    @patch("kiwoom_monitor.infrastructure.persistence.minute_bar_repository.kst_wall_now",
+           return_value=datetime(2026, 9, 10, 10, 15, 30))
+    def test_realtime_and_query_minute_bars_store_distinct_observation_meaning(self, clock) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
             Database(path).initialize()
             repository = MinuteBarRepository(path)
-            live_minute = datetime.now().replace(second=0, microsecond=0)
+            live_minute = clock.return_value.replace(second=0, microsecond=0)
             query_minute = live_minute - timedelta(minutes=1)
             repository.upsert_many({
                 "005930": (MinuteOhlcv(live_minute, 100, 110, 90, 105, 20, 1.25),),
