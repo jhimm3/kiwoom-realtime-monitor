@@ -47,12 +47,14 @@
 
 **상태·실패·공식 경계.** `load_top_stocks`, 순위 응답 coordinator와 reference service의 기존 `load/is_enabled` 경계를 사용한다. 로컬 `load_ranking_cache`는 묶음 조회, native `update_price_cache`는 같은 가격 job의 단일 transaction을 소유한다. 기준 자료의 확인시각, 일자, 고가 MAX, coverage와 시장 출처를 유지한다. 순위 재시도는 worker/broker에서 수행하고 저우선 백필이 다음 순위 회차를 막지 않게 한다. 저장 실패와 이미 성공한 화면 조회를 분리한다.
 
-**미해결.** R3-002의 transaction 통합과 R3-026의 묶음 read를 다시 만들지 않는다. 원거래일 실패 재병합은 023, Collector의 reference 복원은 034, NXT 포함 고가의 cache 증분 누락은 068로 남아 있다.
+**미해결.** R3-002의 transaction 통합과 R3-026의 묶음 read를 다시 만들지 않는다. 원거래일 실패 재병합은023의 c0cf7ce에서 로컬 검증했고, 이번 TOP20/Ingestor 공통 시계 인계와 dataset receipt도 기존 owner에서 보완했다. Collector의 reference 복원은034, NXT 포함 고가의 cache 증분 누락은 068로 남아 있다.
 
 **관련 검사.** [순위 service](../../tests/unit/test_ranking_service.py), [순위 실행](../../tests/unit/test_ranking_execution.py), [StockRepository](../../tests/unit/test_stock_repository.py). 기준 자료 변경은 KRX/NXT·빈/부분 자료·수신 후 저장/재조회까지 필요한 경계를 선택한다.
 
 <a id="market-data"></a>
 ## 실시간·저장·복구 — F04~F09
+
+**023 서버 시계·dataset receipt.** app의 기존 공통 `server_now`를 Ingestor와 AutonomousTop20의 기존 provider에 전달한다. QueryStore의 정규화된 provider가 dataset batch saved_at(epoch)을 한 번 샘플하며 revision receipt/원본 observation 시각과 구분한다. RAM 게시와 DB 저장은 서로 다른 기존 시점이다. reader/API는 숫자 epoch를 그대로 반환하고 Shadow의 UTC canonical 표현은 같은 순간의 경계로 유지한다. 새 clock 조회·layer·DB 연결/transaction이 없으며 native SQLite·PG SQL fixture/실제 app 조립의 관련 검증은 R3-023 최신 원장을 따른다. 실제 PG/NAS는 미검증이다. 이 경계 변경 시 [앱 조립·HTTP](../../tests/unit/test_central_server_app.py), [native SQLite](../../tests/unit/test_central_server_database.py), [PG batch 계약](../../tests/unit/test_dataset_batch_postgres.py)을 선택한다.
 
 **현재 책임.** NAS Collector는 상류 등록/ACK·수신·RAM 최신값/봉·직렬 flush를, RealtimeHub와 기존 worker는 배포/PC 전달을 소유한다. PC MainWindow의 0B receiver가 MinuteTradeValueAggregator를 갱신하고 AppController가 pending을 MarketCacheWriter에 넘긴다. TOP20 collector는 cohort 활성화·분 내 기여를 계산한다. 서버 TOP20의 outbox/native index 저장과 ProgramSnapshotWriter의 pending/drain은 각각 기존 owner에 남긴다.
 

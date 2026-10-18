@@ -541,3 +541,9 @@ v5는 시간을 늘린 복원 재시도가 아니다. 고정 v4 결과 canonical
 finalization retry와 체결시점pressure는 `datetime.min`을 결측값으로 비교하지 않고 존재시각만 기존 `as_kst`로 정규화한다. 정확5분/최대2회·60초표본/gap만료의 기존 의미를 유지했다. 실제 controller signal→snapshot enqueue와 native SQLite/종료를 포함한5모듈128건/동일전후5조건·실행ID/구조가드 통과다. 새제품 CI·PG·NAS·장중·실계좌는 미검증이다.
 
 스냅샷 stale cutoff는 이미store provider로 연결돼있음을 현재본문으로 정정했다. app의 Ingestor/AutonomousTop20 생성시계 누락, dataset saved_at, 결측봉 fallback/legacySQL 잔여는 이 작업으로 완료되지 않았다. 다음 범위·F연결·전후수치와 실패기록 정본은 [R3-023 및 후속 원장](../../REFACTOR_BACKLOG.md#r3-023--시계-연결의-남은-host-fallback)을 따른다.
+
+## 2026-10-18 R3-023 생성자·dataset receipt 후속
+
+R3-023의 남은 생성자 시계 주입과 dataset saved_at 선택 경계를 로컬 커밋 `4e97fe1`에서 보완했다. 기존 app.server_now를 MarketDataIngestor/AutonomousTop20Service에 전달하고, SQLite/PG dataset saved_at은 기존 store._now_provider의 epoch를 쓴다. 관련6모듈 **273건/98.049초 통과**, source/계획·실행ID/worker·자식 종료·임시 정리를 확인했다. 구조 검사와 20번째 증분 원장·실행 대조도 통과했다. 새 계층·DB 경로·조회·clock polling·스키마 변경은 없다.
+
+RAM projection의 게시시각과 dataset의 저장 receipt는 서로 다른 샘플시점이며 같도록 강제하지 않는다. 원시 epoch·원본 observation·naive KST snapshot key와 외부 UTC canonical 경계는 보존하고 과거 DB 자료는 변환하지 않았다. 실제 PostgreSQL은 실행하지 않았고 PG SQL/transaction fixture만 검증했다. 새 제품 push/GitHub CI·NAS 배포·실시간 키움·운영 DB/주문·로컬 전수 회귀는 미실행이다. R3-023 전체는 결측봉 host fallback/legacy SQL 잔여 때문에 진행을 유지한다. 다음은 `_bar_available_at`와 local bar의 결측 시각 경계를 좁혀 확인하며, 기존 정상 epoch·원본 시각·명시적 offline fallback을 일괄 변환하지 않는다. 전후 실측·관련 테스트·F03/F08/F09/F10/F13 판정은 [최신 R3-023 원장](../../REFACTOR_BACKLOG.md#r3-023-시계-주입dataset-저장시각--2026-10-18)을 따른다.

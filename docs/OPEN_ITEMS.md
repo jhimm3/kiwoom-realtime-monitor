@@ -1,5 +1,12 @@
 # 남은 작업 요약
 
+## 2026-10-18 R3-023 시계 주입·dataset 저장시각
+
+R3-023의 남은 생성자 시계 주입과 dataset saved_at 선택 경계를 로컬 커밋 `4e97fe1`에서 보완했다. 기존 app.server_now를 MarketDataIngestor/AutonomousTop20Service에 전달하고, SQLite/PG dataset saved_at은 기존 store._now_provider의 epoch를 쓴다. 관련6모듈 **273건/98.049초 통과**, source/계획·실행ID/worker·자식 종료·임시 정리를 확인했다. 구조 검사와 20번째 증분 원장·실행 대조도 통과했다. 새 계층·DB 경로·조회·clock polling·스키마 변경은 없다.
+
+실제 PostgreSQL은 실행하지 않았고 PG SQL/transaction fixture만 검증했다. 새 제품 push/GitHub CI·NAS 배포·실시간 키움·운영 DB/주문·로컬 전수 회귀는 미실행이다. R3-023 전체는 결측봉 host fallback/legacy SQL 잔여 때문에 진행을 유지한다. 다음은 `_bar_available_at`와 local bar의 결측 시각 경계를 좁혀 확인하며, 기존 정상 epoch·원본 시각·명시적 offline fallback을 일괄 변환하지 않는다.
+
+
 ## 2026-10-18 R3-002·023 후속 로컬 검증
 
 문서eef5563의 [후속 CI39119680966](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/39119680966)은9job/13분1초·Windows5581건으로 통과했다. 이후 제품 로컬커밋 `c0cf7ce`에서 가격 retry의 원일·원batch시각/최신값·고가MAX/실패종료 보존과 두 naive/aware 비교 경계를 병렬 보완했다. 관련5모듈 **128건 통과**, 동일native 전후5조건·구조가드·18번째증분원장/실행ID 대조를 확인했다. 정상 batch의 연결/COMMIT1·SELECT0·기존3owner를 유지했다. [백로그](../REFACTOR_BACKLOG.md)의 F04/F06/F08/F10/F18/F22/F23/F24와 책임계약을 갱신했다.

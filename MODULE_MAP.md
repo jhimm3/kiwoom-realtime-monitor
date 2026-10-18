@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-18 R3-023 시계 후속: 기존 app.server_now→MarketDataIngestor/AutonomousTop20 constructor와 기존 QueryStore→SQLite/PG dataset saved_at을 연결했다. owner/파일 수·호출 깊이·transaction·epoch/원본 시각은 그대로이며 새 task/clock 조회는 없다. 관련6모듈 273건 통과/로컬 4e97fe1, F03/F08/F09/F10/F13·잔여 fallback은 [R3-023 정본](REFACTOR_BACKLOG.md#r3-023-시계-주입dataset-저장시각--2026-10-18)을 따른다.
+
 구조 퇴행 방지: [기능별 책임 계약](docs/architecture/r3-ownership.md#필요한-기능군부터-읽기)에서 관련 기능군만 선택한다. `scripts/check_architecture.py`는 기존 `select_ci_groups._dependency_graph`와 구조 계약의 정적 차이만 검사한다. native 비용·실패/종료·연결은 기존 기능 검사를 재사용하며, 도구 자체의 결함 주입 검사는 `tests/unit/test_architecture_guardrails.py`와 기존 runner/CI에 등록한다. 제품 owner·런타임 계층은 추가하지 않는다.
 
 2026-10-18 선택적 테스트 도구: 기존 `check_test_changes --query`가 Git 전후 정의·선택 범위와 관련 감사/후속 항목만 조회하고, `select_ci_groups.test_impact`의 기존 import 그래프가 직접/간접·fixture·리터럴 계약 소비자 및 불명확한 동적 의존성의 profile 확대 근거를 제공한다. `run_regression --selection`은 현재 소스/선정 재대조 후 기존 batch·worker/종료·로그 책임을 재사용하고 실제 모듈/ID 실행을 대조한다. `--summarize`/`--compact`는 저장된 결과에서 성공 수만 요약하고 실패 상세만 출력한다. 관리 경로이며 앱/NAS/주문 연결은 추가하지 않는다. [명령·외부 환경·한계](docs/INCREMENTAL_TEST_REVIEW.md#선택적-조회실행-명령).
