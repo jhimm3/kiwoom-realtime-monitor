@@ -1,5 +1,11 @@
 # 남은 작업 요약
 
+## 2026-10-18 R3-023 사후분석 일봉 복사 시계
+
+로컬 제품·검사 `442a83e`에서 JournalWindow가 기존 query-client의 보정 시계를 TradeAnalysisPreparationService에 지연 전달하도록 연결했다. 서비스는 prepare마다 한 번 받은 KST observed_at을 기존 일봉 복사 API로 전달한다. 수동 사후분석과 자동 AnalysisEnrichmentWorker가 같은 preparer를 소비한다. 관련9모듈 **102건/52.764초 통과**. 구조·24번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 영향 F08/F10/F18/F22/F24와 책임 계약을 갱신했다.
+
+R3-023 전체는 **진행**이다. 이번 일봉 복사 caller는 완료했으며 다음은 같은 prepare의 `save_trade_analysis_setup(now 미전달)` 및 `journal_analysis_revision(now 미전달)`이 만드는 판정 updated_at/revision created_at이다. 실제 본문에서 기존 host fallback 소비를 확인했으나 이번 일봉 복사 범위 밖으로 남겼다. 같은 주입 시각을 넘기면서 계좌 범위·원자 저장·revision ID/hash·동일 ID 원래 created_at 보존을 검증한다. 끝낸 Window/legacy/dataset/봉 경계는 재조사하지 않는다. 실제 키움/장중·운영DB/주문·외부 Drive·PostgreSQL·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. startup/offline 공통 KST fallback은 동기화 완료가 아니며 앱 전체 시계 통일·기능 전체 정상으로 확대하지 않는다.
+
 ## 2026-10-18 R3-023 JournalWindow·legacy 수락 시각
 
 로컬 제품·검사 `f72a85f`에서 JournalWindow 현재 시각과 봉 receipt를 기존 query-client 시계에 연결하고, legacy 일지 수락 기록과 SettingsBackup 카탈로그 INSERT/UPDATE를 기존 서버 시계/KST로 저장하도록 보완했다. MainWindow→Drive v1/v2 복원에도 같은 동적 시계를 전달한다. 관련14모듈 **265건/167.970초 통과**. 구조·22번째 증분 원장·실행ID·소스 불변·worker/자식 종료·임시 정리를 확인했다. 영향 F01/F08/F10/F18/F22/F23/F24와 책임 계약을 갱신했다.

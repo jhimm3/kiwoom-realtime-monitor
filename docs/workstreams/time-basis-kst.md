@@ -561,3 +561,9 @@ RAM projection의 게시시각과 dataset의 저장 receipt는 서로 다른 샘
 R3-023 전체는 **진행**이다. 다음은 실제 온라인 `TradeAnalysisPreparationService.prepare`의 `import_monitor_daily_bars(monitor_db, code, episode.ended_at.date(), 250)` 미주입 caller(현재148행 부근)다. 이 서비스는 현재 provider가 없으며 기존4인자 Protocol/호환은 보존했다. 이미 끝낸 Window·legacy·constructor/dataset·봉 helper는 재조사하지 않는다. 실제 키움/장중·운영DB/주문·외부 Drive·PostgreSQL·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. startup/offline 공통 KST fallback과 원본/스키마 migration은 유지하며 앱 전체 시계 통일·기능 전체 정상으로 확대하지 않는다.
 
 `data/diagnostics/r3-023-journal-legacy-20261018/`의 `architecture.json`, `related-v1/run.json`·`summary.json`, `review-execution.json`, `INDEPENDENT_REVIEW.md`를 기준으로 한다.
+
+## 2026-10-18 R3-023 사후분석 일봉 복사 시계
+
+로컬 제품·검사 `442a83e`에서 JournalWindow가 기존 query-client의 보정 시계를 TradeAnalysisPreparationService에 지연 전달하도록 연결했다. 서비스는 prepare마다 한 번 받은 KST observed_at을 기존 일봉 복사 API로 전달한다. 수동 사후분석과 자동 AnalysisEnrichmentWorker가 같은 preparer를 소비한다. 관련9모듈 **102건/52.764초 통과**. 구조·24번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인하고 영향 F08/F10/F18/F22/F24와 책임 계약을 갱신했다.
+
+R3-023 전체는 **진행**이다. 이번 일봉 복사 caller는 완료했으며 다음은 같은 prepare의 `save_trade_analysis_setup(now 미전달)` 및 `journal_analysis_revision(now 미전달)`이 만드는 판정 updated_at/revision created_at이다. 실제 본문에서 기존 host fallback 소비를 확인했으나 이번 일봉 복사 범위 밖으로 남겼다. 같은 주입 시각을 넘기면서 계좌 범위·원자 저장·revision ID/hash·동일 ID 원래 created_at 보존을 검증한다. 끝낸 Window/legacy/dataset/봉 경계는 재조사하지 않는다. 실제 키움/장중·운영DB/주문·외부 Drive·PostgreSQL·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. startup/offline 공통 KST fallback은 동기화 완료가 아니며 앱 전체 시계 통일·기능 전체 정상으로 확대하지 않는다.
