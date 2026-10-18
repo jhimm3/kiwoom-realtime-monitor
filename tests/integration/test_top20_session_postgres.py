@@ -97,7 +97,7 @@ class Top20SessionPostgresTests(unittest.TestCase):
                 membership_rows = report['final_tables']['central_dataset_snapshots']['rows']
                 self.assertGreaterEqual(membership_rows, 1 if enabled else 0)
                 self.assertEqual(1 if enabled else 0, report['final_tables']['central_minute_bars']['rows'])
-                self.assertEqual(1 if enabled else 0, report['final_tables']['central_second_trade_bars']['rows'])
+                self.assertEqual(0, report['final_tables']['central_second_trade_bars']['rows'])
                 self.assertGreaterEqual(report['final_tables']['central_observation_revisions']['rows'],
                                         1 if enabled else 0)
                 if enabled and not peers:

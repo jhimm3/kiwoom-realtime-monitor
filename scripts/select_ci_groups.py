@@ -3,12 +3,62 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.util
 import json
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 GROUPS = ("windows_fast", "windows_long", "postgres", "sealed", "operator")
+
+
+def related_test_modules(paths: list[str], root: Path = ROOT) -> list[str]:
+    """Follow current Python imports from changed files to their unit-test consumers."""
+    def module_name(path: str) -> str:
+        name = path.replace("\\", "/").removeprefix("src/").removesuffix(".py").replace("/", ".")
+        return name.removesuffix(".__init__")
+
+    affected = {module_name(path) for path in paths if path.endswith(".py")}
+    if any(path.startswith(".github/") or path in {
+        "tests/regression_profiles.json", "tests/ci_groups.json", "requirements.lock.txt",
+    } for path in paths):
+        affected.add("tests.unit.test_run_regression")
+    if any(path.startswith("deploy/") or path == "tests/ci_runtime.Dockerfile" for path in paths):
+        affected.update({"tests.unit.test_nas_source_runtime", "tests.unit.test_source_runtime_deploy",
+                         "tests.unit.test_central_deployment_check"})
+    dependencies: dict[str, set[str]] = {}
+    for directory in ("src", "scripts", "tests"):
+        for file in (root / directory).rglob("*.py"):
+            module = module_name(file.relative_to(root).as_posix())
+            package = module if file.name == "__init__.py" else module.rpartition(".")[0]
+            imports = set()
+            for node in ast.walk(ast.parse(file.read_text(encoding="utf-8-sig"))):
+                if isinstance(node, ast.Import):
+                    imports.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    base = node.module or ""
+                    if node.level:
+                        base = importlib.util.resolve_name("." * node.level + base, package)
+                    imports.add(base)
+                    imports.update(base + "." + alias.name for alias in node.names)
+            dependencies[module] = imports
+    while True:
+        consumers = {module for module, imports in dependencies.items() if imports & affected}
+        if consumers <= affected:
+            break
+        affected.update(consumers)
+    catalog_path = root / "tests/ci_groups.json"
+    linux = set(json.loads(catalog_path.read_text(encoding="utf-8"))["linux_required"]) if catalog_path.exists() else set()
+    return sorted(module for module in affected
+                  if module.startswith("tests.unit.test_") and module in dependencies and module not in linux)
+
+
+def related_modules_since(base: str, root: Path = ROOT) -> list[str]:
+    paths = subprocess.check_output(
+        ["git", "diff", "--name-only", "--no-ext-diff", base, "HEAD"], cwd=root, text=True,
+    ).splitlines()
+    return related_test_modules(paths, root)
 
 
 def select(paths: list[str], mode: str) -> dict[str, object]:
@@ -94,6 +144,10 @@ def main() -> int:
     else:
         result = select([], args.mode)
     result["base_ref"] = args.base_ref
+    base = args.base_ref or "HEAD^"
+    result["windows_modules"] = related_modules_since(base)
+    result["groups"]["windows_fast"] = bool(result["windows_modules"])
+    result["groups"]["windows_long"] = False  # Related modules run once, independently of all-local.
     result["head"] = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                              cwd=ROOT, text=True).strip()
     args.report.parent.mkdir(parents=True, exist_ok=True)

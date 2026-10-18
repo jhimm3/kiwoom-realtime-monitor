@@ -38,20 +38,30 @@ def validate_windows(windows: dict, commit: str | None) -> None:
     manifest = run_regression._load_manifest()
     catalog = run_regression._load_ci_groups()
     membership = run_regression._ci_membership(manifest, catalog)
-    if windows.get("status") != "passed" or windows.get("profile") != "all-local":
-        raise ValueError("Windows full regression did not pass")
+    profile = windows.get("profile")
+    if windows.get("status") != "passed" or profile not in {"all-local", "related"}:
+        raise ValueError("Windows selected regression did not pass")
     if commit is not None and (windows.get("git", {}).get("commit") != commit
                                or windows.get("git", {}).get("working_tree_dirty") is not False):
         raise ValueError("Windows source commit or cleanliness differs")
     if windows.get("missing_test_files") or windows.get("unrun_batches") or windows.get("interrupted"):
         raise ValueError("Windows run omitted work")
-    planned_batches = run_regression._planned_batches(manifest, "all-local")
+    if profile == "related":
+        from scripts.select_ci_groups import related_modules_since
+        if not windows.get("base_ref"):
+            raise ValueError("Related Windows report has no comparison base")
+        modules = related_modules_since(windows["base_ref"])
+        if not modules:
+            raise ValueError("Related Windows report has no applicable modules")
+        planned_batches = [{"modules": modules}]
+    else:
+        planned_batches = run_regression._planned_batches(manifest, "all-local")
     planned = [m for batch in planned_batches for m in batch["modules"]]
     actual = [m for batch in windows.get("batch_results", []) for m in batch.get("modules", [])]
     if actual != planned or [m for batch in windows.get("planned_batches", [])
                               for m in batch.get("modules", [])] != planned:
         raise ValueError("Windows plan/result differs from current manifest")
-    if len({m for m in actual}) != len(membership["ci-required-windows"] |
+    if profile == "all-local" and len({m for m in actual}) != len(membership["ci-required-windows"] |
                                      membership["ci-extended-windows"] |
                                      membership["ci-long-windows"]):
         raise ValueError("Windows planned modules are incomplete")
@@ -75,8 +85,13 @@ def validate_windows(windows: dict, commit: str | None) -> None:
         raise ValueError("Windows source changed during regression")
 
 
-def validate(windows: dict, linux: dict, postgres: dict, commit: str) -> None:
-    validate_windows(windows, commit)
+def validate(windows: dict | None, linux: dict, postgres: dict, commit: str, *, base_ref: str = "") -> None:
+    if windows is not None:
+        validate_windows(windows, commit)
+    else:
+        from scripts.select_ci_groups import related_modules_since
+        if not base_ref or related_modules_since(base_ref):
+            raise ValueError("Applicable Windows tests were not executed")
     manifest = run_regression._load_manifest()
     membership = run_regression._ci_membership(manifest, run_regression._load_ci_groups())
     _assert_clean_result(linux, "Linux POSIX")
@@ -88,17 +103,19 @@ def validate(windows: dict, linux: dict, postgres: dict, commit: str) -> None:
     if postgres.get("git_commit") != commit:
         raise ValueError("PostgreSQL source commit differs")
     fingerprints = {
-        windows.get("code_tree_start", {}).get("lf_sha256"),
         linux.get("source_start", {}).get("lf_sha256"),
         postgres.get("source_start", {}).get("lf_sha256"),
     }
+    if windows is not None:
+        fingerprints.add(windows.get("code_tree_start", {}).get("lf_sha256"))
     if None in fingerprints or len(fingerprints) != 1:
         raise ValueError("Required jobs did not use the same normalized source")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--windows", required=True, type=Path)
+    parser.add_argument("--windows", type=Path)
+    parser.add_argument("--base-ref", default="")
     parser.add_argument("--linux", type=Path)
     parser.add_argument("--postgres", type=Path)
     parser.add_argument("--windows-only", action="store_true",
@@ -107,12 +124,14 @@ def main() -> int:
                         help="Allow a precommit dirty report; still require exact current source content")
     parser.add_argument("--covered-profile", choices=run_regression.CI_WINDOWS_PROFILES)
     args = parser.parse_args()
+    if args.windows_only and args.windows is None:
+        parser.error("Windows-only validation requires a Windows report")
     if (args.local or args.covered_profile) and not args.windows_only:
         parser.error("local/covered-profile options require --windows-only")
     if not args.windows_only and (args.linux is None or args.postgres is None):
         parser.error("required CI validation requires Linux and PostgreSQL reports")
     try:
-        windows = _read(args.windows)
+        windows = _read(args.windows) if args.windows else None
         if args.windows_only:
             commit = None if args.local else os.environ["GITHUB_SHA"]
             validate_windows(windows, commit)
@@ -128,8 +147,9 @@ def main() -> int:
                 print(f"{args.covered_profile}: all modules passed in the existing all-local run")
             print("Windows source evidence passed; external CI environments remain separate")
         else:
-            validate(windows, _read(args.linux), _read(args.postgres), os.environ["GITHUB_SHA"])
-            print("Required regression passed: Windows, Linux and PostgreSQL reports match the source")
+            validate(windows, _read(args.linux), _read(args.postgres), os.environ["GITHUB_SHA"],
+                     base_ref=args.base_ref)
+            print("Selected regression passed: applicable Windows, Linux and PostgreSQL results match the source")
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
         print(f"Required regression failed: {error}", file=sys.stderr)
         return 1

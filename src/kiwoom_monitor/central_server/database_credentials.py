@@ -30,9 +30,8 @@ _CREDENTIAL_ACTIVATION_COLUMNS = (
 def _credential_activation_row(row: tuple[object, ...]) -> dict[str, Any]:
     document = dict(zip(_CREDENTIAL_ACTIVATION_COLUMNS, row, strict=True))
     committed_at = document["committed_at"]
-    document["committed_at"] = (
-        committed_at.isoformat() if isinstance(committed_at, datetime) else str(committed_at)
-    )
+    instant = committed_at if isinstance(committed_at, datetime) else datetime.fromisoformat(str(committed_at))
+    document["committed_at"] = as_kst(instant).isoformat()
     return document
 
 
@@ -247,7 +246,8 @@ def _finalize_credential_activation(cursor: Any, value: dict[str, Any], p: str) 
                    f"VALUES({','.join([p] * len(_CREDENTIAL_ACTIVATION_COLUMNS))})",
                    tuple(document[key] for key in _CREDENTIAL_ACTIVATION_COLUMNS))
     _claim_account_settings(cursor, document, p, disabled=disabled)
-    return document
+    # Keep recorded binding/ID inputs intact; initial and replay receipts share KST serialization.
+    return _credential_activation_row(tuple(document[key] for key in _CREDENTIAL_ACTIVATION_COLUMNS))
 
 
 class SQLiteCredentialStoreMixin:

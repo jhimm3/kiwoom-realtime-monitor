@@ -957,7 +957,7 @@ def _locked_environment() -> dict[str, Any]:
             "timezone": list(time.tzname), "locked_dependencies": versions}
 
 
-def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> int:
+def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, base_ref: str = "") -> int:
     if timeout_seconds < 1:
         raise ValueError("--timeout-seconds must be positive")
     output_path = output_path.resolve()
@@ -970,7 +970,12 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> i
             raise ValueError("Full regression requires complete unit/integration routing")
         environment = _locked_environment()
     manifest = _load_manifest()
-    batches = _planned_batches(manifest, profile)
+    if profile == "related":
+        from scripts.select_ci_groups import related_modules_since
+        base_ref = base_ref or "HEAD^"
+        batches = [{"name": "related", "modules": related_modules_since(base_ref), "isolate_modules": False}]
+    else:
+        batches = _planned_batches(manifest, profile)
     if not batches or any(not batch["modules"] for batch in batches):
         raise ValueError(f"Regression profile {profile!r} has no runnable tests")
     output_path.mkdir(parents=True)
@@ -981,6 +986,7 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path) -> i
     missing = [str(path) for path in test_paths.values() if not path.is_file()]
     summary: dict[str, Any] = {
         "schema_version": 1, "profile": profile, "status": "incomplete",
+        "base_ref": base_ref if profile == "related" else None,
         "environment": environment,
         "scope": {"windows_profiles": list(CI_WINDOWS_PROFILES),
                   "external_groups_not_run": ["linux_required", "postgres_required",
@@ -1103,7 +1109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as error:
             print(f"Regression runner: {type(error).__name__}: {error}", file=sys.stderr)
             return 2
-    if args.base_ref or args.fallback_ref:
+    if (args.base_ref or args.fallback_ref) and args.profile != "related":
         parser.error("base-ref options require --check-new-test-modules")
     if args.list_only == (args.profile is not None):
         parser.error("choose exactly one of --list or --profile")
@@ -1117,6 +1123,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 0
         output_path = args.output or _next_run_path()
+        if args.profile == "related":
+            return _execute_profile(args.profile, args.timeout_seconds, output_path, base_ref=args.base_ref)
         return _execute_profile(args.profile, args.timeout_seconds, output_path)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Regression runner: {type(error).__name__}: {error}", file=sys.stderr)

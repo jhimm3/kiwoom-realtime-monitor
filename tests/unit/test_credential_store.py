@@ -174,8 +174,10 @@ class CredentialStoreTests(unittest.TestCase):
 
     def test_activation_idempotency_account_change_and_no_secrets(self):
         value = self._activation()
+        value["committed_at"] = "2026-09-15T03:00:00+00:00"
         one = self.database.finalize_credential_activation(value)
         two = self.database.finalize_credential_activation(value)
+        self.assertEqual("2026-09-15T12:00:00+09:00", one["committed_at"])
         self.assertEqual(one, two)
         self.assertEqual(1, len(self.database.load_account_bindings()))
         new_account = self.database.register_account_identity({
@@ -193,15 +195,17 @@ class CredentialStoreTests(unittest.TestCase):
             self.assertNotIn(secret, str(one))
 
     def test_postgres_activation_timestamp_is_normalized_to_iso_text(self):
-        committed_at = datetime.fromisoformat("2026-09-15T12:00:00+09:00")
-        row = (
-            "operation", "kiwoom_mock", 1, "request", "a" * 64,
-            "profile", None, None, None, committed_at,
-        )
-        self.assertEqual(
-            "2026-09-15T12:00:00+09:00",
-            _credential_activation_row(row)["committed_at"],
-        )
+        for text in ("2026-09-15T12:00:00+09:00", "2026-09-15T03:00:00+00:00"):
+            for committed_at in (text, datetime.fromisoformat(text)):
+                with self.subTest(committed_at=committed_at):
+                    row = (
+                        "operation", "kiwoom_mock", 1, "request", "a" * 64,
+                        "profile", None, None, None, committed_at,
+                    )
+                    self.assertEqual(
+                        "2026-09-15T12:00:00+09:00",
+                        _credential_activation_row(row)["committed_at"],
+                    )
 
     def test_activation_failure_rolls_back_binding_and_profile(self):
         value = self._activation()

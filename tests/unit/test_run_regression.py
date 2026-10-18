@@ -341,6 +341,73 @@ class RunRegressionTests(unittest.TestCase):
         )
         self.assertTrue(all(select_ci_groups.select([], "weekly")["groups"].values()))
 
+    def test_related_selection_follows_imports_and_keeps_linux_tests_separate(self) -> None:
+        root = self.directory / "related-source"
+        files = {
+            "src/sample/value.py": "VALUE = 1\n",
+            "src/sample/reader.py": "from .value import VALUE\n",
+            "tests/unit/test_consumer.py": "from sample.reader import VALUE\n",
+            "tests/unit/test_unrelated.py": "import unittest\n",
+            "tests/unit/test_linux.py": "from sample.reader import VALUE\n",
+            "tests/ci_groups.json": json.dumps({"linux_required": ["tests.unit.test_linux"]}),
+        }
+        for name, text in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        self.assertEqual(["tests.unit.test_consumer"], select_ci_groups.related_test_modules(
+            ["src/sample/value.py"], root))
+        self.assertEqual(["tests.unit.test_unrelated"], select_ci_groups.related_test_modules(
+            ["tests/unit/test_unrelated.py"], root))
+        self.assertEqual([], select_ci_groups.related_test_modules(["docs/README.md"], root))
+        (root / "src/sample/value.py").unlink()
+        self.assertEqual(["tests.unit.test_consumer"], select_ci_groups.related_test_modules(
+            ["src/sample/value.py"], root))
+
+    def test_related_report_requires_its_exact_selected_modules_and_completed_workers(self) -> None:
+        modules = ["tests.unit.test_run_regression"]
+        windows = {
+            "status": "passed", "profile": "related", "base_ref": "parent-commit",
+            "git": {"commit": "test-commit", "working_tree_dirty": False},
+            "planned_batches": [{"modules": modules}],
+            "batch_results": [{"modules": modules, "status": "passed", "exit_code": 0,
+                "worker_exit_confirmed": True, "process_tree_exit_confirmed": True,
+                "source": {"verified": True}, "test_count": 1, "planned_test_count": 1}],
+            "code_tree_start": {"lf_sha256": "f" * 64},
+            "code_tree_end": {"lf_sha256": "f" * 64},
+        }
+        with patch.object(select_ci_groups, "related_modules_since", return_value=modules):
+            check_required_ci_results.validate_windows(windows, "test-commit")
+            missing = copy.deepcopy(windows)
+            missing["batch_results"][0]["modules"] = []
+            with self.assertRaisesRegex(ValueError, "plan/result"):
+                check_required_ci_results.validate_windows(missing, "test-commit")
+            unfinished = copy.deepcopy(windows)
+            unfinished["batch_results"][0]["process_tree_exit_confirmed"] = False
+            with self.assertRaisesRegex(ValueError, "worker incomplete"):
+                check_required_ci_results.validate_windows(unfinished, "test-commit")
+        catalog = run_regression._load_ci_groups()
+        linux = {"status": "passed", "modules": catalog["linux_required"], "planned": 1, "ran": 1,
+                 "failures": 0, "errors": 0, "skipped": 0, "expected_failures": 0,
+                 "unexpected_successes": 0, "source_start": {"lf_sha256": "f" * 64},
+                 "source_end": {"lf_sha256": "f" * 64}}
+        postgres = {**linux, "modules": catalog["postgres_required"], "git_commit": "test-commit"}
+        with patch.object(select_ci_groups, "related_modules_since", return_value=[]):
+            check_required_ci_results.validate(None, linux, postgres, "test-commit", base_ref="parent-commit")
+        with patch.object(select_ci_groups, "related_modules_since", return_value=modules):
+            with self.assertRaisesRegex(ValueError, "Windows tests were not executed"):
+                check_required_ci_results.validate(None, linux, postgres, "test-commit", base_ref="parent-commit")
+
+    def test_automatic_related_ci_does_not_depend_on_manual_full_regression(self) -> None:
+        workflow = (run_regression.ROOT / ".github/workflows/dependency-regression.yml").read_text(encoding="utf-8")
+        related = workflow.split("  windows-related:\n", 1)[1].split("\n  postgres-extended:", 1)[0]
+        self.assertIn("needs: [select-extended]", related)
+        self.assertNotIn("all-local", related)
+        self.assertIn("--profile related", related)
+        self.assertNotIn("REGRESSION_BASE_REF:", related)
+        self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.mode == 'comprehensive'", workflow)
+        self.assertNotIn('test "$WINDOWS_JOB" = success\n', workflow)
+
     def test_new_test_modules_must_be_registered_but_existing_exclusions_are_unchanged(self) -> None:
         base_paths = [
             "tests/unit/test_existing_registered.py",
