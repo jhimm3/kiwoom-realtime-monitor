@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-18 R3-023 봉 관측: 기존 Ingestor/Collector/QueryStore provider를 central market_observations와 revision8caller에 인계한다. PC MinuteBarRepository gap/empty/index3메서드는 같은 transaction에서 한 번 받은 available_at을 local helper로 전달한다. 유효 epoch/명시 시각·원본·metadata/COMMIT→ACK·기존정상receipt정책 보존, 새owner/layer/SQL0. 관련12모듈 370건·로컬 4280ca5, 요약표정합화/영향F·잔여는 [R3 최신 원장](REFACTOR_BACKLOG.md#r3-023-봉-관측-fallback품질-시각--2026-10-18)을 따른다.
+
 2026-10-18 R3-023 시계 후속: 기존 app.server_now→MarketDataIngestor/AutonomousTop20 constructor와 기존 QueryStore→SQLite/PG dataset saved_at을 연결했다. owner/파일 수·호출 깊이·transaction·epoch/원본 시각은 그대로이며 새 task/clock 조회는 없다. 관련6모듈 273건 통과/로컬 4e97fe1, F03/F08/F09/F10/F13·잔여 fallback은 [R3-023 정본](REFACTOR_BACKLOG.md#r3-023-시계-주입dataset-저장시각--2026-10-18)을 따른다.
 
 구조 퇴행 방지: [기능별 책임 계약](docs/architecture/r3-ownership.md#필요한-기능군부터-읽기)에서 관련 기능군만 선택한다. `scripts/check_architecture.py`는 기존 `select_ci_groups._dependency_graph`와 구조 계약의 정적 차이만 검사한다. native 비용·실패/종료·연결은 기존 기능 검사를 재사용하며, 도구 자체의 결함 주입 검사는 `tests/unit/test_architecture_guardrails.py`와 기존 runner/CI에 등록한다. 제품 owner·런타임 계층은 추가하지 않는다.

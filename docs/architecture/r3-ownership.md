@@ -54,6 +54,8 @@
 <a id="market-data"></a>
 ## 실시간·저장·복구 — F04~F09
 
+**023 봉 관측 시계.** 중앙 minute/daily·revision helper는 유효 updated_at(epoch0/과거 포함)을 그대로 쓰고 결측/invalid일 때만 기존 Ingestor/Collector/store provider를 소비한다. minute의 fallback 시각은 한 번 공유한다. PC writer→repository의 gap/empty/index metadata도 기존 transaction에서 배치당 한 번 받은 시각을 전달하며 COMMIT→ACK를 유지한다. local helper의 명시 available_at은 보존하고 미주입 standalone은 공통 KST fallback이다. PC 정상 upsert의 기존 receipt 정책·원시값·canonical UTC를 재정의하지 않는다. [native/기존 품질](../../tests/unit/test_minute_bar_repository.py)·[실제 ACK](../../tests/unit/test_realtime_gap_quality.py)·[관측/revision 저장](../../tests/unit/test_central_server_database.py)·[가용시각 reader](../../tests/unit/test_minute_bar_revisions.py)를 영향에 맞춰 선택한다. JournalWindow/legacy SQL 잔여와 실제 PG·운영 수락은 R3-023에 남긴다.
+
 **023 서버 시계·dataset receipt.** app의 기존 공통 `server_now`를 Ingestor와 AutonomousTop20의 기존 provider에 전달한다. QueryStore의 정규화된 provider가 dataset batch saved_at(epoch)을 한 번 샘플하며 revision receipt/원본 observation 시각과 구분한다. RAM 게시와 DB 저장은 서로 다른 기존 시점이다. reader/API는 숫자 epoch를 그대로 반환하고 Shadow의 UTC canonical 표현은 같은 순간의 경계로 유지한다. 새 clock 조회·layer·DB 연결/transaction이 없으며 native SQLite·PG SQL fixture/실제 app 조립의 관련 검증은 R3-023 최신 원장을 따른다. 실제 PG/NAS는 미검증이다. 이 경계 변경 시 [앱 조립·HTTP](../../tests/unit/test_central_server_app.py), [native SQLite](../../tests/unit/test_central_server_database.py), [PG batch 계약](../../tests/unit/test_dataset_batch_postgres.py)을 선택한다.
 
 **현재 책임.** NAS Collector는 상류 등록/ACK·수신·RAM 최신값/봉·직렬 flush를, RealtimeHub와 기존 worker는 배포/PC 전달을 소유한다. PC MainWindow의 0B receiver가 MinuteTradeValueAggregator를 갱신하고 AppController가 pending을 MarketCacheWriter에 넘긴다. TOP20 collector는 cohort 활성화·분 내 기여를 계산한다. 서버 TOP20의 outbox/native index 저장과 ProgramSnapshotWriter의 pending/drain은 각각 기존 owner에 남긴다.

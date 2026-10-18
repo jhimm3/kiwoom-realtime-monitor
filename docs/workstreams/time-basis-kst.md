@@ -547,3 +547,9 @@ finalization retry와 체결시점pressure는 `datetime.min`을 결측값으로 
 R3-023의 남은 생성자 시계 주입과 dataset saved_at 선택 경계를 로컬 커밋 `4e97fe1`에서 보완했다. 기존 app.server_now를 MarketDataIngestor/AutonomousTop20Service에 전달하고, SQLite/PG dataset saved_at은 기존 store._now_provider의 epoch를 쓴다. 관련6모듈 **273건/98.049초 통과**, source/계획·실행ID/worker·자식 종료·임시 정리를 확인했다. 구조 검사와 20번째 증분 원장·실행 대조도 통과했다. 새 계층·DB 경로·조회·clock polling·스키마 변경은 없다.
 
 RAM projection의 게시시각과 dataset의 저장 receipt는 서로 다른 샘플시점이며 같도록 강제하지 않는다. 원시 epoch·원본 observation·naive KST snapshot key와 외부 UTC canonical 경계는 보존하고 과거 DB 자료는 변환하지 않았다. 실제 PostgreSQL은 실행하지 않았고 PG SQL/transaction fixture만 검증했다. 새 제품 push/GitHub CI·NAS 배포·실시간 키움·운영 DB/주문·로컬 전수 회귀는 미실행이다. R3-023 전체는 결측봉 host fallback/legacy SQL 잔여 때문에 진행을 유지한다. 다음은 `_bar_available_at`와 local bar의 결측 시각 경계를 좁혀 확인하며, 기존 정상 epoch·원본 시각·명시적 offline fallback을 일괄 변환하지 않는다. 전후 실측·관련 테스트·F03/F08/F09/F10/F13 판정은 [최신 R3-023 원장](../../REFACTOR_BACKLOG.md#r3-023-시계-주입dataset-저장시각--2026-10-18)을 따른다.
+
+## 2026-10-18 R3-023 봉 관측 fallback·품질 시각
+
+요약표83행 중 상세 최신 상태와 다른 R3-002·023·083의3행을 `5c4814a`에서 먼저 동기화했다. 이후 로컬 제품 `4280ca5`에서 서버 봉 관측의 결측/invalid 시각을 기존 provider로 전달하고, PC gap·빈 분 확인·시장지수 metadata의 누락3경로에 기존 writer 시계를 배치당1회 전달했다. 관련12모듈 **370건/188.485초 통과**, 구조·21번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인했다.
+
+중앙의 유효updated_at은원래epoch를보존하고missing/invalid일때만기존provider를소비한다. local명시available_at도보존하며gap/empty/index3누락경로만기존batch시계를전달한다. 미주입standalone/offline은공통KSTfallback이고replay고정합성2099/검증된finalclosure의유효epoch는원경로를유지한다. 원본/UTCcanonical·업무시각표현을혼동한9시간이동이나과거DB일괄변환은없다. R3-023 전체는 **진행**이다. 다음은 JournalWindow의 `_backfill_received`·`_daily_chart_received`·`import_live_bars`에서의 기존 시계 전달과 standalone/offline 경계를 좁혀 확인하고, SettingsBackup/일지 legacy SQL 시각 잔여를 이어간다. 이번에 끝낸 두 생성자·dataset saved_at·봉 helper/PC3경로를 재조사하지 않는다. 실제 PG·키움/장중·운영DB/주문·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. 상세 전후·검증·F 원장은 [최신 R3-023](../../REFACTOR_BACKLOG.md#r3-023-봉-관측-fallback품질-시각--2026-10-18)을 따른다.

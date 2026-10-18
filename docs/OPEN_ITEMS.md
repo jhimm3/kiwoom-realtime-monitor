@@ -1,5 +1,11 @@
 # 남은 작업 요약
 
+## 2026-10-18 R3-023 봉 관측 fallback·품질 시각
+
+요약표83행 중 상세 최신 상태와 다른 R3-002·023·083의3행을 `5c4814a`에서 먼저 동기화했다. 이후 로컬 제품 `4280ca5`에서 서버 봉 관측의 결측/invalid 시각을 기존 provider로 전달하고, PC gap·빈 분 확인·시장지수 metadata의 누락3경로에 기존 writer 시계를 배치당1회 전달했다. 관련12모듈 **370건/188.485초 통과**, 구조·21번째 증분 원장/실행ID·소스 불변·worker/자식 종료·임시 정리를 확인했다.
+
+R3-023 전체는 **진행**이다. 다음은 JournalWindow의 `_backfill_received`·`_daily_chart_received`·`import_live_bars`에서의 기존 시계 전달과 standalone/offline 경계를 좁혀 확인하고, SettingsBackup/일지 legacy SQL 시각 잔여를 이어간다. 이번에 끝낸 두 생성자·dataset saved_at·봉 helper/PC3경로를 재조사하지 않는다. 실제 PG·키움/장중·운영DB/주문·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다.
+
 ## 2026-10-18 R3-023 시계 주입·dataset 저장시각
 
 R3-023의 남은 생성자 시계 주입과 dataset saved_at 선택 경계를 로컬 커밋 `4e97fe1`에서 보완했다. 기존 app.server_now를 MarketDataIngestor/AutonomousTop20Service에 전달하고, SQLite/PG dataset saved_at은 기존 store._now_provider의 epoch를 쓴다. 관련6모듈 **273건/98.049초 통과**, source/계획·실행ID/worker·자식 종료·임시 정리를 확인했다. 구조 검사와 20번째 증분 원장·실행 대조도 통과했다. 새 계층·DB 경로·조회·clock polling·스키마 변경은 없다.
