@@ -150,6 +150,8 @@ class JournalWindow(QMainWindow):
                 self._snapshot_news_repo.load_journal_linked(group_id, code, account_scope)
                 if self._snapshot_news_repo is not None else ()
             ),
+            # Resolve after construction, from the same client used by UI/workers.
+            now_provider=lambda: self._query_client.server_now(),
         )
         self._journal_settings = QSettings("KiwoomMonitor", "TradingJournalWindow")
         self._selection_row_enabled = True; self._selection_marker_enabled = True; self._selection_row_color = "#DDEBF7"

@@ -8,6 +8,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Protocol
 
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
+
 from kiwoom_monitor.application.journal_enrichment import (
     JournalResearchLink,
     journal_analysis_revision,
@@ -36,7 +38,8 @@ from kiwoom_monitor.application.trade_strategy_coordinator import (
 
 class TradeAnalysisRepository(Protocol):
     def import_monitor_daily_bars(
-        self, monitor_path: Path, code: str, base_day: date, limit: int = 250,
+        self, monitor_path: Path, code: str, base_day: date, limit: int = 250, *,
+        observed_at: datetime | None = None,
     ) -> int: ...
 
     def load_daily_bars(
@@ -127,11 +130,14 @@ class TradeAnalysisPreparationService:
         monitor_db: Path,
         snapshot_loader: SnapshotLoader,
         linked_news_loader: LinkedNewsLoader,
+        *, now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self._repository = repository
         self._monitor_db = monitor_db
         self._snapshot_loader = snapshot_loader
         self._linked_news_loader = linked_news_loader
+        # Unbound startup/offline callers keep the shared local KST fallback.
+        self._now = now_provider if now_provider is not None else kst_now
 
     def prepare(
         self,
@@ -144,8 +150,11 @@ class TradeAnalysisPreparationService:
     ) -> PreparedTradeAnalysis:
         code = episode.summary.stock_code
         base_day = episode.ended_at.date()
+        observed_at = as_kst(self._now())
         try:
-            self._repository.import_monitor_daily_bars(self._monitor_db, code, base_day, 250)
+            self._repository.import_monitor_daily_bars(
+                self._monitor_db, code, base_day, 250, observed_at=observed_at,
+            )
         except (OSError, sqlite3.Error):
             pass
         daily_rows = self._repository.load_daily_bars(code, base_day)

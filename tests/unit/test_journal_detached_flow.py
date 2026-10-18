@@ -18,6 +18,86 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQuery
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
+    def test_window_analysis_and_enrichment_share_current_client_daily_receipt(self) -> None:
+        from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
+        from PySide6.QtWidgets import QApplication
+        from qt_settings_test_support import wait_until
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        from kiwoom_monitor.presentation.journal_workers import AnalysisEnrichmentWorker
+
+        type(self)._application = QApplication.instance() or QApplication([])
+        app = type(self)._application
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor, journal = root / "monitor.sqlite3", root / "journal.sqlite3"
+            Database(monitor).initialize()
+            with closing(sqlite3.connect(monitor)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO daily_bars(stock_code,trade_date,open_price,high_price,low_price,close_price,volume,trade_value_eok) VALUES(?,?,?,?,?,?,?,?)",
+                    (("005930", "2026-09-09", 100, 110, 90, 105, 10, 1.0),
+                     ("005930", "2030-01-02", 200, 210, 190, 205, 20, 2.0)),
+                )
+            settings = QSettings(str(root / "journal.ini"), QSettings.Format.IniFormat)
+            settings.setValue("auto_history_sync_enabled", False)
+            initial = Mock(return_value=as_kst(datetime(2030, 1, 2, 3, 4, 5)))
+            with patch("kiwoom_monitor.journal_process.QSettings", return_value=settings), \
+                 patch("kiwoom_monitor.journal_process.create_query_client", return_value=SimpleNamespace(server_now=initial)), \
+                 patch.object(QTimer, "singleShot"):
+                window = JournalWindow(monitor, journal, root / "api.json")
+            window.shutdown()  # No unrelated timer/network work in this isolated UI path.
+            window._history_followup_timer.stop()  # Constructor's pending history refresh is outside this path.
+            current_episode = group_trade_episodes((
+                TradeFill("1", "005930", "fixture", "매수", datetime(2026, 9, 9, 9, 10), 1, 100),
+                TradeFill("2", "005930", "fixture", "매도", datetime(2026, 9, 9, 9, 15), 1, 105),
+            ))[0]
+            worker = None
+            try:
+                initial.reset_mock()
+                window._show_trade_analysis(current_episode, ())
+                self.assertEqual(1, initial.call_count)
+                self.assertTrue(window._analysis_label.toPlainText())
+                first = MarketDataMetadataRepository(journal).load(
+                    MarketDatasetKind.DAILY_BAR, "005930", "2026-09-09")
+                self.assertEqual(as_kst(datetime(2030, 1, 2, 3, 4, 5)), first.available_at)
+
+                # The already-created preparer must resolve the current client again.
+                updated = Mock(return_value=datetime(2030, 1, 2, 18, 6, 7, tzinfo=timezone.utc))
+                window._query_client = SimpleNamespace(server_now=updated)
+                received, failed, totals = [], [], []
+                worker = AnalysisEnrichmentWorker(
+                    window._trade_analysis_preparer, ((current_episode, ()),),
+                    active_pack=window._active_strategy_pack, strategy_packs=window._strategy_packs,
+                    result_mode=window._strategy_result_mode,
+                )
+                worker.item_completed.connect(lambda *args: received.append(args), Qt.ConnectionType.QueuedConnection)
+                worker.item_failed.connect(lambda *args: failed.append(args), Qt.ConnectionType.QueuedConnection)
+                worker.completed.connect(lambda *args: totals.append(args), Qt.ConnectionType.QueuedConnection)
+                worker.start()
+                wait_until(lambda: bool(totals), 10)
+                self.assertTrue(worker.wait(3000))
+                self.assertEqual([], failed)
+                self.assertEqual([(1, 0)], totals)
+                self.assertEqual(1, received[0][1].daily_bar_count)
+                self.assertEqual(1, updated.call_count)
+                second = MarketDataMetadataRepository(journal).load(
+                    MarketDatasetKind.DAILY_BAR, "005930", "2026-09-09")
+                self.assertEqual(as_kst(updated.return_value), second.available_at)
+                self.assertEqual(first.effective_at, second.effective_at)
+                with closing(sqlite3.connect(journal)) as connection:
+                    rows = connection.execute("SELECT trade_date,close_price,confirmed_at FROM journal_daily_bars").fetchall()
+                self.assertEqual([("2026-09-09", 105, "2030-01-03T03:06:07+09:00")], rows)
+            finally:
+                if worker is not None:
+                    worker.requestInterruption()
+                    self.assertTrue(worker.wait(3000))
+                    worker.deleteLater()
+                    app.sendPostedEvents(worker, QEvent.Type.DeferredDelete)
+                window.shutdown()
+                window.deleteLater()
+                app.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+
     def test_account_change_debounces_reload_and_skips_same_scope(self) -> None:
         scope = AccountScope(
             "kiwoom", AccountEnvironment.REAL, "11111111-1111-4111-8111-111111111111",
