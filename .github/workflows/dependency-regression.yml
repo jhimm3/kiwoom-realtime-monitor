@@ -390,6 +390,7 @@ jobs:
           set -o pipefail
           python scripts/check_recorded_replay_baseline.py --execution-gates \
             --secrets-directory tmp/regression/ci-sealed/secrets \
+            --report tmp/regression/ci-sealed/v1-execution.json \
             2>&1 | tee tmp/regression/ci-sealed/v1-execution.log
       - name: Build exact checkout runtime image for isolated v2
         shell: bash
@@ -437,7 +438,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sealed-replay-${{ github.run_id }}
-          path: tmp/regression/ci-sealed/*.log
+          path: |
+            tmp/regression/ci-sealed/*.log
+            tmp/regression/ci-sealed/v1-execution.json
           if-no-files-found: error
           retention-days: 14
 
@@ -543,12 +546,22 @@ jobs:
             --linux tmp/ci-required/postgres/linux-unit.json \
             --postgres tmp/ci-required/postgres/required.json
 
+      - name: Download selected sealed execution result
+        if: ${{ env.SEALED_SELECTED == 'true' }}
+        uses: actions/download-artifact@v7
+        with:
+          name: sealed-replay-${{ github.run_id }}
+          path: tmp/ci-required/sealed
+
       - name: Confirm declared related tests actually ran
         env:
           REVIEW_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
-        run: >-
-          python -m scripts.check_test_changes --base-ref "$REVIEW_BASE"
-          --execution tmp/ci-required/windows/run.json
-          --execution tmp/ci-required/postgres/linux-unit.json
-          --execution tmp/ci-required/postgres/required.json
-          --report tmp/ci-required/test-review.json
+        run: |
+          reports=(--execution tmp/ci-required/windows/run.json
+                   --execution tmp/ci-required/postgres/linux-unit.json
+                   --execution tmp/ci-required/postgres/required.json)
+          if [ "$SEALED_SELECTED" = true ]; then
+            reports+=(--execution tmp/ci-required/sealed/v1-execution.json)
+          fi
+          python -m scripts.check_test_changes --base-ref "$REVIEW_BASE" "${reports[@]}" \
+            --report tmp/ci-required/test-review.json

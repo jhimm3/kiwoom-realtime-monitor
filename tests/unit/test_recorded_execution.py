@@ -112,7 +112,8 @@ class RecordedExecutionTests(unittest.TestCase):
                 'collector_input_version': COLLECTOR_INPUT_VERSION, 'excluded_types': omissions,
                 'payload': freeze_payload(value).value})
         with tempfile.TemporaryDirectory() as root:
-            store = SQLiteQueryStore(Path(root) / 'market.sqlite3')
+            store = SQLiteQueryStore(Path(root) / 'market.sqlite3',
+                                     now_provider=lambda: origin + timedelta(seconds=1))
             store.initialize()
             try:
                 with patch('kiwoom_monitor.central_server.realtime_collector.connect',
@@ -131,8 +132,7 @@ class RecordedExecutionTests(unittest.TestCase):
                 self.assertIn('market_state', {call['kind'] for call in report['calls']})
                 self.assertEqual('input-2', next(call for call in report['calls']
                                                if call['kind'] == 'market_state')['source_input_id_high_water'])
-                with patch('kiwoom_monitor.central_server.database_realtime_snapshot.time', return_value=origin.timestamp() + 1):
-                    latest = store.load_realtime_snapshots(['005930', 'kospi', 'kosdaq'])
+                latest = store.load_realtime_snapshots(['005930', 'kospi', 'kosdaq'])
                 self.assertEqual(4, len(latest))
                 program = next(row['payload'] for row in latest if row['type'] == 'program_trade')
                 self.assertEqual(('NXT', -5, 7), (program['market'], program['net_buy_quantity'], program['net_buy_amount_million_won']))

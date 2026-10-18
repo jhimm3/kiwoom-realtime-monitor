@@ -1156,13 +1156,13 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
             log_path = output_path / f"worker-{index:03}.log"
             if os.environ.get("GITHUB_ACTIONS") == "true":
                 print(json.dumps({"worker": index, "workers": len(workers),
-                                  "name": name, "phase": "start"}), flush=True)
+                                  "name": name, "phase": "start"}), file=sys.stderr, flush=True)
             result = _run_process(modules=modules, result_path=result_path,
                                   log_path=log_path, timeout_seconds=timeout_seconds)
             if os.environ.get("GITHUB_ACTIONS") == "true":
                 print(json.dumps({"worker": index, "name": name, "phase": "complete",
                                   "status": result["status"], "seconds": result.get("duration_seconds"),
-                                  "tests": result.get("test_count", 0)}), flush=True)
+                                  "tests": result.get("test_count", 0)}), file=sys.stderr, flush=True)
             result["name"] = name
             result["modules"] = list(modules)
             summary["batch_results"].append(result)

@@ -48,8 +48,7 @@ class CentralRestBrokerTests(unittest.TestCase):
         async def scenario():
             now = [datetime.fromisoformat("2026-10-01T06:59:59+09:00")]
             store, client = Store(), FakeClient()
-            with patch("kiwoom_monitor.central_server.rest_broker.datetime") as clock:
-                clock.now.side_effect = lambda *_: now[0]
+            with patch.object(client, "server_now", side_effect=lambda: now[0], create=True):
                 broker = CentralRestBroker(client, store=store)
                 await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
                 broker._cache.clear()
@@ -81,8 +80,7 @@ class CentralRestBrokerTests(unittest.TestCase):
             store = Store()
             client = FakeClient()
             now = [datetime.fromisoformat("2026-10-01T06:59:59+09:00")]
-            with patch("kiwoom_monitor.central_server.rest_broker.datetime") as clock:
-                clock.now.side_effect = lambda *_: now[0]
+            with patch.object(client, "server_now", side_effect=lambda: now[0], create=True):
                 broker = CentralRestBroker(client, store=store)
                 await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
                 repeated = await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})

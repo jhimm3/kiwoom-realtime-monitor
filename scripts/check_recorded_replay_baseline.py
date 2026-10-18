@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import subprocess
 import sys
 import unittest
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -25,6 +26,7 @@ import psycopg
 from psycopg import sql
 from kiwoom_monitor.central_server import diagnostic_replay_baseline as baseline
 from scripts.run_postgres_access_integration import _dedicated_url
+from scripts.run_regression import _code_tree_identity, _IdentityTestResult, _suite_test_ids
 
 
 def _endpoint(server_url):
@@ -159,6 +161,8 @@ def main(argv=None):
                         help='capture/window/native replay gates on the already sealed replay DB')
     parser.add_argument('--recorded-capture-gates', action='store_true',
                         help='run capture invariants and recorded collector replay gates together')
+    parser.add_argument('--report', type=Path,
+                        help='write execution identities and source evidence without credentials')
     args = parser.parse_args(argv)
     if args.execution_gates and args.recorded_capture_gates:
         parser.error('choose one acceptance gate set')
@@ -166,6 +170,8 @@ def main(argv=None):
         parser.error('acceptance gates require an already provisioned and sealed replay DB')
     stage = 'settings'
     try:
+        if args.report and (args.report.exists() or args.report.is_symlink()):
+            raise FileExistsError('replay_acceptance_report_exists')
         server_url = os.environ.get('KIWOOM_SERVER_DATABASE_URL', '')
         endpoint = _endpoint(server_url)
         with _locked_secrets(args.secrets_directory) as directory:
@@ -191,27 +197,52 @@ def main(argv=None):
             # execution gates use the separately sealed replay DB above.
             os.environ['KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL'] = _dedicated_url(server_url)
             stage = 'postgres_acceptance'
+            source_start = _code_tree_identity() if args.report else None
             if args.recorded_capture_gates:
-                suite = unittest.TestSuite((
-                    unittest.defaultTestLoader.loadTestsFromName(
-                        'tests.integration.test_recorded_workload_capture_postgres.RecordedWorkloadCapturePostgresTests'),
-                    unittest.defaultTestLoader.loadTestsFromName(
-                        'tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests'),
-                ))
-                module_counts = [part.countTestCases() for part in suite]
+                suite_names = (
+                    'tests.integration.test_recorded_workload_capture_postgres.RecordedWorkloadCapturePostgresTests',
+                    'tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests')
             else:
                 suite_name = ('tests.integration.test_recorded_execution_postgres.RecordedExecutionPostgresTests'
                               if args.execution_gates else
                               'tests.integration.test_recorded_replay_baseline_postgres.RecordedReplayBaselinePostgresTests')
-                suite = unittest.defaultTestLoader.loadTestsFromName(suite_name)
-                module_counts = [suite.countTestCases()]
+                suite_names = (suite_name,)
+            parts = [unittest.defaultTestLoader.loadTestsFromName(name) for name in suite_names]
+            module_counts = [part.countTestCases() for part in parts]
+            discovered = {name.rsplit('.', 1)[0]: count for name, count in zip(suite_names, module_counts)}
+            suite = unittest.TestSuite(parts) if len(parts) > 1 else parts[0]
             planned_tests = suite.countTestCases()
             if planned_tests < 1 or not all(module_counts):
                 raise RuntimeError('replay_acceptance_discovered_no_tests')
-            result = unittest.TextTestRunner(verbosity=2).run(suite)
+            planned_ids = _suite_test_ids(suite) if args.report else None
+            result = unittest.TextTestRunner(verbosity=2, **(
+                {'resultclass': _IdentityTestResult} if args.report else {})).run(suite)
+            source_end = _code_tree_identity() if args.report else None
             success = (result.wasSuccessful() and result.testsRun == planned_tests
                        and not result.skipped and not result.expectedFailures
                        and not result.unexpectedSuccesses)
+            if args.report:
+                success = (success and source_start['lf_sha256'] == source_end['lf_sha256']
+                           and planned_ids == result.executed_test_ids
+                           and len(set(result.executed_test_ids)) == len(result.executed_test_ids))
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                report = {
+                    'status': 'passed' if success else 'failed',
+                    'group': ('recorded_capture' if args.recorded_capture_gates else
+                              'recorded_execution' if args.execution_gates else 'recorded_baseline'),
+                    'modules': list(discovered), 'discovered': discovered,
+                    'planned': planned_tests, 'ran': result.testsRun,
+                    'planned_test_ids': planned_ids, 'executed_test_ids': result.executed_test_ids,
+                    'failures': len(result.failures), 'errors': len(result.errors),
+                    'skipped': len(result.skipped), 'expected_failures': len(result.expectedFailures),
+                    'unexpected_successes': len(result.unexpectedSuccesses),
+                    'git_commit': subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
+                        capture_output=True, text=True, check=True).stdout.strip(),
+                    'source_root': str(ROOT / 'src'),
+                    'source_start': source_start, 'source_end': source_end,
+                }
+                with args.report.open('x', encoding='utf-8') as stream:
+                    stream.write(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
             print(json.dumps({'state': 'passed' if success else 'failed',
                               'database': baseline.DATABASE_NAME, 'source': str(ROOT),
                               'baseline_id': baseline_id, 'planned_tests': planned_tests, 'module_counts': module_counts, 'tests': result.testsRun,

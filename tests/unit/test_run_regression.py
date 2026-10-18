@@ -10,7 +10,7 @@ import time
 import tempfile
 import unittest
 import yaml
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -485,6 +485,24 @@ class RunRegressionTests(unittest.TestCase):
         sealed_build = workflow.split("      - name: Build exact checkout runtime image for isolated v2\n", 1)[1].split("      - name: Confirm installed", 1)[0]
         self.assertIn("tee tmp/regression/ci-sealed/build.log", sealed_build)
         self.assertNotIn("ci-operator/", sealed_build)
+        # A changed native sealed test must reach the same execution-ID check;
+        # successful upstream job status alone cannot supply its discovery receipt.
+        import yaml
+        jobs = yaml.load(workflow, Loader=yaml.BaseLoader)['jobs']
+        sealed = {step.get('name'): step for step in jobs['sealed-replay']['steps']}
+        required = {step.get('name'): step for step in jobs['required-regression']['steps']}
+        self.assertIn('--report tmp/regression/ci-sealed/v1-execution.json',
+                      sealed['Check v1 recorded execution on sealed DB']['run'])
+        artifact = sealed['Preserve replay outcomes without secret files']['with']
+        download = required['Download selected sealed execution result']
+        self.assertEqual(artifact['name'], download['with']['name'])
+        self.assertIn('tmp/regression/ci-sealed/v1-execution.json', artifact['path'].splitlines())
+        self.assertEqual("${{ env.SEALED_SELECTED == 'true' }}", download['if'])
+        self.assertEqual('tmp/ci-required/sealed', download['with']['path'])
+        declaration = required['Confirm declared related tests actually ran']['run']
+        self.assertIn('if [ "$SEALED_SELECTED" = true ]; then', declaration)
+        self.assertIn('reports+=(--execution tmp/ci-required/sealed/v1-execution.json)', declaration)
+        self.assertIn('"${reports[@]}"', declaration)
 
     def test_new_test_modules_must_be_registered_but_existing_exclusions_are_unchanged(self) -> None:
         base_paths = [
@@ -828,14 +846,17 @@ class RunRegressionTests(unittest.TestCase):
                 passed = {"status": "passed", "worker_exit_confirmed": True,
                     "process_tree_exit_confirmed": True, "test_count": 1}
                 console = StringIO()
+                summary_output = StringIO()
                 with patch.object(run_regression, "_run_process", side_effect=[first, passed]) as run, \
-                        patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), redirect_stdout(console):
+                        patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), \
+                        redirect_stderr(console), redirect_stdout(summary_output):
                     self.assertNotEqual(0, run_regression._execute_profile("core", 5, output))
                 events = [json.loads(line) for line in console.getvalue().splitlines()]
                 self.assertEqual(["start", "complete"] * run.call_count,
                                  [event["phase"] for event in events if "phase" in event])
                 self.assertEqual(first["status"], events[1]["status"])
                 result = json.loads((output / "run.json").read_text(encoding="utf-8"))
+                self.assertEqual(result['status'], json.loads(summary_output.getvalue())['status'])
                 self.assertEqual(1 if stop else 2, run.call_count)
                 self.assertEqual(["journal-and-news"] if stop else [], result["unrun_batches"])
                 self.assertEqual(first["status"], result["batch_results"][0]["status"])

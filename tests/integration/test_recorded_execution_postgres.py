@@ -64,6 +64,26 @@ class RecordedExecutionPostgresTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertEqual(0, lease.status()['owned_connections'])
+            # libpq close releases the local receipt before PostgreSQL necessarily
+            # removes this backend. Observe that exact PID, without relaxing the
+            # restore gate for any other session or assuming a fixed sleep drains it.
+            closed_at, probes, first_present = time.monotonic(), 0, None
+            while True:
+                with lease.connection.cursor() as cursor:
+                    cursor.execute('SELECT EXISTS (SELECT 1 FROM pg_stat_activity '
+                                   'WHERE datname=current_database() AND pid=%s)', (pid,))
+                    present = cursor.fetchone()[0]
+                probes += 1
+                if first_present is None:
+                    first_present = present
+                elapsed = time.monotonic() - closed_at
+                if not present or elapsed >= 5:
+                    print(json.dumps({'closed_writer_backend_pid': pid,
+                        'first_probe_present': first_present, 'last_probe_present': present,
+                        'probe_count': probes, 'elapsed_seconds': elapsed}), flush=True)
+                    self.assertFalse(present, 'closed replay writer backend did not exit within 5 seconds')
+                    break
+                time.sleep(.01)
             with lease.connection.cursor() as cursor:
                 cursor.execute('SHOW default_transaction_read_only')
                 self.assertEqual('off', cursor.fetchone()[0])
