@@ -2055,6 +2055,77 @@ class Top20IndexFlushOwnershipTests(unittest.IsolatedAsyncioTestCase):
             ("005930",), (1, 0, 0), (), "partial",
         )
 
+    async def test_unreadable_outbox_start_preserves_source_before_task_start_and_recovers(self):
+        import json
+        for original, expected in ((b'{"old":', json.JSONDecodeError), (b"[]", ValueError)):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:
+                store, service = self._store_and_service(directory)
+                path = Path(directory) / "index-outbox.json"
+                await service._queue_index(self._record())
+                valid = path.read_bytes()
+                path.write_bytes(original)
+                try:
+                    with patch.object(store, "save_dataset_snapshot", wraps=store.save_dataset_snapshot) as save:
+                        caught = None
+                        try:
+                            await service.start()
+                        except Exception as error:
+                            caught = error
+                        self.assertEqual(original, path.read_bytes())
+                        self.assertIsInstance(caught, expected)
+                        self.assertEqual([], service._tasks)
+                        self.assertIsNone(service._subscriber)
+                        save.assert_not_called()
+                    await service.close()
+                    self.assertEqual(original, path.read_bytes())
+                    # Explicitly repair this owned temporary fixture; no automatic fallback policy.
+                    path.write_bytes(valid)
+                    await service.start()
+                    await service.close()
+                    rows = store.load_dataset_snapshots("top20_index", "2026-09-10", 10)
+                    self.assertEqual([10.0], [row["payload"]["total"] for row in rows])
+                    self.assertEqual({}, service._outbox.load())
+                    self.assertEqual({}, service._pending_index_records)
+                finally:
+                    await service.close()
+                    store.close()
+
+
+    async def test_outbox_read_failure_keeps_queue_or_native_ack_pending_until_retry(self):
+        from dataclasses import replace
+        for boundary in ("put", "remove"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                store, service = self._store_and_service(directory)
+                path = Path(directory) / "index-outbox.json"
+                await service._queue_index(self._record(10.0))
+                original = path.read_bytes()
+                try:
+                    with patch.object(Path, "read_text", side_effect=OSError("controlled outbox read failure")):
+                        with self.assertRaisesRegex(OSError, "controlled outbox read failure"):
+                            if boundary == "put":
+                                later = replace(self._record(20.0), minute=datetime.fromisoformat("2026-09-10T10:02:00+09:00"))
+                                await service._queue_index(later)
+                            else:
+                                await service._flush_pending_indexes()
+                    self.assertEqual(original, path.read_bytes())
+                    self.assertEqual(2 if boundary == "put" else 1, len(service._pending_index_records))
+                    self.assertEqual(0 if boundary == "put" else 1,
+                                     len(store.load_dataset_snapshots("top20_index", "2026-09-10", 10)))
+                    if boundary == "put":
+                        await service.start()  # Restored disk input and current RAM input both save.
+                    else:
+                        await service._flush_pending_indexes()  # Retry a committed save whose ACK removal failed.
+                    await service.close()
+                    self.assertEqual({}, service._outbox.load())
+                    self.assertEqual({}, service._pending_index_records)
+                    rows = store.load_dataset_snapshots("top20_index", "2026-09-10", 10)
+                    self.assertEqual([10.0, 20.0] if boundary == "put" else [10.0],
+                                     sorted(row["payload"]["total"] for row in rows))
+                finally:
+                    await service.close()
+                    store.close()
+
+
     async def test_concurrent_index_flushes_share_one_actual_native_save(self):
         with tempfile.TemporaryDirectory() as directory:
             store, service = self._store_and_service(directory)

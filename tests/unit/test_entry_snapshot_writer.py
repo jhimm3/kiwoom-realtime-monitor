@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import sqlite3
+import threading
 import unittest
 import uuid
 from contextlib import closing
@@ -25,6 +26,99 @@ class EntrySnapshotWriterTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_running_worker_keeps_old_job_but_never_publishes_into_replaced_provider_cache(self):
+        for transition in ("replacement", "disabled", "same", "roundtrip"):
+            with self.subTest(transition=transition), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "journal.sqlite3"
+                scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+                at = datetime(2026, 10, 20, 10, 30)
+                snapshot = TradeEntrySnapshot(scoped_snapshot_execution_key("old-030", scope), "order-030",
+                    "005930", "삼성전자", "매수", at, 70000, 1, "KRX", origin_scope=scope)
+                entered, release, old_returned = threading.Event(), threading.Event(), threading.Event()
+                calls = {"old": [], "new": []}
+                def old(code, observed):
+                    calls["old"].append((code, observed))
+                    count = len(calls["old"])
+                    if count == 1:
+                        entered.set()
+                        if not release.wait(3):
+                            old_returned.set()
+                            raise TimeoutError("old provider was not released")
+                        old_returned.set()
+                    return {"available": True, "source": "old", "provider_call": count}
+                def new(code, observed):
+                    calls["new"].append((code, observed))
+                    return {"available": True, "source": "new", "provider_call": len(calls["new"])}
+                writer = EntrySnapshotWriter(path, investor_loader=old)
+                failures = []
+                writer.failed.connect(failures.append)
+                writer.enqueue(snapshot)
+                writer.start()
+                try:
+                    self.assertTrue(entered.wait(2))
+                    # The setter must finish while provider I/O is still blocked.
+                    if transition == "roundtrip":
+                        writer.set_investor_loader(new)
+                    writer.set_investor_loader(new if transition == "replacement" else None if transition == "disabled" else old)
+                    self.assertFalse(release.is_set())
+                    self.assertFalse(old_returned.is_set(), "setter waited for provider I/O")
+                    release.set()
+                    for index in (1, 2):
+                        writer.enqueue(replace(snapshot, execution_key=scoped_snapshot_execution_key(f"new-030-{index}", scope),
+                                               executed_at=at + timedelta(seconds=index)))
+                    writer.requestInterruption()
+                    self.assertTrue(writer.wait(5000))
+                    stored = JournalRepository(path).load_entry_snapshots("005930", at, at + timedelta(seconds=3), scope)
+                    self.assertEqual([], failures)
+                    self.assertEqual(3, len(stored))
+                    self.assertEqual({"available": True, "source": "old", "provider_call": 1}, stored[0].investor_flow)
+                    if transition == "disabled":
+                        self.assertEqual(({}, {}), tuple(item.investor_flow for item in stored[1:]))
+                        self.assertEqual({}, writer._investor_cache)
+                        self.assertEqual((1, 0), (len(calls["old"]), len(calls["new"])))
+                    else:
+                        source, count = ("new", 1) if transition == "replacement" else ("old", 2)
+                        self.assertEqual({"available": True, "source": source, "provider_call": count}, stored[1].investor_flow)
+                        self.assertEqual({"available": True, "source": source, "provider_call": count, "cached": True}, stored[2].investor_flow)
+                        self.assertEqual((1, 1) if transition == "replacement" else (2, 0),
+                                         (len(calls["old"]), len(calls["new"])))
+                        self.assertEqual(stored[1].investor_flow, writer._investor_cache["005930"][1])
+                    self.assertTrue(all(item.origin_scope == scope for item in stored))
+                    self.assertFalse(writer.has_pending_work())
+                finally:
+                    release.set()
+                    writer.requestInterruption()
+                    self.assertTrue(writer.wait(5000))
+
+    def test_provider_cache_keeps_ttl_code_key_copy_and_optional_error_contract(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as directory:
+            scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+            snapshot = TradeEntrySnapshot(scoped_snapshot_execution_key("ttl-030", scope), "order-030",
+                "005930", "삼성전자", "매수", datetime(2026, 10, 20, 10, 30), 70000, 1, "KRX", origin_scope=scope)
+            loader = Mock(side_effect=({"available": True, "value": 1}, {"available": True, "value": 2}))
+            writer = EntrySnapshotWriter(Path(directory) / "journal.sqlite3", investor_loader=loader)
+            clock = [100.0]
+            with patch("kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer.time.monotonic", side_effect=lambda: clock[0]):
+                self.assertEqual({"available": True, "value": 1}, writer._investor_at_execution(snapshot))
+                clock[0] = 159.999
+                cached = writer._investor_at_execution(replace(snapshot, executed_at=snapshot.executed_at + timedelta(days=1)))
+                self.assertEqual({"available": True, "value": 1, "cached": True}, cached)
+                cached["value"] = 99
+                self.assertEqual({"available": True, "value": 1}, writer._investor_cache["005930"][1])
+                clock[0] = 160.0
+                self.assertEqual({"available": True, "value": 2}, writer._investor_at_execution(snapshot))
+            self.assertEqual(2, loader.call_count)
+            self.assertEqual({"available": True, "value": 2}, writer._investor_cache["005930"][1])
+            unavailable = Mock(side_effect=OSError("provider unavailable"))
+            writer.set_investor_loader(unavailable)
+            for _ in range(2):
+                self.assertEqual({"available": False, "error": "provider unavailable"}, writer._investor_at_execution(snapshot))
+            self.assertEqual(2, unavailable.call_count)
+            self.assertEqual({}, writer._investor_cache)
+            writer.set_investor_loader(None)
+            self.assertEqual({}, writer._investor_at_execution(snapshot))
 
     def test_failed_base_and_enriched_writes_keep_exact_payload_until_explicit_retry(self) -> None:
         for stage in ("base", "enriched"):

@@ -274,11 +274,11 @@ class RealCredentialOwner:
                 context.realtime_drain_failed = True
         await asyncio.gather(*(asyncio.shield(task) for context in contexts
                                for task in tuple(context.account_reads)), return_exceptions=True)
-        if require_saved_events and not self._closing and any(isinstance(result, BaseException)
-                                                               for result in (*monitor_results, *writer_results)):
+        if require_saved_events and any(isinstance(result, BaseException)
+                                        for result in (*monitor_results, *writer_results)):
             raise RuntimeError("REAL_ACCOUNT_DRAIN_FAILED")
-        if require_saved_events and not self._closing and any(context.pending_event is not None or not context.event_queue.empty()
-                                     for context in contexts):
+        if require_saved_events and any(context.pending_event is not None or not context.event_queue.empty()
+                                        for context in contexts):
             raise RuntimeError("REAL_ACCOUNT_EVENTS_PENDING")
 
     def _start_account_monitor(self, profile_id, context, configuration):
@@ -1052,8 +1052,19 @@ class RealCredentialOwner:
 
     async def close(self):
         self._closing = True
-        if self._close_task is None:
+        retry = (self._close_task is not None and self._close_task.done()
+                 and not self._close_task.cancelled() and self._close_task.exception() is not None)
+        if self._close_task is None or retry:
+            if retry:
+                for context in self._contexts.values():
+                    if (context.event_writer is not None and context.event_writer.done()
+                            and not context.event_writer.cancelled()
+                            and (context.pending_event is not None or not context.event_queue.empty())):
+                        # Explicit close retry drains the original evidence with producers still stopped.
+                        context.event_writer = asyncio.create_task(self._write_account_events(context),
+                                                                  name="real-account-event-writer")
             self._close_task = asyncio.create_task(self._close(), name="real-owner-close")
+            self._close_task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         await asyncio.shield(self._close_task)
 
     async def _close(self):
@@ -1063,8 +1074,8 @@ class RealCredentialOwner:
         if self._start_task is not None:
             await asyncio.gather(asyncio.shield(self._start_task), return_exceptions=True)
         await asyncio.gather(*self._boot_tasks, return_exceptions=True)
+        await self._drain_account_reads(*self._contexts.values())
         for context in self._contexts.values():
-            await self._drain_account_reads(context)
             if context.account_queries is not None:
                 await context.account_queries.close()
             # The shared market broker/collector are closed by the server after producers.

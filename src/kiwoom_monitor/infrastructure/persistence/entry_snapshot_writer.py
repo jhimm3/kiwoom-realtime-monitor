@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from queue import Empty, Queue
+from threading import Lock
 import time
 from dataclasses import replace
 from datetime import date, datetime, time as datetime_time
@@ -35,6 +36,7 @@ class EntrySnapshotWriter(QThread):
         self._pending_enriched = False
         # Observed values belong only to this unfinished job, not the provider cache.
         self._pending_backfill_values: dict[str, Any] = {}
+        self._investor_cache_lock = Lock()
         self._investor_cache: dict[str, tuple[float, dict[str, object]]] = {}
 
     def enqueue(self, snapshot: TradeEntrySnapshot) -> None:
@@ -47,8 +49,10 @@ class EntrySnapshotWriter(QThread):
         self._queue.put(("investor_backfill", trade_date, codes))
 
     def set_investor_loader(self, loader: Callable[[str, datetime], dict[str, object]] | None) -> None:
-        self._investor_loader = loader
-        self._investor_cache.clear()
+        with self._investor_cache_lock:
+            self._investor_loader = loader
+            # A detached dict is also a generation token, even for the same loader.
+            self._investor_cache = {}
 
     def set_program_loader(self, loader: Callable[[str, date], tuple[dict[str, object], ...]] | None) -> None:
         self._program_loader = loader
@@ -165,14 +169,19 @@ class EntrySnapshotWriter(QThread):
         return news_at_execution(repository, snapshot)
 
     def _investor_at_execution(self, snapshot: TradeEntrySnapshot) -> dict[str, object]:
-        if self._investor_loader is None:
-            return {}
-        cached = self._investor_cache.get(snapshot.stock_code)
-        if cached and time.monotonic() - cached[0] < 60:
-            return {**cached[1], "cached": True}
+        with self._investor_cache_lock:
+            loader = self._investor_loader
+            cache = self._investor_cache
+            if loader is None:
+                return {}
+            cached = cache.get(snapshot.stock_code)
+            if cached and time.monotonic() - cached[0] < 60:
+                return {**cached[1], "cached": True}
         try:
-            value = self._investor_loader(snapshot.stock_code, snapshot.executed_at)
+            value = loader(snapshot.stock_code, snapshot.executed_at)
         except Exception as error:
             return {"available": False, "error": str(error)}
-        self._investor_cache[snapshot.stock_code] = (time.monotonic(), value)
+        with self._investor_cache_lock:
+            if cache is self._investor_cache and loader is self._investor_loader:
+                cache[snapshot.stock_code] = (time.monotonic(), value)
         return value

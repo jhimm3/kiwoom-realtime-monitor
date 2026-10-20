@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import unittest
+import uuid
+from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import TradeEntrySnapshot
+from PySide6.QtWidgets import QApplication
+
+from kiwoom_monitor.domain.market_data_contract import DataCompleteness, MarketDatasetKind, ObservationOrigin
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.domain.time_basis import as_kst
+from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
+    TradeEntrySnapshot,
+    scoped_snapshot_execution_key,
+)
+from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+from kiwoom_monitor.presentation.trade_review_formatting import format_entry_snapshot_blocks
 from kiwoom_monitor.infrastructure.persistence.journal_snapshot_service import (
     load_episode_entry_snapshots,
     news_at_execution,
@@ -135,6 +153,176 @@ class JournalSnapshotServiceTests(unittest.TestCase):
             (),
             news_at_execution(SimpleNamespace(load=fail), snapshot("one", self.started)),
         )
+
+
+class NativeJournalSnapshotNewsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_duplicate_writer_keeps_observed_news_for_episode_consumer_and_account(self) -> None:
+        for backfilled in (False, True):
+            for enrich_investor in (False, True):
+                with self.subTest(backfilled=backfilled, enrich_investor=enrich_investor), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "journal.sqlite3"
+                    repository = JournalRepository(path)
+                    at = datetime(2026, 10, 19, 10, 30)
+                    scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+                    other_scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+                    source_key = "same-broker-execution"
+                    original_news = ({"title": "original", "link": "https://example/original",
+                                      "published_at": "2026-10-19T10:20:00+09:00"},)
+                    base = replace(snapshot(scoped_snapshot_execution_key(source_key, scope), at),
+                                   origin_scope=scope, orderbook={"source": "original-0B"})
+                    other = replace(base, execution_key=scoped_snapshot_execution_key(source_key, other_scope),
+                                    origin_scope=other_scope, news=({"title": "other-account"},))
+                    repository.save_entry_snapshot(other, now=at, account_scope=other_scope)
+                    repository.save_entry_snapshot(replace(base, news=() if backfilled else original_news),
+                                                   now=at, account_scope=scope)
+                    if backfilled:
+                        with patch(
+                            "kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository.kst_wall_now",
+                            return_value=as_kst(at + timedelta(hours=1)),
+                        ):
+                            load_episode_entry_snapshots(
+                                repository, object(), base.stock_code, at, at + timedelta(minutes=1),
+                                news_loader=lambda _repo, _snapshot: original_news,
+                                account_scope=scope,
+                            )
+                    expected = repository.load_entry_snapshots(base.stock_code, at, at + timedelta(seconds=1), scope)[0]
+                    expected_news_metadata = MarketDataMetadataRepository(path).load(
+                        MarketDatasetKind.ENTRY_CONTEXT, f"{base.stock_code}:news", base.execution_key,
+                    )
+                    investor = {"available": True, "backfilled": True, "source": "confirmed-investor"}
+                    program = {"available": True, "backfilled": True, "source": "confirmed-0w"}
+                    repository.save_investor_flow_backfill(base.execution_key, investor)
+                    repository.save_program_trade_backfill(base.execution_key, program)
+                    loader = (lambda _code, _at: {"available": True, "source": "new-investor"}) if enrich_investor else None
+                    if enrich_investor:
+                        with closing(sqlite3.connect(path)) as connection:
+                            connection.execute(
+                                "CREATE TRIGGER fail_enriched BEFORE INSERT ON trade_entry_snapshots "
+                                "WHEN NEW.capture_state='realtime_enriched' "
+                                "BEGIN SELECT RAISE(ABORT,'064 enrichment fault'); END"
+                            )
+                            connection.commit()
+                    writer = EntrySnapshotWriter(path, investor_loader=loader)
+                    try:
+                        writer.enqueue(base)
+                        writer.start()
+                        writer.requestInterruption()
+                        self.assertTrue(writer.wait(5000))
+                        if enrich_investor:
+                            self.assertTrue(writer.has_pending_work())
+                            with closing(sqlite3.connect(path)) as connection:
+                                connection.execute("DROP TRIGGER fail_enriched")
+                                connection.commit()
+                            writer.start()
+                            writer.requestInterruption()
+                            self.assertTrue(writer.wait(5000))
+                        self.assertFalse(writer.has_pending_work())
+                    finally:
+                        writer.requestInterruption()
+                        self.assertTrue(writer.wait(5000))
+                    loads: list[str] = []
+
+                    def unexpected_reload(_repository: object, value: TradeEntrySnapshot) -> tuple[dict[str, object], ...]:
+                        loads.append(value.execution_key)
+                        return ()
+
+                    rows = load_episode_entry_snapshots(
+                        repository, object(), base.stock_code, at, at + timedelta(minutes=1),
+                        news_loader=unexpected_reload, account_scope=scope,
+                    )
+                    self.assertEqual(expected.news, rows[0].news)
+                    self.assertEqual([], loads)
+                    self.assertTrue(any("관련 뉴스 1건" in block for block in format_entry_snapshot_blocks(rows[0])))
+                    self.assertEqual(base.execution_key, rows[0].execution_key)
+                    self.assertEqual(scope, rows[0].origin_scope)
+                    self.assertEqual(base.executed_at, rows[0].executed_at)
+                    self.assertEqual(base.orderbook, rows[0].orderbook)
+                    self.assertEqual("confirmed-investor", rows[0].investor_flow["source"])
+                    self.assertEqual(program, rows[0].investor_flow["program_trade"])
+                    self.assertEqual(other.news, repository.load_entry_snapshots(
+                        base.stock_code, at, at + timedelta(seconds=1), other_scope,
+                    )[0].news)
+                    metadata = MarketDataMetadataRepository(path).load(
+                        MarketDatasetKind.ENTRY_CONTEXT, f"{base.stock_code}:news", base.execution_key,
+                    )
+                    self.assertIsNotNone(metadata)
+                    self.assertEqual(ObservationOrigin.BACKFILLED if backfilled else ObservationOrigin.REALTIME, metadata.origin)
+                    self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+                    self.assertEqual(expected_news_metadata, metadata)
+
+    def test_native_news_updates_remain_explicit_and_atomic_on_failure_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            at = datetime(2026, 10, 19, 10, 30)
+            base = snapshot("native-news-retry", at)
+            repository.save_entry_snapshot(base, now=at)
+            original = ({"title": "original", "published_at": "2026-10-19T10:20:00+09:00"},)
+            available_at = as_kst(at + timedelta(hours=1))
+            with patch(
+                "kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository.kst_wall_now",
+                return_value=available_at,
+            ):
+                repository.save_snapshot_news_backfill(base.execution_key, original)
+            metadata_repository = MarketDataMetadataRepository(path)
+            expected_metadata = metadata_repository.load(
+                MarketDatasetKind.ENTRY_CONTEXT, f"{base.stock_code}:news", base.execution_key,
+            )
+
+            def stored_rows() -> tuple[tuple[object, ...], tuple[tuple[object, ...], ...]]:
+                with closing(sqlite3.connect(path)) as connection:
+                    return (
+                        connection.execute("SELECT * FROM trade_entry_snapshots WHERE execution_key=?", (base.execution_key,)).fetchone(),
+                        tuple(connection.execute("SELECT * FROM market_data_observation_meta WHERE observation_key=? ORDER BY subject", (base.execution_key,)).fetchall()),
+                    )
+
+            previous = stored_rows()
+            for operation in ("duplicate", "nonempty", "backfill"):
+                with self.subTest(operation=operation):
+                    with patch(
+                        "kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository.upsert_market_data_metadata",
+                        side_effect=sqlite3.OperationalError("064 metadata fault"),
+                    ), self.assertRaisesRegex(sqlite3.OperationalError, "064 metadata fault"):
+                        if operation == "backfill":
+                            repository.save_snapshot_news_backfill(base.execution_key, ({"title": "replacement"},))
+                        else:
+                            repository.save_entry_snapshot(replace(base, news=({"title": "replacement"},) if operation == "nonempty" else ()),
+                                                           now=at + timedelta(seconds=1))
+                    self.assertEqual(previous, stored_rows())
+            repository.save_entry_snapshot(base, now=at + timedelta(seconds=1))
+            self.assertEqual(({**original[0], "backfilled": True},), repository.load_entry_snapshots(
+                base.stock_code, at, at + timedelta(seconds=1),
+            )[0].news)
+            for receipt in (at - timedelta(minutes=1), available_at, available_at + timedelta(hours=1)):
+                repository.save_entry_snapshot(base, now=receipt)
+                metadata = metadata_repository.load(
+                    MarketDatasetKind.ENTRY_CONTEXT, f"{base.stock_code}:news", base.execution_key,
+                )
+                self.assertEqual(expected_metadata, metadata)
+                self.assertFalse(metadata.was_available_by(as_kst(at + timedelta(minutes=30))))
+                self.assertTrue(metadata.was_available_by(available_at))
+            correction = ({"title": "explicit-correction", "published_at": "2026-10-19T10:21:00+09:00"},)
+            repository.save_entry_snapshot(replace(base, news=correction), now=at + timedelta(seconds=2))
+            self.assertEqual(correction, repository.load_entry_snapshots(base.stock_code, at, at + timedelta(seconds=1))[0].news)
+            repository.save_snapshot_news_backfill(base.execution_key, ())
+            self.assertEqual((), repository.load_entry_snapshots(base.stock_code, at, at + timedelta(seconds=1))[0].news)
+            repository.save_entry_snapshot(replace(base, news=correction), now=at + timedelta(seconds=3))
+            with self.assertRaises(TypeError):
+                repository.save_entry_snapshot(replace(base, news=None), now=at + timedelta(seconds=4))
+            self.assertEqual(correction, repository.load_entry_snapshots(base.stock_code, at, at + timedelta(seconds=1))[0].news)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("DELETE FROM market_data_observation_meta WHERE subject=? AND observation_key=?",
+                                   (f"{base.stock_code}:news", base.execution_key))
+                connection.commit()
+            repository.save_entry_snapshot(base, now=at + timedelta(seconds=5))
+            self.assertIsNone(metadata_repository.load(
+                MarketDatasetKind.ENTRY_CONTEXT, f"{base.stock_code}:news", base.execution_key,
+            ))
+            self.assertEqual(correction, repository.load_entry_snapshots(base.stock_code, at, at + timedelta(seconds=1))[0].news)
 
 
 if __name__ == "__main__":

@@ -21,10 +21,8 @@ class JsonRecordOutbox:
                 value = json.loads(self._path.read_text(encoding="utf-8"))
             except FileNotFoundError:
                 return {}
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                return {}
         if not isinstance(value, dict):
-            return {}
+            raise ValueError("outbox contents must be a JSON object")
         return {
             str(key): dict(document)
             for key, document in value.items()

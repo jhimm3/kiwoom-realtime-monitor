@@ -1290,6 +1290,78 @@ class AppControllerTests(unittest.TestCase):
             self.wait_until(lambda: window._app_controller.request_close())
             self.assertTrue(completed.is_set())
 
+    def test_runtime_provider_swap_and_view_rollback_use_public_setter_without_old_cache_publication(self):
+        import threading
+        from dataclasses import replace
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import TradeEntrySnapshot, scoped_snapshot_execution_key
+
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "journal.sqlite3"
+                scope = AccountScope("kiwoom", AccountEnvironment.MOCK, "00000000-0000-4000-8000-000000000030")
+                at = datetime(2026, 10, 20, 10, 30)
+                snapshot = TradeEntrySnapshot(scoped_snapshot_execution_key("apply-old-030", scope), "order-030",
+                    "005930", "삼성전자", "매수", at, 70000, 1, "KRX", origin_scope=scope)
+                entered, release = threading.Event(), threading.Event()
+                old_calls, new_calls = [], []
+                def old(code, observed):
+                    old_calls.append((code, observed))
+                    count = len(old_calls)
+                    if count == 1:
+                        entered.set()
+                        if not release.wait(3):
+                            raise TimeoutError("controller did not release old provider")
+                    return {"available": True, "source": "old", "provider_call": count}
+                def new(code, observed):
+                    new_calls.append((code, observed))
+                    return {"available": True, "source": "new", "provider_call": len(new_calls)}
+                controller = self.controller([])
+                writer = EntrySnapshotWriter(path, investor_loader=old)
+                controller.entry_snapshot_writer = writer
+                # A valid pre-swap cache entry must be restored on view rollback.
+                writer._investor_cache["000660"] = (time.monotonic(), {"available": True, "source": "old-seed"})
+                runtime = {"entry_investor_loader": new, "program_trade_loader": None}
+                def apply_runtime(_runtime):
+                    if rollback:
+                        raise RuntimeError("controlled view rollback")
+                actions = AppRuntimeActions(apply_runtime=apply_runtime)
+                writer.enqueue(snapshot)
+                writer.start()
+                try:
+                    self.assertTrue(entered.wait(2))
+                    with patch.object(writer, "set_investor_loader", wraps=writer.set_investor_loader) as setter:
+                        if rollback:
+                            with self.assertRaisesRegex(RuntimeError, "controlled view rollback"):
+                                controller._apply_api_runtime(runtime, actions)
+                            self.assertEqual([new, old], [call.args[0] for call in setter.call_args_list])
+                        else:
+                            controller._apply_api_runtime(runtime, actions)
+                            setter.assert_called_once_with(new)
+                    self.assertFalse(release.is_set())
+                    release.set()
+                    writer.enqueue(replace(snapshot, execution_key=scoped_snapshot_execution_key("apply-new-030", scope),
+                                           executed_at=at + timedelta(seconds=1)))
+                    writer.requestInterruption()
+                    self.assertTrue(writer.wait(5000))
+                    stored = JournalRepository(path).load_entry_snapshots("005930", at, at + timedelta(seconds=2), scope)
+                    self.assertEqual(2, len(stored))
+                    self.assertEqual({"available": True, "source": "old", "provider_call": 1}, stored[0].investor_flow)
+                    self.assertEqual({"available": True, "source": "old" if rollback else "new", "provider_call": 2 if rollback else 1}, stored[1].investor_flow)
+                    self.assertEqual((2, 0) if rollback else (1, 1), (len(old_calls), len(new_calls)))
+                    if rollback:
+                        self.assertEqual({"available": True, "source": "old-seed", "cached": True},
+                                         writer._investor_at_execution(replace(snapshot, stock_code="000660")))
+                    else:
+                        self.assertNotIn("000660", writer._investor_cache)
+                    self.assertFalse(writer.has_pending_work())
+                finally:
+                    release.set()
+                    writer.requestInterruption()
+                    self.assertTrue(writer.wait(5000))
+
     def test_runtime_reload_waits_for_old_signals_then_replaces_resources_and_resets_view(self):
         from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
         temporary = tempfile.TemporaryDirectory()

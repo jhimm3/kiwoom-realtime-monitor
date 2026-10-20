@@ -103,7 +103,9 @@ class JournalSnapshotRepositoryMixin:
                     "rank=COALESCE(excluded.rank,trade_entry_snapshots.rank), trade_value_1m_eok=COALESCE(excluded.trade_value_1m_eok,trade_entry_snapshots.trade_value_1m_eok), "
                     "trade_value_5m_eok=COALESCE(excluded.trade_value_5m_eok,trade_entry_snapshots.trade_value_5m_eok), themes_json=excluded.themes_json, "
                     "theme_ranks_json=excluded.theme_ranks_json, high_distance_percent=COALESCE(excluded.high_distance_percent,trade_entry_snapshots.high_distance_percent), "
-                    "news_json=excluded.news_json, investor_flow_json=CASE "
+                    # An empty live delivery has no news observation; enrichment owns its saved news.
+                    "news_json=CASE WHEN excluded.news_json='[]' THEN trade_entry_snapshots.news_json "
+                    "ELSE excluded.news_json END, investor_flow_json=CASE "
                     "WHEN COALESCE(json_extract(trade_entry_snapshots.investor_flow_json,'$.backfilled'),0)=1 "
                     "AND COALESCE(json_extract(excluded.investor_flow_json,'$.backfilled'),0)<>1 "
                     "THEN trade_entry_snapshots.investor_flow_json ELSE excluded.investor_flow_json END, "
@@ -114,7 +116,8 @@ class JournalSnapshotRepositoryMixin:
                 stored = _snapshot_for_key(connection, value.execution_key)
                 if stored is not None:
                     _save_snapshot_metadata(
-                        connection, stored, datetime.fromisoformat(captured_at)
+                        connection, stored, datetime.fromisoformat(captured_at),
+                        preserve_news_metadata=not value.news and bool(stored.news),
                     )
 
     def load_entry_snapshots(
@@ -321,10 +324,13 @@ def _save_snapshot_metadata(
     available_at: datetime,
     *,
     fields: tuple[str, ...] | None = None,
+    preserve_news_metadata: bool = False,
 ) -> None:
     observations = entry_context_observations(snapshot, available_at)
     selected = fields or tuple(observations)
     for field in selected:
+        if field == "news" and preserve_news_metadata:
+            continue
         observation = observations[field]
         upsert_market_data_metadata(
             connection,

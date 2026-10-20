@@ -7,7 +7,7 @@ import unittest
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from kiwoom_monitor.central_server.mock_account_monitor import RealAccountRealtimeCollector
 from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
@@ -248,6 +248,160 @@ class RealAccountRealtimeOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], self.documents(target))
         self.assertEqual("account_only", self.owner.account_monitor_status(source.binding.scope.to_dict())["realtime"]["source"])
 
+    async def _assert_failed_close_requires_explicit_retry(self, failure):
+        source, target = await self.contexts()
+        original = self.store.save_real_account_event
+        entered, release = threading.Event(), threading.Event()
+        writes, lose_ack = [], [failure == "lost_ack"]
+        trigger = "fail_real_event_close"
+
+        def set_trigger(enabled):
+            connection = self.store._connect()
+            try:
+                if enabled:
+                    connection.execute(f"CREATE TRIGGER {trigger} BEFORE INSERT ON central_documents "
+                        "WHEN NEW.collection='real_account_event' "
+                        "BEGIN SELECT RAISE(ABORT, 'controlled event failure'); END")
+                else:
+                    connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                connection.commit()
+            finally:
+                connection.close()
+
+        def controlled_save(*args, **kwargs):
+            writes.append((args, kwargs))
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError("test event writer gate timed out")
+            result = original(*args, **kwargs)
+            if lose_ack[0]:
+                raise OSError("controlled lost acknowledgement")
+            return result
+
+        if failure == "precommit":
+            set_trigger(True)
+        closing = None
+        try:
+            with patch.object(self.store, "save_real_account_event", side_effect=controlled_save), \
+                    patch.object(source.account_queries, "close", new=AsyncMock(wraps=source.account_queries.close)) as source_close, \
+                    patch.object(target.account_queries, "close", new=AsyncMock(wraps=target.account_queries.close)) as target_close, \
+                    patch.object(target.broker, "close", new=AsyncMock(wraps=target.broker.close)) as broker_close, \
+                    patch.object(self.owner._probe, "close", new=AsyncMock(wraps=self.owner._probe.close)) as probe_close:
+                socket = target.realtime
+                socket.emit("order_execution", self.event(target, "first"))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                pending = target.pending_event
+                socket.emit("order_execution", self.event(target, "queued"))
+                closing = asyncio.create_task(self.owner.close())
+                await self.until(lambda: target.monitor_stop.is_set())
+                self.assertFalse(closing.done())
+                release.set()
+                with self.assertRaisesRegex(RuntimeError, "REAL_ACCOUNT_EVENTS_PENDING"):
+                    await closing
+                first_owner = self.owner._close_task
+                self.assertIs(pending, target.pending_event)
+                self.assertEqual(1, target.event_queue.qsize())
+                self.assertEqual(1 if failure == "lost_ack" else 0, len(self.documents(target)))
+                self.assertIs(target, self.owner.bundle(self.profile))
+                self.assertTrue(self.owner._closing)
+                for context in (source, target):
+                    self.assertTrue(context.account_reads_paused)
+                    self.assertTrue(context.monitor_stop.is_set())
+                for close in (source_close, target_close, broker_close, probe_close):
+                    close.assert_not_awaited()
+                reads = (len(source.client.account_calls), len(target.client.account_calls))
+                with self.assertRaisesRegex(RuntimeError, "REAL_ACCOUNT_EVENTS_PENDING"):
+                    await self.owner.close()
+                self.assertIsNot(first_owner, self.owner._close_task)
+                self.assertEqual(2, len(writes))
+                self.assertIs(pending, target.pending_event)
+                for close in (source_close, target_close, broker_close, probe_close):
+                    close.assert_not_awaited()
+                await asyncio.sleep(0.03)
+                self.assertEqual(2, len(writes), "failed close must not retry on its own")
+                set_trigger(False)
+                lose_ack[0] = False
+                await self.owner.close()
+                self.assertEqual(4, len(writes))
+                self.assertEqual(writes[0], writes[1])
+                self.assertEqual(writes[0], writes[2])
+                self.assertEqual("first", writes[2][0][2].execution_no)
+                self.assertEqual("queued", writes[3][0][2].execution_no)
+                self.assertEqual(2, len(self.documents(target)))
+                self.assertIsNone(target.pending_event)
+                self.assertTrue(target.event_queue.empty())
+                self.assertEqual(reads, (len(source.client.account_calls), len(target.client.account_calls)))
+                self.assertEqual(1, socket.starts)
+                self.assertTrue(self.owner._closing)
+                self.assertEqual((), self.owner.account_bindings())
+                for close in (source_close, target_close, broker_close, probe_close):
+                    close.assert_awaited_once()
+        finally:
+            release.set()
+            lose_ack[0] = False
+            set_trigger(False)
+            if closing is not None:
+                await asyncio.gather(closing, return_exceptions=True)
+            await self.owner.close()
+
+    async def test_precommit_failure_preserves_pending_queue_and_dependencies_until_explicit_close_retry(self):
+        await self._assert_failed_close_requires_explicit_retry("precommit")
+
+    async def test_lost_ack_preserves_original_event_and_explicit_close_retry_is_idempotent(self):
+        await self._assert_failed_close_requires_explicit_retry("lost_ack")
+
+    async def test_cancelled_close_waiter_keeps_one_owner_until_actual_event_commit(self):
+        _, target = await self.contexts()
+        original = self.store.save_real_account_event
+        entered, release = threading.Event(), threading.Event()
+        writes = []
+        waiters = []
+
+        def blocked(*args, **kwargs):
+            writes.append((args, kwargs))
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError("test event writer gate timed out")
+            return original(*args, **kwargs)
+
+        try:
+            with patch.object(self.store, "save_real_account_event", side_effect=blocked):
+                target.realtime.emit("order_execution", self.event(target))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                waiter = asyncio.create_task(self.owner.close())
+                waiters.append(waiter)
+                await self.until(lambda: target.monitor_stop.is_set())
+                close_owner, writer = self.owner._close_task, target.event_writer
+                waiter.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await waiter
+                self.assertFalse(close_owner.done())
+                second = asyncio.create_task(self.owner.close())
+                waiters.append(second)
+                await asyncio.sleep(0)
+                self.assertIs(close_owner, self.owner._close_task)
+                self.assertIs(writer, target.event_writer)
+                self.assertFalse(second.done())
+                self.assertEqual(1, len(writes))
+                reads = len(target.client.account_calls)
+                target.realtime.emit("order_execution", self.event(target, "after-close"))
+                self.assertTrue(target.event_queue.empty())
+                with self.assertRaisesRegex(CredentialOperationError, "PROFILE_RUNTIME_NOT_READY"):
+                    await self.owner.read_account(self.profile, expected_binding_revision=1)
+                self.assertEqual(reads, len(target.client.account_calls))
+                release.set()
+                await second
+                self.assertTrue(writer.done())
+                self.assertIsNone(target.pending_event)
+                self.assertEqual(1, len(self.documents(target)))
+                await self.owner.close()
+                self.assertIs(close_owner, self.owner._close_task)
+                self.assertEqual(1, len(writes))
+        finally:
+            release.set()
+            await asyncio.gather(*waiters, return_exceptions=True)
+            await self.owner.close()
+
     async def test_event_store_fence_and_exact_retry_idempotency(self):
         _, target = await self.contexts()
         event, now = self.event(target), as_kst(target.client.server_now())
@@ -346,16 +500,26 @@ class RealAccountRealtimeOwnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_socket_close_failure_cannot_commit_off_or_claim_complete_drain(self):
         _, target = await self.contexts()
         socket = target.realtime
+        original_close = socket.close
         async def failed_close():
             raise RuntimeError("socket close failed")
         target.realtime.close = failed_close
-        with self.assertRaises(CredentialOperationError):
-            await self.toggle(target, False)
-        self.assertEqual(1, self.settings(target)["revision"])
-        self.assertTrue(target.monitor_enabled)
-        self.assertTrue(target.account_reads_paused)
-        self.assertIsNone(self.owner.applied_settings_revision(target.binding.scope.to_dict()))
-        self.assertIs(socket, target.realtime)
+        try:
+            with self.assertRaises(CredentialOperationError):
+                await self.toggle(target, False)
+            self.assertEqual(1, self.settings(target)["revision"])
+            self.assertTrue(target.monitor_enabled)
+            self.assertTrue(target.account_reads_paused)
+            self.assertIsNone(self.owner.applied_settings_revision(target.binding.scope.to_dict()))
+            self.assertIs(socket, target.realtime)
+            with self.assertRaisesRegex(RuntimeError, "REAL_ACCOUNT_DRAIN_FAILED"):
+                await self.owner.close()
+            self.assertIs(target, self.owner.bundle(self.profile))
+        finally:
+            # Repair the injected socket failure before fixture dependency teardown.
+            socket.close = original_close
+            await socket.close()
+            target.monitor_task = None
 
 
 if __name__ == "__main__":
