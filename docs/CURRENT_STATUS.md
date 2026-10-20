@@ -1,5 +1,21 @@
 # 현재 상태 요약
 
+## 2026-10-20 여섯 번째 병렬 통합: 030·064·065·066
+
+로컬제품·검사 `0a54c35`. 현재 통합 소스 관련 27개 실제 모듈 고유394건/431.634 worker초 통과(journal167/index112/real115). 변경14 ID·계획/실행/통과, 전체 소스 지문, 동결9파일과035 기존본문을 보존한065 추가2메서드 병합, worker/자식 종료·native TEMP 제거를 대조했다.
+
+전체84/완료36/미완료48. 준비후보11(개발·검증제출 포함), 계약/영향확인30(027 잔여·054 실제caller 확인·084 포함), 선행/외부대기3(043 실제PG/047←042/058 의미), 명시보류4(006/008/020/024). 063·067·072는 격리검증 제출/메인 통합대기, 보조3개는060→061 같은owner직렬·054실제연결재평가·052리뷰저장을 독립 진행한다. 실제 세션은 메인 포함4slot이며 공용원장/F는 메인만 작성한다.
+
+R3-030 검증 완료: 기존 EntrySnapshotWriter에 짧은 cache lock 하나로 loader/cache 동시 포착·setter의 dict 교체·현재dict/loader 확인후게시를 묶었다. provider/native I/O·signal·job/backfill은 lock 밖이다. 동일callable/None/A→B→A도 옛 in-flight 결과가 새cache를 채우지 못하고 원래job의 provenance는 보존한다. 실제 AppController의 기존 public setter 적용/rollback을 재사용(제품0). A→B old1/new0→old1/new1은 필요한 새조회 복구이며 이후cache hit 추가조회0, TTL60초/code-only/얕은copy·오류uncached 유지. Controller의 별도 private cache backup/update 전체를 새lock으로 원자화하거나 cross-date/global singleflight를 해결한 것은 아니다.
+
+R3-064 검증 완료: 같은 execution_key의 serialized 빈news [] 재전달은 이미 저장된 news_json을 native CASE로 보존한다. nonempty 정정·명시 save_snapshot_news_backfill(empty) 의미는 유지한다. 같은transaction의 기존stored조회 결과로 retained news metadata UPSERT만 생략해 원래 BACKFILLED/source/effective/available/hash를 유지한다. CASE-only 중간안은 시각을 소급/연기해4assertion 실패했으며 원문을 보존했다. 보완receipt11:30·재전달10:30/11:30/12:30 모두 news1/동일metadata, 실제 was_available_by는11:00불가/11:30가능. retained news INSERT시도11→10, SELECT/연결/BEGIN/COMMIT 각1 유지. 최초empty는MISSING·legacy metadata없음은unknown, 명시empty/nonempty정정의기존metadata전반정책까지재정의하지않는다.
+
+R3-065 검증 완료: JsonRecordOutbox는 missing만{}로 처리하고 read/JSON오류·최상위non-object는 명시실패로 전달한다. 정상dict/member filtering/원자write·replace는 유지, 손상/read실패 put의write/replace1→0으로원본bytes를보존한다. 실제Top20 start는subscriber/task/native전실패하고, put실패의RAM입력과 native성공뒤 remove실패의파일/pending을 명시retry/start복구까지 유지한다. 새로운repair/archive/format/queue/자동retry없음. 원본6method28subcase실패를보존, 실제Windows ACL/NAS 손상을재현한것은아니다.
+
+R3-066 검증 완료: 기존 variadic drain을 모든context에 한번적용해 producer를멈추고 monitor/writer/read를실제합류한뒤에만 dependency를닫는다. closing예외조건을제거해 미저장pending/실패를정상종료로보고하지않는다. 이미끝난failed close에대한새명시close만 완료된noncancelled eventwriter로원본pending/queue를drain한다. closing/admission/binding/settings/order gate는닫힌채유지,자동retry/REST재조회/새queue없음. 실제native precommit/ACKloss 두실패+두event복구 save4/행2/dependency close0→1,추가REST0. waiter취소/동시close는같은살아있는owner를합류한다. native event readback/diagnostic archive까지검증했고 genericcontent route는이collection을노출하지않아실제일지/API end-to-end는확인하지못했다. processkill RAM유실·직접ownertask취소·socket자동복구는해결범위밖이다.
+
+영향F09/F18/F22/F23/F24·책임/비용계약갱신. 실제 키움/장중·실제PG(기존043 변경2 ID 포함)·운영 DB/계좌/주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀·물리I/O/운영발생률은 미검증이다. 이번 증거 검사 통과는 이전043의 외부검증 미완료를 해소하지 않는다.
+
 ## 2026-10-20 다섯 번째 병렬 통합: 035·046 완료 / 043 실제PG 대기
 
 로컬 제품·검사 `64a74e0`. 현재 통합 소스 관련 20개 실제 모듈, 고유 305건/124.603 worker초 통과(index107/news113/research85). 계획·실행·통과 ID, 변경 로컬14 ID, 전체 소스 지문·동결12파일, worker/자식 종료와 native TEMP 제거를 대조했다.

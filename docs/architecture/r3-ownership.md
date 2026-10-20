@@ -30,13 +30,15 @@
 <a id="composition"></a>
 ## 조립·시계·수명 — F01/F23/F24
 
+**2026-10-20 `0a54c35` 추가계약.** R3-030 검증 완료: 기존 EntrySnapshotWriter에 짧은 cache lock 하나로 loader/cache 동시 포착·setter의 dict 교체·현재dict/loader 확인후게시를 묶었다. provider/native I/O·signal·job/backfill은 lock 밖이다. 동일callable/None/A→B→A도 옛 in-flight 결과가 새cache를 채우지 못하고 원래job의 provenance는 보존한다. 실제 AppController의 기존 public setter 적용/rollback을 재사용(제품0). A→B old1/new0→old1/new1은 필요한 새조회 복구이며 이후cache hit 추가조회0, TTL60초/code-only/얕은copy·오류uncached 유지. Controller의 별도 private cache backup/update 전체를 새lock으로 원자화하거나 cross-date/global singleflight를 해결한 것은 아니다. R3-066 검증 완료: 기존 variadic drain을 모든context에 한번적용해 producer를멈추고 monitor/writer/read를실제합류한뒤에만 dependency를닫는다. closing예외조건을제거해 미저장pending/실패를정상종료로보고하지않는다. 이미끝난failed close에대한새명시close만 완료된noncancelled eventwriter로원본pending/queue를drain한다. closing/admission/binding/settings/order gate는닫힌채유지,자동retry/REST재조회/새queue없음. 실제native precommit/ACKloss 두실패+두event복구 save4/행2/dependency close0→1,추가REST0. waiter취소/동시close는같은살아있는owner를합류한다. native event readback/diagnostic archive까지검증했고 genericcontent route는이collection을노출하지않아실제일지/API end-to-end는확인하지못했다. processkill RAM유실·직접ownertask취소·socket자동복구는해결범위밖이다.
+
 R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를명시해 QWidget이themes로전달되던TypeError를복구했다. 실제 MainWindow→Settings→modal검색/선택·중복/취소/없음→기존worker/native저장→테마총140억/제외40억·정렬40→재오픈을검증했다. 올바른themes 명시import caller·원래dialog시그니처는유지했다. F22는일반설정저장소간접공유만확인했고원격sync를새로수락하지않는다.
 
 **현재 책임.** `bootstrap`은 실행 모드, client와 worker factory를 조립한다. MainWindow는 UI 선택과 신호 수신/표시를, AppController는 주입된 action·worker controller·pending buffer와 API 교체/종료 순서를 소유한다. 서버는 `app.create_app`/lifespan이 store·broker·collector·각 runtime owner를 조립하고 닫는다. 작은 worker controller의 중복 실행 방지·신호·결과 신선도·수명 책임은 유지한다.
 
 **상태·실패·공식 경계.** PC는 `configure_runtime/configure_ranking/configure_shutdown`, `request_close` 등 기존 controller 경계를 쓴다. producer 정지 → 도착 중인 결과 처리 → pending flush → 실제 writer 종료와 queued ACK 확인 순서를 보존한다. 실패 pending이 남은 종료와 정상 종료를 구분하며 API 교체도 구 producer의 결과/loader 수명을 함께 처리한다. 서버 설정 저장 revision과 실제 적용 revision은 구분하고, 요청 시작에 선택한 runtime/gateway를 응답 중 임의 교체하지 않는다. transaction은 settings/native store에 남긴다.
 
-**미해결.** 이 순서가 존재한다고 모든 worker 종료가 검증된 것은 아니다. R3-030/031의 entry writer, 032의 별도 thread, 042의 owner/Runner 교체, 066의 real account close 등은 원장의 개별 실패 계약으로 처리한다.
+**남은 수명 범위.** 030/031 entry writer와066 real close의 등록경계는 로컬검증 완료했다. 032의 별도thread/042 owner-Runner교체와각완료항목의운영·강제중단잔여는개별계약을따르며전체worker종료수락으로확대하지않는다.
 
 **002·023 후속 계약.** 가격 실패도 같은 Controller에서 원 batch context와 최신 dispatch 순서를 관리한다. 실패 retry가 남으면 writer 유무와 무관하게 ready를 반환하지 않고 기존 명시적 close 재시도를 사용한다. 별도 ACK 신호/저장 owner를 추가하지 않는다. 다른 worker 종료 수락과 이 좁은 검증을 구분한다.
 
@@ -60,6 +62,8 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 <a id="market-data"></a>
 ## 실시간·저장·복구 — F04~F09
 
+**2026-10-20 `0a54c35` 추가계약.** R3-065 검증 완료: JsonRecordOutbox는 missing만{}로 처리하고 read/JSON오류·최상위non-object는 명시실패로 전달한다. 정상dict/member filtering/원자write·replace는 유지, 손상/read실패 put의write/replace1→0으로원본bytes를보존한다. 실제Top20 start는subscriber/task/native전실패하고, put실패의RAM입력과 native성공뒤 remove실패의파일/pending을 명시retry/start복구까지 유지한다. 새로운repair/archive/format/queue/자동retry없음. 원본6method28subcase실패를보존, 실제Windows ACL/NAS 손상을재현한것은아니다.
+
 **2026-10-20 `64a74e0` 계약 보완.** R3-035 검증 완료: 실제 index loop에서 collector advance와 frozen record 추출만 기존 RAM lock 안에 두고, 같은 outbox/native save await를 밖으로 옮겼다. 제어 native/outbox 100ms 대기에서 lock 보유 true→false, 실제 ranking prepare/Hub subscription의 barrier 해제 전 완료 false→true. RAM membership은 원래도 먼저 공개됐으며 신규 개선으로 세지 않는다. 동일120억/시장60·60/cohort와 native 연결3/SELECT2/BEGIN·COMMIT2/INSERT5/DELETE2/save1을 유지한다. R036 caller-cut/owned task·실패·취소·close/start 복구를 보존하고 새 queue/계층/transaction은 없다. R3-036 후속 검증 보완(제품 변경0): 기존 replay의 lost-ACK 기대값1은 native thread와 추가된 owned save task의 실패 관측을 합산하는 RuntimeScope 실제 계약을 놓쳤다. thread/task OSError 각각1, raw error_count2, execution_succeeded=False·동일 save2회·outbox 복원을 함께 검증한다. 사건 중복 제거 정책이나 DB 시도 횟수를 바꾸지 않았다. 옛 기대값은 R065의 원본 load를 복원해도 동일 실패, 보강한 기대는 원본/현재 load 모두 통과한다. 초기 R036 관련90건에 replay-outbox 검사가 빠졌던 범위를 명시하고 향후 해당 소비자 검사를 함께 선택한다.
 
 **2026-10-20 `8f3bade` 추가계약.** R3-036 완료: 기존지수pending의caller진입key cut을전용flush lock으로직렬화하고동일service의shield save task가실제native수명을소유한다. 같은cut의native/연결/BEGIN/COMMIT/provider각2→1·INSERT/DELETE각4→2·반영행4→2,최종snapshot동일. 새caller는진입cut의최신payload를저장한뒤반환하고진입후다른key를무한drain하지않는다. 원본barrier PASS→중간합류-only FAIL→최종PASS를보존했다. 취소/실패합류/명시retry/ACK유실/outbox제거실패/start복구·실제RuntimeScope task/thread drain을검증했다. close는진행owner join만하고새강제retry0,collector/outbox lock범위와기존11메서드는그대로다. R3-038 완료: 분봉COMPLETE-only page는불필요한ACTUAL사전조회없이기존native권한판단을따르고,IN_PROGRESS는기존metadata 시간범위로좁힌다. SOR는실제소비page의기존start/end reader를쓴다. 동일120행 fixture에서metadata반환120→1(혼합)/0(완결),SOR120→2;완결연결5→4/SELECT4→3,Python commit호출5→4지만실제BEGIN/COMMIT각2→2다. 최종전체봉/meta/비교문서·반영행/시계동일,UTC-KST/23:59/lateSOR/component merge/필수사전조회실패와저장뒤SOR실패를구분했다. 다른venue component가필요한기존owner문서전체조회와sparse범위내중간행은남는다.
@@ -78,7 +82,7 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 
 **상태·실패·공식 경계.** PC는 `queue_minute_bar/queue_price_cache`, writer의 `enqueue_*`/`stop_and_drain`을 쓴다. native bar/metadata·가격 transaction은 repository/store가 수행한다. 저장 중 batch와 새 pending을 구분하고 실패 복원이 더 최신 값을 덮지 않게 한다. query/history → writer commit ACK → aggregator의 generation별 복구 확인 순서를 유지한다. 화면은 기존 display/live-bar read를 사용하고 저장 조회를 실시간 원본 수집으로 복제하지 않는다. 직접/NAS 전환은 실제 구독 승인과 조회 성공을 소비한다.
 
-**미해결.** R3-001/004의 metadata 중복 read·range 개선은 승계한다. lock 안 저장 대기/동일 flush(035/036), sender 정리(037), page/recent read 비용(038/039), outbox 읽기 실패(065), 장후 coverage 반복(078)은 개별 후속이다. 같은 계층을 합치는 것으로 종료·ACK 문제를 해결했다고 하지 않는다.
+**남은 read 범위.** 001/004/035/036/037/038/065/078의등록개선은각로컬검증근거를승계한다. 최근날짜직렬read039와각항목에명시한실PG/운영/late처리잔여를구분하며같은계층통합으로ACK/종료수락을대체하지않는다.
 
 **가격 batch의 날짜·재시도 계약.** 기존 tick/history caller의 `observed_at`은 high의 수신 거래일에 사용하고 pending high는 `(date, code)`별 MAX다. 가격/시총은 개별 tick 정밀시각이 아닌 기존 batch 단위이며 최초 dispatch/enqueue 때 고정한 시각을 재시도에 보존한다. normal batch는 같은 FIFO writer와 Repository에서 연결/BEGIN/COMMIT1·SELECT0으로 처리하며 여러 날짜 high도 같은 transaction에 들어간다.
 
@@ -104,6 +108,8 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 <a id="execution"></a>
 ## 계좌·Risk·Execution — F14/F16/F17/F18
 
+**2026-10-20 `0a54c35` 추가계약.** R3-066 검증 완료: 기존 variadic drain을 모든context에 한번적용해 producer를멈추고 monitor/writer/read를실제합류한뒤에만 dependency를닫는다. closing예외조건을제거해 미저장pending/실패를정상종료로보고하지않는다. 이미끝난failed close에대한새명시close만 완료된noncancelled eventwriter로원본pending/queue를drain한다. closing/admission/binding/settings/order gate는닫힌채유지,자동retry/REST재조회/새queue없음. 실제native precommit/ACKloss 두실패+두event복구 save4/행2/dependency close0→1,추가REST0. waiter취소/동시close는같은살아있는owner를합류한다. native event readback/diagnostic archive까지검증했고 genericcontent route는이collection을노출하지않아실제일지/API end-to-end는확인하지못했다. processkill RAM유실·직접ownertask취소·socket자동복구는해결범위밖이다.
+
 **2026-10-20 `8f3bade` 추가계약.** R3-040 유지·검증완료: 제품변경0. 첫read뒤기존offline unowned apply가native JSON의account/run을바꿀수있고reader가그JSON을소비하므로두번째최신scope read를제거하지않았다. frozen DTO는native불변성을보장하지않는다. 실제활성lease/독립두store의normal/state/account/run반례와둘째read제거음성대조2assertion실패로지속검사를보강했다. 정상/state는기존첫record반환·추가transport/refresh0,scope변경은거절한다. SELECT2/실행loop동기I/O는그대로이며제거완료나지연개선으로보고하지않는다. R3-009안전조회근거에연결하고042owner/047runner·legacyHTTP오류매핑은별도다.
 
 **R3-010 per-key 저장 책임.** typed profile/report/spec/admission/gate/feedback 검증·Mapping 변환은 기존 ForwardEvaluationRepository, key별 불변 insert/equality/conflict·첫 receipt·transaction/commit ACK는 같은 native QueryStore가 소유한다. 기존 latest stage/binding/STOP/Risk·native claim의 안전 확인은 유지한다. stage의 current-stage 값 비교/append는 기존 native transaction에서 수행하고 binding은 기존 identity owner의 scoped latest 조회를 쓴다. 다중 문서 게시를 원자화했다고 보지 않는다. native 동시2store·ACK retry·기존 admission/Risk/Runner 소비 검사는 [forward report](../../tests/unit/test_forward_report.py), [specification](../../tests/unit/test_mock_automation_specification.py), 기존 Risk/Runner 모듈을 재사용한다. 실제 PG는 미검증이며 generic native SQLite commit 전후의 소유 child 강제종료는 후속 진단2건으로 확인했다. stage 자체/전원 차단 내구성으로 확대하지 않는다.
@@ -112,7 +118,7 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 
 **상태·실패·공식 경계.** 기존 인증 order/account/control/publication API, typed OrderIntent/AccountSnapshot, runtime submit/cancel, Lifecycle reconcile와 native repository를 통과한다. 제출 전 durable claim, UNKNOWN 후 대사, 취소 ACK와 취소 확정의 구분을 유지한다. 실제 position은 상세 FILL로 갱신하고 BROKER_FILL_AGGREGATE의 증가량을 상세 체결로 위장하지 않는다. 포지션/배분/EV의 순수 계산은 같은 account/Risk cut과 기존 RAM 관측을 받아 결과를 내며 별도 계좌 조회·원장·주문 owner를 만들지 않는다.
 
-**미해결.** R3-010의 등록 코드 개선은 로컬 검증 완료다. 보호 context 재조회는 동일 안전시점 중복이 입증되지 않아 유지하며 실제PG/운영 수락은 별도다. 다른 잔여인 040의 재조회, 042의 owner 연결, 049/050의 Risk/비동기 책임, 066의 close 실패를 구분한다. R3-024의 미지원 입력/정책은 그대로 남기며 연구 PASSED·Shadow 결과·목표 수량을 실행 승인으로 승격하지 않는다. 보호 Risk와 native 주문 경계를 일반 EV 대기로 대체하지 않는다.
+**미해결.** R3-010의 등록 코드 개선은 로컬 검증 완료다. 보호 context 재조회는 동일 안전시점 중복이 입증되지 않아 유지하며 실제PG/운영 수락은 별도다. 040의두번째조회는안전성근거로유지검증했고066의미저장close등록경계는완료했다. 042 owner연결/049·050 Risk·비동기책임과실제운영잔여는남는다. R3-024의 미지원 입력/정책은 그대로 남기며 연구 PASSED·Shadow 결과·목표 수량을 실행 승인으로 승격하지 않는다. 보호 Risk와 native 주문 경계를 일반 EV 대기로 대체하지 않는다.
 
 **관련 검사.** [OrderLifecycle](../../tests/unit/test_order_lifecycle.py), [ExecutionRepository](../../tests/unit/test_execution_repository.py), [자동 Risk](../../tests/unit/test_mock_automation_risk.py), [Runner](../../tests/unit/test_mock_automation_runner.py). 계좌/세대·중복 명령·UNKNOWN·부분체결·STOP/교체·close의 실제 변경 경계를 검사한다.
 
@@ -125,7 +131,7 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 
 **상태·실패·공식 경계.** 기존 request/typed split·dataset·Family registry, repository의 owned claim/finish 계약과 후보 게시 API를 사용한다. 실제 지원하는 봉 해상도·정책·입력 가용시점을 명시하고 분봉을 가짜 틱/초봉으로 바꾸지 않는다. 개발/최종평가·과거 완결 결과와 현재 가용 관측을 분리한다. retry/재시작은 원래 run identity·owner·결과 불변성을 보존하고 source/result 경로를 혼용하지 않는다. child는 stop/checkpoint와 실제 완료를 부모에게 전달한다.
 
-**미해결.** 일반 request=result 충돌은 R3-046, terminal 전이 경합은 063, 최대 낙폭 ppm은 067이다. R3-024의 feedback/context/thesis producer 및 일반 연구→live 적용 범위는 미완료다. 수동 전략팩의 일지 사후분석을 이 Family/자동매매 경로와 합치지 않는다.
+**남은 연구 범위.** 일반 request=result 충돌046은로컬검증완료, terminal전이063/최대낙폭067은격리검증제출·메인통합대기다. R3-024의 feedback/context/thesis producer 및 일반 연구→live 적용 범위는 미완료다. 수동 전략팩의 일지 사후분석을 이 Family/자동매매 경로와 합치지 않는다.
 
 **관련 검사.** [연구 process](../../tests/unit/test_research_process.py), [연구 저장소](../../tests/unit/test_research_repository.py), [실행](../../tests/unit/test_research_execution.py), [평가](../../tests/unit/test_research_evaluation.py). 고정 입력/분할·소유권·중단/복원·원본/결과 보존과 후속 후보 소비를 확인한다.
 
@@ -142,12 +148,14 @@ R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/
 
 **상태·실패·공식 경계.** 기존 news 수집/page/history·job claim/finish/retry·인증 AI API와 PC worker 신호를 사용한다. native 저장소가 revision·job 상태·transaction을 소유하고 AI service가 accepted 요청/실행 lock을 소유한다. UI용 그룹 대표와 NAS의 저장 body revision 입력을 섞지 않는다. 미확인 자료는 원값과 확인 상태를 함께 보존한다. 장전 context의 `advisory_only/consumer_binding=not_connected`는 실시간 판단/주문 연결과 구분하며 공급자 호출이나 polling task를 소비자마다 복제하지 않는다.
 
-**미해결.** R3-019의 read/error, 020의 프로세스 결합, 043의 stale attempt, 072의 NAS-only 수동 버튼, 073의 동일 기사 쓰기가 남는다. 장전 결과와 외부 지연시세(060/061)는 서로 다른 입력 경계다.
+**남은 뉴스 범위.** 073동일기사쓰기등록경계는완료,043terminal은PC통합·실제PG대기,072가용성은격리검증제출·메인통합대기다. 019read/error·020프로세스결합·084body/projection소비계약은남는다. 장전 결과와 외부 지연시세(060/061)는 서로 다른 입력 경계다.
 
 **관련 검사.** [CentralNewsService](../../tests/unit/test_central_news_service.py), [news jobs](../../tests/unit/test_news_jobs.py), [기사 저장소](../../tests/unit/test_stock_news_repository.py), [장전 계약](../../tests/unit/test_morning_market_brief.py). 원문 revision·중복/실패·가용시각·선택한 provider/버튼과 실제 worker 입력을 대조한다.
 
 <a id="journal-sync"></a>
 ## 일지·편집·동기화 — F22 및 F18 소비
+
+**2026-10-20 `0a54c35` 추가계약.** R3-030 검증 완료: 기존 EntrySnapshotWriter에 짧은 cache lock 하나로 loader/cache 동시 포착·setter의 dict 교체·현재dict/loader 확인후게시를 묶었다. provider/native I/O·signal·job/backfill은 lock 밖이다. 동일callable/None/A→B→A도 옛 in-flight 결과가 새cache를 채우지 못하고 원래job의 provenance는 보존한다. 실제 AppController의 기존 public setter 적용/rollback을 재사용(제품0). A→B old1/new0→old1/new1은 필요한 새조회 복구이며 이후cache hit 추가조회0, TTL60초/code-only/얕은copy·오류uncached 유지. Controller의 별도 private cache backup/update 전체를 새lock으로 원자화하거나 cross-date/global singleflight를 해결한 것은 아니다. R3-064 검증 완료: 같은 execution_key의 serialized 빈news [] 재전달은 이미 저장된 news_json을 native CASE로 보존한다. nonempty 정정·명시 save_snapshot_news_backfill(empty) 의미는 유지한다. 같은transaction의 기존stored조회 결과로 retained news metadata UPSERT만 생략해 원래 BACKFILLED/source/effective/available/hash를 유지한다. CASE-only 중간안은 시각을 소급/연기해4assertion 실패했으며 원문을 보존했다. 보완receipt11:30·재전달10:30/11:30/12:30 모두 news1/동일metadata, 실제 was_available_by는11:00불가/11:30가능. retained news INSERT시도11→10, SELECT/연결/BEGIN/COMMIT 각1 유지. 최초empty는MISSING·legacy metadata없음은unknown, 명시empty/nonempty정정의기존metadata전반정책까지재정의하지않는다.
 
 **2026-10-20 `539cbad` 추가계약.** R3-031 완료(등록저장/종료경계): 기존단일FIFO에서실패한현재job·단계/이미관측한backfill값만보존한다. native저장실패는failed를전달하고후속queue를소비하지않고멈춘다. AppController는기존cache_failed/안내를재사용해거짓ready를막고새명시close만멈춘writer를재시작한다. base5회재시도·정상scope/뉴스/수급/0w원문·optional loader오류/None continue는그대로다. 이미조회한값은setter(None)뒤에도저장하고명시retry의외부loader재호출0/논리중복행0(기존native후보조회는유지)·prefix commit/후속원본을보존한다. 새queue/schema/relay/자동restart·poll/durability는없다. 영구저장오류면다음job도명시retry까지RAM에대기하며process kill/전원복구를제공하지않는다. R030provider cache/R064snapshot덮어쓰기는별도다.
 
@@ -171,7 +179,7 @@ R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/
 
 **상태·실패·공식 경계.** 기존 snapshot enqueue/backfill, scoped history/query/analysis, 테마 preview→bulk apply와 백업/복원 API를 쓴다. 네트워크 동기화는 기존 service/runner가 수행하고 native repository의 transaction을 우회하지 않는다. CentralContentSync의 identity/hash delta와 CentralJournalSync의 현재 전량 동기화는 서로 다른 경로다. 전송 ACK는 새 로컬 편집까지 저장됐다는 뜻이 아니며 원본/보완/사용자 편집을 구분한다. Drive/NAS/파일 복원도 같은 변경 필드와 revision의 소비자다.
 
-**미해결.** R3-044/045의 ACK/내용 hash, 051·055·057~059의 일지 read/출처/사후입력, 064의 snapshot 뉴스 재전달, 071/074/075의 반복 작업, 076~077의 catalog/미사용 profile, 080~082의 OCR/표시 책임을 개별 처리한다. 기존 delta 구현을 재개발하거나 모든 일지·뉴스 sync가 이미 delta라고 설명하지 않는다.
+**미해결.** R3-044/045의 ACK/내용 hash, 051·055·057~059의 일지 read/출처/사후입력, 071/074/075의반복작업,076~077 catalog/미사용profile,081~082 표시책임(064뉴스보존·080기본추론중복은로컬완료,054실제catalogcaller는별도재평가)을 개별 처리한다. 기존 delta 구현을 재개발하거나 모든 일지·뉴스 sync가 이미 delta라고 설명하지 않는다.
 
 **관련 검사.** [snapshot service](../../tests/unit/test_journal_snapshot_service.py), [일지 보완](../../tests/unit/test_journal_enrichment.py), [콘텐츠 sync](../../tests/unit/test_central_content_sync.py), [일지 sync](../../tests/unit/test_central_journal_sync.py), [테마 backup](../../tests/unit/test_theme_backup.py). 원본 재전달/보완 보존·편집 중 ACK·실패 retry·restore/close를 변경 경계에 맞춰 확인한다.
 
@@ -228,6 +236,8 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 ```
 
 ### 재현 가능한 실제 비용 기준
+
+**여섯번째 통합:** 현재 통합 소스 관련 27개 실제 모듈 고유394건/431.634 worker초 통과(journal167/index112/real115). 변경14 ID·계획/실행/통과, 전체 소스 지문, 동결9파일과035 기존본문을 보존한065 추가2메서드 병합, worker/자식 종료·native TEMP 제거를 대조했다. 구조1374site/위반0·retirable0/guard변경0. 증분40번째기록5996→6009/추가13·기존socket실패검사보강1·삭제0, 이전39기록·미결49보존. 기존socket실패assertion은유지하고close실패/owner보존을추가했으며finally에서는주입한socket실패만원복해실제fixture종료한다. full_required495/external32/불확실성7은자동실행하지않고실제변경caller/owner/native/consumer/실패·종료의27모듈과앱종료기존1ID만선정했다. 전체확장범위통과로보고하지않는다. 030필요새provider조회/이후hit0,064metadata시도11→10·native tx1유지,065오류시write/replace1→0,066명시실패2+event2복구save4/행2/REST0. 실제 키움/장중·실제PG(기존043 변경2 ID 포함)·운영 DB/계좌/주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀·물리I/O/운영발생률은 미검증이다. 이번 증거 검사 통과는 이전043의 외부검증 미완료를 해소하지 않는다.
 
 **다섯 번째 통합:** 현재 통합 소스 관련 20개 실제 모듈, 고유 305건/124.603 worker초 통과(index107/news113/research85). 계획·실행·통과 ID, 변경 로컬14 ID, 전체 소스 지문·동결12파일, worker/자식 종료와 native TEMP 제거를 대조했다. R043 retry 두 execute-site의 유효 한도2→1을 정확히 한 건의 review로 낮췄다. adopted 목록/기존 rules/승인이력은 변경0이다. QueryStore 검사가 의도한 필수 attempts 서명6개만 review_required로 잡아 호출자/SQLite/PG/Protocol을 대조 후 해당6개 계약값만 갱신했다. site/forward/candidate 추가·삭제0, 기존 unresolved same-name39도 유지했다. 최초113건 중 audit1 실패 원문을 보존하고 외부 JSON을 읽는 audit4건만 재실행 통과; 나머지5개 성공 모듈은 같은 소스 결과를 그대로 합성했다. 증분 원장은39기록/5996 case/추가8·기존수정8/삭제0, 과거38기록·미결49 보존, metadata 정적검사 통과와 PG 누락으로 실패한 전체 실행 증거 검사를 구분한다. R3-043 실제 PostgreSQL 변경2 ID 및 해당87건 모듈은 미실행이다. 전용 diagnostic DSN 부재로 증분 실행 증거 검사는 누락을 감지해 실패했으며 성공 처리하지 않았다. 기존 push/PR의 필수 postgres-integration이 postgres_required 전체 모듈을 실행하고 실패·누락을 required 증거로 전달하는 본문만 확인했다. 현재 hosted CI 실행은 없다. 실제 키움/장중·운영 DB/계좌/주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀·물리 I/O/WAL/운영 발생률은 미검증이다. 뉴스body/asof·assessment projection은084에서 소비자별 확인 후 정한다.
 

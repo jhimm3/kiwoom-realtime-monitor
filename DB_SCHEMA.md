@@ -1,3 +1,5 @@
+**R3-064/066 저장·ACK 계약(2026-10-20, `0a54c35`).** snapshot의빈news재전달은기존news_json과그metadata origin/effective/available/hash를보존하고nonempty/명시backfill호환을유지한다. 추가SELECT/connection/transaction/schema0,retained news metadata INSERT1회생략. 계좌eventnative SQL/멱등identity/binding/settings fence는그대로이며close의실패pending이dependency해제전에드러난다. 실제일지/API event소비·운영/실PG는별도다.
+
 **R3-043 native 전이 계약(2026-10-20, `64a74e0`).** 기존 news_jobs 행의 claim attempts를 필수 terminal 인자로 전달해 job_key/RUNNING/attempt와 일치할 때만 finish/retry를 반영한다. 정상 retry SELECT1→0, UPDATE/연결/BEGIN/COMMIT 각1·3회FAILED·120초stale·immutable revision·None 반환 유지. schema/DDL/열/index/버전 추가0. QueryStore 서명6개만 검토 갱신, 실제PG2건 미실행/CI 예정 경로만 확인했으므로043은진행이다. 명시 DELETE+동일key재생성 ABA와 body 선택084는 별도다.
 
 **R3-036/038/040/073 native 계약(2026-10-20, `8f3bade`).** 지수는같은cutnative2→1/새cutcaller완료·identity/outbox보존,metadata/SOR는기존time/minute range를재사용,기사11field의동일내용UPDATE만생략하고receipt1과원자rollback/pin/first_seen유지. 주문JSON은기존unowned API에서scope변경가능하므로최신scope SELECT2유지. schema/원본계좌·봉/기사·문서계약은그대로다. 연결/반영행기준은R3정본·기존비용검사로보호하며실제PG/물리I/O는별도다.
