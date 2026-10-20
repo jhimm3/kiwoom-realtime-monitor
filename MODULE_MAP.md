@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 `539cbad`: 기존EntrySnapshotWriter가단일실패job/관측payload를소유하고AppController가RAM pending을확인해명시close재시도/ready를결정한다. PaddleThemeOcr/ImageThemeOcrWorker는같은파일의추론/page해석을공유하고첫결과를지역인계한다(controller제품0). 새모듈/계층/DBschema없음. 관련8실제모듈121건·F10/F18/F22/F23좁은경계/F24갱신,미확정Qt abort/실제모델은정본잔여를따른다.
+
 2026-10-20 `8f3bade`: AutonomousTop20Service는caller cut직렬화/실제save owner,MarketDataIngestor는기존native범위reader,StockNewsRepository는같은transaction의조건부내용UPDATE를사용한다. ManualMockOrderGateway최신scope재조회는그대로유지(제품변경0). 새모듈/계층/schema/driverconnection없음. 관련21모듈479건·영향F/계약갱신,036선행035해제.
 
 2026-10-20 `9955a24`: Collector실패복원은동일pending owner의새도착을보존, historical_backfill initializer는기존URL upgrade뒤동일index생성, SettingsDialog는기존SimilarStockDialog parent를명시한다. MainWindow는수집/저장/구독뒤숨김TOP20표시만생략(027일부). 새파일/계층/상태owner/schema없음. 관련7모듈157건,034/069/070완료·[준비큐](REFACTOR_BACKLOG.md#의존성-기반-병렬-실행-원장--2026-10-20)유지.

@@ -1,3 +1,7 @@
+## 2026-10-20 R3-031·080 (로컬 미배포)
+
+`539cbad`: 일지native저장실패의currentjob/원자료를보존하고명시close재시도전ready를막았다. OCR기본추론N+1→N/필수badge유지,새owner/queue/schema없음. 현재통합소스 관련8개실제모듈 **고유121건/79.524 worker초 통과**(journal/controller85+실제MainWindow기존signal1+OCR/controller/theme35). 11개변경ID·계획/실행/통과·현재전체지문/frozen7파일·worker/tree종료/nativeTEMP제거를대조했다. 031의중간동일소스Qt native abort3221226505는보고된통과0/원문ERROR traceback미확보·정확원인미확정으로실패TEMP/로그를보존한다. 이후단독/모듈·계측86건과root현재121건에는재현되지않았지만원인해결로보고하지않는다. 080은provider를통제한실제parser/Qt검증이며WT필수6모델파일이없어실제모델정확도/추론latency를수락하지않았다. 실제모델정확도/처리시간·실제PG·장중/키움·운영DB/계좌·주문·외부망/NAS·push/GitHub CI·배포·로컬전수회귀는미검증이다.
+
 ## 2026-10-20 R3-036·038·040·073 (로컬 미배포)
 
 `8f3bade`: 같은cut지수저장2→1/caller완료·native수명보존,분봉page metadata120→1/0·SOR120→2,동일5기사총반영6→1(receipt유지). 주문의최신scope재조회는native반례에따라유지하며제품변경0이다. 현재 통합소스 관련21모듈 **고유479건/428.669 worker초 통과**(index90+ingest/app241+gateway90+news58,중복0). 계획/실행/통과·14개변경ID/현재전체지문·frozen7파일·worker/tree종료/nativeTEMP제거를대조했다. 실제 PostgreSQL·장중/키움/운영 DB/실계좌·주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀와물리IO/WAL/운영latency는미검증이다.

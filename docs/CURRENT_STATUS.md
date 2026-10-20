@@ -1,5 +1,19 @@
 # 현재 상태 요약
 
+## 2026-10-20 네 번째 병렬 통합: 031·080
+
+로컬제품·검사`539cbad`. 현재통합소스 관련8개실제모듈 **고유121건/79.524 worker초 통과**(journal/controller85+실제MainWindow기존signal1+OCR/controller/theme35). 11개변경ID·계획/실행/통과·현재전체지문/frozen7파일·worker/tree종료/nativeTEMP제거를대조했다.
+
+완료30/미완료53. 준비후보18(실행/제출포함),계약/영향확인29(027잔여포함),선행·의미대기2(047/058),명시보류4(006/008/020/024)다. 035는036선행충족후격리개발/검증제출,043은뉴스native claim CAS개발,046은CLI원본보호검증제출·root통합대기다. 030은031새실패payload보존경계를승계한worktree에서실제개발중이다. 메인포함실제4slot을계속활용하며공유원장/F는root만작성한다.
+
+R3-031 완료(등록저장/종료경계): 기존단일FIFO에서실패한현재job·단계/이미관측한backfill값만보존한다. native저장실패는failed를전달하고후속queue를소비하지않고멈춘다. AppController는기존cache_failed/안내를재사용해거짓ready를막고새명시close만멈춘writer를재시작한다. base5회재시도·정상scope/뉴스/수급/0w원문·optional loader오류/None continue는그대로다. 이미조회한값은setter(None)뒤에도저장하고명시retry의외부loader재호출0/논리중복행0(기존native후보조회는유지)·prefix commit/후속원본을보존한다. 새queue/schema/relay/자동restart·poll/durability는없다. 영구저장오류면다음job도명시retry까지RAM에대기하며process kill/전원복구를제공하지않는다. R030provider cache/R064snapshot덮어쓰기는별도다.
+
+R3-080 완료(기본추론중복): 같은engine의첫predict결과를지역pages로한번물질화해첫row/badge해석에인계한다. 3mode×1/2/5장기본predict2→1/3→2/6→5,필요badge추론N/constructor1과정상rows/progress·검사한model/predict/callable-page/준비취소경계를유지한다. public서명과controller제품은그대로며실제QThread완료/실패/cancel/deleteLater를검증했다. 새cache/owner/모듈/모델다운로드없음. 이미초기화된extract_rows의후속파일삭제와malformedpage대Image.open오류우선순위는전후비교하지않았고기존is_file공통화/물질화순서로메시지·우선순위가달라질수있다. 전체오류계약/실제모델출력동일로과장하지않는다.
+
+031의중간동일소스Qt native abort3221226505는보고된통과0/원문ERROR traceback미확보·정확원인미확정으로실패TEMP/로그를보존한다. 이후단독/모듈·계측86건과root현재121건에는재현되지않았지만원인해결로보고하지않는다. 080은provider를통제한실제parser/Qt검증이며WT필수6모델파일이없어실제모델정확도/추론latency를수락하지않았다.
+
+영향F10/F18/F22/F23(좁은setterNone)/F24·책임/비용계약갱신. 실제모델정확도/처리시간·실제PG·장중/키움·운영DB/계좌·주문·외부망/NAS·push/GitHub CI·배포·로컬전수회귀는미검증이다.
+
 ## 2026-10-20 세 번째 병렬 통합: 036·038·040·073
 
 로컬제품·검사`8f3bade`. 현재 통합소스 관련21모듈 **고유479건/428.669 worker초 통과**(index90+ingest/app241+gateway90+news58,중복0). 계획/실행/통과·14개변경ID/현재전체지문·frozen7파일·worker/tree종료/nativeTEMP제거를대조했다.
