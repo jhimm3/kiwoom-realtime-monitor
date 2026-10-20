@@ -184,6 +184,121 @@ class NativeStoreTests(unittest.TestCase):
         self.assertEqual(False, data.eligibility["A"])
         self.assertEqual("KOSPI", data.markets["A"])
 
+    def test_coverage_inputs_batch_queries_and_keep_sparse_venue_documents(self):
+        from datetime import timedelta
+        from kiwoom_monitor.central_server.database_top20_reconciliation import _inputs
+
+        class PostgresShapeCursor:
+            """Exercise the shared %s SQL shape against SQLite, not a live PG server."""
+            def __init__(self, cursor):
+                self.cursor = cursor
+                self.statements = []
+
+            def execute(self, statement, parameters):
+                self.statements.append((statement, parameters))
+                translated = statement.replace("b.trading_date::text", "b.trading_date").replace(
+                    "to_char(b.minute,'HH24:MI')", "b.minute"
+                ).replace("%s", "?")
+                return self.cursor.execute(translated, parameters)
+
+            def fetchall(self):
+                return self.cursor.fetchall()
+
+        # This is the bounded-read contract, including the existing 200-code boundary.
+        for count, select_budget in ((0, 1), (3, 5), (20, 5), (200, 5), (201, 9)):
+            with self.subTest(codes=count):
+                store = SQLiteQueryStore(Path(":memory:"))
+                store.initialize()
+                try:
+                    codes = [f"C{number:04}" for number in range(count)]
+                    expected_cohorts, expected_pairs = {}, {}
+                    for offset in range(0, count, 20):
+                        minute = (datetime.fromisoformat(MINUTE) + timedelta(minutes=offset // 20)).isoformat(timespec="minutes")
+                        cohort = {"cohort_segments": [[minute + ":00", codes[offset:offset + 20]]]}
+                        expected_cohorts[minute] = cohort
+                        store.save_dataset_snapshot("top20_index", DAY, minute, cohort)
+                    documents = []
+                    for number, code in enumerate(codes):
+                        for venue in ("KRX", "NXT"):
+                            if venue == "NXT" and number % 3:
+                                continue
+                            document = {} if venue == "NXT" and number % 6 == 0 else {
+                                "as_of": DAY, "code": code, "venue": venue, "row": number,
+                            }
+                            expected_pairs[f"{code}:{venue}"] = {"bars": {}, "metadata": {}, "coverage": document}
+                            documents.append({"owner": f"{DAY}:{code}:{venue}", "key": "complete", "document": document})
+                        documents.extend((
+                            {"owner": f"{DAY}:{code}:SOR", "key": "complete", "document": {"wrong": "venue"}},
+                            {"owner": f"1999-01-01:{code}:KRX", "key": "complete", "document": {"wrong": "day"}},
+                            {"owner": f"{DAY}:{code}:KRX", "key": "partial", "document": {"wrong": "key"}},
+                        ))
+                    if documents:
+                        store.upsert_documents("market_data_coverage", documents)
+                    statements = []
+                    original_connect = store._connect
+
+                    def connect():
+                        connection = original_connect()
+                        connection.set_trace_callback(statements.append)
+                        return connection
+
+                    with patch.object(store, "_connect", side_effect=connect) as connections, \
+                            patch("kiwoom_monitor.central_server.database_top20_reconciliation.environment_value", return_value=NOW.isoformat()):
+                        data = store.load_top20_reconciliation_inputs(DAY)
+                    connections.assert_called_once_with()
+                    normalized = [statement.lstrip().upper() for statement in statements]
+                    self.assertEqual(select_budget, sum(statement.startswith("SELECT") for statement in normalized))
+                    self.assertEqual(1, normalized.count("BEGIN"))
+                    self.assertEqual(1, normalized.count("COMMIT"))
+                    self.assertFalse(any(statement.startswith(("INSERT", "UPDATE", "DELETE")) for statement in normalized))
+                    self.assertEqual(expected_cohorts, data.cohorts)
+                    self.assertEqual(expected_pairs, data.pairs)
+                    self.assertEqual(({}, {}, []), (data.eligibility, data.markets, data.sources))
+                    self.assertEqual(NOW.isoformat(), data.input_as_of)
+                    with store._connection() as connection, \
+                            patch("kiwoom_monitor.central_server.database_top20_reconciliation.environment_value", return_value=NOW.isoformat()):
+                        connection.execute("BEGIN")
+                        cursor = PostgresShapeCursor(connection.cursor())
+                        shaped = _inputs(cursor, DAY, "%s")
+                    self.assertEqual(data, shaped)
+                    self.assertEqual(select_budget, len(cursor.statements))
+                    self.assertTrue(all("?" not in statement for statement, _ in cursor.statements))
+                    self.assertTrue(all(len(parameters) <= 400 for _, parameters in cursor.statements))
+                finally:
+                    store.close()
+
+    def test_coverage_read_failure_closes_transaction_and_preserves_published_day(self):
+        import sqlite3
+
+        self.seed()
+        service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW)
+        published = asyncio.run(service.reconcile_top20_day(DAY))
+        with self.store._connection() as connection:
+            connection.execute("UPDATE central_documents SET document_json='[]' "
+                               "WHERE collection='market_data_coverage' AND owner=? AND document_key='complete'",
+                               (DAY + ":A:KRX",))
+        statements, connections = [], []
+        original_connect = self.store._connect
+
+        def connect():
+            connection = original_connect()
+            connection.set_trace_callback(statements.append)
+            connections.append(connection)
+            return connection
+
+        with patch.object(self.store, "_connect", side_effect=connect), \
+                self.assertRaisesRegex(ValueError, "TOP20 stored document is not an object"):
+            asyncio.run(service.reconcile_top20_day(DAY))
+        self.assertEqual(1, len(connections))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connections[0].execute("SELECT 1")
+        self.assertNotIn("COMMIT", [statement.upper() for statement in statements])
+        self.assertEqual(published, self.store.load_dataset_snapshots(RECONCILED_KIND, DAY)[0]["payload"])
+        self.store.upsert_documents("market_data_coverage", [{
+            "owner": DAY + ":A:KRX", "key": "complete", "document": pair()["coverage"],
+        }])
+        self.assertEqual(published, asyncio.run(service.reconcile_top20_day(DAY)))
+
     def test_atomic_projection_cache_invalidation_and_raw_preservation(self):
         self.seed()
         raw_before = self.store.load_dataset_snapshots("top20_index", DAY)

@@ -83,14 +83,19 @@ def _inputs(cursor: Any, day: str, marker: str) -> Top20ReconciliationInput:
             value = _document(raw)
             if value.get("as_of") == day:
                 markets[str(code)] = str(value.get("market", ""))
-    for code in sorted_codes:
-        for venue in ("KRX", "NXT"):
-            subject = f"{code}:{venue}"
-            cursor.execute("SELECT document_json FROM central_documents WHERE collection='market_data_coverage' "
-                           "AND owner=" + marker + " AND document_key='complete'", (f"{day}:{subject}",))
-            row = cursor.fetchone()
-            if row is not None:
-                pairs.setdefault(subject, {"bars": {}, "metadata": {}, "coverage": {}})["coverage"] = _document(row[0])
+    for offset in range(0, len(sorted_codes), 200):
+        chunk = sorted_codes[offset:offset + 200]
+        owners = tuple(f"{day}:{code}:{venue}" for code in chunk for venue in ("KRX", "NXT"))
+        slots = ",".join([marker] * len(owners))
+        cursor.execute("SELECT owner,document_json FROM central_documents WHERE collection='market_data_coverage' "
+                       "AND document_key='complete' AND owner IN (" + slots + ")", owners)
+        coverage = {str(owner): _document(raw) for owner, raw in cursor.fetchall()}
+        for code in chunk:
+            for venue in ("KRX", "NXT"):
+                subject = f"{code}:{venue}"
+                document = coverage.get(f"{day}:{subject}")
+                if document is not None:
+                    pairs.setdefault(subject, {"bars": {}, "metadata": {}, "coverage": {}})["coverage"] = document
     return Top20ReconciliationInput(day, cohorts, pairs, eligibility, markets,
                                     environment_value('computed_at', lambda: datetime.now(KST).isoformat()), sources)
 

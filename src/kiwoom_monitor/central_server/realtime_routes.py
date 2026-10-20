@@ -94,9 +94,11 @@ def create_realtime_router(
             pass
         finally:
             sender.cancel()
-            with suppress(asyncio.CancelledError):
-                await sender
-            realtime_hub.disconnect(subscriber)
+            try:
+                with suppress(asyncio.CancelledError):
+                    await sender
+            finally:
+                realtime_hub.disconnect(subscriber)
 
 
     return router
