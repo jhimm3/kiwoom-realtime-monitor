@@ -150,6 +150,7 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                 local_central_server.stop()
             local_central_server = None
     migrate_legacy_news_database(paths.database_path, paths.news_database_path)
+    central_content_thread: threading.Thread | None = None
     central_theme_sync: CentralThemeSyncDispatcher | None = None
     central_settings_sync: CentralSettingsSyncService | None = None
     candidate_client: CentralContentClient | None = None
@@ -203,7 +204,10 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
             except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
                 logging.getLogger(__name__).warning("중앙 콘텐츠 이전을 건너뜁니다: %s", error)
 
-        threading.Thread(target=sync_central_content, name="central-content-sync", daemon=True).start()
+        central_content_thread = threading.Thread(
+            target=sync_central_content, name="central-content-sync", daemon=True,
+        )
+        central_content_thread.start()
         central_settings_sync = CentralSettingsSyncService(CentralContentClient(
             configured_data_source.server_url, configured_data_source.access_token,
         ))
@@ -442,6 +446,8 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
             central_settings_timer.stop()
         if central_theme_sync is not None:
             central_theme_sync.close()
+        if central_content_thread is not None:
+            central_content_thread.join()
         if local_central_server is not None:
             local_central_server.stop()
     sys.exit(exit_code)

@@ -519,10 +519,12 @@ class MarketCacheWriterTests(unittest.TestCase):
                             self.assertEqual(("complete", "query", "kiwoom-ka10080"), (row[8], row[9], row[10]))
                     self.assertEqual(1, len(clock_calls))
                     self.assertEqual(original_keeper, keeper())
-                    if stage in {"bar", "current", "cutoff"}:
+                    if stage in {"current", "cutoff"}:
                         self.assertEqual([kept.date()], purges)  # No additional SQL/lookup.
                         self.assertEqual(1, len(events))
                     else:
+                        # A failed expired upsert cannot reveal whether COMMIT returned;
+                        # even native rollback now reuses the same no-op retention fence.
                         self.assertEqual([kept.date()] * 2, purges)
                         self.assertEqual(int(stage in {"cleanup_precommit", "cleanup_postcommit"}), len(events) - 1)
                         if len(events) == 2:
@@ -560,6 +562,201 @@ class MarketCacheWriterTests(unittest.TestCase):
                         self.assertEqual([("TARGET", {"generation": 11, "minutes": minutes})], quality)
                         self.assertEqual([(now.date().isoformat(), "TARGET", now.isoformat(timespec="seconds"), len(bars))], target()["receipt"])
                     self.assertEqual(original_keeper, keeper())
+
+    def _observe_failed_native_commit_return(self, stage, *, day="expired", cleanup=None, recover=False):
+        """Run real SQLite transactions; only their commit return can be lost."""
+        from datetime import timedelta
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+
+        now = as_kst(datetime(2026, 10, 21, 10))
+        kept = now - timedelta(days=30)
+        minute = {"expired": kept - timedelta(days=1), "cutoff": kept,
+                  "current": now - timedelta(minutes=1)}[day]
+        native_connect = sqlite3.connect
+        clock_calls, sql, connections, committed, failures, prefixes, acks, quality = [], [], [], [], [], [], [], []
+
+        def clock():
+            clock_calls.append(1)
+            return now
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path, now_provider=clock)
+            repository.upsert_bars("KEEP", (MinuteOhlcv(kept, 100, 110, 90, 105, 10),))
+            repository.upsert_market_index_minutes({("kosdaq", kept): (1., 2., 1., 2., 10.)})
+            repository.record_history_sync("KEEP", kept.date(), kept, 1)
+            repository.record_history_sync("TARGET", now.date(), now - timedelta(minutes=5), 17)
+
+            def state():
+                # Readbacks bypass the traced/faulting production connection.
+                with closing(native_connect(path)) as connection:
+                    return {
+                        "bars": connection.execute("SELECT * FROM minute_bars WHERE stock_code='TARGET' ORDER BY minute").fetchall(),
+                        "index": connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kospi' ORDER BY minute").fetchall(),
+                        "metadata": connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('TARGET','market:kospi') ORDER BY subject,observation_key").fetchall(),
+                        "receipt": connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='TARGET'").fetchall(),
+                        "keeper": (
+                            connection.execute("SELECT * FROM minute_bars WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kosdaq'").fetchall(),
+                            connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject,observation_key").fetchall()),
+                    }
+
+            initial = state()
+            writer = MarketCacheWriter(path, now_provider=clock)
+            writer.enqueue_minute_retention(kept.date())
+            writer.start()
+            self.assertTrue(writer.stop_and_drain())
+            self.assertEqual(kept.date(), writer._minute_retention_cutoff)
+            bar = MinuteOhlcv(minute, 50, 70, 40, 60, 3)
+            pending, market = {("TARGET", minute): bar}, {("kospi", minute): (1., 2., 1., 2., 10.)}
+            history = stage == "history_commit"
+            original_payload = repr((bar,) if history else (pending, market))
+            message = "native index INSERT failed" if stage == "index_insert" else "native stock INSERT failed" if stage == "stock_insert" else "native COMMIT return lost: " + stage
+            cleanup_message = "native cleanup COMMIT return lost" if cleanup == "commit" else "native cleanup DELETE failed"
+
+            def history_failed(code, error):
+                failures.append(("history_failed", code, error))
+                prefixes.append(state())
+
+            failed_pending = []
+
+            def minute_failed(values, indexes, error):
+                failed_pending.append((values, indexes))
+                failures.append(("minute_failed", repr(values), repr(indexes), error))
+                prefixes.append(state())
+
+            writer.history_failed.connect(history_failed, Qt.ConnectionType.DirectConnection)
+            writer.minute_failed.connect(minute_failed, Qt.ConnectionType.DirectConnection)
+            writer.retention_failed.connect(lambda cutoff, error: failures.append(("retention_failed", cutoff.isoformat(), error)), Qt.ConnectionType.DirectConnection)
+            writer.history_saved.connect(lambda *args: acks.append(args), Qt.ConnectionType.DirectConnection)
+            writer.minute_saved.connect(lambda *args: acks.append(args), Qt.ConnectionType.DirectConnection)
+            writer.history_quality_saved.connect(lambda *args: quality.append(args), Qt.ConnectionType.DirectConnection)
+            with closing(native_connect(path)) as connection:
+                if stage in {"stock_insert", "index_insert"}:
+                    table = "minute_bars" if stage == "stock_insert" else "market_index_minute_bars"
+                    connection.execute(f"CREATE TRIGGER reject_insert BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'{message}'); END")
+                if cleanup == "delete":
+                    connection.execute("CREATE TRIGGER reject_cleanup BEFORE DELETE ON minute_bars WHEN OLD.stock_code='TARGET' AND OLD.trade_date < '2026-09-21' BEGIN SELECT RAISE(ABORT,'native cleanup DELETE failed'); END")
+                connection.commit()
+
+            injected = []
+
+            class CommitReturnConnection(sqlite3.Connection):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.role = None
+                    connections.append(1)
+                    self.set_trace_callback(sql.append)
+
+                def execute(self, statement, *args, **kwargs):
+                    if statement.lstrip().upper().startswith("DELETE FROM MINUTE_BARS"):
+                        self.role = "cleanup"
+                    return super().execute(statement, *args, **kwargs)
+
+                def executemany(self, statement, *args, **kwargs):
+                    upper = statement.lstrip().upper()
+                    if upper.startswith("INSERT INTO MINUTE_BARS"):
+                        self.role = "stock"
+                    elif upper.startswith("INSERT INTO MARKET_INDEX_MINUTE_BARS"):
+                        self.role = "index"
+                    return super().executemany(statement, *args, **kwargs)
+
+                def commit(self):
+                    super().commit()  # Actual SQLite COMMIT occurs before fault injection.
+                    target = "stock" if stage in {"history_commit", "stock_commit"} else "index" if stage == "index_commit" else None
+                    if self.role == target and "save" not in injected:
+                        injected.append("save")
+                        committed.append({"in_transaction": self.in_transaction, "state": state()})
+                        raise OSError(message)
+                    if self.role == "cleanup" and cleanup == "commit" and "cleanup" not in injected:
+                        injected.append("cleanup")
+                        raise OSError(cleanup_message)
+
+            def connect(*args, **kwargs):
+                kwargs["factory"] = CommitReturnConnection
+                return native_connect(*args, **kwargs)
+
+            def enqueue():
+                if history:
+                    writer.enqueue_history_bars("TARGET", (bar,), now.date(), now, recovery_generation=23)
+                else:
+                    writer.enqueue_minute_bars(pending, market)
+
+            clock_calls.clear()
+            with patch("sqlite3.connect", side_effect=connect):
+                enqueue()
+                writer.start()
+                self.assertTrue(writer.stop_and_drain())
+            final = state()
+            self.assertEqual(message, failures[0][-1])
+            self.assertEqual("history_failed" if history else "minute_failed", failures[0][0])
+            self.assertEqual([], acks)
+            self.assertEqual([], quality)
+            self.assertEqual(1, len(prefixes))
+            self.assertEqual(initial["receipt"], final["receipt"])
+            self.assertEqual(initial["keeper"], prefixes[0]["keeper"])
+            self.assertEqual(initial["keeper"], final["keeper"])
+            if not history:
+                self.assertEqual([(pending, market)], failed_pending)
+            self.assertEqual(original_payload, repr((bar,) if history else (pending, market)))
+            expected_stock, expected_index = int(stage != "stock_insert"), int(stage == "index_commit")
+            self.assertEqual((expected_stock, expected_index), (len(prefixes[0]["bars"]), len(prefixes[0]["index"])))
+            self.assertEqual(expected_stock + expected_index, len(prefixes[0]["metadata"]))
+            if stage.endswith("commit"):
+                self.assertEqual(1, len(committed))
+                self.assertFalse(committed[0]["in_transaction"])
+                self.assertEqual(committed[0]["state"], prefixes[0])
+            else:
+                self.assertEqual([], committed)
+            for row in prefixes[0]["metadata"]:
+                self.assertEqual(minute, datetime.fromisoformat(row[3]))
+                self.assertEqual(now, datetime.fromisoformat(row[4]))
+                self.assertEqual("kiwoom-ka10080" if history else "kiwoom-websocket-0B" if row[1] == "TARGET" else "kiwoom-websocket-index", row[10])
+            counts = {key: sum(statement.lstrip().upper().startswith(key.upper()) for statement in sql)
+                      for key in ("select", "delete", "begin", "commit", "rollback")}
+            result = {"stage": stage, "day": day, "cleanup": cleanup, "connections": len(connections), **counts,
+                      "clock": len(clock_calls), "sql": sql, "original_payload": original_payload,
+                      "failures": failures.copy(), "success_acks": acks.copy(), "quality_acks": quality.copy(),
+                      "committed_before_raise": committed, "at_failure": prefixes[0], "after_drain": final,
+                      "cutoff": writer._minute_retention_cutoff.isoformat(), "keeper_exact": True}
+            if recover:
+                with closing(native_connect(path)) as connection:
+                    connection.execute("DROP TRIGGER IF EXISTS reject_insert")
+                    connection.execute("DROP TRIGGER IF EXISTS reject_cleanup")
+                    connection.commit()
+                enqueue()
+                writer.start()
+                self.assertTrue(writer.stop_and_drain())
+                self.assertEqual(1, len(acks))
+                self.assertEqual(int(history), len(quality))
+                if history:
+                    self.assertEqual([("TARGET", {"generation": 23, "minutes": (minute,)})], quality)
+                self.assertEqual(initial["keeper"], state()["keeper"])
+                self.assertEqual(int(day != "expired"), len(state()["bars"]))
+                self.assertEqual(int(not history and day != "expired"), len(state()["index"]))
+                self.assertEqual(kept.date(), writer._minute_retention_cutoff)
+                self.assertEqual(result["failures"], failures)
+                result["same_writer_retry"] = {"success_acks": acks, "quality_acks": quality, "after_retry": state()}
+            return result
+
+    def test_failed_native_commit_return_and_partial_index_failure_keep_failure_ack_and_existing_cutoff(self):
+        for stage in ("history_commit", "stock_commit", "index_commit", "index_insert", "stock_insert"):
+            with self.subTest(stage=stage):
+                observed = self._observe_failed_native_commit_return(stage, recover=True)
+                self.assertEqual([], observed["after_drain"]["bars"])
+                self.assertEqual([], observed["after_drain"]["index"])
+                self.assertEqual([], observed["after_drain"]["metadata"])
+                self.assertEqual(1, len(observed["failures"]))
+        for cleanup in ("delete", "commit"):
+            with self.subTest(cleanup=cleanup):
+                observed = self._observe_failed_native_commit_return("index_commit", cleanup=cleanup, recover=True)
+                self.assertEqual(["minute_failed", "retention_failed"], [event[0] for event in observed["failures"]])
+                self.assertEqual("2026-09-21", observed["failures"][1][1])
+                self.assertEqual("native cleanup DELETE failed" if cleanup == "delete" else "native cleanup COMMIT return lost", observed["failures"][1][2])
+                self.assertEqual(int(cleanup == "delete"), len(observed["after_drain"]["bars"]))
+                self.assertEqual(int(cleanup == "delete"), len(observed["after_drain"]["index"]))
 
     def test_stop_drains_minute_and_price_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

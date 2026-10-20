@@ -995,6 +995,94 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.transport.submit.assert_not_called()
         self.transport.cancel.assert_not_called()
 
+    async def test_cancelled_resume_spec_read_retains_owner_until_original_query_finishes(self):
+        await self.supervisor.bundle_changed(self.profile, None)
+        response = await self.http.post("/api/v1/mock-automation/stop", json={
+            "credential_profile_id": self.profile, "account_ref": self.account_ref,
+            "spec_id": self.spec.spec_id, "expected_control_revision": self.control.control_revision,
+            "reason": "prepare stopped control for cancelled resume spec read",
+        })
+        self.assertEqual(200, response.status_code)
+        repository = self.supervisor._repository
+        control_before = repository.load_mock_automation_control(self.account_ref)
+        spec_before = repository.load_mock_automation_spec(self.account_ref, self.spec.spec_id)
+        receipts_before = repository.load_mock_automation_stop_revisions(self.account_ref)
+        self.assertEqual(MockAutomationDesiredState.STOPPED, control_before.desired_state)
+        self.assertEqual(1, len(receipts_before))
+        load_spec = repository.load_mock_automation_spec
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        native_results = []
+
+        def blocked_spec(account_ref, spec_id):
+            # Control/revision validation has already passed. This thread call
+            # pauses before the original query, without holding a DB connection.
+            entered.set()
+            try:
+                if not release.wait(5):
+                    raise AssertionError("cancelled resume spec-read barrier was not released")
+                spec = load_spec(account_ref, spec_id)
+                native_results.append((spec, repository.load_mock_automation_control(account_ref),
+                    repository.load_mock_automation_stop_revisions(account_ref),
+                    self.bundle.runtime._new_orders_enabled))
+                return spec
+            finally:
+                finished.set()
+
+        with patch.object(repository, "load_mock_automation_spec", side_effect=blocked_spec) as load, \
+             patch.object(self.store, "close", wraps=self.store.close) as close_store:
+            request = asyncio.create_task(self.http.post("/api/v1/mock-automation/resume", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_control_revision": control_before.control_revision,
+                "expected_settings_revision": self.settings["revision"], "credential_revision": 1,
+                "reason": "cancel during resume spec read",
+            }))
+            shutdown = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                request.cancel()
+                await asyncio.sleep(0)
+                shutdown = asyncio.create_task(self.close_app())
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.2)
+                except TimeoutError:
+                    pass
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()
+                await asyncio.sleep(0)
+                observed = {
+                    "request_pending": not request.done(),
+                    "account_lock_held": self.supervisor._locks[self.account_ref].locked(),
+                    "shutdown_pending": not shutdown.done(),
+                    "owner_closing": self.owner._closing,
+                    "runtime_retired": self.bundle.runtime._retired,
+                    "store_close_calls": close_store.call_count,
+                    "native_pending": not finished.is_set(),
+                }
+            finally:
+                release.set()
+                outcome = await asyncio.gather(request, return_exceptions=True)
+                if shutdown is not None:
+                    await shutdown
+                if entered.is_set():
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+
+        self.assertEqual({
+            "request_pending": True, "account_lock_held": True,
+            "shutdown_pending": True, "owner_closing": False,
+            "runtime_retired": False, "store_close_calls": 0,
+            "native_pending": True,
+        }, observed)
+        self.assertIsInstance(outcome[0], asyncio.CancelledError)
+        self.assertEqual(1, load.call_count)
+        self.assertEqual([(spec_before, control_before, receipts_before, False)], native_results)
+        self.assertEqual({}, self.supervisor._runners)
+        self.assertTrue(self.bundle.runtime._retired)
+        self.assertEqual("completed", self.app.state.shutdown_status["state"])
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
     async def test_post_switch_admission_failure_records_original_error_and_closes_current_order_gate(self):
         failure = ValueError("controlled existing approval rejection")
         with patch.object(self.runner, "close", wraps=self.runner.close) as close:

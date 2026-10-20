@@ -307,12 +307,16 @@ class JournalBarRepositoryMixin:
                 " OR journal_minute_bars.source IS NOT excluded.source"
                 " OR journal_minute_bars.confirmed_at IS NOT excluded.confirmed_at)"
             )
+        minute_bounds = (
+            (min(row[2] for row in rows), max(row[2] for row in rows)) if rows else ()
+        )
         preserved = {
                 str(minute): (str(saved_source), saved_at)
                 for minute, saved_source, saved_at in connection.execute(
                     "SELECT minute,source,confirmed_at FROM journal_minute_bars "
-                    "WHERE stock_code=? AND source IN ('api_confirmed','after_close_confirmed')",
-                    (code,),
+                    "WHERE stock_code=? AND source IN ('api_confirmed','after_close_confirmed')"
+                    + (" AND minute>=? AND minute<=?" if minute_bounds else ""),
+                    (code, *minute_bounds),
                 )
         }
         connection.executemany(

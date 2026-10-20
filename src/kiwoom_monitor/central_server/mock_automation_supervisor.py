@@ -343,7 +343,7 @@ class MockAutomationSupervisor:
                 or control.desired_state is not MockAutomationDesiredState.STOPPED
             ):
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_NOT_STOPPED")
-            spec = await asyncio.to_thread(
+            spec = await drain_thread_call(
                 self._repository.load_mock_automation_spec, account_ref, spec_id,
             )
             admission = await asyncio.to_thread(

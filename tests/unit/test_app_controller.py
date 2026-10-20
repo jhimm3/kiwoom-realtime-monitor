@@ -1634,7 +1634,9 @@ class AppControllerTests(unittest.TestCase):
             self.wait_until(lambda: window._app_controller.request_close())
             self.assertTrue(completed.is_set())
 
-    def _bootstrap_settings_desktop(self, during_loop, after_exit=None):
+    def _bootstrap_settings_desktop(self, during_loop, after_exit=None, *,
+                                    content_service=None, expected_error=SystemExit,
+                                    source_mode="local_server"):
         import json
         import sys
         import threading
@@ -1722,11 +1724,11 @@ class AppControllerTests(unittest.TestCase):
 
         def loop():
             fixture.window = fixture.windows[0]
-            fixture.schedule = next(
+            fixture.schedule = next((
                 callback for _delay, callback in fixture.callbacks
                 if getattr(callback, "__name__", "") == "schedule_central_settings_sync"
-            )
-            fixture.timer = fixture.timers[-1]
+            ), None)
+            fixture.timer = fixture.timers[-1] if fixture.timers else None
             during_loop(fixture)
             return 0
 
@@ -1734,10 +1736,12 @@ class AppControllerTests(unittest.TestCase):
         application.exec.side_effect = loop
         server = Mock()
         server.stop.side_effect = lambda: fixture.events.append("server.stop")
-        service = Mock()
-        service.pull.return_value = SimpleNamespace(total=0)
-        service.push.return_value = SimpleNamespace(total=0)
-        source = DataSourceSettings(mode="local_server", server_url="https://fixture.invalid", access_token="fixture")
+        fixture.server = server
+        service = Mock() if content_service is None else content_service
+        if content_service is None:
+            service.pull.return_value = SimpleNamespace(total=0)
+            service.push.return_value = SimpleNamespace(total=0)
+        source = DataSourceSettings(mode=source_mode, server_url="https://fixture.invalid", access_token="fixture")
         single_shot = lambda delay, callback: fixture.callbacks.append((delay, callback))
         with ExitStack() as stack:
             for active in (
@@ -1760,9 +1764,11 @@ class AppControllerTests(unittest.TestCase):
                 stack.enter_context(active)
             bootstrap.QTimer.singleShot.side_effect = single_shot
             try:
-                with self.assertRaises(SystemExit) as exited:
+                with self.assertRaises(expected_error) as exited:
                     bootstrap._main_with_restore_gate()
-                self.assertEqual(0, exited.exception.code)
+                fixture.exit_error = exited.exception
+                if expected_error is SystemExit:
+                    self.assertEqual(0, exited.exception.code)
                 fixture.lease_released_while_running = (
                     not fixture.completed.is_set() and restore_available()
                 )
@@ -1776,11 +1782,213 @@ class AppControllerTests(unittest.TestCase):
                         worker.join(5)
                         self.assertFalse(worker.is_alive())
                 for value in fixture.windows:
+                    if content_service is not None:
+                        value.close()
                     self.wait_until(lambda value=value: not any(
                         worker.isRunning() for worker in value._app_controller.findChildren(QThread)
                     ))
                 self.app.processEvents()
         return fixture
+
+    def _bootstrap_content_case(self, *, stage="sqlite", exit_mode="quit", fail_http=False,
+                                source_mode="local_server"):
+        import json
+        import threading
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+        from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        state = SimpleNamespace(
+            entered=Event(), release=Event(), completed=Event(), lease_released=Event(),
+            stopped=Event(), errors=[], events=[], threads=[], observer=None, calls=0,
+            connections=0, sql=[], timed_out=False, observed=None,
+        )
+        now = "2030-01-02T10:00:00+09:00"
+
+        def barrier():
+            state.events.append(stage + ".entered")
+            state.entered.set()
+            if not state.release.wait(4):
+                state.timed_out = True
+
+        class Response:
+            headers = {"X-Kiwoom-Server-Time": now}
+
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.value).encode()
+
+        def http(request, **_kwargs):
+            state.calls += 1
+            if "/news_article?" in request.full_url:
+                if stage == "http":
+                    barrier()
+                if fail_http:
+                    raise OSError("controlled content HTTP failure")
+                return Response({"documents": [{
+                    "owner": "005930", "key": "content-fixture", "updated_at": 1.0,
+                    "document": {"stock_code": "005930", "identity": "content-fixture",
+                                 "title": "content lifetime fixture", "first_seen_at": now},
+                }]})
+            if request.get_method() == "GET":
+                return Response({"documents": []})
+            return Response({"saved": len(json.loads(request.data)["documents"])})
+
+        service = CentralContentSyncService(CentralContentClient(
+            "https://fixture.invalid", "fixture", opener=http,
+        ))
+        connect = sqlite3.connect
+        thread_type = threading.Thread
+        thread_start = thread_type.start
+        lease_close = AppDataLease.close
+
+        def trace(statement):
+            state.sql.append(statement)
+            if stage == "sqlite" and statement.lstrip().upper().startswith("BEGIN") and not state.entered.is_set():
+                barrier()
+
+        def connection(*args, **kwargs):
+            value = connect(*args, **kwargs)
+            if threading.current_thread().name == "central-content-sync":
+                state.connections += 1
+                value.set_trace_callback(trace)
+            return value
+
+        def start_thread(worker):
+            if worker.name == "central-content-sync":
+                target = worker._target
+
+                def tracked_target():
+                    state.events.append("content.begin")
+                    try:
+                        target()
+                    finally:
+                        state.events.append("content.done")
+                        state.completed.set()
+
+                worker._target = tracked_target
+                state.threads.append(worker)
+            thread_start(worker)
+
+        def close_lease(lease):
+            shared = not lease._exclusive and not lease._stream.closed
+            lease_close(lease)
+            if shared:
+                state.events.append("lease.released")
+                state.lease_released.set()
+
+        def during_loop(fixture):
+            state.fixture = fixture
+            stop = fixture.server.stop.side_effect
+
+            def stop_server():
+                stop()
+                state.events.append("server.stop")
+                state.stopped.set()
+
+            fixture.server.stop.side_effect = stop_server
+            if source_mode == "local":
+                return
+            self.assertTrue((state.completed if stage is None else state.entered).wait(2))
+            if exit_mode == "normal":
+                fixture.window.close()
+                self.wait_until(lambda: fixture.window._app_controller._shutdown_stage == "ready")
+            state.events.append("app.exec.leaving")
+
+            if stage is not None:
+                def observe():
+                    try:
+                        state.lease_released.wait(0.15)
+                        state.observed = (state.stopped.is_set(), state.lease_released.is_set(),
+                                          fixture.restore_available())
+                        self.assertEqual((False, False, False), state.observed, state.events)
+                        self.assertFalse(state.completed.is_set())
+                    except BaseException as error:
+                        state.errors.append(error)
+                    finally:
+                        state.release.set()
+
+                state.observer = thread_type(target=observe, name="content-close-observer")
+                state.observer.start()
+            if exit_mode == "error":
+                raise RuntimeError("controlled app.exec failure")
+
+        def after_exit(fixture):
+            if state.observer is not None:
+                state.observer.join(5)
+                self.assertFalse(state.observer.is_alive())
+            if state.errors:
+                raise state.errors[0]
+            self.assertTrue(fixture.restore_available())
+            if source_mode == "local":
+                self.assertEqual([], state.threads)
+                self.assertEqual(0, state.calls)
+                fixture.server.stop.assert_not_called()
+                return
+            self.assertTrue(state.completed.is_set())
+            self.assertEqual(1, len(state.threads))
+            self.assertTrue(state.threads[0].daemon)
+            self.assertFalse(state.threads[0].is_alive())
+            self.assertLess(state.events.index("content.done"), state.events.index("server.stop"))
+            self.assertLess(state.events.index("server.stop"), state.events.index("lease.released"))
+            if exit_mode == "error":
+                self.assertEqual("controlled app.exec failure", str(fixture.exit_error))
+            self.assertEqual(not fail_http, (fixture.paths.data_dir / ".central_content_seeded").exists())
+            with closing(sqlite3.connect(fixture.paths.news_database_path)) as value:
+                rows = value.execute("SELECT title FROM stock_news WHERE identity='content-fixture'").fetchall()
+            self.assertEqual([] if fail_http else [("content lifetime fixture",)], rows)
+
+        with patch.object(thread_type, "start", start_thread), \
+                patch.object(sqlite3, "connect", side_effect=connection), \
+                patch.object(AppDataLease, "close", close_lease):
+            try:
+                self._bootstrap_settings_desktop(
+                    during_loop, after_exit, content_service=service, source_mode=source_mode,
+                    expected_error=RuntimeError if exit_mode == "error" else SystemExit,
+                )
+            finally:
+                state.release.set()
+                if state.observer is not None:
+                    state.observer.join(5)
+                    self.assertFalse(state.observer.is_alive())
+                for worker in state.threads:
+                    worker.join(5)
+                    self.assertFalse(worker.is_alive())
+                print("R032_CONTENT_CLOSE " + json.dumps({
+                    "stage": stage, "exit_mode": exit_mode, "fail_http": fail_http,
+                    "source_mode": source_mode, "observed": state.observed,
+                    "events": state.events, "http_calls": state.calls,
+                    "connections": state.connections, "sql_count": len(state.sql),
+                    "timed_out": state.timed_out,
+                }))
+        self.assertFalse(state.timed_out)
+
+    def test_bootstrap_content_quit_keeps_native_sqlite_and_restore_lease(self):
+        self._bootstrap_content_case()
+
+    def test_bootstrap_content_normal_close_drains_after_controller_ready(self):
+        self._bootstrap_content_case(exit_mode="normal")
+
+    def test_bootstrap_content_exec_exception_keeps_http_and_restore_lease(self):
+        self._bootstrap_content_case(stage="http", exit_mode="error")
+
+    def test_bootstrap_content_http_failure_finishes_before_server_and_lease_close(self):
+        self._bootstrap_content_case(stage="http", exit_mode="normal", fail_http=True)
+
+    def test_bootstrap_content_already_finished_thread_joins_without_restart(self):
+        self._bootstrap_content_case(stage=None)
+
+    def test_bootstrap_content_disabled_source_has_no_thread_or_http(self):
+        self._bootstrap_content_case(stage=None, source_mode="local")
 
     def test_bootstrap_settings_close_preserves_inflight_dependency_and_restore_lease(self):
         def close_while_http_is_running(fixture):
