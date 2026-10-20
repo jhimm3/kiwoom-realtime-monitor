@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 병렬 통합 `fba8994`: realtime_routes가 sender합류의오류와무관하게 기존Hub해제를보장하고 database_top20_reconciliation은같은snapshot의coverage만batch조회한다. 새파일/owner/driverconnection없음. 관련4모듈89건,037구독잔류해소·078 SELECT44→5(20code). F04/F24·F09 갱신,나머지는[의존성 준비큐](REFACTOR_BACKLOG.md#의존성-기반-병렬-실행-원장--2026-10-20).
+
 2026-10-20 R3-012: MainWindow header/표시·ColumnManager→기존 MainTableColumnController/ColumnSettingsRepository의 native 조건부 값/version 저장→Qt 복원·중앙 sync 경계를 유지한다. 새 owner/schema/수명 없음. 로컬 `47e780d`·관련9모듈152건; 동일16열32→0/한 열32→2, reset·폭 revision 의미 보존. 후속 DAG 준비큐, [범위/한계](REFACTOR_BACKLOG.md#r3-012-열-설정-변경행revision-저장-완료--2026-10-20).
 
 2026-10-20 R3-011: 기존 SettingsRepository가 DB 값/version transaction과 RAM cache 세대를 계속 소유한다. MainWindow geometry/Alert는 기존 set_many로 연결하고 CentralSettingsSync/Drive restore의 clear_cache 및 설정 worker 경계를 유지한다. 새 계층/schema/polling 없음. 로컬 `aeb63c6`·관련14모듈175건; 동일4키 반영행8→0·두 UI의 연결/COMMIT/시계4→1. F01(간접)/F22/F23/F24 갱신, 다음012. [실측·의도한 revision 의미·미검증](REFACTOR_BACKLOG.md#r3-011-설정-no-opcacheui-batch-완료--2026-10-20).

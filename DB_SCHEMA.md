@@ -1,3 +1,5 @@
+**R3-078 coverage 조회 계약(2026-10-20, `fba8994`).** 기존 central_documents의 collection=market_data_coverage/document_key=complete와 정확한 day:code:venue owner를 같은read snapshot에서200code(400owner)씩IN조회한다. PK/schema/DDL·문서/시계·누락/빈coverage의의미는 변경하지 않았다. 20code SELECT44→5,201code409→9·반환내용/연결·transaction동일,실제PG/물리IO수락은별도다.
+
 # 데이터베이스 스키마 지도
 
 2026-10-19 R3-005: 기존 CandidateMonitor도 load_minute_bars의 optional start_minute 포함/end_minute 제외를 사용한다. current KST day와 정책window의 교집합만 조회하고 native metadata/가용시각을 기존 codec로 판단입력에 인계한다. reader의 외부 반환형·저장된 provenance/원본·full-day API 기본값·DDL/index/schema version은 그대로이며 빈일 교집합/미설정/subminute read0이다. native 입력 연결 복구와 range 효과의 동등성은 [R3-005](REFACTOR_BACKLOG.md#r3-005-기준선-분봉-범위native-입력-연결-완료--2026-10-19)에 구분한다.

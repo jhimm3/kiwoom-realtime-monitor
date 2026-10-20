@@ -1,5 +1,17 @@
 # 현재 상태 요약
 
+## 2026-10-20 병렬 첫 통합: R3-037·078 완료
+
+로컬 제품·검사 `fba8994`. 현재 소스 관련4모듈 **고유89건/12.839 worker초 통과**(WS51+reconciliation38, 중복0). 계획/실행/통과ID·5개 변경ID·현재 소스와 frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다.
+
+의존성 준비큐를 유지한다. 완료21/미완료62이며 준비후보27(검증제출/실행 포함), 계약/영향확인28, 선행/의미대기3, 명시보류4다. 027숨김chart slice·034·036·069는격리검증 제출/통합대기,070은개발중이다. 027전체와035(036선행)는 아직 완료/준비 승격하지 않는다. worker slot은 개발/다른 작성자 교차검토에 연속 배정하며 root만 원장/F·통합을 맡는다.
+
+R3-037: 기존 route의 sender cancel/join을 nested finally로 감싸 RealtimeHub.disconnect를 보장한다. 원래 송신 오류/취소를 숨기지 않고 정상 subscriber/구독union을 보존한다. 실패 sender 뒤 수신 종료 시 client 잔류를 native router+제어 socket으로 재현해 제거했고 ready/snapshot/ping·gap·정상 종료/취소도 확인했다. sender만 죽고 receive가 계속 대기하는 경우의 양방향 감시는 기존 별도가설이며 추가 구현하지 않았다.
+
+R3-078: 기존 _inputs의 coverage2N SELECT만200code(최대400 owner) batch로 읽는다. 같은 cursor/SQLite transaction·PG repeatable-read wrapper/decoder·subject순서·missing과empty{}·source/generation을 유지한다. 0/3/20/200/201code SELECT는 각각1→1/10→5/44→5/404→5/409→9, coverage는0→0/6→1/40→1/400→1/402→2다. native 반환행/최종input/payload/generation 동일·연결/BEGIN/COMMIT각1/DML0. 실제PG 대신%s SQLite-backed driver shape만 검증했으며 물리I/O/WAL/latency는 미측정이다.
+
+F04/F24(037)·F09(078)와 책임·재현 비용 계약을 갱신했다. 실제 PostgreSQL·키움/장중·다중PC/NAS/운영 DB/계좌/주문·앱 전체 수락·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다.
+
 ## 2026-10-20 의존성 기반 병렬 실행 전환
 
 R3 83개 중 완료19·미완료64. 기존 감사 근거를 재사용해 준비 후보29(현재027/037/078 실행중 포함), 계약/영향 확인28, 선행/의미 대기3, 명시보류4를 구분했다. 5개 엄격선행 edge의 순환 없음과83개 ID를 대조했다. 준비29개 전체의 상호 독립성 완료를 뜻하지 않는다. 실제 독립 경계3개를 별도 Git worktree에 배정했고 root만 백로그/F·공통 계약을 갱신하며 결과를 순차 통합한다. 현재 도구의 총4slot(메인포함)을 사용하며 더 큰 한도가 실제 적용되면 독립 범위까지 확대한다. 전역 Codex 설정·NAS/운영/push 변경은 없다. [전체 배정·의존/충돌 원장](../REFACTOR_BACKLOG.md#의존성-기반-병렬-실행-원장--2026-10-20)을 정본으로 사용한다.
