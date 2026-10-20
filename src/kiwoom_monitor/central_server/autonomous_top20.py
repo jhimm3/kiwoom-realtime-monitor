@@ -178,6 +178,8 @@ class AutonomousTop20Service:
         self._account_entry_codes: tuple[str, ...] = ()
         self._pending_index_records: dict[str, dict[str, Any]] = {}
         self._index_outbox_lock = asyncio.Lock()
+        self._index_flush_lock = asyncio.Lock()
+        self._index_save_task: asyncio.Task[None] | None = None
         self._program_snapshots = ProgramSnapshotWriter(store)
         self._close_task: asyncio.Task[None] | None = None
         self._latest_membership_snapshot: dict[str, Any] | None = None
@@ -250,8 +252,13 @@ class AutonomousTop20Service:
         if self._subscriber is not None:
             self._hub.disconnect(self._subscriber)
             self._subscriber = None
-        # The index-loop waiter may have been cancelled while to_thread was still
-        # committing. Drain its owner before retrying failures or flushing newer input.
+        # A cancelled index-loop waiter must not outlive its actual save owner.
+        # Failed/newer index input stays in the outbox for the existing start recovery.
+        if self._index_save_task is not None:
+            try:
+                await asyncio.shield(self._index_save_task)
+            except Exception as error:
+                logger.warning("NAS TOP20 지수 종료 저장 실패(영속 재시도 보존): %s", error)
         await self._program_snapshots.drain()
 
     async def _select_ranking_response(self, now: datetime):
@@ -949,7 +956,31 @@ class AutonomousTop20Service:
                 await owned_to_thread(self._outbox.put, snapshot_key, payload)
 
     async def _flush_pending_indexes(self) -> None:
-        for snapshot_key, payload in tuple(self._pending_index_records.items()):
+        # Each caller waits for its entry keys, without draining later arrivals forever.
+        keys = tuple(self._pending_index_records)
+        async with self._index_flush_lock:
+            task = self._index_save_task
+            if task is not None and not task.done():
+                # A cancelled waiter can release the lock while native I/O still owns it.
+                await asyncio.shield(task)
+            batch = tuple(
+                (key, self._pending_index_records[key])
+                for key in keys if key in self._pending_index_records
+            )
+            if not batch:
+                return
+            task = owned_create_task(self._write_pending_indexes(batch), name="nas-top20-index-save")
+            self._index_save_task = task
+            task.add_done_callback(
+                lambda done: done.exception() if not done.cancelled() else None,
+            )
+            # The lock serializes caller cuts; the task owns uncancellable native I/O.
+            await asyncio.shield(task)
+
+    async def _write_pending_indexes(
+        self, batch: tuple[tuple[str, dict[str, Any]], ...],
+    ) -> None:
+        for snapshot_key, payload in batch:
             await self._write_index(payload)
             async with self._index_outbox_lock:
                 if self._pending_index_records.get(snapshot_key) is payload:

@@ -43,6 +43,7 @@ class MarketIngestStore(Protocol):
     def load_minute_bars(
         self, code: str, trading_date: str, market: str = "", *,
         realtime_deltas: list[dict[str, Any]] | None = None,
+        start_minute: str | None = None, end_minute: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def replace_daily_bars(
@@ -151,6 +152,7 @@ class MarketDataIngestor:
         values = parse_minute_response(body, payload, now)
         comparison_values = list(values)
         observations = []
+        in_progress_minutes = []
         for value in values:
             effective = datetime.fromisoformat(f"{value['trading_date']}T{value['minute']}")
             completeness = (
@@ -158,6 +160,8 @@ class MarketDataIngestor:
                 if effective < now.replace(tzinfo=None, second=0, microsecond=0)
                 else DataCompleteness.IN_PROGRESS
             )
+            if completeness != DataCompleteness.COMPLETE:
+                in_progress_minutes.append(effective.replace(tzinfo=KST))
             observation = minute_bar_observation(
                 value,
                 origin=ObservationOrigin.QUERY,
@@ -169,11 +173,10 @@ class MarketDataIngestor:
             observations.append((bar_observation_key(observation), observation))
         prepare_ms = round((monotonic() - prepare_started) * 1000)
         metadata_read_ms = 0
-        if values:
-            first_day = min(str(value["trading_date"]) for value in values)
-            last_day = max(str(value["trading_date"]) for value in values)
-            start = datetime.fromisoformat(first_day).replace(tzinfo=KST)
-            end = datetime.fromisoformat(last_day).replace(tzinfo=KST) + timedelta(days=1)
+        # Only unfinished query bars need the existing ACTUAL protection prefilter.
+        if in_progress_minutes:
+            start = min(in_progress_minutes)
+            end = max(in_progress_minutes) + timedelta(minutes=1)
             metadata_started = monotonic()
             actual_keys = {
                 item.observation_key
@@ -225,9 +228,15 @@ class MarketDataIngestor:
         for value in values:
             by_day.setdefault(str(value["trading_date"]), []).append(value)
         for day, day_values in by_day.items():
+            first_minute = min(str(value["minute"]) for value in day_values)
+            last_minute = max(str(value["minute"]) for value in day_values)
+            end = datetime.fromisoformat(f"{day}T{last_minute}") + timedelta(minutes=1)
+            end_minute = end.strftime("%H:%M") if end.date().isoformat() == day else None
             sor_rows = {
                 str(row.get("minute", "")): row
-                for row in self._store.load_minute_bars(code, day, "SOR")
+                for row in self._store.load_minute_bars(
+                    code, day, "SOR", start_minute=first_minute, end_minute=end_minute,
+                )
             }
             if not sor_rows:
                 continue

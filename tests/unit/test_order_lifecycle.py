@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
 from kiwoom_monitor.application.market_session_schedule import CURRENT_SCHEDULE_VERSION
@@ -14,7 +15,7 @@ from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime, ManualMockOrderGateway
 from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot, BrokerFill, BrokerOrderSnapshot, BrokerSubmission,
-    OrderIntent, OrderSide, OrderState, OrderType,
+    OrderEvent, OrderIntent, OrderSide, OrderState, OrderType,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionRejected, SubmissionUnknown
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
@@ -754,6 +755,84 @@ class OrderLifecycleTests(unittest.TestCase):
                     request_id="same-id", symbol="005930", side=OrderSide.BUY,
                     quantity=1, limit_price=70_100, expires_seconds=120,
                 )
+
+        asyncio.run(scenario())
+
+    def test_manual_duplicate_rechecks_native_scope_after_first_load(self) -> None:
+        async def scenario() -> None:
+            path = Path(self.directory.name) / "central.sqlite3"
+            store = SQLiteQueryStore(path, now_provider=lambda: NOW)
+            repository = ExecutionRepository(store)
+            transport = _Transport()
+            runtime = ExecutionRuntime(
+                OrderLifecycle(repository, transport, now_provider=lambda: NOW),
+                repository, account_ref="account-1", run_id="run-1",
+                owner_token="owner-1", now_provider=lambda: NOW,
+            )
+            runtime.start()
+            external_store = SQLiteQueryStore(path, now_provider=lambda: NOW)
+            offline_repository = ExecutionRepository(external_store)
+            refreshes = 0
+
+            async def unexpected_refresh() -> AccountSnapshot:
+                nonlocal refreshes
+                refreshes += 1
+                raise AssertionError("an existing request must not refresh or submit")
+
+            gateway = ManualMockOrderGateway(
+                runtime, repository, unexpected_refresh, now_provider=lambda: NOW,
+            )
+            try:
+                for change in ("none", "state", "account_ref", "run_id"):
+                    with self.subTest(change=change):
+                        request_id = f"native-duplicate-{change}"
+                        intent_id = gateway.intent_id(request_id)
+                        initial = repository.create(replace(_intent(), intent_id=intent_id))
+                        native_load = repository.load
+                        first_loaded = False
+
+                        def load_then_update(key):
+                            nonlocal first_loaded
+                            record = native_load(key)
+                            if not first_loaded:
+                                first_loaded = True
+                                if change != "none":
+                                    # The offline/import writer is intentionally unowned.
+                                    # Frozen DTOs do not make its native JSON immutable.
+                                    intent = (replace(record.intent, **{change: "different"})
+                                              if change in {"account_ref", "run_id"} else record.intent)
+                                    state = OrderState.SUBMISSION_UNKNOWN if change == "state" else record.state
+                                    offline_repository.apply(replace(record, intent=intent), OrderEvent(
+                                        f"offline-{change}", key, "OFFLINE_IMPORT", state,
+                                        NOW, NOW + timedelta(seconds=1),
+                                    ))
+                            return record
+
+                        with patch.object(repository, "load", side_effect=load_then_update):
+                            command = gateway.submit_limit(
+                                request_id=request_id, symbol="005930", side=OrderSide.BUY,
+                                quantity=3, limit_price=70_000, expires_seconds=60,
+                            )
+                            if change in {"account_ref", "run_id"}:
+                                with self.assertRaisesRegex(KeyError, "unknown order intent"):
+                                    await command
+                            else:
+                                self.assertEqual(initial, await command)
+                        latest = offline_repository.load(intent_id)
+                        if change in {"account_ref", "run_id"}:
+                            self.assertEqual("different", getattr(latest.intent, change))
+                        elif change == "state":
+                            self.assertEqual(OrderState.SUBMISSION_UNKNOWN, latest.state)
+                            self.assertEqual(NOW + timedelta(seconds=1), latest.updated_at)
+                        self.assertTrue(first_loaded)
+                        self.assertEqual(0, refreshes)
+                        self.assertEqual(0, transport.submit_calls)
+                        self.assertEqual(0, transport.cancel_calls)
+            finally:
+                await gateway.close()
+                runtime.stop()
+                external_store.close()
+                store.close()
 
         asyncio.run(scenario())
 

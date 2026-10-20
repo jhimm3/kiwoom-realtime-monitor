@@ -423,5 +423,124 @@ class MarketDataIngestorTests(unittest.TestCase):
         self.assertEqual("2026-09-12", nxt_history[0]["snapshot_key"])
 
 
+class MinutePageReadBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def _bar(day, minute, market="KRX", value=30):
+        return {"trading_date": day, "minute": minute, "code": "005930", "market": market,
+                "open": 10000, "high": 10000, "low": 10000, "close": 10000,
+                "volume": value * 100, "trade_value_million_won": value, "updated_at": 1.0}
+
+    @staticmethod
+    def _payload(*timestamps):
+        return {"stk_min_pole_chart_qry": [
+            {"cntr_tm": stamp, "open_pric": "10000", "high_pric": "10000",
+             "low_pric": "10000", "cur_prc": "10000", "trde_qty": "1000"}
+            for stamp in timestamps]}
+
+    def test_mixed_minute_page_limits_native_reads_and_keeps_actual_current_bar_and_components(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.fromisoformat("2026-09-14T10:00:30+09:00")
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            try:
+                values = [self._bar("2026-09-14", (datetime(2026, 9, 14, 9) + timedelta(minutes=i)).strftime("%H:%M"))
+                          for i in range(120)]
+                observations = [minute_bar_observation(value, origin=ObservationOrigin.REALTIME,
+                    completeness=DataCompleteness.IN_PROGRESS, source="actual-fixture",
+                    value_kind=DataValueKind.ACTUAL, now_provider=lambda: now) for value in values]
+                store.save_minute_bars(values, observations=[(bar_observation_key(o), o) for o in observations])
+                store.save_minute_bars([dict(value, market="SOR", trade_value_million_won=25) for value in values])
+                before_current = store.load_market_data_metadata(MarketDatasetKind.MINUTE_BAR, "005930:KRX", "2026-09-14T10:00")
+                store.upsert_documents("minute_trade_value_comparisons", [
+                    {"owner": "2026-09-14:005930", "key": minute,
+                     "document": {"query_components_million_won": {"NXT": 5}}} for minute in ("09:59", "10:00")
+                ] + [{"owner": "2026-09-14:005930", "key": "09:15", "document": {"preserve": "outside-page"}}])
+                native_meta, native_bars = store.load_market_data_metadata_range, store.load_minute_bars
+                received = {"metadata": [], "sor": []}
+                def metadata(*args, **kwargs):
+                    rows = native_meta(*args, **kwargs)
+                    received["metadata"].append(len(rows))
+                    return rows
+                def bars(*args, **kwargs):
+                    rows = native_bars(*args, **kwargs)
+                    if args[2] == "SOR": received["sor"].append(len(rows))
+                    return rows
+                with patch.object(store, "load_market_data_metadata_range", side_effect=metadata), \
+                        patch.object(store, "load_minute_bars", side_effect=bars):
+                    MarketDataIngestor(store, now_provider=lambda: now).ingest("ka10080", {"stk_cd": "005930"},
+                        self._payload("20260914095900", "20260914100000"))
+                rows = {row["minute"]: row for row in native_bars("005930", "2026-09-14", "KRX")}
+                self.assertEqual((1000, 10), (rows["09:59"]["volume"], rows["09:59"]["trade_value_million_won"]))
+                self.assertEqual((3000, 30), (rows["10:00"]["volume"], rows["10:00"]["trade_value_million_won"]))
+                self.assertEqual(before_current, store.load_market_data_metadata(MarketDatasetKind.MINUTE_BAR, "005930:KRX", "2026-09-14T10:00"))
+                closed = store.load_market_data_metadata(MarketDatasetKind.MINUTE_BAR, "005930:KRX", "2026-09-14T09:59")
+                self.assertEqual((DataCompleteness.COMPLETE, DataValueKind.ESTIMATED, ObservationOrigin.QUERY),
+                                 (closed.completeness, closed.value_kind, closed.origin))
+                comparisons = {row["key"]: row["document"] for row in store.load_documents("minute_trade_value_comparisons", "2026-09-14:005930", 20)}
+                for minute in ("09:59", "10:00"):
+                    self.assertEqual({"NXT": 5, "KRX": 10}, comparisons[minute]["query_components_million_won"])
+                    self.assertEqual((25, 15, 10, now.isoformat()), tuple(comparisons[minute][key] for key in (
+                        "realtime_trade_value_million_won", "query_trade_value_million_won", "difference_million_won", "compared_at")))
+                self.assertEqual({"preserve": "outside-page"}, comparisons["09:15"])
+                self.assertEqual([1], received["metadata"])
+                self.assertEqual([2], received["sor"])
+            finally:
+                store.close()
+
+    def test_completed_cross_midnight_pages_skip_prefilter_and_late_sor_keeps_component_merge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.fromisoformat("2026-09-15T10:00:00+09:00")
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            try:
+                store.save_minute_bars([self._bar(day, minute, "SOR", 25) for day, minute in (
+                    ("2026-09-14", "23:58"), ("2026-09-14", "23:59"), ("2026-09-15", "00:01"))])
+                store.upsert_documents("minute_trade_value_comparisons", [
+                    {"owner": "2026-09-15:005930", "key": "00:00", "document": {"query_components_million_won": {"NXT": 5}}}])
+                native_bars = store.load_minute_bars
+                received = []
+                def bars(*args, **kwargs):
+                    rows = native_bars(*args, **kwargs)
+                    if args[2] == "SOR": received.append((args[1], len(rows)))
+                    return rows
+                ingestor = MarketDataIngestor(store, now_provider=lambda: now)
+                with patch.object(store, "load_market_data_metadata_range", wraps=store.load_market_data_metadata_range) as metadata, \
+                        patch.object(store, "load_minute_bars", side_effect=bars):
+                    ingestor.ingest("ka10080", {"stk_cd": "005930"}, self._payload("20260914235900", "20260915000000"))
+                    prior = store.load_documents("minute_trade_value_comparisons", "2026-09-15:005930", 10)[0]["document"]
+                    self.assertEqual({"query_components_million_won": {"NXT": 5}}, prior)
+                    store.save_minute_bars([self._bar("2026-09-15", "00:00", "SOR", 25)])
+                    ingestor.ingest("ka10080", {"stk_cd": "005930"}, self._payload("20260915000000"))
+                    self.assertEqual(0, metadata.call_count)
+                self.assertEqual([("2026-09-14", 1), ("2026-09-15", 0), ("2026-09-15", 1)], received)
+                for day, minute in (("2026-09-14", "23:59"), ("2026-09-15", "00:00")):
+                    row = next(row for row in native_bars("005930", day, "KRX") if row["minute"] == minute)
+                    self.assertEqual((1000, 10), (row["volume"], row["trade_value_million_won"]))
+                comparison = store.load_documents("minute_trade_value_comparisons", "2026-09-15:005930", 10)[0]["document"]
+                self.assertEqual({"NXT": 5, "KRX": 10}, comparison["query_components_million_won"])
+                self.assertEqual((15, 10), (comparison["query_trade_value_million_won"], comparison["difference_million_won"]))
+            finally:
+                store.close()
+
+    def test_required_prefilter_failure_stops_write_but_sor_failure_keeps_committed_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.fromisoformat("2026-09-14T10:00:30+09:00")
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            try:
+                ingestor = MarketDataIngestor(store, now_provider=lambda: now)
+                with patch.object(store, "load_market_data_metadata_range", side_effect=RuntimeError("required metadata unavailable")), \
+                        patch.object(store, "replace_minute_bars", wraps=store.replace_minute_bars) as save:
+                    with self.assertRaisesRegex(RuntimeError, "required metadata unavailable"):
+                        ingestor.ingest("ka10080", {"stk_cd": "005930"}, self._payload("20260914100000"))
+                    save.assert_not_called()
+                with patch.object(store, "load_minute_bars", side_effect=RuntimeError("diagnostic SOR unavailable")), \
+                        self.assertLogs("kiwoom_monitor.central_server.market_ingest", level="ERROR"):
+                    ingestor.ingest("ka10080", {"stk_cd": "005930"}, self._payload("20260914095900"))
+                self.assertEqual(["09:59"], [row["minute"] for row in store.load_minute_bars("005930", "2026-09-14", "KRX")])
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

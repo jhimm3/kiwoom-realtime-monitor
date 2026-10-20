@@ -17,6 +17,52 @@ from kiwoom_monitor.infrastructure.persistence.news_ai_repository import news_id
 
 class StockNewsRepositoryTest(unittest.TestCase):
     @staticmethod
+    def _observe_native_writes():
+        from contextlib import contextmanager
+        from unittest.mock import patch
+        from kiwoom_monitor.infrastructure.persistence import stock_news_repository as module
+
+        @contextmanager
+        def observe():
+            metrics = {"connections": 0, "article_rows": 0, "receipt_rows": 0, "deleted_rows": 0}
+            statements = []
+            original_transaction = module.sqlite_transaction
+
+            class ObservedConnection:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def executemany(self, statement, parameters):
+                    cursor = self.connection.executemany(statement, parameters)
+                    if statement.startswith("INSERT INTO stock_news("):
+                        metrics["article_rows"] += cursor.rowcount
+                    return cursor
+
+                def execute(self, statement, parameters=()):
+                    cursor = self.connection.execute(statement, parameters)
+                    if statement.startswith("INSERT INTO stock_news_sync("):
+                        metrics["receipt_rows"] += cursor.rowcount
+                    elif statement.startswith("DELETE FROM stock_news "):
+                        metrics["deleted_rows"] += cursor.rowcount
+                    return cursor
+
+            @contextmanager
+            def transaction(*args, **kwargs):
+                with original_transaction(*args, **kwargs) as connection:
+                    metrics["connections"] += 1
+                    before = connection.total_changes
+                    connection.set_trace_callback(statements.append)
+                    yield ObservedConnection(connection)
+                    metrics["row_changes"] = connection.total_changes - before
+
+            with patch.object(module, "sqlite_transaction", transaction):
+                yield metrics
+            normalized = [statement.strip().upper() for statement in statements]
+            metrics.update(selects=sum(statement.startswith("SELECT") for statement in normalized),
+                           begins=normalized.count("BEGIN"), commits=normalized.count("COMMIT"))
+        return observe()
+
+    @staticmethod
     def _item(index: int) -> StockNewsItem:
         return StockNewsItem(
             f"기사 {index}", "요약", f"https://n.news.naver.com/{index}", f"https://example.com/{index}",
@@ -57,6 +103,115 @@ class StockNewsRepositoryTest(unittest.TestCase):
             self.assertEqual(item.title, loaded[0].title)
             self.assertEqual("호재 가능성 높음", loaded[0].assessment.outlook)
 
+    def test_identical_batch_preserves_articles_and_advances_only_check_receipts(self) -> None:
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+            repository = StockNewsRepository(path, now_provider=lambda: now)
+            items = tuple(self._item(index) for index in range(5))
+            self.assertEqual(5, repository.upsert("005930", items, naver_checked_at=now))
+            with closing(sqlite3.connect(path)) as connection:
+                original_rows = connection.execute("SELECT * FROM stock_news ORDER BY identity").fetchall()
+            next_check = now + timedelta(seconds=10)
+            with self._observe_native_writes() as metrics:
+                self.assertEqual(0, repository.upsert("005930", items, next_check))
+            self.assertEqual({"connections": 1, "article_rows": 0, "receipt_rows": 1, "deleted_rows": 0,
+                              "row_changes": 1, "selects": 1, "begins": 1, "commits": 1}, metrics)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(original_rows, connection.execute("SELECT * FROM stock_news ORDER BY identity").fetchall())
+                self.assertEqual((next_check.isoformat(), now.isoformat()), connection.execute(
+                    "SELECT checked_at,naver_checked_at FROM stock_news_sync WHERE stock_code='005930'"
+                ).fetchone())
+            corrected = replace(items[0], description="정정된 본문")
+            with self._observe_native_writes() as changed:
+                self.assertEqual(0, repository.upsert("005930", (corrected, *items[1:]), next_check,
+                                                      naver_checked_at=next_check))
+            self.assertEqual((1, 1, 2), (changed["article_rows"], changed["receipt_rows"], changed["row_changes"]))
+            self.assertEqual(next_check, repository.last_naver_checked_at("005930"))
+            self.assertEqual(corrected, next(item for item in repository.load("005930") if item.original_link == corrected.original_link))
+            with self._observe_native_writes() as partial:
+                self.assertEqual(0, repository.upsert("005930", items[1:3], next_check))
+            self.assertEqual((0, 1, 0), (partial["article_rows"], partial["receipt_rows"], partial["deleted_rows"]))
+            self.assertEqual(5, len(repository.load("005930")))
+
+    def test_each_content_correction_and_nullable_publication_are_saved_from_current_db(self) -> None:
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+            repository = StockNewsRepository(path, now_provider=lambda: now)
+            item = self._item(0)
+            repository.upsert("005930", (item,))
+            identity = news_identity(item)
+            repository.set_journal_link("g", "005930", identity, True)
+            corrections = {"title": "외부 제목", "description": "외부 본문", "link": "https://other.test/page",
+                           "original_link": "", "published_at": None, "relevant": 0, "category": "다른분류",
+                           "outlook": "다른판단", "reason": "추가근거", "relevance_score": 51, "outlook_score": 1}
+            with closing(sqlite3.connect(path)) as connection:
+                original_seen = connection.execute("SELECT first_seen_at FROM stock_news").fetchone()[0]
+                original_link = connection.execute("SELECT * FROM journal_news_links").fetchall()
+            for column, value in corrections.items():
+                with self.subTest(corrected_column=column):
+                    # Simulate another writer; the submitted object is deliberately unchanged in RAM.
+                    with closing(sqlite3.connect(path)) as connection, connection:
+                        connection.execute(f"UPDATE stock_news SET {column}=? WHERE stock_code=? AND identity=?",
+                                           (value, "005930", identity))
+                    with self._observe_native_writes() as metrics:
+                        self.assertEqual(0, repository.upsert("005930", (item,)))
+                    self.assertEqual((1, 1, 2), (metrics["article_rows"], metrics["receipt_rows"], metrics["row_changes"]))
+                    self.assertEqual((item,), repository.load("005930"))
+            missing_time = replace(item, published_at=None)
+            for submitted, affected in ((missing_time, 1), (missing_time, 0), (item, 1)):
+                with self._observe_native_writes() as metrics:
+                    self.assertEqual(0, repository.upsert("005930", (submitted,)))
+                self.assertEqual(affected, metrics["article_rows"])
+                self.assertEqual((submitted,), repository.load_journal_linked("g", "005930"))
+            new_item = replace(item, original_link="https://publisher.test/new-identity")
+            with self._observe_native_writes() as metrics:
+                self.assertEqual(1, repository.upsert("005930", (new_item,)))
+            self.assertEqual((1, 1, 2), (metrics["article_rows"], metrics["receipt_rows"], metrics["row_changes"]))
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(original_seen, connection.execute(
+                    "SELECT first_seen_at FROM stock_news WHERE stock_code=? AND identity=?", ("005930", identity)
+                ).fetchone()[0])
+                self.assertEqual(original_link, connection.execute("SELECT * FROM journal_news_links").fetchall())
+
+    def test_failed_receipt_rolls_back_article_changes_and_retry_keeps_original_pin(self) -> None:
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news.sqlite3"
+            now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+            repository = StockNewsRepository(path, now_provider=lambda: now)
+            original = self._item(0)
+            repository.upsert("005930", (original,), naver_checked_at=now)
+            repository.set_journal_link("g", "005930", news_identity(original), True)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                article_rows = connection.execute("SELECT * FROM stock_news").fetchall()
+                receipt_rows = connection.execute("SELECT * FROM stock_news_sync").fetchall()
+                links = connection.execute("SELECT * FROM journal_news_links").fetchall()
+                connection.execute("CREATE TRIGGER reject_news_receipt BEFORE UPDATE ON stock_news_sync "
+                                   "BEGIN SELECT RAISE(ABORT,'receipt failure'); END")
+            corrected = replace(original, description="정정 본문", published_at=None,
+                                assessment=NewsAssessment(True, "수주·계약", "호재", "정정 근거", 80, 70))
+            checked = now + timedelta(minutes=1)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "receipt failure"):
+                repository.upsert("005930", (corrected, self._item(1)), checked, naver_checked_at=checked)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(article_rows, connection.execute("SELECT * FROM stock_news").fetchall())
+                self.assertEqual(receipt_rows, connection.execute("SELECT * FROM stock_news_sync").fetchall())
+                self.assertEqual(links, connection.execute("SELECT * FROM journal_news_links").fetchall())
+                connection.execute("DROP TRIGGER reject_news_receipt")
+            self.assertEqual(1, repository.upsert("005930", (corrected, self._item(1)), checked,
+                                                naver_checked_at=checked))
+            self.assertEqual((corrected,), repository.load_journal_linked("g", "005930"))
+            with self._observe_native_writes() as retry:
+                self.assertEqual(0, repository.upsert("005930", (corrected, self._item(1)), checked))
+            self.assertEqual((0, 1, 1), (retry["article_rows"], retry["receipt_rows"], retry["row_changes"]))
+
     def test_journal_linked_news_is_not_removed_by_two_hundred_item_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = StockNewsRepository(Path(temporary_directory) / "news.sqlite3")
@@ -65,6 +220,10 @@ class StockNewsRepositoryTest(unittest.TestCase):
             repository.upsert("005930", tuple(self._item(index) for index in range(201)))
             self.assertIn(news_identity(pinned), repository.journal_linked_identities("group-1", "005930"))
             self.assertEqual((pinned.title,), tuple(item.title for item in repository.load_journal_linked("group-1", "005930")))
+            with self._observe_native_writes() as repeated:
+                self.assertEqual(0, repository.upsert("005930", tuple(self._item(index) for index in range(201))))
+            self.assertEqual((0, 1, 0), (repeated["article_rows"], repeated["receipt_rows"], repeated["deleted_rows"]))
+            self.assertEqual((pinned,), repository.load_journal_linked("group-1", "005930"))
 
     def test_configured_limit_controls_both_storage_and_default_load(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

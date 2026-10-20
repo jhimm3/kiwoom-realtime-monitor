@@ -80,7 +80,13 @@ class StockNewsRepository:
                     "ON CONFLICT(stock_code, identity) DO UPDATE SET "
                     "title=excluded.title, description=excluded.description, link=excluded.link, original_link=excluded.original_link, "
                     "published_at=excluded.published_at, relevant=excluded.relevant, category=excluded.category, outlook=excluded.outlook, "
-                    "reason=excluded.reason, relevance_score=excluded.relevance_score, outlook_score=excluded.outlook_score",
+                    "reason=excluded.reason, relevance_score=excluded.relevance_score, outlook_score=excluded.outlook_score "
+                    "WHERE stock_news.title IS NOT excluded.title OR stock_news.description IS NOT excluded.description "
+                    "OR stock_news.link IS NOT excluded.link OR stock_news.original_link IS NOT excluded.original_link "
+                    "OR stock_news.published_at IS NOT excluded.published_at OR stock_news.relevant IS NOT excluded.relevant "
+                    "OR stock_news.category IS NOT excluded.category OR stock_news.outlook IS NOT excluded.outlook "
+                    "OR stock_news.reason IS NOT excluded.reason OR stock_news.relevance_score IS NOT excluded.relevance_score "
+                    "OR stock_news.outlook_score IS NOT excluded.outlook_score",
                     rows,
                 )
             connection.execute(

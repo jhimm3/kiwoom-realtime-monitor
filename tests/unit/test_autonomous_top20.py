@@ -2012,5 +2012,306 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             store.close()
 
 
+class _BlockedIndexWrite:
+    def __init__(self, native):
+        self.native = native
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.condition = threading.Condition()
+        self.calls = self.completed = 0
+
+    def __call__(self, *args, **kwargs):
+        with self.condition:
+            self.calls += 1
+        self.entered.set()
+        try:
+            if not self.release.wait(3):
+                raise TimeoutError("test index write was not released")
+            return self.native(*args, **kwargs)
+        finally:
+            with self.condition:
+                self.completed += 1
+                self.condition.notify_all()
+
+    def wait_completed(self):
+        with self.condition:
+            return self.condition.wait_for(lambda: self.completed == self.calls, 3)
+
+
+class Top20IndexFlushOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    def _store_and_service(self, directory):
+        now = datetime.fromisoformat("2026-09-10T10:02:00+09:00")
+        store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=lambda: now)
+        store.initialize()
+        service = AutonomousTop20Service(
+            _Broker(), RealtimeHub(), store, now_provider=lambda: now,
+            outbox_path=Path(directory) / "index-outbox.json",
+        )
+        return store, service
+
+    def _record(self, total=10.0):
+        from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord
+        return Top20MinuteRecord(
+            datetime.fromisoformat("2026-09-10T10:01:00+09:00"), (total, 0.0, 0.0),
+            ("005930",), (1, 0, 0), (), "partial",
+        )
+
+    async def test_concurrent_index_flushes_share_one_actual_native_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, service = self._store_and_service(directory)
+            blocked = _BlockedIndexWrite(store.save_dataset_snapshot)
+            store.save_dataset_snapshot = blocked
+            tasks = []
+            try:
+                await service._queue_index(self._record())
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                await asyncio.sleep(.03)
+                blocked.release.set()
+                await asyncio.gather(*tasks)
+                self.assertEqual(1, blocked.calls)
+                self.assertEqual({}, service._pending_index_records)
+                self.assertEqual({}, service._outbox.load())
+                rows = store.load_dataset_snapshots("top20_index", "2026-09-10", 10)
+                self.assertEqual(1, len(rows))
+                self.assertEqual(10.0, rows[0]["payload"]["total"])
+            finally:
+                blocked.release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                store.close()
+
+    async def test_newer_index_payload_survives_an_old_inflight_ack_and_joiner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, service = self._store_and_service(directory)
+            blocked = _BlockedIndexWrite(store.save_dataset_snapshot)
+            store.save_dataset_snapshot = blocked
+            tasks = []
+            try:
+                await service._queue_index(self._record(10.0))
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                await service._queue_index(self._record(20.0))
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                await asyncio.sleep(.03)
+                blocked.release.set()
+                await asyncio.gather(*tasks)
+                # The second caller's entry cut must be durable when it returns.
+                self.assertEqual(2, blocked.calls)
+                self.assertEqual({}, service._pending_index_records)
+                self.assertEqual({}, service._outbox.load())
+                self.assertEqual(20.0, store.load_dataset_snapshots("top20_index", "2026-09-10", 1)[0]["payload"]["total"])
+            finally:
+                blocked.release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                store.close()
+
+    async def test_flush_entry_cut_excludes_later_keys_and_preserves_unjoined_payload(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as directory:
+            store, service = self._store_and_service(directory)
+            blocked = _BlockedIndexWrite(store.save_dataset_snapshot)
+            store.save_dataset_snapshot = blocked
+            tasks = []
+            try:
+                await service._queue_index(self._record(10.0))
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                await service._queue_index(self._record(20.0))
+                # With no newer caller yet, the old save's ACK cannot consume new input.
+                blocked.release.set()
+                await tasks[0]
+                self.assertEqual(1, blocked.calls)
+                self.assertEqual([20.0], [p["total"] for p in service._pending_index_records.values()])
+                self.assertEqual([20.0], [p["total"] for p in service._outbox.load().values()])
+
+                blocked.entered.clear()
+                blocked.release.clear()
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                await service._queue_index(self._record(25.0))
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                await asyncio.sleep(.03)  # The waiting caller has captured the existing key.
+                later = replace(self._record(30.0), minute=datetime.fromisoformat("2026-09-10T10:02:00+09:00"))
+                await service._queue_index(later)
+                blocked.release.set()
+                await asyncio.gather(*tasks)
+                self.assertEqual(3, blocked.calls)
+                rows = store.load_dataset_snapshots("top20_index", "2026-09-10", 10)
+                self.assertEqual([25.0], [row["payload"]["total"] for row in rows])
+                self.assertEqual([30.0], [p["total"] for p in service._pending_index_records.values()])
+                self.assertEqual([30.0], [p["total"] for p in service._outbox.load().values()])
+            finally:
+                blocked.release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                store.close()
+
+    async def test_inflight_failure_preserves_newer_cut_then_explicit_retry_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, service = self._store_and_service(directory)
+            connection = store._connect()
+            try:
+                connection.execute("CREATE TRIGGER reject_index BEFORE INSERT ON central_dataset_snapshots "
+                                   "BEGIN SELECT RAISE(ABORT,'controlled prior owner failure'); END")
+                connection.commit()
+            finally:
+                connection.close()
+            blocked = _BlockedIndexWrite(store.save_dataset_snapshot)
+            store.save_dataset_snapshot = blocked
+            tasks = []
+            try:
+                await service._queue_index(self._record(10.0))
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                tasks[0].cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await tasks[0]
+                await service._queue_index(self._record(20.0))
+                tasks.append(asyncio.create_task(service._flush_pending_indexes()))
+                await asyncio.sleep(.03)
+                self.assertEqual(1, blocked.calls)
+                blocked.release.set()
+                with self.assertRaisesRegex(Exception, "controlled prior owner failure"):
+                    await tasks[1]
+                self.assertEqual(1, blocked.calls)  # Joining a failed active owner adds no implicit retry.
+                self.assertEqual([20.0], [p["total"] for p in service._pending_index_records.values()])
+                self.assertEqual([20.0], [p["total"] for p in service._outbox.load().values()])
+                self.assertEqual([], store.load_dataset_snapshots("top20_index", "2026-09-10", 10))
+                connection = store._connect()
+                try:
+                    connection.execute("DROP TRIGGER reject_index")
+                    connection.commit()
+                finally:
+                    connection.close()
+                # A new explicit call retries pending data rather than re-awaiting the failed task forever.
+                await service._flush_pending_indexes()
+                self.assertEqual(2, blocked.calls)
+                self.assertEqual({}, service._pending_index_records)
+                self.assertEqual({}, service._outbox.load())
+                self.assertEqual(20.0, store.load_dataset_snapshots("top20_index", "2026-09-10", 1)[0]["payload"]["total"])
+                await service.close()
+                self.assertEqual(2, blocked.calls)
+            finally:
+                blocked.release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                store.close()
+
+    async def test_cancelled_index_waiters_and_close_do_not_abandon_or_overlap_native_save(self):
+        for cancel_all, late_failure in ((False, False), (True, False), (True, True)):
+            with self.subTest(cancel_all=cancel_all, late_failure=late_failure), tempfile.TemporaryDirectory() as directory:
+                store, service = self._store_and_service(directory)
+                if late_failure:
+                    connection = store._connect()
+                    try:
+                        connection.execute("CREATE TRIGGER reject_index BEFORE INSERT ON central_dataset_snapshots "
+                                           "BEGIN SELECT RAISE(ABORT,'controlled late index failure'); END")
+                        connection.commit()
+                    finally:
+                        connection.close()
+                blocked = _BlockedIndexWrite(store.save_dataset_snapshot)
+                store.save_dataset_snapshot = blocked
+                waiters, closing = [], None
+                try:
+                    await service._queue_index(self._record())
+                    waiters.append(asyncio.create_task(service._flush_pending_indexes()))
+                    self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                    waiters.append(asyncio.create_task(service._flush_pending_indexes()))
+                    await asyncio.sleep(.03)
+                    for waiter in waiters if cancel_all else waiters[:1]:
+                        waiter.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await waiter
+                    closing = asyncio.create_task(service.close())
+                    await asyncio.sleep(.03)
+                    self.assertFalse(closing.done())
+                    self.assertEqual(1, blocked.calls)
+                    if late_failure:
+                        with self.assertLogs("kiwoom_monitor.central_server.autonomous_top20", level="WARNING") as observed:
+                            blocked.release.set()
+                            await closing
+                        self.assertIn("controlled late index failure", " ".join(observed.output))
+                    else:
+                        blocked.release.set()
+                        await closing
+                    await asyncio.gather(*waiters, return_exceptions=True)
+                    self.assertEqual(1, blocked.calls)
+                    self.assertEqual(blocked.calls, blocked.completed)
+                    self.assertEqual(1 if late_failure else 0, len(service._pending_index_records))
+                    self.assertEqual(1 if late_failure else 0, len(service._outbox.load()))
+                    self.assertEqual(0 if late_failure else 1,
+                                     len(store.load_dataset_snapshots("top20_index", "2026-09-10", 10)))
+                finally:
+                    blocked.release.set()
+                    await asyncio.gather(*waiters, return_exceptions=True)
+                    if closing is not None:
+                        await asyncio.gather(closing, return_exceptions=True)
+                    self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                    store.close()
+
+    async def test_index_write_ack_and_outbox_remove_failures_keep_retryable_payload(self):
+        for failure in ("write", "lost_ack", "remove"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                store, service = self._store_and_service(directory)
+                calls = []
+                recovered_store = recovered = None
+                native_save = store.save_dataset_snapshot
+                native_remove = service._outbox.remove
+
+                def save(*args, **kwargs):
+                    calls.append(1)
+                    if failure == "write" and len(calls) == 1:
+                        raise RuntimeError("controlled index write failure")
+                    native_save(*args, **kwargs)
+                    if failure == "lost_ack" and len(calls) == 1:
+                        raise RuntimeError("controlled index ACK loss")
+
+                def remove(key):
+                    if failure == "remove":
+                        raise RuntimeError("controlled outbox remove failure")
+                    native_remove(key)
+
+                store.save_dataset_snapshot = save
+                service._outbox.remove = remove
+                try:
+                    await service._queue_index(self._record())
+                    with self.assertRaisesRegex(RuntimeError, "controlled"):
+                        await service._flush_pending_indexes()
+                    self.assertEqual(1, len(service._pending_index_records))
+                    self.assertEqual(1, len(service._outbox.load()))
+                    self.assertEqual(0 if failure == "write" else 1,
+                                     len(store.load_dataset_snapshots("top20_index", "2026-09-10", 10)))
+                    service._outbox.remove = native_remove
+                    await service.close()
+                    self.assertEqual(1, len(calls))  # Close joins the owner; it does not add a retry policy.
+                    self.assertEqual(1, len(service._pending_index_records))
+                    self.assertEqual(1, len(service._outbox.load()))
+                    recovered_store, recovered = self._store_and_service(directory)
+                    recovered_native = recovered_store.save_dataset_snapshot
+
+                    def recovered_save(*args, **kwargs):
+                        calls.append(1)
+                        return recovered_native(*args, **kwargs)
+
+                    recovered_store.save_dataset_snapshot = recovered_save
+                    await recovered.start()
+                    await recovered.close()
+                    self.assertEqual(2, len(calls))
+                    self.assertEqual({}, recovered._pending_index_records)
+                    self.assertEqual({}, recovered._outbox.load())
+                    rows = recovered_store.load_dataset_snapshots("top20_index", "2026-09-10", 10)
+                    self.assertEqual(1, len(rows))
+                    self.assertEqual(10.0, rows[0]["payload"]["total"])
+                finally:
+                    service._outbox.remove = native_remove
+                    if recovered is not None:
+                        await recovered.close()
+                    if recovered_store is not None:
+                        recovered_store.close()
+                    store.close()
+
+
 if __name__ == "__main__":
     unittest.main()
