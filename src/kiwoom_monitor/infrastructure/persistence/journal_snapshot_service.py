@@ -9,6 +9,7 @@ from typing import Callable, Protocol
 
 from kiwoom_monitor.domain.order_contract import AccountScope
 from kiwoom_monitor.domain.snapshot_provenance import mark_news_backfilled
+from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import TradeEntrySnapshot
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 
@@ -38,12 +39,21 @@ def news_at_execution(
     snapshot: TradeEntrySnapshot,
 ) -> tuple[dict[str, object], ...]:
     """체결 직전 48시간부터 직후 5분까지의 관련 뉴스만 최대 10건 고른다."""
+    return _news_items_at_execution(_load_news_items(repository, snapshot.stock_code), snapshot)
+
+
+def _load_news_items(repository: StockNewsRepository | None, stock_code: str) -> tuple[StockNewsItem, ...]:
     if repository is None:
         return ()
     try:
-        items = repository.load(snapshot.stock_code, limit=50)
+        return repository.load(stock_code, limit=50)
     except Exception:
         return ()
+
+
+def _news_items_at_execution(
+    items: tuple[StockNewsItem, ...], snapshot: TradeEntrySnapshot,
+) -> tuple[dict[str, object], ...]:
     executed = (
         snapshot.executed_at.replace(tzinfo=KST)
         if snapshot.executed_at.tzinfo is None
@@ -99,11 +109,17 @@ def load_episode_entry_snapshots(
         return snapshots
 
     enriched: list[TradeEntrySnapshot] = []
+    news_items_by_code: dict[str, tuple[StockNewsItem, ...]] = {}
     for snapshot in snapshots:
         if snapshot.news:
             enriched.append(snapshot)
             continue
-        news = news_loader(news_repository, snapshot)
+        if news_loader is news_at_execution:
+            if snapshot.stock_code not in news_items_by_code:
+                news_items_by_code[snapshot.stock_code] = _load_news_items(news_repository, snapshot.stock_code)
+            news = _news_items_at_execution(news_items_by_code[snapshot.stock_code], snapshot)
+        else:
+            news = news_loader(news_repository, snapshot)
         if news:
             repository.save_snapshot_news_backfill(snapshot.execution_key, news)
             snapshot = replace(snapshot, news=mark_news_backfilled(news))

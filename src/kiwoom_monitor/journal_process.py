@@ -1744,8 +1744,16 @@ class JournalWindow(QMainWindow):
             self._detached_chart_window.set_shared_chart_state(
                 source_id, "일봉", self._history_daily_chart.view_count(), self._history_daily_chart.annotations(),
             )
-        self._configure_detached_charts(); self._sync_detached_charts()
-        self._detached_chart_window.show(); self._detached_chart_window.raise_(); self._detached_chart_window.activateWindow()
+        self._configure_detached_charts()
+        was_visible = self._detached_chart_window.isVisible()
+        self._detached_chart_window.show()
+        try:
+            self._sync_detached_charts()
+        except Exception:
+            if not was_visible:
+                self._detached_chart_window.hide()
+            raise
+        self._detached_chart_window.raise_(); self._detached_chart_window.activateWindow()
         if self._selected_history_code and self._selected_history_day is not None:
             self._start_daily_chart(self._selected_history_code, as_kst(self._query_client.server_now()).date(), "history")
 
@@ -1761,13 +1769,15 @@ class JournalWindow(QMainWindow):
 
     def _sync_detached_charts(self) -> None:
         if self._detached_chart_window is None: return
+        visible = self._detached_chart_window.isVisible()
         episode = self._active_episode
         if episode is None:
-            self._detached_chart_window.set_data(None, (), (), ()); return
-        minute_rows = self._load_selected_chart_rows()
+            if visible: self._detached_chart_window.set_data(None, (), (), ())
+            return
+        minute_rows = self._load_selected_chart_rows() if visible else ()
         observed_at = as_kst(self._query_client.server_now())
         latest_day = observed_at.date()
-        daily_rows = self._repo.load_daily_bars(episode.summary.stock_code, latest_day)
+        daily_rows = self._repo.load_daily_bars(episode.summary.stock_code, latest_day) if visible else ()
         custom_rows: dict[str, tuple[tuple[object, ...], ...]] = {}
         selected_codes = self._detached_chart_window.selected_stock_codes()
         for code in selected_codes:
@@ -1778,25 +1788,29 @@ class JournalWindow(QMainWindow):
                 )
             except (OSError, sqlite3.Error):
                 pass
-            custom_rows[code] = self._repo.load_chart_bars_range(code, episode.started_at.date(), episode.ended_at.date())
+            if visible:
+                custom_rows[code] = self._repo.load_chart_bars_range(code, episode.started_at.date(), episode.ended_at.date())
             try: self._repo.import_monitor_daily_bars(self._monitor_db, code, latest_day, 250, observed_at=observed_at)
             except (OSError, sqlite3.Error): pass
-            custom_rows[f"daily:{code}"] = self._repo.load_daily_bars(code, latest_day)
+            if visible:
+                custom_rows[f"daily:{code}"] = self._repo.load_daily_bars(code, latest_day)
+        selected_markets = self._detached_chart_window.selected_index_markets()
         index_rows = {
             market: self._repo.load_monitor_market_index_bars(
                 self._monitor_db, market, episode.started_at.date(), episode.ended_at.date(),
             )
-            for market in ("kospi", "kosdaq")
+            for market in selected_markets if visible
         }
-        for market in ("kospi", "kosdaq"):
+        for market in selected_markets if visible else ():
             index_rows[f"daily:{market}"] = self._repo.load_monitor_market_index_daily(
                 self._monitor_db, market, latest_day,
             )
         index_rows.update(custom_rows)
-        self._detached_chart_window.set_data(
-            episode, minute_rows, daily_rows, self._history_chart.setup_types(), index_rows,
-        )
-        if self._detached_chart_window.selected_index_markets():
+        if visible:
+            self._detached_chart_window.set_data(
+                episode, minute_rows, daily_rows, self._history_chart.setup_types(), index_rows,
+            )
+        if selected_markets:
             self._start_market_index_backfill(episode.ended_at.date())
 
     def _detached_source_changed(self) -> None:

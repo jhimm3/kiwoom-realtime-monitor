@@ -168,20 +168,26 @@ class DetachedChartPanel(QWidget):
         self.chart.set_context_fills(self._episode.fills if self._episode is not None else ())
         if source_key:
             rows = self._index_rows.get(source_key, ())
-            self.chart.set_rows(rows); self.chart.set_daily_rows(self._index_rows.get(f"daily:{source_key}", _daily_chart_rows(rows)))
+            daily_key = f"daily:{source_key}"
+            self.chart.set_daily_rows(self._index_rows[daily_key] if daily_key in self._index_rows else _daily_chart_rows(rows))
+            self.chart.set_rows(rows)
             # 비교 차트는 체결 시각으로 보유 구간의 연한 노란 배경만 계산한다.
             # B/S·점·세로선은 MinuteChart의 reference 모드에서 그리지 않는다.
             self.chart.set_reference_fills(True); self.chart.set_fills(self._episode.fills if self._episode is not None else ()); self.chart.set_setup_types(())
         elif custom_code:
             rows = self._index_rows.get(custom_code, ())
-            self.chart.set_rows(rows); self.chart.set_daily_rows(self._index_rows.get(f"daily:{custom_code}", _daily_chart_rows(rows)))
+            daily_key = f"daily:{custom_code}"
+            self.chart.set_daily_rows(self._index_rows[daily_key] if daily_key in self._index_rows else _daily_chart_rows(rows))
+            self.chart.set_rows(rows)
             self.chart.set_reference_fills(True); self.chart.set_fills(self._episode.fills if self._episode is not None else ()); self.chart.set_setup_types(())
         else:
-            self.chart.set_rows(self._minute_rows); self.chart.set_daily_rows(self._daily_rows)
+            self.chart.set_daily_rows(self._daily_rows); self.chart.set_rows(self._minute_rows)
             self.chart.set_reference_fills(False); self.chart.set_fills(self._episode.fills if self._episode is not None and self.show_trades.isChecked() else ())
             self.chart.set_setup_types(self._setup_types)
         self.show_trades.setEnabled(not bool(source_key or custom_code))
-        self.chart.set_interval(self.interval.currentText())
+        # Current rows already use this interval, including an empty-daily fallback.
+        if self.chart._interval != self.interval.currentText():
+            self.chart.set_interval(self.interval.currentText())
         self._apply_trade_value_thresholds()
         self.chart.set_view_count(self.view_count.value())
         self.chart.update()
@@ -228,7 +234,9 @@ class DetachedChartWindow(QMainWindow):
         for index, label in enumerate(tuple(f"차트 {value}" for value in range(1, 7))):
             check = QCheckBox(label); check.setChecked(settings.value(f"detached_chart_{index}_visible", index < 3, type=bool))
             check.toggled.connect(lambda checked, target=index: settings.setValue(f"detached_chart_{target}_visible", checked))
-            check.toggled.connect(self._reflow); self.panel_checks.append(check); header.addWidget(check)
+            check.toggled.connect(self._reflow)
+            check.toggled.connect(lambda _checked: self.source_changed.emit())
+            self.panel_checks.append(check); header.addWidget(check)
         header.addStretch(); outer.addLayout(header)
         controls.addWidget(QLabel("배치")); self.layout_mode = QComboBox(); self.layout_mode.addItems(("세로", "격자"))
         self.layout_mode.setCurrentText(settings.value("detached_chart_layout", "세로", type=str))

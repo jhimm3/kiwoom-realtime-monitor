@@ -559,7 +559,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
                     else:
                         episode = SimpleNamespace(summary=SimpleNamespace(stock_code="000660"),
                                                   started_at=minute, ended_at=minute)
-                        detached = SimpleNamespace(selected_stock_codes=lambda: ("005930",),
+                        detached = SimpleNamespace(isVisible=lambda: True, selected_stock_codes=lambda: ("005930",),
                                                    selected_index_markets=lambda: (), set_data=lambda *args: None)
                         JournalWindow._sync_detached_charts(SimpleNamespace(**base, _active_episode=episode,
                             _detached_chart_window=detached, _load_selected_chart_rows=lambda: (),
@@ -644,7 +644,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
             minute = datetime(2026, 9, 8, 10)
             owner = SimpleNamespace(_query_client=SimpleNamespace(server_now=clock), _repo=repository, _monitor_db=monitor,
                 _active_episode=SimpleNamespace(summary=SimpleNamespace(stock_code="000660"), started_at=minute, ended_at=minute),
-                _detached_chart_window=SimpleNamespace(selected_stock_codes=lambda: ("005930",),
+                _detached_chart_window=SimpleNamespace(isVisible=lambda: True, selected_stock_codes=lambda: ("005930",),
                                                      selected_index_markets=lambda: (), set_data=lambda *args: None),
                 _load_selected_chart_rows=lambda: (), _history_chart=SimpleNamespace(setup_types=lambda: ()))
             JournalWindow._sync_detached_charts(owner)

@@ -6,7 +6,7 @@ import unittest
 import uuid
 from contextlib import closing
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import QApplication
 from kiwoom_monitor.domain.market_data_contract import DataCompleteness, MarketDatasetKind, ObservationOrigin
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.domain.time_basis import as_kst
+from kiwoom_monitor.application.news_analysis import NewsAssessment
+from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
 from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
 from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
@@ -23,6 +25,7 @@ from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository impor
     scoped_snapshot_execution_key,
 )
 from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 from kiwoom_monitor.presentation.trade_review_formatting import format_entry_snapshot_blocks
 from kiwoom_monitor.infrastructure.persistence.journal_snapshot_service import (
     load_episode_entry_snapshots,
@@ -159,6 +162,96 @@ class NativeJournalSnapshotNewsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_episode_reads_native_news_once_and_keeps_each_snapshot_window_scope_and_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            at = datetime(2026, 9, 9, 9, 10)
+            receipt = as_kst(at + timedelta(days=1))
+            news_repository = StockNewsRepository(Path(directory) / "news.sqlite3", now_provider=lambda: receipt)
+            assessment = NewsAssessment(True, "공시", "긍정", "original-reason", 7, 3)
+            items = tuple(StockNewsItem(
+                f"article-{index}", "original-description", f"https://example/{index}",
+                f"https://original/{index}", as_kst(at + timedelta(minutes=index * 10 - 5)), assessment,
+            ) for index in range(13)) + (
+                StockNewsItem("boundary-old", "", "old", "", as_kst(at - timedelta(hours=48)), assessment),
+                StockNewsItem("outside-old", "", "outside", "", as_kst(at - timedelta(hours=48, seconds=1)), assessment),
+                StockNewsItem("utc", "", "utc", "", as_kst(at).astimezone(timezone.utc), assessment),
+                StockNewsItem("unpublished", "", "unknown", "", None, assessment),
+            )
+            news_repository.upsert("000001", items, checked_at=receipt)
+            ordered = news_repository.load("000001", limit=50)
+            scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+            other_scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+            values = tuple(replace(
+                snapshot(scoped_snapshot_execution_key(f"execution-{index}", scope), at + timedelta(minutes=index * 10)),
+                origin_scope=scope,
+            ) for index in range(10))
+            existing = replace(values[0], execution_key=scoped_snapshot_execution_key("existing", scope),
+                               news=({"title": "original-observed-news"},))
+            other = replace(values[0], execution_key=scoped_snapshot_execution_key("execution-0", other_scope),
+                            origin_scope=other_scope, news=({"title": "other-account-news"},))
+            for value in (*values, existing, other):
+                repository.save_entry_snapshot(value, now=at, account_scope=value.origin_scope)
+            with patch.object(news_repository, "load", wraps=news_repository.load) as load, patch(
+                "kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository.kst_wall_now", return_value=receipt,
+            ):
+                result = load_episode_entry_snapshots(repository, news_repository, "000001", at,
+                                                     at + timedelta(minutes=100), account_scope=scope)
+            self.assertEqual(1, load.call_count)
+            self.assertEqual([("000001",)], [call.args for call in load.call_args_list])
+            self.assertEqual({"limit": 50}, load.call_args.kwargs)
+            by_key = {value.execution_key: value for value in result}
+            self.assertEqual(10, max(len(value.news) for value in result))
+            self.assertEqual(existing.news, by_key[existing.execution_key].news)
+            for value in values:
+                cut = as_kst(value.executed_at)
+                expected = [item for item in ordered if item.published_at is not None
+                            and cut - timedelta(hours=48) <= as_kst(item.published_at) <= cut + timedelta(minutes=5)][:10]
+                saved = by_key[value.execution_key]
+                self.assertEqual([item.title for item in expected], [item["title"] for item in saved.news])
+                self.assertEqual([item.original_link or item.link for item in expected], [item["link"] for item in saved.news])
+                self.assertTrue(all(item["backfilled"] and item["reason"] == "original-reason" for item in saved.news))
+                metadata = MarketDataMetadataRepository(path).load(MarketDatasetKind.ENTRY_CONTEXT, "000001:news", value.execution_key)
+                self.assertEqual(ObservationOrigin.BACKFILLED, metadata.origin)
+                self.assertEqual(receipt, metadata.available_at)
+                self.assertEqual(scope, saved.origin_scope)
+            self.assertEqual(other.news, repository.load_entry_snapshots("000001", at, at + timedelta(minutes=100), other_scope)[0].news)
+            with patch.object(news_repository, "load", wraps=news_repository.load) as second_load:
+                self.assertEqual(result, load_episode_entry_snapshots(repository, news_repository, "000001", at,
+                                                                     at + timedelta(minutes=100), account_scope=scope))
+            self.assertEqual(0, second_load.call_count)
+
+    def test_episode_native_news_read_failure_is_local_and_backfill_write_failure_still_propagates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            at = datetime(2026, 9, 9, 9, 10)
+            news_repository = StockNewsRepository(Path(directory) / "news.sqlite3", now_provider=lambda: as_kst(at))
+            values = tuple(snapshot(f"execution-{index}", at + timedelta(seconds=index)) for index in range(3))
+            for value in values:
+                repository.save_entry_snapshot(value, now=at)
+            item = StockNewsItem("original-article", "", "https://example", "", as_kst(at),
+                                 NewsAssessment(True, "공시", "긍정", "original", 7, 3))
+            news_repository.upsert("000001", (item,), checked_at=as_kst(at))
+            with patch.object(news_repository, "load", side_effect=sqlite3.OperationalError("051 read fault")) as load:
+                result = load_episode_entry_snapshots(repository, news_repository, "000001", at, at + timedelta(minutes=1))
+            self.assertEqual(1, load.call_count)
+            self.assertTrue(all(not value.news for value in result))
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("CREATE TRIGGER reject_news BEFORE UPDATE ON trade_entry_snapshots "
+                                   "WHEN NEW.news_json<>OLD.news_json "
+                                   "BEGIN SELECT RAISE(ABORT,'051 backfill write fault'); END")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "051 backfill write fault"):
+                load_episode_entry_snapshots(repository, news_repository, "000001", at, at + timedelta(minutes=1))
+            self.assertTrue(all(not value.news for value in repository.load_entry_snapshots("000001", at, at + timedelta(minutes=1))))
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("DROP TRIGGER reject_news")
+            with patch.object(news_repository, "load", wraps=news_repository.load) as retry_load:
+                recovered = load_episode_entry_snapshots(repository, news_repository, "000001", at, at + timedelta(minutes=1))
+            self.assertEqual(1, retry_load.call_count)
+            self.assertTrue(all(value.news[0]["title"] == "original-article" for value in recovered))
 
     def test_duplicate_writer_keeps_observed_news_for_episode_consumer_and_account(self) -> None:
         for backfilled in (False, True):
