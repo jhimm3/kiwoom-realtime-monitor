@@ -26,30 +26,32 @@ def _save_sqlite_shadow_evaluation(
     expires_at: str,
 ) -> None:
     encoded_decision = _canonical_document(decision)
-    existing = connection.execute(
-        "SELECT document_json FROM central_shadow_decisions WHERE decision_id=?",
-        (str(decision["decision_id"]),),
-    ).fetchone()
-    if existing is not None and str(existing[0]) != encoded_decision:
-        raise ValueError("shadow decision id already has different immutable content")
-    connection.execute(
+    inserted = connection.execute(
         "INSERT OR IGNORE INTO central_shadow_decisions VALUES(?,?,?,?)",
         (str(decision["decision_id"]), monitor_id, str(decision["decided_at"]), encoded_decision),
-    )
+    ).rowcount
+    if not inserted:
+        existing = connection.execute(
+            "SELECT document_json FROM central_shadow_decisions WHERE decision_id=?",
+            (str(decision["decision_id"]),),
+        ).fetchone()
+        if existing is None or str(existing[0]) != encoded_decision:
+            raise ValueError("shadow decision id already has different immutable content")
     if candidate is None:
         return
     encoded_candidate = _canonical_document(candidate)
-    existing = connection.execute(
-        "SELECT document_json FROM central_shadow_candidate_events WHERE event_id=?",
-        (str(candidate["event_id"]),),
-    ).fetchone()
-    if existing is not None and str(existing[0]) != encoded_candidate:
-        raise ValueError("shadow candidate id already has different immutable content")
-    connection.execute(
+    inserted = connection.execute(
         "INSERT OR IGNORE INTO central_shadow_candidate_events("
         "event_id,monitor_id,available_at,expires_at,document_json) VALUES(?,?,?,?,?)",
         (str(candidate["event_id"]), monitor_id, str(candidate["available_at"]), expires_at, encoded_candidate),
-    )
+    ).rowcount
+    if not inserted:
+        existing = connection.execute(
+            "SELECT document_json FROM central_shadow_candidate_events WHERE event_id=?",
+            (str(candidate["event_id"]),),
+        ).fetchone()
+        if existing is None or str(existing[0]) != encoded_candidate:
+            raise ValueError("shadow candidate id already has different immutable content")
 
 
 def _save_postgres_shadow_evaluation(
@@ -60,33 +62,36 @@ def _save_postgres_shadow_evaluation(
     expires_at: str,
 ) -> None:
     cursor.execute(
-        "SELECT document_json FROM central_shadow_decisions WHERE decision_id=%s",
-        (str(decision["decision_id"]),),
-    )
-    existing = cursor.fetchone()
-    if existing is not None and _canonical_document(json_mapping(existing[0])) != _canonical_document(decision):
-        raise ValueError("shadow decision id already has different immutable content")
-    cursor.execute(
-        "INSERT INTO central_shadow_decisions VALUES(%s,%s,%s,%s) ON CONFLICT(decision_id) DO NOTHING",
+        "INSERT INTO central_shadow_decisions VALUES(%s,%s,%s,%s) "
+        "ON CONFLICT(decision_id) DO NOTHING RETURNING document_json",
         (str(decision["decision_id"]), monitor_id, str(decision["decided_at"]),
          json.dumps(decision, ensure_ascii=False)),
     )
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "SELECT document_json FROM central_shadow_decisions WHERE decision_id=%s",
+            (str(decision["decision_id"]),),
+        )
+        existing = cursor.fetchone()
+        if existing is None or _canonical_document(json_mapping(existing[0])) != _canonical_document(decision):
+            raise ValueError("shadow decision id already has different immutable content")
     if candidate is None:
         return
     cursor.execute(
-        "SELECT document_json FROM central_shadow_candidate_events WHERE event_id=%s",
-        (str(candidate["event_id"]),),
-    )
-    existing = cursor.fetchone()
-    if existing is not None and _canonical_document(json_mapping(existing[0])) != _canonical_document(candidate):
-        raise ValueError("shadow candidate id already has different immutable content")
-    cursor.execute(
         "INSERT INTO central_shadow_candidate_events("
         "event_id,monitor_id,available_at,expires_at,document_json) VALUES(%s,%s,%s,%s,%s) "
-        "ON CONFLICT(event_id) DO NOTHING",
+        "ON CONFLICT(event_id) DO NOTHING RETURNING document_json",
         (str(candidate["event_id"]), monitor_id, str(candidate["available_at"]), expires_at,
          json.dumps(candidate, ensure_ascii=False)),
     )
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "SELECT document_json FROM central_shadow_candidate_events WHERE event_id=%s",
+            (str(candidate["event_id"]),),
+        )
+        existing = cursor.fetchone()
+        if existing is None or _canonical_document(json_mapping(existing[0])) != _canonical_document(candidate):
+            raise ValueError("shadow candidate id already has different immutable content")
 
 
 def _shadow_candidate_page(rows: list[tuple[object, ...]], high_watermark: int) -> dict[str, Any]:

@@ -25,12 +25,45 @@ from .database_codec import (
     document_result_rows,
     document_select_query,
     document_value_rows,
+    json_mapping,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class SQLiteDocumentStoreMixin:
+    def insert_immutable_document(
+        self, collection: str, owner: str, key: str, document: dict[str, Any],
+    ) -> bool:
+        with self._lock, self._connection() as connection:
+            existing = connection.execute(
+                "SELECT document_json FROM central_documents "
+                "WHERE collection=? AND owner=? AND document_key=?", (collection, owner, key),
+            ).fetchone()
+            inserted = False
+            if existing is None:
+                row = document_value_rows(collection, [{"owner": owner, "key": key, "document": document}],
+                                          self._now_provider().timestamp())[0]
+                if json_mapping(row[-1]) != document:
+                    raise RuntimeError(f"failed to persist immutable document: {collection}/{owner}/{key}")
+                cursor = connection.execute(
+                    "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO NOTHING", row,
+                )
+                inserted = cursor.rowcount == 1
+                if not inserted:
+                    # Another writer may have committed after the initial lookup.
+                    existing = connection.execute(
+                        "SELECT document_json FROM central_documents "
+                        "WHERE collection=? AND owner=? AND document_key=?", (collection, owner, key),
+                    ).fetchone()
+            if not inserted:
+                if existing is None:
+                    raise RuntimeError(f"failed to persist immutable document: {collection}/{owner}/{key}")
+                if json_mapping(existing[0]) != document:
+                    raise ValueError(f"immutable document conflict: {collection}/{owner}/{key}")
+        return inserted  # The owning connection context has committed successfully.
+
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         if not values:
             return
@@ -105,6 +138,44 @@ class SQLiteDocumentStoreMixin:
 
 
 class PostgresDocumentStoreMixin:
+    def insert_immutable_document(
+        self, collection: str, owner: str, key: str, document: dict[str, Any],
+    ) -> bool:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(writer_family="document.immutable", writer_kind=f"document:{collection}",
+                                 operation="insert_immutable_document", rows_attempted=1)
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT document_json FROM central_documents "
+                "WHERE collection=%s AND owner=%s AND document_key=%s", (collection, owner, key),
+            )
+            existing = cursor.fetchone()
+            inserted = False
+            if existing is None:
+                row = document_value_rows(collection, [{"owner": owner, "key": key, "document": document}],
+                                          self._now_provider().timestamp())[0]
+                if json_mapping(row[-1]) != document:
+                    raise RuntimeError(f"failed to persist immutable document: {collection}/{owner}/{key}")
+                cursor.execute(
+                    "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                    "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(collection,owner,document_key) DO NOTHING "
+                    "RETURNING document_json", row,
+                )
+                inserted = cursor.fetchone() is not None
+                if not inserted:
+                    cursor.execute(
+                        "SELECT document_json FROM central_documents "
+                        "WHERE collection=%s AND owner=%s AND document_key=%s", (collection, owner, key),
+                    )
+                    existing = cursor.fetchone()
+            if not inserted:
+                if existing is None:
+                    raise RuntimeError(f"failed to persist immutable document: {collection}/{owner}/{key}")
+                if json_mapping(existing[0]) != document:
+                    raise ValueError(f"immutable document conflict: {collection}/{owner}/{key}")
+        return inserted
+
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None:
         if not values:
             return

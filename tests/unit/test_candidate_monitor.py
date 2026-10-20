@@ -23,7 +23,7 @@ from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor, ru
 from kiwoom_monitor.central_server.observation_frame_recovery import drain_thread_call
 from kiwoom_monitor.central_server.market_observations import ranking_observation, minute_bar_observation
 from kiwoom_monitor.domain.market_data_contract import DataCompleteness, DataValueKind, ObservationOrigin
-from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server.database import PostgresQueryStore, SQLiteQueryStore
 from kiwoom_monitor.central_server.database_observation_readers import (
     OBSERVATION_DELIVERY_PROTOCOL, ObservationRevisionPage,
 )
@@ -340,11 +340,142 @@ class CandidateMonitorTests(unittest.TestCase):
             empty = store.load_shadow_candidates(page["next_cursor"], 100)
             with self.assertRaisesRegex(ValueError, "immutable"):
                 store.save_shadow_evaluation("monitor", {**decision, "decided_at": "changed"}, None)
+            with self.assertRaisesRegex(ValueError, "candidate.*immutable"):
+                store.save_shadow_evaluation("other", {**decision, "decision_id": "d2"},
+                    {**candidate, "symbol": "000660"}, "changed-expiry")
+            store.save_shadow_evaluation("other", decision, candidate, "changed-expiry")
+            with store._connection() as connection:
+                self.assertEqual([("d1", "monitor")], connection.execute(
+                    "SELECT decision_id,monitor_id FROM central_shadow_decisions").fetchall())
+                self.assertEqual(("monitor", "2026-09-12T00:01:00+00:00"), connection.execute(
+                    "SELECT monitor_id,expires_at FROM central_shadow_candidate_events").fetchone())
             store.close()
 
         self.assertEqual(1, page["high_watermark"])
         self.assertEqual("e1", page["events"][0]["event_id"])
         self.assertEqual([], empty["events"])
+
+    def test_sqlite_concurrent_shadow_decision_ids_compare_after_the_writer_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "concurrent-shadow.sqlite3"
+            stores = [SQLiteQueryStore(path) for _ in range(2)]
+            stores[0].initialize()
+            start, old_prechecks = threading.Barrier(2), threading.Barrier(2)
+            class Connection(sqlite3.Connection):
+                def execute(self, sql, parameters=()):
+                    cursor = super().execute(sql, parameters)
+                    if sql.startswith("SELECT document_json FROM central_shadow_decisions") and not self.in_transaction:
+                        # Force the old SELECT-before-INSERT writers to both see no row.
+                        row = cursor.fetchone()
+                        old_prechecks.wait(3)
+                        return Mock(fetchone=Mock(return_value=row))
+                    return cursor
+            for store in stores:
+                store._connect = lambda: sqlite3.connect(path, timeout=3, factory=Connection)
+            outcomes = []
+            def write(index):
+                try:
+                    start.wait(3)
+                    stores[index].save_shadow_evaluation("monitor", {
+                        "decision_id": "shared", "decided_at": "2026-09-12T00:00:00+00:00",
+                        "fixture_price": 100 + index,
+                    }, None)
+                except Exception as error:
+                    outcomes.append(error)
+                else:
+                    outcomes.append(None)
+            threads = [threading.Thread(target=write, args=(index,)) for index in range(2)]
+            try:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(5)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                self.assertEqual(1, outcomes.count(None))
+                conflicts = [error for error in outcomes if error is not None]
+                self.assertEqual(1, len(conflicts))
+                self.assertIsInstance(conflicts[0], ValueError)
+                self.assertIn("immutable", str(conflicts[0]))
+                with closing(sqlite3.connect(path)) as connection:
+                    rows = connection.execute("SELECT document_json FROM central_shadow_decisions").fetchall()
+                    self.assertEqual(1, len(rows))
+                    self.assertIn(json.loads(rows[0][0])["fixture_price"], (100, 101))
+            finally:
+                for store in stores:
+                    store.close()
+
+    def test_postgres_shadow_insert_conflicts_compare_winner_and_roll_back_the_pair(self):
+        decision = {"decision_id": "d1", "decided_at": "2026-09-12T00:00:00+00:00"}
+        candidate = {"event_id": "e1", "symbol": "005930", "available_at": decision["decided_at"]}
+        for collision, same in ((None, False), ("decisions", False), ("decisions", True),
+                                ("candidates", False), ("candidates", True)):
+            with self.subTest(collision=collision, same=same):
+                durable = {"decisions": {}, "candidates": {}}
+                injected, connections, statements = [], [], []
+                class Cursor:
+                    def __init__(self, connection): self.connection, self.result = connection, None
+                    def __enter__(self): return self
+                    def __exit__(self, *_): return False
+                    def execute(self, sql, parameters):
+                        statements.append(sql)
+                        table = "candidates" if "central_shadow_candidate_events" in sql else "decisions"
+                        key = parameters[0]
+                        working = self.connection.working[table]
+                        if sql.startswith("INSERT"):
+                            if collision == table and not injected:
+                                injected.append(True)
+                                document = json.loads(parameters[-1])
+                                if not same:
+                                    document["fixture_winner"] = True
+                                winner = (key, "first-monitor", *parameters[2:-1], json.dumps(document))
+                                durable[table][key] = working[key] = winner
+                            if key not in working:
+                                working[key] = tuple(parameters)
+                                self.result = (json.loads(parameters[-1]),) if "RETURNING" in sql else None
+                            else:
+                                self.result = None
+                        else:
+                            self.result = (json.loads(working[key][-1]),) if key in working else None
+                    def fetchone(self):
+                        row, self.result = self.result, None
+                        return row
+                class Connection:
+                    def __init__(self):
+                        self.working = deepcopy(durable)
+                        self.commits = self.rollbacks = 0
+                        self.closed = False
+                    def __enter__(self): return self
+                    def __exit__(self, error_type, *_):
+                        self.rollback() if error_type else self.commit()
+                        self.close()
+                        return False
+                    def cursor(self): return Cursor(self)
+                    def commit(self):
+                        durable.update(deepcopy(self.working))
+                        self.commits += 1
+                    def rollback(self): self.rollbacks += 1
+                    def close(self): self.closed = True
+                def connect():
+                    connection = Connection()
+                    connections.append(connection)
+                    return connection
+                store = PostgresQueryStore("postgresql://unused")
+                store._connect = connect
+                if collision and not same:
+                    with self.assertRaisesRegex(ValueError, "immutable"):
+                        store.save_shadow_evaluation("monitor", decision, candidate, "first-expiry")
+                    self.assertEqual((0, 1, True), (connections[0].commits, connections[0].rollbacks, connections[0].closed))
+                    self.assertEqual({collision}, {table for table, rows in durable.items() if rows})
+                else:
+                    store.save_shadow_evaluation("monitor", decision, candidate, "first-expiry")
+                    self.assertEqual((1, 0, True), (connections[0].commits, connections[0].rollbacks, connections[0].closed))
+                    original = deepcopy(durable)
+                    store.save_shadow_evaluation("other", dict(reversed(tuple(decision.items()))),
+                        dict(reversed(tuple(candidate.items()))), "changed-expiry")
+                    self.assertEqual(original, durable)
+                    if collision is None:
+                        self.assertTrue(all(sql.startswith("INSERT") and "RETURNING document_json" in sql
+                                            for sql in statements[:2]))
 
     def test_new_profile_monitor_bootstraps_cursor_without_republishing_history(self) -> None:
         history = (_rank(1), _bar(2, 0, 1000, 1010), _bar(3, 1, 1010, 1020),

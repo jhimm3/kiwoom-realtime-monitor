@@ -193,5 +193,140 @@ class ForwardReportTests(unittest.TestCase):
         )
 
 
+class NativeImmutableDocumentTests(unittest.TestCase):
+    def test_native_immutable_write_costs_and_read_only_duplicate_preserve_original_receipt(self):
+        import json
+        from unittest.mock import Mock, patch
+
+        clock = Mock(return_value=datetime(2030,1,2,10,tzinfo=timezone(timedelta(hours=9))))
+        store = SQLiteQueryStore(Path(':memory:'), now_provider=clock)
+        store.initialize();self.addCleanup(store.close)
+        repository = ForwardEvaluationRepository(store)
+        statements = []
+        native = store._connect
+
+        def connect():
+            connection = native();connection.set_trace_callback(statements.append);return connection
+
+        payload = {'z':[1,{'flag':True}], 'a':'original'}
+        clock.reset_mock()
+        with patch.object(store,'_connect',side_effect=connect) as connections:
+            self.assertTrue(repository._save_immutable('test-immutable','owner','key',payload))
+        self.assertEqual(1,connections.call_count)
+        self.assertEqual(1,sum(s.startswith('SELECT') for s in statements))
+        self.assertEqual(1,sum(s.startswith('INSERT') for s in statements))
+        self.assertEqual(1,statements.count('COMMIT'))
+        clock.assert_called_once_with()
+        original = store.load_document('test-immutable','owner','key')
+        statements.clear();clock.reset_mock();clock.side_effect=AssertionError('no-op must not sample time')
+        with patch.object(store,'_connect',side_effect=connect) as connections:
+            self.assertFalse(repository._save_immutable('test-immutable','owner','key',{'a':'original','z':[1,{'flag':True}]}))
+            with self.assertRaisesRegex(ValueError,'immutable document conflict'):
+                repository._save_immutable('test-immutable','owner','key',{'a':'changed'})
+        self.assertEqual(2,connections.call_count)
+        self.assertEqual(2,sum(s.startswith('SELECT') for s in statements))
+        self.assertFalse(any(s.startswith(('INSERT','UPDATE','BEGIN','COMMIT')) for s in statements))
+        clock.assert_not_called()
+        self.assertEqual(original,store.load_document('test-immutable','owner','key'))
+        self.assertEqual(payload,json.loads(json.dumps(original['document'])))
+
+    def test_two_native_stores_cannot_ack_different_content_for_the_same_identity(self):
+        import tempfile,threading
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            for equal in (False,True):
+                with self.subTest(equal=equal):
+                    path=Path(directory)/f'{equal}.sqlite3'
+                    stores=[SQLiteQueryStore(path),SQLiteQueryStore(path)]
+                    stores[0].initialize()
+                    barrier=threading.Barrier(2);results=[]
+
+                    class Cursor:
+                        def __init__(self,raw):self.raw=raw
+                        def fetchone(self):
+                            row=self.raw.fetchone()
+                            if row is None:barrier.wait(5)
+                            return row
+
+                    class Connection:
+                        def __init__(self,raw):self.raw=raw;self.read=False
+                        def __getattr__(self,name):return getattr(self.raw,name)
+                        def execute(self,sql,*args):
+                            cursor=self.raw.execute(sql,*args)
+                            if sql.startswith('SELECT document_json') and not self.read:
+                                self.read=True;return Cursor(cursor)
+                            return cursor
+
+                    def save(index):
+                        try:
+                            document={'value':0 if equal else index}
+                            result=ForwardEvaluationRepository(stores[index])._save_immutable('race','owner','key',document)
+                            results.append((index,result,None))
+                        except BaseException as error:results.append((index,None,error))
+
+                    workers=[];native0=stores[0]._connect;native1=stores[1]._connect
+                    try:
+                        with patch.object(stores[0],'_connect',side_effect=lambda:Connection(native0())), \
+                             patch.object(stores[1],'_connect',side_effect=lambda:Connection(native1())):
+                            for index in range(2):
+                                worker=threading.Thread(target=save,args=(index,));workers.append(worker);worker.start()
+                            for worker in workers:
+                                worker.join(10);self.assertFalse(worker.is_alive())
+                        self.assertEqual(2,len(results))
+                        self.assertEqual(1,sum(result is True for _,result,_ in results))
+                        if equal:
+                            self.assertEqual(1,sum(result is False for _,result,_ in results))
+                            self.assertTrue(all(error is None for _,_,error in results))
+                        else:
+                            self.assertEqual(1,sum(isinstance(error,ValueError) for _,_,error in results))
+                        winner=next(index for index,result,_ in results if result is True)
+                        self.assertEqual({'value':0 if equal else winner},
+                            stores[0].load_document('race','owner','key')['document'])
+                    finally:
+                        for worker in workers:worker.join(10)
+                        for store in stores:store.close()
+
+    def test_native_commit_failure_and_lost_ack_never_allow_overwrite_on_retry(self):
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'ack.sqlite3';store=SQLiteQueryStore(path);store.initialize()
+            self.addCleanup(store.close)
+            repository=ForwardEvaluationRepository(store);native=store._connect
+            with self.assertRaises(TypeError):
+                repository._save_immutable('ack','owner','invalid',{'value':object()})
+            with self.assertRaisesRegex(RuntimeError,'failed to persist immutable document'):
+                repository._save_immutable('ack','owner','invalid',{'value':(1,2)})
+            self.assertIsNone(store.load_document('ack','owner','invalid'))
+
+            class CommitFailure:
+                def __init__(self,raw):self.raw=raw
+                def __getattr__(self,name):return getattr(self.raw,name)
+                def commit(self):raise OSError('controlled commit failure')
+
+            with patch.object(store,'_connect',side_effect=lambda:CommitFailure(native())):
+                with self.assertRaisesRegex(OSError,'controlled commit failure'):
+                    repository._save_immutable('ack','owner','key',{'value':'first'})
+            self.assertIsNone(store.load_document('ack','owner','key'))
+            insert=store.insert_immutable_document
+
+            def lose_ack(*args):
+                insert(*args)
+                raise OSError('controlled committed ACK loss')
+
+            with patch.object(store,'insert_immutable_document',side_effect=lose_ack):
+                with self.assertRaisesRegex(OSError,'committed ACK loss'):
+                    repository._save_immutable('ack','owner','key',{'value':'first'})
+            reopened=SQLiteQueryStore(path);self.addCleanup(reopened.close)
+            retry=ForwardEvaluationRepository(reopened)
+            original=reopened.load_document('ack','owner','key')
+            self.assertFalse(retry._save_immutable('ack','owner','key',{'value':'first'}))
+            with self.assertRaisesRegex(ValueError,'immutable document conflict'):
+                retry._save_immutable('ack','owner','key',{'value':'second'})
+            self.assertEqual(original,reopened.load_document('ack','owner','key'))
+
+
 if __name__ == "__main__":
     unittest.main()

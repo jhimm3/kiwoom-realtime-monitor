@@ -1409,5 +1409,16 @@
     "dynamic|src/kiwoom_monitor/presentation/theme_dialogs.py|review_image_theme_rows|dialog.exec": 1,
     "dynamic|src/kiwoom_monitor/presentation/theme_dialogs.py|review_image_theme_rows|preview.exec": 1
   },
-  "reviews": []
+  "reviews": [
+    {
+      "id": "R3-010-native-immutable-document-20261019",
+      "reason": "The existing ForwardEvaluationRepository immutable append now delegates to one native insert/equality-conflict boundary instead of generic read/upsert/read. Three conditional SQL source sites per backend cover lookup, attempted insert, and concurrent-winner verification; these are source-site limits, not three runtime statements or approval of existing debt.",
+      "connection": "ForwardEvaluationRepository._save_immutable -> existing SQLiteDocumentStoreMixin/PostgresDocumentStoreMixin.insert_immutable_document -> one existing native connection/transaction. PostgreSQL reuses open_observed_connection and DBWriterContext; no new driver connect, pool, service, schema, or hot RAM I/O boundary. Shadow insert-first guards retain their existing source-site limits.",
+      "validation": "R3-010 INDEPENDENT_REVIEW.md and agent-cost/native-after-v3-observations.json record isolated native cost/conflict/no-op evidence; agent-shadow/counterexamples.json records native SQLite and PG statement-contract winner checks. Exact source deltas and static-gate before/after are preserved under agent-shadow/guardrails; related regression and real PG/operating acceptance are separate.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.insert_immutable_document|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.insert_immutable_document|connection.execute": 3
+      }
+    }
+  ]
 }

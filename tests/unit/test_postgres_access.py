@@ -840,6 +840,11 @@ class PostgresAccessTests(unittest.TestCase):
                           call["commits"]))
 
     def test_shadow_evaluation_and_checkpoint_keep_two_native_connections(self) -> None:
+        class ReturningShadowCursor(FakeCursor):
+            def execute(self, sql: str, parameters: object = ()) -> FakeCursor:
+                self.connection.rows = [(parameters[-1],)] if sql.endswith("RETURNING document_json") else []
+                return super().execute(sql, parameters)
+
         evaluation_connection = self._native_context_connection()
         checkpoint_connection = self._native_context_connection()
         store = PostgresQueryStore("unused")
@@ -852,12 +857,15 @@ class PostgresAccessTests(unittest.TestCase):
             "universes": [{"codes": ("005930", "000660")}],
         }
         started = time.time() - 1
-        with patch.object(store, "_connect", side_effect=[evaluation_connection, checkpoint_connection]):
+        with patch.object(evaluation_connection, "cursor", return_value=ReturningShadowCursor(evaluation_connection)), \
+                patch.object(store, "_connect", side_effect=[evaluation_connection, checkpoint_connection]):
             store.save_shadow_evaluation("monitor", decision, candidate, "2099-01-09T00:01:00+00:00")
             store.save_shadow_monitor_state("monitor", checkpoint)
 
-        self.assertEqual(["SELECT", "INSERT", "SELECT", "INSERT"],
+        self.assertEqual(["INSERT", "INSERT"],
                          [statement[0] for statement in evaluation_connection.statements])
+        self.assertEqual([decision, candidate],
+                         [json.loads(parameters[-1]) for _, parameters in evaluation_connection.statements])
         self.assertEqual(["INSERT", "DELETE"],
                          [statement[0] for statement in checkpoint_connection.statements])
         for connection in (evaluation_connection, checkpoint_connection):
@@ -865,7 +873,7 @@ class PostgresAccessTests(unittest.TestCase):
         calls = self._calls()
         self.assertEqual(2, len(calls))
         self.assertEqual(2, len({call["call_id"] for call in calls}))
-        self.assertEqual([("candidate.shadow_evaluation", "shadow_evaluation", 2, 4),
+        self.assertEqual([("candidate.shadow_evaluation", "shadow_evaluation", 2, 2),
                           ("candidate.shadow_checkpoint", "shadow_monitor_state", 1, 2)], [
             (call["writer_family"], call["writer_kind"], call["rows_attempted"], call["sql_calls"])
             for call in calls

@@ -73,6 +73,9 @@ from kiwoom_monitor.domain.execution_activation import (
 
 class ForwardEvaluationStore(Protocol):
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
+    def insert_immutable_document(
+        self, collection: str, owner: str, key: str, document: dict[str, Any],
+    ) -> bool: ...
     def load_documents(
         self, collection: str, owner: str = "", limit: int = 1000,
         offset: int = 0, updated_after: float = 0.0,
@@ -1003,17 +1006,7 @@ class ForwardEvaluationRepository:
     def _save_immutable(
         self, collection: str, owner: str, key: str, document: Mapping[str, Any],
     ) -> bool:
-        existing = self._find(collection, owner, key)
-        body = dict(document)
-        if existing is not None:
-            if existing != body:
-                raise ValueError(f"immutable document conflict: {collection}/{owner}/{key}")
-            return False
-        self._store.upsert_documents(collection, [{"owner": owner, "key": key, "document": body}])
-        persisted = self._find(collection, owner, key)
-        if persisted != body:
-            raise RuntimeError(f"failed to persist immutable document: {collection}/{owner}/{key}")
-        return True
+        return self._store.insert_immutable_document(collection, owner, key, dict(document))
 
     def _find(self, collection: str, owner: str, key: str) -> dict[str, Any] | None:
         row = self._store.load_document(collection, owner, key)

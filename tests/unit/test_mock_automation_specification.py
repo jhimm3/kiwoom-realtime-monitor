@@ -907,20 +907,29 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         for name, documents in cases.items():
             with self.subTest(name=name), patch.object(
                 self.store, "load_mock_automation_lineage", return_value=documents,
-            ), patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write:
+            ), patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write, \
+                    patch.object(self.store, "insert_immutable_document",
+                                 wraps=self.store.insert_immutable_document) as immutable_write:
                 with self.assertRaises(ValueError):
                     self.repository.save_mock_automation_decision_gate(gate)
                 write.assert_not_called()
+                immutable_write.assert_not_called()
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
 
     async def test_lineage_read_does_not_cache_or_replace_current_risk_recheck(self):
         await self._poll_bar(0, 71_000, 71_200)
         gate = self.repository.load_mock_automation_decision_gates(ACCOUNT_REF)[0]
         await self._refresh_recovery()  # A newer, native persisted reconciliation revision.
-        with patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write:
+        with patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write, \
+                patch.object(self.store, "insert_immutable_document",
+                             wraps=self.store.insert_immutable_document) as immutable_write, \
+                patch.object(self.repository, "load_latest_mock_automation_risk",
+                             wraps=self.repository.load_latest_mock_automation_risk) as current_risk:
             with self.assertRaisesRegex(ValueError, "current risk evidence"):
                 self.repository.save_mock_automation_decision_gate(gate)
+            current_risk.assert_called_once_with(ACCOUNT_REF)
             write.assert_not_called()
+            immutable_write.assert_not_called()
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
 
     async def test_breakout_runner_round_trip_restart_and_journal(self):

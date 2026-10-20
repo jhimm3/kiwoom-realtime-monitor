@@ -2434,6 +2434,126 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(("fixture", "owner", "key"), cursor.rows[0][:3])
         self.assertEqual({"title": "same"}, json.loads(cursor.rows[0][-1]))
 
+    def test_postgres_immutable_document_preserves_noop_conflicts_and_commit_ack(self) -> None:
+        # Scripted PG responses exercise the real observed connection wrapper, not a live PG server.
+        body = {"beta": [1, 2], "alpha": {"enabled": True}}
+        equal = ('{"alpha":{"enabled":true},"beta":[1,2]}',)
+        different = ('{"alpha":{"enabled":true},"beta":[1,3]}',)
+        collection, owner, key = "execution_forward_profiles", "strategy-1", "profile-1"
+        cases = (
+            ("equal", [equal], False, None, False, 0),
+            ("conflict", [different], None, ValueError, False, 0),
+            ("insert", [None, (json.dumps(body),)], True, None, False, 1),
+            ("race_equal", [None, None, equal], False, None, False, 1),
+            ("race_conflict", [None, None, different], None, ValueError, False, 1),
+            ("race_missing", [None, None, None], None, RuntimeError, False, 1),
+            ("insert_commit_error", [None, (json.dumps(body),)], None, OSError, True, 1),
+            ("equal_commit_error", [equal], None, OSError, True, 0),
+        )
+
+        class Cursor:
+            def __init__(self, responses, events):
+                self.responses = list(responses)
+                self.events = events
+                self.statements = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, parameters=()):
+                self.statements.append((sql, tuple(parameters)))
+                self.events.append("select" if sql.startswith("SELECT") else "insert")
+                return self
+
+            def fetchone(self):
+                return self.responses.pop(0)
+
+        class Connection:
+            def __init__(self, responses, commit_error):
+                self.events = []
+                self.query = Cursor(responses, self.events)
+                self.commit_error = commit_error
+                self.commit_attempts = self.commits = self.rollbacks = 0
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, *_args):
+                # Match the driver order: a failed COMMIT propagates with unknown outcome;
+                # body exceptions roll back. Do not invent an automatic rollback on lost ACK.
+                if exc_type:
+                    self.rollback()
+                else:
+                    self.commit()
+                self.close()
+                return False
+
+            def cursor(self):
+                return self.query
+
+            def commit(self):
+                self.events.append("commit")
+                self.commit_attempts += 1
+                if self.commit_error:
+                    raise OSError("controlled commit ACK failure")
+                self.commits += 1
+
+            def rollback(self):
+                self.events.append("rollback")
+                self.rollbacks += 1
+
+            def close(self):
+                self.events.append("close")
+                self.closed = True
+
+        for scenario, responses, expected, error, commit_error, clock_calls in cases:
+            with self.subTest(scenario=scenario):
+                connection = Connection(responses, commit_error)
+                clock = Mock(return_value=datetime(2030, 1, 1, 18, 4, 5, tzinfo=timezone.utc))
+                store = PostgresQueryStore("postgresql://unused", now_provider=clock)
+                connect = Mock(return_value=connection)
+                store._connect = connect  # type: ignore[method-assign]
+                if error:
+                    message = "immutable document conflict" if error is ValueError else (
+                        "commit ACK failure" if error is OSError else "failed to persist immutable document")
+                    with self.assertRaisesRegex(error, message):
+                        store.insert_immutable_document(collection, owner, key, body)
+                    self.assertEqual(0, connection.commits)
+                else:
+                    self.assertIs(expected, store.insert_immutable_document(collection, owner, key, body))
+                    connection.events.append("returned")
+                    self.assertEqual(1, connection.commits)
+                    self.assertLess(connection.events.index("commit"), connection.events.index("returned"))
+                    self.assertLess(connection.events.index("close"), connection.events.index("returned"))
+                connect.assert_called_once_with()
+                self.assertEqual(clock_calls, clock.call_count)
+                self.assertEqual([], connection.query.responses)
+                statements = connection.query.statements
+                self.assertTrue(statements[0][0].startswith("SELECT document_json FROM central_documents"))
+                self.assertEqual((collection, owner, key), statements[0][1])
+                inserts = [(sql, parameters) for sql, parameters in statements if sql.startswith("INSERT")]
+                self.assertEqual(clock_calls, len(inserts))
+                self.assertFalse(any(sql.startswith("UPDATE") for sql, _ in statements))
+                if inserts:
+                    sql, parameters = inserts[0]
+                    self.assertIn("ON CONFLICT(collection,owner,document_key) DO NOTHING", sql)
+                    self.assertIn("RETURNING document_json", sql)
+                    self.assertEqual((collection, owner, key, 1893521045.), parameters[:4])
+                    self.assertEqual(body, json.loads(parameters[4]))
+                if scenario.startswith("race_"):
+                    self.assertEqual(["select", "insert", "select"], connection.events[:3])
+                    self.assertEqual((collection, owner, key), statements[2][1])
+                self.assertEqual(0 if error in (ValueError, RuntimeError) else 1, connection.commit_attempts)
+                self.assertEqual(1 if error in (ValueError, RuntimeError) else 0, connection.rollbacks)
+                self.assertEqual(not commit_error, connection.closed)
+                # The fake owns no socket; explicitly release its state after the driver's unknown-ACK path.
+                if not connection.closed:
+                    connection.close()
+
     def test_postgres_latest_market_cap_reads_persisted_trade_without_age_filter(self) -> None:
         class Cursor:
             sql = ""
