@@ -2986,6 +2986,37 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(10.0, summary["mean_absolute_difference_percent"])
         self.assertEqual(10.0, summary["max_absolute_difference_percent"])
 
+    def test_recent_minute_http_checks_auth_and_uses_one_bounded_native_request(self) -> None:
+        requests = []
+        native_read = SQLiteQueryStore.load_recent_minute_bars
+        def read(store, *args, **kwargs):
+            requests.append((args, kwargs))
+            return native_read(store, *args, **kwargs)
+        # Store construction binds its capture wrapper to the current native method.
+        with tempfile.TemporaryDirectory() as directory, patch.object(SQLiteQueryStore, 'load_recent_minute_bars', read):
+            with market_read_contract_app(create_app, Path(directory) / 'recent-http.sqlite3') as (app, store, collectors):
+                with TestClient(app) as client:
+                    params = dict(code='999999', end_date='2026-09-14', market='COMBINED', trading_days=2)
+                    path = '/api/v1/market/recent-minute-bars'
+                    self.assertEqual(401, client.get(path, params=params).status_code)
+                    self.assertEqual([], requests)
+                    response = client.get(path, params=params, headers={'Authorization': 'Bearer private-token'})
+                    self.assertEqual(200, response.status_code, response.text)
+                    self.assertEqual([], response.json()['trading_days'])
+                    self.assertEqual([], response.json()['bars'])
+                    self.assertEqual(1, len(requests))
+                    self.assertEqual(('999999', '2026-08-15', '2026-09-14', 'COMBINED', 2), requests[0][0])
+                    invalid = client.get(path, params={**params, 'trading_days': 6}, headers={'Authorization': 'Bearer private-token'})
+                    self.assertEqual(422, invalid.status_code)
+                    self.assertEqual(1, len(requests))
+                    app.state.realtime_collector = collectors[0]
+                    live = client.get(path, params={**params, 'code': '005930', 'trading_days': 1},
+                                      headers={'Authorization': 'Bearer private-token'})
+                    self.assertEqual(200, live.status_code, live.text)
+                    self.assertEqual(['2026-09-14'], live.json()['trading_days'])
+                    self.assertEqual(2, len(requests))
+                    self.assertTrue(requests[-1][1]['realtime_deltas'])
+
     def test_recent_minute_bars_reads_two_stored_trading_days_without_broker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

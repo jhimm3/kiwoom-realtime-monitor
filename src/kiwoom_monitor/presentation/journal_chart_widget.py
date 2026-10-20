@@ -81,6 +81,9 @@ class MinuteChart(QWidget):
         self._moving_average_rows: tuple[tuple[object, ...], ...] | None = None
         self._moving_average_periods: tuple[int, ...] = ()
         self._moving_average_values: dict[int, dict[int, float]] = {}
+        self._fill_index_rows: tuple[tuple[object, ...], ...] | None = None
+        self._fill_index_fills: tuple[TradeFill, ...] | None = None
+        self._fill_indices: dict[str, int] = {}
         self._text_editor: QLineEdit | None = None
         self._editing_text_index: int | None = None
         self._selected_annotation: int | None = None
@@ -368,6 +371,19 @@ class MinuteChart(QWidget):
         self._moving_average_values = averages
         return averages
 
+    def _trade_fill_indices(self, row_minutes: list[datetime]) -> dict[str, int]:
+        """현재 화면의 봉·체결이 같은 동안 최근접 봉 index 한 벌만 재사용한다."""
+        if self._fill_index_rows is self._rows and self._fill_index_fills is self._fills:
+            return self._fill_indices
+        indices = {
+            trade_fill_key(fill): min(range(len(row_minutes)), key=lambda candidate: abs((row_minutes[candidate] - fill.filled_at).total_seconds()))
+            for fill in self._fills
+        }
+        self._fill_index_rows = self._rows
+        self._fill_index_fills = self._fills
+        self._fill_indices = indices
+        return indices
+
     def paintEvent(self, event: object) -> None:
         painter = QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), self._background)
@@ -421,10 +437,7 @@ class MinuteChart(QWidget):
                 painter.setPen(QColor(color)); painter.drawText(int(legend_x), 19, label)
                 legend_x += painter.fontMetrics().horizontalAdvance(label) + 8
 
-        fill_indices = {
-            trade_fill_key(fill): min(range(len(row_minutes)), key=lambda candidate: abs((row_minutes[candidate] - fill.filled_at).total_seconds()))
-            for fill in day_fills
-        }
+        fill_indices = self._trade_fill_indices(row_minutes)
         position = 0; holding_start = -1; cycle_index = 0
         holding_spans: list[tuple[int, int, str]] = []
         for fill in sorted(day_fills, key=lambda value: value.filled_at):

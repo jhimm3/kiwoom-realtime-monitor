@@ -822,6 +822,92 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.transport.submit.assert_not_called()
         self.transport.cancel.assert_not_called()
 
+    async def test_cancelled_stop_joins_native_receipt_before_shutdown_retires_owner(self):
+        # Isolate the accepted STOP operation from the already-tested Runner
+        # drain. The real automatic bundle, runtime, control and app remain.
+        await self.supervisor.bundle_changed(self.profile, None)
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        repository = self.supervisor._repository
+        save_receipt = repository.save_mock_automation_stop_revision
+        before_writer, after_writer = [], []
+
+        def blocked_receipt(value):
+            before_writer.append((repository.load_mock_automation_control(self.account_ref),
+                                  self.bundle.runtime._new_orders_enabled))
+            entered.set()
+            try:
+                if not release.wait(5):
+                    raise AssertionError("cancelled STOP native receipt barrier was not released")
+                result = save_receipt(value)
+                after_writer.append((repository.load_mock_automation_control(self.account_ref),
+                                     repository.load_mock_automation_stop_revisions(self.account_ref)))
+                return result
+            finally:
+                finished.set()
+
+        with patch.object(repository, "save_mock_automation_stop_revision", side_effect=blocked_receipt) as save, \
+             patch.object(self.store, "close", wraps=self.store.close) as close_store:
+            request = asyncio.create_task(self.http.post("/api/v1/mock-automation/stop", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_control_revision": self.control.control_revision,
+                "reason": "operator stop during request cancellation",
+            }))
+            shutdown = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                request.cancel()
+                await asyncio.sleep(0)
+                shutdown = asyncio.create_task(self.close_app())
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.2)
+                except TimeoutError:
+                    pass
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()
+                await asyncio.sleep(0)
+                observed = {
+                    "request_pending": not request.done(),
+                    "account_lock_held": self.supervisor._locks[self.account_ref].locked(),
+                    "shutdown_pending": not shutdown.done(),
+                    "owner_closing": self.owner._closing,
+                    "runtime_retired": self.bundle.runtime._retired,
+                    "store_close_calls": close_store.call_count,
+                    "native_pending": not finished.is_set(),
+                }
+            finally:
+                release.set()
+                outcome = await asyncio.gather(request, return_exceptions=True)
+                if shutdown is not None:
+                    await shutdown
+                if entered.is_set():
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+
+        self.assertEqual({
+            "request_pending": True, "account_lock_held": True,
+            "shutdown_pending": True, "owner_closing": False,
+            "runtime_retired": False, "store_close_calls": 0,
+            "native_pending": True,
+        }, observed)
+        self.assertIsInstance(outcome[0], asyncio.CancelledError)
+        self.assertEqual(1, save.call_count)
+        self.assertEqual(1, len(before_writer))
+        self.assertEqual(1, len(after_writer))
+        before_control, before_enabled = before_writer[0]
+        final_control, receipts = after_writer[0]
+        self.assertFalse(before_enabled)
+        self.assertEqual(MockAutomationDesiredState.STOPPED, before_control.desired_state)
+        self.assertEqual(self.control.control_revision + 1, before_control.control_revision)
+        self.assertEqual(before_control, final_control)
+        self.assertEqual(1, len(receipts))
+        self.assertEqual("operator stop during request cancellation", receipts[0].reason)
+        self.assertFalse(receipts[0].new_orders_enabled)
+        self.assertTrue(self.bundle.runtime._retired)
+        self.assertEqual("completed", self.app.state.shutdown_status["state"])
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
     async def test_post_switch_admission_failure_records_original_error_and_closes_current_order_gate(self):
         failure = ValueError("controlled existing approval rejection")
         with patch.object(self.runner, "close", wraps=self.runner.close) as close:

@@ -8,6 +8,53 @@ from kiwoom_monitor.domain.theme_import import ThemeImportRow
 
 
 class ThemeMatchingTests(unittest.TestCase):
+    def test_matching_batch_preserves_duplicate_rows_and_legacy_lookup_order(self) -> None:
+        rows = (
+            ThemeImportRow("Current", ("AI",)),
+            ThemeImportRow("Alias", ("로봇",)),
+            ThemeImportRow("Current", ("반도체",)),
+            ThemeImportRow("missing", ("제외",)),
+        )
+        expected = (
+            (MatchedThemeRow("A", "Current", ("AI",)),
+             MatchedThemeRow("B", "Alias", ("로봇",)),
+             MatchedThemeRow("A", "Current", ("반도체",))),
+            (rows[3],),
+        )
+
+        class Legacy:
+            def __init__(self):
+                self.calls = []
+
+            def find_code_by_name(self, name):
+                self.calls.append(name)
+                return {"Current": "A", "Alias": "B"}.get(name)
+
+        legacy = Legacy()
+        self.assertEqual(expected, match_theme_rows(rows, legacy))
+        self.assertEqual(["Current", "Alias", "Current", "missing"], legacy.calls)
+
+        class Batch(Legacy):
+            def find_codes_by_names(self, names):
+                self.calls.append(names)
+                return {name: {"Current": "A", "Alias": "B"}.get(name) for name in names}
+
+        batch = Batch()
+        self.assertEqual(expected, match_theme_rows(rows, batch))
+        self.assertEqual([("Current", "Alias", "missing")], batch.calls)
+
+    def test_matching_empty_input_and_batch_error_do_not_invoke_point_fallback(self) -> None:
+        class Lookup:
+            def find_codes_by_names(self, _names):
+                raise ValueError("lookup failed")
+
+            def find_code_by_name(self, _name):
+                raise AssertionError("batch failure must propagate")
+
+        self.assertEqual(((), ()), match_theme_rows((), Lookup()))
+        with self.assertRaisesRegex(ValueError, "lookup failed"):
+            match_theme_rows((ThemeImportRow("A", ("AI",)),), Lookup())
+
     def test_preview_preserves_rows_and_legacy_reader_contract(self) -> None:
         class Memberships:
             def __init__(self):

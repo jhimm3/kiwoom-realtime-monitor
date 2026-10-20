@@ -15,6 +15,43 @@ from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepo
 
 
 class ThemeColorRepositoryTests(unittest.TestCase):
+    def test_shared_catalog_compatibility_keeps_profile_independence_approval_and_fk_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            stocks = StockRepository(path)
+            stocks.upsert("A", "예전회사")
+            stocks.upsert("A", "신규회사")
+            stocks.upsert("B", "현재회사")
+            repository = ThemeRepository(path)
+            self.assertEqual({"예전회사": None, "신규회사": "A"}, repository.find_codes_by_names(("예전회사", "신규회사")))
+            self.assertEqual(("A", "예전회사", "신규회사", "KRX"), repository.pending_name_change(" 예전회사 "))
+            self.assertEqual((("A", "신규회사"),), repository.find_stock_candidates("신규"))
+            self.assertEqual((("A", "신규회사"), ("B", "현재회사")), repository.find_concatenated_stocks("신규회사현재회사"))
+            self.assertEqual(((("A", "신규회사"),), ("오타",)), repository.find_partial_concatenated_stocks("신규회사오타"))
+            repository.review_name_changes({("A", "예전회사"): True})
+            self.assertEqual("A", repository.find_code_by_name("예전회사"))
+            self.assertEqual({"예전회사": "A"}, repository.find_codes_by_names(("예전회사",)))
+            self.assertIsNone(repository.pending_name_change("예전회사"))
+            repository.create_profile("다른 프로필", copy_current=False)
+            repository.select_profile("다른 프로필")
+            self.assertEqual("A", repository.find_code_by_name("예전회사"))
+
+            with closing(sqlite3.connect(path)) as seed:
+                seed.executemany(
+                    "INSERT INTO stock_name_history(stock_code,old_name,new_name,source,decision) VALUES(?,?,?,'KRX','pending')",
+                    (("A", "현재회사", "신규회사"), ("A", "원자승인", "신규회사"), ("missing", "고아승인", "없는회사")),
+                )
+                seed.commit()
+            repository.review_name_changes({("A", "현재회사"): True})
+            self.assertEqual("B", repository.find_code_by_name("현재회사"))
+            with closing(sqlite3.connect(path)) as check:
+                self.assertIsNone(check.execute("SELECT stock_code FROM stock_aliases WHERE alias='현재회사'").fetchone())
+            with self.assertRaises(sqlite3.IntegrityError):
+                repository.review_name_changes({("A", "원자승인"): True, ("missing", "고아승인"): True})
+            self.assertEqual(("A", "원자승인", "신규회사", "KRX"), repository.pending_name_change("원자승인"))
+            self.assertIsNone(repository.find_code_by_name("원자승인"))
+
     def test_preview_reads_only_requested_memberships_in_one_profile_and_chunks_native_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

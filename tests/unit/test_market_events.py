@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import tempfile
 import threading
 import unittest
@@ -40,6 +41,50 @@ class _Broker:
         raise AssertionError(f"unexpected request {api_id}")
 
 
+class _HeldConditionStatusStore:
+    """Observe the real status store call while holding only its first attempt."""
+
+    def __init__(self, native, *, fail_first=False, commit_before_error=False):
+        self.native = native
+        self.fail_first = fail_first
+        self.commit_before_error = commit_before_error
+        self.error = OSError("controlled condition status write failure")
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.first_finished, self.second_entered = threading.Event(), threading.Event()
+        self.attempts = []
+        self.active = self.max_active = 0
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name):
+        return getattr(self.native, name)
+
+    def upsert_documents(self, collection, values):
+        if collection != "condition_search_status":
+            return self.native.upsert_documents(collection, values)
+        with self._lock:
+            self.attempts.append(deepcopy(values))
+            ordinal = len(self.attempts)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if ordinal == 1:
+                self.entered.set()
+                if not self.release.wait(5):
+                    raise TimeoutError("test did not release condition status commit")
+                if self.fail_first:
+                    if self.commit_before_error:
+                        self.native.upsert_documents(collection, values)
+                    raise self.error
+            else:
+                self.second_entered.set()
+            return self.native.upsert_documents(collection, values)
+        finally:
+            with self._lock:
+                self.active -= 1
+            if ordinal == 1:
+                self.first_finished.set()
+
+
 class MarketEventContractTests(unittest.TestCase):
     def test_condition_selection_never_guesses(self) -> None:
         values = [("1", "급등 15%"), ("2", "거래량")]
@@ -77,6 +122,133 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.close()
         self.store.close()
         self.temp.cleanup()
+
+    async def test_condition_status_serializes_frozen_revisions_across_reconnect(self) -> None:
+        held = _HeldConditionStatusStore(self.store)
+        self.service._store = held
+        socket = _Socket()
+        old = latest = None
+        try:
+            await self.service.on_ws_connected(socket)
+            await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
+            old = self.service._condition_status_tail
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
+            self.assertFalse(old.done())
+            self.now[0] += timedelta(seconds=1)
+            self.service.update_operational_settings(enabled=True, exact_name="새조건", substring="")
+            await self.service.on_ws_connected(socket)
+            await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["8", "새조건"]]}, socket)
+            latest = self.service._condition_status_tail
+            await asyncio.sleep(0)
+            self.assertEqual(("8", 1), (self.service._pending_condition.selected[0], self.service._pending_condition.revision))
+            self.assertFalse(held.second_entered.is_set(), "new revision started before the old native ACK")
+            self.assertEqual(1, len(held.attempts))
+            before = held.attempts[0][0]["document"]
+            self.assertEqual(("", 0, ["7", "상승 15%"]),
+                             (before["configured_exact_name"], before["runtime"]["policy_revision"], before["selected"]))
+        finally:
+            held.release.set()
+            if latest is not None or old is not None:
+                await asyncio.wait_for(asyncio.shield(latest or old), 3)
+        current = self.store.load_documents("condition_search_status", "hot_cohort", 1)[0]["document"]
+        self.assertEqual(("새조건", 1, ["8", "새조건"], self.now[0].timestamp()),
+                         (current["configured_exact_name"], current["runtime"]["policy_revision"],
+                          current["selected"], current["updated_at"]))
+        self.assertEqual([0, 1], [rows[0]["document"]["runtime"]["policy_revision"] for rows in held.attempts])
+        self.assertEqual((2, 1, 0), (len(held.attempts), held.max_active, held.active))
+
+    async def test_condition_status_failure_reaches_poll_once_and_reconnect_retries(self) -> None:
+        for lost_ack in (False, True):
+            with self.subTest(lost_ack=lost_ack):
+                held = _HeldConditionStatusStore(self.store, fail_first=True, commit_before_error=lost_ack)
+                self.service._store = held
+                socket = _Socket()
+                try:
+                    await self.service.on_ws_connected(socket)
+                    await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
+                    first = self.service._condition_status_tail
+                    self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
+                    await self.service.on_ws_connected(socket)
+                    await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["19", "상승 15%"]]}, socket)
+                    await asyncio.sleep(0)
+                    self.assertFalse(held.second_entered.is_set())
+                finally:
+                    held.release.set()
+                with self.assertRaises(OSError) as failed:
+                    await asyncio.wait_for(asyncio.shield(first), 3)
+                self.assertIs(held.error, failed.exception)
+                await asyncio.wait_for(asyncio.shield(self.service._condition_status_tail), 3)
+                self.assertEqual(["19", "상승 15%"], self.store.load_documents(
+                    "condition_search_status", "hot_cohort", 1)[0]["document"]["selected"])
+                with self.assertRaises(OSError) as propagated:
+                    await self.service.poll_condition_updates(socket)
+                self.assertIs(held.error, propagated.exception)
+                await self.service.poll_condition_updates(socket)
+                self.assertEqual(2, len(held.attempts), "status failure introduced an independent retry")
+                await self.service.on_ws_connected(socket)
+                await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
+                await asyncio.wait_for(asyncio.shield(self.service._condition_status_tail), 3)
+                self.assertEqual(["7", "상승 15%"], self.store.load_documents(
+                    "condition_search_status", "hot_cohort", 1)[0]["document"]["selected"])
+                self.assertEqual((3, 1, 0), (len(held.attempts), held.max_active, held.active))
+
+    async def test_cancelled_condition_status_and_close_waiter_join_actual_native_ack(self) -> None:
+        held = _HeldConditionStatusStore(self.store)
+        self.service._store = held
+        socket = _Socket()
+        closing = None
+        try:
+            await self.service.on_ws_connected(socket)
+            await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
+            owner = self.service._condition_status_tail
+            owner.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(owner.done(), "cancelled status owner retired an actual native write")
+            closing = asyncio.create_task(self.service.close())
+            await asyncio.sleep(0)
+            closing.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(closing.done())
+            self.assertFalse(held.first_finished.is_set())
+        finally:
+            held.release.set()
+            if closing is not None:
+                with self.assertRaises(asyncio.CancelledError):
+                    await closing
+            else:
+                await self.service.close()
+        await self.service.close()
+        self.assertTrue(owner.cancelled())
+        self.assertTrue(held.first_finished.is_set())
+        self.assertEqual((1, 1, 0), (len(held.attempts), held.max_active, held.active))
+        self.assertEqual(["7", "상승 15%"], self.store.load_documents(
+            "condition_search_status", "hot_cohort", 1)[0]["document"]["selected"])
+        self.assertFalse(self.service._background)
+
+    async def test_condition_status_failure_is_not_a_successful_close(self) -> None:
+        for lost_ack in (False, True):
+            with self.subTest(lost_ack=lost_ack):
+                held = _HeldConditionStatusStore(self.store, fail_first=True, commit_before_error=lost_ack)
+                service = MarketEventService(self.broker, self.hub, held, now_provider=lambda: self.now[0])
+                socket = _Socket()
+                closing = None
+                try:
+                    await service.on_ws_connected(socket)
+                    await service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
+                    self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
+                    closing = asyncio.create_task(service.close())
+                    await asyncio.sleep(0)
+                    self.assertFalse(closing.done())
+                finally:
+                    held.release.set()
+                    with self.assertRaises(OSError) as failed:
+                        await (closing if closing is not None else service.close())
+                self.assertIs(held.error, failed.exception)
+                self.assertTrue(held.first_finished.is_set())
+                self.assertEqual((1, 1, 0), (len(held.attempts), held.max_active, held.active))
+                self.assertFalse(service._background)
+                self.assertFalse(service._tasks)
 
     async def test_null_realtime_data_is_ignored(self) -> None:
         handled = await self.service.handle_ws_message(

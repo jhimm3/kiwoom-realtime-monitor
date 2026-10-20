@@ -27,9 +27,10 @@ from kiwoom_monitor.application.research_execution import (
     SimulationExecutionConfig,
 )
 from kiwoom_monitor.application.research_families import BREAKOUT_FAMILY_ID
+from kiwoom_monitor.application.research_replay import KrxMinuteBarFrame
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec, ResearchFoldSpec
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner, _checkpoint_bar_document
 from kiwoom_monitor.central_server.database_observation_readers import (
     OBSERVATION_DELIVERY_PROTOCOL, ObservationRevisionPage,
 )
@@ -375,7 +376,95 @@ def _checkpoint_commit_failures(store, count):
     return write, evidence
 
 
+def _checkpoint_bar_fields():
+    return {
+        "revision_id": "bar-revision", "observation_key": "bar-key", "code": "005930",
+        "bar_start": "2026-10-21T09:00:00+09:00", "bar_end": "2026-10-21T09:01:00+09:00",
+        "available_at": "2026-10-21T09:01:01+09:00", "open": 10000, "high": 10020,
+        "low": 9990, "close": 10010, "volume": 100, "trade_value_million_won": 1,
+        "session_finalized": False, "capture_quality": "complete", "finalization_source": "native",
+        "session_profile": "krx-regular/v1", "research_session": "2026-10-21",
+        "market_session": "REGULAR", "market_phase": "CONTINUOUS", "schedule_version": "fixture-v1",
+    }
+
+
+class CheckpointBarDocumentTests(unittest.TestCase):
+    def test_declared_fields_subclasses_slots_and_none_preserve_checkpoint_values(self):
+        from dataclasses import dataclass, make_dataclass
+
+        expected = _checkpoint_bar_fields()
+        normal = KrxMinuteBarFrame(**expected)
+        object.__setattr__(normal, "diagnostic_extra", {"ignored": []})
+
+        class Subclass(KrxMinuteBarFrame):
+            pass
+
+        @dataclass(frozen=True)
+        class Added(KrxMinuteBarFrame):
+            added: int = 9
+
+        class EqualAtomic(type):
+            __hash__ = type.__hash__
+
+            def __eq__(cls, other):
+                return other is str
+
+        class MutablePretender(metaclass=EqualAtomic):
+            def __init__(self):
+                self.values = ["before"]
+
+            def __deepcopy__(self, memo):
+                return {"copied": list(self.values)}
+
+        pretender = MutablePretender()
+        slots_type = make_dataclass("SlotsBar", [(name, object) for name in expected], frozen=True, slots=True)
+        cases = (
+            (normal, expected), (Subclass(**expected), expected),
+            (Added(**expected), {**expected, "added": 9}), (slots_type(**expected), expected),
+            (KrxMinuteBarFrame(**{**expected, "capture_quality": None}), {**expected, "capture_quality": None}),
+            (KrxMinuteBarFrame(**{**expected, "capture_quality": pretender}),
+             {**expected, "capture_quality": {"copied": ["before"]}}),
+        )
+        for frame, document in cases:
+            with self.subTest(frame_type=type(frame).__name__, quality=document["capture_quality"]):
+                self.assertEqual(document, _checkpoint_bar_document(frame))
+        with self.assertRaisesRegex(TypeError, "asdict.*dataclass instances"):
+            _checkpoint_bar_document(None)
+
+
 class MockAutomationRunnerTests(unittest.TestCase):
+    def test_each_prefix_ack_preserves_bar_fields_and_detaches_restored_mutable_values(self):
+        runner = MockAutomationRunner(self.store, self.bundle, self.spec, now_provider=lambda: NOW)
+        normal_fields = _checkpoint_bar_fields()
+        normal = KrxMinuteBarFrame(**normal_fields)
+        object.__setattr__(normal, "diagnostic_extra", {"ignored": []})
+        restored_fields = {**normal_fields, "revision_id": "restored-revision", "observation_key": "restored-key",
+                           "capture_quality": ["restored-value"]}
+        restored = KrxMinuteBarFrame(**json.loads(json.dumps(restored_fields)))
+        runner._bars = {(normal.code, normal.observation_key): normal,
+                        (restored.code, restored.observation_key): restored}
+        initial_cursor = runner._cursor
+        with patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write:
+            for prefix in range(1, 21):
+                runner._cursor = initial_cursor + prefix
+                runner._save_checkpoint()
+                self.assertFalse(runner._checkpoint_pending)
+            self.assertEqual(20, write.call_count)
+            saved = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+            self.assertEqual([normal_fields, restored_fields], saved["bars"])
+            self.assertEqual(initial_cursor + 20, saved["input_cursor"])
+            runner._save_checkpoint()
+            self.assertEqual(20, write.call_count)
+            acknowledged = runner._last_checkpoint_content
+            restored.capture_quality.append("changed-after-ack")
+            self.assertEqual(["restored-value"], acknowledged["bars"][1]["capture_quality"])
+            runner._save_checkpoint()
+            self.assertEqual(21, write.call_count)
+            runner._save_checkpoint(force=True)
+            self.assertEqual(22, write.call_count)
+        saved = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
+        self.assertEqual(["restored-value", "changed-after-ack"], saved["bars"][1]["capture_quality"])
+
     def test_checkpoint_noop_preserves_document_and_forced_close_boundary_can_write(self):
         runner = MockAutomationRunner(self.store, self.bundle, self.spec)
         before = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")

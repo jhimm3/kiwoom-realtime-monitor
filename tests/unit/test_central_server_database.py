@@ -993,6 +993,118 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(20, krx[0]["volume"])
         self.assertEqual(2, len(both))
 
+    def test_recent_minutes_select_real_days_without_consuming_hidden_combined_days(self) -> None:
+        at = datetime.fromisoformat('2026-10-19T11:00:00+09:00')
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'recent.sqlite3', now_provider=lambda: at)
+            self.addCleanup(store.close)
+            store.initialize()
+            base = dict(code='005930', minute='10:00', market='KRX', open=100, high=110,
+                        low=90, close=105, volume=10, trade_value_million_won=20, updated_at=at.timestamp())
+            days = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16']
+            store.save_minute_bars([{**base, 'trading_date': day} for day in days] + [
+                {**base, 'trading_date': '2026-10-19', 'market': 'UNKNOWN'},
+                {**base, 'trading_date': '2026-10-18', 'minute': ''},
+                {**base, 'trading_date': '2026-10-16', 'market': 'nxt', 'volume': 5},
+                {**base, 'trading_date': '2026-10-15', 'market': 'SOR'},
+                {**base, 'code': '035420', 'trading_date': '2026-09-19'},
+                {**base, 'code': '035420', 'trading_date': '2026-09-18'},
+            ])
+            for count in range(1, 6):
+                with self.subTest(trading_days=count), patch.object(store, '_connect', wraps=store._connect) as connect:
+                    rows = store.load_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'COMBINED', count)
+                    self.assertEqual(days[-count:], sorted({row['trading_date'] for row in rows}))
+                    self.assertTrue(all(row['minute'] and row['market'].upper() in {'KRX', 'NXT', 'SOR'} for row in rows))
+                    connect.assert_called_once_with()
+            for market, expected in (('', ['2026-10-18', '2026-10-19']),
+                                     ('KRX', ['2026-10-16', '2026-10-18']),
+                                     ('NXT', []), ('SOR', ['2026-10-15'])):
+                with self.subTest(market=market):
+                    rows = store.load_recent_minute_bars('005930', '2026-09-19', '2026-10-19', market, 2)
+                    self.assertEqual(expected, sorted({row['trading_date'] for row in rows}))
+            [boundary] = store.load_recent_minute_bars('035420', '2026-09-19', '2026-10-19', 'KRX', 5)
+            self.assertEqual('2026-09-19', boundary['trading_date'])
+            with patch.object(store, '_connect', wraps=store._connect) as connect:
+                self.assertEqual([], store.load_recent_minute_bars('999999', '2026-09-19', '2026-10-19', '', 2))
+                connect.assert_called_once_with()
+            self.assertEqual('', store.load_minute_bars('005930', '2026-10-18', 'KRX')[0]['minute'])
+
+    def test_recent_minutes_keep_day_identity_authority_lost_ack_and_concurrent_commit(self) -> None:
+        at = datetime.fromisoformat('2026-10-19T11:00:00+09:00')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'recent-overlay.sqlite3'
+            store = SQLiteQueryStore(path, now_provider=lambda: at)
+            other = SQLiteQueryStore(path, now_provider=lambda: at)
+            self.addCleanup(store.close)
+            self.addCleanup(other.close)
+            store.initialize()
+            base = dict(code='005930', minute='10:00', market='KRX', open=100, high=110,
+                        low=90, close=105, volume=10, trade_value_million_won=20, updated_at=at.timestamp())
+            days = ['2026-10-13', '2026-10-16', '2026-10-19']
+            values = [{**base, 'trading_date': day} for day in days]
+            observations = []
+            for value, origin, completeness in zip(values,
+                    (ObservationOrigin.REALTIME, ObservationOrigin.QUERY, ObservationOrigin.QUERY),
+                    (DataCompleteness.COMPLETE, DataCompleteness.IN_PROGRESS, DataCompleteness.COMPLETE), strict=True):
+                observation = minute_bar_observation(value, origin=origin, completeness=completeness,
+                    source='kiwoom-ka10080' if origin == ObservationOrigin.QUERY else 'kiwoom-websocket-0B',
+                    value_kind=DataValueKind.ACTUAL, now_provider=lambda: at)
+                observations.append((bar_observation_key(observation), observation))
+            store.save_minute_bars(values, observations=observations)
+            deltas = [{**value, 'volume': 3, 'operation_id': f'recent-{index}'} for index, value in enumerate(values)]
+            deltas += [dict(deltas[0]), {**deltas[0], 'trading_date': '2026-09-18'},
+                       {**deltas[0], 'trading_date': '2026-10-20'}, {**deltas[0], 'code': '000660'}]
+            rows = store.load_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'KRX', 3, realtime_deltas=deltas)
+            self.assertEqual(list(zip(days, [13, 3, 10])), [(row['trading_date'], row['volume']) for row in rows])
+            for row, day in zip(rows, days, strict=True):
+                self.assertEqual([row], store.load_minute_bars('005930', day, 'KRX', realtime_deltas=deltas))
+            store.save_minute_bars([deltas[0]])
+            committed_rows = [row for day in days for row in store.load_minute_bars(
+                '005930', day, 'KRX', realtime_deltas=deltas)]
+            self.assertEqual([13, 3, 10], [row['volume'] for row in committed_rows])
+            self.assertEqual(committed_rows, store.load_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'KRX', 3, realtime_deltas=deltas))
+            connection = store._connect()
+            with patch.object(store, '_connect', return_value=connection), patch(
+                    'kiwoom_monitor.central_server.database_market_bars._read_realtime_minute_overlay',
+                    side_effect=OSError('recent authority read failed')):
+                with self.assertRaisesRegex(OSError, 'authority read failed'):
+                    store.load_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'KRX', 3, realtime_deltas=deltas)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute('SELECT 1')
+            self.assertEqual(committed_rows, store.load_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'KRX', 3, realtime_deltas=deltas))
+
+            metadata_only = {**base, 'trading_date': '2026-10-18'}
+            observation = minute_bar_observation(metadata_only, origin=ObservationOrigin.QUERY,
+                completeness=DataCompleteness.COMPLETE, source='kiwoom-ka10080',
+                value_kind=DataValueKind.ACTUAL, now_provider=lambda: at)
+            store.save_market_data_metadata(bar_observation_key(observation), observation)
+            extra = [{**metadata_only, 'operation_id': 'confirmed-no-row', 'volume': 99},
+                     {**base, 'trading_date': '2026-10-17', 'operation_id': 'ram-only-day', 'volume': 4}]
+            projected = store.load_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'COMBINED', 3, realtime_deltas=deltas + extra)
+            self.assertEqual([('2026-10-16', 3), ('2026-10-17', 4), ('2026-10-19', 10)],
+                             [(row['trading_date'], row['volume']) for row in projected])
+
+            original = {**base, 'code': '035420', 'trading_date': '2026-10-19'}
+            increment = {**original, 'volume': 3, 'operation_id': 'recent-concurrent-commit'}
+            store.save_minute_bars([original])
+            native_connect, committed = sqlite3.connect, []
+            class ReadConnection(sqlite3.Connection):
+                def execute(self, sql, *args, **kwargs):
+                    cursor = super().execute(sql, *args, **kwargs)
+                    if 'GROUP BY trading_date' in sql and not committed:
+                        committed.append(True)
+                        other.save_minute_bars([increment])
+                    return cursor
+            def connect(*args, **kwargs):
+                return native_connect(*args, factory=ReadConnection, **kwargs)
+            with patch('sqlite3.connect', side_effect=connect):
+                [during] = store.load_recent_minute_bars('035420', '2026-09-19', '2026-10-19', 'KRX', 2, realtime_deltas=[increment])
+            self.assertEqual([True], committed)
+            self.assertEqual(13, during['volume'])
+            after = store.load_recent_minute_bars('035420', '2026-09-19', '2026-10-19', 'KRX', 2, realtime_deltas=[increment])
+            self.assertEqual(13, after[0]['volume'])
+            self.assertEqual(store.load_minute_bars('035420', '2026-10-19', 'KRX', realtime_deltas=[increment]), after)
+
     def test_minute_range_preserves_metadata_overlay_authority_and_full_day_default(self) -> None:
         now = datetime(2026, 10, 13, 10, 4, tzinfo=ZoneInfo('Asia/Seoul'))
         with tempfile.TemporaryDirectory() as directory:

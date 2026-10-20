@@ -643,6 +643,7 @@ class AppControllerTests(unittest.TestCase):
                     daily_load.assert_called_once_with(codes[0])
                     self.assertEqual(1, len(failures))
                     self.assertIn("controlled minute failure", failures[0])
+                    fundamentals.assert_called_once_with(codes)
 
                     completed_fundamentals = fundamentals.call_count
                     for boundary in ("close", "reload", "priority"):
@@ -659,6 +660,100 @@ class AppControllerTests(unittest.TestCase):
                                 controller._closing = False
                                 controller._api_reloading = False
                                 controller.ranking_execution.end_priority_preparation()
+                    window.close()
+                    self.wait_until(controller.request_close)
+                    self.assertTrue(window.close())
+
+    def test_daily_high_finished_signal_preserves_cleanup_first_fallback_and_guards(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        now = as_kst(datetime(2026, 10, 6, 20, 10))
+        target = now.date()
+        codes = ("OK", "RETRY", "UNCONFIRMED")
+        for fundamentals_started, nxt_started in ((True, False), (False, True), (False, False)):
+            with self.subTest(fundamentals=fundamentals_started, nxt=nxt_started):
+                database = Database(Path(temporary.name) / f"daily-{fundamentals_started}-{nxt_started}.sqlite3")
+                database.initialize()
+                phases, effects, observations = [], [], []
+
+                def start_fundamentals(requested):
+                    observations.append((bool(window._after_close_finalization_codes),
+                        window._after_close_finalization_date,
+                        bool(window._after_close_minute_received), bool(window._after_close_daily_received),
+                        bool(window._daily_high_basis_refresh_expected), bool(window._daily_high_basis_refresh_received),
+                        database.settings.get("daily_high_adjusted_basis_version")))
+                    phases.append(("fundamentals", requested))
+                    return fundamentals_started
+
+                def start_nxt(requested):
+                    phases.append(("nxt", requested))
+                    return nxt_started
+
+                with patch.object(MainWindow, "_open_api_settings"), \
+                        patch.object(MainWindow, "_start_fundamentals_loading", side_effect=start_fundamentals), \
+                        patch.object(MainWindow, "_start_nxt_eligibility_loading", side_effect=start_nxt), \
+                        patch.object(MainWindow, "_start_daily_krx_catalog_sync", side_effect=lambda: phases.append("catalog")):
+                    window = MainWindow(database.settings)
+                    self.windows.append(window)
+                    controller = window._app_controller
+                    controller.ranking_loader = SimpleNamespace(server_now=lambda: now)
+                    window._daily_bar_repository = SimpleNamespace(
+                        mark_finalized=lambda requested, day: effects.append(("finalized", requested, day)),
+                        mark_unconfirmed=lambda code, day, missing, attempts: effects.append(
+                            ("unconfirmed", code, day, missing, attempts)))
+                    controller.entry_snapshot_writer = SimpleNamespace(enqueue_program_backfill=
+                        lambda day, requested: effects.append(("program", day, requested)))
+
+                    def prime():
+                        effects.clear()
+                        window._after_close_finalization_codes = set(codes)
+                        window._after_close_finalization_date = target
+                        window._after_close_minute_received = {"OK"}
+                        window._after_close_daily_received = {"OK"}
+                        window._finalization_attempts = {(target, "RETRY"): 1, (target, "UNCONFIRMED"): 2}
+                        window._daily_high_basis_refresh_expected = {"OK"}
+                        window._daily_high_basis_refresh_received = {"OK"}
+                        database.settings.set("daily_high_adjusted_basis_version", "0")
+
+                    expected_effects = [("finalized", ("OK",), target),
+                        ("program", target, codes),
+                        ("unconfirmed", "UNCONFIRMED", target, ("분봉", "일봉"), 2)]
+                    try:
+                        prime()
+                        controller.daily_high.finished.emit(codes)
+                        self.assertEqual(expected_effects, effects)
+                        self.assertEqual([(False, None, False, False, False, False, "1")], observations)
+                        expected_phases = [("fundamentals", codes)]
+                        if not fundamentals_started:
+                            expected_phases.append(("nxt", codes))
+                            if not nxt_started:
+                                expected_phases.append("catalog")
+                        self.assertEqual(expected_phases, phases)
+                        self.assertEqual(now + timedelta(minutes=5), window._finalization_retry_after[(target, "RETRY")])
+
+                        for boundary in ("close", "reload", "priority"):
+                            with self.subTest(boundary=boundary):
+                                prime()
+                                controller._closing = boundary == "close"
+                                controller._api_reloading = boundary == "reload"
+                                if boundary in {"reload", "priority"}:
+                                    controller.ranking_execution.begin_priority_preparation()
+                                try:
+                                    controller.daily_high.finished.emit(codes)
+                                    self.assertEqual(expected_effects, effects)
+                                    self.assertFalse(window._after_close_finalization_codes)
+                                    self.assertIsNone(window._after_close_finalization_date)
+                                    self.assertFalse(window._daily_high_basis_refresh_expected)
+                                    self.assertEqual("1", database.settings.get("daily_high_adjusted_basis_version"))
+                                    self.assertEqual(expected_phases, phases)
+                                    self.assertEqual(1, len(observations))
+                                finally:
+                                    controller._closing = False
+                                    controller._api_reloading = False
+                                    controller.ranking_execution.end_priority_preparation()
+                    finally:
+                        controller.entry_snapshot_writer = None
+                        window._daily_bar_repository = None
                     window.close()
                     self.wait_until(controller.request_close)
                     self.assertTrue(window.close())
@@ -1147,6 +1242,95 @@ class AppControllerTests(unittest.TestCase):
         self.wait_until(controller.request_close)
         self.assertIsNone(controller.pending_minute_retention)
         saved.assert_not_called()  # Retention itself is not a minute-data ACK.
+
+    def test_expired_batch_retry_keeps_committed_ack_and_retention_failure_until_explicit_close_retry(self):
+        for after_commit in (False, True):
+            with self.subTest(after_commit=after_commit), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                Database(path).initialize()
+                events, restored, failures, acks, calls = [], [], [], [], []
+                controller = self.controller(events, monitor_database_path=path,
+                    minute_bar_repository=MinuteBarRepository(path),
+                    ranking_loader=SimpleNamespace(server_now=lambda: as_kst(datetime(2026, 10, 21, 10))))
+                controller.start_market_cache_writer()
+                writer = controller.market_cache_writer
+                old = datetime(2026, 9, 20, 10)
+                cutoff = date(2026, 9, 21)
+                pending = {("EXPIRED", old): MinuteOhlcv(old, 100, 110, 90, 105, 10)}
+                market = {("kospi", old): (1., 2., 1., 2., 10.)}
+                real_purge = MinuteBarRepository.purge_before
+
+                def purge(repository, requested):
+                    calls.append(requested)
+                    real_purge(repository, requested)
+                    if after_commit and len(calls) in (2, 3):
+                        raise OSError("controlled cleanup ACK loss after COMMIT")
+
+                def failed_batch(*_):
+                    controller.minute_cache_timer.stop()
+                    restored.append((dict(controller.pending_minutes), dict(controller.pending_market_minutes)))
+
+                def failed_retention(*_):
+                    controller.minute_cache_timer.stop()
+                    failures.append(controller.pending_minute_retention)
+
+                def saved():
+                    with closing(sqlite3.connect(path)) as connection:
+                        acks.append((connection.execute("SELECT COUNT(*) FROM minute_bars WHERE stock_code='EXPIRED'").fetchone()[0],
+                                     connection.execute("SELECT COUNT(*) FROM market_index_minute_bars").fetchone()[0]))
+
+                writer.minute_failed.connect(failed_batch, Qt.ConnectionType.QueuedConnection)
+                writer.retention_failed.connect(failed_retention, Qt.ConnectionType.QueuedConnection)
+                writer.minute_saved.connect(saved, Qt.ConnectionType.DirectConnection)
+                with closing(sqlite3.connect(path)) as connection:
+                    connection.execute("CREATE TRIGGER reject_expired_insert BEFORE INSERT ON minute_bars WHEN NEW.stock_code='EXPIRED' BEGIN SELECT RAISE(ABORT,'controlled expired write failure'); END")
+                    connection.commit()
+                controller.pending_minutes.update(pending)
+                controller.pending_market_minutes.update(market)
+                with patch.object(MinuteBarRepository, "purge_before", purge):
+                    controller.queue_minute_retention(cutoff)
+                    self.wait_until(lambda: restored and writer._minute_retention_cutoff == cutoff)
+                    self.assertEqual([(pending, market)], restored)
+                    self.assertEqual([], acks)
+                    with closing(sqlite3.connect(path)) as connection:
+                        connection.execute("DROP TRIGGER reject_expired_insert")
+                        if not after_commit:
+                            connection.execute("CREATE TRIGGER reject_expired_delete BEFORE DELETE ON minute_bars WHEN OLD.stock_code='EXPIRED' BEGIN SELECT RAISE(ABORT,'controlled cleanup precommit failure'); END")
+                        connection.commit()
+                    controller.minute_cache_timer.timeout.emit()
+                    self.wait_until(lambda: len(failures) == 1)
+                    # Direct ACK readback precedes maintenance; its native data
+                    # save stays successful even when the later purge fails.
+                    self.assertEqual([(1, 1)], acks)
+                    self.assertEqual({}, controller.pending_minutes)
+                    self.assertEqual({}, controller.pending_market_minutes)
+                    self.assertEqual(cutoff, controller.pending_minute_retention)
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual(int(not after_commit), connection.execute(
+                            "SELECT COUNT(*) FROM minute_bars WHERE stock_code='EXPIRED'").fetchone()[0])
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    self.assertEqual([cutoff, cutoff], failures)
+                    self.assertEqual(cutoff, controller.pending_minute_retention)
+                    self.assertNotIn("ready", events)
+                    self.assertNotIn("auxiliaries", events)
+                    self.assertFalse(writer.isRunning())
+                    self.assertEqual(cutoff, writer._minute_retention_cutoff)
+                    if not after_commit:
+                        with closing(sqlite3.connect(path)) as connection:
+                            connection.execute("DROP TRIGGER reject_expired_delete")
+                            connection.commit()
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(controller.request_close)
+                self.assertIs(writer, controller.market_cache_writer)
+                self.assertEqual(cutoff, writer._minute_retention_cutoff)
+                self.assertEqual([cutoff] * 4, calls)
+                self.assertEqual([(1, 1)], acks)
+                self.assertEqual(1, events.count("ready"))
+                self.assertIsNone(controller.pending_minute_retention)
+                with closing(sqlite3.connect(path)) as connection:
+                    for table in ("minute_bars", "market_index_minute_bars", "market_data_observation_meta"):
+                        self.assertEqual(0, connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], table)
 
     def test_gap_metadata_failure_blocks_close_until_existing_writer_retry_commits(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1690,6 +1874,176 @@ class AppControllerTests(unittest.TestCase):
 
         fixture = self._bootstrap_settings_desktop(retry_after_http_failure, assert_before_cleanup)
         self.assertTrue(fixture.restore_available())
+
+    def _bootstrap_retention_case(self, *, fail_minute=False):
+        import json
+        import threading
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
+
+        fixed = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+        cutoff = fixed.date() - timedelta(days=30)
+        old_minute = datetime.combine(cutoff - timedelta(days=1), datetime.min.time()).replace(hour=9)
+        kept_minute = old_minute + timedelta(days=1)
+        state = SimpleNamespace(
+            entered=Event(), release=Event(), done=Event(), phase=threading.local(),
+            traces=[], connections=0, timed_out=False, begin_count=0, cutoffs=[], limits=[],
+        )
+        connect = sqlite3.connect
+        purge = MinuteBarRepository.purge_before
+        retain = DailyBarRepository.retain_latest
+
+        def trace(statement):
+            phase = state.phase.value
+            state.traces.append((phase, statement))
+            if phase == "minute" and statement.strip().upper().startswith("BEGIN"):
+                state.begin_count += 1
+                state.fixture.events.append("retention.begin")
+                state.entered.set()
+                if not state.release.wait(4):
+                    state.timed_out = True
+
+        def connection(*args, **kwargs):
+            value = connect(*args, **kwargs)
+            if getattr(state.phase, "value", None) is not None:
+                state.connections += 1
+                value.set_trace_callback(trace)
+                if fail_minute and state.phase.value == "minute":
+                    value.set_authorizer(lambda action, *_args:
+                        sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_DELETE else sqlite3.SQLITE_OK)
+            return value
+
+        def purge_minute(repository, value):
+            state.cutoffs.append(value)
+            state.phase.value = "minute"
+            try:
+                return purge(repository, value)
+            finally:
+                state.fixture.events.append("retention.minute.closed")
+                state.phase.value = None
+
+        def retain_daily(repository, limit):
+            state.limits.append(limit)
+            state.phase.value = "daily"
+            try:
+                return retain(repository, limit)
+            finally:
+                state.fixture.events.append("retention.daily.closed")
+                state.phase.value = None
+                state.done.set()
+
+        def close_while_native_begin_is_running(fixture):
+            state.fixture = fixture
+            repository = MinuteBarRepository(fixture.paths.database_path, now_provider=lambda: fixed)
+            repository.upsert_bars("A", (
+                MinuteOhlcv(old_minute, 100, 110, 90, 105, 10),
+                MinuteOhlcv(kept_minute, 100, 110, 90, 105, 10),
+            ))
+            with closing(connect(fixture.paths.database_path)) as native, native:
+                native.executemany(
+                    "INSERT INTO daily_bars(stock_code,trade_date,high_price,trade_value_eok,close_price) "
+                    "VALUES(?,?,?,?,?)",
+                    (("A", (fixed.date() - timedelta(days=index)).isoformat(), index, None, index)
+                     for index in range(280)),
+                )
+            delay, callback = next(
+                (delay, callback) for delay, callback in fixture.callbacks
+                if getattr(callback, "__name__", "") == "retain_market_bars_after_startup"
+            )
+            self.assertEqual(30_000, delay)
+            fixture.retention_callback = callback
+            callback()
+            try:
+                if fail_minute:
+                    self.assertTrue(state.done.wait(2))
+                else:
+                    self.assertTrue(state.entered.wait(1))
+                    self.assertEqual(1, state.begin_count)
+                fixture.window.close()
+                deadline = time.monotonic() + 1
+                while not fixture.window._app_controller.request_close() and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.005)
+                state.ready_before_release = fixture.window._app_controller.request_close()
+                if not state.ready_before_release:
+                    self.assertFalse(fixture.restore_available())
+                    self.assertNotIn("server.stop", fixture.events)
+                    state.release.set()
+                    self.wait_until(lambda: fixture.window._app_controller.request_close())
+            except BaseException:
+                state.release.set()
+                raise
+
+        def assert_before_cleanup(fixture):
+            try:
+                state.lease_released_while_running = not state.done.is_set() and fixture.restore_available()
+                self.assertFalse(state.timed_out)
+                self.assertEqual(0, fixture.http_calls, "settings sync must not be started by this retention test")
+                if not fail_minute:
+                    self.assertEqual(
+                        (False, True, ["retention.begin", "retention.minute.closed", "retention.daily.closed", "server.stop"]),
+                        (state.ready_before_release, state.done.is_set(), fixture.before_release),
+                        {"stage": fixture.window._app_controller._shutdown_stage,
+                         "exclusive_restore_available": fixture.restore_available(),
+                         "native_begin_entered": state.entered.is_set()},
+                    )
+                self.assertTrue(fixture.restore_available())
+            finally:
+                state.release.set()
+
+        try:
+            with patch.object(bootstrap, "kst_wall_now", return_value=fixed), \
+                    patch.object(sqlite3, "connect", side_effect=connection), \
+                    patch.object(MinuteBarRepository, "purge_before", purge_minute), \
+                    patch.object(DailyBarRepository, "retain_latest", retain_daily):
+                try:
+                    fixture = self._bootstrap_settings_desktop(close_while_native_begin_is_running, assert_before_cleanup)
+                    with patch.object(bootstrap, "SettingsRequestWorker", wraps=SettingsRequestWorker) as start:
+                        fixture.retention_callback()
+                        start.assert_not_called()
+                finally:
+                    state.release.set()
+                    for worker in threading.enumerate():
+                        if worker.name == "market-bar-retention":
+                            worker.join(5)
+                            self.assertFalse(worker.is_alive())
+        finally:
+            print("R032_RETENTION_OBSERVATION " + json.dumps({
+                "case": "minute_failure" if fail_minute else "native_begin_close",
+                "ready_before_release": getattr(state, "ready_before_release", None),
+                "lease_released_while_running": getattr(state, "lease_released_while_running", None),
+                "events_before_cleanup": getattr(getattr(state, "fixture", None), "before_release", None),
+                "done_after_cleanup": state.done.is_set(), "timed_out": state.timed_out,
+                "native_cost": {"connections": state.connections, **{
+                    operation: sum(statement.lstrip().upper().startswith(operation.upper())
+                                   for _phase, statement in state.traces)
+                    for operation in ("select", "delete", "begin", "commit")
+                }},
+            }))
+        self.assertTrue(state.done.is_set())
+        self.assertEqual([cutoff], state.cutoffs)
+        self.assertEqual([250], state.limits)
+        with closing(connect(fixture.paths.database_path)) as native:
+            self.assertEqual(2 if fail_minute else 1, native.execute(
+                "SELECT count(*) FROM minute_bars WHERE stock_code='A'",
+            ).fetchone()[0])
+            self.assertEqual(250, native.execute(
+                "SELECT count(*) FROM daily_bars WHERE stock_code='A'",
+            ).fetchone()[0])
+            self.assertEqual(1, native.execute(
+                "SELECT count(*) FROM market_data_observation_meta WHERE dataset_kind='minute_bar' "
+                "AND subject='A' AND observation_key LIKE ?", (kept_minute.date().isoformat() + "%",),
+            ).fetchone()[0])
+            self.assertEqual(2 if fail_minute else 1, native.execute(
+                "SELECT count(*) FROM market_data_observation_meta WHERE dataset_kind='minute_bar' AND subject='A'",
+            ).fetchone()[0])
+        return fixture, state
+
+    def test_bootstrap_retention_close_preserves_native_begin_and_restore_lease(self):
+        self._bootstrap_retention_case()
+
+    def test_bootstrap_retention_minute_sql_failure_keeps_daily_cleanup_and_blocks_late_start(self):
+        self._bootstrap_retention_case(fail_minute=True)
 
     def test_runtime_provider_swap_and_view_rollback_use_public_setter_without_old_cache_publication(self):
         import threading

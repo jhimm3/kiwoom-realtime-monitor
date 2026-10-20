@@ -579,6 +579,31 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual(2, summary["readers"]["read.document_collection/document:fixture_collection"]
                          ["calls"])
 
+    def test_recent_minute_reader_keeps_native_context_bound_scope_and_failure_cleanup(self) -> None:
+        raw_hit = self._native_context_connection()
+        raw_miss = self._native_context_connection()
+        raw_failure = self._native_context_connection()
+        raw_failure.fail_execute = 1
+        raw_hit.rows = [(day, '10:00', 'DIAG', 'KRX', 100, 110, 90, 105, 10, 1, 1790000000.0)
+                        for day in ('2099-01-06', '2099-01-09')]
+        store = PostgresQueryStore('unused')
+        with patch.object(store, '_connect', side_effect=[raw_hit, raw_miss, raw_failure]):
+            rows = store.load_recent_minute_bars('DIAG', '2098-12-10', '2099-01-09', 'KRX', 2)
+            self.assertEqual(['2099-01-06', '2099-01-09'], [row['trading_date'] for row in rows])
+            self.assertEqual([], store.load_recent_minute_bars('MISSING', '2098-12-10', '2099-01-09', 'COMBINED', 5))
+            with self.assertRaisesRegex(ValueError, 'statement failed'):
+                store.load_recent_minute_bars('DIAG', '2098-12-10', '2099-01-09', '', 2)
+        self.assertEqual(['DIAG', 'DIAG', '2098-12-10', '2099-01-09', 'KRX', 2, 'KRX'], raw_hit.statements[0][1])
+        self.assertEqual(['MISSING', 'MISSING', '2098-12-10', '2099-01-09', 5], raw_miss.statements[0][1])
+        self.assertEqual((1, 0, 1), (raw_hit.commits, raw_hit.rollbacks, raw_hit.closes))
+        self.assertEqual((1, 0, 1), (raw_miss.commits, raw_miss.rollbacks, raw_miss.closes))
+        self.assertEqual((0, 1, 1), (raw_failure.commits, raw_failure.rollbacks, raw_failure.closes))
+        calls = self._calls()
+        self.assertEqual(3, len(calls))
+        self.assertTrue(all(call['access_mode'] == 'read' and call['writer_family'] == 'read.market_bars'
+                            and call['operation'] == 'load_recent_minute_bars' and call['sql_calls'] == 1 for call in calls))
+        self.assertEqual(['committed', 'committed', 'rolled_back'], [call['outcome'] for call in calls])
+
     def test_market_bar_readers_keep_native_context_and_separate_kinds(self) -> None:
         raw_minute = self._native_context_connection()
         raw_daily = self._native_context_connection()

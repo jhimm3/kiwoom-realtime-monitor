@@ -4237,10 +4237,14 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         )
         service._list_policy = (0, "", "15%")
         websocket = WebSocket()
-        asyncio.run(service._condition_list({
-            "return_code": 0,
-            "data": [["17", "TOP 15% value"]],
-        }, websocket))
+        async def save_status():
+            await service._condition_list({
+                "return_code": 0,
+                "data": [["17", "TOP 15% value"]],
+            }, websocket)
+            await service.close()
+
+        asyncio.run(save_status())
         first = self.store.load_documents("condition_search_status", "hot_cohort", 1)
         self.assertEqual("UNIQUE_SUBSTRING", first[0]["document"]["status"])
         self.assertEqual(["17", "TOP 15% value"], first[0]["document"]["selected"])
@@ -6519,6 +6523,36 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             and call["backend_pid"] is not None
             for call in reader_calls
         ))
+
+    def test_recent_minute_reader_preserves_actual_days_authority_and_lost_ack(self) -> None:
+        code = f'DIAG{uuid.uuid4().hex[:16]}'
+        self.query_bar_codes.append(code)
+        at = datetime.fromisoformat('2026-10-19T11:00:00+09:00')
+        base = dict(code=code, minute='10:00', market='KRX', open=100, high=110,
+                    low=90, close=105, volume=10, trade_value_million_won=20, updated_at=at.timestamp())
+        self.store.replace_minute_bars([{**base, 'trading_date': day} for day in ('2026-10-16', '2026-10-19')]
+            + [{**base, 'trading_date': '2026-10-20', 'market': 'UNKNOWN'}])
+        metadata_only = {**base, 'trading_date': '2026-10-20'}
+        observation = minute_bar_observation(metadata_only, origin=ObservationOrigin.QUERY,
+            completeness=DataCompleteness.COMPLETE, source='kiwoom-ka10080',
+            value_kind=DataValueKind.ACTUAL, now_provider=lambda: at)
+        self.store.save_market_data_metadata(bar_observation_key(observation), observation)
+        pending_id = f'recent-{uuid.uuid4().hex}'
+        self.realtime_operation_ids.append(pending_id)
+        pending = {**base, 'trading_date': '2026-10-19', 'operation_id': pending_id, 'volume': 3}
+        hidden = {**metadata_only, 'operation_id': f'recent-hidden-{uuid.uuid4().hex}', 'volume': 99}
+        for count in (1, 2, 5):
+            rows = self.store.load_recent_minute_bars(code, '2026-09-20', '2026-10-20', 'COMBINED', count,
+                realtime_deltas=[pending, dict(pending), hidden])
+            self.assertEqual(['2026-10-19'] if count == 1 else ['2026-10-16', '2026-10-19'],
+                             [row['trading_date'] for row in rows])
+            self.assertEqual(13, rows[-1]['volume'])
+        self.store.save_minute_bars([pending])
+        [after] = self.store.load_recent_minute_bars(code, '2026-09-20', '2026-10-20', 'COMBINED', 1,
+            realtime_deltas=[pending, hidden])
+        self.assertEqual(13, after['volume'])
+        self.assertEqual([after], self.store.load_minute_bars(code, '2026-10-19', 'KRX', realtime_deltas=[pending]))
+        self.assertEqual([], self.store.load_recent_minute_bars(code + '-missing', '2026-09-20', '2026-10-20', 'COMBINED', 2))
 
     def test_market_bar_readers_keep_native_context_and_separate_kinds(self) -> None:
         code, missing_code = f"DIAG{uuid.uuid4().hex[:16]}", f"DIAG{uuid.uuid4().hex[:16]}"

@@ -298,12 +298,12 @@ class MockAutomationSupervisor:
             bundle = self._require_automatic_bundle(
                 credential_profile_id, account_ref, spec_id,
             )
-            control = await asyncio.to_thread(
+            control = await drain_thread_call(
                 self._repository.load_mock_automation_control, account_ref,
             )
             if control is None or control.control_revision != expected_control_revision:
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_CONTROL_REVISION_CONFLICT")
-            await asyncio.to_thread(
+            await drain_thread_call(
                 emergency_stop_mock_automation,
                 self._repository,
                 bundle.runtime,

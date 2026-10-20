@@ -124,6 +124,95 @@ class MainWindowTest(unittest.TestCase):
         reopened.close()
 
 
+    def test_late_direct_history_keeps_original_commit_ack_and_cutoff_keeper_before_serial_cleanup(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.domain.time_basis import as_kst
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        database = Database(path)
+        database.initialize()
+        now = as_kst(datetime(2026, 10, 21, 10))
+        kept = now - timedelta(days=30)
+        old, current = kept - timedelta(days=1), now - timedelta(minutes=1)
+        stocks, repository = StockRepository(path), MinuteBarRepository(path, now_provider=lambda: now)
+        stocks.upsert("005930", "fixture", "KOSPI")
+        repository.upsert_bars("KEEP", (MinuteOhlcv(kept, 100, 110, 90, 105, 10),))
+        repository.upsert_market_index_minutes({("kosdaq", kept): (1., 2., 1., 2., 10.)})
+        repository.record_history_sync("KEEP", kept.date(), kept, 1)
+
+        def keeper():
+            with closing(sqlite3.connect(path)) as connection:
+                return (
+                    connection.execute("SELECT * FROM minute_bars WHERE stock_code='KEEP'").fetchall(),
+                    connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kosdaq'").fetchall(),
+                    connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'").fetchall(),
+                    connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject").fetchall(),
+                )
+
+        original_keeper = keeper()
+        loader = SimpleNamespace(server_now=lambda: now, load_top_stocks=lambda: ())
+        with patch.object(AppController, "start_initial_ranking"), patch.object(MainWindow, "_start_top20_market_repair"):
+            window = MainWindow(database.settings, loader, stock_lookup=stocks,
+                minute_bar_repository=repository, monitor_database_path=path)
+        controller, writer = window._app_controller, window._market_cache_writer
+
+        def wait_until(predicate):
+            deadline = time.monotonic() + 7
+            while not predicate() and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.005)
+            self.assertTrue(predicate(), "late-history native/Qt boundary did not settle")
+
+        window._ensure_today_minute_bar_storage(now)
+        wait_until(lambda: writer._minute_retention_cutoff == kept.date())
+        window._historical_high_prices["005930"] = 9999
+        bars = (MinuteOhlcv(old, 100, 999, 90, 110, 3), MinuteOhlcv(kept, 100, 888, 90, 110, 3),
+                MinuteOhlcv(current, 50, 60, 40, 55, 3))
+        acks, quality, failures = [], [], []
+
+        def committed(code):
+            with closing(sqlite3.connect(path)) as connection:
+                acks.append((code,
+                    connection.execute("SELECT * FROM minute_bars WHERE stock_code='005930' ORDER BY minute").fetchall(),
+                    connection.execute("SELECT observation_key,source,origin,completeness,effective_at,available_at FROM market_data_observation_meta WHERE subject='005930' ORDER BY observation_key").fetchall(),
+                    connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='005930'").fetchall()))
+
+        writer.history_saved.connect(committed, Qt.ConnectionType.DirectConnection)
+        writer.history_quality_saved.connect(lambda code, value: quality.append((code, value)), Qt.ConnectionType.DirectConnection)
+        writer.retention_failed.connect(lambda *args: failures.append(args), Qt.ConnectionType.DirectConnection)
+        with patch.object(writer, "enqueue_history_bars", wraps=writer.enqueue_history_bars) as enqueue:
+            controller.minute_history.history_received.emit("005930", bars)
+            wait_until(lambda: len(acks) == 1 and len(quality) == 1 and "005930" in window._minute_history_codes)
+        received = enqueue.call_args.args[1]
+        self.assertEqual(bars, received)
+        self.assertTrue(all(left is right for left, right in zip(bars, received)))
+        self.assertEqual(tuple(bar.minute for bar in bars), quality[0][1]["minutes"])
+        self.assertEqual(3, len(acks[0][1]))  # Direct ACK observes original COMMIT before cleanup.
+        self.assertEqual([bar.minute.isoformat(timespec="minutes") for bar in bars], [row[0] for row in acks[0][2]])
+        self.assertTrue(all(row[1:4] == ("kiwoom-ka10080", "query", "complete") for row in acks[0][2]))
+        self.assertTrue(all(datetime.fromisoformat(row[5]) == now for row in acks[0][2]))
+        self.assertEqual(3, acks[0][3][0][-1])  # Receipt keeps original response count.
+        self.assertEqual(60, window._today_high_prices["005930"])
+        self.assertEqual(9999, window._historical_high_prices["005930"])
+        self.assertEqual({current}, {bar.minute for bar in window._minute_aggregator.bars("005930")})
+        controller.flush_price_cache()
+        controller.flush_minute_cache()
+        self.assertTrue(writer.stop_and_drain())
+        self.assertEqual([], failures)
+        self.assertEqual(original_keeper, keeper())
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual([(kept.date().isoformat(),), (now.date().isoformat(),)], connection.execute(
+                "SELECT DISTINCT trade_date FROM minute_bars WHERE stock_code='005930' ORDER BY trade_date").fetchall())
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM market_data_observation_meta WHERE substr(observation_key,1,10) < ?", (kept.date().isoformat(),)).fetchone()[0])
+            self.assertEqual(acks[0][3], connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='005930'").fetchall())
+        self.assertEqual({"005930": 60}, stocks.load_intraday_highs(("005930",), now.date()))
+        window.close()
+        wait_until(lambda: controller._shutdown_stage == "ready")
+
     def test_drive_start_failure_and_reentrant_edit_preserve_pending_ack(self) -> None:
         from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncResult
 

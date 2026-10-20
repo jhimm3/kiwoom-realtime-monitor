@@ -3,13 +3,12 @@ from __future__ import annotations
 import sqlite3
 import json
 from datetime import datetime
-from difflib import get_close_matches
 from pathlib import Path
 from typing import Callable
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
-from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
 from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion, ThemeSuggestion
+from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 
 
 class ThemeRepository:
@@ -17,6 +16,7 @@ class ThemeRepository:
 
     def __init__(self, path: Path, profile_name: str = "기본 테마", *, now_provider=None) -> None:
         self._path = path
+        self._stock_catalog = StockRepository(path, catalog_connection_factory=lambda: self._connect())
         self.set_now_provider(now_provider or kst_now)
         self._profile_name = profile_name.strip() or "기본 테마"
         self._change_callback: Callable[[], None] | None = None
@@ -202,90 +202,25 @@ class ThemeRepository:
         return {code: tuple(names) for code, names in themes.items()}
 
     def find_code_by_name(self, name: str) -> str | None:
-        connection = self._connect()
-        try:
-            row = connection.execute("SELECT code FROM stocks WHERE name=?", (name,)).fetchone()
-            if row is None:
-                row = connection.execute("SELECT stock_code FROM stock_aliases WHERE alias=?", (name,)).fetchone()
-        finally:
-            connection.close()
-        return str(row[0]) if row else None
+        return self._stock_catalog.find_code_by_name(name)
+
+    def find_codes_by_names(self, names: tuple[str, ...]) -> dict[str, str | None]:
+        return self._stock_catalog.find_codes_by_names(names)
 
     def pending_name_change(self, old_name: str) -> tuple[str, str, str, str] | None:
-        connection = self._connect()
-        try:
-            row = connection.execute(
-                "SELECT stock_code,old_name,new_name,source FROM stock_name_history "
-                "WHERE old_name=? AND decision='pending'",
-                (old_name.strip(),),
-            ).fetchone()
-        finally:
-            connection.close()
-        return tuple(str(value) for value in row) if row is not None else None  # type: ignore[return-value]
+        return self._stock_catalog.pending_name_change(old_name)
 
     def review_name_changes(self, decisions: dict[tuple[str, str], bool]) -> None:
-        if not decisions:
-            return
-        connection = self._connect()
-        try:
-            with connection:
-                for (stock_code, old_name), approved in decisions.items():
-                    row = connection.execute(
-                        "SELECT 1 FROM stock_name_history WHERE stock_code=? AND old_name=? AND decision='pending'",
-                        (stock_code, old_name),
-                    ).fetchone()
-                    if row is None:
-                        continue
-                    if approved:
-                        owner = connection.execute("SELECT code FROM stocks WHERE name=? AND code<>?", (old_name, stock_code)).fetchone()
-                        if owner is None:
-                            connection.execute(
-                                "INSERT INTO stock_aliases(alias,stock_code) VALUES(?,?) "
-                                "ON CONFLICT(alias) DO UPDATE SET stock_code=excluded.stock_code",
-                                (old_name, stock_code),
-                            )
-                    connection.execute(
-                        "UPDATE stock_name_history SET decision=? WHERE stock_code=? AND old_name=?",
-                        ("approved" if approved else "rejected", stock_code, old_name),
-                    )
-        finally:
-            connection.close()
+        self._stock_catalog.review_name_changes(decisions)
 
     def find_stock_candidates(self, name: str, limit: int = 8) -> tuple[tuple[str, str], ...]:
-        query = name.strip()
-        if not query:
-            return ()
-        connection = self._connect()
-        try:
-            rows = connection.execute("SELECT code, name FROM stocks WHERE name LIKE ? ORDER BY name LIMIT ?", (f"%{query}%", limit)).fetchall()
-            if len(rows) < limit:
-                all_rows = connection.execute("SELECT code, name FROM stocks ORDER BY name").fetchall()
-                used = {str(code) for code, _ in rows}
-                similar = set(get_close_matches(query, [str(stock_name) for _, stock_name in all_rows], n=limit, cutoff=0.35))
-                rows += [row for row in all_rows if str(row[1]) in similar and str(row[0]) not in used]
-        finally:
-            connection.close()
-        return tuple((str(code), str(stock_name)) for code, stock_name in rows[:limit])
+        return self._stock_catalog.find_stock_candidates(name, limit)
 
     def find_concatenated_stocks(self, name: str) -> tuple[tuple[str, str], ...]:
-        connection = self._connect()
-        try:
-            rows = connection.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
-        finally:
-            connection.close()
-        return split_concatenated_stock_name(
-            name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
-        )
+        return self._stock_catalog.find_concatenated_stocks(name)
 
     def find_partial_concatenated_stocks(self, name: str) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
-        connection = self._connect()
-        try:
-            rows = connection.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
-        finally:
-            connection.close()
-        return extract_known_stocks_and_unknown_fragments(
-            name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
-        )
+        return self._stock_catalog.find_partial_concatenated_stocks(name)
 
     def replace_for_stock(self, code: str, themes: tuple[str, ...]) -> None:
         self.replace_many(((code, themes),))

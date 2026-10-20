@@ -1503,6 +1503,37 @@
         "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._export_all_profiles|connection.execute": 0,
         "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._export_all_profiles|sqlite3.connect": 0
       }
+    },
+    {
+      "id": "R3-039-recent-minute-single-native-read-20261021",
+      "reason": "Replace the existing 31-date serial recent-minute route reads with one native recent-day reader. Approve exactly two cursor.execute source sites in the existing helper: conditional SQLite BEGIN/PostgreSQL repeatable-read setup and one bounded SELECT. These source sites are not two runtime SELECTs. No adoption snapshot or global limit reset.",
+      "connection": "Existing recent HTTP -> current collector RAM snapshot/owned_to_thread or direct asyncio.to_thread -> QueryStore native SQLite/PostgreSQL owner. Reuse the existing lock/connection/context/metadata decoder and per-day operation/query-authority overlay. Add no cache, worker, pool, schema, clock or relay; keep the 31-calendar-date search and API trading_days 1..5.",
+      "validation": "Frozen WT related82 IDs and separate native cost1 passed on manifest source e06e43301bd753fa1eedbc8d1714c837a9052bf6095f4b331ba2c605189033f6. Actual SQLite empty connections/SELECT31->1; two stored days4->1; COMBINED hidden current date5->1; RAM case connections4->1/SELECT6->3 with BEGIN/COMMIT1 retained and full response equality. Existing capture readers and recorded executor each register load_recent_minute_bars once. Root integrated source must rerun selected tests; actual PostgreSQL integration1 remains unexecuted. Physical I/O/WAL/writer waiting/live latency are unmeasured.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_market_bars.py|_read_recent_minute_bars|cursor.execute": 2
+      }
+    },
+    {
+      "id": "R3-076-shared-catalog-bulk-match-20261021",
+      "reason": "Reuse the existing StockRepository for six duplicated stock-catalog decisions. The two new source sites are the deferred default catalog connection factory and the request-name batch SELECT; ratchet twelve retired native sites to zero. No new owner/schema/index/cache or additional connection per existing point call.",
+      "connection": "OCR/Excel keep StockRepository; ThemeRepository public compatibility methods reuse the same existing owner with its own FK-ON _connect factory. Native current-name-first/alias fallback, pending approval transaction/rollback and per-call re-read remain. Profile theme decisions, preview batch and replace_many transaction are unchanged.",
+      "validation": "Frozen WT f7a153b: related nonQt68+Qt8 unique76 and diagnostic1 passed; all planned/executed/passed IDs, full1154-file source before/end/current, worker/tree exit and actual TEMP removal match. Same20 names: matcher native connection20->1/SELECT20->1/rows20 unchanged; completed preview included21->2/22->3/rows61 unchanged. Five compatibility reads retain5 connections/7 SELECT/63 rows; correlated stock-name scans remain. Evidence: data/diagnostics/r3-076-wave13/manifest.json, native-cost.json and wrappers. Root integrated verification is separate.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.find_code_by_name|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.find_concatenated_stocks|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.find_partial_concatenated_stocks|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.find_stock_candidates|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.pending_name_change|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.review_name_changes|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.find_code_by_name|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.find_concatenated_stocks|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.find_partial_concatenated_stocks|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.find_stock_candidates|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.pending_name_change|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.review_name_changes|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.__init__|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.find_codes_by_names|con.execute": 1
+      }
     }
   ]
 }

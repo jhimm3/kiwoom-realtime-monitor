@@ -420,6 +420,102 @@ class AccountContextTests(unittest.TestCase):
                 self.assertEqual(self.source.load_execution_events('prior-intent'), target.load_execution_events('prior-intent'))
             self.assertEqual([], context.prepare_archive_seed(legacy, []))
 
+    def test_versioned_projection_replaces_only_its_clock_scope_and_keeps_archive_and_rollback(self):
+        from tests.unit.test_diagnostic_display_capture import clock_document
+
+        self.seed_ledger()
+        binding = AccountBinding('profile-1', AccountScope('kiwoom', AccountEnvironment.REAL, REF), 3, NOW)
+        recovery = AccountRecovery(AccountSnapshot(REF, 10000, 0, {'005930': 3}, NOW), ())
+        self.source._account_input_wall_time = lambda: 123.25
+        self.source.save_real_account_recovery(binding, recovery, NOW, settings_revision=2)
+        without_clock = self.capsule()
+        captured_clock = clock_document()
+        self.source.upsert_documents(context.CLOCK_COLLECTION,
+            [{'owner': REF, 'key': 'current', 'document': captured_clock}])
+        with_clock = self.capsule()
+        prior_clock = dict(captured_clock, control_revision=2,
+                           cancel_attempted_intent_ids=['parent-only'])
+        archive_input = {'event_type': 'operation_start', 'operation_id': 'archive-retry',
+            'codec_version': 'store-input/v1', 'account_input_version': 'account-store-input/v1',
+            'method': 'save_real_account_recovery',
+            'account_alias_domain': without_clock['alias_domain'],
+            'payload': freeze_payload(dict(binding=binding, recovery=recovery, received_at=NOW,
+                                          settings_revision=2)).value}
+        with self.source._connection() as connection:
+            source_archive = [(*row[:-1], json.loads(row[-1])) for row in connection.execute(
+                "SELECT collection,owner,document_key,updated_at,document_json FROM central_documents "
+                "WHERE collection='real_account_recovery'").fetchall()]
+        self.assertEqual(1, len(source_archive))
+        self.assertEqual(123.25, source_archive[0][3])
+        cases = [('account-context/v4', old, captured) for old in (False, True) for captured in (False, True)]
+        cases += [(version, True, False) for version in context.VERSIONS[:3]]
+
+        def rows(connection):
+            return {table: connection.execute('SELECT * FROM ' + table).fetchall()
+                    for table in (*context.COLUMNS, 'sqlite_sequence')}
+
+        for version, old_present, captured_present in cases:
+            with self.subTest(version=version, old=old_present, captured=captured_present):
+                capsule = copy.deepcopy(with_clock if captured_present else without_clock)
+                capsule['version'] = version
+                if version not in context.ARCHIVE_VERSIONS:
+                    capsule.pop('archive_index')
+                    if version == 'account-context/v1':
+                        capsule.pop('execution_event_next_sequence')
+                        capsule['tables'] = {key: value for key, value in capsule['tables'].items()
+                                             if key in context.COLUMNS_V1}
+                    capsule['row_count'] = sum(map(len, capsule['tables'].values()))
+                capsule['sha256'] = context._digest({k: v for k, v in capsule.items() if k != 'sha256'})[0]
+                context.validate_account_context(capsule)
+                original_capsule = copy.deepcopy(capsule)
+                aliases = resolve_owner_bindings(capsule['owner_bindings'])
+                seed = context.prepare_archive_seed(capsule, [archive_input])
+                expected_archive = source_archive if version in context.ARCHIVE_VERSIONS else []
+                target = self.store(version.rsplit('/', 1)[-1] + str(old_present) + str(captured_present))
+                with target._connection() as connection:
+                    if old_present:
+                        connection.execute('INSERT INTO central_documents VALUES(?,?,?,?,?)',
+                            (context.CLOCK_COLLECTION, REF, 'current', 17.0, json.dumps(prior_clock)))
+                    connection.execute('INSERT INTO central_documents VALUES(?,?,?,?,?)',
+                        ('unrelated', 'owner', 'untouched', 19.0, '{"keep":"parent"}'))
+                    for collection in ('real_account_recovery', 'real_account_event'):
+                        connection.execute('INSERT INTO central_documents VALUES(?,?,?,?,?)',
+                            (collection, 'old-owner', 'old-key', 23.0, '{"keep":"legacy-only"}'))
+                    # Give rollback an independently different native sequence state.
+                    connection.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('central_execution_events',37)")
+                with target._connection() as connection:
+                    before = rows(connection)
+                # The bridge validates native INSERT/DELETE/transaction behavior,
+                # not PostgreSQL lease ownership, parent digests, or DDL acceptance.
+                with self.assertRaisesRegex(RuntimeError, 'after-projected-context'):
+                    with target._connection() as connection:
+                        context._apply_account_context(SQLiteProjectionCursor(connection.cursor()), capsule,
+                                                       bindings=aliases, archive_seed=seed)
+                        raise RuntimeError('after-projected-context')
+                with target._connection() as connection:
+                    self.assertEqual(before, rows(connection))
+                    context._apply_account_context(SQLiteProjectionCursor(connection.cursor()), capsule,
+                                                   bindings=aliases, archive_seed=seed)
+                    clocks = connection.execute('SELECT owner,document_key,document_json FROM central_documents '
+                                                'WHERE collection=? ORDER BY owner,document_key',
+                                                (context.CLOCK_COLLECTION,)).fetchall()
+                    expected_clock = (captured_clock if captured_present else None) if version == context.VERSION else prior_clock
+                    self.assertEqual([] if expected_clock is None else [(REF, 'current', expected_clock)],
+                                     [(owner, key, json.loads(body)) for owner, key, body in clocks])
+                    self.assertEqual([(19.0, '{"keep":"parent"}')], connection.execute(
+                        "SELECT updated_at,document_json FROM central_documents WHERE collection='unrelated'").fetchall())
+                    archive = connection.execute('SELECT collection,owner,document_key,updated_at,document_json '
+                        "FROM central_documents WHERE collection IN ('real_account_recovery','real_account_event') "
+                        'ORDER BY collection,owner,document_key').fetchall()
+                    expected = ([(collection, 'old-owner', 'old-key', 23.0, {'keep': 'legacy-only'})
+                                 for collection in ('real_account_event', 'real_account_recovery')]
+                                if version == 'account-context/v1' else
+                                expected_archive)
+                    self.assertEqual(expected, [(*row[:-1], json.loads(row[-1])) for row in archive])
+                    sequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name='central_execution_events'").fetchone()[0]
+                    self.assertEqual(37 if version == 'account-context/v1' else 12, sequence)
+                self.assertEqual(original_capsule, capsule)
+
     def test_context_recording_and_durable_reader_retain_one_snapshot(self):
         with deferred_capture(account_inputs=True, account_context_store=self.source) as (identifier, _):
             self.assertEqual('captured', trace.status()['account_context']['state'])

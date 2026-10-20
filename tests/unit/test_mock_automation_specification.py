@@ -4090,9 +4090,12 @@ class MockUnfilledPairedInputTests(unittest.IsolatedAsyncioTestCase):
         await self.runner._consume(observation)
         self.assertEqual('HOLD',self.runner._unfilled_judgment['final_action'])
         self.assertEqual(prior,self.runner._state)
-        await self.runner.run_once()
+        with patch.object(self.runner, '_current_unfilled_judgment',
+                          wraps=self.runner._current_unfilled_judgment) as judgment:
+            await self.runner.run_once()
         self.assertEqual(('WAIT',0),(self.runner._unfilled_attempt_plan['result']['action'],self.cancel_calls))
         self.assertTrue(self.runner._unfilled_attempt_plan['result']['inputs']['assessment']['trend_allows_wait'])
+        self.assertEqual(2, judgment.call_count)
 
     async def test_model_expiry_cannot_support_native_paired_reprice(self):
         await self.ready();self.publish()

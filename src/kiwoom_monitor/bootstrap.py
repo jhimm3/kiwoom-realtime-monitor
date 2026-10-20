@@ -384,6 +384,9 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
         QTimer.singleShot(0, lambda: dialog(window, "Google Drive 복원", restore_outcome.message))
 
     def retain_market_bars_after_startup() -> None:
+        if window._app_controller.closing:
+            return
+
         def run() -> None:
             try:
                 minute_bar_repository.purge_before(kst_wall_now().date() - timedelta(days=30))
@@ -394,7 +397,8 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
             except sqlite3.Error as error:
                 logging.getLogger(__name__).warning("시작 후 일봉 보존 정리를 건너뜁니다: %s", error)
 
-        threading.Thread(target=run, name="market-bar-retention", daemon=True).start()
+        worker = SettingsRequestWorker(run, window._app_controller)
+        worker.start()
 
     # 실제 크기 DB에서 분봉/일봉 정리가 각각 약 0.65초/0.12초까지 걸렸다.
     # 첫 화면과 최초 순위 처리를 먼저 시작한 뒤 한 번 실행해 보존 정책은 유지한다.

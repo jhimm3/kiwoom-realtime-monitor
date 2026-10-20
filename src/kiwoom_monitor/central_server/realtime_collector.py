@@ -85,6 +85,10 @@ class RealtimeCollectorStore(Protocol):
         realtime_deltas: list[dict[str, Any]] | None = None,
         start_minute: str | None = None, end_minute: str | None = None,
     ) -> list[dict[str, Any]]: ...
+    def load_recent_minute_bars(
+        self, code: str, start_date: str, end_date: str, market: str = "", trading_days: int = 2, *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
 
     def save_dataset_snapshots(
         self,
@@ -1327,6 +1331,24 @@ class CentralRealtimeCollector:
         if deltas:
             read_options['realtime_deltas'] = deltas
         return await owned_to_thread(self._store.load_minute_bars, code, trading_date, market, **read_options)
+
+    async def load_live_recent_minute_bars(
+        self, code: str, start_date: str, end_date: str, market: str = "", trading_days: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Freeze all requested RAM segments before the single owned native read."""
+        if self._store is None:
+            return []
+        source_market = "" if market == "COMBINED" else market
+        deltas = [dict(value) for value in [
+            *self._pending_minute_retries.values(), *self._inflight_minute_bars,
+            *self._minute_bars.pending_bars(code, end_date, source_market, start_date=start_date),
+        ] if str(value['code']) == code and start_date <= str(value['trading_date']) <= end_date
+            and (not source_market or str(value['market']) == source_market)]
+        read_options = {'realtime_deltas': deltas} if deltas else {}
+        return await owned_to_thread(
+            self._store.load_recent_minute_bars, code, start_date, end_date, market, trading_days,
+            **read_options,
+        )
 
     async def _save_snapshots(self) -> None:
         next_latest = _next_latest_checkpoint(self._now_provider().timestamp())

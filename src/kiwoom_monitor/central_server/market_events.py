@@ -110,6 +110,8 @@ class MarketEventService:
         self._subscriber: RealtimeSubscriber | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._background: set[asyncio.Task[None]] = set()
+        self._condition_status_tail: asyncio.Task[None] | None = None
+        self._condition_status_error: Exception | None = None
         self._vi_inflight: dict[str, asyncio.Future[bool]] = {}
         self._state_lock = asyncio.Lock()
         self._metadata_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2000)
@@ -224,6 +226,8 @@ class MarketEventService:
             while self._background:
                 await asyncio.gather(*tuple(self._background), return_exceptions=True)
             self._background.clear()
+            if self._condition_status_error is not None:
+                errors.append(self._condition_status_error)
             async with self._fact_admission_lock:
                 self._fact_admission_closed = True
             self._fact_stop_requested = True
@@ -312,6 +316,10 @@ class MarketEventService:
             "native_inflight": self._fact_native is not None}
 
     async def poll_condition_updates(self, websocket: Any) -> None:
+        error, self._condition_status_error = self._condition_status_error, None
+        if error is not None:
+            # Preserve the existing Collector failure/reconnect path, once per failure.
+            raise error
         now = asyncio.get_running_loop().time()
         if self._condition_deadline and now >= self._condition_deadline:
             self._list_policy = None
@@ -562,7 +570,7 @@ class MarketEventService:
             await websocket.send(json.dumps({
                 "trnm": "CNSRREQ", "seq": selected[0], "search_type": "1", "stex_tp": "K",
             }, ensure_ascii=False))
-        await asyncio.to_thread(self._store.upsert_documents, "condition_search_status", [{
+        values = [{
             "owner": "hot_cohort", "key": "current", "document": {
                 "status": status, "configured_exact_name": self._exact_name,
                 "configured_substring": self._substring, "matches": [list(value) for value in pairs],
@@ -570,7 +578,51 @@ class MarketEventService:
                 "runtime": self.condition_status(),
                 "updated_at": self._now().timestamp(),
             },
-        }])
+        }]
+        task = owned_create_task(self._save_condition_status(self._condition_status_tail, values),
+                                 name="condition-status-store", shutdown=self._event_draining)
+        self._condition_status_tail = task
+        self._background.add(task)
+        task.add_done_callback(self._condition_status_done)
+
+    async def _save_condition_status(
+        self, previous: asyncio.Task[None] | None, values: list[dict[str, Any]],
+    ) -> None:
+        # Every accepted snapshot is retained. Serialize actual commits, including
+        # across reconnect/policy changes, without holding condition admission.
+        cancelled = False
+        if previous is not None:
+            while not previous.done():
+                try:
+                    await asyncio.shield(previous)
+                except asyncio.CancelledError:
+                    if previous.cancelled():
+                        break
+                    cancelled = True
+                except Exception:
+                    # Its callback retains the failure for poll/close; a later
+                    # accepted snapshot still gets its own native save attempt.
+                    break
+        save = owned_create_task(owned_to_thread(
+            self._store.upsert_documents, "condition_search_status", values),
+            name="condition-status-commit", shutdown=self._event_draining)
+        while True:
+            try:
+                await asyncio.shield(save)
+                break
+            except asyncio.CancelledError:
+                if save.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def _condition_status_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None and self._condition_status_error is None:
+                self._condition_status_error = error
+        self._background_done(task)
 
     async def _condition_initial(self, message: dict[str, Any], websocket: Any) -> None:
         pending = self._pending_condition

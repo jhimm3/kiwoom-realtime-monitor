@@ -50,11 +50,28 @@ class RecordedAccountPostgresTests(unittest.TestCase):
         url = urlunsplit((parts.scheme, authority, '/' + baseline.DATABASE_NAME, '', ''))
         token = secrets.token_hex(16)
         baseline.provision_existing_empty_database(url, token)
+        now = datetime.now(timezone.utc)
+        ref = 'f9f2a34b-9188-4f8e-9e14-6fbc271c0001'
+        from tests.unit.test_diagnostic_display_capture import clock_document
+        clock_initial = dict(clock_document(), account_ref=ref)
+        clock_collection = context.CLOCK_COLLECTION
+        parent_only_ref = 'f9f2a34b-9188-4f8e-9e14-6fbc271c0002'
         with baseline.ReplayDatabaseLease(url, token) as lease:
+            # These clocks are part of the valid v1 parent itself. Adding them
+            # after sealing would only test the existing dirty-parent fence.
+            with lease.connection.transaction(), lease.connection.cursor() as cursor:
+                for owner in (ref, parent_only_ref):
+                    previous = dict(clock_initial, account_ref=owner, control_revision=2,
+                                    cancel_attempted_intent_ids=['parent-only'])
+                    cursor.execute('INSERT INTO central_documents VALUES(%s,%s,%s,%s,%s::jsonb)',
+                        (clock_collection, owner, 'current', 17.0, json.dumps(previous)))
             parent = lease.seal()['baseline_id']
             lease.restore(parent)
-            now = datetime.now(timezone.utc)
-            ref = 'f9f2a34b-9188-4f8e-9e14-6fbc271c0001'
+            with lease.connection.transaction(), lease.connection.cursor() as cursor:
+                # The source observation no longer contains this other account's
+                # clock. Restoring the parent before seal must not retain it.
+                cursor.execute('DELETE FROM central_documents WHERE collection=%s AND owner=%s',
+                               (clock_collection, parent_only_ref))
             run = 'run:with:colons'
             authority = run + ':' + secrets.token_hex(16)
             settings = {'scope': {'broker': 'kiwoom', 'environment': 'real', 'account_ref': ref},
@@ -95,9 +112,6 @@ class RecordedAccountPostgresTests(unittest.TestCase):
         store.save_real_account_recovery(binding, recovery, now, settings_revision=2)
         # v4 must carry the pre-capture clock, including a stop and an unresolved
         # intent. Capturing its later writes alone cannot reconstruct this state.
-        from tests.unit.test_diagnostic_display_capture import clock_document
-        clock_initial = dict(clock_document(), account_ref=ref)
-        clock_collection = context.CLOCK_COLLECTION
         store.upsert_documents(clock_collection, [
             {'owner': ref, 'key': 'current', 'document': clock_initial}])
         clock_changed = dict(clock_initial,
@@ -213,6 +227,11 @@ class RecordedAccountPostgresTests(unittest.TestCase):
                                     output=output), output.getvalue())
         sealed = json.loads(output.getvalue())['result']
         baseline_id = sealed['baseline_id']
+        with baseline.ReplayDatabaseLease(url, token, **options) as lease:
+            with lease.connection.cursor() as cursor:
+                cursor.execute('SELECT owner,document_key,document_json FROM public.central_documents '
+                               'WHERE collection=%s ORDER BY owner,document_key', (clock_collection,))
+                self.assertEqual([(ref, 'current', clock_initial)], cursor.fetchall())
         results = []
         original_comparison = collect_final_content_comparison
         def check_native_large_content(cursor, **options):

@@ -285,7 +285,6 @@ class AppController(QObject):
             start_daily_high=secondary.start_daily_high,
             start_daily_high_phase=self.start_daily_high_phase,
             start_fundamentals=secondary.start_fundamentals,
-            start_fundamentals_phase=self.start_fundamentals_phase,
             start_nxt_phase=self.start_nxt_phase,
         )
 

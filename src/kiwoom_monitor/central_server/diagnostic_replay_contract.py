@@ -107,7 +107,7 @@ _METHOD_GROUPS = {
     ),
     "market_data": ("save_dataset_snapshot", "save_dataset_snapshots", "load_dataset_snapshots"),
     "readers": (
-        "load_minute_bars", "load_daily_bars", "load_realtime_snapshots", "load_latest_market_caps",
+        "load_minute_bars", "load_recent_minute_bars", "load_daily_bars", "load_realtime_snapshots", "load_latest_market_caps",
         "load_top20_statistics", "load_observation_revisions", "load_observation_revisions_after",
         "load_shadow_candidates", "load_shadow_monitor_state", "load_external_bars",
         "load_hot_cohort", "load_market_event_history", "load_theme_snapshots",

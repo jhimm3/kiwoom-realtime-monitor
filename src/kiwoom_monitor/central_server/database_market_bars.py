@@ -491,6 +491,73 @@ def _display_minute_rows(rows: list[tuple[object, ...]]) -> list[dict[str, Any]]
         value["metadata"] = market_metadata_document(metadata) if metadata else {"completeness": "unconfirmed"}
     return result
 
+
+def _read_recent_minute_bars(
+    cursor: Any, code: str, start_date: str, end_date: str, market: str,
+    trading_days: int, realtime_deltas: list[dict[str, Any]], *, postgres: bool,
+) -> list[dict[str, Any]]:
+    """Select stored days and apply each day's existing overlay in one snapshot."""
+    combined = market == "COMBINED"
+    deltas = [value for value in realtime_deltas
+              if value['code'] == code and start_date <= str(value['trading_date']) <= end_date
+              and (not market or combined or value['market'] == market)
+              and (not combined or (str(value['market']).upper() in {'KRX', 'NXT', 'SOR'}
+                                   and str(value['minute'])))]
+    placeholder = '%s' if postgres else '?'
+
+    def venue_filter(prefix: str) -> str:
+        if combined:
+            # The HTTP COMBINED projection ignores unknown venues and blank minutes.
+            return (f" AND UPPER({prefix}market) IN ('KRX','NXT','SOR')"
+                    + (f" AND {prefix}minute<>''" if not postgres else ''))
+        return f' AND {prefix}market={placeholder}' if market else ''
+
+    date_column = 'b.trading_date::text' if postgres else 'b.trading_date'
+    minute_column = "to_char(b.minute,'HH24:MI')" if postgres else 'b.minute'
+    sql = (
+        f'SELECT {date_column},{minute_column},b.code,b.market,b.open,b.high,b.low,b.close,b.volume,'
+        'b.trade_value_million_won,b.updated_at,m.effective_at,m.available_at,m.venue,m.unit,'
+        'm.value_kind,m.completeness,m.origin,m.source,m.candidate_universe '
+        'FROM central_minute_bars b LEFT JOIN central_market_data_observation_meta m ON '
+        "m.dataset_kind='minute_bar' AND m.subject=b.code||':'||b.market "
+        f"AND m.observation_key={date_column}||'T'||{minute_column} "
+        f'WHERE b.code={placeholder} AND b.trading_date IN ('
+        f'SELECT trading_date FROM central_minute_bars WHERE code={placeholder} '
+        f'AND trading_date>={placeholder} AND trading_date<={placeholder}'
+        + venue_filter('')
+        + f' GROUP BY trading_date ORDER BY trading_date DESC LIMIT {placeholder})'
+        + venue_filter('b.') + ' ORDER BY b.trading_date,b.minute'
+    )
+    parameters: list[object] = [code, code, start_date, end_date]
+    if market and not combined:
+        parameters.append(market)
+    parameters.append(trading_days)
+    if market and not combined:
+        parameters.append(market)
+    if deltas:
+        cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY' if postgres else 'BEGIN')
+    executed = cursor.execute(sql, parameters)
+    rows = _display_minute_rows((cursor if postgres else executed).fetchall())
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    pending_by_day: dict[str, list[dict[str, Any]]] = {}
+    for value in rows:
+        by_day.setdefault(str(value['trading_date']), []).append(value)
+    for value in deltas:
+        pending_by_day.setdefault(str(value['trading_date']), []).append(value)
+    result: list[dict[str, Any]] = []
+    found = 0
+    for day in sorted(by_day.keys() | pending_by_day.keys(), reverse=True):
+        values = by_day.get(day, [])
+        if pending_by_day.get(day):
+            values = _read_realtime_minute_overlay(cursor, values, pending_by_day[day], postgres=postgres)
+        if values:
+            result.extend(values)
+            found += 1
+            if found >= trading_days:
+                break
+    return sorted(result, key=lambda value: (str(value['trading_date']), str(value['minute'])))
+
+
 def _load_postgres_latest_revisions(
     cursor: Any, sources: list[ObservationRevisionSource], *,
     timings: dict[str, float] | None = None,
@@ -838,6 +905,17 @@ class SQLiteMarketBarStoreMixin:
                     connection, _display_minute_rows(rows), realtime_deltas, postgres=False,
                 )
         return _display_minute_rows(rows)
+
+
+    def load_recent_minute_bars(
+        self, code: str, start_date: str, end_date: str, market: str = "", trading_days: int = 2, *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as connection:
+            return _read_recent_minute_bars(
+                connection, code, start_date, end_date, market, trading_days,
+                realtime_deltas or [], postgres=False,
+            )
 
 
     def replace_minute_bars(
@@ -1194,6 +1272,21 @@ class PostgresMarketBarStoreMixin:
                     cursor, _display_minute_rows(rows), realtime_deltas, postgres=True,
                 )
         return _display_minute_rows(rows)
+
+
+    def load_recent_minute_bars(
+        self, code: str, start_date: str, end_date: str, market: str = "", trading_days: int = 2, *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        reader = DBWriterContext(
+            writer_family="read.market_bars", writer_kind="minute_bar",
+            operation="load_recent_minute_bars", access_mode="read",
+        )
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+            return _read_recent_minute_bars(
+                cursor, code, start_date, end_date, market, trading_days,
+                realtime_deltas or [], postgres=True,
+            )
 
 
     def replace_minute_bars(

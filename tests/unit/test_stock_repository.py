@@ -18,6 +18,48 @@ from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
 
 
 class StockRepositoryTests(unittest.TestCase):
+    def test_catalog_batch_preserves_current_first_native_duplicate_order_and_chunk_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            stocks = StockRepository(path)
+            stocks.upsert_many((("A", "Same", ""), ("B", "Same", ""), ("C", "Other", "")))
+            stocks.save_alias("Same", "C")
+            stocks.save_alias("Alias", "C")
+            statements = []
+            opened = []
+
+            def connect():
+                con = sqlite3.connect(path)
+                con.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 3)
+                con.set_trace_callback(statements.append)
+                opened.append(con)
+                return con
+
+            repository = StockRepository(path, catalog_connection_factory=connect)
+            expected = {"Same": "A", "Alias": "C", "missing": None, "same": None, "Other": "C"}
+            self.assertEqual(expected, repository.find_codes_by_names(("Same", "Alias", "Same", "missing", "same", "Other")))
+            self.assertEqual(1, len(opened))
+            self.assertEqual(2, len(statements))
+            self.assertTrue(all(sql.startswith("WITH requested") for sql in statements))
+            with self.assertRaises(sqlite3.ProgrammingError):
+                opened[0].execute("SELECT 1")
+            self.assertEqual("A", stocks.find_code_by_name("Same"))
+            with patch.object(repository, "_catalog_connect", side_effect=AssertionError("empty batch")):
+                self.assertEqual({}, repository.find_codes_by_names(()))
+
+    def test_catalog_batch_read_error_closes_injected_native_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            connection = sqlite3.connect(path)
+            connection.set_authorizer(lambda action, *_: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ else sqlite3.SQLITE_OK)
+            repository = StockRepository(path, catalog_connection_factory=lambda: connection)
+            with self.assertRaises(sqlite3.DatabaseError):
+                repository.find_codes_by_names(("missing",))
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
     def test_market_cap_noop_repairs_derived_values_and_preserves_receipt_consumers(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
         path = Path(directory) / "monitor.sqlite3"

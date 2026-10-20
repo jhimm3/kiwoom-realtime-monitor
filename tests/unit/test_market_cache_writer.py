@@ -66,6 +66,120 @@ class MarketCacheWriterTests(unittest.TestCase):
                 self.assertEqual(kept_metadata, connection.execute(
                     "SELECT * FROM market_data_observation_meta ORDER BY subject").fetchall())
 
+    def test_applied_cutoff_survives_restart_and_late_jobs_preserve_ack_keeper_and_native_cost(self) -> None:
+        from datetime import timedelta
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+
+        now = as_kst(datetime(2026, 10, 21, 10))
+        kept = now - timedelta(days=30)
+        observations = {}
+
+        def observe(kind, minute, applied):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                Database(path).initialize()
+                clock_calls = []
+
+                def clock():
+                    clock_calls.append(1)
+                    return now
+
+                repository = MinuteBarRepository(path, now_provider=clock)
+                repository.upsert_bars("KEEP", (MinuteOhlcv(kept, 100, 110, 90, 105, 10),))
+                repository.upsert_market_index_minutes({("kosdaq", kept): (1., 2., 1., 2., 10.)})
+                repository.record_history_sync("KEEP", kept.date(), kept, 1)
+                original_connect = sqlite3.connect
+
+                def keeper():
+                    with closing(original_connect(path)) as connection:
+                        return (
+                            connection.execute("SELECT * FROM minute_bars WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kosdaq'").fetchall(),
+                            connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject").fetchall(),
+                        )
+
+                original_keeper = keeper()
+                writer = MarketCacheWriter(path, now_provider=clock)
+                failures, acks, quality, statements, connections = [], [], [], [], []
+                writer.retention_failed.connect(lambda *args: failures.append(args), Qt.ConnectionType.DirectConnection)
+                writer.minute_failed.connect(lambda *args: failures.append(args), Qt.ConnectionType.DirectConnection)
+                writer.history_failed.connect(lambda *args: failures.append(args), Qt.ConnectionType.DirectConnection)
+                if applied:
+                    writer.enqueue_minute_retention(kept.date())
+                    writer.enqueue_minute_retention(kept.date() - timedelta(days=1))
+                    writer.start()
+                    self.assertTrue(writer.stop_and_drain())
+                    self.assertEqual(kept.date(), writer._minute_retention_cutoff)
+                self.assertEqual(original_keeper, keeper())
+
+                def committed(*_):
+                    # Exclude these diagnostic reads from production SQL cost.
+                    with closing(original_connect(path)) as connection:
+                        acks.append((connection.execute("SELECT * FROM minute_bars WHERE stock_code='TARGET'").fetchall(),
+                                     connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kospi'").fetchall()))
+
+                writer.minute_saved.connect(committed, Qt.ConnectionType.DirectConnection)
+                writer.history_saved.connect(committed, Qt.ConnectionType.DirectConnection)
+                writer.history_quality_saved.connect(lambda code, value: quality.append((code, value)), Qt.ConnectionType.DirectConnection)
+
+                class TracedConnection(sqlite3.Connection):
+                    def __init__(self, *args, **kwargs):
+                        super().__init__(*args, **kwargs)
+                        connections.append(1)
+                        self.set_trace_callback(statements.append)
+
+                def connect(*args, **kwargs):
+                    kwargs["factory"] = TracedConnection
+                    return original_connect(*args, **kwargs)
+
+                bar = MinuteOhlcv(minute, 50, 70, 40, 60, 3)
+                if kind == "minute":
+                    writer.enqueue_minute_bars({("TARGET", minute): bar}, {("kospi", minute): (1., 2., 1., 2., 10.)})
+                else:
+                    writer.enqueue_history_bars("TARGET", (bar,), now.date(), now, recovery_generation=7)
+                clock_calls.clear()
+                with patch("sqlite3.connect", side_effect=connect):
+                    writer.start()  # Same instance restarts with its successful cutoff.
+                    self.assertTrue(writer.stop_and_drain())
+                self.assertEqual([], failures)
+                self.assertEqual(1, len(acks))
+                self.assertEqual(1, len(acks[0][0]))
+                self.assertEqual(int(kind == "minute"), len(acks[0][1]))
+                self.assertEqual(original_keeper, keeper())
+                if kind == "history":
+                    self.assertEqual([("TARGET", {"generation": 7, "minutes": (minute,)})], quality)
+                with closing(original_connect(path)) as connection:
+                    target_rows = connection.execute("SELECT COUNT(*) FROM minute_bars WHERE stock_code='TARGET'").fetchone()[0]
+                    self.assertEqual(int(not (applied and minute.date() < kept.date())), target_rows)
+                    if kind == "history":
+                        self.assertEqual([(now.date().isoformat(), "TARGET", now.isoformat(timespec="seconds"), 1)],
+                            connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='TARGET'").fetchall())
+                counts = {key: sum(statement.lstrip().upper().startswith(key.upper()) for statement in statements)
+                          for key in ("select", "delete", "begin", "commit")}
+                return {"connections": len(connections), **counts, "clock": len(clock_calls),
+                        "sql": statements, "direct_ack_rows": [len(rows) for rows in acks[0]],
+                        "target_rows_after_drain": target_rows, "keeper_exact": True}
+
+        for kind in ("minute", "history"):
+            for label, minute in (("expired", kept - timedelta(days=1)), ("cutoff", kept), ("current", now - timedelta(minutes=1))):
+                with self.subTest(kind=kind, date=label):
+                    baseline, retained = observe(kind, minute, False), observe(kind, minute, True)
+                    extra = int(label == "expired")
+                    self.assertEqual(baseline["sql"], retained["sql"][:len(baseline["sql"])])
+                    self.assertEqual(baseline["connections"] + extra, retained["connections"])
+                    self.assertEqual(baseline["select"] + extra, retained["select"])
+                    self.assertEqual(baseline["delete"] + 4 * extra, retained["delete"])
+                    self.assertEqual(baseline["begin"] + extra, retained["begin"])
+                    self.assertEqual(baseline["commit"] + extra, retained["commit"])
+                    self.assertEqual(baseline["clock"], retained["clock"])
+                    if not extra:
+                        self.assertEqual(baseline["sql"], retained["sql"])
+                    observations[f"{kind}:{label}"] = {
+                        name: {key: value for key, value in result.items() if key != "sql"}
+                        for name, result in (("without_applied_cutoff", baseline), ("with_applied_cutoff", retained))}
+        self.retention_cost_observations = observations
+
     def test_repeated_market_cap_jobs_skip_row_changes_but_preserve_price_receipts_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

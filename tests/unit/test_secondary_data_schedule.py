@@ -34,7 +34,6 @@ class SecondaryDataScheduleTests(unittest.TestCase):
             start_daily_high=worker("daily"),
             start_daily_high_phase=lambda codes: calls.append(("daily_phase", codes)),
             start_fundamentals=lambda codes: worker("fundamentals")(codes),
-            start_fundamentals_phase=lambda codes: calls.append(("fundamentals_phase", codes)),
             start_nxt_phase=lambda codes: calls.append(("nxt", codes)),
         )
 
@@ -72,12 +71,10 @@ class SecondaryDataScheduleTests(unittest.TestCase):
         calls: list[tuple[object, ...]] = []
         coordinator = self.coordinator(calls)
 
-        coordinator.daily_high_finished(("C",))
         coordinator.fundamentals_finished(("D",), after_hours_pause=False)
         coordinator.fundamentals_finished(("E",), after_hours_pause=True)
 
         self.assertEqual([
-            ("fundamentals_phase", ("C",)),
             ("nxt", ("D",)),
             ("nxt", ("E",)),
         ], calls)

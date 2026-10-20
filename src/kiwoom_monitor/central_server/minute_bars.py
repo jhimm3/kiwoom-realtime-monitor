@@ -126,12 +126,15 @@ class MinuteBarAccumulator:
         self._dirty.difference_update(selected)
         return values
 
-    def pending_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, object]]:
+    def pending_bars(
+        self, code: str, trading_date: str, market: str = "", *, start_date: str | None = None,
+    ) -> list[dict[str, object]]:
         """Copy unflushed deltas without consuming them or changing their IDs."""
         return [
             {**self._bars[key].as_record(), "operation_id": self._operation_ids[key]}
             for key in self._dirty
-            if key[0] == trading_date and key[2] == code and (not market or key[3] == market)
+            if (key[0] == trading_date if start_date is None else start_date <= key[0] <= trading_date)
+            and key[2] == code and (not market or key[3] == market)
         ]
 
     def mark_capture_gap(self) -> None:

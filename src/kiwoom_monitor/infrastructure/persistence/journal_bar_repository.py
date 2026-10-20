@@ -296,6 +296,17 @@ class JournalBarRepositoryMixin:
         ) for bar in bars]
         update_guard = (" WHERE journal_minute_bars.source NOT IN ('api_confirmed', 'after_close_confirmed')" if preserve_confirmed
                         else " WHERE journal_minute_bars.source NOT IN ('api_confirmed','after_close_confirmed') OR excluded.source IN ('api_confirmed','after_close_confirmed')")
+        if preserve_confirmed:
+            update_guard += (
+                " AND (journal_minute_bars.open_price IS NOT excluded.open_price"
+                " OR journal_minute_bars.high_price IS NOT excluded.high_price"
+                " OR journal_minute_bars.low_price IS NOT excluded.low_price"
+                " OR journal_minute_bars.close_price IS NOT excluded.close_price"
+                " OR journal_minute_bars.volume IS NOT excluded.volume"
+                " OR journal_minute_bars.trade_value_eok IS NOT excluded.trade_value_eok"
+                " OR journal_minute_bars.source IS NOT excluded.source"
+                " OR journal_minute_bars.confirmed_at IS NOT excluded.confirmed_at)"
+            )
         preserved = {
                 str(minute): (str(saved_source), saved_at)
                 for minute, saved_source, saved_at in connection.execute(

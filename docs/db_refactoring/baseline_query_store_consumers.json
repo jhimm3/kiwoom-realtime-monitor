@@ -1588,11 +1588,11 @@
     ],
     [
       "src/kiwoom_monitor/central_server/market_events.py",
-      "MarketEventService._condition_list",
+      "MarketEventService._save_condition_status",
       "self._store",
       "upsert_documents",
       "callable_argument",
-      "asyncio.to_thread",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
       "",
       "",
       "reviewed_store_binding"
@@ -4382,17 +4382,6 @@
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.activate",
-      "self._repository",
-      "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
       "MockAutomationSupervisor.publish_native_unfilled_population",
       "self._repository",
       "load_mock_automation_control",
@@ -4429,8 +4418,8 @@
       "MockAutomationSupervisor.stop",
       "self._repository",
       "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
+      "bound_reference",
+      "",
       "",
       "",
       "unresolved_candidate"
@@ -4676,6 +4665,39 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "create_market_live_read_router.recent_minute_bars",
+      "store",
+      "load_recent_minute_bars",
+      "callable_argument",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/market/recent-minute-bars",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/realtime_collector.py",
+      "CentralRealtimeCollector.load_live_recent_minute_bars",
+      "self._store",
+      "load_recent_minute_bars",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.activate",
+      "self._repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
     ]
   ],
   "forwarding_identities": [
@@ -5468,7 +5490,8 @@
       "storage_size_bytes": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Name(id='int', ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "insert_strategy_stage_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_recent_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='start_date', annotation=Name(id='str', ctx=Load())), arg(arg='end_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load())), arg(arg='trading_days', annotation=Name(id='int', ctx=Load()))], kwonlyargs=[arg(arg='realtime_deltas', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)], defaults=[Constant(value=''), Constant(value=2)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "QueryStore": {
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -5580,7 +5603,8 @@
       "storage_size_bytes": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Name(id='int', ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "insert_strategy_stage_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_recent_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='start_date', annotation=Name(id='str', ctx=Load())), arg(arg='end_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load())), arg(arg='trading_days', annotation=Name(id='int', ctx=Load()))], kwonlyargs=[arg(arg='realtime_deltas', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)], defaults=[Constant(value=''), Constant(value=2)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "SQLiteQueryStore": {
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Attribute(value=Name(id='sqlite3', ctx=Load()), attr='Connection', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -5696,7 +5720,8 @@
       "storage_size_bytes": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Name(id='int', ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "insert_strategy_stage_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_recent_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='code', annotation=Name(id='str', ctx=Load())), arg(arg='start_date', annotation=Name(id='str', ctx=Load())), arg(arg='end_date', annotation=Name(id='str', ctx=Load())), arg(arg='market', annotation=Name(id='str', ctx=Load())), arg(arg='trading_days', annotation=Name(id='int', ctx=Load()))], kwonlyargs=[arg(arg='realtime_deltas', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)], defaults=[Constant(value=''), Constant(value=2)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     }
   }
 }

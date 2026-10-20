@@ -6,7 +6,7 @@ import unittest
 import uuid
 from contextlib import closing
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +33,144 @@ from kiwoom_monitor.application.personal_trade_rules import StructuredTradeRule
 
 
 class JournalRepositoryTests(unittest.TestCase):
+    def _counted_live_import(self, repository, monitor, now, receipt):
+        counts = dict(connections=0, closed=0, raw=0, metadata=0, changed_rows=0)
+        statements = []
+        real_connect = sqlite3.connect
+
+        class CountedConnection(sqlite3.Connection):
+            def executemany(self, sql, parameters):
+                cursor = super().executemany(sql, parameters)
+                if sql.startswith("INSERT INTO journal_minute_bars "):
+                    counts["raw"] += cursor.rowcount
+                return cursor
+
+            def execute(self, sql, parameters=()):
+                cursor = super().execute(sql, parameters)
+                if "INSERT INTO market_data_observation_meta " in sql:
+                    counts["metadata"] += cursor.rowcount
+                return cursor
+
+            def close(self):
+                counts["closed"] += 1
+                counts["changed_rows"] += self.total_changes
+                super().close()
+
+        def connect(*args, **kwargs):
+            counts["connections"] += 1
+            connection = real_connect(*args, **kwargs, factory=CountedConnection)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with patch("sqlite3.connect", side_effect=connect):
+            copied = repository.import_live_bars(monitor, "005930", now, observed_at=receipt)
+        return copied, counts, statements
+
+    def test_unchanged_live_copy_refreshes_receipt_and_repairs_retained_backup(self):
+        from kiwoom_monitor.domain.time_basis import as_kst
+        from kiwoom_monitor.infrastructure.persistence.journal_backup import JournalBackupService
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor, target = root / "monitor.sqlite3", root / "journal.sqlite3"
+            Database(monitor).initialize()
+            minute = datetime(2026, 10, 21, 9)
+            receipt = as_kst(datetime(2026, 10, 21, 10))
+            bars = (MinuteOhlcv(minute, 100, 110, 90, 105, 10, 1.0),
+                    MinuteOhlcv(minute + timedelta(minutes=1), 200, 210, 190, 205, 20, 2.0))
+            source = MinuteBarRepository(monitor, now_provider=lambda: receipt)
+            source.upsert_bars("005930", bars)
+            repository = JournalRepository(target)
+            repository.import_live_bars(monitor, "005930", minute, observed_at=receipt)
+            expected = repository.load_bars("005930", minute)
+            metadata = MarketDataMetadataRepository(target)
+            keys = tuple(bar.minute.isoformat(timespec="minutes") for bar in bars)
+            later = receipt + timedelta(seconds=1)
+            copied, counts, statements = self._counted_live_import(repository, monitor, minute, later)
+            self.assertEqual(2, copied)
+            self.assertEqual(dict(connections=2, closed=2, raw=0, metadata=2, changed_rows=2), counts)
+            self.assertEqual((1, 1, 4), (sum(sql.startswith("BEGIN") for sql in statements),
+                statements.count("COMMIT"), sum(sql.lstrip().startswith("INSERT") for sql in statements)))
+            self.assertEqual(expected, repository.load_bars("005930", minute))
+            self.assertEqual((later, later), tuple(metadata.load(MarketDatasetKind.MINUTE_BAR, "005930", key).available_at for key in keys))
+
+            with closing(sqlite3.connect(target)) as connection, connection:
+                connection.execute("DELETE FROM journal_minute_bars WHERE minute=?", (keys[0],))
+            copied, counts, _ = self._counted_live_import(repository, monitor, minute, later)
+            self.assertEqual((2, 1, 2), (copied, counts["raw"], counts["metadata"]))
+            with closing(sqlite3.connect(target)) as connection, connection:
+                connection.execute("DELETE FROM market_data_observation_meta WHERE observation_key=?", (keys[0],))
+            copied, counts, _ = self._counted_live_import(repository, monitor, minute, later)
+            self.assertEqual((2, 0, 2), (copied, counts["raw"], counts["metadata"]))
+            self.assertIsNotNone(metadata.load(MarketDatasetKind.MINUTE_BAR, "005930", keys[0]))
+
+            source.purge_before(minute.date() + timedelta(days=1))
+            self.assertEqual(0, repository.import_live_bars(monitor, "005930", minute, observed_at=later))
+            self.assertEqual(expected, repository.load_bars("005930", minute))
+            backup, restored = root / "backup.sqlite3", root / "restored.sqlite3"
+            JournalBackupService(target).export_to(backup)
+            JournalBackupService(restored).import_from(backup)
+            self.assertEqual(expected, JournalRepository(restored).load_bars("005930", minute))
+            restored_metadata = MarketDataMetadataRepository(restored)
+            self.assertEqual(tuple(metadata.load(MarketDatasetKind.MINUTE_BAR, "005930", key) for key in keys),
+                tuple(restored_metadata.load(MarketDatasetKind.MINUTE_BAR, "005930", key) for key in keys))
+
+    def test_live_copy_checks_each_raw_field_including_nullable_confirmation(self):
+        from kiwoom_monitor.domain.time_basis import as_kst
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor, target = root / "monitor.sqlite3", root / "journal.sqlite3"
+            Database(monitor).initialize()
+            minute = datetime(2026, 10, 21, 9)
+            receipt = as_kst(datetime(2026, 10, 21, 10))
+            bar = MinuteOhlcv(minute, 100, 110, 90, 105, 10, 1.0)
+            MinuteBarRepository(monitor, now_provider=lambda: receipt).upsert_bars("005930", (bar,))
+            repository = JournalRepository(target)
+            repository.import_live_bars(monitor, "005930", minute, observed_at=receipt)
+            for field, previous in (("open_price", 99), ("high_price", 109), ("low_price", 89),
+                    ("close_price", 104), ("volume", 9), ("trade_value_eok", 0.5),
+                    ("source", "legacy_partial"), ("confirmed_at", receipt.isoformat())):
+                with self.subTest(field=field):
+                    with closing(sqlite3.connect(target)) as connection, connection:
+                        connection.execute(f"UPDATE journal_minute_bars SET {field}=?", (previous,))
+                    copied, counts, _ = self._counted_live_import(repository, monitor, minute, receipt)
+                    self.assertEqual((1, 1, 1), (copied, counts["raw"], counts["metadata"]))
+                    with closing(sqlite3.connect(target)) as connection:
+                        row = connection.execute("SELECT open_price,high_price,low_price,close_price,volume,trade_value_eok,source,confirmed_at FROM journal_minute_bars").fetchone()
+                    self.assertEqual((100, 110, 90, 105, 10, 1.0, "realtime_partial", None), row)
+                    _, counts, _ = self._counted_live_import(repository, monitor, minute, receipt)
+                    self.assertEqual((0, 1), (counts["raw"], counts["metadata"]))
+
+    def test_live_copy_metadata_failure_rolls_back_updates_and_inserts_before_retry(self):
+        from kiwoom_monitor.domain.time_basis import as_kst
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor, target = root / "monitor.sqlite3", root / "journal.sqlite3"
+            Database(monitor).initialize()
+            minute = datetime(2026, 10, 21, 9)
+            receipt = as_kst(datetime(2026, 10, 21, 10))
+            first = MinuteOhlcv(minute, 100, 110, 90, 105, 10, 1.0)
+            source = MinuteBarRepository(monitor, now_provider=lambda: receipt)
+            source.upsert_bars("005930", (first,))
+            repository = JournalRepository(target)
+            repository.import_live_bars(monitor, "005930", minute, observed_at=receipt)
+            metadata = MarketDataMetadataRepository(target)
+            before = metadata.load(MarketDatasetKind.MINUTE_BAR, "005930", minute.isoformat(timespec="minutes"))
+            later = receipt + timedelta(seconds=1)
+            changed = replace(first, close_price=106)
+            second = MinuteOhlcv(minute + timedelta(minutes=1), 200, 210, 190, 205, 20, 2.0)
+            source.upsert_bars("005930", (changed, second))
+            with patch("kiwoom_monitor.infrastructure.persistence.journal_bar_repository.upsert_market_data_metadata",
+                    side_effect=RuntimeError("metadata failed")), self.assertRaisesRegex(RuntimeError, "metadata failed"):
+                repository.import_live_bars(monitor, "005930", minute, observed_at=later)
+            self.assertEqual((105,), tuple(row[4] for row in repository.load_bars("005930", minute)))
+            self.assertEqual(before, metadata.load(MarketDatasetKind.MINUTE_BAR, "005930", minute.isoformat(timespec="minutes")))
+            copied, counts, _ = self._counted_live_import(repository, monitor, minute, later)
+            self.assertEqual((2, 2, 2), (copied, counts["raw"], counts["metadata"]))
+            self.assertEqual((106, 205), tuple(row[4] for row in repository.load_bars("005930", minute)))
+
     def test_scoped_review_requires_matching_account_and_filters_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = JournalRepository(Path(directory) / "journal.sqlite3")

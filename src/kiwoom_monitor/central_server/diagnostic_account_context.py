@@ -388,6 +388,8 @@ def _apply_account_context(cursor, document, *, bindings, archive_seed=()):
     for table in reversed(columns_by_table):
         if table == 'central_documents':
             collections = DOCUMENT_COLLECTIONS_V1 if document['version'] == VERSIONS[0] else DOCUMENT_COLLECTIONS
+            if document['version'] == VERSION:
+                collections = (*collections, CLOCK_COLLECTION)
             cursor.execute('DELETE FROM central_documents WHERE collection=ANY(%s)', (list(collections),))
         else:
             cursor.execute(sql.SQL('DELETE FROM {}').format(sql.Identifier('public', table)))

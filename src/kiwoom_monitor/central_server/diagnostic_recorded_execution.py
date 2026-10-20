@@ -42,7 +42,7 @@ from .diagnostic_account_input import METHODS as ACCOUNT_METHODS, native_error_r
 _METHODS = frozenset({
     'save_realtime_snapshots', 'save_minute_bars', 'finalize_minute_bars',
     'save_second_trade_bars', 'replace_minute_bars', 'replace_daily_bars',
-    'save_five_minute_bars', 'load_five_minute_bars', 'load_minute_bars',
+    'save_five_minute_bars', 'load_five_minute_bars', 'load_minute_bars', 'load_recent_minute_bars',
     'load_daily_bars', 'load_realtime_snapshots', 'load_latest_market_caps',
     'save_market_data_metadata', 'load_market_data_metadata',
     'load_market_data_metadata_range', 'save_dataset_snapshot',

@@ -275,6 +275,64 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
             self.assertNotIn('end_minute', calls[1][3])
         asyncio.run(exercise())
 
+    def test_recent_read_freezes_all_dates_and_sources_and_retains_owned_read_after_cancel(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_replay_runtime import ReplayRuntimeScope
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+        entered, release = Event(), Event()
+        calls = []
+        class Store:
+            def load_recent_minute_bars(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError('test did not release recent reader')
+                return kwargs.get('realtime_deltas', [])
+        at = datetime.fromisoformat('2026-10-19T10:03:00+09:00')
+        collector = CentralRealtimeCollector(lambda: 'unused', 'real', RealtimeHub(), lambda: at, Store())
+        retry = dict(code='005930', trading_date='2026-10-16', market='KRX', minute='10:00', operation_id='recent-retry', volume=1)
+        inflight = {**retry, 'trading_date': '2026-10-19', 'market': 'NXT', 'operation_id': 'recent-inflight', 'volume': 2}
+        collector._pending_minute_retries = {'retry': retry,
+            'old': {**retry, 'trading_date': '2026-09-18'}, 'future': {**retry, 'trading_date': '2026-10-20'},
+            'other': {**retry, 'code': '000660'}}
+        collector._inflight_minute_bars = [inflight]
+        pending_at = at.replace(minute=1, second=40)
+        collector._minute_bars.add(TradeTick('005930', 100, None, None, 3, None, '100140', market='KRX'), pending_at, pending_at.timestamp())
+        async def exercise():
+            task = asyncio.create_task(collector.load_live_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'COMBINED', 5))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                retry['volume'] = 99
+                inflight['volume'] = 99
+                collector._minute_bars.add(TradeTick('005930', 101, None, None, 9, None, '100141', market='KRX'), pending_at, pending_at.timestamp())
+            finally:
+                release.set()
+            rows = await task
+            self.assertEqual([1, 2, 3], [row['volume'] for row in rows])
+            self.assertEqual(('005930', '2026-09-19', '2026-10-19', 'COMBINED', 5), calls[0][0])
+            self.assertEqual(12, collector._minute_bars.pending_bars('005930', '2026-10-19')[0]['volume'])
+            self.assertEqual(99, collector._pending_minute_retries['retry']['volume'])
+            entered.clear(); release.clear()
+            runtime = ReplayRuntimeScope()
+            with runtime.activate():
+                cancelled = asyncio.create_task(collector.load_live_recent_minute_bars('005930', '2026-09-19', '2026-10-19', 'KRX', 2))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    cancelled.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await cancelled
+                    self.assertEqual(1, runtime.status()['pending_threads'])
+                    runtime.begin_shutdown()
+                    draining = asyncio.create_task(runtime.drain(timeout=3))
+                    await asyncio.sleep(0)
+                    self.assertFalse(draining.done())
+                finally:
+                    release.set()
+                await draining
+                self.assertEqual(0, runtime.status()['pending_threads'])
+            self.assertEqual(2, len(calls))
+            self.assertTrue(all(row['market'] == 'KRX' for row in calls[1][1]['realtime_deltas']))
+        asyncio.run(exercise())
+
     def test_status_times_share_injected_kiwoom_kst_clock(self) -> None:
         from kiwoom_monitor.central_server.market_observations import KST
         at = datetime(2026, 10, 15, 14, 21, 3, tzinfo=KST)

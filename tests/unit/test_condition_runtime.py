@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from kiwoom_monitor.central_server.app import create_app
@@ -14,9 +16,10 @@ from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_events import MarketEventService
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
+from kiwoom_monitor.central_server import realtime_collector as collector_module
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
 from qt_settings_test_support import dispose_dialogs
-from test_market_events import _Broker, _Socket
+from test_market_events import _Broker, _Socket, _HeldConditionStatusStore
 from credential_owner_test_support import FakeClient
 
 
@@ -31,6 +34,35 @@ def initial(seq, codes=(), **extra):
 def live(seq, code, signal="I"):
     return {"trnm": "REAL", "data": [{"type": "02", "values": {
         "841": seq, "9001": code, "843": signal}}]}
+
+
+class _CollectorConditionSocket(_Socket):
+    def __init__(self):
+        super().__init__()
+        self.responses = asyncio.Queue()
+        self.list_requested, self.trade_received = asyncio.Event(), asyncio.Event()
+
+    async def send(self, raw):
+        value = json.loads(raw)
+        await super().send(raw)
+        if value["trnm"] == "LOGIN":
+            self.responses.put_nowait({"trnm": "LOGIN", "return_code": 0})
+        elif value["trnm"] in {"REG", "REMOVE"}:
+            self.responses.put_nowait({"trnm": value["trnm"], "return_code": 0})
+        elif value["trnm"] == "CNSRLST":
+            self.list_requested.set()
+
+    async def recv(self):
+        value = await self.responses.get()
+        if any(row.get("type") == "0B" for row in value.get("data") or () if isinstance(row, dict)):
+            self.trade_received.set()
+        return json.dumps(value)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
 
 
 class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -58,6 +90,8 @@ class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def flush(self):
         await asyncio.wait_for(self.service._signal_queue.join(), 2)
         await asyncio.wait_for(self.service._metadata_queue.join(), 2)
+        if self.service._condition_status_tail is not None:
+            await asyncio.wait_for(asyncio.shield(self.service._condition_status_tail), 2)
 
     async def change(self, name="새조건", enabled=True, substring=""):
         self.service.update_operational_settings(enabled=enabled, exact_name=name, substring=substring)
@@ -258,6 +292,152 @@ class ConditionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 receiving.cancel()
                 await asyncio.gather(receiving, return_exceptions=True)
 
+    async def test_status_native_ack_does_not_delay_approved_trade_decode_admission_or_publish(self):
+        held = _HeldConditionStatusStore(self.store)
+        self.service._store = held
+        hub, socket = self.service._hub, _CollectorConditionSocket()
+        observer = hub.connect()
+        hub.update_subscription(observer, ["005930"], [])
+        collector = CentralRealtimeCollector(lambda: "fake", "real", hub,
+            lambda: datetime.fromisoformat("2026-09-15T10:00:00+09:00"), market_events=self.service)
+        ready, decoded, admitted, published, heartbeat = (asyncio.Event() for _ in range(5))
+        original_ready, original_publish = hub.set_upstream_ready, hub.publish
+        original_filter = collector_module.filter_message
+        trade = {"trnm": "REAL", "data": [{"type": "0B", "item": "005930",
+                 "values": {"10": "+60700", "15": "2", "20": "100000"}}]}
+
+        def observe_ready(codes, value, **kwargs):
+            result = original_ready(codes, value, **kwargs)
+            if value and "005930" in codes:
+                ready.set()
+            return result
+
+        def observe_decode(raw, *args, **kwargs):
+            result = json.loads(raw, *args, **kwargs)
+            if result == trade:
+                decoded.set()
+            return result
+
+        def observe_admission(message, allowed):
+            result = original_filter(message, allowed)
+            if message == trade:
+                self.assertEqual(trade, result)
+                admitted.set()
+            return result
+
+        def observe_publish(event, code=""):
+            result = original_publish(event, code)
+            if event.get("type") == "trade" and code == "005930":
+                published.set()
+            return result
+
+        async def pulse():
+            await socket.trade_received.wait()
+            await asyncio.sleep(0)
+            heartbeat.set()
+
+        heartbeat_task = asyncio.create_task(pulse())
+        with patch.object(collector_module, "connect", return_value=socket) as connect, \
+                patch.object(collector_module, "REALTIME_REG_INTERVAL_SECONDS", .01), \
+                patch.object(collector_module, "json", SimpleNamespace(loads=observe_decode, dumps=json.dumps)), \
+                patch.object(collector_module, "filter_message", side_effect=observe_admission), \
+                patch.object(hub, "set_upstream_ready", side_effect=observe_ready), \
+                patch.object(hub, "publish", side_effect=observe_publish):
+            await collector.start()
+            try:
+                await asyncio.wait_for(asyncio.gather(ready.wait(), socket.list_requested.wait()), 3)
+                self.assertIn(("005930", "KRX"), collector._approved_trade_sources)
+                socket.responses.put_nowait({"trnm": "CNSRLST", "data": PAIRS})
+                self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
+                socket.responses.put_nowait(trade)
+                await asyncio.wait_for(asyncio.gather(published.wait(), heartbeat.wait()), 3)
+                self.assertTrue(socket.trade_received.is_set())
+                self.assertTrue(decoded.is_set())
+                self.assertTrue(admitted.is_set())
+                self.assertFalse(held.release.is_set())
+                self.assertFalse(held.first_finished.is_set())
+                self.assertEqual((1, 1), (len(held.attempts), held.max_active))
+                self.assertEqual(1, connect.call_count)
+                self.assertEqual("WAITING_REGISTER", self.service.condition_status()["apply_status"])
+                self.assertEqual(("7", 0), (self.service._pending_condition.selected[0], self.service._pending_condition.revision))
+                events = []
+                while not observer.queue.empty():
+                    events.append(observer.queue.get_nowait())
+                self.assertEqual(1, sum(value.get("type") == "trade" for value in events))
+                self.assertEqual(60700, collector._latest_snapshots[("trade", "005930")]["event"]["payload"]["current_price"])
+            finally:
+                held.release.set()
+                if self.service._condition_status_tail is not None:
+                    await asyncio.wait_for(asyncio.shield(self.service._condition_status_tail), 3)
+                await collector.close()
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+                hub.disconnect(observer)
+        self.assertEqual((1, 1, 0), (len(held.attempts), held.max_active, held.active))
+
+    async def test_status_failure_keeps_collector_failure_ready_clear_and_three_second_reconnect(self):
+        for lost_ack in (False, True):
+            with self.subTest(lost_ack=lost_ack):
+                held = _HeldConditionStatusStore(self.store, fail_first=True, commit_before_error=lost_ack)
+                self.service._store = held
+                hub = self.service._hub
+                observer = hub.connect()
+                hub.update_subscription(observer, ["005930"], [])
+                sockets, connected = [_CollectorConditionSocket(), _CollectorConditionSocket()], []
+                ready = [asyncio.Event(), asyncio.Event()]
+                failed = asyncio.Event()
+                failure_times = []
+                collector = CentralRealtimeCollector(lambda: "fake", "real", hub,
+                    lambda: datetime.fromisoformat("2026-09-15T10:00:00+09:00"), market_events=self.service)
+                original_ready, original_publish = hub.set_upstream_ready, hub.publish
+
+                def connect_socket(*args, **kwargs):
+                    self.assertLess(len(connected), 2, "one status failure caused repeated reconnects")
+                    socket = sockets[len(connected)]
+                    connected.append(socket)
+                    return socket
+
+                def observe_ready(codes, value, **kwargs):
+                    result = original_ready(codes, value, **kwargs)
+                    if value and "005930" in codes:
+                        ready[len(connected) - 1].set()
+                    return result
+
+                def observe_publish(event, code=""):
+                    result = original_publish(event, code)
+                    if event.get("type") == "connection_failed":
+                        self.assertIn("controlled condition status write failure", event["message"])
+                        failure_times.append(time.monotonic())
+                        failed.set()
+                    return result
+
+                with patch.object(collector_module, "connect", side_effect=connect_socket), \
+                        patch.object(collector_module, "REALTIME_REG_INTERVAL_SECONDS", .01), \
+                        patch.object(hub, "set_upstream_ready", side_effect=observe_ready), \
+                        patch.object(hub, "publish", side_effect=observe_publish):
+                    await collector.start()
+                    try:
+                        await asyncio.wait_for(asyncio.gather(ready[0].wait(), sockets[0].list_requested.wait()), 3)
+                        sockets[0].responses.put_nowait({"trnm": "CNSRLST", "data": PAIRS})
+                        self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
+                        self.assertEqual(1, len(connected))
+                        held.release.set()
+                        await asyncio.wait_for(failed.wait(), 3)
+                        self.assertFalse(hub.upstream_ready_for({"005930"}))
+                        self.assertEqual("FAILED", collector.credential_connection_status()["phase"])
+                        await asyncio.wait_for(asyncio.gather(ready[1].wait(), sockets[1].list_requested.wait()), 6)
+                        self.assertGreaterEqual(time.monotonic() - failure_times[0], 3)
+                        sockets[1].responses.put_nowait({"trnm": "CNSRLST", "data": PAIRS})
+                        self.assertTrue(await asyncio.to_thread(held.second_entered.wait, 2))
+                        await asyncio.wait_for(asyncio.shield(self.service._condition_status_tail), 3)
+                        self.assertTrue(hub.upstream_ready_for({"005930"}))
+                        self.assertEqual((2, 1, 2, 1), (len(connected), len(failure_times), len(held.attempts), held.max_active))
+                        self.assertIsNone(self.service._condition_status_error)
+                    finally:
+                        held.release.set()
+                        await collector.close()
+                        hub.disconnect(observer)
+
     async def test_failed_clear_ack_is_visible_and_explicit_retry_reuses_active_condition(self):
         await self.change()
         await self.message(initial("8"))
@@ -285,8 +465,12 @@ class ConditionOperationsAPITests(unittest.TestCase):
             with TestClient(app) as client:
                 service, socket = app.state.market_event_service, _Socket()
                 service._broker = _Broker()
+                async def status_ack():
+                    await asyncio.shield(service._condition_status_tail)
+
                 client.portal.call(service.on_ws_connected, socket)
                 client.portal.call(service.handle_ws_message, {"trnm": "CNSRLST", "data": PAIRS}, socket)
+                client.portal.call(status_ack)
                 client.portal.call(service.handle_ws_message, initial("7"), socket)
                 self.assertTrue(client.get("/api/v1/settings/operations", headers=headers).json()["condition_runtime_supported"])
                 response = client.put("/api/v1/settings/operations", headers=headers, json={
@@ -294,6 +478,7 @@ class ConditionOperationsAPITests(unittest.TestCase):
                 self.assertEqual(200, response.status_code)
                 client.portal.call(service.poll_condition_updates, socket)
                 client.portal.call(service.handle_ws_message, {"trnm": "CNSRLST", "data": PAIRS}, socket)
+                client.portal.call(status_ack)
                 client.portal.call(service.handle_ws_message, initial("8", return_code=1), socket)
                 client.portal.call(service.handle_ws_message, {"trnm": "CNSRCLR", "seq": "8", "return_code": 0}, socket)
                 failed = client.get("/api/v1/settings/operations", headers=headers).json()

@@ -143,9 +143,13 @@ class MatchedThemeRow:
     themes: tuple[str, ...]
 
 def match_theme_rows(rows: tuple[ThemeImportRow, ...], stocks: StockLookup) -> tuple[tuple[MatchedThemeRow, ...], tuple[ThemeImportRow, ...]]:
+    if not rows:
+        return (), ()
+    load_many = getattr(stocks, "find_codes_by_names", None)
+    codes_by_name = load_many(tuple(dict.fromkeys(row.name for row in rows))) if callable(load_many) else None
     matched=[]; errors=[]
     for row in rows:
-        code=stocks.find_code_by_name(row.name)
+        code=codes_by_name[row.name] if codes_by_name is not None else stocks.find_code_by_name(row.name)
         if code is None: errors.append(row)
         else: matched.append(MatchedThemeRow(code,row.name,row.themes))
     return tuple(matched),tuple(errors)

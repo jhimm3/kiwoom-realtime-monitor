@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 class MarketReadStore(Protocol):
     def load_minute_bars(self, code: str, trading_date: str, market: str = "") -> list[dict[str, Any]]: ...
 
+    def load_recent_minute_bars(
+        self, code: str, start_date: str, end_date: str, market: str = "", trading_days: int = 2, *,
+        realtime_deltas: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
     def load_latest_market_caps(self, codes: list[str]) -> list[dict[str, Any]]: ...
 
     def load_documents(self, collection: str, owner: str = "", limit: int = 1000) -> list[dict[str, Any]]: ...
@@ -101,22 +106,20 @@ def create_market_live_read_router(
     ) -> dict[str, object]:
         """TR 없이 중앙 저장 이력과 미저장 RAM 집계로 최근 거래일 분봉을 반환한다."""
         end = datetime.fromisoformat(end_date).date()
-        values: list[dict[str, Any]] = []
-        found_days: set[str] = set()
-        for offset in range(31):
-            day = (end - timedelta(days=offset)).isoformat()
-            requested_market = market.upper()
-            rows = await load_display_minute_bars(
-                code, day,
-                "" if requested_market == "COMBINED" else requested_market,
+        start_date = (end - timedelta(days=30)).isoformat()
+        requested_market = market.upper()
+        current_collector = get_collector()
+        if current_collector is not None:
+            values = await current_collector.load_live_recent_minute_bars(
+                code, start_date, end_date, requested_market, trading_days,
             )
-            if requested_market == "COMBINED":
-                rows = _combined_minute_bars(rows)
-            if rows:
-                values.extend(rows)
-                found_days.add(day)
-                if len(found_days) >= trading_days:
-                    break
+        else:
+            values = await asyncio.to_thread(
+                store.load_recent_minute_bars, code, start_date, end_date, requested_market, trading_days,
+            )
+        if requested_market == "COMBINED":
+            values = _combined_minute_bars(values)
+        found_days = {str(value['trading_date']) for value in values}
         values.sort(key=lambda value: (
             str(value.get("trading_date", "")), str(value.get("minute", "")),
         ))

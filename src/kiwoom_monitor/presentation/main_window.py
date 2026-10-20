@@ -4323,7 +4323,7 @@ class MainWindow(QMainWindow):
                 self._settings.set("daily_high_adjusted_basis_version", "1")
             self._daily_high_basis_refresh_expected.clear()
             self._daily_high_basis_refresh_received.clear()
-        self._secondary_data_coordinator.daily_high_finished(codes)
+        self._app_controller.start_fundamentals_phase(codes)
 
     def _load_cached_historical_highs(self, codes: tuple[str, ...]) -> None:
         if self._stock_lookup is None or not hasattr(self._stock_lookup, "load_historical_high_prices"):

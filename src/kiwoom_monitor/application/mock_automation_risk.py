@@ -387,7 +387,7 @@ def position_cost_fifo(exact_fills, costs, trading_date, *, cost_query_complete=
         if event.side == "BUY":
             lots.setdefault(event.symbol, []).append([
                 event.quantity,
-                Fraction(event.quantity * event.price) + allocated_cost.get(event.source_event_id, Fraction(0)),
+                Fraction(event.quantity * event.price) + allocated_cost.get(event.source_event_id, 0),
                 event.run_id,
             ])
             continue

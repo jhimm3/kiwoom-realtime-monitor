@@ -36,6 +36,7 @@ class MarketCacheWriter(QThread):
         # Standalone/offline tests may omit the app's existing broker clock.
         self._now = now_provider or kst_now
         self._queue: Queue[tuple[object, ...]] = Queue()
+        self._minute_retention_cutoff: date | None = None
 
     def enqueue_minute_bars(
         self,
@@ -100,11 +101,20 @@ class MarketCacheWriter(QThread):
             except Empty:
                 continue
             if job[0] == "minute":
-                self._save_minute(minute_repository, job[1], job[2])
+                saved = self._save_minute(minute_repository, job[1], job[2])
+                cutoff = self._minute_retention_cutoff
+                if saved and cutoff is not None and (
+                    any(bar.minute.date() < cutoff for bar in job[1].values())
+                    or any(minute.date() < cutoff for _, minute in job[2])
+                ):
+                    self._purge_minute_retention(minute_repository, cutoff)
             elif job[0] == "price":
                 self._save_prices(stock_repository, job[1], job[2], job[3], job[4], job[5], job[6])
             elif job[0] == "history":
-                self._save_history(minute_repository, job[1], job[2], job[3], job[4], job[5])
+                saved = self._save_history(minute_repository, job[1], job[2], job[3], job[4], job[5])
+                cutoff = self._minute_retention_cutoff
+                if saved and cutoff is not None and any(bar.minute.date() < cutoff for bar in job[2]):
+                    self._purge_minute_retention(minute_repository, cutoff)
             elif job[0] == "gap":
                 try:
                     minute_repository.mark_gap_minutes(job[1])
@@ -122,10 +132,16 @@ class MarketCacheWriter(QThread):
             elif job[0] == "fundamentals":
                 self._save_fundamentals(stock_repository, job[1], job[2], job[3], job[4], job[5])
             elif job[0] == "retention":
-                try:
-                    minute_repository.purge_before(job[1])
-                except Exception as error:
-                    self.retention_failed.emit(job[1], str(error))
+                self._purge_minute_retention(minute_repository, job[1])
+
+    def _purge_minute_retention(self, repository: MinuteBarRepository, cutoff: date) -> None:
+        try:
+            repository.purge_before(cutoff)
+        except Exception as error:
+            self.retention_failed.emit(cutoff, str(error))
+        else:
+            previous = self._minute_retention_cutoff
+            self._minute_retention_cutoff = max(previous, cutoff) if previous is not None else cutoff
 
     def _save_fundamentals(self, repository: StockRepository, code: str,
                            market_cap_eok: float | None, float_ratio_percent: float | None,
@@ -156,7 +172,7 @@ class MarketCacheWriter(QThread):
         market_pending: dict[
             tuple[str, datetime], tuple[float, float, float, float, float | None]
         ],
-    ) -> None:
+    ) -> bool:
         grouped: dict[str, list[MinuteOhlcv]] = {}
         for (code, _), bar in pending.items():
             grouped.setdefault(code, []).append(bar)
@@ -165,8 +181,9 @@ class MarketCacheWriter(QThread):
             repository.upsert_market_index_minutes(market_pending)
         except Exception as error:
             self.minute_failed.emit(pending, market_pending, str(error))
-            return
+            return False
         self.minute_saved.emit()
+        return True
 
     def _save_prices(
         self,
@@ -192,13 +209,14 @@ class MarketCacheWriter(QThread):
         self, repository: MinuteBarRepository, code: str,
         bars: tuple[MinuteOhlcv, ...], trade_date: date, synced_at: datetime,
         recovery_generation: int | None = None,
-    ) -> None:
+    ) -> bool:
         try:
             repository.upsert_bars(code, bars)
             repository.record_history_sync(code, trade_date, synced_at, len(bars))
         except Exception as error:
             self.history_failed.emit(code, str(error))
-            return
+            return False
         self.history_saved.emit(code)
         self.history_quality_saved.emit(code, {"generation": recovery_generation,
             "minutes": tuple(bar.minute for bar in bars)})
+        return True

@@ -81,6 +81,62 @@ class NativeStore:
 
 
 class RecordedCaptureTests(unittest.TestCase):
+    def test_native_recent_minutes_preserve_market_day_and_overlay_through_recorded_execution(self):
+        from kiwoom_monitor.central_server.diagnostic_recorded_execution import (
+            _execute_recorded_operations, _result_digest,
+        )
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import thaw_operation_arguments
+
+        now = datetime.fromisoformat('2026-10-16T11:00:00+09:00')
+        with tempfile.TemporaryDirectory() as root:
+            store = SQLiteQueryStore(Path(root) / 'recent-recorded.sqlite3', now_provider=lambda: now)
+            store.initialize()
+            self.addCleanup(store.close)
+            base = dict(code='005930', minute='10:00', market='KRX', open=100, high=110,
+                        low=90, close=105, volume=10, trade_value_million_won=20, updated_at=now.timestamp())
+            store.save_minute_bars([
+                {**base, 'trading_date': '2026-10-14'},
+                {**base, 'trading_date': '2026-10-15', 'market': 'SOR', 'volume': 7},
+                {**base, 'trading_date': '2026-10-16', 'market': 'UNKNOWN', 'volume': 99},
+            ])
+            deltas = [
+                {**base, 'trading_date': '2026-10-14', 'volume': 3, 'operation_id': 'recorded-existing'},
+                {**base, 'trading_date': '2026-10-16', 'volume': 4, 'operation_id': 'recorded-ram-day'},
+            ]
+            with capture(store_inputs=True, collector_inputs=False) as session:
+                with capture_owner('readers', 'recent:source', 'recent:actor'):
+                    results = [store.load_recent_minute_bars('005930', '2026-09-16', '2026-10-16', market, 2,
+                        realtime_deltas=deltas) for market in ('COMBINED', 'KRX')]
+                trace.stop()
+                manifest, events = trace.recorded_events(session['trace_id'])
+            self.assertEqual(0, manifest['input_rejected'])
+            self.assertEqual([
+                [('2026-10-15', 'SOR', 7), ('2026-10-16', 'KRX', 4)],
+                [('2026-10-14', 'KRX', 13), ('2026-10-16', 'KRX', 4)],
+            ], [[(row['trading_date'], row['market'], row['volume']) for row in rows] for rows in results])
+            starts = [row for row in events if row['event_type'] == 'operation_start'
+                      and row['method'] == 'load_recent_minute_bars']
+            self.assertEqual(2, len(starts))
+            endings = {row['operation_id']: row for row in events if row['event_type'] == 'operation_end'}
+            for start, market, result in zip(starts, ('COMBINED', 'KRX'), results, strict=True):
+                self.assertEqual(dict(code='005930', start_date='2026-09-16', end_date='2026-10-16',
+                    market=market, trading_days=2, realtime_deltas=deltas), thaw_operation_arguments(start))
+                ending = endings[start['operation_id']]
+                self.assertEqual(('returned', 'list', len(result)),
+                                 (ending['outcome'], ending['result_type'], ending['result_count']))
+            window_end = max((row['entered_mono_ns'] - manifest['started_mono_ns']) / 1e9
+                             for row in starts) + .05
+            replay = asyncio.run(_execute_recorded_operations(store, events,
+                started_mono_ns=manifest['started_mono_ns'], window_start_seconds=0,
+                window_end_seconds=window_end))
+            self.assertEqual('complete', replay['state'])
+            self.assertEqual([row['operation_id'] for row in starts],
+                             [row['source_operation_id'] for row in replay['calls']])
+            self.assertEqual([_result_digest(result)[0] for result in results],
+                             [row['result_digest'] for row in replay['calls']])
+            self.assertTrue(all(not row['result_digest_unavailable'] for row in replay['calls']))
+            self.assertEqual(['recorded-existing', 'recorded-ram-day'], [row['operation_id'] for row in deltas])
+
     def test_native_minute_range_and_legacy_full_day_arguments_survive_capture_and_replay(self):
         store = SQLiteQueryStore(Path(':memory:'))
         store.initialize()

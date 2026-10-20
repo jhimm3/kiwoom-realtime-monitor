@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from difflib import get_close_matches
 from pathlib import Path
+from typing import Callable
 
 from kiwoom_monitor.application.trade_strength import StockFundamentals
 from kiwoom_monitor.application.historical_high_service import HistoricalHighCache, HistoricalHighEvidence, HistoricalHighTarget
@@ -24,7 +25,13 @@ class RankingStockCache:
 
 
 class StockRepository:
-    def __init__(self, path: Path) -> None: self._path = path
+    def __init__(
+        self, path: Path, *,
+        catalog_connection_factory: Callable[[], sqlite3.Connection] | None = None,
+    ) -> None:
+        self._path = path
+        # Catalog compatibility callers retain their existing native FK policy.
+        self._catalog_connect = catalog_connection_factory or (lambda: sqlite3.connect(self._path))
 
     def load_ranking_cache(
         self, codes: tuple[str, ...], market_codes: tuple[str, ...], trade_date: date,
@@ -113,18 +120,45 @@ class StockRepository:
         finally:
             con.close()
     def find_code_by_name(self, name: str) -> str | None:
-        con = sqlite3.connect(self._path)
+        con = self._catalog_connect()
         try:
             row=con.execute("SELECT code FROM stocks WHERE name=?",(name,)).fetchone()
             if row is None: row=con.execute("SELECT stock_code FROM stock_aliases WHERE alias=?",(name,)).fetchone()
         finally:
             con.close()
         return str(row[0]) if row else None
+
+    def find_codes_by_names(self, names: tuple[str, ...]) -> dict[str, str | None]:
+        """Resolve requested names with the same current-name/alias precedence."""
+        result: dict[str, str | None] = {name: None for name in names}
+        if not result:
+            return {}
+        con = self._catalog_connect()
+        try:
+            requested = tuple(result)
+            chunk_size = max(1, con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER))
+            for offset in range(0, len(requested), chunk_size):
+                chunk = requested[offset:offset + chunk_size]
+                placeholders = ",".join("(?)" for _ in chunk)
+                rows = con.execute(
+                    f"WITH requested(name) AS (VALUES {placeholders}) "
+                    "SELECT requested.name, COALESCE("
+                    "(SELECT code FROM stocks WHERE stocks.name=requested.name LIMIT 1), "
+                    "(SELECT stock_code FROM stock_aliases WHERE alias=requested.name LIMIT 1)) "
+                    "FROM requested",
+                    chunk,
+                ).fetchall()
+                for name, code in rows:
+                    result[str(name)] = str(code) if code is not None else None
+        finally:
+            con.close()
+        return result
+
     def find_stock_candidates(self, name: str, limit: int = 8) -> tuple[tuple[str, str], ...]:
         query = name.strip()
         if not query:
             return ()
-        con = sqlite3.connect(self._path)
+        con = self._catalog_connect()
         try:
             rows = con.execute("SELECT code, name FROM stocks WHERE name LIKE ? ORDER BY name LIMIT ?", (f"%{query}%", limit)).fetchall()
             if len(rows) < limit:
@@ -137,7 +171,7 @@ class StockRepository:
             con.close()
         return tuple((str(code), str(stock_name)) for code, stock_name in rows[:limit])
     def find_concatenated_stocks(self, name: str) -> tuple[tuple[str, str], ...]:
-        con = sqlite3.connect(self._path)
+        con = self._catalog_connect()
         try:
             rows = con.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
         finally:
@@ -146,7 +180,7 @@ class StockRepository:
             name, tuple((str(code), str(stock_name)) for code, stock_name in rows)
         )
     def find_partial_concatenated_stocks(self, name: str) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
-        con = sqlite3.connect(self._path)
+        con = self._catalog_connect()
         try:
             rows = con.execute("SELECT code, name FROM stocks ORDER BY LENGTH(name) DESC, name").fetchall()
         finally:
@@ -205,7 +239,7 @@ class StockRepository:
         return tuple((str(code), str(old), str(new), str(source)) for code, old, new, source in rows)
 
     def pending_name_change(self, old_name: str) -> tuple[str, str, str, str] | None:
-        con = sqlite3.connect(self._path)
+        con = self._catalog_connect()
         try:
             row = con.execute(
                 "SELECT stock_code,old_name,new_name,source FROM stock_name_history "
@@ -220,7 +254,7 @@ class StockRepository:
         """승인한 과거 이름만 별칭으로 만들고, 나머지는 거절 상태로 보관한다."""
         if not decisions:
             return
-        con = sqlite3.connect(self._path)
+        con = self._catalog_connect()
         try:
             with con:
                 for (stock_code, old_name), approved in decisions.items():

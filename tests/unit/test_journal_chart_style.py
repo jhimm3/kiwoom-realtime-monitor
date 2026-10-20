@@ -133,6 +133,56 @@ class JournalChartStyleTests(unittest.TestCase):
         self.assertEqual(visible, chart._rows)
         self.assertEqual({5: {4: 48.0, 5: 40.0, 6: 50.0}}, chart._moving_average_data())
 
+    def test_fill_nearest_keeps_first_tie_last_duplicate_and_nonsorted_rows(self) -> None:
+        chart = MinuteChart()
+        start = datetime(2026, 8, 28, 9)
+        moments = tuple(start + timedelta(minutes=minute, microseconds=500_000) for minute in (2, 0, 2, 4))
+        chart.set_rows(tuple((moment.isoformat(), 100, 101, 99, 100, 1, 1.0, "확정") for moment in moments))
+        fills = tuple(
+            TradeFill(order, "005930", "테스트", "매수", moment, 1, 100, "", "KRX")
+            for order, moment in (
+                ("before", start),
+                ("tie", start + timedelta(minutes=1, microseconds=500_000)),
+                ("exact", moments[0]),
+                ("after", start + timedelta(minutes=5)),
+                ("duplicate", start + timedelta(minutes=1, microseconds=100_000)),
+                ("duplicate", start + timedelta(minutes=1, microseconds=900_000)),
+            )
+        )
+        chart.set_fills(fills)
+        self.assertEqual({
+            "before|005930|2026-08-28T09:00:00|매수": 1,
+            "tie|005930|2026-08-28T09:01:00|매수": 0,
+            "exact|005930|2026-08-28T09:02:00|매수": 0,
+            "after|005930|2026-08-28T09:05:00|매수": 3,
+            "duplicate|005930|2026-08-28T09:01:00|매수": 0,
+        }, chart._trade_fill_indices(list(moments)))
+
+    def test_fill_nearest_reuses_only_current_rows_and_fills(self) -> None:
+        chart = MinuteChart(); chart.resize(900, 420)
+        start = datetime(2026, 8, 28, 9)
+        rows = tuple(((start + timedelta(minutes=index)).isoformat(), 100, 101, 99, 100, 1, 1.0, "확정") for index in range(4))
+        chart.set_rows(rows)
+        chart.set_fills((TradeFill("buy", "005930", "테스트", "매수", start, 1, 100, "", "KRX"),))
+
+        def indices() -> dict[str, int]:
+            return chart._trade_fill_indices([datetime.fromisoformat(str(row[0])) for row in chart._rows])
+
+        first = indices()
+        chart.resize(600, 300); chart.set_reference_fills(True); chart.set_top_margin(30)
+        chart.set_background("#222222"); chart.set_annotations(())
+        self.assertIs(first, indices())
+        chart.set_view_count(2); chart.set_view_start(1)
+        second = indices()
+        self.assertIsNot(first, second)
+        self.assertEqual({"buy|005930|2026-08-28T09:00:00|매수": 0}, second)
+        chart.set_fills((TradeFill("buy", "005930", "테스트", "매수", start + timedelta(minutes=2), 1, 100, "", "KRX"),))
+        self.assertEqual({"buy|005930|2026-08-28T09:02:00|매수": 1}, indices())
+        chart.set_rows(tuple(((start + timedelta(minutes=10 + index)).isoformat(), *row[1:]) for index, row in enumerate(rows)))
+        self.assertEqual({"buy|005930|2026-08-28T09:02:00|매수": 0}, indices())
+        chart.set_fills(())
+        self.assertEqual({}, indices())
+
     def test_repaint_reuses_average_input_with_current_view_and_line_style(self) -> None:
         conversions: list[float] = []
 

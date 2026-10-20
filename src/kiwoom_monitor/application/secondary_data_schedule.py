@@ -24,14 +24,12 @@ class SecondaryDataFollowupCoordinator:
         start_daily_high: Callable[[tuple[str, ...], bool], bool],
         start_daily_high_phase: Callable[[tuple[str, ...]], None],
         start_fundamentals: Callable[[tuple[str, ...]], bool],
-        start_fundamentals_phase: Callable[[tuple[str, ...]], None],
         start_nxt_phase: Callable[[tuple[str, ...]], None],
     ) -> None:
         self._start_minute_history = start_minute_history
         self._start_daily_high = start_daily_high
         self._start_daily_high_phase = start_daily_high_phase
         self._start_fundamentals = start_fundamentals
-        self._start_fundamentals_phase = start_fundamentals_phase
         self._start_nxt_phase = start_nxt_phase
 
     def start(
@@ -56,9 +54,6 @@ class SecondaryDataFollowupCoordinator:
         if not self._start_minute_history(codes, False):
             self._start_daily_high_phase(codes)
         return SecondaryStartPhase.MINUTE_HISTORY
-
-    def daily_high_finished(self, codes: tuple[str, ...]) -> None:
-        self._start_fundamentals_phase(codes)
 
     def fundamentals_finished(self, codes: tuple[str, ...], *, after_hours_pause: bool) -> None:
         self._start_nxt_phase(codes)

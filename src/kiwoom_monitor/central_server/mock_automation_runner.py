@@ -16,7 +16,7 @@ from .observation_frame_recovery import (
 )
 from time import perf_counter
 from threading import Lock
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -68,6 +68,19 @@ RUNNER_CHECKPOINT_VERSION = "mock_automation_runner_checkpoint/v1"
 INPUT_KINDS = ("top20_membership", "minute_bar")
 CLOCK_COLLECTION = "execution_mock_automation_clock_current"
 PROTECTION_REVIEW_VERSION = "mock-protection-review/v1"
+
+
+def _checkpoint_bar_document(value):
+    if type(value) is not KrxMinuteBarFrame:
+        return asdict(value)
+    document = {}
+    for field in fields(value):
+        item = getattr(value, field.name)
+        item_type = type(item)
+        if not (item is None or item_type is str or item_type is int or item_type is bool or item_type is float):
+            return asdict(value)
+        document[field.name] = item
+    return document
 
 
 class MockAutomationRunner:
@@ -1404,7 +1417,7 @@ class MockAutomationRunner:
         stamps=[price['available_at']] if available else []
         if source is not None and not self._protection_pending() and policy.purpose!='PROTECTIVE_EXIT':
             stamps.append(source['available_at'])
-        _,judgment_at=self._current_unfilled_judgment(policy,now)
+        judgment,judgment_at=self._current_unfilled_judgment(policy,now)
         if judgment_at is not None:stamps.append(judgment_at)
         if (decision_cut==risk.observed_at and any(stamp>risk.observed_at for stamp in stamps)
                 or previous is not None and (decision_cut,risk.reconciliation_revision)==previous[:2]):
@@ -1436,7 +1449,7 @@ class MockAutomationRunner:
             price['input_ref'] if available else '', price['available_at'] if available else None, 0, None)
         paired = {'ev_status':'EV_UNAVAILABLE','reason':'unfilled_paired_population_not_selected'}
         if not protecting:
-            judgment, stamp = self._current_unfilled_judgment(policy,now)
+            stamp = judgment_at
             if stamp is not None:
                 assessment = replace(assessment,thesis_valid=judgment is not None,trend_allows_wait=judgment,
                     thesis_input_ref=self._unfilled_judgment['decision_id'],thesis_available_at=stamp,
@@ -2755,7 +2768,7 @@ class MockAutomationRunner:
             "seen_fill_ids": sorted(self._seen_fill_ids),
             "universes": [asdict(value) for value in
                           (recovery.universes if recovery is not None else self._universes)],
-            "bars": [asdict(value) for value in
+            "bars": [_checkpoint_bar_document(value) for value in
                      (recovery.bars if recovery is not None else self._bars).values()],
             "status": deepcopy(self._status),
         }
