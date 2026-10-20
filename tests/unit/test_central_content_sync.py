@@ -3,6 +3,9 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from copy import deepcopy
+from contextlib import closing
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,8 +18,11 @@ from kiwoom_monitor.infrastructure.central_content_sync import (
     CentralContentSyncService,
     _journal_news_link_key,
     _merge_journal_link,
+    _manifest_hash,
 )
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.infrastructure.persistence.database import Database
+from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 
 
@@ -53,6 +59,131 @@ class _Client:
 
 
 class CentralContentSyncServiceTest(unittest.TestCase):
+    def test_theme_manifest_ignores_only_full_backup_generation_time(self) -> None:
+        first = {"owner": "default", "key": "full", "document": {
+            "format": ThemeBackupService.FORMAT, "version": ThemeBackupService.VERSION,
+            "profiles": [{"name": "기본", "created_at": "원래 편집 시각"}],
+            "created_at": "2030-01-02T09:00:00+09:00",
+        }}
+        later = deepcopy(first)
+        later["document"]["created_at"] = "2030-01-02T09:01:00+09:00"
+        self.assertEqual(_manifest_hash(first, collection="theme_metadata"),
+                         _manifest_hash(later, collection="theme_metadata"))
+        self.assertNotEqual(_manifest_hash(first, collection="news_article"),
+                            _manifest_hash(later, collection="news_article"))
+        edited = deepcopy(later)
+        edited["document"]["profiles"][0]["created_at"] = "새 편집 시각"
+        self.assertNotEqual(_manifest_hash(first, collection="theme_metadata"),
+                            _manifest_hash(edited, collection="theme_metadata"))
+        for document in ({"created_at": "first"}, {"format": "other", "profiles": [], "created_at": "first"}):
+            with self.subTest(document=document):
+                before = {"document": document}
+                after = {"document": {**document, "created_at": "later"}}
+                self.assertNotEqual(_manifest_hash(before, collection="theme_metadata"),
+                                    _manifest_hash(after, collection="theme_metadata"))
+
+    def test_theme_noop_preserves_native_completion_after_restart_pull_and_inflight_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            main, news = root / "main.sqlite3", root / "news.sqlite3"
+            Database(main).initialize()
+            with closing(sqlite3.connect(main)) as connection, connection:
+                connection.execute("INSERT INTO stocks(code,name,market) VALUES('005930','원래 이름','KOSPI')")
+            now = [datetime.fromisoformat("2030-01-02T09:00:00+09:00")]
+            store = SQLiteQueryStore(root / "central.sqlite3", now_provider=lambda: now[0])
+            store.initialize()
+
+            class NativeClient(_Client):
+                def __init__(self):
+                    super().__init__()
+                    self.calls = []
+                    self.after_write = None
+                    self.fail = False
+
+                def upsert(self, collection, documents):
+                    if self.fail and collection == "theme_metadata":
+                        raise RuntimeError("native upload retry fixture")
+                    store.upsert_documents(collection, documents)
+                    self.calls.append((collection, deepcopy(documents)))
+                    callback, self.after_write = self.after_write, None
+                    if callback is not None:
+                        callback()
+                    return len(documents)
+
+                def load_all(self, collection, **kwargs):
+                    return store.load_documents(collection, updated_after=kwargs.get("updated_after", 0))
+
+            client = NativeClient()
+            service = CentralContentSyncService(client)
+            try:
+                with patch("kiwoom_monitor.infrastructure.persistence.theme_backup.kst_now", side_effect=lambda: now[0]):
+                    artifact1 = root / "backup-first.json"
+                    ThemeBackupService(main).export_to(artifact1)
+                    self.assertEqual(1, service.push(main, news).theme_metadata)
+                    accepted = store.load_documents("theme_metadata")
+                    history = store.load_theme_snapshots()
+                    self.assertEqual(1, len(history))
+                    manifest_path = root / "central_content_push_manifest.json"
+                    manifest = manifest_path.read_bytes()
+                    client.calls.clear()
+                    now[0] += timedelta(minutes=1)
+                    artifact2 = root / "backup-later.json"
+                    ThemeBackupService(main).export_to(artifact2)
+                    self.assertNotEqual(artifact1.read_bytes(), artifact2.read_bytes())
+                    with patch.object(service, "_save_push_manifest", wraps=service._save_push_manifest) as save:
+                        self.assertEqual(0, service.push(main, news).total)
+                    save.assert_not_called()
+                    self.assertEqual([], client.calls)
+                    self.assertEqual(manifest, manifest_path.read_bytes())
+                    self.assertEqual(accepted, store.load_documents("theme_metadata"))
+                    self.assertEqual(history, store.load_theme_snapshots())
+
+                    service = CentralContentSyncService(client)
+                    self.assertEqual(0, service.push(main, news).total)
+                    self.assertEqual(0, service.pull(main, news).total)
+                    self.assertEqual(0, service.push(main, news).total)
+                    other_root = root / "other-pc"
+                    other_root.mkdir()
+                    other_main, other_news = other_root / "main.sqlite3", other_root / "news.sqlite3"
+                    Database(other_main).initialize()
+                    other = CentralContentSyncService(client)
+                    self.assertEqual(1, other.pull(other_main, other_news).theme_metadata)
+                    self.assertEqual(0, other.push(other_main, other_news).total)
+                    self.assertEqual(accepted, store.load_documents("theme_metadata"))
+
+                    def edit(name):
+                        with closing(sqlite3.connect(main)) as connection, connection:
+                            connection.execute("UPDATE stocks SET name=? WHERE code='005930'", (name,))
+
+                    now[0] += timedelta(minutes=1)
+                    edit("보낸 편집")
+                    client.after_write = lambda: edit("전송 중 다음 편집")
+                    self.assertEqual(1, service.push(main, news).theme_metadata)
+                    self.assertEqual("보낸 편집", store.load_documents("theme_metadata")[0]["document"]["stock_catalog"][0]["name"])
+                    now[0] += timedelta(minutes=1)
+                    self.assertEqual(1, service.push(main, news).theme_metadata)
+                    self.assertEqual("전송 중 다음 편집", store.load_documents("theme_metadata")[0]["document"]["stock_catalog"][0]["name"])
+                    self.assertEqual(0, service.push(main, news).total)
+
+                    now[0] += timedelta(minutes=1)
+                    edit("실패 후 재시도")
+                    client.fail = True
+                    manifest = manifest_path.read_bytes()
+                    with self.assertRaisesRegex(RuntimeError, "native upload retry fixture"):
+                        service.push(main, news)
+                    self.assertEqual(manifest, manifest_path.read_bytes())
+                    client.fail = False
+                    service = CentralContentSyncService(client)
+                    self.assertEqual(1, service.push(main, news).theme_metadata)
+                    self.assertEqual(0, service.push(main, news).total)
+                    final = store.load_documents("theme_metadata")[0]
+                    self.assertEqual("실패 후 재시도", final["document"]["stock_catalog"][0]["name"])
+                    self.assertEqual(now[0].isoformat(timespec="seconds"), client.calls[-1][1][0]["effective_at"])
+                    self.assertEqual(now[0].isoformat(timespec="seconds"), final["document"]["created_at"])
+                    self.assertEqual(4, len(store.load_theme_snapshots()))
+            finally:
+                store.close()
+
     def test_nas_mode_skips_bulk_news_catalog_but_keeps_local_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

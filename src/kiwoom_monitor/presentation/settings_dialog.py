@@ -279,37 +279,6 @@ class SettingsDialog(QDialog):
         if geometry is not None:
             self.restoreGeometry(geometry)
         return
-        layout = QFormLayout(self)
-        layout.addRow("화면 갱신 주기(초)", self._refresh_interval)
-        layout.addRow("화면 모드", self._ui_mode)
-        layout.addRow("관심 기준(%)", self._interest); layout.addRow("주의 기준(%)", self._caution); layout.addRow("불 기준(%)", self._fire)
-        layout.addRow("신고가 근접 기준(%)", self._near_high)
-        layout.addRow("추가 테마 구분자", self._theme_separators)
-        layout.addRow("표 글자 크기(0: 자동)", self._font_size)
-        layout.addRow("표 행 높이(0: 자동)", self._row_height)
-        layout.addRow("테마 배지 글자 크기(0: 자동)", self._badge_font_size)
-        layout.addRow("테마 배지 여백", self._badge_padding)
-        layout.addRow(self._near_high_enabled)
-        layout.addRow(self._strength_icons)
-        layout.addRow("신고가 거리 기준", self._high_distance_period)
-        if self._api_path is not None:
-            api_button = QPushButton("API 설정")
-            api_button.clicked.connect(self._open_api_settings)
-            layout.addRow("API", api_button)
-        if self._log_opener is not None:
-            log_button = QPushButton("로그 폴더 열기")
-            log_button.clicked.connect(self._log_opener)
-            layout.addRow("모니터링 로그", log_button)
-        if self._theme_manager_opener is not None:
-            theme_button = QPushButton("종목/테마 관리")
-            theme_button.clicked.connect(self._theme_manager_opener)
-            layout.addRow("종목/테마", theme_button)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("설정 저장")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
 
     def _build_grouped_layout(self) -> None:
         self.resize(self._dialog_dimension("settings_dialog_width", 680), self._dialog_dimension("settings_dialog_height", 650))

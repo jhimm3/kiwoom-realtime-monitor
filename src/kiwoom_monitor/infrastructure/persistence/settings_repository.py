@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from kiwoom_monitor.domain.time_basis import kst_now, as_kst

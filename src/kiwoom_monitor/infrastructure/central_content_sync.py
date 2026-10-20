@@ -190,7 +190,7 @@ class CentralContentSyncService:
             self._load_push_manifest(news_database_path)
             for collection, document in received_documents:
                 key = _manifest_key(collection, document)
-                fingerprint = _manifest_hash(document)
+                fingerprint = _manifest_hash(document, collection=collection)
                 if self._push_manifest.get(key) != fingerprint:
                     manifest_changes.append((collection, document, key, fingerprint))
         changed_collections = {name: [] for name in collections}
@@ -251,14 +251,14 @@ class CentralContentSyncService:
     def _upload_changed(self, collection: str, documents: list[dict[str, Any]]) -> int:
         changed = [
             document for document in documents
-            if self._push_manifest.get(_manifest_key(collection, document)) != _manifest_hash(document)
+            if self._push_manifest.get(_manifest_key(collection, document)) != _manifest_hash(document, collection=collection)
         ]
         saved = 0
         for offset in range(0, len(changed), self._batch_size):
             batch = changed[offset:offset + self._batch_size]
             saved += self._client.upsert(collection, batch)
             for document in batch:
-                self._push_manifest[_manifest_key(collection, document)] = _manifest_hash(document)
+                self._push_manifest[_manifest_key(collection, document)] = _manifest_hash(document, collection=collection)
             # 성공한 batch는 즉시 기록한다. 뒤 batch 실패 시 이미 끝난 자료를
             # 다시 전송하지 않고 실패한 변경만 다음 실행에서 재시도한다.
             self._save_push_manifest()
@@ -287,7 +287,7 @@ class CentralContentSyncService:
             **self._read_themes(main_database_path),
         }.items():
             for document in documents:
-                self._push_manifest[_manifest_key(collection, document)] = _manifest_hash(document)
+                self._push_manifest[_manifest_key(collection, document)] = _manifest_hash(document, collection=collection)
         self._save_push_manifest()
         return True
 
@@ -674,8 +674,14 @@ def _manifest_key(collection: str, envelope: dict[str, Any]) -> str:
     )
 
 
-def _manifest_hash(envelope: dict[str, Any]) -> str:
+def _manifest_hash(envelope: dict[str, Any], *, collection: str) -> str:
     document = envelope.get("document")
+    if (collection == "theme_metadata" and isinstance(document, dict)
+            and document.get("format") == ThemeBackupService.FORMAT
+            and document.get("version") == ThemeBackupService.VERSION
+            and isinstance(document.get("profiles"), list)):
+        # Backup generation is not a theme edit; keep it in the transmitted artifact.
+        document = {key: value for key, value in document.items() if key != "created_at"}
     encoded = json.dumps(
         document if isinstance(document, dict) else {},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,

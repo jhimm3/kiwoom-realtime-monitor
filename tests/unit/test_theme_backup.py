@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,66 @@ from kiwoom_monitor.application.theme_suggestions import ThemeSuggestion
 
 
 class ThemeBackupServiceTest(unittest.TestCase):
+    def test_revision_keeps_exported_edits_and_rolls_back_failed_remote_import(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            StockRepository(path).upsert("005930", "삼성전자", "KOSPI")
+            themes = ThemeRepository(path)
+            themes.replace_for_stock("005930", ("반도체",))
+            themes.set_theme_alias("칩", "반도체")
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("INSERT INTO stock_aliases VALUES('삼전','005930')")
+                connection.execute(
+                    "INSERT INTO profile_theme_suggestions(profile_id,stock_code,news_identity,"
+                    "raw_theme_name,evidence,confidence,provider,model,body_hash,analyzed_at) "
+                    "SELECT profile_id,'005930','article','칩','근거',80,'fixture','fixture',"
+                    "'body','2030-01-02T09:00:00+09:00' FROM theme_profiles LIMIT 1",
+                )
+            backup = ThemeBackupService(path)
+            changes = (
+                "UPDATE stocks SET name='새 이름'",
+                "UPDATE stocks SET market='KOSDAQ'",
+                "INSERT INTO stocks(code,name,market) VALUES('000001','새 종목','KOSPI')",
+                "UPDATE stock_aliases SET alias='새 별칭'",
+                "UPDATE profile_themes SET default_color='#123456'",
+                "UPDATE profile_stock_themes SET custom_color='#654321'",
+                "UPDATE profile_theme_name_decisions SET decision_source='새 승인'",
+                "UPDATE profile_theme_suggestions SET evidence='새 근거'",
+                "UPDATE theme_profiles SET profile_name='새 프로필'",
+                "UPDATE settings SET value='새 프로필' WHERE key='theme_active_profile'",
+            )
+            for statement in changes:
+                with self.subTest(statement=statement):
+                    remote = backup.export_document()
+                    revision = backup.revision()
+                    with closing(sqlite3.connect(path)) as writer, writer:
+                        self.assertGreater(writer.execute(statement).rowcount, 0)
+                    current = backup.export_document()
+                    self.assertNotEqual(revision, backup.revision())
+                    with self.assertRaises(ThemeRevisionConflict):
+                        backup.import_document(remote, expected_revision=revision)
+                    observed = backup.export_document()
+                    current.pop("created_at")
+                    observed.pop("created_at")
+                    self.assertEqual(current, observed)
+
+            remote = backup.export_document()
+            remote["profiles"].append({"name": "원격", "themes": [{"name": "실패"}]})
+            revision = backup.revision()
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TRIGGER fail_remote_theme BEFORE INSERT ON profile_themes "
+                    "WHEN NEW.theme_name='실패' BEGIN SELECT RAISE(ABORT,'native import fault'); END",
+                )
+            with self.assertRaises(ThemeBackupError):
+                backup.import_document(remote, expected_revision=revision)
+            self.assertEqual(revision, backup.revision())
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("DROP TRIGGER fail_remote_theme")
+            backup.import_document(remote, expected_revision=revision)
+            self.assertIn("원격", [item["name"] for item in backup.export_document()["profiles"]])
+
     def test_export_replacement_failure_keeps_previous_backup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.sqlite3"

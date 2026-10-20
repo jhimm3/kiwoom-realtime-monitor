@@ -58,7 +58,7 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
     def test_cap_noop_allows_remote_import_but_theme_and_catalog_edits_keep_conflict(self) -> None:
         first = datetime.fromisoformat("2030-01-02T09:00:00+09:00")
         received = datetime.fromisoformat("2030-01-02T09:00:01+09:00")
-        for edit in ("cap_only", "theme", "catalog"):
+        for edit in ("cap_only", "price_receipt", "market_values", "theme", "catalog"):
             with self.subTest(edit=edit), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "monitor.sqlite3"
                 Database(path).initialize()
@@ -94,7 +94,13 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
                             document = backup.export_document()
                             document.pop("created_at")
                             observed["cap_document"] = document
-                            if edit == "theme":
+                            if edit in {"price_receipt", "market_values"}:
+                                StockRepository(path).update_price_cache(
+                                    {"000001": 100 if edit == "price_receipt" else 120},
+                                    {}, {} if edit == "price_receipt" else {"000001": 1500.0},
+                                    first.date(), observed_at=received,
+                                )
+                            elif edit == "theme":
                                 themes.create_profile("사용자가 편집")
                             elif edit == "catalog":
                                 StockRepository(path).upsert("000001", "사용자 이름", "KOSDAQ")
@@ -118,12 +124,23 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
                     self.assertEqual(revision, observed["cap_revision"])
                     self.assertEqual(before_document, observed["cap_document"])
                     profiles = {profile["name"] for profile in backup.export_document()["profiles"]}
-                    if edit == "cap_only":
+                    if edit in {"cap_only", "price_receipt", "market_values"}:
                         self.assertEqual(revision, observed["edited_revision"])
                         self.assertTrue(result)
                         self.assertEqual(0, schedule.call_count)
                         self.assertFalse(marker.exists())
                         self.assertIn("원격에서 추가", profiles)
+                        with closing(sqlite3.connect(path)) as connection:
+                            price, receipt, cap = connection.execute(
+                                "SELECT last_price,last_price_updated_at,market_cap "
+                                "FROM stocks WHERE code='000001'",
+                            ).fetchone()
+                        self.assertEqual(120 if edit == "market_values" else 100, price)
+                        self.assertEqual(
+                            received.isoformat() if edit != "cap_only" else first.isoformat(),
+                            receipt,
+                        )
+                        self.assertEqual(1500 if edit == "market_values" else 1000, cap)
                     else:
                         self.assertNotEqual(revision, observed["edited_revision"])
                         self.assertFalse(result)

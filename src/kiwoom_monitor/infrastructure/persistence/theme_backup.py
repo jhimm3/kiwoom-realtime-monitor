@@ -58,7 +58,9 @@ class ThemeBackupService:
             if table not in available:
                 continue
             digest.update(table.encode())
-            for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid"):
+            # Import owns the stock catalog, not market observations or their receipts.
+            columns = "code,name,market" if table == "stocks" else "*"
+            for row in connection.execute(f"SELECT {columns} FROM {table} ORDER BY rowid"):
                 digest.update(json.dumps(row, ensure_ascii=False, default=str).encode())
         if "settings" in available:
             row = connection.execute(
