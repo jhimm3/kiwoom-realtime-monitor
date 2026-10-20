@@ -1,3 +1,5 @@
+**R3-052/060/061 계약(2026-10-20, `017bb03`).** 복기의기존scoped review저장이성공한뒤dirty/종료ACK를정리한다(원본/canonical/DDL/시계변경0). 외부월물의미확인거래량은판단입력0으로바꾸지않고이전roll-state행을보존,원본bars/daily성공표식과기존failedstatus는유지한다. auto-off 미조회candidate는기존nullable JSON필드의null,새테이블/열/버전0. 정상비용동일/unknown잘못된state쓰기1회생략,과거잘못된state자동복구는별도다.
+
 **R3-063/067 계약(2026-10-20, `964ddbe`).** research_runs의일반4전이는상태SELECT~commit을같은BEGIN IMMEDIATE로직렬화한다. 기존상태표/불변spec·hash/owner이력/schema변경0. 정상write비용동일,no-op/거절write API에는writer예약1회가추가된다. 새report의상대낙폭ppm은당시peak최대비율로정정하지만과거불변report/package·hash를자동교체하지않는다. 원화낙폭/필드/임계값유지,실제운영재평가는별도다.
 
 **R3-064/066 저장·ACK 계약(2026-10-20, `0a54c35`).** snapshot의빈news재전달은기존news_json과그metadata origin/effective/available/hash를보존하고nonempty/명시backfill호환을유지한다. 추가SELECT/connection/transaction/schema0,retained news metadata INSERT1회생략. 계좌eventnative SQL/멱등identity/binding/settings fence는그대로이며close의실패pending이dependency해제전에드러난다. 실제일지/API event소비·운영/실PG는별도다.

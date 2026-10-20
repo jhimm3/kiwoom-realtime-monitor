@@ -47,6 +47,8 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 <a id="ranking"></a>
 ## 순위·기준 자료 — F02/F03/F10
 
+**2026-10-20 `017bb03` 추가계약.** 초기감사의helper직접fixture를실제OCR진입으로판정한근거를정정했다. 실제이미지선택→OCRworker→row검토/name lookup/preview는catalog helper를호출하지않고catalog실제caller는수동sync와daily/secondary다. 미사용private _with_krx_stock_catalog16줄만제거(메서드294→293/나머지전체AST동일),controller/두실제caller/공개계약/기존검사변경0. 실제Qt manual/daily×성공/실패/취소·OCR취소8상태의원본/현재JSON동일,fetch1/predict1/검토1(취소0)/추가검토0·두worker해제. 새조회/실제호출깊이변화/실행비용절감/새OCR복구주장0. 초기진단의API설정dialog timeout240·trace15는fixture loaderNone원인확정/0통과로보존하고기존FakeRankingLoader정상구성으로대조했다.
+
 **2026-10-20 `539cbad` 추가계약.** R3-080 완료(기본추론중복): 같은engine의첫predict결과를지역pages로한번물질화해첫row/badge해석에인계한다. 3mode×1/2/5장기본predict2→1/3→2/6→5,필요badge추론N/constructor1과정상rows/progress·검사한model/predict/callable-page/준비취소경계를유지한다. public서명과controller제품은그대로며실제QThread완료/실패/cancel/deleteLater를검증했다. 새cache/owner/모듈/모델다운로드없음. 이미초기화된extract_rows의후속파일삭제와malformedpage대Image.open오류우선순위는전후비교하지않았고기존is_file공통화/물질화순서로메시지·우선순위가달라질수있다. 전체오류계약/실제모델출력동일로과장하지않는다.
 
 **003 저장·시각 계약.** MainWindow의 기존 RAM/queue·AppController 정상/retry dispatch·MarketCacheWriter/native fallback은 같은 StockRepository.update_price_cache를 쓴다. cap 및 현재 DB float_ratio로 계산한 circulating_market_cap이 다를 때만 해당 cap UPDATE를 반영한다. ratioNULL은 기존 유통시총 보존, ratio0/후행 비율/NULL 파생값은 필요한 보정을 한다. cap write가 생략되면 shared stocks.updated_at도 보존한다. last_price_updated_at은 같은 가격의 새 수신에도 갱신하며 fundamentals_updated_at의 당일 gate·원일 고가/원자 transaction은 유지한다. 추가 SELECT/ACK 캐시/계층 없이 기존 저장소/writer/native rollback·restart 검사를 재사용한다. 일반 updated_at을 새 전용 cap 수신시각으로 해석하거나 신선도/TTL을 추가하지 않는다.
@@ -142,6 +144,8 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 <a id="news"></a>
 ## 뉴스·장전 — F19/F20
 
+**2026-10-20 `017bb03` 추가계약.** 같은poll owner의await collect_once 경계에서escaped회차오류를기존diagnostic/warning으로관측하고원래poll주기로회복한다. 정상연결7/SELECT1/BEGIN6/INSERT8/COMMIT6/provider6/fetch4/sleep60동일. native readfault에서원본1회후task종료/close오류→동일owner2회·sleep[60,60]뒤정상fetch/close. 기존TypeError/ValueError잘못된입력과cancel은전파,새task/간격/즉시retry/상태추가쓰기없음. daily성공표식·설정disable/close합류는유지한다. 최초to_thread proxy/비용진단release순서오류는수정된제품근거와분리보존했다. 기존trailing_volume은사용가능한window행이없으면None,실제0행은0,기존부분유효합/공통24h window를유지한다. 필요한active/next가미확인이면비교·roll-state쓰기를하지않고이전count/price/reference/rolled_at전체row를보존하며기존failedstatus로관측한다. 정상float evaluate_roll/임계값/확인횟수·auto-off의명시(0,0)평가는그대로다. native14상태/재시작/회복과unknown5반례19assertion실패→통과;unknown의잘못된rollstate1회쓰기제거로connection/BEGIN/COMMIT/INSERT반영각-1,정상on/off비용동일. 미조회candidate의기존nullable필드는JSONnull이며float계산유입0. 원본bars/daily성공은보존하고과거bad state자동수정·새coverage/같은window연속count정책은추가하지않았다.
+
 **2026-10-20 `964ddbe` 추가계약.** 기존자동판정의 provider!=none && (local credentials OR central client)를같은news_execution모듈의순수함수로공유해detail/start/finished를일치시켰다. 실제Qt수동·자동→기존AINewsWorker→인증client의제어POST→native결과/usage→표시가2회,중복/busy/한도추가POST0·localfallback0이다. 링크/busy/기존quota·ChatGPTpause/manualqueue/server키·permission·수명정책을유지한다. 선택/idlefinished의dailyDB조회추가0,finished는현재설정1회확인비용이필요하다. client존재는라우팅가능성일뿐실제서버권한/키/구독/NAS성공을보장하지않으며원격POST취소·late결과폐기는이번범위밖이다.
 
 **2026-10-20 `64a74e0` 계약 보완.** R3-043 진행(PC 구현통합·실제PG 대기): 기존 claim attempts를 필수 keyword로 모든 finish/retry caller와 QueryStore/CentralNewsStore 계약에 전달한다. native WHERE job_key/RUNNING/attempt 일치 때만 상태·output_ref를 갱신하고 실제 matched PENDING commit 뒤에만 깨운다. 정상 retry SELECT1→0, UPDATE/연결/BEGIN/COMMIT 각1 유지. 120초 stale/3회 FAILED/None 반환·immutable 원문과 결과는 보존한다. old/new 성공·실패 역순, ACK 유실/취소복구를 native SQLite와 PG SQL/rollback fixture로 확인했다. 행 삭제 후 같은 key 재생성 ABA는 보장 범위 밖이다. R3-043 실제 PostgreSQL 변경2 ID 및 해당87건 모듈은 미실행이다. 전용 diagnostic DSN 부재로 증분 실행 증거 검사는 누락을 감지해 실패했으며 성공 처리하지 않았다. 기존 push/PR의 필수 postgres-integration이 postgres_required 전체 모듈을 실행하고 실패·누락을 required 증거로 전달하는 본문만 확인했다. 현재 hosted CI 실행은 없다.
@@ -154,12 +158,14 @@ R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/
 
 **상태·실패·공식 경계.** 기존 news 수집/page/history·job claim/finish/retry·인증 AI API와 PC worker 신호를 사용한다. native 저장소가 revision·job 상태·transaction을 소유하고 AI service가 accepted 요청/실행 lock을 소유한다. UI용 그룹 대표와 NAS의 저장 body revision 입력을 섞지 않는다. 미확인 자료는 원값과 확인 상태를 함께 보존한다. 장전 context의 `advisory_only/consumer_binding=not_connected`는 실시간 판단/주문 연결과 구분하며 공급자 호출이나 polling task를 소비자마다 복제하지 않는다.
 
-**남은 뉴스 범위.** 073동일기사쓰기등록경계는완료,043terminal은PC통합·실제PG대기,072가용성은등록UI연결로컬검증완료다. 서버실제권한/키및remote취소수락은별도다. 019read/error·020프로세스결합·084body/projection소비계약은남는다. 장전 결과와 외부 지연시세(060/061)는 서로 다른 입력 경계다.
+**남은 뉴스 범위.** 073동일기사쓰기등록경계는완료,043terminal은PC통합·실제PG대기,072가용성은등록UI연결로컬검증완료다. 서버실제권한/키및remote취소수락은별도다. 019read/error·020프로세스결합·084body/projection소비계약은남는다. 장전결과와외부지연시세F20.1은서로다른입력이다. 060/061등록범위는기존collector/원본bars/diagnostics의로컬검증을완료했으며장전AI/매매판단의새소비연결을구현한것이아니다.
 
 **관련 검사.** [CentralNewsService](../../tests/unit/test_central_news_service.py), [news jobs](../../tests/unit/test_news_jobs.py), [기사 저장소](../../tests/unit/test_stock_news_repository.py), [장전 계약](../../tests/unit/test_morning_market_brief.py). 원문 revision·중복/실패·가용시각·선택한 provider/버튼과 실제 worker 입력을 대조한다.
 
 <a id="journal-sync"></a>
 ## 일지·편집·동기화 — F22 및 F18 소비
+
+**2026-10-20 `017bb03` 추가계약.** 기존dirty/active/debounce owner를재사용해account/다른episode교체와shutdown전에원래scope복기를저장하고동일identity dirty refresh의재로드를막았다. 실패는원draft/origin·canonical계좌/의존객체·예외를보존하고실패표시를남긴다. close는성공전ignore,process shutdown/sync ACK는flush뒤다. parent-loss는기존command timer정지를유지해자동retry0·UI명시retry만가능하다. dirty-close 저장0→1/700ms debounce1→1/clean추가0/계좌전환1/실패retry2. 기존native schema/시계·chart·분봉·비용·parent force-stop정책은변경0,영구실패/kill에는RAM유실위험이남는다. 최초account findData fixture오류는제품원인에서제외했고corrected원본6메서드음성대조로유실을검증했다. 기존chart/account fake의편집없음계약2필드만명시해옛assertion을유지했다.
 
 **2026-10-20 `0a54c35` 추가계약.** R3-030 검증 완료: 기존 EntrySnapshotWriter에 짧은 cache lock 하나로 loader/cache 동시 포착·setter의 dict 교체·현재dict/loader 확인후게시를 묶었다. provider/native I/O·signal·job/backfill은 lock 밖이다. 동일callable/None/A→B→A도 옛 in-flight 결과가 새cache를 채우지 못하고 원래job의 provenance는 보존한다. 실제 AppController의 기존 public setter 적용/rollback을 재사용(제품0). A→B old1/new0→old1/new1은 필요한 새조회 복구이며 이후cache hit 추가조회0, TTL60초/code-only/얕은copy·오류uncached 유지. Controller의 별도 private cache backup/update 전체를 새lock으로 원자화하거나 cross-date/global singleflight를 해결한 것은 아니다. R3-064 검증 완료: 같은 execution_key의 serialized 빈news [] 재전달은 이미 저장된 news_json을 native CASE로 보존한다. nonempty 정정·명시 save_snapshot_news_backfill(empty) 의미는 유지한다. 같은transaction의 기존stored조회 결과로 retained news metadata UPSERT만 생략해 원래 BACKFILLED/source/effective/available/hash를 유지한다. CASE-only 중간안은 시각을 소급/연기해4assertion 실패했으며 원문을 보존했다. 보완receipt11:30·재전달10:30/11:30/12:30 모두 news1/동일metadata, 실제 was_available_by는11:00불가/11:30가능. retained news INSERT시도11→10, SELECT/연결/BEGIN/COMMIT 각1 유지. 최초empty는MISSING·legacy metadata없음은unknown, 명시empty/nonempty정정의기존metadata전반정책까지재정의하지않는다.
 
@@ -242,6 +248,8 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 ```
 
 ### 재현 가능한 실제 비용 기준
+
+**여덟번째 통합:** 현재 통합 소스 관련17개실제모듈 고유212건/307.507 worker초 통과(일지118/catalog65/외부시장29). 별도현재MainWindow→두QThread→row editor/name lookup/preview 진단1건·8상태도29.698초통과/원본관측JSON동일. 변경16ID·계획/실행/통과·전체지문/동결7파일·worker/tree종료/nativeTEMP제거를대조했다. 구조1374site-key/위반0·retirable0·guard/adoption/rules/review변경0. 증분42기록6016→6030/추가14·기존fixture보강2/삭제0,과거41기록·미결49보존·실행증거검사통과. full_required495/external32/불확실성4는자동실행하지않고변경caller/owner/native/소비/실패·종료의17모듈과별도실제Qt진단을선정했다. DB/API는직접연결된기존2ID만선택했고selector/probe SHA와fixture HERE경로만다른동일class AST를보존했다. 052dirty저장0→1은필요비용,060정상비용동일/다음회차회복,061unknownstate연결·tx·반영각1회생략,054실제경로실행비용변화0. 실제PG(043대기2건포함)·운영DB/실계좌/주문·실제키움/외부시세·모델정확도/NAS/network·push/hostedCI/배포·로컬전수회귀는미실행이다. 물리I/O/운영오류빈도·강제kill/전원/독립journal child종료및기존미확정031nativeabort원인해결로확대하지않는다.
 
 **일곱번째 통합:** 현재 통합 소스 관련20모듈 고유231건/317.202 worker초 통과(연구153·뉴스65·기존구조차단13). 변경8 ID·전체 계획/실행/통과, 현재 전체지문/동결9파일, worker/tree종료·nativeTEMP제거를 대조했다. 구조1374고유site-key/위반0·retirable0. 063terminal3키의허용execute횟수만2→3으로승인review1건을추가했고adopted/rules/기존review이력은동일하다(start는기존site재사용). 기존차단13건도재사용통과했다. 증분41기록6009→6016/추가7·기존availability검사보강1/삭제0,과거40기록·미결49보존·실행증거검사통과. 동적full_required495/external32/불확실성7은자동실행하지않고실제owner/소비/실패·종료의관련20모듈만선정했다. 필요한063writer예약/067교차곱/072설정확인증가와절감은구분한다. 실제PG(043변경2건포함)·키움/장중/실계좌/주문·운영DB·외부provider/NAS/network·push/hostedCI/배포·로컬전수회귀는미실행이다. 과거 immutable연구결과 재작성/재승인과 원격POST취소·late결과폐기는수락하지않았다.
 

@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 `017bb03`: JournalWindow의기존dirty/native저장/종료ACK와YahooDelayedMarketCollector의기존poll/error·roll입력가용성을정리했다. 미사용MainWindow helper1개제거/실제catalog·OCRcaller유지,새모듈/계층/schema0. 관련212건+별도실제Qt8상태·영향F10/F18/F20.1/F22/F23/F24는R3정본참조.
+
 2026-10-20 `964ddbe`: 기존ResearchRepository는run전이원자성,같은research_evaluation은원화/상대낙폭,news_execution은provider/credential가용성공통판정을소유한다. 새모듈/계층/schema없음. 관련20모듈231건·F15/F17/F19/F21/F23/F24·필요안전비용/잔여는R3정본참조.
 
 2026-10-20 `0a54c35`: 기존EntrySnapshotWriter는provider-cache세대,JournalSnapshotRepository는뉴스/metadata원자보존,JsonRecordOutbox는파일read실패,RealCredentialOwner는all-contextdrain/명시close retry를소유한다. 새module/계층/schema없음. 실제event소비는native/diagnostic까지이며일지API전체는미확인. 관련27모듈394건·계약/잔여는R3정본참조.
