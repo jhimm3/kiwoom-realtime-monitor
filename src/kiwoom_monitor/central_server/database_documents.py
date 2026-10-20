@@ -9,6 +9,9 @@ from datetime import datetime
 from time import monotonic, time
 from typing import Any, Callable
 from kiwoom_monitor.domain.time_basis import kst_now
+from kiwoom_monitor.domain.execution_activation import (
+    StrategyLifecycleStage, stage_revision_from_dict,
+)
 
 from kiwoom_monitor.domain.news_observation import (
     ARTICLE_BODY_EXTRACTOR_VERSION,
@@ -31,7 +34,63 @@ from .database_codec import (
 logger = logging.getLogger(__name__)
 
 
+def _insert_strategy_stage_revision(
+    cursor: Any, document: dict[str, Any], now_provider: Callable[[], datetime], placeholder: str,
+) -> bool:
+    """Compare the predecessor and append under the caller's native writer lock."""
+    value = stage_revision_from_dict(document)
+    collection = "execution_strategy_stage_revisions"
+    cursor.execute(
+        "SELECT document_json FROM central_documents "
+        f"WHERE collection={placeholder} AND owner={placeholder} AND document_key={placeholder}",
+        (collection, value.strategy_ref, value.revision_id),
+    )
+    existing = cursor.fetchone()
+    if existing is not None:
+        if json_mapping(existing[0]) != document:
+            raise ValueError(f"immutable document conflict: {collection}/{value.strategy_ref}/{value.revision_id}")
+        return False
+    cursor.execute(
+        "SELECT document_key,document_json FROM central_documents "
+        f"WHERE collection={placeholder} AND owner={placeholder} "
+        "ORDER BY updated_at DESC,owner,document_key LIMIT 10000", (collection, value.strategy_ref),
+    )
+    rows = cursor.fetchall()
+    revisions = [stage_revision_from_dict(json_mapping(raw)) for _, raw in rows]
+    latest = max(revisions, key=lambda item: (item.decided_at, item.revision_id), default=None)
+    current = latest.stage if latest is not None else StrategyLifecycleStage.DRAFT
+    if current is not value.previous_stage:
+        raise ValueError(f"strategy stage changed: expected {value.previous_stage.value}, found {current.value}")
+    row = document_value_rows(collection, [{"owner": value.strategy_ref, "key": value.revision_id,
+                                           "document": document}], now_provider().timestamp())[0]
+    if json_mapping(row[-1]) != document:
+        raise RuntimeError(f"failed to persist immutable document: {collection}/{value.strategy_ref}/{value.revision_id}")
+    cursor.execute(
+        "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+        f"VALUES({','.join([placeholder] * 5)}) "
+        "ON CONFLICT(collection,owner,document_key) DO NOTHING"
+        + (" RETURNING document_json" if placeholder == "%s" else ""), row,
+    )
+    inserted = cursor.fetchone() is not None if placeholder == "%s" else cursor.rowcount == 1
+    if not inserted:
+        cursor.execute(
+            "SELECT document_json FROM central_documents "
+            f"WHERE collection={placeholder} AND owner={placeholder} AND document_key={placeholder}",
+            (collection, value.strategy_ref, value.revision_id),
+        )
+        existing = cursor.fetchone()
+        if existing is None or json_mapping(existing[0]) != document:
+            raise ValueError(f"immutable document conflict: {collection}/{value.strategy_ref}/{value.revision_id}")
+    return inserted
+
+
 class SQLiteDocumentStoreMixin:
+    def insert_strategy_stage_revision(self, document: dict[str, Any]) -> bool:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            inserted = _insert_strategy_stage_revision(connection.cursor(), document, self._now_provider, "?")
+        return inserted
+
     def insert_immutable_document(
         self, collection: str, owner: str, key: str, document: dict[str, Any],
     ) -> bool:
@@ -138,6 +197,19 @@ class SQLiteDocumentStoreMixin:
 
 
 class PostgresDocumentStoreMixin:
+    def insert_strategy_stage_revision(self, document: dict[str, Any]) -> bool:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        writer = DBWriterContext(writer_family="document.stage", writer_kind="document:execution_strategy_stage_revisions",
+                                 operation="insert_strategy_stage_revision", rows_attempted=1)
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            # A waiting advisory-lock SELECT must not pin an older repeatable-read snapshot.
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                           (f"strategy-stage:{document['strategy_ref']}",))
+            inserted = _insert_strategy_stage_revision(cursor, document, self._now_provider, "%s")
+        return inserted
+
     def insert_immutable_document(
         self, collection: str, owner: str, key: str, document: dict[str, Any],
     ) -> bool:

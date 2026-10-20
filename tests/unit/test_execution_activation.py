@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import unittest
 import uuid
+import json
+import sqlite3
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
+from unittest.mock import patch
 
-from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server.database import SQLiteQueryStore, PostgresQueryStore
 from kiwoom_monitor.domain.execution_activation import (
     ForwardCriteria,
     ForwardEvaluationSpec,
@@ -253,6 +260,154 @@ class ExecutionActivationTests(unittest.TestCase):
         self.assertEqual(spec, restored.load_profile(spec.strategy_ref, spec.profile_id))
         self.assertEqual(StrategyLifecycleStage.EVALUATED, restored.latest_stage(spec.strategy_ref))
         self.assertEqual((first,), restored.load_stage_revisions(spec.strategy_ref))
+
+    def test_stage_predecessor_check_serializes_distinct_revisions_and_same_id_retries(self) -> None:
+        for same in (False, True):
+            with self.subTest(same=same), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / 'central.sqlite'
+                stores = [SQLiteQueryStore(path), SQLiteQueryStore(path)]
+                stores[0].initialize()
+                barrier = Barrier(2, timeout=10)
+                values = [strategy_stage_revision(
+                    strategy_ref='strategy', previous_stage=StrategyLifecycleStage.DRAFT,
+                    stage=StrategyLifecycleStage.EVALUATED, evidence_refs=('report',),
+                    reason='same' if same else str(i), decided_at=NOW,
+                ) for i in range(2)]
+                for store in stores:
+                    native = store.insert_strategy_stage_revision
+                    def gated(document, native=native):
+                        barrier.wait()
+                        return native(document)
+                    store.insert_strategy_stage_revision = gated
+                def save(store, value):
+                    try:
+                        return ForwardEvaluationRepository(store).save_stage_revision(value)
+                    except ValueError as exc:
+                        self.assertIn('strategy stage changed: expected draft, found evaluated', str(exc))
+                        return 'stale'
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        futures = [pool.submit(save, store, value) for store, value in zip(stores, values)]
+                        outcomes = [future.result(timeout=20) for future in futures]
+                    self.assertCountEqual([True, False] if same else [True, 'stale'], outcomes)
+                    stored = ForwardEvaluationRepository(stores[0]).load_stage_revisions('strategy')
+                    self.assertEqual(1, len(stored))
+                    self.assertIn(stored[0], values)
+                finally:
+                    for store in stores:
+                        store.close()
+
+    def test_stage_native_costs_preserve_read_only_retry_and_rollback_before_ack(self) -> None:
+        store = SQLiteQueryStore(Path(':memory:'), now_provider=lambda: NOW)
+        store.initialize()
+        self.addCleanup(store.close)
+        repository = ForwardEvaluationRepository(store)
+        first = strategy_stage_revision(strategy_ref='strategy', previous_stage=StrategyLifecycleStage.DRAFT,
+            stage=StrategyLifecycleStage.EVALUATED, evidence_refs=('report',), reason='first', decided_at=NOW)
+        statements, connections = [], []
+        native = store._connection
+        @contextmanager
+        def traced():
+            connections.append(1)
+            with native() as connection:
+                connection.set_trace_callback(statements.append)
+                yield connection
+        with patch.object(store, '_connection', traced), patch.object(store, '_now_provider', return_value=NOW) as clock:
+            self.assertTrue(repository.save_stage_revision(first))
+            self.assertEqual(2, len(connections))
+            self.assertEqual(3, sum(s.startswith('SELECT') for s in statements))
+            self.assertEqual(1, sum(s.startswith('INSERT') for s in statements))
+            self.assertEqual(1, sum(s == 'BEGIN IMMEDIATE' for s in statements))
+            self.assertEqual(1, sum(s == 'COMMIT' for s in statements))
+            clock.assert_called_once_with()
+            statements.clear(); connections.clear(); clock.reset_mock()
+            self.assertFalse(repository.save_stage_revision(first))
+            self.assertEqual(1, len(connections))
+            self.assertEqual(1, len(statements))
+            self.assertTrue(statements[0].startswith('SELECT'))
+            clock.assert_not_called()
+        second = strategy_stage_revision(strategy_ref='strategy', previous_stage=StrategyLifecycleStage.EVALUATED,
+            stage=StrategyLifecycleStage.VALIDATED, evidence_refs=('report-2',), reason='second',
+            decided_at=NOW + timedelta(seconds=1))
+        with native() as connection:
+            connection.execute("CREATE TRIGGER reject_stage BEFORE INSERT ON central_documents "
+                "WHEN NEW.collection='execution_strategy_stage_revisions' "
+                "BEGIN SELECT RAISE(ABORT,'stage write failed'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'stage write failed'):
+            repository.save_stage_revision(second)
+        self.assertEqual((first,), repository.load_stage_revisions('strategy'))
+        with native() as connection:
+            connection.execute('DROP TRIGGER reject_stage')
+        self.assertTrue(repository.save_stage_revision(second))
+        self.assertFalse(repository.save_stage_revision(first))
+        self.assertEqual(StrategyLifecycleStage.VALIDATED, repository.latest_stage('strategy'))
+
+    def test_postgres_stage_lock_compare_insert_and_commit_ack_contract(self) -> None:
+        first = strategy_stage_revision(strategy_ref='strategy', previous_stage=StrategyLifecycleStage.DRAFT,
+            stage=StrategyLifecycleStage.EVALUATED, evidence_refs=('report',), reason='first', decided_at=NOW)
+        other = strategy_stage_revision(strategy_ref='strategy', previous_stage=StrategyLifecycleStage.DRAFT,
+            stage=StrategyLifecycleStage.EVALUATED, evidence_refs=('report',), reason='other', decided_at=NOW)
+        class Cursor:
+            def __init__(self, owner): self.owner = owner
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def execute(self, sql, params=()):
+                self.owner.sql.append((sql, params))
+            def fetchall(self): return self.owner.history
+            def fetchone(self):
+                sql, parameters = self.owner.sql[-1]
+                if sql.startswith('INSERT'):
+                    return (json.dumps(first.to_dict()),)
+                return next(((json.dumps(raw),) for key, raw in self.owner.history if key == parameters[-1]), None)
+        class Connection:
+            def __init__(self, history, fail_commit):
+                self.history, self.fail_commit = history, fail_commit
+                self.sql = []
+                self.commits = self.rollbacks = self.closes = 0
+            def __enter__(self): return self
+            def __exit__(self, kind, *_):
+                if kind:
+                    self.rollback()
+                else:
+                    self.commit()
+                self.close()
+            def commit(self):
+                self.commits += 1
+                if self.fail_commit: raise ConnectionError('commit acknowledgement lost')
+            def rollback(self): self.rollbacks += 1
+            def close(self): self.closes += 1
+            def cursor(self): return Cursor(self)
+        for case in ('fresh', 'same', 'stale', 'commit_error'):
+            with self.subTest(case=case):
+                history = [(first.revision_id, first.to_dict())] if case in ('same', 'stale') else []
+                raw = Connection(history, case == 'commit_error')
+                store = PostgresQueryStore('unused', now_provider=lambda: NOW)
+                with patch.object(store, '_connect', return_value=raw), \
+                        patch.object(store, '_now_provider', return_value=NOW) as clock:
+                    if case == 'stale':
+                        with self.assertRaisesRegex(ValueError, 'expected draft, found evaluated'):
+                            store.insert_strategy_stage_revision(other.to_dict())
+                    elif case == 'commit_error':
+                        with self.assertRaisesRegex(ConnectionError, 'commit acknowledgement lost'):
+                            store.insert_strategy_stage_revision(first.to_dict())
+                    else:
+                        self.assertEqual(case == 'fresh', store.insert_strategy_stage_revision(first.to_dict()))
+                    self.assertEqual(1 if case in ('fresh', 'commit_error') else 0, clock.call_count)
+                self.assertEqual(('SET TRANSACTION ISOLATION LEVEL READ COMMITTED', ()), raw.sql[0])
+                self.assertEqual(('SELECT pg_advisory_xact_lock(hashtext(%s))', ('strategy-stage:strategy',)), raw.sql[1])
+                self.assertEqual(('execution_strategy_stage_revisions', 'strategy',
+                                  (other if case == 'stale' else first).revision_id), raw.sql[2][1])
+                self.assertEqual(3 if case == 'same' else (5 if case in ('fresh', 'commit_error') else 4), len(raw.sql))
+                if case != 'same':
+                    self.assertEqual(('execution_strategy_stage_revisions', 'strategy'), raw.sql[3][1])
+                    self.assertIn('ORDER BY updated_at DESC,owner,document_key LIMIT 10000', raw.sql[3][0])
+                if case in ('fresh', 'commit_error'):
+                    self.assertIn('ON CONFLICT(collection,owner,document_key) DO NOTHING RETURNING document_json', raw.sql[4][0])
+                    self.assertEqual(first.to_dict(), json.loads(raw.sql[4][1][-1]))
+                    self.assertEqual(NOW.timestamp(), raw.sql[4][1][-2])
+                self.assertEqual(1 if case != 'stale' else 0, raw.commits)
+                self.assertEqual(1 if case == 'stale' else 0, raw.rollbacks)
+                self.assertEqual(0 if case == 'commit_error' else 1, raw.closes)
 
 
 if __name__ == "__main__":

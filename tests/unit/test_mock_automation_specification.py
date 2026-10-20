@@ -418,6 +418,105 @@ def capture_mock_publication_http_contract(client, store, inputs):
 
 
 class MockPublicationHTTPContractTests(unittest.TestCase):
+    def test_scoped_binding_reads_recheck_rotation_for_publication_and_immutable_retry(self):
+        from kiwoom_monitor.central_server import app as app_module
+
+        app_stores = []
+
+        def capture_store_owner(settings):
+            original_factory = app_module.create_query_store
+
+            def capture_native_store(*args, **kwargs):
+                native_store = original_factory(*args, **kwargs)
+                app_stores.append(native_store)
+                return native_store
+
+            with patch.object(app_module, "create_query_store", side_effect=capture_native_store):
+                return create_app(settings)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock_publication_contract_app(capture_store_owner, Path(directory) / "publication.sqlite3") as (app, store, inputs):
+                self.assertEqual(1, len(app_stores))
+                app_store = app_stores[0]
+                with TestClient(app) as client:
+                    candidate_path = "/api/v1/research/mock-automation-candidates"
+                    spec_path = "/api/v1/research/mock-automation-specs"
+                    headers = {"Authorization": "Bearer private-token"}
+                    candidate = {
+                        "account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID,
+                        "expected_binding_revision": inputs.binding["binding_revision"],
+                        "package": inputs.package.to_dict(), "eligibility_policy": inputs.policy.to_dict(),
+                        "eligibility_receipt": inputs.receipt.to_dict(),
+                    }
+                    spec = {
+                        "account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID,
+                        "expected_binding_revision": inputs.binding["binding_revision"],
+                        "shadow_event_id": inputs.shadow_event["event_id"],
+                        "forward_profile": inputs.profile.to_dict(),
+                        "stage_revisions": [stage.to_dict() for stage in inputs.stages],
+                        "operating_spec": inputs.spec.to_dict(),
+                    }
+                    with patch.object(
+                        app_store, "load_account_bindings", side_effect=AssertionError("publication loaded full history"),
+                    ), patch.object(
+                        app_store, "load_latest_account_binding", wraps=app_store.load_latest_account_binding,
+                    ) as scoped:
+                        empty = client.get(candidate_path + "/" + ACCOUNT_REF, headers=headers,
+                                           params={"credential_profile_id": PROFILE_ID})
+                        self.assertEqual(200, empty.status_code)
+                        self.assertEqual(1, scoped.call_count)
+                        for expected_status in ("saved", "unchanged"):
+                            scoped.reset_mock()
+                            response = client.post(candidate_path, headers=headers, json=candidate)
+                            self.assertEqual(200, response.status_code)
+                            self.assertEqual(expected_status, response.json()["status"])
+                            self.assertFalse(response.json()["orders_started"])
+                            self.assertEqual(1, scoped.call_count)
+                        scoped.reset_mock()
+                        response = client.post(spec_path, headers=headers, json=spec)
+                        self.assertEqual(200, response.status_code)
+                        self.assertEqual("saved", response.json()["status"])
+                        self.assertFalse(response.json()["orders_started"])
+                        # The route cut and repository persistence cut each revalidate; no snapshot is cached.
+                        self.assertEqual(2, scoped.call_count)
+                        first_receipt = store.load_document(
+                            ForwardEvaluationRepository.MOCK_AUTOMATION_SPEC_COLLECTION, ACCOUNT_REF, inputs.spec.spec_id,
+                        )
+                        new_account = "00000000-0000-0000-0000-000000000102"
+                        store.register_account_identity({
+                            "broker": "kiwoom", "environment": "mock", "identity_fingerprint": "d" * 64,
+                            "account_ref": new_account, "created_at": NOW.isoformat(),
+                        })
+                        rotated = store.append_account_binding({
+                            "credential_profile_id": PROFILE_ID, "broker": "kiwoom", "environment": "mock",
+                            "account_ref": new_account, "verified_at": (NOW + timedelta(minutes=1)).isoformat(),
+                            "verification_method": "ka00001",
+                        })
+                        old = client.get(candidate_path + "/" + ACCOUNT_REF, headers=headers,
+                                         params={"credential_profile_id": PROFILE_ID})
+                        self.assertEqual(409, old.status_code)
+                        current = client.get(candidate_path + "/" + new_account, headers=headers,
+                                             params={"credential_profile_id": PROFILE_ID})
+                        self.assertEqual(200, current.status_code)
+                        self.assertEqual(rotated["binding_revision"], current.json()["binding"]["binding_revision"])
+                        self.assertEqual([], current.json()["candidates"])
+                        for path, body in ((candidate_path, candidate), (spec_path, spec)):
+                            refused = client.post(path, headers=headers, json=body)
+                            self.assertEqual(409, refused.status_code)
+                        with patch.object(
+                            store, "load_account_bindings", side_effect=AssertionError("immutable retry loaded full history"),
+                        ), patch.object(
+                            store, "load_latest_account_binding", wraps=store.load_latest_account_binding,
+                        ) as retry_recheck:
+                            with self.assertRaisesRegex(ValueError, "current verified mock binding"):
+                                inputs.repository.save_mock_automation_spec(inputs.spec)
+                            retry_recheck.assert_called_once_with(PROFILE_ID, "kiwoom", "mock")
+                        self.assertEqual(first_receipt, store.load_document(
+                            ForwardEvaluationRepository.MOCK_AUTOMATION_SPEC_COLLECTION, ACCOUNT_REF, inputs.spec.spec_id,
+                        ))
+                        for call in scoped.call_args_list:
+                            self.assertEqual((PROFILE_ID, "kiwoom", "mock"), call.args)
+
     def test_http_and_native_publication_results_match_pre_extraction_baseline(self):
         expected = json.loads(PUBLICATION_BASELINE.read_text(encoding="utf-8"))["result"]
         scientific_hash = expected["stored"][

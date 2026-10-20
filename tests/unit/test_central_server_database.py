@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -2433,6 +2433,184 @@ class CentralServerDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(("fixture", "owner", "key"), cursor.rows[0][:3])
         self.assertEqual({"title": "same"}, json.loads(cursor.rows[0][-1]))
+
+    def test_latest_account_binding_reads_one_current_scope_and_preserves_history(self) -> None:
+        from kiwoom_monitor.central_server import database_account_identity
+
+        store = SQLiteQueryStore(Path(":memory:"))
+        store.initialize()
+        self.addCleanup(store.close)
+        observed_at = "2026-10-20T10:00:00+09:00"
+        old_account = "00000000-0000-0000-0000-000000000101"
+        new_account = "00000000-0000-0000-0000-000000000102"
+        real_account = "00000000-0000-0000-0000-000000000103"
+        for account_ref, environment, fingerprint in (
+            (old_account, "mock", "a"), (new_account, "mock", "b"), (real_account, "real", "c"),
+        ):
+            store.register_account_identity({
+                "broker": "kiwoom", "environment": environment,
+                "identity_fingerprint": fingerprint * 64, "account_ref": account_ref,
+                "created_at": observed_at,
+            })
+        for profile in ("target", "unrelated"):
+            for _ in range(3):
+                store.append_account_binding({
+                    "credential_profile_id": profile, "broker": "kiwoom", "environment": "mock",
+                    "account_ref": old_account, "verified_at": observed_at, "verification_method": "ka00001",
+                })
+        rotated = store.append_account_binding({
+            "credential_profile_id": "target", "broker": "kiwoom", "environment": "mock",
+            "account_ref": new_account, "verified_at": observed_at, "verification_method": "ka00001",
+        })
+        for _ in range(5):
+            store.append_account_binding({
+                "credential_profile_id": "target", "broker": "kiwoom", "environment": "real",
+                "account_ref": real_account, "verified_at": observed_at, "verification_method": "ka00001",
+            })
+        history = store.load_account_bindings()
+        self.assertEqual(12, len(history))
+        original_connection = store._connection
+        statements = []
+
+        @contextmanager
+        def traced_connection():
+            with original_connection() as connection:
+                connection.set_trace_callback(statements.append)
+                yield connection
+
+        with patch.object(store, "_connection", side_effect=traced_connection) as connect, patch.object(
+            database_account_identity, "_account_binding_row", wraps=database_account_identity._account_binding_row,
+        ) as decode, patch.object(store, "load_account_bindings", side_effect=AssertionError("full history used")):
+            latest = store.load_latest_account_binding("target", "kiwoom", "mock")
+            self.assertEqual(rotated, latest)
+            self.assertEqual(1, decode.call_count)
+            connect.assert_called_once_with()
+        self.assertEqual(new_account, latest["account_ref"])
+        self.assertEqual(4, latest["binding_revision"])
+        queries = [sql for sql in statements if sql.startswith("SELECT")]
+        self.assertEqual(1, len(queries))
+        self.assertIn("credential_profile_id='target' AND broker='kiwoom' AND environment='mock'", queries[0])
+        self.assertIn("ORDER BY binding_revision DESC LIMIT 1", queries[0])
+        self.assertNotIn("AND account_ref", queries[0])
+        self.assertNotIn("AND binding_revision", queries[0])
+        self.assertFalse(any(sql.startswith(("INSERT", "UPDATE", "BEGIN", "COMMIT")) for sql in statements))
+        self.assertIsNone(store.load_latest_account_binding("missing", "kiwoom", "mock"))
+        self.assertIsNone(store.load_latest_account_binding("target", "other-broker", "mock"))
+        self.assertIsNone(store.load_latest_account_binding("target", "kiwoom", "other-environment"))
+        self.assertEqual(5, store.load_latest_account_binding("target", "kiwoom", "real")["binding_revision"])
+        self.assertEqual(history, store.load_account_bindings())
+        newer = store.append_account_binding({
+            "credential_profile_id": "target", "broker": "kiwoom", "environment": "mock",
+            "account_ref": new_account, "verified_at": "2026-10-20T10:01:00+09:00", "verification_method": "ka00001",
+        })
+        self.assertEqual(newer, store.load_latest_account_binding("target", "kiwoom", "mock"))
+
+    def test_postgres_latest_account_binding_scopes_one_row_and_propagates_read_failures(self) -> None:
+        verified_at = datetime(2026, 10, 20, 10, tzinfo=timezone(timedelta(hours=9)))
+        stored_row = (
+            "binding-11", "target", "kiwoom", "mock", "00000000-0000-0000-0000-000000000102",
+            11, verified_at, "ka00001",
+        )
+
+        class Cursor:
+            def __init__(self, row, error):
+                self.row, self.error, self.statements, self.fetchone_calls = row, error, [], 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, parameters):
+                self.statements.append((sql, tuple(parameters)))
+                if self.error == "execute":
+                    raise OSError("controlled binding execute failure")
+
+            def fetchone(self):
+                self.fetchone_calls += 1
+                if self.error == "fetch":
+                    raise OSError("controlled binding fetch failure")
+                return self.row
+
+            def fetchall(self):
+                raise AssertionError("latest binding must not fetch full history")
+
+        class Connection:
+            def __init__(self, row, error):
+                self.query = Cursor(row, error)
+                self.events = []
+                self.commits = self.rollbacks = 0
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, *_args):
+                self.events.append(("exit", exc_type))
+                if exc_type:
+                    self.rollback()
+                else:
+                    self.commit()
+                self.close()
+                return False
+
+            def cursor(self):
+                return self.query
+
+            def commit(self):
+                self.events.append(("commit", None))
+                self.commits += 1
+
+            def rollback(self):
+                self.events.append(("rollback", None))
+                self.rollbacks += 1
+
+            def close(self):
+                self.events.append(("close", None))
+                self.closed = True
+
+        for scenario, row, failure in (
+            ("found", stored_row, None), ("missing", None, None),
+            ("execute_error", stored_row, "execute"), ("fetch_error", stored_row, "fetch"),
+        ):
+            with self.subTest(scenario=scenario):
+                connection = Connection(row, failure)
+                clock = Mock(side_effect=AssertionError("read must not create a current timestamp"))
+                store = PostgresQueryStore("postgresql://unused", now_provider=clock)
+                connect = Mock(return_value=connection)
+                store._connect = connect  # type: ignore[method-assign]
+                with patch.object(store, "load_account_bindings", side_effect=AssertionError("full history used")):
+                    if failure:
+                        with self.assertRaisesRegex(OSError, "controlled binding"):
+                            store.load_latest_account_binding("target", "kiwoom", "mock")
+                    else:
+                        latest = store.load_latest_account_binding("target", "kiwoom", "mock")
+                        if row is None:
+                            self.assertIsNone(latest)
+                        else:
+                            self.assertEqual({
+                                "binding_id": "binding-11", "credential_profile_id": "target", "broker": "kiwoom",
+                                "environment": "mock", "account_ref": stored_row[4], "binding_revision": 11,
+                                "verified_at": "2026-10-20T10:00:00+09:00", "verification_method": "ka00001",
+                            }, latest)
+                connect.assert_called_once_with()
+                clock.assert_not_called()
+                self.assertTrue(connection.closed)
+                self.assertEqual(0 if failure else 1, connection.commits)
+                self.assertEqual(1 if failure else 0, connection.rollbacks)
+                self.assertEqual([
+                    ("exit", OSError if failure else None),
+                    ("rollback" if failure else "commit", None), ("close", None),
+                ], connection.events)
+                self.assertEqual(0 if failure == "execute" else 1, connection.query.fetchone_calls)
+                self.assertEqual(1, len(connection.query.statements))
+                sql, parameters = connection.query.statements[0]
+                self.assertEqual(("target", "kiwoom", "mock"), parameters)
+                self.assertIn("WHERE credential_profile_id=%s AND broker=%s AND environment=%s", sql)
+                self.assertIn("ORDER BY binding_revision DESC LIMIT 1", sql)
+                self.assertNotIn("AND account_ref", sql)
+                self.assertNotIn("AND binding_revision", sql)
 
     def test_postgres_immutable_document_preserves_noop_conflicts_and_commit_ack(self) -> None:
         # Scripted PG responses exercise the real observed connection wrapper, not a live PG server.

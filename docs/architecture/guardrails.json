@@ -1419,6 +1419,19 @@
         "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.insert_immutable_document|cursor.execute": 3,
         "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.insert_immutable_document|connection.execute": 3
       }
+    },
+    {
+      "id": "R3-010-stage-binding-native-20261020",
+      "reason": "Current-stage predecessor comparison and immutable append must share one native writer transaction; scope-specific latest binding reads replace three whole-history callers. Exact five new SQL keys only, not adoption of prior debt or runtime statement counts.",
+      "connection": "Existing Forward repository -> native stage BEGIN IMMEDIATE (SQLite) or transaction-local READ COMMITTED + scoped advisory lock (PostgreSQL) -> key retry/current-stage compare/append/commit; existing binding owner/index -> one latest profile/broker/environment row. No new schema/head pointer/service/polling or driver connection site. Mutable Risk/STOP/native claim and separate fresh publication/spec safety cuts remain.",
+      "validation": "stage/before.json and cost.json: same predecessor two ACKs reproduced; connections3->2, SELECT3/INSERT1/COMMIT1/clock1 and existing read-only retry unchanged. Existing execution_activation tests cover two native stores, abort/retry and PG SET/lock/order/commit exceptions. binding REPORT records native1031->1 and rotation/error/real app routes. crash REPORT records isolated owned-child before/after commit termination; actual PG/operating/CI are unverified.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|PostgresAccountIdentityStoreMixin.load_latest_account_binding|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|SQLiteAccountIdentityStoreMixin.load_latest_account_binding|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.insert_strategy_stage_revision|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.insert_strategy_stage_revision|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_insert_strategy_stage_revision|cursor.execute": 4
+      }
     }
   ]
 }

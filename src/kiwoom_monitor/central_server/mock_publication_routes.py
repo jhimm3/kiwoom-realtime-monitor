@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 
 
 class MockPublicationEvidenceStore(Protocol):
-    def load_account_bindings(self) -> list[dict[str, Any]]: ...
+    def load_latest_account_binding(
+        self, credential_profile_id: str, broker: str, environment: str,
+    ) -> dict[str, Any] | None: ...
 
     def load_shadow_candidates(self, after_sequence: int = 0, limit: int = 100) -> dict[str, Any]: ...
 
@@ -95,14 +97,8 @@ def create_mock_publication_router(
         }
 
     def current_mock_binding(credential_profile_id: str) -> dict[str, Any] | None:
-        bindings = [
-            row for row in store.load_account_bindings()
-            if str(row.get("credential_profile_id", "")) == credential_profile_id
-            and str(row.get("broker", "")) == "kiwoom"
-            and str(row.get("environment", "")) == "mock"
-        ]
-        return max(
-            bindings, key=lambda row: int(row.get("binding_revision", 0)), default=None,
+        return store.load_latest_account_binding(
+            credential_profile_id, "kiwoom", "mock",
         )
 
     @router.get(

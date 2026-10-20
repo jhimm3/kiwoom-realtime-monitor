@@ -2239,9 +2239,9 @@
       "src/kiwoom_monitor/central_server/mock_publication_routes.py",
       "create_mock_publication_router.current_mock_binding",
       "store",
-      "load_account_bindings",
+      "load_latest_account_binding",
       "direct_call",
-      "store.load_account_bindings",
+      "store.load_latest_account_binding",
       "",
       "",
       "reviewed_store_binding"
@@ -3999,9 +3999,9 @@
       "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
       "ForwardEvaluationRepository.publish_mock_automation_candidate",
       "self._store",
-      "load_account_bindings",
+      "load_latest_account_binding",
       "direct_call",
-      "self._store.load_account_bindings",
+      "self._store.load_latest_account_binding",
       "",
       "",
       "reviewed_store_binding"
@@ -4098,9 +4098,9 @@
       "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
       "ForwardEvaluationRepository.save_mock_automation_spec",
       "self._store",
-      "load_account_bindings",
+      "load_latest_account_binding",
       "direct_call",
-      "self._store.load_account_bindings",
+      "self._store.load_latest_account_binding",
       "",
       "",
       "reviewed_store_binding"
@@ -4662,6 +4662,17 @@
       "upsert_documents",
       "bound_reference",
       "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
+      "ForwardEvaluationRepository.save_stage_revision",
+      "self._store",
+      "insert_strategy_stage_revision",
+      "direct_call",
+      "self._store.insert_strategy_stage_revision",
       "",
       "",
       "reviewed_store_binding"
@@ -5455,7 +5466,9 @@
       "set_news_job_wakeup": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='callback', annotation=BinOp(left=Subscript(value=Name(id='Callable', ctx=Load()), slice=Tuple(elts=[List(ctx=Load()), Constant(value=None)], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "storage_breakdown": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='object', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "storage_size_bytes": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Name(id='int', ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
-      "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+      "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "insert_strategy_stage_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
     },
     "QueryStore": {
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -5565,7 +5578,9 @@
       "save_shadow_monitor_state": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='monitor_id', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "storage_breakdown": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='object', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "storage_size_bytes": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Name(id='int', ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
-      "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+      "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "insert_strategy_stage_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
     },
     "SQLiteQueryStore": {
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Attribute(value=Name(id='sqlite3', ctx=Load()), attr='Connection', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -5679,7 +5694,9 @@
       "set_news_job_wakeup": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='callback', annotation=BinOp(left=Subscript(value=Name(id='Callable', ctx=Load()), slice=Tuple(elts=[List(ctx=Load()), Constant(value=None)], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "storage_breakdown": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='object', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "storage_size_bytes": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Name(id='int', ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
-      "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+      "upsert_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "insert_strategy_stage_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_latest_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='credential_profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='broker', annotation=Name(id='str', ctx=Load())), arg(arg='environment', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
     }
   }
 }

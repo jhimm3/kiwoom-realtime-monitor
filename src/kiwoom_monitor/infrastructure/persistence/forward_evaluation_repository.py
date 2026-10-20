@@ -76,6 +76,7 @@ class ForwardEvaluationStore(Protocol):
     def insert_immutable_document(
         self, collection: str, owner: str, key: str, document: dict[str, Any],
     ) -> bool: ...
+    def insert_strategy_stage_revision(self, document: dict[str, Any]) -> bool: ...
     def load_documents(
         self, collection: str, owner: str = "", limit: int = 1000,
         offset: int = 0, updated_after: float = 0.0,
@@ -84,6 +85,9 @@ class ForwardEvaluationStore(Protocol):
         self, collection: str, owner: str, key: str,
     ) -> dict[str, Any] | None: ...
     def load_account_bindings(self) -> list[dict[str, Any]]: ...
+    def load_latest_account_binding(
+        self, credential_profile_id: str, broker: str, environment: str,
+    ) -> dict[str, Any] | None: ...
     def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None: ...
     def load_mock_automation_lineage(
         self, account_ref: str, *, spec_id: str, admission_id: str,
@@ -145,13 +149,9 @@ class ForwardEvaluationRepository:
             or profile.environment != "mock"
         ):
             raise ValueError("mock automation spec does not match its forward profile scope")
-        bindings = [
-            row for row in self._store.load_account_bindings()
-            if str(row.get("credential_profile_id", "")) == value.credential_profile_id
-            and str(row.get("broker", "")) == value.account_scope.broker
-            and str(row.get("environment", "")) == value.account_scope.environment.value
-        ]
-        latest = max(bindings, key=lambda row: int(row.get("binding_revision", 0)), default=None)
+        latest = self._store.load_latest_account_binding(
+            value.credential_profile_id, value.account_scope.broker, value.account_scope.environment.value,
+        )
         if latest is None or (
             str(latest.get("account_ref", "")) != value.account_scope.account_ref
             or int(latest.get("binding_revision", 0)) != value.binding_revision
@@ -284,13 +284,7 @@ class ForwardEvaluationRepository:
         )
         if expected_receipt != receipt:
             raise ValueError("candidate eligibility receipt does not match policy evaluation")
-        bindings = [
-            row for row in self._store.load_account_bindings()
-            if str(row.get("credential_profile_id", "")) == credential_profile_id
-            and str(row.get("broker", "")) == "kiwoom"
-            and str(row.get("environment", "")) == "mock"
-        ]
-        latest = max(bindings, key=lambda row: int(row.get("binding_revision", 0)), default=None)
+        latest = self._store.load_latest_account_binding(credential_profile_id, "kiwoom", "mock")
         if latest is None or (
             str(latest.get("account_ref", "")) != receipt.account_ref
             or int(latest.get("binding_revision", 0)) != expected_binding_revision
@@ -977,11 +971,6 @@ class ForwardEvaluationRepository:
                     f"{value.strategy_ref}/{value.revision_id}"
                 )
             return False
-        latest = self.latest_stage(value.strategy_ref)
-        if latest is not value.previous_stage:
-            raise ValueError(
-                f"strategy stage changed: expected {value.previous_stage.value}, found {latest.value}"
-            )
         if (
             value.stage is StrategyLifecycleStage.BROKER_MOCK_VALIDATED
             and not self._has_passing_forward_report(value.strategy_ref, value.evidence_refs)
@@ -990,9 +979,7 @@ class ForwardEvaluationRepository:
                 "broker_mock_validated requires a stored finalized PASSED forward report "
                 "for the same strategy"
             )
-        return self._save_immutable(
-            self.STAGE_COLLECTION, value.strategy_ref, value.revision_id, value.to_dict(),
-        )
+        return self._store.insert_strategy_stage_revision(value.to_dict())
 
     def load_stage_revisions(self, strategy_ref: str) -> tuple[StrategyStageRevision, ...]:
         rows = self._store.load_documents(self.STAGE_COLLECTION, strategy_ref, 10_000)
