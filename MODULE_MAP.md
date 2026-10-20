@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 R3-011: 기존 SettingsRepository가 DB 값/version transaction과 RAM cache 세대를 계속 소유한다. MainWindow geometry/Alert는 기존 set_many로 연결하고 CentralSettingsSync/Drive restore의 clear_cache 및 설정 worker 경계를 유지한다. 새 계층/schema/polling 없음. 로컬 `aeb63c6`·관련14모듈175건; 동일4키 반영행8→0·두 UI의 연결/COMMIT/시계4→1. F01(간접)/F22/F23/F24 갱신, 다음012. [실측·의도한 revision 의미·미검증](REFACTOR_BACKLOG.md#r3-011-설정-no-opcacheui-batch-완료--2026-10-20).
+
 2026-10-20 R3-010 등록 개선 완료: typed Forward stage gate→기존 native stage writer의 key/이전단계 비교·append·commit, publication/spec→기존 identity scoped latest binding1행으로 연결했다. stage 기존 reader 범위/clock·동일retry·full binding history·최신Risk/STOP/claim을 유지한다. 로컬 `fc21038`·17모듈 546건, stage연결3→2/binding1031→1·별도nativeSQLite종료2건. 새 계층/schema/polling 없음. 다음011·정확한 완료 수준/한계는 [R3 최신](REFACTOR_BACKLOG.md#r3-010-stagebinding-등록-개선-완료--2026-10-20)을 따른다.
 
 2026-10-20 R3-010 이전 per-key 단계: 기존 ForwardEvaluationRepository의 typed 검증/변환 → 같은 QueryStore의 native insert_immutable_document가 key별 충돌·transaction·commit ACK를 소유한다. Shadow native helper는 decision/candidate 쌍과 canonical 충돌을 소유한다. generic SELECT-first/Shadow INSERT-first를 구분하며 새 owner/계층/schema는 없다. 신규 연결3→1·SELECT2→1, 기존 동일 문서 쓰기0. 로컬 `2bd43df`·관련18모듈 739건 통과; stage CAS/binding 범위/OS crash·실제PG는 잔여. [R3-010 최신 범위](REFACTOR_BACKLOG.md#r3-010-불변-저장충돌ack-경계--2026-10-20).

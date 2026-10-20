@@ -136,6 +136,8 @@ R3g 선택 계좌 모의 주문도 기존 intent/event 원장을 사용한다(�
 | 파생 통계 캐시 | `top20_statistics_daily_cache` | PC 직접 연결의 완료일 시간대 합계·표본 수·정규장 합계·시장 분모. 원본 보완 시 해당 날짜를 무효화하고 다음 조회에서 재생성 |
 | 수집 상태 | `minute_history_sync_log`, `daily_bar_sync_log`, `market_data_finalization_log`, `market_data_unconfirmed_log` | 백필·확정·최종 실패 상태 |
 
+**R3-011 설정 값/version 계약(2026-10-20, `aeb63c6`).** schema/DDL·키/문자열 형식·기존 KST provider는 변경하지 않았다. `central_setting_versions.updated_at`은 값 편집 또는 최초 공유 등록 시각이며 매 저장 버튼의 접수 시각이 아니다. 기존 `SettingsRepository.set_many` transaction에서 version UPSERT가 writer lock 아래 변경 전 `settings.value`를 비교한 후 조건부 value UPSERT·commit한다. 같은 값+기존 version은 두 row와 시각을 유지하고, 누락 version은 최초1행을 등록하며 실제 변경은 값/version을 함께 반영한다. 오류 시 둘 다 rollback한다. RAM만 비교해 외부 DB 변경을 덮거나 별도 사전 SELECT를 추가하지 않는다. `column_settings` 변경셋은 다음 R3-012이며 이 작업의 완료에 포함하지 않는다. [비용/동기화·실패 검증](REFACTOR_BACKLOG.md#r3-011-설정-no-opcacheui-batch-완료--2026-10-20).
+
 `stocks.code`가 테마·신고가의 논리적 부모다. 일부 봉 테이블은 성능과 과거 호환 때문에 외래키를 강제하지 않는다. `top20_trade_value_index`는 원시 체결이 아니라 순위 코호트와 분봉에서 계산된 파생 데이터다.
 
 NAS `central_dataset_snapshots(kind='top20_statistics_day')`는 완료된 날짜의 TOP20 시간대·정규장 파생 집계다. `top20_index` 또는 `market_index_chart`가 같은 날짜에 다시 저장되면 같은 트랜잭션에서 해당 집계를 삭제하고 다음 통계 조회에서 재생성한다. 당일은 캐시하지 않는다.

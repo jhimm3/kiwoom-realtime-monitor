@@ -1,3 +1,9 @@
+## 2026-10-20 R3-011 설정 no-op·cache·UI batch (로컬 미배포)
+
+제품·검사 `aeb63c6`: 같은 값의 기존 revision을 보존하고 최초 공유 등록은 유지한다. 이전 read/늦은 write ACK의 cache 재삽입을 막고 geometry/Alert4키를 기존 transaction1회로 저장한다. 동일4키 반영행8→0, 각 UI 연결·COMMIT·시계4→1. 현재 소스 관련 **14모듈·고유175건/140.776 worker초 통과**(독립2묶음 병렬). 계획/발견/실행/통과 ID, 변경8개 ID, 소스 불변, worker/자식 종료와 native TEMP 제거를 대조했다.
+
+**R3-011은 검증 완료(등록 개선 코드·로컬 관련검증)**다. 다음 미보류 대기 작업은 **R3-012(열 설정 저장의 변경셋)**이다. R3-032의 bootstrap daemon/restore 수명과 R3-056의 전송 중 편집 ACK 문제는 별도 미결로 유지한다. 실제 다중PC/NAS 동기화·앱 전체 bootstrap/timer/daemon 종료·운영 DB/계좌/주문·장중·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. 이번 결과를 기존 hosted CI 성공이나 운영 수락으로 확대하지 않는다.
+
 ## 2026-10-20 R3-010 stage·binding 완료 (로컬 미배포)
 
 제품·검사 `fc21038`: 같은 이전 단계로 서로 다른 stage 승인을 모두 ACK하던 경합을 native 비교/append로 막고, 기존 인덱스의 최신 binding1행을 실제 후보/spec 경로에 연결했다. stage 연결3→2·SELECT3유지, binding 반환1031→1. 현재 소스 관련17모듈 **고유 546건/440.307 worker초 통과**(두 묶음 병렬). 계획/발견/실행/통과 ID와 변경6개 ID·소스 불변·worker/자식 종료·TEMP 정리를 대조했다. 별도 SQLite commit 전후 강제종료2건도 검증했다.

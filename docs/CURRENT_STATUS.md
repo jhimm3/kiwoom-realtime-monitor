@@ -1,5 +1,19 @@
 # 현재 상태 요약
 
+## 2026-10-20 R3-011 설정 no-op·cache·UI batch 완료
+
+로컬 제품·검사 `aeb63c6`. 현재 소스 관련 **14모듈·고유175건/140.776 worker초 통과**(독립2묶음 병렬). 계획/발견/실행/통과 ID, 변경8개 ID, 소스 불변, worker/자식 종료와 native TEMP 제거를 대조했다.
+
+**R3-011은 검증 완료(등록 개선 코드·로컬 관련검증)**다. 다음 미보류 대기 작업은 **R3-012(열 설정 저장의 변경셋)**이다. R3-032의 bootstrap daemon/restore 수명과 R3-056의 전송 중 편집 ACK 문제는 별도 미결로 유지한다.
+
+SettingsRepository의 기존 native transaction에서 version UPSERT가 변경 전 DB 값을 비교한 뒤 조건부 value UPSERT를 수행한다. 같은 값+기존 version은 revision을 보존하고, 같은 값+누락 version은 최초 공유 등록을 남기며, 실제 변경은 값/version을 함께 commit한다. 같은 값의 저장을 새 편집·재승인 시각으로 취급하지 않는 것이 의도한 변경이다. 혼합 UTC/KST의 실제 순간 비교와 더 최신 원격 편집 수락·진짜 로컬 편집의 업로드를 기존 CentralSettingsSyncService+격리 SQLite로 검증했다.
+
+기존 RAM cache에 짧은 Lock과 무효화 세대를 적용했다. get의 DB 조회 중 clear/새 write가 끝나면 이전 결과를 cache에 다시 넣지 않는다. write의 commit·close 성공 및 동일 세대일 때만 값을 게시하고, 늦은 ACK/실패는 해당 키를 무효화한다. DB I/O는 Lock 밖이며 진행 중 get 자체의 이전 snapshot 반환은 허용한다. 외부 프로세스가 clear_cache 없이 바꾼 값을 자동 감지하는 기능은 추가하지 않았다.
+
+격리 native SQLite의 동일4키 저장은 연결1/BEGIN1/COMMIT1/시계1/INSERT 시도8을 유지하며 실제 반영행8→0이다. 모두 실제 변경한 geometry/Alert4키는 각 연결·BEGIN·COMMIT·시계4→1, 반영행8 유지다. version 비교에는 인덱스 기반 scalar subquery가 있으며 별도 SELECT 왕복은 추가하지 않았다. no-op도 연결/transaction/SQL 시도는 남는다. 물리 I/O·WAL·잠금 대기·장중 latency와 cache Lock 비용은 미측정이다.
+
+F01(간접)/F22/F23/F24와 책임·DB 계약 및 [백로그 최신](../REFACTOR_BACKLOG.md#r3-011-설정-no-opcacheui-batch-완료--2026-10-20)을 갱신했다. 실제 다중PC/NAS 동기화·앱 전체 bootstrap/timer/daemon 종료·운영 DB/계좌/주문·장중·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. 이번 결과를 기존 hosted CI 성공이나 운영 수락으로 확대하지 않는다.
+
 ## 2026-10-20 R3-010 stage·binding 등록 개선 완료
 
 로컬 제품·검사 `fc21038`. 현재 소스 관련17모듈 **고유 546건/440.307 worker초 통과**(두 묶음 병렬). 계획/발견/실행/통과 ID와 변경6개 ID·소스 불변·worker/자식 종료·TEMP 정리를 대조했다.
