@@ -9,6 +9,7 @@ from datetime import datetime
 
 from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsSyncService, is_shared_setting
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
 
 
 class _Client:
@@ -26,6 +27,81 @@ class _Client:
 
 
 class CentralSettingsSyncTests(unittest.TestCase):
+    def test_column_noop_preserves_remote_edit_while_local_changes_and_explicit_reset_are_shared(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'columns.sqlite'
+            old = '2026-10-20T00:00:00+00:00'
+            now = datetime.fromisoformat('2026-10-20T10:00:00+09:00')
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);'
+                    'CREATE TABLE central_setting_versions(setting_key TEXT PRIMARY KEY,updated_at TEXT NOT NULL);'
+                    'CREATE TABLE column_settings(column_name TEXT PRIMARY KEY,visible INTEGER,position INTEGER,width INTEGER);'
+                    'CREATE TABLE central_column_setting_versions(column_name TEXT PRIMARY KEY,updated_at TEXT NOT NULL);')
+                connection.executemany('INSERT INTO column_settings VALUES(?,?,?,?)',
+                                       [('rank', 1, 0, 32), ('stock', 1, 1, 333)])
+                connection.executemany('INSERT INTO central_column_setting_versions VALUES(?,?)',
+                                       [('rank', old), ('stock', old)])
+            repository = ColumnSettingsRepository(path, now_provider=lambda: now)
+            def versions():
+                with closing(sqlite3.connect(path)) as connection:
+                    return dict(connection.execute('SELECT column_name,updated_at FROM central_column_setting_versions'))
+            client = _Client()
+            client.remote = {'app_column_settings': [
+                {'owner': 'main_table', 'key': 'stock', 'document': {
+                    'column_name': 'stock', 'visible': False, 'position': 9,
+                    'updated_at': '2026-10-20T09:30:00+09:00'}},
+                {'owner': 'main_table', 'key': 'not_installed', 'document': {
+                    'column_name': 'not_installed', 'visible': True, 'position': 40,
+                    'updated_at': '2026-10-20T09:45:00+09:00'}},
+            ]}
+            service = CentralSettingsSyncService(client, now_provider=lambda: now)
+            repository.save(repository.list())
+            self.assertEqual({'rank': old, 'stock': old}, versions())
+            self.assertEqual(1, service.sync(path))  # The partial remote lacked the existing versioned rank column.
+            self.assertEqual((ColumnSetting('rank', True, 0, 32), ColumnSetting('stock', False, 9, 333)), repository.list())
+            self.assertNotIn('not_installed', versions())
+            self.assertEqual(0, service.sync(path))
+
+            repository.save((ColumnSetting('rank', True, 0, 32), ColumnSetting('stock', True, 2, 444)))
+            self.assertEqual(old, versions()['rank'])
+            self.assertEqual(now.isoformat(), versions()['stock'])
+            self.assertEqual(1, service.sync(path))
+            payload = client.upsert_calls[-1][1]
+            self.assertEqual(['stock'], [value['key'] for value in payload])
+            self.assertEqual({'column_name': 'stock', 'visible': True, 'position': 2,
+                              'updated_at': now.isoformat()}, payload[0]['document'])
+            self.assertNotIn('width', payload[0]['document'])
+            self.assertEqual(0, service.sync(path))
+
+            # Width remains local data, while its existing revision coupling is preserved.
+            now = datetime.fromisoformat('2026-10-20T10:05:00+09:00')
+            repository.save((ColumnSetting('stock', True, 2, 555),))
+            self.assertEqual(now.isoformat(), versions()['stock'])
+            self.assertEqual(1, service.sync(path))
+            self.assertNotIn('width', client.upsert_calls[-1][1][0]['document'])
+            self.assertEqual(555, next(column.width for column in repository.list() if column.name == 'stock'))
+
+            for stamp in ('2026-10-20T10:10:00+09:00', '2026-10-20T10:11:00+09:00'):
+                now = datetime.fromisoformat(stamp)
+                repository.reset()
+                # A second reset of already-default values is still an explicit shared action.
+                self.assertEqual((ColumnSetting('rank', True, 0, 32), ColumnSetting('stock', True, 1, 142)), repository.list())
+                self.assertEqual(stamp, versions()['rank'])
+                self.assertEqual(stamp, versions()['stock'])
+                self.assertEqual(2, service.sync(path))
+                self.assertEqual({'rank', 'stock'}, {value['key'] for value in client.upsert_calls[-1][1]})
+                self.assertEqual(0, service.sync(path))
+
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("DELETE FROM central_column_setting_versions WHERE column_name='rank'")
+            now = datetime.fromisoformat('2026-10-20T11:00:00+09:00')
+            repository.save(repository.list())
+            self.assertEqual(now.isoformat(), versions()['rank'])
+            self.assertEqual('2026-10-20T10:11:00+09:00', versions()['stock'])
+            self.assertEqual(1, service.sync(path))
+            self.assertEqual(['rank'], [value['key'] for value in client.upsert_calls[-1][1]])
+            self.assertEqual(0, service.sync(path))
+
     def test_equal_save_is_not_a_new_edit_and_changed_value_still_wins_by_instant(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'settings.sqlite'

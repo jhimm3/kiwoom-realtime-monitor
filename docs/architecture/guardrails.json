@@ -1432,6 +1432,15 @@
         "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.insert_strategy_stage_revision|connection.execute": 1,
         "db|src/kiwoom_monitor/central_server/database_documents.py|_insert_strategy_stage_revision|cursor.execute": 4
       }
+    },
+    {
+      "id": "R3-012-column-writer-before-clock-20261020",
+      "reason": "Preserve the original column save ordering: acquire the SQLite writer lock before sampling the existing KST revision clock, while comparing pre-write DB values for no-op writes. One exact SQL site is justified; adopted inventory/rules/history are unchanged.",
+      "connection": "Existing ColumnSettingsRepository.save uses BEGIN IMMEDIATE for nonempty input and BEGIN (deferred) for empty input, replacing its implicit BEGIN. The existing version/value writes and one native commit/connection remain. Empty legacy table creation must roll back on clock failure, and explicit reset remains unchanged. No new layer, schema, polling, driver connection or RAM IO path.",
+      "validation": "repository/REPORT.md and clock-baseline/candidate/fixed diagnostics preserve baseline PASS, intermediate pre-lock clock FAIL, empty missing-version-table DDL rollback FAIL and final native PASS; existing test_nonempty_save_samples_revision_after_acquiring_native_writer_lock protects these boundaries. Default16 native costs keep BEGIN/connection/COMMIT/clock1 and32 statement attempts, with same rows32->0 or one changed column32->2. Related Qt/sync/native final regression is recorded separately; physical IO, operating DB, remote CI/NAS are not measured.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/column_settings_repository.py|ColumnSettingsRepository.save|con.execute": 1
+      }
     }
   ]
 }

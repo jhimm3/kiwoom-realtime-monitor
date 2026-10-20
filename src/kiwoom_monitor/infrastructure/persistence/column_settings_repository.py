@@ -26,8 +26,14 @@ class ColumnSettingsRepository:
     def save(self, settings: tuple[ColumnSetting, ...]) -> None:
         con = sqlite3.connect(self._database_path)
         try:
-            con.executemany("UPDATE column_settings SET visible=?, position=?, width=? WHERE column_name=?", [(int(s.visible),s.position,s.width,s.name) for s in settings])
-            self._record_versions(con, tuple(setting.name for setting in settings))
+            # Preserve writer-lock-before-clock and empty-save DDL rollback boundaries.
+            con.execute("BEGIN IMMEDIATE" if settings else "BEGIN")
+            self._record_versions(con, tuple(setting.name for setting in settings), settings=settings)
+            con.executemany(
+                "UPDATE column_settings SET visible=?, position=?, width=? WHERE column_name=? "
+                "AND (visible IS NOT ? OR position IS NOT ? OR width IS NOT ?)",
+                [(int(s.visible), s.position, s.width, s.name, int(s.visible), s.position, s.width) for s in settings],
+            )
             con.commit()
         finally:
             con.close()
@@ -46,14 +52,27 @@ class ColumnSettingsRepository:
         finally:
             con.close()
 
-    def _record_versions(self, connection: sqlite3.Connection, names: tuple[str, ...]) -> None:
+    def _record_versions(
+        self, connection: sqlite3.Connection, names: tuple[str, ...],
+        *, settings: tuple[ColumnSetting, ...] | None = None,
+    ) -> None:
         connection.execute(
             "CREATE TABLE IF NOT EXISTS central_column_setting_versions ("
             "column_name TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
         )
         now = self._now().isoformat()
-        connection.executemany(
+        statement = (
             "INSERT INTO central_column_setting_versions(column_name,updated_at) VALUES(?,?) "
-            "ON CONFLICT(column_name) DO UPDATE SET updated_at=excluded.updated_at",
-            ((name, now) for name in names),
+            "ON CONFLICT(column_name) DO UPDATE SET updated_at=excluded.updated_at"
         )
+        if settings is None:
+            parameters = ((name, now) for name in names)
+        else:
+            # Compare before the value UPDATE, within this UPSERT's writer transaction.
+            # Missing versions and unknown names retain their existing registration contract.
+            statement += (
+                " WHERE NOT EXISTS (SELECT 1 FROM column_settings "
+                "WHERE column_name=excluded.column_name AND visible IS ? AND position IS ? AND width IS ?)"
+            )
+            parameters = ((s.name, now, int(s.visible), s.position, s.width) for s in settings)
+        connection.executemany(statement, parameters)
