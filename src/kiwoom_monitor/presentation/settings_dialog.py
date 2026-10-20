@@ -736,7 +736,7 @@ class SettingsDialog(QDialog):
         if self._stock_lookup is None:
             QMessageBox.information(self, "종목 찾기", "전체 상장종목 목록을 사용할 수 없습니다.")
             return
-        dialog = SimilarStockDialog(self._stock_lookup, "", self)
+        dialog = SimilarStockDialog(self._stock_lookup, "", parent=self)
         if not dialog.exec() or dialog.selected is None:
             return
         _, name = dialog.selected

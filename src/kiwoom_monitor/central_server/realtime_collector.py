@@ -1432,9 +1432,9 @@ class CentralRealtimeCollector:
                     )
             except Exception:
                 for value in entry_values:
-                    self._pending_account_entry_symbols[
-                        (str(value["owner"]), str(value["key"]))
-                    ] = value
+                    self._pending_account_entry_symbols.setdefault(
+                        (str(value["owner"]), str(value["key"])), value,
+                    )
                 raise
         reference_values = list(self._pending_stock_references.values())
         self._pending_stock_references.clear()
@@ -1448,7 +1448,7 @@ class CentralRealtimeCollector:
                     )
             except Exception:
                 for value in reference_values:
-                    self._pending_stock_references[str(value["owner"])] = value
+                    self._pending_stock_references.setdefault(str(value["owner"]), value)
                 raise
         closures = list(self._pending_minute_finalizations.values())
         self._pending_minute_finalizations.clear()

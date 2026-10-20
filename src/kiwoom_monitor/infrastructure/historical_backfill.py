@@ -1518,9 +1518,6 @@ def initialize_probe_database(path: Path) -> None:
                     observed_at TEXT NOT NULL,
                     PRIMARY KEY (provider, office_id, article_id, code)
                 );
-                CREATE INDEX IF NOT EXISTS idx_news_articles_collection_identity
-                    ON news_articles(COALESCE(NULLIF(original_url,''),
-                        NULLIF(portal_url,''),'naver:'||office_id||':'||article_id));
                 CREATE TABLE IF NOT EXISTS news_search_observations (
                     provider TEXT NOT NULL,
                     office_id TEXT NOT NULL,
@@ -1683,6 +1680,11 @@ def initialize_probe_database(path: Path) -> None:
                 connection.execute(
                     "ALTER TABLE news_articles ADD COLUMN portal_url TEXT NOT NULL DEFAULT ''"
                 )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_news_articles_collection_identity "
+                "ON news_articles(COALESCE(NULLIF(original_url,''),"
+                "NULLIF(portal_url,''),'naver:'||office_id||':'||article_id))"
+            )
             additions = {
                 "published_at_source": "TEXT NOT NULL DEFAULT ''",
                 "published_at_raw": "TEXT NOT NULL DEFAULT ''",

@@ -1441,6 +1441,15 @@
       "limits": {
         "db|src/kiwoom_monitor/infrastructure/persistence/column_settings_repository.py|ColumnSettingsRepository.save|con.execute": 1
       }
+    },
+    {
+      "id": "R3-069-legacy-index-after-columns-20261020",
+      "reason": "Move the existing identity index DDL out of executescript to after the existing original_url/portal_url upgrades. Exactly one Python execute site increases12 to13; the same index and runtime SQL statement are retained, not a new DB/I/O path or inventory reset.",
+      "connection": "Existing initialize_probe_database native connection -> existing column upgrades -> same IF NOT EXISTS index -> remaining original upgrades/commit/close. Fresh logical schema31 unchanged; legacy zero/one/both URL columns and interrupted upgrade retry preserve rows/URLs/timestamps and preexisting index. No new schema, transaction owner, provider, polling or layer.",
+      "validation": "R3-069 isolated native-before-after diagnostic preserves original missing-column failure and same-file recovery. Related historical_backfill29 tests include DDL/ALTER/index faults and cleanup/retry. SQLite executescript partial DDL persistence is explicit, not whole-initializer rollback. Root current-source regression is recorded separately; operating archives, real PG, NAS/CI and crash durability are unverified.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/historical_backfill.py|initialize_probe_database|connection.execute": 13
+      }
     }
   ]
 }

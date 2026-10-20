@@ -24,6 +24,127 @@ from qt_settings_test_support import dispose_dialogs, wait_until
 
 
 class ApiSettingsDialogTests(unittest.TestCase):
+    def test_excluded_stock_search_modal_save_and_theme_consumers_are_connected(self):
+        import gc
+        import sqlite3
+        from contextlib import closing
+        from datetime import datetime
+        from types import SimpleNamespace
+        from PySide6.QtCore import QCoreApplication, QEvent, QSettings
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QDialogButtonBox, QLabel, QPushButton, QTabWidget
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        from kiwoom_monitor.presentation.main_window import MainWindow
+        from kiwoom_monitor.presentation.similar_stock_dialog import SimilarStockDialog, choose_similar_stock
+        from kiwoom_monitor.presentation.settings_request_worker import _running_requests
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = Database(root / "monitor.sqlite3")
+            database.initialize()
+            stocks = StockRepository(database.settings.database_path)
+            stocks.upsert_many((("005930", "삼성전자", "KOSPI"), ("000660", "SK하이닉스", "KOSPI")))
+            now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+            loader = SimpleNamespace(load_top_stocks=lambda: (), server_now=lambda: now)
+            window = MainWindow(database.settings, loader, stock_lookup=stocks,
+                                themes={"삼성전자": "반도체", "SK하이닉스": "반도체"})
+            window._app_controller._initial_ranking_timer.stop()
+            initial_requests = set(_running_requests)
+            created, callback_errors = [], []
+            action = ["삼성", "select", 1]
+            expected_parent = [None]
+
+            def picker_factory(*args, **kwargs):
+                picker = SimilarStockDialog(*args, **kwargs)
+                created.append(picker)
+                self.assertIs(expected_parent[0], picker.parent())
+
+                def interact():
+                    try:
+                        picker._search.setText(action[0])
+                        QTest.qWait(180)  # Exercise the existing 150ms search signal/debounce.
+                        self.assertEqual(action[2], picker._list.count())
+                        if action[1] == "select":
+                            self.assertTrue(picker._select.isEnabled())
+                            picker._select.click()
+                        else:
+                            if not action[2]:
+                                self.assertFalse(picker._select.isEnabled())
+                            next(button for button in picker.findChildren(QPushButton)
+                                 if button.text() == "이번 종목 무시").click()
+                    except BaseException as error:
+                        callback_errors.append(error)
+                        picker.reject()
+                QTimer.singleShot(0, interact)
+                return picker
+
+            try:
+                # Keep the real MainWindow factory/finished callback; isolate only file locations.
+                with patch.object(window, "_api_config_path", return_value=root / "api.env"), \
+                        patch("kiwoom_monitor.presentation.settings_dialog.QSettings", side_effect=lambda *_args: QSettings(str(root / "geometry.ini"), QSettings.Format.IniFormat)):
+                    window._open_settings()
+                    dialog = window._settings_dialog
+                    expected_parent[0] = dialog
+                    tabs = dialog.findChild(QTabWidget)
+                    tabs.setCurrentIndex(next(index for index in range(tabs.count()) if tabs.tabText(index) == "표시 형식"))
+                    self.app.processEvents()
+                    find = next(button for button in dialog.findChildren(QPushButton) if button.text() == "종목 찾기")
+                    with patch("kiwoom_monitor.presentation.settings_dialog.SimilarStockDialog", side_effect=picker_factory):
+                        for query, operation, count in (("삼성", "select", 1), ("삼성", "select", 1),
+                                                        ("하이닉스", "cancel", 1), ("ZZZ-XQ-999", "cancel", 0)):
+                            action[:] = [query, operation, count]
+                            prior = len(created)
+                            find.click()
+                            self.assertEqual(prior + 1, len(created))
+                            if callback_errors:
+                                raise callback_errors[0]
+                            self.assertEqual("삼성전자", dialog._theme_trade_summary_excluded_stocks.text())
+                            self.assertIn("확인할 테마 없음", "\n".join(label.text() for label in created[-1].findChildren(QLabel)))
+                    dialog._theme_trade_summary_excluded_enabled.setChecked(True)
+                    dialog._theme_group_sort_basis.setCurrentIndex(1)
+                    dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+                    wait_until(lambda: dialog._save_request is None and window._settings_dialog is None)
+                    self.assertEqual(1, dialog.result())
+                    self.assertEqual("기본 설정 저장 완료", window.statusBar().currentMessage())
+                    wait_until(lambda: not (set(_running_requests) - initial_requests))
+                    with closing(sqlite3.connect(database.settings.database_path)) as connection:
+                        self.assertEqual(("삼성전자",), connection.execute(
+                            "SELECT value FROM settings WHERE key='theme_trade_summary_excluded_stocks'"
+                        ).fetchone())
+                    database.settings.clear_cache()
+                    window._ranked_stock_names = {"005930": "삼성전자", "000660": "SK하이닉스"}
+                    window._minute_aggregator.today_trade_value_eok = lambda code, _now: {"005930": 100., "000660": 40.}[code]
+                    window._refresh_theme_trade_summary()
+                    self.assertIn("140.00억", window._theme_trade_summary.text())
+                    self.assertIn("40.00억", window._theme_trade_excluded_summary.text())
+                    self.assertEqual(({"반도체": 1}, {"반도체": 40.}), window._theme_group_sort_metrics())
+                    window._open_settings()
+                    restored = window._settings_dialog
+                    self.assertEqual("삼성전자", restored._theme_trade_summary_excluded_stocks.text())
+                    restored.reject()
+                    wait_until(lambda: not (set(_running_requests) - initial_requests))
+                # The import helper's explicit themes + parent constructor contract stays valid.
+                expected_parent[0] = window
+                action[:] = ["삼성", "select", 1]
+                with patch("kiwoom_monitor.presentation.similar_stock_dialog.SimilarStockDialog", side_effect=picker_factory):
+                    selected, cancelled_all = choose_similar_stock(window, stocks, "입력 오타", ("반도체",))
+                if callback_errors:
+                    raise callback_errors[0]
+                self.assertEqual((("005930", "삼성전자"), False), (selected, cancelled_all))
+                self.assertIn("반도체", "\n".join(label.text() for label in created[-1].findChildren(QLabel)))
+            finally:
+                for worker in tuple(set(_running_requests) - initial_requests):
+                    self.assertTrue(worker.wait(3000))
+                self.app.processEvents()
+                dispose_dialogs()
+                self.app.processEvents()
+                window.close()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+                gc.collect()
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])

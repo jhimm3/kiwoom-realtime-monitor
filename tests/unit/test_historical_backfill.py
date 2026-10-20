@@ -43,6 +43,138 @@ from scripts.preprocess_historical_news_locally import _search_article
 
 
 class HistoricalBackfillTest(unittest.TestCase):
+    @staticmethod
+    def _legacy_article_database(path: Path, urls: dict[str, str]) -> dict[str, str]:
+        original = {
+            "provider": NAVER_HISTORICAL_SEARCH_PROVIDER,
+            "office_id": "001", "article_id": "legacy",
+            "published_at": "2026-09-27", "published_precision": "date",
+            "office_name": "매체", "title": "보존할 제목", "summary": "원래 요약",
+            "article_url": "https://legacy.test/article", "image_url": "",
+            "first_observed_at": "2026-09-27T01:02:03+09:00",
+            "last_observed_at": "2026-09-27T02:03:04+09:00", **urls,
+        }
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("CREATE TABLE news_articles (" + ",".join(
+                f"{name} TEXT NOT NULL" for name in original
+            ) + ",PRIMARY KEY(provider,office_id,article_id))")
+            connection.execute("INSERT INTO news_articles (" + ",".join(original) + ") VALUES ("
+                               + ",".join("?" for _ in original) + ")", tuple(original.values()))
+        return original
+
+    def test_legacy_url_columns_migrate_before_identity_index_without_rewriting_rows(self) -> None:
+        cases = (
+            ({}, "naver:001:legacy"),
+            ({"original_url": "https://publisher.test/legacy"}, "https://publisher.test/legacy"),
+            ({"portal_url": "https://portal.test/legacy"}, "https://portal.test/legacy"),
+            ({"original_url": "https://publisher.test/legacy", "portal_url": "https://portal.test/legacy"},
+             "https://publisher.test/legacy"),
+        )
+        for urls, expected_identity in cases:
+            with self.subTest(existing_url_columns=tuple(urls)), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "legacy.sqlite3"
+                original = self._legacy_article_database(path, urls)
+                existing_index = None
+                if len(urls) == 2:
+                    with closing(sqlite3.connect(path)) as connection, connection:
+                        connection.execute(
+                            "CREATE INDEX idx_news_articles_collection_identity ON news_articles("
+                            "COALESCE(NULLIF(original_url,''),NULLIF(portal_url,''),'naver:'||office_id||':'||article_id))"
+                        )
+                        existing_index = connection.execute(
+                            "SELECT rootpage,sql FROM sqlite_schema WHERE name='idx_news_articles_collection_identity'"
+                        ).fetchone()
+                initialize_probe_database(path)
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual(tuple(original.values()), connection.execute(
+                        "SELECT " + ",".join(original) + " FROM news_articles"
+                    ).fetchone())
+                    self.assertEqual((expected_identity,), connection.execute(
+                        "SELECT COALESCE(NULLIF(original_url,''),NULLIF(portal_url,''),"
+                        "'naver:'||office_id||':'||article_id) FROM news_articles"
+                    ).fetchone())
+                    self.assertEqual(("", "not_fetched", 0, "publication_time_unverified"), connection.execute(
+                        "SELECT published_at_source,article_fetch_status,training_eligible,training_exclusion_reason "
+                        "FROM news_articles"
+                    ).fetchone())
+                    index = connection.execute(
+                        "SELECT rootpage,sql FROM sqlite_schema WHERE name='idx_news_articles_collection_identity'"
+                    ).fetchone()
+                    if existing_index is not None:
+                        self.assertEqual(existing_index, index)
+                    before_schema = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name").fetchall()
+                    before_rows = connection.execute("SELECT * FROM news_articles").fetchall()
+                initialize_probe_database(path)
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual(before_schema, connection.execute(
+                        "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name"
+                    ).fetchall())
+                    self.assertEqual(before_rows, connection.execute("SELECT * FROM news_articles").fetchall())
+                    self.assertEqual(index, connection.execute(
+                        "SELECT rootpage,sql FROM sqlite_schema WHERE name='idx_news_articles_collection_identity'"
+                    ).fetchone())
+
+    def test_partial_url_migration_failure_closes_and_retries_without_losing_articles(self) -> None:
+        from unittest.mock import patch
+        from kiwoom_monitor.infrastructure import historical_backfill as backfill
+
+        for failing_sql in ("ADD COLUMN portal_url", "CREATE INDEX IF NOT EXISTS idx_news_articles_collection_identity"):
+            with self.subTest(failure=failing_sql), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "legacy.sqlite3"
+                original = self._legacy_article_database(path, {})
+                original_connect = backfill._connect_database
+                opened = []
+
+                class FailedConnection:
+                    def __init__(self, connection):
+                        self.connection = connection
+
+                    def __enter__(self):
+                        self.connection.__enter__()
+                        return self
+
+                    def __exit__(self, *args):
+                        return self.connection.__exit__(*args)
+
+                    def execute(self, statement, *args):
+                        if failing_sql in statement:
+                            raise sqlite3.OperationalError("injected legacy migration failure")
+                        return self.connection.execute(statement, *args)
+
+                    def __getattr__(self, name):
+                        return getattr(self.connection, name)
+
+                def connect(database_path):
+                    connection = original_connect(database_path)
+                    opened.append(connection)
+                    return FailedConnection(connection)
+
+                with patch.object(backfill, "_connect_database", side_effect=connect), \
+                        self.assertRaisesRegex(sqlite3.OperationalError, "injected legacy migration failure"):
+                    initialize_probe_database(path)
+                self.assertEqual(1, len(opened))
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    opened[0].execute("SELECT 1")
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual(tuple(original.values()), connection.execute(
+                        "SELECT " + ",".join(original) + " FROM news_articles"
+                    ).fetchone())
+                    self.assertIsNone(connection.execute(
+                        "SELECT 1 FROM sqlite_schema WHERE name='idx_news_articles_collection_identity'"
+                    ).fetchone())
+                initialize_probe_database(path)
+                initialize_probe_database(path)
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual(tuple(original.values()), connection.execute(
+                        "SELECT " + ",".join(original) + " FROM news_articles"
+                    ).fetchone())
+                    self.assertEqual(("", ""), connection.execute(
+                        "SELECT original_url,portal_url FROM news_articles"
+                    ).fetchone())
+                    self.assertEqual((1,), connection.execute(
+                        "SELECT COUNT(*) FROM sqlite_schema WHERE name='idx_news_articles_collection_identity'"
+                    ).fetchone())
+
     def test_collection_identity_index_and_publication_status_preserve_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "probe.sqlite3"

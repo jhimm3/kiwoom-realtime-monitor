@@ -1369,6 +1369,146 @@ class MainWindowTest(unittest.TestCase):
             self.assertEqual([datetime(2026, 9, 9, 9, 0)], saved)
             window.close()
 
+    def test_hidden_top20_chart_skips_rendering_but_keeps_native_collection_and_reopen(self) -> None:
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            repository = MinuteBarRepository(path)
+            current = [datetime(2026, 9, 9, 11)]
+            loader = FakeRankingLoader()
+            loader.server_now = lambda: current[0]
+            # The unrelated zero-delay repair worker is not part of this live collection path.
+            with patch.object(MainWindow, "_start_top20_market_repair"):
+                window = MainWindow(database.settings, loader, minute_bar_repository=repository)
+                try:
+                    window._top20_index_timer.stop()
+                    window._app_controller._initial_ranking_timer.stop()
+                    start = current[0]
+                    window._ranking_now = lambda: current[0]
+                    window._top20_view_date = start.date()
+                    window._top20_view_mode = "5m"
+                    collector = window._top20_collector
+                    collector.active_codes = ("005930",)
+                    collector.next_codes = ("000660",)
+                    collector.next_activation = start + timedelta(seconds=30)
+                    collector.completed.extend(
+                        (start - timedelta(minutes=120 - index), 1.0, 2.0, 0.0)
+                        for index in range(120)
+                    )
+                    window._row_by_code = {"005930": 0}
+                    window._stock_markets.update({"005930": "KOSPI", "000660": "KOSDAQ"})
+                    window._minute_aggregator.bucket_trade_value_eok = (
+                        lambda code, _interval, minute:
+                        (1.0 if code == "005930" else 2.0) + (current[0] - minute).total_seconds()
+                    )
+                    chart = window._top20_trade_value_chart
+                    self.assertFalse(window._top20_trade_value_window.isVisible())
+                    with patch.object(window, "_aggregate_top20_rows", wraps=window._aggregate_top20_rows) as aggregate, \
+                            patch.object(chart, "set_data", wraps=chart.set_data) as render, \
+                            patch.object(window._app_controller, "start_realtime_subscription") as subscribe:
+                        for _ in range(4):
+                            window._top20_index_timer.timeout.emit()
+                        self.assertEqual([(0, 0.0)], collector.samples)
+                        self.assertEqual((0, 0, 0), (
+                            aggregate.call_count,
+                            sum(len(call.args[0]) for call in aggregate.call_args_list),
+                            render.call_count,
+                        ))
+                        for second in range(1, 61):
+                            current[0] = start + timedelta(seconds=second)
+                            window._top20_index_timer.timeout.emit()
+                        subscribe.assert_called_once_with(("005930", "000660"))
+                        self.assertEqual((0, 0), (aggregate.call_count, render.call_count))
+                        stored = repository.load_top20_trade_value_index_for_date(start.date())
+                        self.assertEqual(1, len(stored))
+                        self.assertEqual((start, 60.0), stored[0][:2])
+                        self.assertEqual({"005930", "000660"}, set(stored[0][2]))
+                        self.assertEqual(("realtime_complete", 30.0, 30.0, 0.0), stored[0][3:])
+                        self.assertEqual((start, 30.0, 30.0, 0.0), collector.completed[-1])
+
+                        window._show_top20_trade_value_window()
+                        QApplication.processEvents()
+                        self.assertTrue(window._top20_trade_value_window.isVisible())
+                        self.assertEqual([(start, 30.0, 30.0, 0.0)], chart._completed)
+                        window._top20_index_timer.timeout.emit()
+                        self.assertEqual(start, chart._current_minute)
+                        self.assertEqual((30.0, 30.0, 0.0), chart._current_values)
+                        self.assertGreater(aggregate.call_count, 0)
+                        self.assertGreater(render.call_count, 0)
+                        window._top20_trade_value_window.close()
+                        aggregate.reset_mock()
+                        render.reset_mock()
+                        window._top20_index_timer.timeout.emit()
+                        self.assertEqual((0, 0), (aggregate.call_count, render.call_count))
+                finally:
+                    window.close()
+
+    def test_hidden_top20_nas_series_reopens_with_existing_failure_and_retry_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            client = SimpleNamespace(
+                load_stored_minute_bars=lambda *_args: (),
+                load_stored_top20_index=lambda *_args: (),
+                load_stored_top20_statistics=lambda *_args: (),
+            )
+            now = datetime(2026, 9, 9, 11, 1, 10)
+            loader = FakeRankingLoader()
+            loader.server_now = lambda: now
+            window = MainWindow(database.settings, loader, market_data_client=client)
+            try:
+                window._top20_index_timer.stop()
+                window._app_controller._initial_ranking_timer.stop()
+                window._ranking_now = lambda: now
+                window._active_api_route = "central"
+                window._top20_view_date = now.date()
+                window._top20_view_mode = "minute"
+                window._top20_collector.active_codes = ("005930",)
+                window._stock_markets["005930"] = "KOSPI"
+                window._minute_aggregator.bucket_trade_value_eok = lambda *_args: 3.0
+                payload = {
+                    "trading_date": now.date().isoformat(), "basis": "realtime",
+                    "rows": [{"minute": "2026-09-09T11:00:00", "status": "complete", "market_values": [5.0, 0.0, 0.0]}],
+                    "coverage": {"full_day": {"complete": 1}},
+                }
+                window._top20_selected_series = payload
+                requests = []
+                window._start_top20_nas_request = lambda key, completed, failed: requests.append((key, completed, failed))
+                chart = window._top20_trade_value_chart
+                with patch.object(chart, "set_series", wraps=chart.set_series) as series, \
+                        patch.object(chart, "set_data", wraps=chart.set_data) as render:
+                    for _ in range(4):
+                        window._top20_index_timer.timeout.emit()
+                    self.assertEqual((0, 0, 0), (series.call_count, render.call_count, len(requests)))
+                    window._show_top20_trade_value_window()
+                    QApplication.processEvents()
+                    self.assertEqual(("date", now.date().isoformat()), requests[-1][0])
+                    requests[-1][2]("controlled read failure")
+                    window._top20_index_timer.timeout.emit()
+                    self.assertIn("controlled read failure", chart._status_text)
+                    self.assertEqual(5.0, chart._completed[0][1])
+                    window._top20_trade_value_window.close()
+                    series.reset_mock()
+                    render.reset_mock()
+                    request_count = len(requests)
+                    window._top20_index_timer.timeout.emit()
+                    self.assertEqual((0, 0, request_count), (series.call_count, render.call_count, len(requests)))
+
+                    window._show_top20_trade_value_window()
+                    QApplication.processEvents()
+                    fresh = {**payload, "rows": [dict(payload["rows"][0], market_values=[9.0, 0.0, 0.0])]}
+                    requests[-1][1](fresh)
+                    self.assertEqual("", window._top20_series_read_error)
+                    self.assertEqual(9.0, chart._completed[0][1])
+                    window._top20_index_timer.timeout.emit()
+                    self.assertEqual(now.replace(second=0), chart._current_minute)
+                    self.assertNotIn("controlled read failure", chart._status_text)
+            finally:
+                window.close()
+
     def test_high_header_reenables_table_updates_after_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Database(Path(temporary_directory) / "monitor.sqlite3")

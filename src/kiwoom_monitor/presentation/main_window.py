@@ -3138,8 +3138,10 @@ class MainWindow(QMainWindow):
             self._save_top20_record(update.completed)
         if update.cohort_changed and self._row_by_code:
             self._app_controller.start_realtime_subscription(self._top20_realtime_codes(tuple(self._row_by_code)))
+        if not self._top20_trade_value_window.isVisible():
+            return
         completed_rows = list(self._top20_collector.completed)
-        if self._uses_nas_top20_source() and self._top20_trade_value_window.isVisible():
+        if self._uses_nas_top20_source():
             refresh_at = getattr(self, "_top20_nas_series_refresh_at", 0.0)
             if time.monotonic() - refresh_at >= 30 and self._top20_view_mode != "daily":
                 self._top20_nas_series_refresh_at = time.monotonic()

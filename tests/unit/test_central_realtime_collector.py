@@ -5,6 +5,8 @@ import asyncio
 import json
 import tempfile
 import time
+from copy import deepcopy
+from threading import Event
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,7 +29,207 @@ from kiwoom_monitor.domain.market_data_contract import (
 )
 
 
+class _HeldDocumentStore:
+    """Fail one owned native save while the event loop accepts a newer arrival."""
+
+    def __init__(self, native, collection, *, failures=1, commit_before_error=False):
+        self.native = native
+        self.collection = collection
+        self.failures = failures
+        self.commit_before_error = commit_before_error
+        self.entered = Event()
+        self.release = Event()
+        self.attempts = []
+
+    def __getattr__(self, name):
+        return getattr(self.native, name)
+
+    def upsert_documents(self, collection, rows):
+        if collection != self.collection:
+            return self.native.upsert_documents(collection, rows)
+        self.attempts.append(deepcopy(rows))
+        if self.failures:
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("test did not release document writer")
+            self.failures -= 1
+            if self.commit_before_error:
+                self.native.upsert_documents(collection, rows)
+            raise OSError("controlled document write failure")
+        return self.native.upsert_documents(collection, rows)
+
+
 class CentralRealtimeCollectorTests(unittest.TestCase):
+    @staticmethod
+    def _reference_message(price, market="KRX", code="005930"):
+        return {"trnm": "REAL", "data": [{
+            "type": "0g", "item": code + ("_NX" if market == "NXT" else ""),
+            "values": {"305": str(price), "306": "-90", "307": "100"},
+        }]}
+
+    @staticmethod
+    def _entry_message(code="005930"):
+        return {"trnm": "REAL", "data": [{"type": "00", "values": {
+            "9203": "18", "909": "7", "9001": "A" + code, "913": "체결",
+            "905": "+매수", "908": "100000", "910": "60700", "911": "2",
+        }}]}
+
+    def test_failed_reference_restore_keeps_latest_arrival_and_native_retry_payload(self) -> None:
+        variants = ((130, "KRX", 140, "NXT"), (140, "NXT", 130, "KRX"), (130, "KRX", None, None))
+        for old_price, old_market, next_price, next_market in variants:
+            for lost_ack in (False, True):
+                with self.subTest(old_market=old_market, next_price=next_price, lost_ack=lost_ack), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "references.sqlite"
+                    now = [datetime.fromisoformat("2026-10-20T10:00:00+09:00")]
+                    native = SQLiteQueryStore(path, now_provider=lambda: now[0])
+                    native.initialize()
+                    held = _HeldDocumentStore(native, "stock_price_references", commit_before_error=lost_ack)
+                    collector = CentralRealtimeCollector(lambda: "unused", "real", RealtimeHub(), lambda: now[0], held)
+                    collector._approved_trade_sources = {("005930", "KRX"), ("005930", "NXT"), ("000660", "KRX")}
+
+                    async def exercise():
+                        collector._publish_parsed(self._reference_message(old_price, old_market))
+                        waiter = asyncio.create_task(collector._flush_snapshots())
+                        try:
+                            self.assertTrue(await asyncio.to_thread(held.entered.wait, 3))
+                            if next_price is not None:
+                                now[0] += timedelta(seconds=1)
+                                collector._publish_parsed(self._reference_message(next_price, next_market))
+                            collector._publish_parsed(self._reference_message(120, code="000660"))
+                        finally:
+                            held.release.set()
+                        with self.assertRaisesRegex(OSError, "controlled document"):
+                            await waiter
+                        pending_after_failure = deepcopy(collector._pending_stock_references)
+                        expected_price = old_price if next_price is None else next_price
+                        expected_market = old_market if next_market is None else next_market
+                        expected_document = {
+                            "code": "005930", "upper_limit_price": expected_price,
+                            "lower_limit_price": 90, "base_price": 100, "market": expected_market,
+                            "observed_at": now[0].isoformat(timespec="seconds"), "source": "kiwoom-websocket-0g",
+                        }
+                        await collector._flush_snapshots()
+                        fresh_reader = SQLiteQueryStore(path)
+                        try:
+                            stored = fresh_reader.load_documents("stock_price_references", "005930", 1)
+                            self.assertEqual(expected_document, stored[0]["document"])
+                            self.assertEqual(120, fresh_reader.load_documents(
+                                "stock_price_references", "000660", 1,
+                            )[0]["document"]["upper_limit_price"])
+                        finally:
+                            fresh_reader.close()
+                        self.assertEqual(expected_document, pending_after_failure["005930"]["document"])
+                        self.assertFalse(collector._pending_stock_references)
+                        self.assertEqual(expected_price, collector._ram_stock_references[("005930", expected_market)]["upper_limit_price"])
+                        if next_market is not None and old_market != next_market:
+                            self.assertEqual(old_price, collector._ram_stock_references[("005930", old_market)]["upper_limit_price"])
+                        self.assertEqual(2, len(held.attempts))
+
+                    try:
+                        asyncio.run(exercise())
+                    finally:
+                        held.release.set()
+                        native.close()
+
+    def test_failed_entry_restore_keeps_same_day_latest_and_distinct_next_day_on_retry(self) -> None:
+        for crosses_day in (False, True):
+            with self.subTest(crosses_day=crosses_day), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "entries.sqlite"
+                first = "2026-10-20T23:59:59+09:00" if crosses_day else "2026-10-20T10:00:00+09:00"
+                now = [datetime.fromisoformat(first)]
+                native = SQLiteQueryStore(path, now_provider=lambda: now[0])
+                native.initialize()
+                held = _HeldDocumentStore(native, "account_entry_symbols_daily", failures=2)
+                collector = CentralRealtimeCollector(lambda: "unused", "real", RealtimeHub(), lambda: now[0], held)
+
+                async def exercise():
+                    collector._publish_parsed(self._entry_message())
+                    waiter = asyncio.create_task(collector._flush_snapshots())
+                    try:
+                        self.assertTrue(await asyncio.to_thread(held.entered.wait, 3))
+                        now[0] += timedelta(seconds=1)
+                        collector._publish_parsed(self._entry_message())
+                    finally:
+                        held.release.set()
+                    with self.assertRaisesRegex(OSError, "controlled document"):
+                        await waiter
+                    with self.assertRaisesRegex(OSError, "controlled document"):
+                        await collector._flush_snapshots()
+                    pending_after_failure = deepcopy(collector._pending_account_entry_symbols)
+                    await collector._flush_snapshots()
+                    expected = {"code": "005930", "environment": "real",
+                                "last_executed_at": now[0].isoformat(timespec="seconds"), "source": "kiwoom-realtime-00"}
+                    fresh_reader = SQLiteQueryStore(path)
+                    try:
+                        stored = fresh_reader.load_documents("account_entry_symbols_daily", now[0].date().isoformat(), 1)
+                        self.assertEqual(expected, stored[0]["document"])
+                        if crosses_day:
+                            old = fresh_reader.load_documents("account_entry_symbols_daily", "2026-10-20", 1)
+                            self.assertEqual(first, old[0]["document"]["last_executed_at"])
+                    finally:
+                        fresh_reader.close()
+                    self.assertEqual(expected, pending_after_failure[(now[0].date().isoformat(), "005930")]["document"])
+                    self.assertEqual(2 if crosses_day else 1, len(pending_after_failure))
+                    self.assertFalse(collector._pending_account_entry_symbols)
+                    self.assertEqual(3, len(held.attempts))
+
+                try:
+                    asyncio.run(exercise())
+                finally:
+                    held.release.set()
+                    native.close()
+
+    def test_credential_drain_and_close_retry_new_arrival_after_inflight_document_failure(self) -> None:
+        for collection in ("stock_price_references", "account_entry_symbols_daily"):
+            for lifecycle in ("credentials", "close"):
+                with self.subTest(collection=collection, lifecycle=lifecycle), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "lifecycle.sqlite"
+                    now = [datetime.fromisoformat("2026-10-20T10:00:00+09:00")]
+                    native = SQLiteQueryStore(path, now_provider=lambda: now[0])
+                    native.initialize()
+                    held = _HeldDocumentStore(native, collection)
+                    collector = CentralRealtimeCollector(lambda: "unused", "real", RealtimeHub(), lambda: now[0], held)
+                    publish = (lambda price: collector._publish_parsed(self._reference_message(price))) if collection == "stock_price_references" else (lambda _price: collector._publish_parsed(self._entry_message()))
+
+                    async def exercise():
+                        publish(130)
+                        waiter = asyncio.create_task(collector._flush_snapshots())
+                        try:
+                            self.assertTrue(await asyncio.to_thread(held.entered.wait, 3))
+                            now[0] += timedelta(seconds=1)
+                            publish(140)
+                            waiter.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await waiter
+                            closer = asyncio.create_task(
+                                collector.begin_credential_change() if lifecycle == "credentials" else collector.close(),
+                            )
+                            await asyncio.sleep(0)
+                            self.assertFalse(closer.done())
+                        finally:
+                            held.release.set()
+                        await closer
+                        owner = "005930" if collection == "stock_price_references" else "2026-10-20"
+                        document = native.load_documents(collection, owner, 1)[0]["document"]
+                        if collection == "stock_price_references":
+                            self.assertEqual((140, "KRX", now[0].isoformat(timespec="seconds")), (
+                                document["upper_limit_price"], document["market"], document["observed_at"],
+                            ))
+                        else:
+                            self.assertEqual(now[0].isoformat(timespec="seconds"), document["last_executed_at"])
+                            self.assertNotIn("account", document)
+                        self.assertEqual("PAUSED" if lifecycle == "credentials" else "STOPPED", collector._credential_phase)
+                        self.assertFalse(collector._pending_stock_references)
+                        self.assertFalse(collector._pending_account_entry_symbols)
+                        self.assertEqual(2, len(held.attempts))
+                        await collector.close()
+
+                    try:
+                        asyncio.run(exercise())
+                    finally:
+                        held.release.set()
+                        native.close()
+
     def test_live_minute_range_freezes_and_filters_all_delta_sources_before_native_read(self) -> None:
         from threading import Event
         from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
