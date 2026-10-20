@@ -1,3 +1,5 @@
+**R3-051/055 계약(2026-10-20, `d6da121`).** schema/DDL/transaction owner/원본시계 변경0. snapshot별 보완쓰기와 provenance receipt는 각각 유지(뉴스 read만10→1). hidden custom minute/daily의 필수 native 복사·metadata는 유지하고 monitor 원본purge 뒤 journal 소비값이 같다. 순수hidden read/aggregate만 생략하며075 보존·주기/051 선택write오류정책은 별도다.
+
 **R3-052/060/061 계약(2026-10-20, `017bb03`).** 복기의기존scoped review저장이성공한뒤dirty/종료ACK를정리한다(원본/canonical/DDL/시계변경0). 외부월물의미확인거래량은판단입력0으로바꾸지않고이전roll-state행을보존,원본bars/daily성공표식과기존failedstatus는유지한다. auto-off 미조회candidate는기존nullable JSON필드의null,새테이블/열/버전0. 정상비용동일/unknown잘못된state쓰기1회생략,과거잘못된state자동복구는별도다.
 
 **R3-063/067 계약(2026-10-20, `964ddbe`).** research_runs의일반4전이는상태SELECT~commit을같은BEGIN IMMEDIATE로직렬화한다. 기존상태표/불변spec·hash/owner이력/schema변경0. 정상write비용동일,no-op/거절write API에는writer예약1회가추가된다. 새report의상대낙폭ppm은당시peak최대비율로정정하지만과거불변report/package·hash를자동교체하지않는다. 원화낙폭/필드/임계값유지,실제운영재평가는별도다.

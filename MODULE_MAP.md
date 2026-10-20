@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 `d6da121`: 기존 snapshot service 안의 call-local 뉴스입력/순수 필터 및 기존 detached 창의 selected/visible 소비만 정리했다. 새모듈/계층/schema/cache/timer0. R052 소유 메서드/공개 MinuteChart 유지, 영향F08/F18/F19/F22/F24 및 비용·잔여는 R3 정본의 아홉번째 통합을 따른다.
+
 2026-10-20 `017bb03`: JournalWindow의기존dirty/native저장/종료ACK와YahooDelayedMarketCollector의기존poll/error·roll입력가용성을정리했다. 미사용MainWindow helper1개제거/실제catalog·OCRcaller유지,새모듈/계층/schema0. 관련212건+별도실제Qt8상태·영향F10/F18/F20.1/F22/F23/F24는R3정본참조.
 
 2026-10-20 `964ddbe`: 기존ResearchRepository는run전이원자성,같은research_evaluation은원화/상대낙폭,news_execution은provider/credential가용성공통판정을소유한다. 새모듈/계층/schema없음. 관련20모듈231건·F15/F17/F19/F21/F23/F24·필요안전비용/잔여는R3정본참조.
