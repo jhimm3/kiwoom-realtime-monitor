@@ -1,5 +1,23 @@
 # 현재 상태 요약
 
+## 2026-10-20 다섯 번째 병렬 통합: 035·046 완료 / 043 실제PG 대기
+
+로컬 제품·검사 `64a74e0`. 현재 통합 소스 관련 20개 실제 모듈, 고유 305건/124.603 worker초 통과(index107/news113/research85). 계획·실행·통과 ID, 변경 로컬14 ID, 전체 소스 지문·동결12파일, worker/자식 종료와 native TEMP 제거를 대조했다.
+
+전체84/완료32/미완료52. 준비후보16(개발·검증제출 포함), 계약/영향확인29(027 잔여·084 포함), 선행/외부검증 대기3(043 실제PG/047←042/058 의미), 명시보류4(006/008/020/024). 030·064·065·066은 격리 검증제출/메인 통합대기, 063·067·072는 독립 격리개발 중이다. 실제 세션 한도는 메인 포함4이며 보조3 슬롯을 연속 배정하고 공유 원장/F는 메인만 갱신한다.
+
+R3-043 실제 PostgreSQL 변경2 ID 및 해당87건 모듈은 미실행이다. 전용 diagnostic DSN 부재로 증분 실행 증거 검사는 누락을 감지해 실패했으며 성공 처리하지 않았다. 기존 push/PR의 필수 postgres-integration이 postgres_required 전체 모듈을 실행하고 실패·누락을 required 증거로 전달하는 본문만 확인했다. 현재 hosted CI 실행은 없다.
+
+R3-035 검증 완료: 실제 index loop에서 collector advance와 frozen record 추출만 기존 RAM lock 안에 두고, 같은 outbox/native save await를 밖으로 옮겼다. 제어 native/outbox 100ms 대기에서 lock 보유 true→false, 실제 ranking prepare/Hub subscription의 barrier 해제 전 완료 false→true. RAM membership은 원래도 먼저 공개됐으며 신규 개선으로 세지 않는다. 동일120억/시장60·60/cohort와 native 연결3/SELECT2/BEGIN·COMMIT2/INSERT5/DELETE2/save1을 유지한다. R036 caller-cut/owned task·실패·취소·close/start 복구를 보존하고 새 queue/계층/transaction은 없다.
+
+R3-043 진행(PC 구현통합·실제PG 대기): 기존 claim attempts를 필수 keyword로 모든 finish/retry caller와 QueryStore/CentralNewsStore 계약에 전달한다. native WHERE job_key/RUNNING/attempt 일치 때만 상태·output_ref를 갱신하고 실제 matched PENDING commit 뒤에만 깨운다. 정상 retry SELECT1→0, UPDATE/연결/BEGIN/COMMIT 각1 유지. 120초 stale/3회 FAILED/None 반환·immutable 원문과 결과는 보존한다. old/new 성공·실패 역순, ACK 유실/취소복구를 native SQLite와 PG SQL/rollback fixture로 확인했다. 행 삭제 후 같은 key 재생성 ABA는 보장 범위 밖이다. R3-043 실제 PostgreSQL 변경2 ID 및 해당87건 모듈은 미실행이다. 전용 diagnostic DSN 부재로 증분 실행 증거 검사는 누락을 감지해 실패했으며 성공 처리하지 않았다. 기존 push/PR의 필수 postgres-integration이 postgres_required 전체 모듈을 실행하고 실패·누락을 required 증거로 전달하는 본문만 확인했다. 현재 hosted CI 실행은 없다.
+
+R3-046 검증 완료: 일반 research CLI의 request/result/cancel resolved alias를 parsing/오류 게시 전에 보호하고, 기존 request 경로 helper로 선언된 DB/dataset도 보존한다. 정상 독립 오류 envelope/atomic result·등록/leader/final/validation/comparison 기존 분기는 유지한다. 기존 보호계약을 재사용했고 새 path 계층/설정/시계/DB 호출은 없다. 원본20 subcase 실패→수정 후 통과; 실제 child4개 conflict/success/cancel/resume 종료2/0/2/0과 원본 bytes·결과 소비를 확인했다. 일반 GUI가 평소 충돌한다는 증거는 없고 전체 ResearchDialog 클릭·동시 파일교체 보안 경계의 수락으로 확대하지 않는다.
+
+R3-036 후속 검증 보완(제품 변경0): 기존 replay의 lost-ACK 기대값1은 native thread와 추가된 owned save task의 실패 관측을 합산하는 RuntimeScope 실제 계약을 놓쳤다. thread/task OSError 각각1, raw error_count2, execution_succeeded=False·동일 save2회·outbox 복원을 함께 검증한다. 사건 중복 제거 정책이나 DB 시도 횟수를 바꾸지 않았다. 옛 기대값은 R065의 원본 load를 복원해도 동일 실패, 보강한 기대는 원본/현재 load 모두 통과한다. 초기 R036 관련90건에 replay-outbox 검사가 빠졌던 범위를 명시하고 향후 해당 소비자 검사를 함께 선택한다.
+
+R3-084는 새 구현 지시가 아닌 P2 계약확인 대기다. 실제 두 BODY runner 뒤 job output_ref는 B, 최신 append body는 A로 갈라졌다. claim 순서/fixture 라벨은 원문 신선도 증거가 아니다. 기본 NAS 목록은 latest body와 article-key assessment를 독립 결합하지만 PC detail core/event는 body ID를 맞추므로 경로별 계약을 확인해야 한다. 원문2개는 보존하고 임의 winner 정책을 만들지 않는다. 영향 F03/F04/F09/F19/F21/F24/F25 및 책임·비용 계약 갱신. 실제 키움/장중·운영 DB/계좌/주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀·물리 I/O/WAL/운영 발생률은 미검증이다.
+
 ## 2026-10-20 네 번째 병렬 통합: 031·080
 
 로컬제품·검사`539cbad`. 현재통합소스 관련8개실제모듈 **고유121건/79.524 worker초 통과**(journal/controller85+실제MainWindow기존signal1+OCR/controller/theme35). 11개변경ID·계획/실행/통과·현재전체지문/frozen7파일·worker/tree종료/nativeTEMP제거를대조했다.

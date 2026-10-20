@@ -1,3 +1,5 @@
+**R3-043 native 전이 계약(2026-10-20, `64a74e0`).** 기존 news_jobs 행의 claim attempts를 필수 terminal 인자로 전달해 job_key/RUNNING/attempt와 일치할 때만 finish/retry를 반영한다. 정상 retry SELECT1→0, UPDATE/연결/BEGIN/COMMIT 각1·3회FAILED·120초stale·immutable revision·None 반환 유지. schema/DDL/열/index/버전 추가0. QueryStore 서명6개만 검토 갱신, 실제PG2건 미실행/CI 예정 경로만 확인했으므로043은진행이다. 명시 DELETE+동일key재생성 ABA와 body 선택084는 별도다.
+
 **R3-036/038/040/073 native 계약(2026-10-20, `8f3bade`).** 지수는같은cutnative2→1/새cutcaller완료·identity/outbox보존,metadata/SOR는기존time/minute range를재사용,기사11field의동일내용UPDATE만생략하고receipt1과원자rollback/pin/first_seen유지. 주문JSON은기존unowned API에서scope변경가능하므로최신scope SELECT2유지. schema/원본계좌·봉/기사·문서계약은그대로다. 연결/반영행기준은R3정본·기존비용검사로보호하며실제PG/물리I/O는별도다.
 
 **R3-034/069 저장 계약(2026-10-20, `9955a24`).** Collector의reference/account-day 실패재시도는같은key의최신arrival pending을보존하고없는key만복원한다. 테이블/키/원거래일/native writer계약은그대로다. 과거뉴스의identity index SQL은기존URL열ALTER뒤로이동했으며fresh logical schema31/기존index/원행/URL/시각동일·중간DDL실패후같은DB재시도확인. 스키마추가/전체DDLrollback·운영archive마이그레이션수락은아니다.

@@ -1,3 +1,7 @@
+## 2026-10-20 R3-035·046 및043 PC 보완(로컬 미배포)
+
+`64a74e0`: collector lock 밖에서 immutable index를 저장하고 일반 연구 CLI의 입력/결과 alias 덮어쓰기를 막았다. 뉴스 terminal은 현재 claim attempts만 수락하며 정상 retry SELECT1→0. R036 raw 실패 관측 thread/task 각1의 기존 계약을 보강했다. 현재 통합 소스 관련 20개 실제 모듈, 고유 305건/124.603 worker초 통과(index107/news113/research85). 계획·실행·통과 ID, 변경 로컬14 ID, 전체 소스 지문·동결12파일, worker/자식 종료와 native TEMP 제거를 대조했다. R3-043 실제 PostgreSQL 변경2 ID 및 해당87건 모듈은 미실행이다. 전용 diagnostic DSN 부재로 증분 실행 증거 검사는 누락을 감지해 실패했으며 성공 처리하지 않았다. 기존 push/PR의 필수 postgres-integration이 postgres_required 전체 모듈을 실행하고 실패·누락을 required 증거로 전달하는 본문만 확인했다. 현재 hosted CI 실행은 없다. 실제 키움/장중·운영 DB/계좌/주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀·물리 I/O/WAL/운영 발생률은 미검증이다.
+
 ## 2026-10-20 R3-031·080 (로컬 미배포)
 
 `539cbad`: 일지native저장실패의currentjob/원자료를보존하고명시close재시도전ready를막았다. OCR기본추론N+1→N/필수badge유지,새owner/queue/schema없음. 현재통합소스 관련8개실제모듈 **고유121건/79.524 worker초 통과**(journal/controller85+실제MainWindow기존signal1+OCR/controller/theme35). 11개변경ID·계획/실행/통과·현재전체지문/frozen7파일·worker/tree종료/nativeTEMP제거를대조했다. 031의중간동일소스Qt native abort3221226505는보고된통과0/원문ERROR traceback미확보·정확원인미확정으로실패TEMP/로그를보존한다. 이후단독/모듈·계측86건과root현재121건에는재현되지않았지만원인해결로보고하지않는다. 080은provider를통제한실제parser/Qt검증이며WT필수6모델파일이없어실제모델정확도/추론latency를수락하지않았다. 실제모델정확도/처리시간·실제PG·장중/키움·운영DB/계좌·주문·외부망/NAS·push/GitHub CI·배포·로컬전수회귀는미검증이다.

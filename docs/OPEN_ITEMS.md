@@ -1,5 +1,15 @@
 # 남은 작업 요약
 
+## 2026-10-20 다섯 번째 병렬 통합: 035·046 완료 / 043 실제PG 대기
+
+로컬 제품·검사 `64a74e0`. 현재 통합 소스 관련 20개 실제 모듈, 고유 305건/124.603 worker초 통과(index107/news113/research85). 계획·실행·통과 ID, 변경 로컬14 ID, 전체 소스 지문·동결12파일, worker/자식 종료와 native TEMP 제거를 대조했다.
+
+전체84/완료32/미완료52. 준비후보16(개발·검증제출 포함), 계약/영향확인29(027 잔여·084 포함), 선행/외부검증 대기3(043 실제PG/047←042/058 의미), 명시보류4(006/008/020/024). 030·064·065·066은 격리 검증제출/메인 통합대기, 063·067·072는 독립 격리개발 중이다. 실제 세션 한도는 메인 포함4이며 보조3 슬롯을 연속 배정하고 공유 원장/F는 메인만 갱신한다.
+
+R3-043 실제 PostgreSQL 변경2 ID 및 해당87건 모듈은 미실행이다. 전용 diagnostic DSN 부재로 증분 실행 증거 검사는 누락을 감지해 실패했으며 성공 처리하지 않았다. 기존 push/PR의 필수 postgres-integration이 postgres_required 전체 모듈을 실행하고 실패·누락을 required 증거로 전달하는 본문만 확인했다. 현재 hosted CI 실행은 없다.
+
+R3-084는 새 구현 지시가 아닌 P2 계약확인 대기다. 실제 두 BODY runner 뒤 job output_ref는 B, 최신 append body는 A로 갈라졌다. claim 순서/fixture 라벨은 원문 신선도 증거가 아니다. 기본 NAS 목록은 latest body와 article-key assessment를 독립 결합하지만 PC detail core/event는 body ID를 맞추므로 경로별 계약을 확인해야 한다. 원문2개는 보존하고 임의 winner 정책을 만들지 않는다. 영향 F03/F04/F09/F19/F21/F24/F25 및 책임·비용 계약 갱신. 실제 키움/장중·운영 DB/계좌/주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀·물리 I/O/WAL/운영 발생률은 미검증이다.
+
 ## 2026-10-20 네 번째 병렬 통합: 031·080
 
 로컬제품·검사`539cbad`. 현재통합소스 관련8개실제모듈 **고유121건/79.524 worker초 통과**(journal/controller85+실제MainWindow기존signal1+OCR/controller/theme35). 11개변경ID·계획/실행/통과·현재전체지문/frozen7파일·worker/tree종료/nativeTEMP제거를대조했다.

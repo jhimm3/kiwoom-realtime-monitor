@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 `64a74e0`: AutonomousTop20의 collector RAM critical section과 기존 outbox/native 수명을 분리하고, NewsJobRunner→QueryStore/native의 필수 claim-attempt 전이를 연결했다(실제PG 대기). 일반 research CLI는 기존 경로 helper로 입력 alias를 보호한다. 새 모듈/계층/schema 없음. 관련20모듈305건/실제PG2건 미실행, R036 replay 관측계약 및 새084 소비 cut 계약확인은 정본 참조.
+
 2026-10-20 `539cbad`: 기존EntrySnapshotWriter가단일실패job/관측payload를소유하고AppController가RAM pending을확인해명시close재시도/ready를결정한다. PaddleThemeOcr/ImageThemeOcrWorker는같은파일의추론/page해석을공유하고첫결과를지역인계한다(controller제품0). 새모듈/계층/DBschema없음. 관련8실제모듈121건·F10/F18/F22/F23좁은경계/F24갱신,미확정Qt abort/실제모델은정본잔여를따른다.
 
 2026-10-20 `8f3bade`: AutonomousTop20Service는caller cut직렬화/실제save owner,MarketDataIngestor는기존native범위reader,StockNewsRepository는같은transaction의조건부내용UPDATE를사용한다. ManualMockOrderGateway최신scope재조회는그대로유지(제품변경0). 새모듈/계층/schema/driverconnection없음. 관련21모듈479건·영향F/계약갱신,036선행035해제.
