@@ -30,6 +30,8 @@
 <a id="composition"></a>
 ## 조립·시계·수명 — F01/F23/F24
 
+**2026-10-20 `8cc2d19` 추가계약.** 두 저장소의 비참조 datetime/UTC import 각1줄만 제거했다. 본문/SQL/시그니처/type hints·기존 kst_now/as_kst·native값/버전/rollback/동기화는 불변이다. 등록 소비자의 incidental module.datetime/UTC 사용은 발견하지 못했으며 외부 미등록 소비자는 미검증이다. 실행비용 개선을 주장하지 않는다. SettingsDialog 생성자의 unconditional return을 보존하고 그 뒤 도달 불가 구형31줄만 제거했다. 실제 grouped layout/연결버튼/save worker·geometry 및 다른 메서드/도달 AST·resolved 명령1790은 같다. bytecode index 재배치는 있으며 co_names173→153, 제품 실행비용 절감은0이다. 새검사/계층/설정/시계/DB 경로를 추가하지 않았다.
+
 **2026-10-20 `0a54c35` 추가계약.** R3-030 검증 완료: 기존 EntrySnapshotWriter에 짧은 cache lock 하나로 loader/cache 동시 포착·setter의 dict 교체·현재dict/loader 확인후게시를 묶었다. provider/native I/O·signal·job/backfill은 lock 밖이다. 동일callable/None/A→B→A도 옛 in-flight 결과가 새cache를 채우지 못하고 원래job의 provenance는 보존한다. 실제 AppController의 기존 public setter 적용/rollback을 재사용(제품0). A→B old1/new0→old1/new1은 필요한 새조회 복구이며 이후cache hit 추가조회0, TTL60초/code-only/얕은copy·오류uncached 유지. Controller의 별도 private cache backup/update 전체를 새lock으로 원자화하거나 cross-date/global singleflight를 해결한 것은 아니다. R3-066 검증 완료: 기존 variadic drain을 모든context에 한번적용해 producer를멈추고 monitor/writer/read를실제합류한뒤에만 dependency를닫는다. closing예외조건을제거해 미저장pending/실패를정상종료로보고하지않는다. 이미끝난failed close에대한새명시close만 완료된noncancelled eventwriter로원본pending/queue를drain한다. closing/admission/binding/settings/order gate는닫힌채유지,자동retry/REST재조회/새queue없음. 실제native precommit/ACKloss 두실패+두event복구 save4/행2/dependency close0→1,추가REST0. waiter취소/동시close는같은살아있는owner를합류한다. native event readback/diagnostic archive까지검증했고 genericcontent route는이collection을노출하지않아실제일지/API end-to-end는확인하지못했다. processkill RAM유실·직접ownertask취소·socket자동복구는해결범위밖이다.
 
 R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를명시해 QWidget이themes로전달되던TypeError를복구했다. 실제 MainWindow→Settings→modal검색/선택·중복/취소/없음→기존worker/native저장→테마총140억/제외40억·정렬40→재오픈을검증했다. 올바른themes 명시import caller·원래dialog시그니처는유지했다. F22는일반설정저장소간접공유만확인했고원격sync를새로수락하지않는다.
@@ -112,6 +114,8 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 <a id="execution"></a>
 ## 계좌·Risk·Execution — F14/F16/F17/F18
 
+**085 미해결 identity 경계(2026-10-20).** AUTO run_id와activation UUID가혼용되어키확인prepare가callback전에실패하는native관측을후속후보로등록했다. 실제키오류/금지정책으로단정하지않고기존UUID검증·승인·주문/STOP정책을보존한다. 042의bundle교체/drain검증과성공AUTOcredential회전수락은구분한다.
+
 **2026-10-20 `964ddbe` 추가계약.** 기존최대원화낙폭을그대로두고같은순회에서relative numerator/peak 두정수로최대비율을따로추적한다. 정수교차곱/마지막ppm내림1회,기존fold/event/carry·양수peak없음/음수equity범위를유지한다. 100→50→200은250000→500000ppm,원화50동일;실제report생성→native불변저장/재조회→candidate→한도판정에서검증했다. Fraction독립655입력일치/원화655동일·120비율정정. 1000event곱셈1001→3001/나눗셈1유지·추가state2정수는정확성계산비용이다. 기존저장report/package는옛수치를보존하며자동rewrite/새차단정책/운영임계값·Risk·주문승인변경0이다.
 
 **2026-10-20 `0a54c35` 추가계약.** R3-066 검증 완료: 기존 variadic drain을 모든context에 한번적용해 producer를멈추고 monitor/writer/read를실제합류한뒤에만 dependency를닫는다. closing예외조건을제거해 미저장pending/실패를정상종료로보고하지않는다. 이미끝난failed close에대한새명시close만 완료된noncancelled eventwriter로원본pending/queue를drain한다. closing/admission/binding/settings/order gate는닫힌채유지,자동retry/REST재조회/새queue없음. 실제native precommit/ACKloss 두실패+두event복구 save4/행2/dependency close0→1,추가REST0. waiter취소/동시close는같은살아있는owner를합류한다. native event readback/diagnostic archive까지검증했고 genericcontent route는이collection을노출하지않아실제일지/API end-to-end는확인하지못했다. processkill RAM유실·직접ownertask취소·socket자동복구는해결범위밖이다.
@@ -166,6 +170,8 @@ R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/
 
 <a id="journal-sync"></a>
 ## 일지·편집·동기화 — F22 및 F18 소비
+
+**2026-10-20 `8cc2d19` 추가계약.** ThemeBackupService의 기존 revision SELECT에서 stocks만 export/import 소유필드 code/name/market으로 좁혔다. 다른표/active profile/alias/승인편집·BEGIN IMMEDIATE CAS/rollback·dispatcher generation/pending/retry는 유지한다. 실제 가격/시총/receipt 변경의 거짓충돌을 제거하고 실제 catalog/theme 편집 충돌은 보존했다. stocks hash입력21→3열/188→30bytes·거짓retry1→0/연결3동일; 수락된 native import SELECT18→23/COMMIT1→2는 원래 필요한 작업의 복구다. 가격/시총·전용receipt는 유지하며 일반 stocks.updated_at의 기존 legacy SQL 재작성은 이 범위에서 변경하지 않았다. 현재 full theme backup format/version/profiles를 가진 theme_metadata 컬렉션의 최상위 created_at만 manifest hash 입력에서 제외한다. 실제 전송 backup 생성시각/중첩timestamp·편집필드/effective/history/remote 완료표식은 보존하고 push/ACK/seed/pull echo가 같은 helper를 사용한다. generation-only metadata 업로드1→0/manifest쓰기1→0/중앙 연결·SELECT·INSERT·COMMIT·반영행 각1→0, 로컬연결2/SELECT14 동일. 기존 manifest는 최초1회 재전송 후 restart/no-op0이며 새초기화/이관은 없다. 서비스 수준 다음편집/실패retry를 확인했으나 news_process ACK R044나 실제 다중PC/원격 충돌정책을 해결했다고 하지 않는다.
 
 **2026-10-20 `d6da121` 추가계약.** 한 load_episode_entry_snapshots 호출 안에서 기본 news.load(code,limit=50)를 코드별1회만 수행한다. 순수 snapshot별 48h~+5m/최대10/순서·timezone·계좌/기존news·custom loader 의미와 native write/metadata/clock/예외는 유지한다. missing10 뉴스 연결·SELECT10→1, 전체연결21→12, journal연결11/SELECT11/UPDATE·BEGIN·COMMIT·receipt각10 유지. 기존 read오류 empty와 write오류전파는 그대로이며 유효read/선택write 실패 UI·자동task 정책분리는 미결로 진행 유지한다. 실제 preparer→QThread→native task failed/retry/complete와 수동 메서드 예외를 관측했으나 실제 child 전체진입/운영전파 수락은 아니다. 숨긴 분리창의 순수 read/render와 미선택 index read·중복 aggregate만 생략한다. 필수 custom 분·일봉 native 복사/metadata/기존 선택시장 backfill 요청은 유지한다. show/reopen은 최신 자료를 읽고 실패시 기존 숨김과 원예외를 복원한다. checkbox→기존 source_changed, daily→raw setter 순서와 caller의 동일interval 중복만 제거, 공개 MinuteChart bytes/forced-reapply 의미는 불변이다. hidden custom 연결12→4/SELECT19→3/집계10→0·필수 INSERT4/BEGIN2/COMMIT2/clock1 동일; custom없는 hidden6→0/13→0/10→0, visible현재종목6→2/13→3/10→4. 원본PASS→중간숨김전체skip FAIL0행→최종PASS(원본purge뒤journal/metadata유지)와 원본/최종54 source상태 동일을 재사용 진단으로 확인했다. R052 dirty/close/account/episode 나머지AST·공개chart는 보존하고 필수 같은값 복사UPSERT/075 주기정책은 바꾸지 않는다.
 
@@ -252,6 +258,8 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 ```
 
 ### 재현 가능한 실제 비용 기준
+
+**열번째 통합:** 통합 현재 소스 관련11개 실제모듈 고유107건/75.253 worker초 통과. 계획/실행/통과 ID·전체지문·동결8파일·worker/tree 종료/native TEMP 제거를 대조했다. 증분44기록/6037건(추가3·기존보강1·삭제0), 구조1374site/위반0/기준변경0. WT의 별도 원본/후속 비용2·legacy seed1은 보존하되 root107에 합산하거나 재실행했다고 보고하지 않는다. 029거짓충돌제거는필요import비용을복구하고045불변생성시각만의전송/중앙저장1회를제거한다. 028/082실행비용절감0,단순새계층분리없음. 실계좌/주문/운영DB·실제키움·Drive/네트워크/다중PC/NAS/실제GitHub CI/push/배포/로컬 전수회귀는 미실행. R3-043 실제PG2ID는 미실행/외부대기 그대로다. 원래394모듈/77경로·부모F25개/깊이25행·미결49·보류4를 보존한다.
 
 **아홉번째 통합:** 통합 현재 소스 관련15모듈 고유185건/104.818 worker초 통과. 별도 기존 native 진단5건도 통과했다. 계획/실행/통과 ID·전체 소스 지문·함수별 병합·worker/tree 종료와 native TEMP 제거를 대조했다. 증분43기록/6034건·추가4/fixture2·삭제0, 구조1374site/위반0/기준변경0. 051뉴스입력10→1/필수journalwrite동일,055hidden custom read19→3/aggregate10→0/필수복사동일. 진단은 고정 fixture/native SQL 측정으로 운영 latency나 OS I/O 절감 실측이 아니다. 운영DB/실계좌·주문/실제키움·망/NAS/실제GitHub CI/push/배포/로컬 전수회귀는 미실행. R3-043 실제PG2ID는 여전히 미실행/외부대기다. 051 선택쓰기의 유효read/UI경고/자동task정책과075 봉보존·다른주기 문제는 별도다.
 

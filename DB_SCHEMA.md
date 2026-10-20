@@ -1,3 +1,5 @@
+**R3-029/045 계약(2026-10-20, `8cc2d19`).** DDL/트랜잭션owner/DB필드변경0. 테마revision은stocks code/name/market만소유하고시장값/전용수신시각을제외,실제편집CAS와가격/시총/전용receipt보존. 일반stocks.updated_at의기존import SQL 재작성은유지·사업시각완료로확대하지않는다. theme_metadata 유효backup의생성시각만내용hash에서제외하며wire/history/remote완료시각은불변,기존hash전환최초1회재전송후no-op0.
+
 **R3-051/055 계약(2026-10-20, `d6da121`).** schema/DDL/transaction owner/원본시계 변경0. snapshot별 보완쓰기와 provenance receipt는 각각 유지(뉴스 read만10→1). hidden custom minute/daily의 필수 native 복사·metadata는 유지하고 monitor 원본purge 뒤 journal 소비값이 같다. 순수hidden read/aggregate만 생략하며075 보존·주기/051 선택write오류정책은 별도다.
 
 **R3-052/060/061 계약(2026-10-20, `017bb03`).** 복기의기존scoped review저장이성공한뒤dirty/종료ACK를정리한다(원본/canonical/DDL/시계변경0). 외부월물의미확인거래량은판단입력0으로바꾸지않고이전roll-state행을보존,원본bars/daily성공표식과기존failedstatus는유지한다. auto-off 미조회candidate는기존nullable JSON필드의null,새테이블/열/버전0. 정상비용동일/unknown잘못된state쓰기1회생략,과거잘못된state자동복구는별도다.

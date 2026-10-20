@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 `8cc2d19`: 기존ThemeBackupService revision의stock소유projection·CentralContentSyncService 컬렉션별manifest 의미만정리,settings저장소import/SettingsDialog deadbody 제거. 새파일/계층/상태owner/시계/schema0. 영향F10/F22/F23/F24의관련native소비와미검증은R3정본의열번째통합참조.
+
 2026-10-20 `d6da121`: 기존 snapshot service 안의 call-local 뉴스입력/순수 필터 및 기존 detached 창의 selected/visible 소비만 정리했다. 새모듈/계층/schema/cache/timer0. R052 소유 메서드/공개 MinuteChart 유지, 영향F08/F18/F19/F22/F24 및 비용·잔여는 R3 정본의 아홉번째 통합을 따른다.
 
 2026-10-20 `017bb03`: JournalWindow의기존dirty/native저장/종료ACK와YahooDelayedMarketCollector의기존poll/error·roll입력가용성을정리했다. 미사용MainWindow helper1개제거/실제catalog·OCRcaller유지,새모듈/계층/schema0. 관련212건+별도실제Qt8상태·영향F10/F18/F20.1/F22/F23/F24는R3정본참조.
