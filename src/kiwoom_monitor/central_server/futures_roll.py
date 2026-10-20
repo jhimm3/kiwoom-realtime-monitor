@@ -34,14 +34,15 @@ def latest_bar_date(rows: list[dict[str, Any]]) -> str:
     return max(dated, default="")
 
 
-def trailing_volume(rows: list[dict[str, Any]], end_time: str, hours: int = 24) -> float:
+def trailing_volume(rows: list[dict[str, Any]], end_time: str, hours: int = 24) -> float | None:
     """UTC 날짜 경계에 흔들리지 않도록 공통 종료시각 직전 구간의 거래량을 합산한다."""
     try:
         end = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError):
-        return 0.0
+        return None
     start = end - timedelta(hours=max(1, hours))
     total = 0.0
+    observed = False
     for row in rows:
         if row.get("volume") is None:
             continue
@@ -51,7 +52,8 @@ def trailing_volume(rows: list[dict[str, Any]], end_time: str, hours: int = 24) 
             continue
         if start < moment <= end:
             total += float(row["volume"])
-    return total
+            observed = True
+    return total if observed else None
 
 
 def latest_session_volume(rows: list[dict[str, Any]], session_date: str = "") -> float:

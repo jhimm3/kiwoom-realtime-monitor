@@ -1100,6 +1100,16 @@ class JournalWindow(QMainWindow):
         self._account_filter.blockSignals(False)
 
     def _account_filter_changed(self) -> None:
+        try:
+            self._save_active_review()
+        except Exception:
+            index = next((index for index in range(self._account_filter.count())
+                          if self._account_filter.itemData(index) == self._loaded_history_scope), -1)
+            if index >= 0:
+                blocked = self._account_filter.blockSignals(True)
+                self._account_filter.setCurrentIndex(index)
+                self._account_filter.blockSignals(blocked)
+            raise
         scope = self._selected_account_scope()
         self._journal_settings.setValue(
             "selected_account_scope",
@@ -1111,6 +1121,7 @@ class JournalWindow(QMainWindow):
     def _reload_selected_account(self) -> None:
         if self._selected_account_scope() == self._loaded_history_scope:
             return
+        self._save_active_review()
         self._active_episode = None
         self.reload_history()
 
@@ -1569,10 +1580,15 @@ class JournalWindow(QMainWindow):
         episode = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not isinstance(episode, TradeEpisode):
             return
-        if self._active_episode is not None and self._active_episode.group_id != episode.group_id:
+        if self._active_episode is not None and (
+            self._active_episode.group_id != episode.group_id
+            or self._active_episode.summary.account_scope != episode.summary.account_scope
+            or self._active_episode.fills[0].origin_scope != episode.fills[0].origin_scope
+        ):
             self._save_active_review()
         self._active_episode = episode
-        self._load_active_review()
+        if not self._review_dirty:
+            self._load_active_review()
         summary = episode.summary
         selection = trade_episode_selection(episode)
         related = selection.fills
@@ -2085,12 +2101,20 @@ class JournalWindow(QMainWindow):
             origin_scope, canonical_scope,
         )
         account_scope = None if review.origin_scope == LEGACY_ACCOUNT_SCOPE else review.origin_scope
-        self._repo.save_review(review, account_scope=account_scope)
+        try:
+            self._repo.save_review(review, account_scope=account_scope)
+        except Exception:
+            self._review_saved.setText("저장 실패 · 작성 내용은 유지됩니다.")
+            raise
         self._review_dirty = False
         self._review_saved.setText("저장됨")
-        row = self._summary_table.currentRow()
-        if row >= 0:
-            self._summary_table.setItem(row, 13, QTableWidgetItem(review.status))
+        if self._summary_table.currentRow() >= 0:
+            for row in range(self._summary_table.rowCount()):
+                item = self._summary_table.item(row, 0)
+                episode = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+                if (isinstance(episode, TradeEpisode) and episode.group_id == review.group_id
+                        and episode.summary.account_scope == review.account_scope):
+                    self._summary_table.setItem(row, 13, QTableWidgetItem(review.status))
 
     def _selected_episodes(self) -> tuple[TradeEpisode, ...]:
         rows = sorted({index.row() for index in self._summary_table.selectionModel().selectedRows()})
@@ -2270,6 +2294,10 @@ class JournalWindow(QMainWindow):
                         QTimer.singleShot(0, self._detached_source_changed)
 
     def shutdown(self) -> None:
+        self._save_active_review()
+        self._review_save_timer.stop()
+        self._account_reload_timer.stop()
+        self._history_followup_timer.stop()
         self._shutting_down = True
         self._refresh_timer.stop(); self._confirm_timer.stop(); self._auto_backfill_timer.stop(); self._history_sync_timer.stop(); self._enrichment_timer.stop(); self._central_sync_timer.stop()
         self._pending_market_index_day = None
@@ -2284,6 +2312,8 @@ class JournalWindow(QMainWindow):
             setattr(self, attribute, None)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        event.ignore()
+        self.shutdown()
         settings = QSettings("KiwoomMonitor", "TradingJournalWindow")
         settings.setValue("geometry", self.saveGeometry())
         settings.setValue("history_splitter", self._history_splitter.saveState())
@@ -2300,7 +2330,6 @@ class JournalWindow(QMainWindow):
                 detached.close()
             except RuntimeError:
                 pass
-        self.shutdown()
         event.accept()
         super().closeEvent(event)
         app = QApplication.instance()
@@ -2376,8 +2405,10 @@ def _run_journal_process(arguments: list[str]) -> int:
             if parent_missing_since is None:
                 parent_missing_since = now
             elif now - parent_missing_since >= 5.0:
+                timer.stop()
+                window.shutdown()
                 app.setProperty("journal_terminating", True)
-                timer.stop(); window.shutdown(); app.exit(0)
+                app.exit(0)
             return
         parent_missing_since = None
         request_id = int(command.get("request_id", -1))
@@ -2385,16 +2416,18 @@ def _run_journal_process(arguments: list[str]) -> int:
             return
         last_id = request_id
         if command.get("action") == "shutdown":
+            window.shutdown()
             app.setProperty("journal_terminating", True)
-            timer.stop(); window.shutdown(); app.exit(0); return
+            timer.stop(); app.exit(0); return
         if command.get("action") == "parent":
             return
         if command.get("action") == "sync":
             window._quit_after_history_sync = True
             if not window._auto_sync_history_once():
                 window._quit_after_history_sync = False
+                window.shutdown()
                 app.setProperty("journal_terminating", True)
-                timer.stop(); window.shutdown(); app.exit(0)
+                timer.stop(); app.exit(0)
             return
         window.set_stock(str(command.get("code", "")), str(command.get("name", "")))
         window.showNormal(); window.raise_(); window.activateWindow()

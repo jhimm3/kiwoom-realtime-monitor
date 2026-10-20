@@ -226,6 +226,11 @@ class YahooDelayedMarketCollector:
                 )
                 active_volume = trailing_volume(active_rows, common_end)
                 next_volume = trailing_volume(next_rows, common_end)
+                if active_volume is None or (self._auto_roll_enabled and next_volume is None):
+                    raise ValueError(
+                        f"월물 비교 거래량 미확인: {active_contract}/{next_contract}; "
+                        + "; ".join(errors)
+                    )
                 evaluation = evaluate_roll(
                     active_contract, next_contract, active_volume, next_volume,
                     int(state.get("confirmation_count", 0)), self._roll_confirmations,
@@ -271,9 +276,15 @@ class YahooDelayedMarketCollector:
             if not is_paused("external_market"):
                 today = self._now().date().isoformat()
                 include_daily = self._last_daily_date != today
-                await self.collect_once(include_daily=include_daily)
-                if include_daily and self._daily_collection_complete:
-                    self._last_daily_date = today
+                try:
+                    await self.collect_once(include_daily=include_daily)
+                except (TypeError, ValueError):
+                    raise
+                except Exception as error:
+                    logger.warning("Yahoo 지연 시세 수집 회차 실패: %s", error)
+                else:
+                    if include_daily and self._daily_collection_complete:
+                        self._last_daily_date = today
             await asyncio.sleep(self._poll_seconds)
 
     def _fetch(self, instrument: str, contract: str, interval: str, range_value: str) -> list[dict[str, Any]]:

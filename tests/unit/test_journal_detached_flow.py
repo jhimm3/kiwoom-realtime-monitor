@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
+import json
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, ExitStack
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 from unittest.mock import Mock, patch
 
@@ -341,6 +343,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
             _account_reload_timer=SimpleNamespace(start=lambda delay: calls.append(("start", delay))),
             _loaded_history_scope=LEGACY_ACCOUNT_SCOPE,
             _active_episode=object(),
+            _save_active_review=Mock(),
             reload_history=lambda: calls.append("reload"),
         )
 
@@ -467,6 +470,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
             _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 15, 10)),
             _summary_table=SimpleNamespace(currentRow=lambda: 0, item=lambda _row, _column: item),
             _active_episode=None,
+            _review_dirty=False,
             _load_active_review=lambda: None,
             _history_chart=chart,
             _history_daily_chart=SimpleNamespace(clear_daily_rows=lambda: None, set_fills=lambda _fills: None),
@@ -1028,6 +1032,305 @@ class JournalDetachedFlowTests(unittest.TestCase):
         self.assertEqual([(code, date(2026, 9, 15), f"detached:{code}")], daily_requests)
         self.assertEqual([(code, day, True)], minute_requests)
         self.assertIn((code, day), owner._compare_stock_requested)
+
+
+class JournalReviewLifecycleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from PySide6.QtCore import QSettings, QTimer
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.stack = ExitStack()
+        self.now = as_kst(datetime(2026, 10, 20, 10, 30))
+        self.origin = AccountScope("kiwoom", AccountEnvironment.REAL, "11111111-1111-4111-8111-111111111111")
+        self.scope = AccountScope("kiwoom", AccountEnvironment.REAL, "33333333-3333-4333-8333-333333333333")
+        self.other = AccountScope("kiwoom", AccountEnvironment.REAL, "22222222-2222-4222-8222-222222222222")
+        monitor, journal = self.root / "monitor.sqlite3", self.root / "journal.sqlite3"
+        Database(monitor).initialize()
+        self.settings = QSettings(str(self.root / "window.ini"), QSettings.Format.IniFormat)
+        self.settings.setValue("auto_history_sync_enabled", False)
+        self.settings.setValue("auto_backfill", False)
+        self.stack.enter_context(patch("kiwoom_monitor.journal_process.QSettings", return_value=self.settings))
+        self.stack.enter_context(patch("kiwoom_monitor.journal_process.create_query_client",
+            return_value=SimpleNamespace(server_now=lambda: self.now)))
+        self.stack.enter_context(patch.object(QTimer, "singleShot"))
+        self.stack.enter_context(patch("kiwoom_monitor.infrastructure.persistence.journal_trade_repository.kst_wall_now", return_value=self.now))
+        self.window = JournalWindow(monitor, journal, self.root / "api.json")
+        for name in ("_refresh_timer", "_confirm_timer", "_auto_backfill_timer", "_history_sync_timer",
+                     "_enrichment_timer", "_central_sync_timer", "_account_reload_timer", "_history_followup_timer"):
+            getattr(self.window, name).stop()
+        # Review ownership stays real; chart/backfill work is outside this fixture.
+        for name in ("_show_trade_analysis", "_sync_detached_charts", "_request_incomplete_trade_days",
+                     "_request_previous_chart_day"):
+            self.stack.enter_context(patch.object(self.window, name))
+        self.exit = self.stack.enter_context(patch.object(self.app, "exit"))
+        self.app.setProperty("journal_terminating", False)
+        self.errors = []
+        self.stack.enter_context(patch.object(sys, "excepthook", side_effect=lambda _type, error, _trace: self.errors.append(error)))
+        first = (
+            TradeFill("one", "005930", "fixture-a", "매수", datetime(2026, 10, 20, 9), 1, 100,
+                      origin_scope=self.origin, canonical_scope=self.scope),
+            TradeFill("two", "000660", "fixture-b", "매수", datetime(2026, 10, 20, 10), 1, 200,
+                      origin_scope=self.origin, canonical_scope=self.scope),
+        )
+        other = (TradeFill("other", "005930", "other-account", "매수", datetime(2026, 10, 20, 9), 1, 300,
+                           origin_scope=self.other),)
+        self.window._repo.upsert_history_sync(first, (), now=self.now, account_scope=self.origin)
+        self.window._repo.upsert_history_sync(other, (), now=self.now, account_scope=self.other)
+        self.episodes = group_trade_episodes((*first, *other))
+        for episode in self.episodes:
+            original = episode.fills[0].origin_scope
+            canonical = episode.summary.account_scope if original != episode.summary.account_scope else None
+            self.window._repo.save_review(TradeReview(episode.group_id, "stored reason", "stored review", "stored tags",
+                "보통", "작성 중", original, canonical), now=self.now, account_scope=original)
+        self.window._refresh_account_choices(self.scope)
+        self.window.reload_history()
+        self.window._history_followup_timer.stop()
+        self.save = self.stack.enter_context(patch.object(self.window._repo, "save_review", wraps=self.window._repo.save_review))
+
+    def tearDown(self):
+        from PySide6.QtCore import QCoreApplication, QEvent
+        try:
+            self.trigger(False)
+            self.window._review_save_timer.stop()
+            self.window.shutdown()
+            self.window.deleteLater()
+            QCoreApplication.sendPostedEvents(self.window, QEvent.Type.DeferredDelete)
+            self.app.processEvents()
+        finally:
+            self.app.setProperty("journal_terminating", False)
+            self.stack.close()
+            self.temp.cleanup()
+
+    def trigger(self, enabled):
+        with closing(sqlite3.connect(self.window._journal_db)) as connection, connection:
+            if enabled:
+                connection.execute("CREATE TRIGGER deny_review BEFORE INSERT ON trade_reviews "
+                    "BEGIN SELECT RAISE(ABORT, 'controlled review rollback'); END")
+            else:
+                connection.execute("DROP TRIGGER IF EXISTS deny_review")
+
+    def edit(self, text="unfinished note"):
+        from PySide6.QtTest import QTest
+        self.window._review_reason.setPlainText(" edited reason ")
+        self.window._review_note.clear()
+        QTest.keyClicks(self.window._review_note, text)
+        self.window._review_tags.setText(" edited tags ")
+        self.window._review_rating.setCurrentText("아쉬움")
+        self.window._review_status.setCurrentText("복기 완료")
+        self.assertTrue(self.window._review_dirty)
+        self.assertTrue(self.window._review_save_timer.isActive())
+
+    def stored(self, episode):
+        return self.window._repo.load_review(episode.group_id, episode.summary.account_scope)
+
+    def test_close_before_debounce_commits_native_review_once_with_original_scope(self):
+        episode = self.window._active_episode
+        self.window.show()
+        self.edit()
+        self.assertTrue(self.window.close())
+        self.assertEqual(1, self.save.call_count)
+        self.assertFalse(self.window._review_dirty)
+        self.assertFalse(self.window._review_save_timer.isActive())
+        review = self.stored(episode)
+        self.assertEqual(("edited reason", "unfinished note", "edited tags", "아쉬움", "복기 완료"),
+                         (review.reason, review.review, review.tags, review.rating, review.status))
+        self.assertEqual((self.origin, self.scope), (review.origin_scope, review.canonical_scope))
+        self.assertEqual(self.origin, self.save.call_args.kwargs["account_scope"])
+        self.window.shutdown()
+        self.assertEqual(1, self.save.call_count)
+        self.exit.assert_called_once_with(0)
+
+    def test_actual_debounce_commits_once_and_clean_shutdown_adds_no_write(self):
+        from qt_settings_test_support import wait_until
+        episode = self.window._active_episode
+        self.edit("debounced note")
+        self.assertEqual(700, self.window._review_save_timer.interval())
+        wait_until(lambda: self.save.call_count == 1)
+        self.assertFalse(self.window._review_dirty)
+        self.assertEqual("debounced note", self.stored(episode).review)
+        self.window.shutdown()
+        self.assertEqual(1, self.save.call_count)
+
+    def test_native_review_failure_aborts_actual_close_and_explicit_retry_keeps_draft(self):
+        episode = self.window._active_episode
+        before = self.stored(episode)
+        self.window.show()
+        self.edit("failed close draft")
+        self.trigger(True)
+        try:
+            closed = self.window.close()
+        except sqlite3.IntegrityError as error:
+            self.errors.append(error)
+            closed = False
+        self.assertFalse(closed)
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(1, self.save.call_count)
+        self.assertTrue(any(isinstance(error, sqlite3.IntegrityError) for error in self.errors))
+        self.assertEqual(before, self.stored(episode))
+        self.assertIs(episode, self.window._active_episode)
+        self.assertTrue(self.window._review_dirty)
+        self.assertEqual("failed close draft", self.window._review_note.toPlainText())
+        self.assertTrue(self.window._review_saved.text().startswith("저장 실패"))
+        self.assertFalse(self.window._shutting_down)
+        self.assertFalse(bool(self.app.property("journal_terminating")))
+        self.exit.assert_not_called()
+        self.trigger(False)
+        self.assertTrue(self.window.close())
+        self.assertEqual(2, self.save.call_count)
+        self.assertEqual("failed close draft", self.stored(episode).review)
+
+    def test_dirty_same_episode_refresh_and_cross_episode_retry_do_not_overwrite_another_form(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QPushButton
+        episode = self.window._active_episode
+        self.edit("retained selection draft")
+        self.window._show_selected_summary()
+        self.assertTrue(self.window._review_dirty)
+        self.assertEqual("retained selection draft", self.window._review_note.toPlainText())
+        self.assertEqual(0, self.save.call_count)
+        target_row = 1 - self.window._summary_table.currentRow()
+        other = self.window._summary_table.item(target_row, 0).data(Qt.ItemDataRole.UserRole)
+        self.trigger(True)
+        self.window._summary_table.setCurrentCell(target_row, 0)
+        self.assertTrue(self.errors)
+        self.assertIs(episode, self.window._active_episode)
+        self.assertTrue(self.window._review_dirty)
+        self.trigger(False)
+        save_button = next(button for button in self.window.findChildren(QPushButton) if button.text() == "지금 저장")
+        save_button.click()
+        self.assertEqual("retained selection draft", self.stored(episode).review)
+        self.assertEqual("stored review", self.stored(other).review)
+        self.assertEqual("작성 중", self.window._summary_table.item(target_row, 13).text())
+        self.window._show_selected_summary()
+        self.assertEqual(other.group_id, self.window._active_episode.group_id)
+        self.assertEqual("stored review", self.window._review_note.toPlainText())
+
+    def test_account_change_flushes_original_review_before_active_episode_is_cleared(self):
+        from qt_settings_test_support import wait_until
+        episode = self.window._active_episode
+        self.edit("original account draft")
+        target = next(index for index in range(self.window._account_filter.count())
+                      if self.window._account_filter.itemData(index) == self.other)
+        self.window._account_filter.setCurrentIndex(target)
+        wait_until(lambda: self.window._loaded_history_scope == self.other)
+        self.window._history_followup_timer.stop()
+        self.assertEqual("original account draft", self.stored(episode).review)
+        self.assertEqual(1, self.save.call_count)
+        self.assertEqual(self.origin, self.save.call_args.kwargs["account_scope"])
+        self.assertEqual(self.other, self.window._active_episode.summary.account_scope)
+        self.assertEqual("stored review", self.window._review_note.toPlainText())
+
+    def test_failed_account_change_restores_loaded_scope_and_preserves_draft_until_retry(self):
+        from qt_settings_test_support import wait_until
+        episode = self.window._active_episode
+        before = self.stored(episode)
+        self.edit("failed account draft")
+        target = next(index for index in range(self.window._account_filter.count())
+                      if self.window._account_filter.itemData(index) == self.other)
+        self.trigger(True)
+        self.window._account_filter.setCurrentIndex(target)
+        self.assertTrue(any(isinstance(error, sqlite3.IntegrityError) for error in self.errors))
+        self.assertEqual(self.scope, self.window._selected_account_scope())
+        self.assertEqual(self.scope, self.window._loaded_history_scope)
+        self.assertIs(episode, self.window._active_episode)
+        self.assertEqual(before, self.stored(episode))
+        self.assertTrue(self.window._review_dirty)
+        self.assertEqual("failed account draft", self.window._review_note.toPlainText())
+        self.assertFalse(self.window._account_reload_timer.isActive())
+        self.trigger(False)
+        self.window._account_filter.setCurrentIndex(target)
+        wait_until(lambda: self.window._loaded_history_scope == self.other)
+        self.window._history_followup_timer.stop()
+        self.assertEqual("failed account draft", self.stored(episode).review)
+        self.assertEqual(2, self.save.call_count)
+
+    def _assert_process_exit_waits_for_review(self, mode):
+        from PySide6.QtCore import QTimer
+        from kiwoom_monitor import journal_process
+        command_path = self.root / "commands.json"
+        command = {"request_id": 1, "action": mode}
+        command_path.write_text(json.dumps(command), encoding="utf-8")
+        episode = self.window._active_episode
+        before = self.stored(episode)
+        self.edit(f"{mode} exit draft")
+        self.trigger(True)
+        command_timers = []
+        previous_hook = sys.excepthook
+        previous_last_window = self.app.quitOnLastWindowClosed()
+        ticks = iter((0.0, 6.0, 6.0))
+
+        def command_timer():
+            timer = QTimer()
+            command_timers.append(timer)
+            return timer
+
+        def drive_process_events():
+            # Exercise the real nested poll callback through its actual Qt signal.
+            sys.excepthook = lambda _type, error, _trace: self.errors.append(error)
+            timer = command_timers[0]
+            timer.timeout.emit()
+            if mode == "parent-loss":
+                timer.timeout.emit()
+            self.assertEqual(1, self.save.call_count)
+            self.assertTrue(any(isinstance(error, sqlite3.IntegrityError) for error in self.errors))
+            self.assertEqual(before, self.stored(episode))
+            self.assertTrue(self.window._review_dirty)
+            self.assertFalse(self.window._shutting_down)
+            self.assertFalse(bool(self.app.property("journal_terminating")))
+            self.exit.assert_not_called()
+            self.assertEqual(mode != "parent-loss", timer.isActive())
+            if mode != "parent-loss":
+                timer.timeout.emit()  # The already-consumed command does not automatically retry.
+                self.assertEqual(1, self.save.call_count)
+            self.trigger(False)
+            if mode == "parent-loss":
+                self.assertTrue(self.window.close())  # Existing explicit UI retry after parent loss.
+            else:
+                command_path.write_text(json.dumps({"request_id": 2, "action": mode}), encoding="utf-8")
+                timer.timeout.emit()
+            self.assertEqual(2, self.save.call_count)
+            self.assertEqual(f"{mode} exit draft", self.stored(episode).review)
+            self.assertFalse(self.window._review_dirty)
+            self.assertTrue(bool(self.app.property("journal_terminating")))
+            self.assertFalse(timer.isActive())
+            self.exit.assert_called_once_with(0)
+            return 0
+
+        try:
+            with patch.object(journal_process, "QApplication", return_value=self.app) as application, \
+                    patch.object(journal_process, "JournalWindow", return_value=self.window), \
+                    patch.object(journal_process, "QTimer", side_effect=command_timer), \
+                    patch.object(journal_process, "_set_taskbar_app_id"), \
+                    patch.object(journal_process, "_parent_is_alive", return_value=mode != "parent-loss"), \
+                    patch.object(journal_process, "monotonic_time", SimpleNamespace(monotonic=lambda: next(ticks))), \
+                    patch.object(self.app, "exec", side_effect=drive_process_events):
+                application.instance.return_value = self.app
+                result = journal_process._run_journal_process([
+                    "--monitor-database", str(self.window._monitor_db), "--journal-database", str(self.window._journal_db),
+                    "--config", str(self.window._config), "--command-file", str(command_path), "--parent-pid", "1",
+                ])
+                self.assertEqual(0, result)
+        finally:
+            sys.excepthook = previous_hook
+            self.app.setQuitOnLastWindowClosed(previous_last_window)
+            for timer in command_timers:
+                timer.stop()
+                timer.deleteLater()
+
+    def test_command_shutdown_does_not_ack_failed_review_and_new_request_retries(self):
+        self._assert_process_exit_waits_for_review("shutdown")
+
+    def test_sync_exit_does_not_ack_failed_review_and_new_request_retries(self):
+        self._assert_process_exit_waits_for_review("sync")
+
+    def test_parent_loss_does_not_ack_failed_review_or_automatically_retry(self):
+        self._assert_process_exit_waits_for_review("parent-loss")
 
 
 if __name__ == "__main__":

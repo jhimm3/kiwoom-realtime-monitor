@@ -2356,22 +2356,6 @@ class MainWindow(QMainWindow):
         if not bool(getattr(self, "_image_theme_rows_reviewing", False)):
             self._image_theme_workflow_active = False
 
-    def _with_krx_stock_catalog(self, continuation: Callable[[], None]) -> None:
-        if self._stock_lookup is None or not hasattr(self._stock_lookup, "upsert_many"):
-            continuation(); return
-        def completed(count: int, cached: bool) -> None:
-            self.statusBar().showMessage("KRX 상장종목 목록 확인 완료" if cached else f"KRX 상장종목 {count:,}개 갱신 완료")
-            self._review_pending_stock_name_changes()
-            continuation()
-        self.statusBar().showMessage("KRX 전체 상장종목 목록을 확인하고 있습니다.")
-        self._krx_stock_catalog_worker_controller.start(
-            self._stock_lookup,
-            self._settings,
-            completed=completed,
-            history_failed=lambda message: logger.warning("KIND 상호변경 이력 동기화 실패: %s", message),
-            failed=lambda message: (QMessageBox.warning(self, "KRX 상장종목 목록", f"전체 목록을 갱신하지 못했습니다.\n저장된 목록으로 계속합니다.\n\n{message}"), continuation()),
-        )
-
     def _sync_krx_stock_catalog(self) -> None:
         if self._stock_lookup is None or not hasattr(self._stock_lookup, "upsert_many"):
             return

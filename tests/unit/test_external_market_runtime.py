@@ -1,14 +1,18 @@
 import asyncio
 import copy
+import sqlite3
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from kiwoom_monitor.central_server.app import create_app
 from kiwoom_monitor.central_server.config import CentralServerSettings
+from kiwoom_monitor.central_server import external_market_collector as collector_module
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
 from test_external_market_collector import _MemoryStore, _SyntheticCollector
 from qt_settings_test_support import dispose_dialogs
@@ -231,6 +235,96 @@ class ExternalMarketRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.collector.release.set(); await first; await closing
         self.assertIsNone(self.collector._task)
         self.assertFalse(self.collector._updates)
+
+
+class ExternalMarketPollFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_poll_owner_recovers_native_cycle_faults_on_existing_interval(self):
+        for stage in ("read", "bars", "roll", "status"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                now = datetime(2026, 9, 10, 10, tzinfo=collector_module.KST)
+                store = SQLiteQueryStore(Path(directory) / "central.sqlite3", now_provider=lambda: now)
+                store.initialize()
+                armed = True
+                original_connect = store._connect
+
+                def connect():
+                    connection = original_connect()
+                    connection.create_function("r3_cycle_fault", 0, lambda: int(armed))
+                    if stage == "read":
+                        connection.set_authorizer(lambda action, table, _column, _database, _source:
+                            sqlite3.SQLITE_DENY if armed and action == sqlite3.SQLITE_READ and table == "central_documents" else sqlite3.SQLITE_OK)
+                    return connection
+
+                with patch.object(store, "_connect", side_effect=connect):
+                    if stage in ("bars", "roll", "status"):
+                        table = "central_external_bars" if stage == "bars" else "central_documents"
+                        condition = "1" if stage == "bars" else "NEW.collection='external_market_roll_state'" if stage == "roll" else "NEW.collection='external_market_collection_status'"
+                        with store._connection() as connection, connection:
+                            connection.execute(f"CREATE TRIGGER reject_cycle BEFORE INSERT ON {table} "
+                                               f"WHEN {condition} AND r3_cycle_fault()=1 "
+                                               "BEGIN SELECT RAISE(ABORT,'060 native cycle fault'); END")
+                    collector = _SyntheticCollector(store, {"WTI_FUTURES": "CLV26.NYM"},
+                                                    now_provider=lambda: now, poll_seconds=60)
+                    recovered, close_release = asyncio.Event(), asyncio.Event()
+                    sleeps, first_diagnostics = [], []
+
+                    async def cycle_sleep(seconds):
+                        nonlocal armed
+                        sleeps.append(seconds)
+                        if len(sleeps) == 1:
+                            first_diagnostics.append(collector.diagnostic_status())
+                            armed = False
+                        else:
+                            recovered.set()
+                            await close_release.wait()
+
+                    proxy = SimpleNamespace(**{name: getattr(asyncio, name) for name in (
+                        "create_task", "shield", "gather", "to_thread", "CancelledError",
+                    )}, sleep=cycle_sleep)
+                    with patch.object(collector_module, "asyncio", proxy), patch.object(
+                        collector_module, "is_paused", return_value=False,
+                    ):
+                        close_results = []
+                        try:
+                            await collector.start()
+                            owner = collector._task
+                            for _ in range(400):
+                                if owner.done() or recovered.is_set():
+                                    break
+                                await asyncio.sleep(.005)
+                            self.assertFalse(owner.done(), f"one native cycle failure stopped the poll owner: {collector.diagnostic_status()['last_collection_error']}")
+                            self.assertTrue(recovered.is_set())
+                            self.assertIs(owner, collector._task)
+                            self.assertEqual([60, 60], sleeps)
+                            self.assertEqual(2, collector.diagnostic_status()["collection_attempts"])
+                            if stage in ("read", "status"):
+                                self.assertIsNotNone(first_diagnostics[0]["last_collection_error"])
+                            self.assertIsNone(collector.diagnostic_status()["last_collection_error"])
+                            self.assertEqual("2026-09-10", collector._last_daily_date)
+                            self.assertEqual("ok", store.load_documents(
+                                "external_market_collection_status", "WTI_FUTURES", 1,
+                            )[0]["document"]["status"])
+                            self.assertGreater(len(store.load_external_bars("WTI_FUTURES", "5m")), 0)
+                        finally:
+                            armed = False
+                            close_results = await asyncio.gather(collector.close(), return_exceptions=True)
+                            close_release.set()
+                            store.close()
+                        self.assertEqual([None], close_results)
+                        self.assertIsNone(collector._task)
+                        self.assertIsNone(collector._collection)
+
+    async def test_invalid_contract_remains_an_explicit_failure_without_poll_retry(self):
+        collector = _SyntheticCollector(_MemoryStore(), {"WTI_FUTURES": "not-a-contract"})
+        try:
+            await collector.start()
+            result = (await asyncio.gather(collector._task, return_exceptions=True))[0]
+            self.assertIsInstance(result, ValueError)
+            self.assertEqual(1, collector.diagnostic_status()["collection_attempts"])
+            self.assertIn("ValueError", collector.diagnostic_status()["last_collection_error"])
+        finally:
+            with self.assertRaises(ValueError):
+                await collector.close()
 
 
 class ExternalMarketSettingsAPITests(unittest.TestCase):
