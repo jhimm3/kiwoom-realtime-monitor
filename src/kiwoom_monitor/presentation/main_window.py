@@ -5143,10 +5143,12 @@ class MainWindow(QMainWindow):
         # 최상위 창 외곽 위치로 적용된다. 내용 좌표를 저장하면 재실행할 때마다
         # 제목 표시줄 높이만큼 아래·오른쪽으로 밀리므로 외곽 좌표를 보관한다.
         frame = self.frameGeometry()
-        self._settings.set("window_width", str(geometry.width()))
-        self._settings.set("window_height", str(geometry.height()))
-        self._settings.set("window_x", str(frame.x()))
-        self._settings.set("window_y", str(frame.y()))
+        self._settings.set_many({
+            "window_width": str(geometry.width()),
+            "window_height": str(geometry.height()),
+            "window_x": str(frame.x()),
+            "window_y": str(frame.y()),
+        })
 
     def _restore_window_position(self) -> None:
         position = parse_window_position(

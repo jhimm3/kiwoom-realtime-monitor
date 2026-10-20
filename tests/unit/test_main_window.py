@@ -42,6 +42,125 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_geometry_timer_batches_four_values_and_close_restores_them(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+            try:
+                window.show()
+                QTest.qWait(30)
+                timer = window._window_geometry_save_timer
+                timer.stop()
+                self.assertTrue(timer.isSingleShot())
+                self.assertEqual(350, timer.interval())
+                with patch.object(database.settings, "set_many", wraps=database.settings.set_many) as save, \
+                        patch.object(database.settings, "set", side_effect=AssertionError("split geometry write")):
+                    window.resize(805, 507)
+                    window.move(18, 24)
+                    expected = {
+                        "window_width": str(window.geometry().width()),
+                        "window_height": str(window.geometry().height()),
+                        "window_x": str(window.frameGeometry().x()),
+                        "window_y": str(window.frameGeometry().y()),
+                    }
+                    self.assertTrue(timer.isActive())
+                    QTest.qWait(420)
+                    save.assert_called_once_with(expected)
+                    self.assertFalse(timer.isActive())
+                # Closing before the debounce fires must still persist the final geometry.
+                window.resize(816, 518)
+                QApplication.processEvents()
+                expected.update(window_width="816", window_height="518")
+                self.assertTrue(timer.isActive())
+                with patch.object(window, "_save_window_geometry", wraps=window._save_window_geometry) as close_save:
+                    self.assertTrue(window.close())
+                    close_save.assert_called_once_with()
+                self.assertFalse(timer.isActive())
+                database.settings.clear_cache()
+                self.assertEqual(expected, {key: database.settings.get(key) for key in expected})
+                restored = MainWindow(database.settings, FakeRankingLoader())
+                try:
+                    QApplication.processEvents()
+                    self.assertEqual((816, 518), (restored.width(), restored.height()))
+                    self.assertEqual((18, 24), (restored.x(), restored.y()))
+                finally:
+                    restored.close()
+            finally:
+                window.close()
+
+    def test_alert_dialog_batch_validation_rollback_and_committed_consumer(self) -> None:
+        import sqlite3
+        from contextlib import closing
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QDialogButtonBox
+        from kiwoom_monitor.presentation.main_window_components import AlertSettingsDialog
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+            dialog = AlertSettingsDialog(database.settings, window)
+            keys = ("near_high_alert_enabled", "near_high_interest_percent",
+                    "near_high_caution_percent", "near_high_fire_percent")
+            before = {key: database.settings.get(key) for key in keys}
+            try:
+                dialog._enabled.setChecked(True)
+                dialog._thresholds["interest"].setText("invalid")
+                with patch.object(database.settings, "set_many", wraps=database.settings.set_many) as save, \
+                        patch.object(QMessageBox, "warning") as warning:
+                    dialog._save()
+                    warning.assert_called_once()
+                    save.assert_not_called()
+                    self.assertEqual(0, dialog.result())
+                for level, value in (("interest", "2"), ("caution", "1"), ("fire", "0.5")):
+                    dialog._thresholds[level].setText(value)
+                with closing(sqlite3.connect(database.settings.database_path)) as connection:
+                    connection.execute(
+                        "CREATE TRIGGER reject_alert_batch BEFORE UPDATE ON settings "
+                        "WHEN NEW.key = 'near_high_caution_percent' "
+                        "BEGIN SELECT RAISE(ABORT, 'alert batch failure'); END"
+                    )
+                    connection.commit()
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "alert batch failure"):
+                    dialog._save()
+                self.assertEqual(0, dialog.result())
+                self.assertEqual(before, {key: database.settings.get(key) for key in keys})
+                with closing(sqlite3.connect(database.settings.database_path)) as connection:
+                    self.assertEqual(before, dict(connection.execute(
+                        "SELECT key, value FROM settings WHERE key IN (?, ?, ?, ?)", keys
+                    )))
+                    connection.execute("DROP TRIGGER reject_alert_batch")
+                    connection.commit()
+                # Keep the real Save signal, modal execution, accept and MainWindow consumer.
+                button = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
+                with patch("kiwoom_monitor.presentation.main_window.AlertSettingsDialog", return_value=dialog), \
+                        patch.object(database.settings, "set_many", wraps=database.settings.set_many) as save, \
+                        patch.object(database.settings, "set", side_effect=AssertionError("split alert write")):
+                    QTimer.singleShot(0, button.click)
+                    window._open_alert_settings()
+                    save.assert_called_once_with(dict(zip(keys, ("1", "2.0", "1.0", "0.5"))))
+                self.assertEqual(1, dialog.result())
+                self.assertEqual("신고가 근접 알림을 사용합니다.", window.statusBar().currentMessage())
+                with patch.object(window, "_selected_high_price", return_value=1000):
+                    self.assertEqual("fire", window._near_high_level("005930", 995))
+                    self.assertEqual("caution", window._near_high_level("005930", 992))
+                    self.assertEqual("interest", window._near_high_level("005930", 985))
+                    self.assertEqual("", window._near_high_level("005930", 970))
+                database.settings.clear_cache()
+                restored = AlertSettingsDialog(database.settings, window)
+                try:
+                    self.assertTrue(restored._enabled.isChecked())
+                    self.assertEqual(("2.0", "1.0", "0.5"), tuple(
+                        restored._thresholds[level].text() for level in ("interest", "caution", "fire")
+                    ))
+                    restored.reject()
+                finally:
+                    restored.deleteLater()
+            finally:
+                dialog.deleteLater()
+                window.close()
+
     def test_drive_legacy_restore_clock_is_bound_to_current_runtime(self) -> None:
         from kiwoom_monitor.domain.time_basis import as_kst
         from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService

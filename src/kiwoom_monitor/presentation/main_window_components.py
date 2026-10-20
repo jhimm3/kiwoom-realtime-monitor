@@ -119,9 +119,12 @@ class AlertSettingsDialog(QDialog):
         if not (thresholds[0] >= thresholds[1] >= thresholds[2] >= 0):
             QMessageBox.warning(self, "입력 확인", "신고가 근접 기준은 관심 ≥ 주의 ≥ 불 순서의 0 이상 숫자로 입력하세요.")
             return
-        self._settings.set("near_high_alert_enabled", "1" if self._enabled.isChecked() else "0")
-        for level, value in zip(("interest", "caution", "fire"), thresholds):
-            self._settings.set(f"near_high_{level}_percent", str(value))
+        values = {"near_high_alert_enabled": "1" if self._enabled.isChecked() else "0"}
+        values.update({
+            f"near_high_{level}_percent": str(value)
+            for level, value in zip(("interest", "caution", "fire"), thresholds)
+        })
+        self._settings.set_many(values)
         self.accept()
 
 

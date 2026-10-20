@@ -5,8 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from contextlib import closing
+from datetime import datetime
 
 from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsSyncService, is_shared_setting
+from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
 
 
 class _Client:
@@ -24,6 +26,34 @@ class _Client:
 
 
 class CentralSettingsSyncTests(unittest.TestCase):
+    def test_equal_save_is_not_a_new_edit_and_changed_value_still_wins_by_instant(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'settings.sqlite'
+            old = '2026-10-20T09:00:00+09:00'
+            now = datetime.fromisoformat('2026-10-20T10:00:00+09:00')
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);'
+                    'CREATE TABLE central_setting_versions(setting_key TEXT PRIMARY KEY,updated_at TEXT NOT NULL);'
+                    'CREATE TABLE column_settings(column_name TEXT PRIMARY KEY,visible INTEGER,position INTEGER,width INTEGER);'
+                    'CREATE TABLE central_column_setting_versions(column_name TEXT PRIMARY KEY,updated_at TEXT NOT NULL);')
+                connection.execute("INSERT INTO settings VALUES('rank_query_type','5')")
+                connection.execute("INSERT INTO central_setting_versions VALUES('rank_query_type',?)", (old,))
+            repository = SettingsRepository(path, now_provider=lambda: now)
+            repository.set('rank_query_type', '5')
+            client = _Client()
+            client.remote = {'app_settings': [{'owner': 'default', 'key': 'rank_query_type', 'document': {
+                'key': 'rank_query_type', 'value': '6', 'updated_at': '2026-10-20T00:30:00+00:00'}}]}
+            service = CentralSettingsSyncService(client, now_provider=lambda: now)
+            service.sync(path)
+            repository.clear_cache()
+            self.assertEqual('6', repository.get('rank_query_type'))
+            repository.set('rank_query_type', '7')
+            self.assertEqual(1, service.sync(path))
+            self.assertEqual('7', client.remote['app_settings'][-1]['document']['value'])
+            self.assertEqual(now.isoformat(), client.remote['app_settings'][-1]['document']['updated_at'])
+            self.assertEqual(0, service.sync(path))
+            self.assertEqual('7', SettingsRepository(path).get('rank_query_type'))
+
     def test_utc_and_kst_versions_compare_instants_in_both_directions(self):
         cases = (
             ('2026-10-15T14:30:00+09:00', '2026-10-15T06:00:00+00:00', 'remote'),
