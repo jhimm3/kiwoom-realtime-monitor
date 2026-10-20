@@ -4396,8 +4396,8 @@
       "MockAutomationSupervisor.resume",
       "self._repository",
       "load_mock_automation_control",
-      "callable_argument",
-      "asyncio.to_thread",
+      "bound_reference",
+      "",
       "",
       "",
       "unresolved_candidate"

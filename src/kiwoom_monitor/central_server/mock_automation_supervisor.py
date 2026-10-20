@@ -333,7 +333,7 @@ class MockAutomationSupervisor:
             existing_runner = self._runners.get(account_ref)
             if existing_runner is not None and existing_runner._bundle is not self._owner.bundle(credential_profile_id):
                 await self._close_runner(existing_runner)
-            control = await asyncio.to_thread(
+            control = await drain_thread_call(
                 self._repository.load_mock_automation_control, account_ref,
             )
             if control is None or control.control_revision != expected_control_revision:

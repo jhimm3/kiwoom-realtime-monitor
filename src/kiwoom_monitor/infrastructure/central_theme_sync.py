@@ -28,6 +28,8 @@ class CentralThemeSyncDispatcher:
         self._retry_delays = tuple(max(0.05, float(value)) for value in retry_delays) or (60.0,)
         self._pending_path = pending_path or database_path.with_name(".central_theme_sync_pending")
         self._state_lock = threading.Lock()
+        self._runs_drained = threading.Condition(self._state_lock)
+        self._active_runs = 0
         self._execution_lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._closed = False
@@ -62,6 +64,9 @@ class CentralThemeSyncDispatcher:
             timer, self._timer = self._timer, None
         if timer is not None:
             timer.cancel()
+        with self._runs_drained:
+            while self._active_runs:
+                self._runs_drained.wait()
 
     def _run(self) -> bool:
         with self._state_lock:
@@ -70,42 +75,48 @@ class CentralThemeSyncDispatcher:
             self._timer = None
             generation = self._generation
             pending_token = self._read_pending()
+            self._active_runs += 1
         try:
-            revision = (ThemeBackupService(self._database_path).revision()
-                        if self._database_path.is_file() else None)
-            with self._execution_lock:
-                remote_snapshot, remote_completed_at = self._service.load_theme_snapshot()
-                local_changed_at = self._pending_time(pending_token)
-                if remote_completed_at is not None and remote_completed_at > local_changed_at:
-                    with self._state_lock:
-                        if generation != self._generation:
-                            return False
-                    self._service.apply_theme_snapshot(
-                        self._database_path, remote_snapshot, expected_revision=revision,
-                    )
-                    logger.info(
-                        "NAS 테마가 로컬 대기 변경보다 최신이어서 NAS 스냅샷을 적용했습니다."
-                    )
-                else:
-                    self._service.replace_themes(self._database_path)
-        except ThemeRevisionConflict as error:
-            logger.info("로컬 테마 편집을 보존하고 새 버전을 다시 동기화합니다: %s", error)
-            self.notify()
-            return False
-        except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
-            # 중앙 장애가 테마 편집이나 메인 실시간 화면을 막지 않는다.
-            logger.warning("테마 중앙 즉시 보존 실패(로컬 자료 유지): %s", error)
+            try:
+                revision = (ThemeBackupService(self._database_path).revision()
+                            if self._database_path.is_file() else None)
+                with self._execution_lock:
+                    remote_snapshot, remote_completed_at = self._service.load_theme_snapshot()
+                    local_changed_at = self._pending_time(pending_token)
+                    if remote_completed_at is not None and remote_completed_at > local_changed_at:
+                        with self._state_lock:
+                            if generation != self._generation:
+                                return False
+                        self._service.apply_theme_snapshot(
+                            self._database_path, remote_snapshot, expected_revision=revision,
+                        )
+                        logger.info(
+                            "NAS 테마가 로컬 대기 변경보다 최신이어서 NAS 스냅샷을 적용했습니다."
+                        )
+                    else:
+                        self._service.replace_themes(self._database_path)
+            except ThemeRevisionConflict as error:
+                logger.info("로컬 테마 편집을 보존하고 새 버전을 다시 동기화합니다: %s", error)
+                self.notify()
+                return False
+            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                # 중앙 장애가 테마 편집이나 메인 실시간 화면을 막지 않는다.
+                logger.warning("테마 중앙 즉시 보존 실패(로컬 자료 유지): %s", error)
+                with self._state_lock:
+                    if not self._closed and generation == self._generation and self._timer is None:
+                        delay = self._retry_delays[min(self._retry_index, len(self._retry_delays) - 1)]
+                        self._retry_index += 1
+                        self._schedule_locked(delay)
+                return False
             with self._state_lock:
-                if not self._closed and generation == self._generation and self._timer is None:
-                    delay = self._retry_delays[min(self._retry_index, len(self._retry_delays) - 1)]
-                    self._retry_index += 1
-                    self._schedule_locked(delay)
-            return False
-        with self._state_lock:
-            if generation == self._generation:
-                self._retry_index = 0
-                self._clear_pending(pending_token)
-        return True
+                if generation == self._generation:
+                    self._retry_index = 0
+                    self._clear_pending(pending_token)
+            return True
+        finally:
+            with self._runs_drained:
+                self._active_runs -= 1
+                self._runs_drained.notify_all()
 
     def _schedule_locked(self, delay: float) -> None:
         self._timer = threading.Timer(delay, self._run)

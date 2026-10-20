@@ -210,11 +210,16 @@ class MarketCacheWriter(QThread):
         bars: tuple[MinuteOhlcv, ...], trade_date: date, synced_at: datetime,
         recovery_generation: int | None = None,
     ) -> bool:
+        bars_committed = False
         try:
             repository.upsert_bars(code, bars)
+            bars_committed = True
             repository.record_history_sync(code, trade_date, synced_at, len(bars))
         except Exception as error:
             self.history_failed.emit(code, str(error))
+            cutoff = self._minute_retention_cutoff
+            if bars_committed and cutoff is not None and any(bar.minute.date() < cutoff for bar in bars):
+                self._purge_minute_retention(repository, cutoff)
             return False
         self.history_saved.emit(code)
         self.history_quality_saved.emit(code, {"generation": recovery_generation,

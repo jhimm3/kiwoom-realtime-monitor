@@ -84,6 +84,8 @@ class MinuteChart(QWidget):
         self._fill_index_rows: tuple[tuple[object, ...], ...] | None = None
         self._fill_index_fills: tuple[TradeFill, ...] | None = None
         self._fill_indices: dict[str, int] = {}
+        self._row_minutes_source: tuple[tuple[object, ...], ...] | None = None
+        self._row_minutes_values: list[datetime] = []
         self._text_editor: QLineEdit | None = None
         self._editing_text_index: int | None = None
         self._selected_annotation: int | None = None
@@ -384,12 +386,21 @@ class MinuteChart(QWidget):
         self._fill_indices = indices
         return indices
 
+    def _visible_row_minutes(self) -> list[datetime]:
+        """같은 화면 봉의 원시 시각 변환 한 벌만 재사용한다."""
+        if self._row_minutes_source is self._rows:
+            return self._row_minutes_values
+        values = [datetime.fromisoformat(str(row[0])) for row in self._rows]
+        self._row_minutes_source = self._rows
+        self._row_minutes_values = values
+        return values
+
     def paintEvent(self, event: object) -> None:
         painter = QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), self._background)
         if not self._rows:
             painter.setPen(self._foreground); painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "분봉 데이터가 없습니다."); return
-        row_minutes = [datetime.fromisoformat(str(row[0])) for row in self._rows]
+        row_minutes = self._visible_row_minutes()
         # 전일+당일 분봉을 함께 그리므로 첫 번째 봉의 날짜로 체결을 제한하면
         # 당일 B/S 표식이 전부 사라진다. 화면 전체 시간 범위에서 선별한다.
         day_fills = self._fills
@@ -771,7 +782,7 @@ class MinuteChart(QWidget):
         price_bottom = max(top + 80.0, self.height() * 0.73)
         if position.x() < left or position.x() > self.width() - right or position.y() < top or position.y() > price_bottom:
             return None
-        row_minutes = [datetime.fromisoformat(str(row[0])) for row in self._rows]
+        row_minutes = self._visible_row_minutes()
         plot_width = max(1.0, self.width() - left - right)
         bar_width = plot_width / len(self._rows)
         index = max(0, min(len(self._rows) - 1, int((position.x() - left) / bar_width)))
@@ -792,7 +803,7 @@ class MinuteChart(QWidget):
             return None
         left, right, top = 14.0, 72.0, 50.0
         price_bottom = max(top + 80.0, self.height() * 0.73)
-        row_minutes = [datetime.fromisoformat(str(row[0])) for row in self._rows]
+        row_minutes = self._visible_row_minutes()
         plot_width = max(1.0, self.width() - left - right)
         bar_width = plot_width / len(self._rows)
         visible_end = row_minutes[-1] + (timedelta(days=1) if self._interval == "일봉" else timedelta(minutes=1))

@@ -11,10 +11,11 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from kiwoom_monitor.application.theme_preview import ThemeChange
 from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion, ThemeSuggestion
+from kiwoom_monitor.domain.theme_import import ThemeImportRow
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
@@ -75,6 +76,28 @@ class ThemePreviewDialogTests(unittest.TestCase):
                 self.assertEqual(("AI", "반도체"), store.themes_for_stock("005930"))
                 self.assertEqual(("신규",), store.themes_for_stock("000660"))
                 self.assertEqual([True], changed)
+                # An unmatched manual row reaches the common split branch before
+                # the same existing preview/cancel and asynchronous save path.
+                with patch("kiwoom_monitor.presentation.theme_dialogs.ThemePreviewDialog", Preview), \
+                        patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.information"), \
+                        patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes), \
+                        patch.object(store, "replace_many", wraps=store.replace_many) as save:
+                    Preview.approve = False
+                    dialog._apply_import_rows((("삼성전자SK하이닉스", "분리"),), ",", "theme_new_import_exclusions")
+                    save.assert_not_called()
+                    self.assertEqual(("신규",), store.themes_for_stock("000660"))
+                    Preview.approve = True
+                    dialog._apply_import_rows((("삼성전자SK하이닉스", "분리"),), ",", "theme_new_import_exclusions")
+                    wait_until(lambda: dialog._save_request is None)
+                    save.assert_called_once_with((("005930", ("분리",)), ("000660", ("분리",))))
+                self.assertEqual([True, True], changed)
+                with patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.question", side_effect=(QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)), \
+                        patch("kiwoom_monitor.presentation.theme_dialogs.choose_similar_stock", return_value=(("000660", "SK하이닉스"), False)), \
+                        patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", side_effect=AssertionError("manual import must retain its picker")):
+                    resolved, cancelled = dialog._resolve_unmatched_new_rows((ThemeImportRow("삼성전자SK하이닉수", ("수동",)),))
+                self.assertFalse(cancelled)
+                self.assertEqual((("000660", "SK하이닉스", ("수동",)),), tuple((row.code, row.name, row.themes) for row in resolved))
+                self.assertIsNone(stocks.find_code_by_name("삼성전자SK하이닉수"))
             finally:
                 dialog.close()
 
@@ -123,6 +146,26 @@ class ThemePreviewDialogTests(unittest.TestCase):
             self.assertIsNone(cancelled)
             self.assertEqual((), store.themes_for_stock("005930"))
             self.assertEqual(1, len(status))
+            lookup.upsert("000660", "SK하이닉스")
+            Preview.approve = True
+            with patch("kiwoom_monitor.presentation.theme_dialogs.ImageThemeRowsDialog", Editor), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ThemePreviewDialog", Preview), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+                split = review_image_theme_rows((("삼성전자SK하이닉스", "분리"),), None, database.settings, lookup, store, status.append)
+            self.assertEqual((("005930", ("분리",)), ("000660", ("분리",))), split)
+            self.assertEqual((), store.themes_for_stock("000660"))
+            # Distinct unmatched rows pass validation. The first correction
+            # persists an alias that the second row enters as its correction.
+            typo = "삼성전자SK하이닉수"
+            with patch("kiwoom_monitor.presentation.theme_dialogs.ImageThemeRowsDialog", Editor), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ThemePreviewDialog", Preview), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.question", side_effect=(QMessageBox.StandardButton.No,) * 2), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", side_effect=(("삼성전자", True), (typo, True))), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.choose_similar_stock", side_effect=AssertionError("fresh alias should resolve the corrected input")):
+                corrected = review_image_theme_rows(((typo, "교정"), ("다른미확인", "교정")), None, database.settings, lookup, store, status.append)
+            self.assertEqual((("005930", ("교정",)), ("005930", ("교정",))), corrected)
+            self.assertEqual("005930", lookup.find_code_by_name(typo))
+            self.assertEqual((), store.themes_for_stock("005930"))
 
     def test_excel_import_from_theme_manager_applies_only_after_preview(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -131,6 +174,7 @@ class ThemePreviewDialogTests(unittest.TestCase):
             database.initialize()
             lookup = StockRepository(path)
             lookup.upsert("005930", "삼성전자")
+            lookup.upsert("000660", "SK하이닉스")
             store = ThemeRepository(path)
             changed: list[bool] = []
             dialog = ThemeManagerDialog(
@@ -140,12 +184,13 @@ class ThemePreviewDialogTests(unittest.TestCase):
 
             class Workbook:
                 theme = "반도체"
+                name = "삼성전자"
 
                 def __init__(self, _path):
                     pass
 
                 def load_header_and_rows(self):
-                    return ("종목명", "테마"), (("삼성전자", self.theme),)
+                    return ("종목명", "테마"), ((self.name, self.theme),)
 
             class Editor:
                 def __init__(self, rows, *_args):
@@ -187,6 +232,23 @@ class ThemePreviewDialogTests(unittest.TestCase):
                 dialog._import_excel()
             self.assertEqual(("반도체",), store.themes_for_stock("005930"))
             self.assertEqual([True], changed)
+            Workbook.name = "삼성전자SK하이닉스"
+            Workbook.theme = "분리"
+            with patch("kiwoom_monitor.presentation.theme_dialogs.QFileDialog.getOpenFileName", return_value=(str(path.with_suffix(".xlsx")), "")), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ExcelThemeRepository", Workbook), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ImageThemeRowsDialog", Editor), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.ThemePreviewDialog", Preview), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.information"), \
+                    patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+                dialog._import_excel()
+                self.assertEqual(("반도체",), store.themes_for_stock("005930"))
+                self.assertEqual((), store.themes_for_stock("000660"))
+                Preview.approve = True
+                dialog._import_excel()
+                wait_until(lambda: dialog._save_request is None)
+            self.assertEqual(("분리",), store.themes_for_stock("005930"))
+            self.assertEqual(("분리",), store.themes_for_stock("000660"))
+            self.assertEqual([True, True], changed)
             dialog.close()
 
     def test_theme_save_keeps_gui_responsive_during_sqlite_contention(self) -> None:

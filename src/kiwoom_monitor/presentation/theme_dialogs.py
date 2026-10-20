@@ -51,6 +51,47 @@ from kiwoom_monitor.presentation.similar_stock_dialog import choose_similar_stoc
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 
 
+def _resolve_known_theme_row(
+    parent: QWidget, stock_lookup: object, original_name: str,
+    themes: tuple[str, ...], source_label: str | None = None,
+) -> tuple[tuple[MatchedThemeRow, ...] | None, bool]:
+    """Return handled rows (possibly empty), or None for the caller's final UX."""
+    renamed, handled = confirm_pending_name_change(parent, stock_lookup, original_name, themes)
+    if handled:
+        return (() if renamed is None else (MatchedThemeRow(renamed[0], renamed[1], themes),)), False
+    prefix = f"{source_label}의 " if source_label is not None else ""
+    split_finder = getattr(stock_lookup, "find_concatenated_stocks", None)
+    split = split_finder(original_name) if callable(split_finder) else ()
+    if split:
+        labels = " + ".join(name for _, name in split)
+        if QMessageBox.question(
+            parent, "붙어 있는 종목명 확인",
+            f"{prefix}'{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n"
+            f"{labels}\n\n이대로 나눌까요?",
+        ) == QMessageBox.StandardButton.Yes:
+            return tuple(MatchedThemeRow(code, name, themes) for code, name in split), False
+    partial_finder = getattr(stock_lookup, "find_partial_concatenated_stocks", None)
+    known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
+    if known and fragments:
+        known_labels = " + ".join(name for _, name in known)
+        fragment_labels = ", ".join(fragments)
+        if QMessageBox.question(
+            parent, "붙어 있는 종목명 일부 확인",
+            f"{prefix}'{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
+            f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
+        ) == QMessageBox.StandardButton.Yes:
+            resolved = [MatchedThemeRow(code, name, themes) for code, name in known]
+            for fragment in fragments:
+                candidate, cancelled = choose_similar_stock(parent, stock_lookup, fragment, themes)
+                if cancelled:
+                    return (), True
+                if candidate:
+                    code, selected_name = candidate
+                    resolved.append(MatchedThemeRow(code, selected_name, themes))
+            return tuple(resolved), False
+    return None, False
+
+
 def resolve_unmatched_theme_rows(
     parent: QWidget, stock_lookup: object | None, rows: tuple[object, ...], source_label: str,
 ) -> tuple[tuple[MatchedThemeRow, ...], bool]:
@@ -61,42 +102,12 @@ def resolve_unmatched_theme_rows(
     for row in rows:
         original_name = str(getattr(row, "name", ""))
         themes = tuple(getattr(row, "themes", ()))
-        renamed, handled = confirm_pending_name_change(parent, stock_lookup, original_name, themes)
-        if handled:
-            if renamed is not None:
-                code, current_name = renamed
-                resolved.append(MatchedThemeRow(code, current_name, themes))
+        known, cancelled = _resolve_known_theme_row(parent, stock_lookup, original_name, themes, source_label)
+        if cancelled:
+            return (), True
+        if known is not None:
+            resolved.extend(known)
             continue
-        split_finder = getattr(stock_lookup, "find_concatenated_stocks", None)
-        split = split_finder(original_name) if callable(split_finder) else ()
-        if split:
-            labels = " + ".join(name for _, name in split)
-            if QMessageBox.question(
-                parent, "붙어 있는 종목명 확인",
-                f"{source_label}의 '{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n"
-                f"{labels}\n\n이대로 나눌까요?",
-            ) == QMessageBox.StandardButton.Yes:
-                resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
-                continue
-        partial_finder = getattr(stock_lookup, "find_partial_concatenated_stocks", None)
-        known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
-        if known and fragments:
-            known_labels = " + ".join(name for _, name in known)
-            fragment_labels = ", ".join(fragments)
-            if QMessageBox.question(
-                parent, "붙어 있는 종목명 일부 확인",
-                f"{source_label}의 '{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
-                f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
-            ) == QMessageBox.StandardButton.Yes:
-                resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
-                for fragment in fragments:
-                    candidate, cancelled = choose_similar_stock(parent, stock_lookup, fragment, themes)
-                    if cancelled:
-                        return (), True
-                    if candidate:
-                        code, selected_name = candidate
-                        resolved.append(MatchedThemeRow(code, selected_name, themes))
-                continue
         while True:
             name, ok = QInputDialog.getText(
                 parent, "키움 종목명 확인",
@@ -1163,43 +1174,12 @@ class ThemeManagerDialog(QDialog):
         for row in rows:
             original_name = str(getattr(row, "name", ""))
             themes = tuple(getattr(row, "themes", ()))
-            renamed, handled = confirm_pending_name_change(self, self._repository, original_name, themes)
-            if handled:
-                if renamed is not None:
-                    code, current_name = renamed
-                    resolved.append(MatchedThemeRow(code, current_name, themes))
+            known, cancelled = _resolve_known_theme_row(self, self._repository, original_name, themes)
+            if cancelled:
+                return (), True
+            if known is not None:
+                resolved.extend(known)
                 continue
-            split_finder = getattr(self._repository, "find_concatenated_stocks", None)
-            split = split_finder(original_name) if callable(split_finder) else ()
-            if split:
-                labels = " + ".join(name for _, name in split)
-                if QMessageBox.question(
-                    self,
-                    "붙어 있는 종목명 확인",
-                    f"'{original_name}'을(를) 다음 종목들로 나눌 수 있습니다.\n\n{labels}\n\n이대로 나눌까요?",
-                ) == QMessageBox.StandardButton.Yes:
-                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in split)
-                    continue
-            partial_finder = getattr(self._repository, "find_partial_concatenated_stocks", None)
-            known, fragments = partial_finder(original_name) if callable(partial_finder) else ((), ())
-            if known and fragments:
-                known_labels = " + ".join(name for _, name in known)
-                fragment_labels = ", ".join(fragments)
-                if QMessageBox.question(
-                    self,
-                    "붙어 있는 종목명 일부 확인",
-                    f"'{original_name}'에서 다음 종목은 확인됐습니다.\n\n{known_labels}\n\n"
-                    f"남은 이름만 다시 찾습니다: {fragment_labels}\n\n계속할까요?",
-                ) == QMessageBox.StandardButton.Yes:
-                    resolved.extend(MatchedThemeRow(code, name, themes) for code, name in known)
-                    for fragment in fragments:
-                        candidate, cancelled = choose_similar_stock(self, self._repository, fragment, themes)
-                        if cancelled:
-                            return (), True
-                        if candidate:
-                            code, selected_name = candidate
-                            resolved.append(MatchedThemeRow(code, selected_name, themes))
-                    continue
             candidate, cancelled = choose_similar_stock(self, self._repository, original_name, themes)
             if candidate:
                 code, selected_name = candidate

@@ -426,6 +426,141 @@ class MarketCacheWriterTests(unittest.TestCase):
             self.assertEqual(["005930"], saved)
             self.assertEqual([((70500,), (1,))], committed_at_signal)
 
+    def test_history_sync_failure_after_bar_commit_reapplies_existing_cutoff_without_success_ack(self) -> None:
+        from datetime import timedelta
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+
+        now = as_kst(datetime(2026, 10, 21, 10))
+        kept, current = now - timedelta(days=30), now - timedelta(minutes=1)
+        expired = kept - timedelta(days=1)
+        for stage in ("bar", "current", "cutoff", "expired", "cleanup_precommit", "cleanup_postcommit"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                Database(path).initialize()
+                clock_calls = []
+
+                def clock():
+                    clock_calls.append(1)
+                    return now
+
+                repository = MinuteBarRepository(path, now_provider=clock)
+                repository.upsert_bars("KEEP", (MinuteOhlcv(kept, 100, 110, 90, 105, 10),))
+                repository.upsert_market_index_minutes({("kosdaq", kept): (1., 2., 1., 2., 10.)})
+                repository.record_history_sync("KEEP", kept.date(), kept, 1)
+                repository.record_history_sync("TARGET", now.date(), now - timedelta(minutes=5), 17)
+
+                def keeper():
+                    with closing(sqlite3.connect(path)) as connection:
+                        return (
+                            connection.execute("SELECT * FROM minute_bars WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kosdaq'").fetchall(),
+                            connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject").fetchall(),
+                        )
+
+                def target():
+                    with closing(sqlite3.connect(path)) as connection:
+                        return {
+                            "bars": connection.execute("SELECT * FROM minute_bars WHERE stock_code='TARGET' ORDER BY minute").fetchall(),
+                            "metadata": connection.execute("SELECT * FROM market_data_observation_meta WHERE subject='TARGET' ORDER BY observation_key").fetchall(),
+                            "receipt": connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='TARGET'").fetchall(),
+                        }
+
+                original_keeper, original_receipt = keeper(), target()["receipt"]
+                writer = MarketCacheWriter(path, now_provider=clock)
+                events, prefixes, saved, quality, purges = [], [], [], [], []
+                real_purge = MinuteBarRepository.purge_before
+
+                def purge(current_repository, cutoff):
+                    purges.append(cutoff)
+                    real_purge(current_repository, cutoff)
+                    if stage == "cleanup_postcommit" and len(purges) == 2:
+                        raise OSError("controlled cleanup lost ACK after COMMIT")
+
+                def failed(code, message):
+                    events.append(("history_failed", code, message))
+                    prefixes.append(target())  # Original failure emission precedes cleanup.
+
+                writer.history_failed.connect(failed, Qt.ConnectionType.DirectConnection)
+                writer.retention_failed.connect(lambda cutoff, message: events.append(("retention_failed", cutoff, message)), Qt.ConnectionType.DirectConnection)
+                writer.history_saved.connect(lambda code: saved.append((code, target())), Qt.ConnectionType.DirectConnection)
+                writer.history_quality_saved.connect(lambda code, value: quality.append((code, value)), Qt.ConnectionType.DirectConnection)
+                minutes = ((current,) if stage == "current" else (kept,) if stage == "cutoff" else (expired, kept, current))
+                bars = tuple(MinuteOhlcv(minute, 50, 70, 40, 60, 3) for minute in minutes)
+                original_payload = repr(bars)
+                with patch.object(MinuteBarRepository, "purge_before", purge):
+                    writer.enqueue_minute_retention(kept.date())
+                    writer.start()
+                    self.assertTrue(writer.stop_and_drain())
+                    self.assertEqual(kept.date(), writer._minute_retention_cutoff)
+                    with closing(sqlite3.connect(path)) as connection:
+                        table = "minute_bars" if stage == "bar" else "minute_history_sync_log"
+                        message = "controlled bar failure" if stage == "bar" else "controlled sync failure"
+                        connection.execute(f"CREATE TRIGGER reject_target_insert BEFORE INSERT ON {table} WHEN NEW.stock_code='TARGET' BEGIN SELECT RAISE(ABORT,'{message}'); END")
+                        if stage == "cleanup_precommit":
+                            connection.execute("CREATE TRIGGER reject_expired_delete BEFORE DELETE ON minute_bars WHEN OLD.stock_code='TARGET' AND OLD.trade_date < '2026-09-21' BEGIN SELECT RAISE(ABORT,'controlled cleanup DELETE failure'); END")
+                        connection.commit()
+                    clock_calls.clear()
+                    writer.enqueue_history_bars("TARGET", bars, now.date(), now, recovery_generation=11)
+                    writer.start()
+                    self.assertTrue(writer.stop_and_drain())
+                    self.assertEqual([("history_failed", "TARGET", message)], events[:1])
+                    self.assertEqual([], saved)
+                    self.assertEqual([], quality)
+                    self.assertEqual(original_payload, repr(bars))
+                    self.assertEqual(original_receipt, prefixes[0]["receipt"])
+                    self.assertEqual(original_receipt, target()["receipt"])
+                    self.assertEqual(0 if stage == "bar" else len(bars), len(prefixes[0]["bars"]))
+                    self.assertEqual(0 if stage == "bar" else len(bars), len(prefixes[0]["metadata"]))
+                    if stage != "bar":
+                        for row, bar in zip(prefixes[0]["metadata"], bars):
+                            self.assertEqual(bar.minute, datetime.fromisoformat(row[3]))
+                            self.assertEqual(now, datetime.fromisoformat(row[4]))
+                            self.assertEqual(("complete", "query", "kiwoom-ka10080"), (row[8], row[9], row[10]))
+                    self.assertEqual(1, len(clock_calls))
+                    self.assertEqual(original_keeper, keeper())
+                    if stage in {"bar", "current", "cutoff"}:
+                        self.assertEqual([kept.date()], purges)  # No additional SQL/lookup.
+                        self.assertEqual(1, len(events))
+                    else:
+                        self.assertEqual([kept.date()] * 2, purges)
+                        self.assertEqual(int(stage in {"cleanup_precommit", "cleanup_postcommit"}), len(events) - 1)
+                        if len(events) == 2:
+                            self.assertEqual(("retention_failed", kept.date()), events[1][:2])
+                            self.assertIn("controlled cleanup", events[1][2])
+                    expected = (() if stage == "bar" else minutes if stage == "cleanup_precommit"
+                                else tuple(minute for minute in minutes if minute.date() >= kept.date()))
+                    self.assertEqual([minute.isoformat(timespec="minutes") for minute in expected],
+                                     [row[2] for row in target()["bars"]])
+                    self.assertEqual([row[2] for row in target()["bars"]], [row[2] for row in target()["metadata"]])
+                    self.assertEqual([row for row in prefixes[0]["bars"] if datetime.fromisoformat(row[2]) in expected], target()["bars"])
+                    self.assertEqual([row for row in prefixes[0]["metadata"] if datetime.fromisoformat(row[2]) in expected], target()["metadata"])
+                    if stage in {"cleanup_precommit", "cleanup_postcommit"}:
+                        with closing(sqlite3.connect(path)) as connection:
+                            connection.execute("DROP TRIGGER IF EXISTS reject_expired_delete")
+                            connection.commit()
+                        writer.enqueue_minute_retention(kept.date())
+                        writer.start()
+                        self.assertTrue(writer.stop_and_drain())
+                        self.assertEqual(2, len(events))
+                        self.assertEqual([], saved)
+                        self.assertEqual([], quality)
+                        self.assertEqual([minute.isoformat(timespec="minutes") for minute in minutes if minute.date() >= kept.date()],
+                                         [row[2] for row in target()["bars"]])
+                    if stage == "expired":
+                        with closing(sqlite3.connect(path)) as connection:
+                            connection.execute("DROP TRIGGER reject_target_insert")
+                            connection.commit()
+                        writer.enqueue_history_bars("TARGET", bars, now.date(), now, recovery_generation=11)
+                        writer.start()
+                        self.assertTrue(writer.stop_and_drain())
+                        self.assertEqual(1, len(events))
+                        self.assertEqual(1, len(saved))
+                        self.assertEqual(len(bars), len(saved[0][1]["bars"]))
+                        self.assertEqual([("TARGET", {"generation": 11, "minutes": minutes})], quality)
+                        self.assertEqual([(now.date().isoformat(), "TARGET", now.isoformat(timespec="seconds"), len(bars))], target()["receipt"])
+                    self.assertEqual(original_keeper, keeper())
+
     def test_stop_drains_minute_and_price_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "monitor.sqlite3"

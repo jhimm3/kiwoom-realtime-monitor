@@ -217,6 +217,56 @@ class JournalChartStyleTests(unittest.TestCase):
         chart.grab()
         self.assertEqual(2, len(conversions))
 
+    def test_visible_row_minutes_keep_iso_order_offsets_and_failed_replacement(self) -> None:
+        from datetime import timezone
+
+        chart = MinuteChart()
+        stamps = ("2026-08-28T09:02:00.500000+09:00", "2026-08-28T00:00:00Z", "2026-08-28T09:02:00.500000+09:00")
+        chart.set_rows(tuple((stamp, 100, 101, 99, 100, 1, 1.0, "확정") for stamp in stamps))
+        expected = [datetime(2026, 8, 28, 9, 2, 0, 500_000, tzinfo=timezone(timedelta(hours=9))),
+                    datetime(2026, 8, 28, tzinfo=timezone.utc),
+                    datetime(2026, 8, 28, 9, 2, 0, 500_000, tzinfo=timezone(timedelta(hours=9)))]
+        self.assertEqual(expected, chart._visible_row_minutes())
+        self.assertEqual([timedelta(hours=9), timedelta(0), timedelta(hours=9)],
+                         [value.utcoffset() for value in chart._visible_row_minutes()])
+        chart.set_rows((("bad-time", 100, 101, 99, 100, 1, 1.0, "확정"),))
+        self.assertIsNone(chart._drawing_data_point(chart.rect().topLeft()))
+        self.assertIsNone(chart._find_annotation_at(chart.rect().topLeft()))
+        for _ in range(2):
+            with self.assertRaises(ValueError):
+                chart._visible_row_minutes()
+        chart.set_rows((("2026-08-29T09:00:00", 100, 101, 99, 100, 1, 1.0, "확정"),))
+        self.assertEqual([datetime(2026, 8, 29, 9)], chart._visible_row_minutes())
+        chart.set_rows(())
+        self.assertEqual([], chart._visible_row_minutes())
+
+    def test_drawing_hit_and_paint_share_only_current_visible_row_times(self) -> None:
+        from PySide6.QtCore import QPointF
+
+        conversions: list[int] = []
+
+        class ObservedTime(str):
+            def __str__(self) -> str:
+                conversions.append(1)
+                return super().__str__()
+
+        chart = MinuteChart(); chart.resize(900, 420)
+        chart.set_rows(tuple((ObservedTime(stamp), 100, 101, 99, 100, 1, 1.0, "확정")
+                             for stamp in ("2026-08-28T09:00:00", "2026-08-28T09:01:00")))
+        chart.set_annotations((("가로선", datetime(2026, 8, 28, 9), 100.0, datetime(2026, 8, 28, 9, 1), 100.0),))
+        point = chart._drawing_data_point(QPointF(200, 150))
+        self.assertEqual(datetime(2026, 8, 28, 9), point[0])
+        self.assertEqual(2, len(conversions))
+        chart._find_annotation_at(QPointF(200, 150)); chart.grab()
+        self.assertEqual(2, len(conversions))
+        chart.resize(640, 300); chart.set_reference_fills(True); chart.set_top_margin(30)
+        chart.set_background("#222222"); chart.grab()
+        self.assertEqual(2, len(conversions))
+        chart.set_view_count(1)
+        point = chart._drawing_data_point(QPointF(200, 150))
+        self.assertEqual(datetime(2026, 8, 28, 9, 1), point[0])
+        self.assertEqual(3, len(conversions))
+
     def test_effective_date_chart_separates_regular_close_and_full_day_final(self) -> None:
         fill = TradeFill("1", "001210", "금호전기", "매수", datetime(2026, 9, 14, 16, 5), 10, 105, "", "KRX")
         rows = (

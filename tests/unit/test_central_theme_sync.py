@@ -55,6 +55,186 @@ class _FailService(_Service):
 
 
 class CentralThemeSyncDispatcherTests(unittest.TestCase):
+    def _close_during_body(self, stage="revision", failure=None):
+        import json
+        from types import SimpleNamespace
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease, StrictRestoreError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "monitor.sqlite3"
+            Database(path).initialize()
+            backup = ThemeBackupService(path)
+            document = backup.export_document()
+            document["profiles"].append({
+                "name": "remote fixture", "themes": [], "stock_themes": [],
+                "theme_name_decisions": [], "theme_suggestions": [],
+            })
+            marker = root / ".theme-pending"
+            state = SimpleNamespace(
+                entered=threading.Event(), release=threading.Event(), close_called=threading.Event(),
+                closed=threading.Event(), local=threading.local(), events=[], calls=0,
+                sql=[], connections=0, timed_out=False, close_errors=[], timers=[],
+            )
+
+            def barrier():
+                state.events.append(stage + ".entered")
+                state.entered.set()
+                if not state.release.wait(4):
+                    state.timed_out = True
+
+            class Client:
+                def load_all(self, collection, **_kwargs):
+                    state.calls += 1
+                    if collection == "theme_profile" and stage == "http":
+                        barrier()
+                    if failure == "runtime":
+                        raise RuntimeError("controlled offline theme sync")
+                    return [{"document": document, "updated_at": 2_000_000_000.0}] if collection == "theme_metadata" else []
+
+                def replace(self, *_args, **_kwargs):
+                    raise AssertionError("newer snapshot must use native CAS import")
+
+            dispatcher = CentralThemeSyncDispatcher(
+                CentralContentSyncService(Client()), path, debounce_seconds=0.05,
+                retry_delays=(0.05,), pending_path=marker,
+            )
+            lease = AppDataLease(root, exclusive=False)
+            connect = sqlite3.connect
+            revision = ThemeBackupService.revision
+            run = CentralThemeSyncDispatcher._run
+            clear_pending = CentralThemeSyncDispatcher._clear_pending
+            timer_type = threading.Timer
+
+            def timer_factory(*args, **kwargs):
+                timer = timer_type(*args, **kwargs)
+                state.timers.append(timer)
+                return timer
+
+            def trace(statement):
+                state.sql.append(statement)
+                if stage == "revision" and getattr(state.local, "revision", False) and not state.entered.is_set():
+                    barrier()
+
+            def connection(*args, **kwargs):
+                value = connect(*args, **kwargs)
+                if getattr(state.local, "in_run", False):
+                    state.connections += 1
+                    value.set_trace_callback(trace)
+                return value
+
+            def actual_revision(service):
+                state.local.revision = True
+                try:
+                    return revision(service)
+                finally:
+                    state.local.revision = False
+                    state.events.append("revision.closed")
+
+            def actual_run(owner):
+                state.local.in_run = True
+                try:
+                    return run(owner)
+                finally:
+                    state.events.append("body.done")
+                    state.local.in_run = False
+
+            def actual_clear(owner, token):
+                if stage == "marker":
+                    barrier()
+                value = clear_pending(owner, token)
+                state.events.append("marker.closed")
+                return value
+
+            def close_and_release():
+                state.close_called.set()
+                try:
+                    dispatcher.close()
+                    state.events.append("close.returned")
+                    state.events.append("server.stop")
+                    lease.close()
+                    state.events.append("lease.released")
+                    state.closed.set()
+                except BaseException as error:
+                    state.close_errors.append(repr(error))
+
+            def exclusive_available():
+                try:
+                    exclusive = AppDataLease(root, exclusive=True, timeout=0)
+                except StrictRestoreError:
+                    return False
+                exclusive.close()
+                return True
+
+            closer = None
+            with patch.object(sqlite3, "connect", side_effect=connection), \
+                    patch.object(ThemeBackupService, "revision", actual_revision), \
+                    patch.object(CentralThemeSyncDispatcher, "_run", actual_run), \
+                    patch.object(CentralThemeSyncDispatcher, "_clear_pending", actual_clear), \
+                    patch.object(threading, "Timer", side_effect=timer_factory):
+                try:
+                    dispatcher.notify()
+                    self.assertTrue(state.entered.wait(2))
+                    if failure == "conflict":
+                        ThemeRepository(path).create_profile("local fixture")
+                    closer = threading.Thread(target=close_and_release, name="theme-close-fixture")
+                    closer.start()
+                    self.assertTrue(state.close_called.wait(1))
+                    state.early_close = state.closed.wait(0.15)
+                    state.early_exclusive = exclusive_available()
+                    self.assertEqual((False, False), (state.early_close, state.early_exclusive), state.events)
+                finally:
+                    state.release.set()
+                    for timer in state.timers:
+                        timer.cancel()
+                        timer.join(5)
+                        self.assertFalse(timer.is_alive())
+                    if closer is not None:
+                        closer.join(5)
+                        self.assertFalse(closer.is_alive())
+                    dispatcher.close()
+                    lease.close()
+                    print("R032_THEME_CLOSE " + json.dumps({
+                        "stage": stage, "failure": failure,
+                        "early_close": getattr(state, "early_close", None),
+                        "early_exclusive": getattr(state, "early_exclusive", None),
+                        "events": state.events, "calls": state.calls,
+                        "connections": state.connections, "selects": sum(
+                            statement.lstrip().upper().startswith("SELECT") for statement in state.sql),
+                        "timed_out": state.timed_out, "close_errors": state.close_errors,
+                    }))
+            self.assertFalse(state.timed_out)
+            self.assertEqual([], state.close_errors)
+            self.assertTrue(state.closed.is_set())
+            boundary = "marker.closed" if failure is None else "revision.closed"
+            self.assertLess(state.events.index(boundary), state.events.index("close.returned"))
+            before = (state.calls, state.connections, len(state.timers))
+            dispatcher.notify()
+            self.assertEqual(failure is None, dispatcher.flush_pending())
+            with patch.object(sqlite3, "connect", side_effect=connection):
+                self.assertFalse(state.timers[0].function())
+            self.assertEqual(before, (state.calls, state.connections, len(state.timers)))
+            profiles = {profile["name"] for profile in backup.export_document()["profiles"]}
+            self.assertEqual(failure is None, "remote fixture" in profiles)
+            if failure == "conflict":
+                self.assertIn("local fixture", profiles)
+            self.assertEqual(failure is not None, marker.exists())
+
+    def test_close_keeps_restore_lease_while_native_revision_is_inflight(self):
+        self._close_during_body()
+
+    def test_close_keeps_restore_lease_while_remote_snapshot_is_inflight(self):
+        self._close_during_body(stage="http")
+
+    def test_close_drains_pending_marker_cleanup_after_native_import(self):
+        self._close_during_body(stage="marker")
+
+    def test_close_during_failure_preserves_pending_without_retry(self):
+        self._close_during_body(stage="http", failure="runtime")
+
+    def test_close_during_revision_conflict_preserves_local_edit_without_retry(self):
+        self._close_during_body(stage="http", failure="conflict")
+
     def test_cap_noop_allows_remote_import_but_theme_and_catalog_edits_keep_conflict(self) -> None:
         first = datetime.fromisoformat("2030-01-02T09:00:00+09:00")
         received = datetime.fromisoformat("2030-01-02T09:00:01+09:00")

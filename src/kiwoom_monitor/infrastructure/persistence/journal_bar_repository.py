@@ -323,9 +323,9 @@ class JournalBarRepositoryMixin:
             "source=excluded.source, confirmed_at=excluded.confirmed_at" + update_guard,
             rows,
         )
-        for bar in bars:
-            key = bar.minute.isoformat(timespec="minutes")
-            incoming_source = "realtime_partial" if bar.metadata is not None and not bar.metadata.is_complete else source
+        for bar, row in zip(bars, rows):
+            key = row[2]
+            incoming_source = row[9]
             preserve_previous = preserve_confirmed or incoming_source == "realtime_partial"
             saved_source, saved_at = preserved.get(key, (incoming_source, None)) if preserve_previous else (incoming_source, None)
             effective_available_at = available_at or confirmed_at or kst_wall_now()
@@ -361,7 +361,7 @@ class JournalBarRepositoryMixin:
             )
             upsert_market_data_metadata(
                 connection,
-                bar.minute.isoformat(timespec="minutes"),
+                key,
                 observation,
                 preserve_complete=preserve_confirmed,
             )
