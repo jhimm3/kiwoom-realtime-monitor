@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 R3-012: MainWindow header/표시·ColumnManager→기존 MainTableColumnController/ColumnSettingsRepository의 native 조건부 값/version 저장→Qt 복원·중앙 sync 경계를 유지한다. 새 owner/schema/수명 없음. 로컬 `47e780d`·관련9모듈152건; 동일16열32→0/한 열32→2, reset·폭 revision 의미 보존. 후속 DAG 준비큐, [범위/한계](REFACTOR_BACKLOG.md#r3-012-열-설정-변경행revision-저장-완료--2026-10-20).
+
 2026-10-20 R3-011: 기존 SettingsRepository가 DB 값/version transaction과 RAM cache 세대를 계속 소유한다. MainWindow geometry/Alert는 기존 set_many로 연결하고 CentralSettingsSync/Drive restore의 clear_cache 및 설정 worker 경계를 유지한다. 새 계층/schema/polling 없음. 로컬 `aeb63c6`·관련14모듈175건; 동일4키 반영행8→0·두 UI의 연결/COMMIT/시계4→1. F01(간접)/F22/F23/F24 갱신, 다음012. [실측·의도한 revision 의미·미검증](REFACTOR_BACKLOG.md#r3-011-설정-no-opcacheui-batch-완료--2026-10-20).
 
 2026-10-20 R3-010 등록 개선 완료: typed Forward stage gate→기존 native stage writer의 key/이전단계 비교·append·commit, publication/spec→기존 identity scoped latest binding1행으로 연결했다. stage 기존 reader 범위/clock·동일retry·full binding history·최신Risk/STOP/claim을 유지한다. 로컬 `fc21038`·17모듈 546건, stage연결3→2/binding1031→1·별도nativeSQLite종료2건. 새 계층/schema/polling 없음. 다음011·정확한 완료 수준/한계는 [R3 최신](REFACTOR_BACKLOG.md#r3-010-stagebinding-등록-개선-완료--2026-10-20)을 따른다.

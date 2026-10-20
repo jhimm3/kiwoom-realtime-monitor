@@ -1,5 +1,19 @@
 # 현재 상태 요약
 
+## 2026-10-20 의존성 기반 병렬 실행 전환
+
+R3 83개 중 완료19·미완료64. 기존 감사 근거를 재사용해 준비 후보29(현재027/037/078 실행중 포함), 계약/영향 확인28, 선행/의미 대기3, 명시보류4를 구분했다. 5개 엄격선행 edge의 순환 없음과83개 ID를 대조했다. 준비29개 전체의 상호 독립성 완료를 뜻하지 않는다. 실제 독립 경계3개를 별도 Git worktree에 배정했고 root만 백로그/F·공통 계약을 갱신하며 결과를 순차 통합한다. 현재 도구의 총4slot(메인포함)을 사용하며 더 큰 한도가 실제 적용되면 독립 범위까지 확대한다. 전역 Codex 설정·NAS/운영/push 변경은 없다. [전체 배정·의존/충돌 원장](../REFACTOR_BACKLOG.md#의존성-기반-병렬-실행-원장--2026-10-20)을 정본으로 사용한다.
+
+## 2026-10-20 R3-012 열 설정 저장 완료
+
+로컬 제품·검사 `47e780d`. 현재 소스 관련 **9모듈·고유152건/127.308 worker초 통과**(독립2묶음 병렬). 계획/발견/실행/통과 ID·변경7개 ID·소스 불변·worker/자식 종료·native TEMP 정리를 대조했다.
+
+**R3-012 검증 완료(등록 코드·로컬 관련검증)**. 후속은 사용자 지정 **의존성 DAG 준비큐**로 전환했다. R3-027·037·078은 격리 worktree 개발 배정, 다른 후보는 기존 근거의 상태/계약 충돌 분류 후 배정한다. 번호순013 강제 대기는 해제하되006/008/020/024의 명시 보류는 유지한다.
+
+기존 ColumnSettingsRepository.save가 같은 native writer transaction에서 nonempty의 기존 writer lock을 BEGIN IMMEDIATE로 확보한 뒤 시계를 얻고 변경 전 DB의 visible/position/width로 version을 조건부 갱신한 뒤 다른 value row만 UPDATE한다. 같은 값+기존 version은 편집 시각을 보존하고 누락 version은 최초 등록한다. 별도 SELECT/새 RAM 상태·계층·schema·debounce를 추가하지 않았다. reset은 명시적 편집으로 원래 전체 값/version 갱신을 유지한다. 기본16열의 실제 native SQLite 반영행은 동일 저장32→0, 한 열(폭 또는 layout) 변경32→2, 누락 version 등록1이다. 명시 reset은32행을 유지한다. 비어 있지 않은 save의 연결/BEGIN/COMMIT/시계 각1·UPDATE16/INSERT16 시도는 그대로이며 기존 version 비교에 인덱스 기반 inline lookup이 있다. 별도 SELECT 왕복0, 물리 I/O/WAL·잠금 대기·장중 latency·신호 빈도는 미측정이다.
+
+F01(간접)/F22/F23/F24·책임/DB 계약과 [정본](../REFACTOR_BACKLOG.md#r3-012-열-설정-변경행revision-저장-완료--2026-10-20)을 갱신했다. 실제 다중PC/NAS/외부 네트워크 동기화·앱 전체 bootstrap/daemon 종료·운영 DB/계좌/주문·장중·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다.
+
 ## 2026-10-20 R3-011 설정 no-op·cache·UI batch 완료
 
 로컬 제품·검사 `aeb63c6`. 현재 소스 관련 **14모듈·고유175건/140.776 worker초 통과**(독립2묶음 병렬). 계획/발견/실행/통과 ID, 변경8개 ID, 소스 불변, worker/자식 종료와 native TEMP 제거를 대조했다.
