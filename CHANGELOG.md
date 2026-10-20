@@ -1,3 +1,11 @@
+## 2026-10-20 R3-010 stage·binding 완료 (로컬 미배포)
+
+제품·검사 `fc21038`: 같은 이전 단계로 서로 다른 stage 승인을 모두 ACK하던 경합을 native 비교/append로 막고, 기존 인덱스의 최신 binding1행을 실제 후보/spec 경로에 연결했다. stage 연결3→2·SELECT3유지, binding 반환1031→1. 현재 소스 관련17모듈 **고유 546건/440.307 worker초 통과**(두 묶음 병렬). 계획/발견/실행/통과 ID와 변경6개 ID·소스 불변·worker/자식 종료·TEMP 정리를 대조했다. 별도 SQLite commit 전후 강제종료2건도 검증했다.
+
+**R3-010은 검증 완료(등록 개선 코드·로컬 관련검증 범위)**다. 이전2bd43df의 per-key/Shadow 검증을 승계하고 이번 stage predecessor·binding 범위·SQLite commit 경계 진단으로 등록 잔여를 마쳤다. context 재사용은 같은 안전시점 중복이 입증되지 않아 기존 R3-009처럼 보호 조회를 **유지**한다. 여러 문서 publication은 기존 ordered/idempotent 계약을 유지하며 전체 원자성을 새로 구현하거나 완료로 주장하지 않는다. 다음 미보류 대기 작업은 **R3-011(설정값과 revision의 no-op)**이다.
+
+실제PG·CI/NAS·운영 수락은 미검증이다.
+
 ## 2026-10-20 R3-010 불변 저장 경계 (로컬 미배포)
 
 `2bd43df`: 승인 문서의 조회→가변 UPSERT→재조회를 기존 DB owner의 원자 불변 insert/동일 no-op/충돌 비교로 교체했다. native 신규 연결3→1·SELECT2→1, 기존 동일 문서는 read-only/첫 receipt를 유지한다. Shadow도 INSERT 충돌 뒤 본문 비교와 decision/candidate pair rollback을 보완했다. 관련18모듈 **고유 739건 통과**(worker 소요 합계 629.437초, 두 묶음 병렬 실행). 변경10개 검사ID·발견/실행ID·현재 소스 일치·worker/자식 종료·TEMP 정리를 대조했다.

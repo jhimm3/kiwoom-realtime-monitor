@@ -1,5 +1,23 @@
 # 현재 상태 요약
 
+## 2026-10-20 R3-010 stage·binding 등록 개선 완료
+
+로컬 제품·검사 `fc21038`. 현재 소스 관련17모듈 **고유 546건/440.307 worker초 통과**(두 묶음 병렬). 계획/발견/실행/통과 ID와 변경6개 ID·소스 불변·worker/자식 종료·TEMP 정리를 대조했다.
+
+**R3-010은 검증 완료(등록 개선 코드·로컬 관련검증 범위)**다. 이전2bd43df의 per-key/Shadow 검증을 승계하고 이번 stage predecessor·binding 범위·SQLite commit 경계 진단으로 등록 잔여를 마쳤다. context 재사용은 같은 안전시점 중복이 입증되지 않아 기존 R3-009처럼 보호 조회를 **유지**한다. 여러 문서 publication은 기존 ordered/idempotent 계약을 유지하며 전체 원자성을 새로 구현하거나 완료로 주장하지 않는다. 다음 미보류 대기 작업은 **R3-011(설정값과 revision의 no-op)**이다.
+
+stage의 같은 이전 단계 확인과 append를 기존 native writer transaction으로 묶었다. 기존 동일 ID는 읽기 전용으로 재시도하며 SQLite BEGIN IMMEDIATE, PG의 해당 transaction만 READ COMMITTED→strategy scoped advisory lock→단건 key 재확인→기존 reader와 같은 이력 범위/순서→단계 비교/insert→commit 순서다. broker-mock PASSED report gate·원래 hash·계좌/증거·단계/시각 정책은 유지한다. 동일 시점에 stale stage와 missing report가 겹치면 거절 오류의 우선순위만 달라질 수 있다.
+
+기존 identity owner에 load_latest_account_binding(profile, broker, environment)를 추가해 native 인덱스/LIMIT1을 쓰고 route helper와 Forward의 승인 사양/후보 게시 3개 caller를 연결했다. account_ref나 기대 revision으로 조회를 좁히면 rotation을 숨기므로 사용하지 않는다. 기존 full history API·각 안전시점의 독립 최신 조회·STOP/Risk/control/native claim은 유지한다.
+
+stage 신규 native SQLite 연결3→2·SELECT3/INSERT1/BEGIN1/COMMIT1/clock1 유지, 기존 동일 ID는 연결1/SELECT1·쓰기/BEGIN/COMMIT/clock0이다. binding fixture는 실제 native 반환·변환1031→1, SELECT/연결 각1·쓰기/clock0이며 기존 index SEARCH를 확인했다. 물리 I/O·WAL/장중 latency는 미측정이다. PG stage의 명시 isolation/lock 추가 SQL은 올바른 snapshot과 직렬화를 위한 안전비용이다.
+
+격리 SQLite의 별도 owned-child 강제 종료 진단2건/2.697초가 통과했다. INSERT 후 commit 직전 종료는 행없음/재시도True, commit 성공 후 ACK 직전 종료는 행보존/동일retryFalse/다른본문충돌·첫 receipt 보존이다. 소유 job의 child6개/outer worker·tree 종료와 누수0/TEMP 제거를 확인했다. 앞선 v4 PID fixture 실패는 보존하며 실제 PG·호스트 전원/스토리지 내구성·stage helper 자체의 OS crash로 확대하지 않는다. 진단2건은 정규 고유 검사 수와 합산하지 않는다.
+
+구조 site1373/위반0·retirable0, QueryStore 서명/site/candidate/forward delta0, PG 직접 연결 승인60/60을 확인했다. 새 SQL key5개와 native2메서드×3owner 서명·binding caller3개 교체/새 stage 직접호출1개만 기존 계약에 등록했다. 규칙/채택점/승인/이력은 초기화하지 않았다. 32번째 증분 검토는5931→5937/추가6·수정0·삭제0이며 원래 미결49를 유지한다.
+
+실제 PostgreSQL 경합/강제종료·운영 DB/계좌/주문·장중·PC 앱 전체 수락·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. PG는 실제 SQL/관측 wrapper의 scripted driver 계약 검증이다. current-stage 값 비교이지 latest revision ID/head 또는 chronology 단조 증가를 새로 보장하는 것이 아니다. 기존 decided_at/revision_id tie-break·updated_at 기준10000행 범위/과거 시각 입력을 보존하며 혼합 구버전 writer와 운영 배포 수락은 별도다.
+
 ## 2026-10-20 R3-010 불변 저장·충돌/ACK 경계
 
 로컬 제품·검사 `2bd43df`에서 ForwardEvaluationRepository의 기존 typed 저장→동일 QueryStore의 insert_immutable_document→reader/승인·Risk·Runner 소비와 CandidateMonitor→native Shadow decision/candidate 저장 경계를 보완했다. generic은 SELECT-first로 기존 동일 문서의 read-only 경로를 유지하고, missing만 UNIQUE INSERT DO NOTHING 후 경합 winner를 비교한다. Shadow는 INSERT-first로 writer 경계 뒤 canonical 내용을 비교하며 decision/candidate는 같은 transaction으로 rollback한다. 첫 본문·receipt·monitor/expiry를 보존하고 성공/동일 ACK는 context commit 성공 뒤 반환한다. 신규 일반 불변 문서 저장의 native SQLite 연결3→1·SELECT2→1, INSERT/BEGIN/COMMIT/clock 각1을 확인했다. 처음 조회에서 이미 존재한 동일 문서는 연결1·SELECT1·쓰기/BEGIN/COMMIT/clock0을 유지한다. 처음 missing인 경합 loser는 충돌 재조회로 SELECT2·INSERT시도1·clock1일 수 있다. 물리 I/O·WAL/lock wait·장중 latency는 미측정이다.

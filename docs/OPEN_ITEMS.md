@@ -1,5 +1,13 @@
 # 남은 작업 요약
 
+## 2026-10-20 R3-010 stage·binding 등록 개선 완료
+
+로컬 제품·검사 `fc21038`. 현재 소스 관련17모듈 **고유 546건/440.307 worker초 통과**(두 묶음 병렬). 계획/발견/실행/통과 ID와 변경6개 ID·소스 불변·worker/자식 종료·TEMP 정리를 대조했다.
+
+**R3-010은 검증 완료(등록 개선 코드·로컬 관련검증 범위)**다. 이전2bd43df의 per-key/Shadow 검증을 승계하고 이번 stage predecessor·binding 범위·SQLite commit 경계 진단으로 등록 잔여를 마쳤다. context 재사용은 같은 안전시점 중복이 입증되지 않아 기존 R3-009처럼 보호 조회를 **유지**한다. 여러 문서 publication은 기존 ordered/idempotent 계약을 유지하며 전체 원자성을 새로 구현하거나 완료로 주장하지 않는다. 다음 미보류 대기 작업은 **R3-011(설정값과 revision의 no-op)**이다.
+
+실제 PostgreSQL 경합/강제종료·운영 DB/계좌/주문·장중·PC 앱 전체 수락·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다. PG는 실제 SQL/관측 wrapper의 scripted driver 계약 검증이다. current-stage 값 비교이지 latest revision ID/head 또는 chronology 단조 증가를 새로 보장하는 것이 아니다. 기존 decided_at/revision_id tie-break·updated_at 기준10000행 범위/과거 시각 입력을 보존하며 혼합 구버전 writer와 운영 배포 수락은 별도다.
+
 ## 2026-10-20 R3-010 불변 저장 경계 부분 검증
 
 제품·검사 `2bd43df`: 관련18모듈 **고유 739건 통과**(worker 소요 합계 629.437초, 두 묶음 병렬 실행). 변경10개 검사ID·발견/실행ID·현재 소스 일치·worker/자식 종료·TEMP 정리를 대조했다. 신규 일반 불변 문서 저장의 native SQLite 연결3→1·SELECT2→1, INSERT/BEGIN/COMMIT/clock 각1을 확인했다. 처음 조회에서 이미 존재한 동일 문서는 연결1·SELECT1·쓰기/BEGIN/COMMIT/clock0을 유지한다. 처음 missing인 경합 loser는 충돌 재조회로 SELECT2·INSERT시도1·clock1일 수 있다. 물리 I/O·WAL/lock wait·장중 latency는 미측정이다.
