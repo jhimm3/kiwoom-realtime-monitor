@@ -106,6 +106,71 @@ def _policy(package: MockAutomationCandidatePackage, **changes) -> MockAutomatio
 
 
 class MockAutomationCandidateTests(unittest.IsolatedAsyncioTestCase):
+    def test_saved_peak_relative_drawdown_report_controls_candidate_eligibility(self) -> None:
+        from kiwoom_monitor.application.mock_automation_candidate import build_candidate_package
+        from kiwoom_monitor.application.research_evaluation import build_research_report
+        from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+        from tests.unit.test_research_reports import _event, _inputs
+
+        observations, manifest, _ = _inputs()
+        evaluation = ResearchEvaluationSpec(
+            "chronological_holdout/v1",
+            (ResearchFoldSpec("final", "OOS", "2026-09-12T00:00:00+00:00", "2026-09-12T01:00:00+00:00"),),
+            600, 0, 0, 1, 1,
+            final_holdout_accessed_at="2026-09-12T01:00:00+00:00",
+            final_holdout_access_reason="locked test final evaluation",
+        )
+        candidate_spec = _candidate_spec()
+        candidate_spec["execution_model"]["initial_cash_won"] = 100
+        events = (
+            _event("buy", "FILL", "BUY", "2026-09-12T00:01:00+00:00", price=10, notional=100, cost=0, realized=0, cash=0, position=10),
+            _event("mark", "MARK", "", "2026-09-12T00:02:00+00:00", price=5, notional=50, cost=0, realized=0, cash=0, position=10),
+            _event("sell", "FILL", "SELL", "2026-09-12T00:03:00+00:00", price=20, notional=200, cost=0, realized=100, cash=200, position=0),
+        )
+        report = build_research_report(
+            "run-dd-067", input_manifest=manifest, observations=observations,
+            candidate_events=(), decisions=(), execution_events=events, outcome_labels=(),
+            initial_cash_won=100, cost_model=candidate_spec["execution_model"]["cost_model"],
+            spec=evaluation, logical_result_hash="b" * 64,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repository = ResearchRepository(Path(directory) / "research.sqlite3")
+            repository.start_run(report.run_id, {"evaluation_spec": evaluation.to_dict()}, manifest)
+            self.assertTrue(repository.save_research_report(report))
+            self.assertFalse(repository.save_research_report(report))
+            saved = repository.load_research_report(report.run_id)
+            self.assertEqual(json.loads(json.dumps(report.to_dict())), saved)
+            # A new calculation must not rewrite a previously saved immutable report.
+            conflicting = replace(report, fold_reports=(replace(report.fold_reports[0], max_drawdown_ppm=1),))
+            with self.assertRaisesRegex(ValueError, "immutable"):
+                repository.save_research_report(conflicting)
+            self.assertEqual(saved, repository.load_research_report(report.run_id))
+            repository.finish_run(report.run_id, "b" * 64)
+            run = repository.load_run(report.run_id)
+            package = build_candidate_package(
+                strategy_ref="strategy-1", candidate_spec=candidate_spec, batch_id="batch-dd-067",
+                run=run, execution={
+                    "candidate_spec_hash": _hash(candidate_spec), "state": "COMPLETED",
+                    "run_id": report.run_id, "logical_result_hash": "b" * 64,
+                }, report=saved,
+            )
+            self.assertEqual("ELIGIBLE", saved["status"])
+            self.assertEqual(50, saved["fold_reports"][0]["max_drawdown_won"])
+            for limit, expected in ((250_000, CandidateEligibilityStatus.BLOCKED),
+                                    (300_000, CandidateEligibilityStatus.BLOCKED),
+                                    (499_999, CandidateEligibilityStatus.BLOCKED),
+                                    (500_000, CandidateEligibilityStatus.ELIGIBLE),
+                                    (500_001, CandidateEligibilityStatus.ELIGIBLE)):
+                with self.subTest(limit=limit):
+                    policy = _policy(package, minimum_closed_trades=1, minimum_active_days=1,
+                                     maximum_drawdown_ppm=limit,
+                                     frozen_at=datetime.fromisoformat(run["started_at"]) - timedelta(seconds=1))
+                    receipt = evaluate_candidate_eligibility(package, policy, account_ref=ACCOUNT_REF)
+                    self.assertEqual(expected, receipt.status)
+                    self.assertEqual(500_000, receipt.observed_metrics["max_drawdown_ppm"])
+                    self.assertEqual(("MAXIMUM_DRAWDOWN_EXCEEDED",) if expected is CandidateEligibilityStatus.BLOCKED else (), receipt.reasons)
+            self.assertEqual(saved, repository.load_research_report(report.run_id))
+
     def test_package_policy_and_receipt_round_trip_with_distinct_hashes(self) -> None:
         package = _package()
         policy = _policy(package)

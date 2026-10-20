@@ -7,6 +7,9 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
@@ -195,6 +198,157 @@ class ResearchRepositoryTests(unittest.TestCase):
             self.assertEqual("cancelled", repository.load_run("run-1")["status"])
             repository.start_run("run-1", {"a": 1}, {"dataset_id": "fixture"})
             self.assertEqual("running", repository.load_run("run-1")["status"])
+
+    def test_two_native_writers_preserve_terminal_state_hash_and_cancelled_resume(self) -> None:
+        cases = (
+            ("fail", "finish", False), ("cancel", "finish", False),
+            ("finish", "fail", False), ("finish", "cancel", False),
+            ("finish", "different_finish", False), ("finish", "same_finish", True),
+            ("resume", "resume_finish", True),
+        )
+        for first_operation, second_operation, retry_succeeds in cases:
+            with self.subTest(first=first_operation, second=second_operation), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "research.sqlite3"
+                first, second = ResearchRepository(path), ResearchRepository(path)
+                spec, manifest = {"mode": "native-terminal"}, {"dataset_id": "fixture"}
+                first.start_run("run-1", spec, manifest)
+                if first_operation == "resume":
+                    first.cancel_run("run-1", "resume fixture")
+                selected, release = Event(), Event()
+                first_errors: list[Exception] = []
+                native_connect = sqlite3.connect
+
+                class PausedConnection(sqlite3.Connection):
+                    def execute(self, sql: str, parameters=()):
+                        cursor = super().execute(sql, parameters)
+                        if sql.startswith("SELECT ") and "FROM research_runs WHERE run_id=?" in sql and not selected.is_set():
+                            # Finish the read before pausing; keep no accidental cursor read lock.
+                            row = cursor.fetchone()
+                            cursor.close()
+                            selected.set()
+                            if not release.wait(5):
+                                raise RuntimeError("native writer barrier timed out")
+                            return SimpleNamespace(fetchone=lambda: row)
+                        return cursor
+
+                def first_connection():
+                    connection = native_connect(path, factory=PausedConnection)
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    return connection
+
+                def second_connection():
+                    connection = native_connect(path, timeout=0)
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    return connection
+
+                def invoke(repository: ResearchRepository, operation: str):
+                    if operation == "fail":
+                        return repository.fail_run("run-1", "native failure")
+                    if operation == "cancel":
+                        return repository.cancel_run("run-1", "native cancellation")
+                    if operation in ("resume", "resume_finish"):
+                        repository.start_run("run-1", spec, manifest)
+                        if operation == "resume":
+                            return
+                    return repository.finish_run("run-1", "hash-first" if operation in ("finish", "same_finish") else "hash-second")
+
+                def run_first():
+                    try:
+                        invoke(first, first_operation)
+                    except Exception as error:
+                        first_errors.append(error)
+
+                thread = Thread(target=run_first)
+                with patch.object(first, "_connect", side_effect=first_connection), patch.object(
+                    second, "_connect", side_effect=second_connection,
+                ):
+                    thread.start()
+                    blocked = False
+                    before_release = None
+                    try:
+                        self.assertTrue(selected.wait(5))
+                        try:
+                            invoke(second, second_operation)
+                        except sqlite3.OperationalError as error:
+                            self.assertIn("locked", str(error))
+                            blocked = True
+                        if not blocked:
+                            before_release = second.load_run("run-1")
+                    finally:
+                        release.set()
+                        thread.join(5)
+                    self.assertFalse(thread.is_alive())
+                    after_first = second.load_run("run-1")
+                    if blocked:
+                        self.assertEqual([], first_errors)
+                        if retry_succeeds:
+                            self.assertIsNone(invoke(second, second_operation))
+                            if first_operation != "resume":
+                                self.assertEqual(after_first, second.load_run("run-1"))
+                        else:
+                            with self.assertRaises(ValueError):
+                                invoke(second, second_operation)
+                            self.assertEqual(after_first, second.load_run("run-1"))
+                    else:
+                        # A native terminal commit must survive an older reader's delayed write.
+                        self.assertEqual(before_release, after_first)
+                        if first_operation != "resume" and second_operation != "same_finish":
+                            self.assertEqual(1, len(first_errors))
+                            self.assertIsInstance(first_errors[0], ValueError)
+
+    def test_run_transition_rollback_retry_and_existing_terminal_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.sqlite3"
+            repository = ResearchRepository(path)
+            spec, manifest = {"mode": "native-terminal"}, {"dataset_id": "fixture"}
+            for operation in ("finish", "fail", "cancel", "resume"):
+                with self.subTest(operation=operation):
+                    run_id = "run-" + operation
+                    repository.start_run(run_id, spec, manifest)
+                    if operation == "resume":
+                        repository.cancel_run(run_id)
+                    previous = repository.load_run(run_id)
+                    with closing(sqlite3.connect(path)) as connection, connection:
+                        connection.execute("CREATE TRIGGER reject_transition BEFORE UPDATE ON research_runs "
+                                           "BEGIN SELECT RAISE(ABORT,'063 native fault'); END")
+
+                    def transition():
+                        if operation == "finish":
+                            return repository.finish_run(run_id, "hash-native")
+                        if operation == "fail":
+                            return repository.fail_run(run_id, "native error")
+                        if operation == "cancel":
+                            return repository.cancel_run(run_id, "native cancel")
+                        return repository.start_run(run_id, spec, manifest)
+
+                    with self.assertRaisesRegex(sqlite3.IntegrityError, "063 native fault"):
+                        transition()
+                    self.assertEqual(previous, repository.load_run(run_id))
+                    with closing(sqlite3.connect(path)) as connection, connection:
+                        connection.execute("DROP TRIGGER reject_transition")
+                    self.assertIsNone(transition())
+                    expected_status = {"finish": "completed", "fail": "failed", "cancel": "cancelled", "resume": "running"}[operation]
+                    self.assertEqual(expected_status, repository.load_run(run_id)["status"])
+            completed = repository.load_run("run-finish")
+            self.assertIsNone(repository.finish_run("run-finish", "hash-native"))
+            self.assertIsNone(repository.start_run("run-finish", spec, manifest))
+            self.assertEqual(completed, repository.load_run("run-finish"))
+            for action in (
+                lambda: repository.finish_run("run-finish", "different-hash"),
+                lambda: repository.fail_run("run-finish", "late failure"),
+                lambda: repository.cancel_run("run-finish"),
+                lambda: repository.start_run("run-finish", {"different": "input"}, manifest),
+            ):
+                with self.assertRaises(ValueError):
+                    action()
+                self.assertEqual(completed, repository.load_run("run-finish"))
+            # Keep existing policies: failed does not auto-resume; fail/cancel can replace each other.
+            failed = repository.load_run("run-fail")
+            repository.start_run("run-fail", spec, manifest)
+            self.assertEqual(failed, repository.load_run("run-fail"))
+            repository.cancel_run("run-fail", "explicit cancel")
+            repository.fail_run("run-fail", "explicit failure")
+            self.assertEqual("failed", repository.load_run("run-fail")["status"])
 
 
 if __name__ == "__main__":

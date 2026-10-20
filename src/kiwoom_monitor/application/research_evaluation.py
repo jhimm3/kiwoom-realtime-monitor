@@ -2954,10 +2954,15 @@ def _maximum_drawdown(
         return None, None
     peak = points[0]
     maximum = 0
+    relative_drawdown = relative_peak = 0
     for value in points:
         peak = max(peak, value)
-        maximum = max(maximum, peak - value)
-    return maximum, maximum * 1_000_000 // peak if peak > 0 else None
+        drawdown = peak - value
+        maximum = max(maximum, drawdown)
+        # The worst relative loss can precede a later, larger absolute loss.
+        if peak > 0 and (relative_peak == 0 or drawdown * relative_peak > relative_drawdown * peak):
+            relative_drawdown, relative_peak = drawdown, peak
+    return maximum, relative_drawdown * 1_000_000 // relative_peak if relative_peak > 0 else None
 
 
 def _data_quality(

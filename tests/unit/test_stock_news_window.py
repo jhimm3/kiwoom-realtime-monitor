@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import os
+import io
+import json
 import tempfile
 import threading
 import unittest
 import uuid
 from datetime import UTC, date, datetime
+from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,6 +25,10 @@ from kiwoom_monitor.presentation.news_view_model import StoredNewsEvidence
 from kiwoom_monitor.presentation.news_workers import NewsEvidenceWorker
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings, StockNewsItem
+from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig, NaverNewsCredentials
+from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
+from kiwoom_monitor.infrastructure.central_operational_settings import apply_to_local_news
+from kiwoom_monitor.infrastructure.central_ai_client import CentralAIClient
 from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
 from kiwoom_monitor.application.news_grouping import NewsEventGroup
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
@@ -32,12 +40,235 @@ from kiwoom_monitor.journal_process import JournalWindow
 from kiwoom_monitor.news_process import _apply_show_command
 from kiwoom_monitor.presentation.main_window import MainWindow
 from kiwoom_monitor.presentation.news_window_coordinator import NewsWindowCoordinator
+from qt_settings_test_support import wait_until
 
 
 class StockNewsWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def _populate_ai_selection(self, window):
+        window._central_evidence_client = None  # Keep the unrelated evidence lookup out of this AI fixture.
+        window._stock_code, window._stock_name = "005930", "테스트기업"
+        items = tuple(StockNewsItem(
+            f"테스트기업 계약 {number}", "계약 발표", f"https://example.test/{number}",
+            f"https://example.test/{number}", datetime.fromisoformat("2026-10-20T10:00:00+09:00"),
+            assess_stock_news("테스트기업", f"테스트기업 계약 {number}", "계약 발표"),
+        ) for number in range(2))
+        window._visible_items = items
+        window._visible_groups = tuple(NewsEventGroup(item, (item,)) for item in items)
+        window._display_rows = [0, 1]
+        window._table.setRowCount(2)
+        window._table.setCurrentCell(0, 4)
+        window._show_detail(0)
+        return items
+
+    def test_nas_only_manual_and_automatic_ai_use_actual_worker_once_and_keep_usage_limit(self):
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_args): self.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            DataSourceConfig(root / "data_source.json").save(DataSourceSettings(
+                "personal_server", "https://nas.example.test", "fixture-token"))
+            config = LocalNaverNewsConfig(root / "news.env")
+            config.save(NaverNewsCredentials(), ai=NewsAISettings(auto_analyze=True))
+            apply_to_local_news(config, {"ai_provider": "gemini", "ai_model": "server-model", "ai_daily_limit": 0})
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            window._window_settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+            entered, release = threading.Event(), threading.Event()
+            calls = []
+
+            def opener(request, **_kwargs):
+                calls.append((request.full_url, request.get_method(), request.get_header("Authorization"),
+                              json.loads(request.data)))
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("controlled central AI gate timed out")
+                return Response(json.dumps({"provider": "gemini", "model": "server-model",
+                    "body_hashes": ["native-body"], "results": [{"summary": "NAS 요약", "outlook": "긍정",
+                        "confidence": 80, "reason": "계약 발표", "category": "수주·계약"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                }).encode())
+
+            try:
+                self.assertIsInstance(window._central_ai_client, CentralAIClient)
+                window._central_ai_client._opener = opener
+                self.assertFalse(config.load_ai().local_credentials_configured)
+                with patch("kiwoom_monitor.presentation.news_workers.fetch_article_text", side_effect=AssertionError("local article I/O")), \
+                        patch("kiwoom_monitor.presentation.news_workers.analyze_articles", side_effect=AssertionError("local paid AI")), \
+                        patch.object(window._ai_repository, "daily_count", wraps=window._ai_repository.daily_count) as count:
+                    items = self._populate_ai_selection(window)
+                    self.assertEqual(0, count.call_count, "selection must not add a daily usage DB read")
+                    self.assertTrue(window._ai_button.isEnabled())
+                    window._ai_button.click()
+                    wait_until(entered.is_set)
+                    worker = window._ai_worker
+                    self.assertIs(window._central_ai_client, worker._central_client)
+                    self.assertFalse(window._ai_button.isEnabled())
+                    window._ai_button.click()
+                    window._table.cellDoubleClicked.emit(0, 3)
+                    self.assertIs(worker, window._ai_worker)
+                    self.assertEqual(1, len(calls))
+                    release.set()
+                    wait_until(lambda: window._ai_worker is None)
+                    self.assertTrue(window._ai_button.isEnabled())
+                    self.assertEqual(1, window._ai_repository.daily_count())
+                    self.assertEqual("NAS 요약", window._ai_repository.load("005930", items[0]).analysis.summary)
+                    self.assertIn("NAS 요약", window._detail.toPlainText())
+
+                    settings = config.load_ai()
+                    config.save(config.load(), ai=replace(settings, daily_limit=1))
+                    window._auto_ai_identities = {news_identity(items[1])}
+                    with patch.object(QMessageBox, "information") as notice:
+                        window._ai_button.click()
+                    notice.assert_called_once()
+                    window._auto_analyze_next()
+                    self.assertIsNone(window._ai_worker)
+                    self.assertEqual(1, len(calls))
+
+                    config.save(config.load(), ai=settings)
+                    entered.clear()
+                    release.clear()
+                    window._auto_analyze_next()
+                    wait_until(entered.is_set)
+                    self.assertEqual(0, window._table.currentRow())
+                    self.assertEqual(2, len(calls))
+                    release.set()
+                    wait_until(lambda: window._ai_worker is None)
+                    self.assertEqual(2, window._ai_repository.daily_count())
+                    self.assertIsNotNone(window._ai_repository.load("005930", items[1]))
+                    self.assertFalse(window._auto_ai_identities)
+                    for url, method, authorization, payload in calls:
+                        self.assertEqual(("https://nas.example.test/api/v1/news/analyze", "POST", "Bearer fixture-token"),
+                                         (url, method, authorization))
+                        self.assertEqual(("005930", "gemini", "server-model", 1),
+                                         (payload["stock_code"], payload["provider"], payload["model"], payload["article_count"]))
+                        self.assertNotIn("api_key", payload)
+                    self.assertEqual([news_identity(item) for item in items],
+                                     [call[3]["events"][0]["identity"] for call in calls])
+            finally:
+                release.set()
+                window.shutdown()
+                self.app.processEvents()
+
+    def test_manual_finished_and_automatic_ai_share_provider_credential_availability(self):
+        class Worker(QObject):
+            completed = Signal(object, object, str, str, object, int)
+            failed = Signal(str, bool, int)
+            finished = Signal()
+            def __init__(self, groups, stock_name, settings, parent, **kwargs):
+                super().__init__(parent)
+                self.running = False
+                workers.append(self)
+            def start(self): self.running = True
+            def isRunning(self): return self.running
+            def wait(self): return True
+            def requestInterruption(self): self.running = False
+            def finish(self):
+                self.running = False
+                self.finished.emit()
+
+        cases = (
+            ("none", NewsAISettings("none", "unused", auto_analyze=True), True, False),
+            ("missing-key", NewsAISettings("gemini", auto_analyze=True), False, False),
+            ("local-key", NewsAISettings("gemini", "fixture", auto_analyze=True), False, True),
+            ("nas-only", NewsAISettings("gemini", auto_analyze=True), True, True),
+            ("local-plan", NewsAISettings("chatgpt_plan", model="account-model", auto_analyze=True,
+                                          chatgpt_storage_path=Path("isolated-never-read")), False, True),
+            ("plan-no-model", NewsAISettings("chatgpt_plan", auto_analyze=True,
+                                             chatgpt_storage_path=Path("isolated-never-read")), False, False),
+            ("plan-no-store", NewsAISettings("chatgpt_plan", model="account-model", auto_analyze=True), False, False),
+            ("remote-plan", NewsAISettings("chatgpt_plan", model="account-model", auto_analyze=True), True, True),
+        )
+        for name, settings, central, expected in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+                window._window_settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+                window._central_ai_client = SimpleNamespace() if central else None
+                workers = []
+                try:
+                    with patch.object(window._config, "load_ai", return_value=settings), \
+                            patch.object(window._ai_repository, "daily_count", return_value=0) as count, \
+                            patch("kiwoom_monitor.presentation.stock_news_window.AINewsWorker", Worker):
+                        items = self._populate_ai_selection(window)
+                        self.assertEqual(expected, window._ai_button.isEnabled())
+                        window._on_ai_finished()
+                        self.assertEqual(expected, window._ai_button.isEnabled())
+                        self.assertEqual(0, count.call_count)
+                        window._ai_button.click()
+                        window._table.cellDoubleClicked.emit(0, 3)
+                        self.assertEqual(int(expected), len(workers))
+                        if expected:
+                            self.assertFalse(window._ai_button.isEnabled())
+                            with patch.object(window._config, "load_ai", return_value=replace(settings, provider="none")):
+                                workers[0].finish()
+                            self.assertFalse(window._ai_button.isEnabled(), "finished must use current provider availability")
+                            window._show_detail(0)
+                            self.assertTrue(window._ai_button.isEnabled())
+                        window._auto_ai_identities = {news_identity(items[1])}
+                        window._auto_analyze_next()
+                        self.assertEqual(2 if expected else 0, len(workers))
+                        window._auto_ai_identities.clear()
+                        if expected:
+                            workers[-1].finish()
+                finally:
+                    window._auto_ai_identities.clear()
+                    if window._ai_worker is not None:
+                        window._ai_worker.finish()
+                    window.shutdown()
+                    self.app.processEvents()
+
+    def test_nas_ai_rejection_keeps_local_fallback_off_and_shutdown_waits_for_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            DataSourceConfig(root / "data_source.json").save(DataSourceSettings(
+                "personal_server", "https://nas.example.test", "fixture-token"))
+            config = LocalNaverNewsConfig(root / "news.env")
+            config.save(NaverNewsCredentials(), ai=NewsAISettings("gemini", "", "server-model", 0))
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            window._window_settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+            entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+            calls = []
+            timer = None
+
+            def rejected(request, **_kwargs):
+                calls.append(request.full_url)
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("controlled central rejection gate timed out")
+                returned.set()
+                raise HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(b'{"detail":"controlled permission rejection"}'))
+
+            try:
+                window._central_ai_client._opener = rejected
+                with patch("kiwoom_monitor.presentation.news_workers.fetch_article_text", side_effect=AssertionError("local article I/O")), \
+                        patch("kiwoom_monitor.presentation.news_workers.analyze_articles", side_effect=AssertionError("local paid AI")):
+                    self._populate_ai_selection(window)
+                    self.assertTrue(window._ai_button.isEnabled())
+                    window._ai_button.click()
+                    wait_until(entered.is_set)
+                    worker = window._ai_worker
+                    timer = threading.Timer(0.03, release.set)
+                    timer.start()
+                    window.shutdown()
+                    self.assertTrue(returned.is_set())
+                    self.assertFalse(worker.isRunning())
+                    self.assertTrue(worker._plan_cancel.is_set())
+                    wait_until(lambda: window._ai_worker is None)
+                    self.assertEqual(["https://nas.example.test/api/v1/news/analyze"], calls)
+                    self.assertEqual(1, window._ai_repository.daily_count())
+                    self.assertIn("HTTP 403", window._status_label.text())
+                    self.assertEqual({}, window._ai_result_cache)
+            finally:
+                release.set()
+                if timer is not None:
+                    timer.join()
+                window.shutdown()
+                self.app.processEvents()
 
     def test_ai_request_receipt_uses_existing_server_clock(self) -> None:
         import sqlite3

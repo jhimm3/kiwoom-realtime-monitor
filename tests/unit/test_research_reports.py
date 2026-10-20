@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import unittest
 
-from kiwoom_monitor.application.research_evaluation import build_research_report
+from kiwoom_monitor.application.research_evaluation import build_research_report, _maximum_drawdown
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec, ResearchFoldSpec
 
 
@@ -50,6 +50,44 @@ def _inputs():
 
 
 class ResearchReportTests(unittest.TestCase):
+    def test_drawdown_uses_each_decline_peak_and_keeps_fold_boundaries(self) -> None:
+        fold = ResearchFoldSpec("final", "OOS", "2026-09-12T00:00:00+00:00", "2026-09-12T01:00:00+00:00")
+        cases = (
+            ("no-events", 100, (), (None, None)),
+            ("flat", 100, (100,), (0, 0)),
+            ("rising", 100, (150, 200), (0, 0)),
+            ("falling", 100, (80, 50), (50, 500_000)),
+            ("recovered", 100, (50, 200), (50, 500_000)),
+            ("larger-won-smaller-relative-loss", 100, (50, 200, 120), (80, 500_000)),
+            ("second-relative-loss", 100, (90, 200, 80), (120, 600_000)),
+            ("integer-ppm-floor", 3, (2, 6), (1, 333_333)),
+            ("zero-peak", 0, (0, -10), (10, None)),
+            ("negative-peak", -5, (-10,), (5, None)),
+            ("positive-peak-negative-equity", 100, (-20, 200), (120, 1_200_000)),
+            ("zero-then-positive-peak", 0, (50, 25), (25, 500_000)),
+        )
+        for name, initial, values, expected in cases:
+            with self.subTest(case=name):
+                events = tuple({
+                    "event_id": f"mark-{index}", "event_type": "MARK",
+                    "occurred_at": f"2026-09-12T00:{index:02}:00+00:00",
+                    "price": 1, "cash_after_won": value, "position_quantity_after": 0,
+                } for index, value in enumerate(values))
+                self.assertEqual(expected, _maximum_drawdown(fold, events, initial))
+
+        # Carry the last pre-fold equity, ignore an invalid-price update and the end boundary.
+        events = tuple({
+            "event_id": str(index), "event_type": kind, "occurred_at": occurred,
+            "price": price, "cash_after_won": cash, "position_quantity_after": 0,
+        } for index, (occurred, cash, price, kind) in enumerate((
+            ("2026-09-11T23:59:00+00:00", 200, 1, "FILL"),
+            ("2026-09-12T09:00:00+09:00", 100, 1, "RISK_FILL"),
+            ("2026-09-12T00:01:00+00:00", 0, 0, "MARK"),
+            ("2026-09-12T00:02:00+00:00", 300, 1, "PARTIAL_FILL"),
+            ("2026-09-12T01:00:00+00:00", -1000, 1, "MARK"),
+        )))
+        self.assertEqual((100, 500_000), _maximum_drawdown(fold, tuple(reversed(events)), 100))
+
     def test_report_separates_trade_metrics_event_study_and_sealed_holdout(self) -> None:
         observations, manifest, spec = _inputs()
         events = (

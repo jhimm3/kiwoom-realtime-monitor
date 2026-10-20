@@ -76,6 +76,7 @@ from kiwoom_monitor.presentation.news_workers import (
 from kiwoom_monitor.presentation.news_settings_dialog import NaverNewsSettingsDialog
 from kiwoom_monitor.presentation.historical_news_archive_dialog import HistoricalNewsArchiveDialog
 from kiwoom_monitor.presentation.news_execution import (
+    ai_execution_available,
     ai_progress_text,
     ai_start_block_reason,
     automatic_ai_run_allowed,
@@ -848,7 +849,8 @@ class StockNewsWindow(QDialog):
             ai = self._config.load_ai()
         except (OSError, ValueError):
             ai = NewsAISettings()
-        self._ai_button.setEnabled(bool((item.link or item.original_link) and ai.provider != "none" and ai.local_credentials_configured)
+        self._ai_button.setEnabled(bool((item.link or item.original_link) and ai_execution_available(
+                                       ai, central_client_available=self._central_ai_client is not None))
                                    and (self._ai_worker is None or not self._ai_worker.isRunning()))
 
     def _restore_detail_scroll(self, identity: str, value: int) -> None:
@@ -977,6 +979,8 @@ class StockNewsWindow(QDialog):
             settings = self._config.load_ai()
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "AI 분석", str(error)); return
+        if not ai_execution_available(settings, central_client_available=self._central_ai_client is not None):
+            return
         used = self._ai_repository.daily_count()
         if settings.provider == "chatgpt_plan":
             if automatic and self._chatgpt_ai_paused:
@@ -1154,7 +1158,14 @@ class StockNewsWindow(QDialog):
         self._ai_worker = None
         dispose_finished_worker(worker)
         self._ai_button.setText("AI 원문 분석")
-        self._ai_button.setEnabled(self._item_index(self._table.currentRow()) is not None)
+        index = self._item_index(self._table.currentRow())
+        try:
+            settings = self._config.load_ai()
+        except (OSError, ValueError):
+            settings = NewsAISettings()
+        self._ai_button.setEnabled(index is not None
+            and bool(self._visible_items[index].link or self._visible_items[index].original_link)
+            and ai_execution_available(settings, central_client_available=self._central_ai_client is not None))
         self._ai_automatic_run = False
         self._ai_groups = ()
         # 이전 작업이 끝나기 직전 또는 끝난 직후 마지막 종목의 후보가

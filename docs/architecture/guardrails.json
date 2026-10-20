@@ -1460,6 +1460,17 @@
         "db|src/kiwoom_monitor/central_server/database_news_jobs.py|SQLiteNewsJobStoreMixin.retry_news_job|connection.execute": 1,
         "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.retry_news_job|cursor.execute": 1
       }
+    },
+    {
+      "id": "R3-063-atomic-run-transition-20261020",
+      "reason": "Reserve the existing native SQLite writer before status SELECT so four run transition APIs enforce their existing sequential state/hash contracts under two-writer interleaving. Exactly three terminal execute sites2->3; start reuses its existing BEGIN site. No new owner/schema/token or result publication layer.",
+      "connection": "Existing research child/run executor -> same ResearchRepository connection/status SELECT/validation/DML/native commit -> immutable results/comparison. BEGIN IMMEDIATE covers only native run transition; external computation/publication remains outside and existing independent/final/campaign owner/generation fences remain.",
+      "validation": "Same native two-connection seven-race original assertion failures -> fixed; all existing sequential status/hash/error behavior retained. Normal writes connection/SELECT/BEGIN/COMMIT/change/clock each1 unchanged. Write-API no-op gains writer reservation/BEGIN-COMMIT0->1; rejects gain BEGIN/ROLLBACK0->1, affected0/clock0 unchanged. Separate native COMMIT denial and commit-ACK loss across4 methods rollback/retry contracts,133 related frozen-WT IDs and root integrated related verification required. Writer contention/latency unmeasured; no claim of DB cost reduction or fencing a newly invoked old-generation fail/cancel.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.finish_run|connection.execute": 3,
+        "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.fail_run|connection.execute": 3,
+        "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.cancel_run|connection.execute": 3
+      }
     }
   ]
 }

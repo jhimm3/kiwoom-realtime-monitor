@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings
 from kiwoom_monitor.presentation.news_execution import (
@@ -53,6 +54,15 @@ class NewsExecutionTests(unittest.TestCase):
         self.assertTrue(automatic_ai_run_allowed(
             manual_settings, manual_queue=True, central_client_available=False, used_requests=0,
         ))
+        for name, settings, manual_queue, used in (
+            ("auto-disabled", manual_settings, False, 0),
+            ("provider-disabled", replace(server_settings, provider="none"), True, 0),
+            ("daily-limit", replace(server_settings, daily_limit=1), True, 1),
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(automatic_ai_run_allowed(
+                    settings, manual_queue=manual_queue, central_client_available=True, used_requests=used,
+                ))
 
 
 if __name__ == "__main__":

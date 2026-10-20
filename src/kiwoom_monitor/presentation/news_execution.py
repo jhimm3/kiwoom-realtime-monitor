@@ -26,6 +26,12 @@ def ai_start_block_reason(settings: NewsAISettings, used_requests: int, group_co
     return ""
 
 
+def ai_execution_available(settings: NewsAISettings, *, central_client_available: bool) -> bool:
+    return settings.provider != "none" and (
+        settings.local_credentials_configured or central_client_available
+    )
+
+
 def automatic_ai_run_allowed(
     settings: NewsAISettings,
     *,
@@ -35,9 +41,7 @@ def automatic_ai_run_allowed(
 ) -> bool:
     if not settings.auto_analyze and not manual_queue:
         return False
-    if settings.provider == "none":
-        return False
-    if not settings.local_credentials_configured and not central_client_available:
+    if not ai_execution_available(settings, central_client_available=central_client_available):
         return False
     if settings.daily_limit > 0 and used_requests >= settings.daily_limit:
         return False

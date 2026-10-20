@@ -1049,8 +1049,7 @@ class ResearchRepository:
                     or normalized_id != expected_id):
                 raise ValueError('independent claim requires its scoped scientific run identity')
         with closing(self._connect()) as connection, connection:
-            if claim_independent:
-                connection.execute('BEGIN IMMEDIATE')
+            connection.execute('BEGIN IMMEDIATE')
             row = connection.execute(
                 "SELECT spec_json,input_manifest_json,status FROM research_runs WHERE run_id=?",
                 (normalized_id,),
@@ -2696,6 +2695,7 @@ class ResearchRepository:
         if not str(logical_result_hash).strip():
             raise ValueError("logical_result_hash is required")
         with closing(self._connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
             row = connection.execute(
                 "SELECT status,logical_result_hash FROM research_runs WHERE run_id=?", (run_id,),
             ).fetchone()
@@ -3083,6 +3083,7 @@ class ResearchRepository:
 
     def fail_run(self, run_id: str, error: str) -> None:
         with closing(self._connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
             row = connection.execute(
                 "SELECT status FROM research_runs WHERE run_id=?", (run_id,),
             ).fetchone()
@@ -3097,6 +3098,7 @@ class ResearchRepository:
 
     def cancel_run(self, run_id: str, reason: str = "user_requested") -> None:
         with closing(self._connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
             row = connection.execute(
                 "SELECT status FROM research_runs WHERE run_id=?", (run_id,),
             ).fetchone()
