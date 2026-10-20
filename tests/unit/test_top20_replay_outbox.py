@@ -151,7 +151,13 @@ class Top20ReplayOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([next(iter(record()))] * 2, calls)
         self.assertEqual(record(), saved)
         self.assertFalse(receipt['execution_succeeded'])
-        self.assertEqual(1, receipt['error_count'])
+        # One lost ACK is observed by both the native thread and R3-036's owned save task.
+        # These are runtime owner observations, not two independent database failures.
+        self.assertEqual(2, receipt['error_count'])
+        self.assertCountEqual(
+            [{"kind": "thread", "error_type": "OSError"}, {"kind": "task", "error_type": "OSError"}],
+            receipt['errors'],
+        )
         fixture.restore(runtime)
         fixture.require_baseline()
 

@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from threading import Barrier
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from kiwoom_monitor.central_server.database import (
     PostgresQueryStore, StoredQuery, _NEWS_JOB_CLAIM_SELECT_SQL,
@@ -827,14 +827,33 @@ class PostgresAccessTests(unittest.TestCase):
                          (call["outcome"], call["commits"], call["rollbacks"]))
         self.assertIsNone(call["close_ms"])
 
-    def test_news_job_finish_uses_native_context_without_changing_commit_boundary(self) -> None:
+    def _claimed_news_fixture(self, attempts):
         raw = self._native_context_connection()
+        raw.rows = [("job-1", "article-1", "005930", "005930", "BODY", "input-hash",
+                     "version-1", attempts - 1, "{}", 0.0)]
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):
-            store.finish_news_job("job-1", "body-ref")
+            return store.claim_news_jobs(now=100.0)[0]
+
+    def _news_terminal_cursor(self, raw):
+        cursor = raw.cursor()
+        cursor.rowcount = 1
+        cursor.execute = Mock(wraps=cursor.execute)
+        raw.cursor = lambda: cursor
+        return cursor
+
+    def test_news_job_finish_uses_native_context_without_changing_commit_boundary(self) -> None:
+        claimed = self._claimed_news_fixture(1)
+        raw = self._native_context_connection()
+        cursor = self._news_terminal_cursor(raw)
+        store = PostgresQueryStore("unused")
+        with patch.object(store, "_connect", return_value=raw):
+            store.finish_news_job(claimed["job_key"], "body-ref", attempts=claimed["attempts"])
+        self.assertIn("WHERE job_key=%s AND state='RUNNING' AND attempts=%s", cursor.execute.call_args.args[0])
         self.assertEqual(["UPDATE"], [item[0] for item in raw.statements])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
-        call = self._calls()[0]
+        self.assertEqual((claimed["job_key"], claimed["attempts"]), raw.statements[0][1][-2:])
+        call = next(item for item in self._calls() if item["writer_family"] == "news.job_finish")
         self.assertEqual(("news.job_finish", "news_job_finish", "committed", 1),
                          (call["writer_family"], call["writer_kind"], call["outcome"],
                           call["commits"]))
@@ -969,45 +988,53 @@ class PostgresAccessTests(unittest.TestCase):
                           call["rollbacks"]))
 
     def test_news_job_finish_execute_failure_still_rolls_back_once(self) -> None:
+        claimed = self._claimed_news_fixture(1)
         raw = self._native_context_connection()
+        cursor = self._news_terminal_cursor(raw)
         raw.fail_execute = 1
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):
             with self.assertRaisesRegex(ValueError, "statement failed"):
-                store.finish_news_job("job-1", "body-ref")
+                store.finish_news_job(claimed["job_key"], "body-ref", attempts=claimed["attempts"])
+        self.assertIn("WHERE job_key=%s AND state='RUNNING' AND attempts=%s", cursor.execute.call_args.args[0])
         self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
-        call = self._calls()[0]
+        call = next(item for item in self._calls() if item["writer_family"] == "news.job_finish")
         self.assertEqual(("news.job_finish", "rolled_back", 1),
                          (call["writer_family"], call["outcome"], call["rollbacks"]))
 
     def test_news_job_retry_preserves_queries_state_rule_and_commit_boundary(self) -> None:
+        claimed = self._claimed_news_fixture(2)
         raw = self._native_context_connection()
-        raw.rows = [(2,)]
+        cursor = self._news_terminal_cursor(raw)
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):
-            store.retry_news_job("job-1", "temporary", 123.0, "body-ref")
-        self.assertEqual(["SELECT", "UPDATE"], [item[0] for item in raw.statements])
+            store.retry_news_job(claimed["job_key"], "temporary", 123.0, "body-ref", attempts=claimed["attempts"])
+        self.assertIn("WHERE job_key=%s AND state='RUNNING' AND attempts=%s", cursor.execute.call_args.args[0])
+        self.assertEqual(["UPDATE"], [item[0] for item in raw.statements])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
         self.assertEqual(("PENDING", "temporary", 123.0, "body-ref"),
-                         raw.statements[1][1][:4])
-        call = self._calls()[0]
+                         raw.statements[0][1][:4])
+        self.assertEqual((claimed["job_key"], claimed["attempts"]), raw.statements[0][1][-2:])
+        call = next(item for item in self._calls() if item["writer_family"] == "news.job_retry")
         self.assertEqual(("news.job_retry", "news_job_retry", "retry_news_job",
-                          "committed", 2, 1, 1),
+                          "committed", 1, 1, 1),
                          (call["writer_family"], call["writer_kind"], call["operation"],
                           call["outcome"], call["sql_calls"], call["commits"],
                           call["rows_attempted"]))
 
     def test_news_job_retry_update_failure_preserves_native_rollback(self) -> None:
+        claimed = self._claimed_news_fixture(3)
         raw = self._native_context_connection()
-        raw.rows = [(3,)]
-        raw.fail_execute = 2
+        cursor = self._news_terminal_cursor(raw)
+        raw.fail_execute = 1  # The owner-fenced UPDATE is now the only statement.
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):
             with self.assertRaisesRegex(ValueError, "statement failed"):
-                store.retry_news_job("job-1", "temporary", 123.0)
-        self.assertEqual(["SELECT", "UPDATE"], [item[0] for item in raw.statements])
+                store.retry_news_job(claimed["job_key"], "temporary", 123.0, attempts=claimed["attempts"])
+        self.assertIn("WHERE job_key=%s AND state='RUNNING' AND attempts=%s", cursor.execute.call_args.args[0])
+        self.assertEqual(["UPDATE"], [item[0] for item in raw.statements])
         self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
-        call = self._calls()[0]
+        call = next(item for item in self._calls() if item["writer_family"] == "news.job_retry")
         self.assertEqual(("news.job_retry", "rolled_back", 0, 1),
                          (call["writer_family"], call["outcome"],
                           call["commits"], call["rollbacks"]))

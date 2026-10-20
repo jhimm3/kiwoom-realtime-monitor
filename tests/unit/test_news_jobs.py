@@ -31,6 +31,68 @@ class _AI:
 
 
 class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reclaimed_attempt_cannot_be_finished_or_retried_by_old_runner(self) -> None:
+        for old_fails in (False, True):
+            for new_finished in (False, True):
+                with self.subTest(old_fails=old_fails, new_finished=new_finished), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "central.sqlite3"
+                    first = SQLiteQueryStore(path)
+                    first.initialize()
+                    first.upsert_documents("news_article", _article())
+                    old_wakes = []
+                    first.set_news_job_wakeup(lambda: old_wakes.append("unexpected stale wake"))
+                    second = SQLiteQueryStore(path)
+                    old, new = NewsJobRunner(first), NewsJobRunner(second)
+                    old_entered, old_release = asyncio.Event(), asyncio.Event()
+                    new_entered, new_release = asyncio.Event(), asyncio.Event()
+                    async def old_body(_job):
+                        old_entered.set()
+                        await old_release.wait()
+                        if old_fails:
+                            raise RuntimeError("old owner failed")
+                        return "old-owner-output"
+                    async def new_body(_job):
+                        new_entered.set()
+                        await new_release.wait()
+                        return "new-owner-output"
+                    def row():
+                        with first._connection() as connection:
+                            return connection.execute(
+                                "SELECT state,attempts,output_ref,error,next_retry_at,updated_at FROM central_news_jobs"
+                            ).fetchone()
+                    clock = [time.time() + 1]
+                    tasks = []
+                    try:
+                        with patch("kiwoom_monitor.central_server.database_news_jobs.time", side_effect=lambda: clock[0]), \
+                                patch.object(old, "_run_body", side_effect=old_body), \
+                                patch.object(new, "_run_body", side_effect=new_body):
+                            tasks.append(asyncio.create_task(old.run_once()))
+                            await asyncio.wait_for(old_entered.wait(), 2)
+                            self.assertEqual(("RUNNING", 1), row()[:2])
+                            clock[0] += 121
+                            tasks.append(asyncio.create_task(new.run_once()))
+                            await asyncio.wait_for(new_entered.wait(), 2)
+                            self.assertEqual(("RUNNING", 2), row()[:2])
+                            if new_finished:
+                                new_release.set()
+                                self.assertEqual(1, await tasks[1])
+                            expected = row()
+                            old_release.set()
+                            self.assertEqual(1, await tasks[0])
+                            self.assertEqual(expected, row(), "a stale runner changed the current claim")
+                            self.assertEqual([], old_wakes)
+                            new_release.set()
+                            self.assertEqual(1, await tasks[1])
+                            self.assertEqual(("COMPLETED", 2, "new-owner-output", ""), row()[:4])
+                    finally:
+                        old_release.set()
+                        new_release.set()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        await old.close()
+                        await new.close()
+                        first.close()
+                        second.close()
+
     async def test_empty_claim_backoff_is_bounded(self) -> None:
         runner = NewsJobRunner(object(), poll_seconds=1, max_idle_poll_seconds=5)
         runner.run_once = AsyncMock(return_value=0)
@@ -49,6 +111,75 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([1, 2, 4, 5], delays)
         self.assertEqual(4, runner.run_once.await_count)
+
+    async def test_finish_ack_loss_does_not_reopen_completed_body_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "central.sqlite3"
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            store.upsert_documents("news_article", _article())
+            wakes = []
+            store.set_news_job_wakeup(lambda: wakes.append("wake"))
+            native_finish = store.finish_news_job
+            def finish_with_lost_ack(*args, **kwargs):
+                native_finish(*args, **kwargs)
+                raise ConnectionError("finish committed, response lost")
+            runner = NewsJobRunner(store, fetcher=lambda *_args, **_kwargs: "immutable body")
+            with patch.object(store, "finish_news_job", side_effect=finish_with_lost_ack):
+                self.assertEqual(1, await runner.run_once())
+            with store._connection() as connection:
+                state = connection.execute(
+                    "SELECT state,attempts,output_ref,error FROM central_news_jobs WHERE stage='BODY'"
+                ).fetchone()
+            self.assertEqual(("COMPLETED", 1, ""), (state[0], state[1], state[3]))
+            body = store.load_news_body_revision(state[2])
+            self.assertEqual("immutable body", body["body_text"])
+            self.assertEqual(1, len(wakes))  # Only BODY publication enqueues/wakes RULE.
+            store.upsert_documents("news_article", _article())
+            await runner.close()
+            store.close()
+            restarted = SQLiteQueryStore(path)
+            after_restart = NewsJobRunner(restarted, fetcher=lambda *_args, **_kwargs: self.fail("completed BODY was fetched again"))
+            try:
+                self.assertEqual(1, await after_restart.run_once())  # The existing RULE job.
+                self.assertEqual([], restarted.claim_news_jobs())
+                bodies = restarted.load_news_history("body", target=body["article_revision_id"])
+                self.assertEqual([state[2]], [value["body_revision_id"] for value in bodies])
+                with restarted._connection() as connection:
+                    self.assertEqual(state, connection.execute(
+                        "SELECT state,attempts,output_ref,error FROM central_news_jobs WHERE stage='BODY'"
+                    ).fetchone())
+            finally:
+                await after_restart.close()
+                restarted.close()
+
+    async def test_cancelled_claim_is_recovered_only_by_existing_stale_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+            store.initialize()
+            store.upsert_documents("news_article", _article())
+            runner = NewsJobRunner(store)
+            entered = asyncio.Event()
+            async def paused(_job):
+                entered.set()
+                await asyncio.Event().wait()
+            base = time.time() + 1
+            try:
+                with patch("kiwoom_monitor.central_server.database_news_jobs.time", return_value=base), \
+                        patch.object(runner, "_run_body", side_effect=paused):
+                    task = asyncio.create_task(runner.run_once())
+                    await asyncio.wait_for(entered.wait(), 2)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                self.assertEqual([], store.claim_news_jobs(now=base + 50))
+                recovered = store.claim_news_jobs(now=base + 121)[0]
+                self.assertEqual(2, recovered["attempts"])
+                store.finish_news_job(recovered["job_key"], "recovered", attempts=recovered["attempts"])
+                self.assertEqual([], store.claim_news_jobs(now=base + 242))
+            finally:
+                await runner.close()
+                store.close()
 
     async def test_wakeup_arriving_during_claim_is_not_lost(self) -> None:
         import threading
@@ -340,7 +471,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([], store.claim_news_jobs(now=base + 50.0))
             recovered = store.claim_news_jobs(now=base + 121.0)
             self.assertEqual(first[0]["job_key"], recovered[0]["job_key"])
-            store.retry_news_job(recovered[0]["job_key"], "failed", 0.0)
+            store.retry_news_job(recovered[0]["job_key"], "failed", 0.0, attempts=recovered[0]["attempts"])
             runner = NewsJobRunner(store, fetcher=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("blocked")))
             await runner.run_once()
             body = store.load_news_history("body", target=first[0]["article_revision_id"])

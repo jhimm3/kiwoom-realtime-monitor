@@ -2313,5 +2313,176 @@ class Top20IndexFlushOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     store.close()
 
 
+class Top20CollectorLockBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    def _seed_loop(self, directory):
+        start = datetime.fromisoformat("2026-09-10T09:00:00+09:00")
+        clock = [start]
+        store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=lambda: clock[0])
+        store.initialize()
+        hub = RealtimeHub()
+        codes = ("005930", "000660")
+        hub.set_upstream_ready(codes, True)
+        service = AutonomousTop20Service(
+            _Broker(), hub, store, now_provider=lambda: clock[0],
+            outbox_path=Path(directory) / "index-outbox.json",
+        )
+        service._subscriber = hub.connect()
+        service._collector.active_codes = codes
+        service._markets = {"005930": "KOSPI", "000660": "KOSDAQ"}
+        # Use the actual collector kernel with 240 timely quarter-second samples;
+        # the injected bucket values grow by 1 eok/second for each original code.
+        service._trade_values.bucket_trade_value_eok = lambda _code, _period, minute: min(
+            60.0, max(0.0, (clock[0] - minute).total_seconds()),
+        )
+        for quarter in range(240):
+            clock[0] = start + timedelta(seconds=quarter / 4)
+            self.assertIsNone(service._advance(clock[0]).completed)
+        clock[0] = start + timedelta(minutes=1)
+        return store, service, clock
+
+    def _assert_original_record(self, store, *, available_at):
+        rows = store.load_dataset_snapshots("top20_index", "2026-09-10", 10)
+        self.assertEqual(1, len(rows))
+        payload = rows[0]["payload"]
+        self.assertEqual("2026-09-10T09:00+09:00", payload["minute"])
+        self.assertEqual([60.0, 60.0, 0.0], payload["market_values"])
+        self.assertEqual(120.0, payload["total"])
+        self.assertEqual({"005930", "000660"}, set(payload["codes"]))
+        self.assertEqual([1, 1, 0], payload["market_counts"])
+        self.assertEqual([["2026-09-10T09:00:00+09:00", ["005930", "000660"]]], payload["cohort_segments"])
+        self.assertEqual("realtime_complete", payload["capture_state"])
+        metadata = store.load_market_data_metadata(MarketDatasetKind.TOP20_INDEX, "2026-09-10", payload["minute"])
+        self.assertEqual(datetime.fromisoformat("2026-09-10T09:00:00+09:00"), metadata.effective_at)
+        self.assertEqual(available_at, metadata.available_at)
+        self.assertEqual(DataCompleteness.COMPLETE, metadata.completeness)
+        self.assertEqual(ObservationOrigin.REALTIME, metadata.origin)
+
+    async def test_index_loop_storage_does_not_block_ranking_prepare_and_real_subscription(self):
+        for stage in ("outbox", "database"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                store, service, clock = self._seed_loop(directory)
+                blocked = _BlockedIndexWrite(service._outbox.put if stage == "outbox" else store.save_dataset_snapshot)
+                if stage == "outbox":
+                    service._outbox.put = blocked
+                else:
+                    native = store.save_dataset_snapshot
+                    store.save_dataset_snapshot = lambda collection, *args, **kwargs: (
+                        blocked(collection, *args, **kwargs) if collection == "top20_index"
+                        else native(collection, *args, **kwargs)
+                    )
+                rows = _ranking_rows("090100")
+                codes = tuple(row["stk_cd"].removeprefix("A").removesuffix("_AL") for row in rows)
+                service._nxt_checked_on.update(dict.fromkeys(codes, "2026-09-10"))
+                service._nxt_eligible.update(dict.fromkeys(codes, False))
+                subscribed, response_ready = asyncio.Event(), asyncio.Event()
+                native_subscription = service._hub.update_subscription
+                def subscription(*args, **kwargs):
+                    native_subscription(*args, **kwargs)
+                    subscribed.set()
+                async def response(_requested_at):
+                    response_ready.set()
+                    return BrokerResult({"item_inq_rank": rows}, False, ""), rows, False, False
+                loop = refresh = None
+                try:
+                    with patch.object(service, "_select_ranking_response", side_effect=response), \
+                            patch.object(service, "_schedule_market_catalog"), \
+                            patch.object(service, "_load_daily_entrant_state", new_callable=AsyncMock, return_value=({}, set())), \
+                            patch.object(service, "_persist_missing_daily_entrants", new_callable=AsyncMock), \
+                            patch.object(service._hub, "update_subscription", side_effect=subscription):
+                        loop = asyncio.create_task(service._index_loop())
+                        self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                        self.assertFalse(service._collector_lock.locked(), "index storage must not own collector RAM lock")
+                        clock[0] += timedelta(milliseconds=750)
+                        refresh = asyncio.create_task(service.refresh_ranking_once(clock[0]))
+                        await asyncio.wait_for(response_ready.wait(), 1)
+                        try:
+                            await asyncio.wait_for(subscribed.wait(), .5)
+                        except TimeoutError:
+                            self.fail("fresh ranking prepare/subscription waited for index storage")
+                        self.assertFalse(blocked.release.is_set())
+                        self.assertEqual(codes, service._collector.next_codes)
+                        self.assertTrue(set(codes).issubset(set(service._hub.requested_codes()[0])))
+                        self.assertEqual(clock[0], service._collector.last_observed_at)
+                        self.assertEqual(list(codes), service._latest_membership_snapshot["payload"]["codes"])
+                        blocked.release.set()
+                        await refresh
+                        await asyncio.wait_for(asyncio.to_thread(blocked.wait_completed), 1)
+                        await service._flush_pending_indexes()
+                        self._assert_original_record(store, available_at=(
+                            clock[0] if stage == "outbox" else clock[0] - timedelta(milliseconds=750)
+                        ))
+                        self.assertEqual({}, service._pending_index_records)
+                        self.assertEqual({}, service._outbox.load())
+                finally:
+                    blocked.release.set()
+                    if loop is not None:
+                        loop.cancel()
+                    await asyncio.gather(*(task for task in (loop, refresh) if task is not None), return_exceptions=True)
+                    await service.close()
+                    self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                    store.close()
+
+    async def test_index_loop_close_joins_native_after_cancel_and_preserves_failed_restart(self):
+        from kiwoom_monitor.central_server.diagnostic_replay_runtime import ReplayRuntimeScope, owned_create_task
+        for late_failure in (False, True):
+            with self.subTest(late_failure=late_failure), tempfile.TemporaryDirectory() as directory:
+                store, service, clock = self._seed_loop(directory)
+                if late_failure:
+                    with store._connection() as connection:
+                        connection.execute("CREATE TRIGGER reject_index BEFORE INSERT ON central_dataset_snapshots "
+                                           "BEGIN SELECT RAISE(ABORT,'controlled loop index failure'); END")
+                blocked = _BlockedIndexWrite(store.save_dataset_snapshot)
+                store.save_dataset_snapshot = blocked
+                runtime = ReplayRuntimeScope()
+                loop = closing = recovered = None
+                try:
+                    with runtime.activate():
+                        loop = owned_create_task(service._index_loop(), name="test-real-index-loop")
+                        service._tasks.append(loop)
+                        self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                        self.assertFalse(service._collector_lock.locked())
+                        runtime.begin_shutdown()
+                        closing = owned_create_task(service.close(), name="test-real-index-close", shutdown=True)
+                        await asyncio.sleep(.02)
+                        self.assertFalse(closing.done())
+                        with self.assertRaisesRegex(RuntimeError, "not_drained"):
+                            runtime.require_drained()
+                        if late_failure:
+                            with self.assertLogs("kiwoom_monitor.central_server.autonomous_top20", level="WARNING") as observed:
+                                blocked.release.set()
+                                await closing
+                            self.assertIn("controlled loop index failure", " ".join(observed.output))
+                        else:
+                            blocked.release.set()
+                            await closing
+                        self.assertEqual(blocked.calls, blocked.completed)
+                        state = await runtime.drain(timeout=2)
+                        self.assertEqual((0, 0, 0), tuple(state[name] for name in ("pending_tasks", "pending_threads", "submitted_threads")))
+                        self.assertEqual(not late_failure, state["execution_succeeded"])
+                    if late_failure:
+                        self.assertEqual(1, len(service._outbox.load()))
+                        with store._connection() as connection:
+                            connection.execute("DROP TRIGGER reject_index")
+                        recovered = AutonomousTop20Service(
+                            _Broker(), RealtimeHub(), store, now_provider=lambda: clock[0],
+                            outbox_path=Path(directory) / "index-outbox.json",
+                        )
+                        await recovered.start()
+                        await recovered.close()
+                        self.assertEqual({}, recovered._outbox.load())
+                    self._assert_original_record(store, available_at=clock[0])
+                    self.assertEqual(2 if late_failure else 1, blocked.calls)
+                finally:
+                    blocked.release.set()
+                    if loop is not None:
+                        loop.cancel()
+                    await asyncio.gather(*(task for task in (loop, closing) if task is not None), return_exceptions=True)
+                    if recovered is not None:
+                        await recovered.close()
+                    await service.close()
+                    self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                    store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

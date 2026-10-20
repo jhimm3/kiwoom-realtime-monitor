@@ -1500,18 +1500,19 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
 
     def test_news_job_finish_updates_only_its_job_and_correlates_metrics(self) -> None:
         key = f"diagnostic-common-access-news-{uuid.uuid4().hex}"
+        claim_attempt = 1
         self.news_keys.append(key)
         with self.store._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO central_news_jobs"
                 "(job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
                 "processing_version,attempts,next_retry_at,state,output_ref,error,payload_json,updated_at) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,1,0,'RUNNING','','','{}'::jsonb,%s)",
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,0,'RUNNING','','','{}'::jsonb,%s)",
                 (key, "diagnostic-article", "000000", "diagnostic-target", "BODY",
-                 "diagnostic-hash", "diagnostic-version", time.time()),
+                 "diagnostic-hash", "diagnostic-version", claim_attempt, time.time()),
             )
         started = time.time() - 1
-        self.store.finish_news_job(key, "diagnostic-output")
+        self.store.finish_news_job(key, "diagnostic-output", attempts=claim_attempt)
         with self.store._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT state,output_ref,error FROM central_news_jobs WHERE job_key=%s",
                            (key,))
@@ -1545,8 +1546,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                 )
 
         started = time.time() - 1
-        for key in keys:
-            self.store.retry_news_job(key, "diagnostic retry", 123.0, "diagnostic-output")
+        for key, attempts in zip(keys, (2, 3)):
+            self.store.retry_news_job(key, "diagnostic retry", 123.0, "diagnostic-output", attempts=attempts)
 
         with self.store._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -1567,7 +1568,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertTrue(all(
             call["writer_kind"] == "news_job_retry"
             and call["outcome"] == "committed"
-            and call["sql_calls"] == 2
+            and call["sql_calls"] == 1
             and call["commits"] == 1
             and call["rows_attempted"] == 1
             and call["backend_pid"] is not None

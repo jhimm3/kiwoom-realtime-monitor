@@ -1450,6 +1450,16 @@
       "limits": {
         "db|src/kiwoom_monitor/infrastructure/historical_backfill.py|initialize_probe_database|connection.execute": 13
       }
+    },
+    {
+      "id": "R3-043-retire-terminal-attempt-select-20261020",
+      "reason": "Both native retry owners now use the existing claimed attempt in a state/attempt guarded UPDATE, retiring the redundant SELECT. Ratchet exactly two existing execute-site budgets2 to1 so reintroducing the second SQL site fails; original adoption/rules/history remain.",
+      "connection": "Existing NewsJobRunner claim snapshot passes required attempts to native finish/retry and matching QueryStore/CentralNewsStore protocols. One existing native connection/transaction/commit; no token, queue, schema, pool or general DB layer. Normal retry keeps three-attempt failure rule and only wakes on a matched PENDING update.",
+      "validation": "R3-043 isolated native original/current normal retry SELECT1->0, UPDATE/connection/BEGIN/COMMIT each1 with identical result. Stale success/failure and commit-ACK loss native tests protect state/output_ref. PG native-context SQL/rollback fixture is distinct from unexecuted real PostgreSQL integration. Immutable body publication/latest-reader semantic difference remains a separately observed follow-up, not approval of result fencing or legacy maintenance DELETE/recreate safety.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_jobs.py|SQLiteNewsJobStoreMixin.retry_news_job|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.retry_news_job|cursor.execute": 1
+      }
     }
   ]
 }

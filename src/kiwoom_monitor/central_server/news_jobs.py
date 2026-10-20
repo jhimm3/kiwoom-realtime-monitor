@@ -113,7 +113,8 @@ class NewsJobRunner:
                     output_ref = await self._run_ai(job)
                 else:
                     raise ValueError(f"지원하지 않는 뉴스 작업 단계입니다: {job['stage']}")
-                await asyncio.to_thread(self._store.finish_news_job, job["job_key"], output_ref)
+                await asyncio.to_thread(self._store.finish_news_job, job["job_key"], output_ref,
+                                        attempts=int(job["attempts"]))
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -129,7 +130,7 @@ class NewsJobRunner:
                 delay = min(60.0, float(2 ** min(int(job["attempts"]), 5)))
                 await asyncio.to_thread(
                     self._store.retry_news_job, job["job_key"], str(error), time() + delay,
-                    output_ref,
+                    output_ref, attempts=int(job["attempts"]),
                 )
             finally:
                 self._record_stage(job, started_at, failed)

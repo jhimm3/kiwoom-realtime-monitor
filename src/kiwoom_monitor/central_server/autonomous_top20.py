@@ -916,8 +916,9 @@ class AutonomousTop20Service:
                 now = self._now()
                 async with self._collector_lock:
                     update = self._advance(now)
-                    if update.completed is not None:
-                        await self._save_index(update.completed)
+                # The completed record is immutable; storage does not own collector RAM.
+                if update.completed is not None:
+                    await self._save_index(update.completed)
             except asyncio.CancelledError:
                 raise
             except Exception as error:

@@ -21,6 +21,119 @@ from research_test_support import (
 
 
 class ResearchProcessTests(unittest.TestCase):
+    def test_generic_cli_rejects_request_aliases_before_parsing_or_execution(self) -> None:
+        from io import StringIO
+        from kiwoom_monitor.research_process import _run_research_process
+        from research_test_support import write_campaign_request
+
+        for mode in ("invalid-json", "invalid-search", "single_run", "rank_comparison", "limited_search"):
+            for output in ("result", "cancel"):
+                with self.subTest(mode=mode, output=output), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    if mode == "limited_search":
+                        request, _ = write_campaign_request(root, max_trials=1)
+                    else:
+                        _write_empty_dataset(root)
+                        request = root / "request.json"
+                        document = (_request_document() if mode not in {"invalid-json", "invalid-search"}
+                                    else {"mode": "limited_search", "audit_source_marker": "preserve-this-input"})
+                        if mode in {"single_run", "rank_comparison"}:
+                            document["mode"] = mode
+                        request.write_text("{invalid json" if mode == "invalid-json" else json.dumps(document), encoding="utf-8")
+                    source = request.read_bytes()
+                    result, cancel = root / "result.json", root / "cancel.request"
+                    # Different spellings resolving to the source must be rejected too.
+                    alias = root / "alias" / ".." / request.name
+                    arguments = ["--request", str(request), "--result", str(alias if output == "result" else result),
+                                 "--cancel", str(alias if output == "cancel" else cancel)]
+                    rejected = False
+                    with patch("sys.stdout", new=StringIO()), patch("sys.stderr", new=StringIO()):
+                        try:
+                            _run_research_process(arguments)
+                        except SystemExit as error:
+                            self.assertEqual(2, error.code)
+                            rejected = True
+                    self.assertEqual(source, request.read_bytes())
+                    self.assertTrue(rejected, "an input alias must be rejected before publishing any result")
+                    self.assertFalse(result.exists())
+                    self.assertFalse(cancel.exists())
+                    self.assertFalse((root / "output").exists())
+
+    def test_generic_cli_protects_declared_database_dataset_and_distinct_output_channels(self) -> None:
+        from io import StringIO
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.research_process import _run_research_process
+
+        for valid in (False, True):
+            for output, target in (("result", "database"), ("cancel", "database"),
+                                   ("result", "dataset"), ("cancel", "dataset"), ("both", "result")):
+                with self.subTest(valid=valid, output=output, target=target), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    _write_empty_dataset(root)
+                    document = _request_document()
+                    if not valid:
+                        document.pop("strategy")
+                    request = root / "request.json"
+                    request.write_text(json.dumps(document), encoding="utf-8")
+                    database = root / "output/research.sqlite3"
+                    database.parent.mkdir()
+                    with closing(sqlite3.connect(database)) as connection, connection:
+                        connection.execute("CREATE TABLE original_input(marker TEXT)")
+                        connection.execute("INSERT INTO original_input VALUES('preserve native database')")
+                    dataset = root / "dataset/observations.jsonl"
+                    protected = {path: path.read_bytes() for path in (request, database, dataset, root / "dataset/manifest.json")}
+                    result, cancel = root / "result.json", root / "cancel.request"
+                    target_path = database if target == "database" else dataset if target == "dataset" else result
+                    if output == "result":
+                        result = target_path
+                    elif output == "cancel":
+                        cancel = target_path
+                    else:
+                        cancel = result
+                    rejected = False
+                    with patch("sys.stdout", new=StringIO()), patch("sys.stderr", new=StringIO()):
+                        try:
+                            _run_research_process(["--request", str(request), "--result", str(result), "--cancel", str(cancel)])
+                        except SystemExit as error:
+                            self.assertEqual(2, error.code)
+                            rejected = True
+                    self.assertEqual(protected, {path: path.read_bytes() for path in protected})
+                    self.assertTrue(rejected, "declared inputs and output channels must not alias")
+                    if target == "result":
+                        self.assertFalse(result.exists())
+                    self.assertFalse((root / "output/runs").exists())
+
+    def test_generic_cli_separate_failure_result_keeps_atomic_publication_and_original_input(self) -> None:
+        from io import StringIO
+        from kiwoom_monitor.research_process import _run_research_process
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / "request.json"
+            request.write_text('{"mode":"limited_search","audit_source_marker":"preserve-this-input"}', encoding="utf-8")
+            source = request.read_bytes()
+            result = root / "result.json"
+            old_result = b'{"status":"previous-result"}\n'
+            result.write_bytes(old_result)
+            native_replace = Path.replace
+            replacements = []
+            def publish(temporary, target):
+                self.assertEqual(result, target)
+                self.assertEqual(old_result, target.read_bytes())
+                envelope = json.loads(temporary.read_text(encoding="utf-8"))
+                self.assertEqual("failed", envelope["status"])
+                replacements.append((temporary, target))
+                return native_replace(temporary, target)
+            with patch("sys.stdout", new=StringIO()), patch.object(Path, "replace", publish):
+                code = _run_research_process(["--request", str(request), "--result", str(result)])
+            self.assertEqual(1, code)
+            self.assertEqual(source, request.read_bytes())
+            self.assertEqual(1, len(replacements))
+            self.assertIn("research request strategy must be an object", json.loads(result.read_text())["reason"])
+            self.assertFalse(replacements[0][0].exists())
+            self.assertEqual([], list(root.glob("*.tmp")))
+
     def test_decimal_cost_request_round_trips_without_float_conversion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

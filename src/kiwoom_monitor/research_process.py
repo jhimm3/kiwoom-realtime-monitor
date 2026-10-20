@@ -2262,6 +2262,10 @@ def _run_research_process(argv: list[str] | None = None) -> int:
             parser.error('comparison result/cancel must not overwrite request or database')
     leader_request = None
     if args.request is not None:
+        request_path = args.request.resolve()
+        outputs = tuple(path.resolve() for path in (args.result, args.cancel) if path is not None)
+        if len(set(outputs)) != len(outputs) or request_path in outputs:
+            parser.error("research result/cancel must not overwrite request or each other")
         try:
             request_header = json.loads(args.request.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -2271,10 +2275,21 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                 leader_request = load_research_process_request(args.request)
             except (OSError, ValueError, TypeError) as error:
                 parser.error(str(error))
-            outputs = tuple(path.resolve() for path in (args.result, args.cancel) if path is not None)
-            if (len(set(outputs)) != len(outputs) or any(path == args.request.resolve()
-                    or _is_within(path, leader_request.dataset) for path in outputs)):
+            if any(_is_within(path, leader_request.dataset) for path in outputs):
                 parser.error("leader breakout result/cancel must not overwrite request or frozen dataset")
+        elif isinstance(request_header, dict):
+            # Protect declared inputs even when full request validation will fail.
+            for name in ("database", "dataset"):
+                if not request_header.get(name):
+                    continue
+                try:
+                    input_path = _request_path(request_path.parent, request_header[name], name)
+                except (OSError, TypeError, ValueError):
+                    # The normal loader still reports malformed fields to a separate result.
+                    continue
+                if any(path == input_path or (name == "dataset" and _is_within(path, input_path))
+                       for path in outputs):
+                    parser.error("research result/cancel must not overwrite database or frozen dataset")
     try:
         if args.register_campaign and args.request is None:
             raise ValueError('--register-campaign requires --request')

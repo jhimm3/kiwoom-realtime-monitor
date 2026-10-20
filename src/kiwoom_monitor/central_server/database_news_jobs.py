@@ -100,26 +100,23 @@ class SQLiteNewsJobStoreMixin:
                 )
         return _news_job_rows(rows)
 
-    def finish_news_job(self, job_key: str, output_ref: str) -> None:
+    def finish_news_job(self, job_key: str, output_ref: str, *, attempts: int) -> None:
         with self._lock, self._connection() as connection:
             connection.execute(
                 "UPDATE central_news_jobs SET state='COMPLETED',output_ref=?,error='',updated_at=? "
-                "WHERE job_key=?", (output_ref, time(), job_key),
+                "WHERE job_key=? AND state='RUNNING' AND attempts=?", (output_ref, time(), job_key, attempts),
             )
 
     def retry_news_job(self, job_key: str, error: str, next_retry_at: float,
-                       output_ref: str = "") -> None:
+                       output_ref: str = "", *, attempts: int) -> None:
+        state = "FAILED" if attempts >= 3 else "PENDING"
         with self._lock, self._connection() as connection:
-            row = connection.execute(
-                "SELECT attempts FROM central_news_jobs WHERE job_key=?", (job_key,),
-            ).fetchone()
-            state = "FAILED" if row is not None and int(row[0]) >= 3 else "PENDING"
-            connection.execute(
+            changed = connection.execute(
                 "UPDATE central_news_jobs SET state=?,error=?,next_retry_at=?,output_ref=?,updated_at=? "
-                "WHERE job_key=?",
-                (state, error[:1000], float(next_retry_at), output_ref, time(), job_key),
-            )
-        if state == "PENDING":
+                "WHERE job_key=? AND state='RUNNING' AND attempts=?",
+                (state, error[:1000], float(next_retry_at), output_ref, time(), job_key, attempts),
+            ).rowcount
+        if changed == 1 and state == "PENDING":
             _notify_news_job_wakeup(self)
 
     def claim_news_request(self, scope: str, *, scope_limit: int, hard_limit: int,
@@ -344,7 +341,7 @@ class PostgresNewsJobStoreMixin:
                           "so this is not a full claim transaction timing.",
         }
 
-    def finish_news_job(self, job_key: str, output_ref: str) -> None:
+    def finish_news_job(self, job_key: str, output_ref: str, *, attempts: int) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         started_at = monotonic()
@@ -355,7 +352,7 @@ class PostgresNewsJobStoreMixin:
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE central_news_jobs SET state='COMPLETED',output_ref=%s,error='',updated_at=%s "
-                "WHERE job_key=%s", (output_ref, time(), job_key),
+                "WHERE job_key=%s AND state='RUNNING' AND attempts=%s", (output_ref, time(), job_key, attempts),
             )
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("news_job_finish", 1,
@@ -363,23 +360,22 @@ class PostgresNewsJobStoreMixin:
                                   db_call_id=writer.call_id)
 
     def retry_news_job(self, job_key: str, error: str, next_retry_at: float,
-                        output_ref: str = "") -> None:
+                        output_ref: str = "", *, attempts: int) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         writer = DBWriterContext(
             writer_family="news.job_retry", writer_kind="news_job_retry",
             operation="retry_news_job", rows_attempted=1,
         )
+        state = "FAILED" if attempts >= 3 else "PENDING"
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT attempts FROM central_news_jobs WHERE job_key=%s", (job_key,))
-            row = cursor.fetchone()
-            state = "FAILED" if row is not None and int(row[0]) >= 3 else "PENDING"
             cursor.execute(
                 "UPDATE central_news_jobs SET state=%s,error=%s,next_retry_at=%s,output_ref=%s,"
-                "updated_at=%s WHERE job_key=%s",
-                (state, error[:1000], float(next_retry_at), output_ref, time(), job_key),
+                "updated_at=%s WHERE job_key=%s AND state='RUNNING' AND attempts=%s",
+                (state, error[:1000], float(next_retry_at), output_ref, time(), job_key, attempts),
             )
-        if state == "PENDING":
+            changed = cursor.rowcount
+        if changed == 1 and state == "PENDING":
             _notify_news_job_wakeup(self)
 
     def claim_news_request(self, scope: str, *, scope_limit: int, hard_limit: int,
