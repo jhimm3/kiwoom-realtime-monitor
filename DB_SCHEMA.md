@@ -400,6 +400,8 @@ coverage 진단은 새 테이블이나 추정 데이터를 만들지 않고 위 
 
 checkpoint는 재시작 위치이며 연구 증거 원본이 아니다. Decision과 CandidateEvent는 같은 ID의 다른 내용으로 덮어쓸 수 없다. 이 원장은 로컬 연구 paper 체결·손익 및 실제 `trade_fills`와 분리한다.
 
+**R3-010 native 불변 저장(2026-10-20).** Shadow는 INSERT 성공 시 중복 SELECT를 생략하고 충돌일 때만 기존 canonical 내용을 비교한다. decision/candidate 쌍은 기존 단일 transaction이며 candidate 충돌이면 신규 decision도 rollback한다. 같은 본문 retry는 첫 monitor/expiry를 보존하고 다른 본문은 거절한다. 실제 PG 경합은 미실행이며 SQL fixture 검증이다.
+
 ## 중앙 O1 모의 주문 원장 (schema v16)
 
 | 테이블 | 역할/주요 키 |
@@ -437,6 +439,8 @@ checkpoint는 재시작 위치이며 연구 증거 원본이 아니다. Decision
 | `execution_mock_automation_approved_gates` / `execution_mock_automation_dispatch_by_intent` | intent별 승인 gate v2와 최초 dispatch receipt 단건 조회 문서. 같은 Decision 재호출로 receipt를 늘리지 않음 |
 | `execution_mock_automation_risk_snapshots` | `owner=mock account_ref`, `key=snapshot_id`. 계좌/run·KST 거래일·broker 관측 구간·binding/account/reconciliation/event/cost revision, FIFO 당일 실현 순손익 또는 unknown 사유, 보유/미체결·장애 근거를 보존하는 append-only 문서 |
 | `execution_mock_automation_current_risk` | `owner=key=mock account_ref`. 단조 증가한 최신 risk reconciliation revision의 단건 조회 문서. 운영 recovery/gate는 이 문서와 같은 snapshot만 사용 |
+
+**R3-010 문서별 계약(2026-10-20).** ForwardEvaluationRepository의 불변 저장은 기존 central_documents와 (collection, owner, document_key) UNIQUE를 사용하는 native insert_immutable_document를 호출한다. 같은 연결의 첫 SELECT에서 동일 decoded mapping이면 read-only False, 다르면 ValueError다. missing은 기존 provider의 receipt/codec로 INSERT DO NOTHING하고 경합 winner가 있으면 같은 transaction에서 재조회·비교한다. 반환은 commit 성공 후이며 첫 receipt를 유지한다. JSON 왕복 불일치는 쓰기 전에 거절하고 commit 오류/ACK 유실은 예외로 전달한다. 가변 upsert·latest control/Risk와 기존 claim transaction은 그대로다. schema/테이블/collection/일반 API 권한은 추가하지 않았다. 서로 다른 stage revision CAS·여러 문서/현재 포인터의 원자성은 별도 잔여다.
 
 이 컬렉션들은 공개 콘텐츠 API allowlist에 넣지 않은 NAS 내부 문서다. 불변 이력 key는 내용 hash를 사용하고 현재 상태 문서는 명시 identity key와 조건부 control revision을 사용한다. O1의 단일 NAS 실행자 전제를 그대로 사용하므로 별도 테이블이나 중앙 schema v17을 추가하지 않는다. O2a stage 저장은 보고서 통과와 분리된 명시 작업이며 `approved_for_live`를 만들 수 없다. O2-M0 복구 통과도 신규 주문을 열지 않으며 승인된 한 Decision의 intent claim에서 현재 control revision을 다시 확인한다.
 ## O2-Me1 자동 모의운용 후보 게시 문서

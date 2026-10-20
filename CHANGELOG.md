@@ -1,3 +1,9 @@
+## 2026-10-20 R3-010 불변 저장 경계 (로컬 미배포)
+
+`2bd43df`: 승인 문서의 조회→가변 UPSERT→재조회를 기존 DB owner의 원자 불변 insert/동일 no-op/충돌 비교로 교체했다. native 신규 연결3→1·SELECT2→1, 기존 동일 문서는 read-only/첫 receipt를 유지한다. Shadow도 INSERT 충돌 뒤 본문 비교와 decision/candidate pair rollback을 보완했다. 관련18모듈 **고유 739건 통과**(worker 소요 합계 629.437초, 두 묶음 병렬 실행). 변경10개 검사ID·발견/실행ID·현재 소스 일치·worker/자식 종료·TEMP 정리를 대조했다.
+
+**R3-010 전체는 진행**이다. 이번 per-key immutable/Shadow 경계는 로컬 검증했고, 다음은 기존 save_stage_revision의 서로 다른 revision ID 간 predecessor CAS와 binding 전체 history의 범위 조회다. stage/profile/binding/lineage 검증·최신 STOP/Risk/control read·native claim은 보존한다. admission/recovery context 재사용은 동일 안전시점 근거가 생긴 범위만 검토한다. 여러 문서/현재 포인터를 묶는 원자성은 이번 per-key 작업으로 해결되지 않는다. 실제 PG/CI/NAS·OS crash 수락은 미검증이다.
+
 ## 2026-10-19 R3-005 기준선 분봉 범위·native 입력 연결 (로컬 미배포)
 
 로컬 제품·검사 `4841f7a`에서 기존 CandidateMonitor의 정책 기준선 조회를 현재 KST 거래일과 정책 window의 교집합으로 제한했다. SQL은 cut.floor 기준 start 포함/end 제외이며 기존 (cut-2초).floor/commit token 캐시는 그대로다. 빈 교집합·미설정·subminute는 조회하지 않는다. 실제 native 반환의 nested metadata는 기존 codec로 품질/출처/가용시각4필드에 연결해, 정상 완결봉도 UNAVAILABLE이던 입력 연결을 복구했다. 20종목×450분 fixture의 실제 native 반환9,000→100(5분×20), SELECT20·연결20 유지/분봉 쓰기0이다. 같은 cache key의 추가 read0/commit token 변경 뒤 추가20이다. 정상 native UNAVAILABLE→COMPLETE는 연결 복구에 따른 의도한 동작 변화이고, 이를 포함한 정규화 full-day oracle와 bounded reference/observation hash는11조건에서 동일하다. 관련5모듈 **361건/127.269초 통과**. 구조·29번째 증분 검토/실행 ID·소스 불변·worker/자식 종료·임시 정리를 확인했다.
