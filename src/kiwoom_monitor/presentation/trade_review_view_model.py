@@ -30,7 +30,7 @@ from kiwoom_monitor.application.trade_journal_summary import TradeEpisode
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_cost_service import (
     DailyTradeCost,
-    allocate_episode_cost,
+    allocate_episode_costs,
     estimate_episode_cost,
 )
 from kiwoom_monitor.presentation.trade_review_formatting import (
@@ -101,7 +101,7 @@ def build_trade_history_summary_view_model(
     episode_displays: Mapping[str, TradeHistoryEpisodeDisplay],
 ) -> TradeHistorySummaryViewModel:
     """저장소나 Qt 객체 없이 기간 요약과 매매 묶음 표의 표시값을 만든다."""
-    costs = tuple(allocate_episode_cost(episode, visible_fills, visible_costs) for episode in episodes)
+    costs = allocate_episode_costs(episodes, visible_fills, visible_costs)
     estimated_costs = tuple(
         estimate_episode_cost(episode, estimated_buy_cost_rate, estimated_sell_cost_rate)
         for episode in episodes

@@ -31,6 +31,60 @@ class AlphaCodeClient:
 
 
 class TradeCostServiceTests(unittest.TestCase):
+    def test_batch_cost_allocation_preserves_scopes_rounding_and_missing_costs(self) -> None:
+        from dataclasses import replace
+        from datetime import timedelta
+        from kiwoom_monitor.application.trade_cost_service import allocate_episode_costs
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
+
+        origin = AccountScope("kiwoom", AccountEnvironment.REAL, "11111111-1111-4111-8111-111111111111")
+        canonical = AccountScope("kiwoom", AccountEnvironment.REAL, "22222222-2222-4222-8222-222222222222")
+        other = AccountScope("kiwoom", AccountEnvironment.REAL, "33333333-3333-4333-8333-333333333333")
+        at = datetime(2026, 9, 10, 9)
+
+        def fill(order, amount, code="005930", side="매수", moment=at, scope=origin, mapped=canonical):
+            return TradeFill(order, code, "fixture", side, moment, 1, amount, origin_scope=scope, canonical_scope=mapped)
+
+        first, second = fill("first", 1), fill("second", 3)
+        other_buy = fill("other", 1, scope=other, mapped=None)
+        legacy = fill("legacy", 1, scope=LEGACY_ACCOUNT_SCOPE, mapped=None)
+        previous = fill("previous", 1, moment=at - timedelta(days=1))
+        other_sell = fill("sell", 1, side="매도", scope=other, mapped=None)
+        missing, zero, outside = fill("missing", 1, "MISS00"), fill("zero", 0, "ZERO00"), fill("outside", 4, "OUT000")
+        all_fills = (first, second, other_buy, legacy, previous, other_sell, missing, zero)
+        episodes = tuple(group_trade_episodes((value,))[0] for value in (*all_fills, outside))
+        partial = replace(episodes[0], group_id="partial", fills=(first, missing))
+        empty = replace(episodes[0], group_id="empty", fills=())
+        episodes += (partial, empty)
+
+        def cost(value, total, settlement_offset=2):
+            return DailyTradeCost(value.filled_at.date(), value.filled_at.date() + timedelta(days=settlement_offset),
+                value.stock_code, value.side, value.price, value.price - total, total, 0, total,
+                value.origin_scope, value.canonical_scope)
+
+        # The same effective key uses the last row, irrespective of settlement date.
+        costs = (cost(first, 99), cost(other_buy, 9), cost(legacy, 7), cost(previous, 5),
+                 cost(other_sell, 11), cost(zero, 13), cost(outside, 17), cost(first, 2, 3))
+        # 2 * 1/4 and 2 * 3/4 keep Python's existing half-even results 0 and 2.
+        expected = ((0, None, True, True), (2, None, True, True), (9, None, True, False),
+            (7, None, True, False), (5, None, True, False), (11, None, True, False),
+            (0, None, False, False), (0, None, True, False), (17, None, True, False),
+            (0, None, False, True), (0, None, False, False))
+
+        def values(results):
+            return tuple((row.total_cost, row.net_realized_profit, row.complete, row.allocated) for row in results)
+
+        self.assertEqual(expected, values(allocate_episode_costs(episodes, all_fills, costs)))
+        self.assertEqual(expected, values(tuple(allocate_episode_cost(episode, all_fills, costs) for episode in episodes)))
+        self.assertEqual(expected, values(allocate_episode_costs(episodes, iter(all_fills), iter(costs))))
+        self.assertEqual(expected, values(tuple(allocate_episode_cost(episode, iter(all_fills), iter(costs)) for episode in episodes)))
+        fill_stream, cost_stream = iter(all_fills), iter(costs)
+        self.assertEqual((expected[0], (0, None, False, False)), values((
+            allocate_episode_cost(episodes[0], fill_stream, cost_stream),
+            allocate_episode_cost(episodes[1], fill_stream, cost_stream))))
+        self.assertEqual(tuple(reversed(expected)), values(allocate_episode_costs(tuple(reversed(episodes)), all_fills, costs)))
+        self.assertEqual((), allocate_episode_costs((), iter(()), iter(())))
+
     def test_preserves_letters_inside_new_stock_codes(self) -> None:
         values = TradeCostService(AlphaCodeClient()).load_period(date(2026, 8, 6), date(2026, 8, 6), date(2026, 8, 30))
         self.assertEqual("0039P0", values[0].stock_code)

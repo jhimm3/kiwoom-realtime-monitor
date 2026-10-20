@@ -83,6 +83,26 @@ def episode():
 
 
 class TradeAnalysisPreparationServiceTests(unittest.TestCase):
+    def test_snapshot_warning_callback_is_per_call_and_default_loader_contract_stays_positional(self):
+        repository = FakeRepository()
+        calls = []
+        def old_loader(code, started, ended):
+            calls.append((code, started, ended))
+            return ()
+        service = TradeAnalysisPreparationService(repository, Path("unused.sqlite3"), old_loader, lambda *_args: ())
+        arguments = dict(active_pack=default_strategy_pack(), strategy_packs=(), result_mode="together")
+        current = episode()
+        service.prepare(current, (), **arguments)
+        self.assertEqual([("000001", current.started_at, current.ended_at)], calls)
+        observer = Mock()
+        loader = Mock(return_value=())
+        service = TradeAnalysisPreparationService(repository, Path("unused.sqlite3"), loader, lambda *_args: ())
+        service.prepare(current, (), **arguments, on_snapshot_backfill_error=observer)
+        loader.assert_called_once_with("000001", current.started_at, current.ended_at, on_backfill_error=observer)
+        loader.reset_mock()
+        service.prepare(current, (), **arguments)
+        loader.assert_called_once_with("000001", current.started_at, current.ended_at)
+
     def test_prepares_daily_rows_and_persists_automatic_result(self) -> None:
         repository = FakeRepository()
         snapshots: list[tuple[str, datetime, datetime]] = []

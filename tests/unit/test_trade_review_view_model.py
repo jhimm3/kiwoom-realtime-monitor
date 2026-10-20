@@ -20,6 +20,52 @@ from kiwoom_monitor.presentation.trade_review_view_model import (
 
 
 class TradeReviewViewModelTests(unittest.TestCase):
+    def test_history_summary_builds_daily_cost_inputs_once_per_render(self) -> None:
+        class Counted(tuple):
+            def __iter__(self):
+                self.iterations += 1
+                for value in super().__iter__():
+                    self.visits += 1
+                    yield value
+
+        at = datetime(2026, 9, 10, 9)
+        fills = tuple(
+            TradeFill(str(index * 2 + side), f"{index:06d}", "fixture", name,
+                      at + timedelta(minutes=side), 1, price)
+            for index in range(8) for side, name, price in ((0, "매수", 100), (1, "매도", 110))
+        )
+        episodes = group_trade_episodes(fills)
+        costs = tuple(
+            DailyTradeCost(at.date(), at.date() + timedelta(days=2), f"{index:06d}", side,
+                           100, 100 - total, total, 0, total)
+            for index in range(8) for side, total in (("매수", 2), ("매도", 3))
+        )
+        counted_fills, counted_costs = Counted(fills), Counted(costs)
+        for values in (counted_fills, counted_costs):
+            values.iterations = values.visits = 0
+        arguments = dict(visible_fills=counted_fills, visible_costs=counted_costs,
+            selected_start=at.date(), selected_end=at.date(), estimated_buy_cost_rate=0.015,
+            estimated_sell_cost_rate=0.215, episode_displays={
+                episode.group_id: TradeHistoryEpisodeDisplay(None, {}, "미작성", "미조회")
+                for episode in episodes})
+
+        model = build_trade_history_summary_view_model(episodes=episodes, **arguments)
+
+        self.assertEqual(8, len(model.rows))
+        self.assertTrue(all(row.values[8:10] == ("5원", "+5원") for row in model.rows))
+        self.assertIn("추정 실현손익 예정 +80원", model.period_summary_text)
+        self.assertIn("비용 반영 예정 +40원(실제 비용 8/8건)", model.period_summary_text)
+        with self.subTest(cost="all fills denominator and trading days"):
+            self.assertEqual((2, 32), (counted_fills.iterations, counted_fills.visits))
+        with self.subTest(cost="actual costs map"):
+            self.assertEqual((1, 16), (counted_costs.iterations, counted_costs.visits))
+        for values in (counted_fills, counted_costs):
+            values.iterations = values.visits = 0
+        empty = build_trade_history_summary_view_model(episodes=(), **arguments)
+        self.assertEqual((), empty.rows)
+        self.assertEqual((1, 16), (counted_fills.iterations, counted_fills.visits))
+        self.assertEqual((0, 0), (counted_costs.iterations, counted_costs.visits))
+
     def test_builds_history_summary_with_actual_cost_and_cycle_override(self) -> None:
         at = datetime(2026, 9, 10, 9, 10)
         fills = (

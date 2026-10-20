@@ -392,7 +392,7 @@ def _run_news_process(arguments: list[str]) -> int:
             source.server_url, source.access_token,
         ))
         main_database_path = database_path.with_name("monitor.sqlite3")
-        last_content_signature = _news_content_signature(database_path)
+        # Check the existing delta manifest once after restart, including unsent edits.
         sync_news_catalog = source.mode != "personal_server"
 
         def schedule_content_sync() -> None:
@@ -407,15 +407,19 @@ def _run_news_process(arguments: list[str]) -> int:
                 nonlocal last_content_signature
                 try:
                     if local_changed:
-                        content_sync.push(
+                        uploaded_signature = _news_content_signature(database_path)
+                        pushed = content_sync.push(
                             main_database_path, database_path,
                             sync_news_catalog=sync_news_catalog,
                         )
+                        if (not pushed.pending_collections
+                                and uploaded_signature == _news_content_signature(database_path)):
+                            last_content_signature = uploaded_signature
                     pulled = content_sync.pull(
                         main_database_path, database_path,
                         sync_news_catalog=sync_news_catalog,
                     )
-                    last_content_signature = _news_content_signature(database_path)
+                    # Pull writes and concurrent edits are checked against the manifest next tick.
                     logger.info(
                         "중앙 콘텐츠 동기화 완료: 내려받기 %s건, 로컬 변경=%s",
                         pulled.total, local_changed,

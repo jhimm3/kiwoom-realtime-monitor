@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -120,6 +121,13 @@ class MockCredentialOwner:
         self._close_task = None
         self._on_change = on_change or (lambda *_: None)
 
+    async def _publish_change(self, profile_id, bundle):
+        # Withdrawal must finish downstream runner work before the old bundle
+        # releases its native lease. Existing synchronous listeners still work.
+        changed = self._on_change(profile_id, bundle)
+        if inspect.isawaitable(changed):
+            await changed
+
     def hooks(self) -> CredentialRuntimeHooks:
         return CredentialRuntimeHooks(self.prepare, self._unused_drain, self.publish, self.resume,
                                       self.active_revision, self.drain, self.release, self.begin_commit,
@@ -235,7 +243,7 @@ class MockCredentialOwner:
             await self.resume(profile_id)
         except Exception:
             self.errors[profile_id] = "MOCK_ACCOUNT_STARTUP_FAILED"
-            self._on_change(profile_id, None)
+            await self._publish_change(profile_id, None)
         finally:
             self._booting.discard(profile_id)
             if candidate is not None: self.release(profile_id, candidate)
@@ -398,7 +406,7 @@ class MockCredentialOwner:
         self._bundles.pop(profile_id, None); self._revisions.pop(profile_id, None)
         self._settings_revisions.pop(profile_id, None)
         self._disabled_scopes.pop(profile_id, None)
-        self._on_change(profile_id, None)
+        await self._publish_change(profile_id, None)
         if plan.previous is not None: await plan.previous.close(close_broker=False)
         await plan.broker.begin_credential_change()
         plan.drained = True
@@ -419,7 +427,7 @@ class MockCredentialOwner:
             self._settings_revisions[profile_id] = configuration["revision"]
             self.errors.pop(profile_id, None)
             plan.published = True
-            self._on_change(profile_id, None)
+            await self._publish_change(profile_id, None)
             return
         await plan.broker.activate_prepared_credentials(plan.prepared)
         await plan.broker.end_credential_change()
@@ -453,7 +461,7 @@ class MockCredentialOwner:
         self._settings_revisions[profile_id] = configuration["revision"]
         self.errors.pop(profile_id, None)
         plan.published = True
-        self._on_change(profile_id, bundle)
+        await self._publish_change(profile_id, bundle)
 
     async def resume(self, profile_id):
         plan = self._applying.get(profile_id)
@@ -467,7 +475,7 @@ class MockCredentialOwner:
             if plan.previous is None:
                 await plan.broker.close()
                 self._brokers.discard(plan.broker)
-            self._on_change(profile_id, None)
+            await self._publish_change(profile_id, None)
             plan.resumed = True
             return
         if plan.broker._credential_paused: await plan.broker.end_credential_change()
@@ -489,7 +497,7 @@ class MockCredentialOwner:
             self._contexts[profile_id] = restored; self._bundles[profile_id] = restored
             self._revisions[profile_id] = plan.previous_revision
             self._settings_revisions[profile_id] = plan.previous_settings_revision
-            self._on_change(profile_id, restored)
+            await self._publish_change(profile_id, restored)
         elif previous is None:
             await plan.broker.close()
             self._brokers.discard(plan.broker)
@@ -587,7 +595,7 @@ class MockCredentialOwner:
             self._bundles.pop(profile_id, None)
             self._revisions.pop(profile_id, None)
             self._settings_revisions.pop(profile_id, None)
-            self._on_change(profile_id, None)
+            await self._publish_change(profile_id, None)
             await old.close(close_broker=False)
             await old.broker.begin_credential_change()
             saved = await asyncio.to_thread(self.store.save_account_settings,
@@ -609,7 +617,7 @@ class MockCredentialOwner:
             self._revisions[profile_id] = credential_revision
             self._settings_revisions[profile_id] = saved["revision"]
             self.errors.pop(profile_id, None)
-            self._on_change(profile_id, new)
+            await self._publish_change(profile_id, new)
             return {"settings": saved, "applied_revision": saved["revision"]}
         except Exception:
             if new is not None: await new.close(close_broker=False)
@@ -678,7 +686,7 @@ class MockCredentialOwner:
             ):
                 raise CredentialOperationError("ACCOUNT_RUNTIME_SWITCH_REQUIRES_FLAT", 409)
             self._bundles.pop(profile_id, None)
-            self._on_change(profile_id, None)
+            await self._publish_change(profile_id, None)
             await old.close(close_broker=False)
             latest = await asyncio.to_thread(self.store.load_account_settings, scope)
             if latest["revision"] != expected_settings_revision:
@@ -710,7 +718,7 @@ class MockCredentialOwner:
                 await new.close(close_broker=False)
                 raise RuntimeError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
             self._bundles[profile_id] = new
-            self._on_change(profile_id, new)
+            await self._publish_change(profile_id, new)
             return new
         except CredentialOperationError:
             if old.runtime._active and old.gateway is not None:

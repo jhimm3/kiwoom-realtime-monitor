@@ -81,31 +81,43 @@ def estimate_episode_cost(
 def allocate_episode_cost(
     episode: TradeEpisode, all_fills: tuple[TradeFill, ...], costs: tuple[DailyTradeCost, ...],
 ) -> EpisodeTradeCost:
+    return allocate_episode_costs((episode,), all_fills, costs)[0]
+
+
+def allocate_episode_costs(
+    episodes: tuple[TradeEpisode, ...], all_fills: tuple[TradeFill, ...], costs: tuple[DailyTradeCost, ...],
+) -> tuple[EpisodeTradeCost, ...]:
+    """Allocate one render's daily costs using the same complete fill denominators."""
+    if not episodes:
+        return ()
     cost_map = {
         (value.effective_scope, value.fill_date, value.stock_code, value.side): value
         for value in costs
     }
     all_amounts: dict[tuple[AccountScope, date, str, str], int] = {}
-    episode_amounts: dict[tuple[AccountScope, date, str, str], int] = {}
     for fill in all_fills:
         key = (fill.effective_scope, fill.filled_at.date(), fill.stock_code, fill.side)
         all_amounts[key] = all_amounts.get(key, 0) + fill.quantity * fill.price
-    for fill in episode.fills:
-        key = (fill.effective_scope, fill.filled_at.date(), fill.stock_code, fill.side)
-        episode_amounts[key] = episode_amounts.get(key, 0) + fill.quantity * fill.price
-    total_cost = 0
-    complete = bool(episode_amounts)
-    allocated = False
-    for key, amount in episode_amounts.items():
-        actual = cost_map.get(key)
-        if actual is None:
-            complete = False
-            continue
-        denominator = all_amounts.get(key, amount)
-        allocated = allocated or denominator != amount
-        total_cost += round(actual.total_cost * amount / denominator) if denominator else 0
-    net_profit = episode.summary.realized_profit - total_cost if complete and episode.summary.open_quantity == 0 and episode.summary.matched_cost else None
-    return EpisodeTradeCost(total_cost, net_profit, complete, allocated)
+    values: list[EpisodeTradeCost] = []
+    for episode in episodes:
+        episode_amounts: dict[tuple[AccountScope, date, str, str], int] = {}
+        for fill in episode.fills:
+            key = (fill.effective_scope, fill.filled_at.date(), fill.stock_code, fill.side)
+            episode_amounts[key] = episode_amounts.get(key, 0) + fill.quantity * fill.price
+        total_cost = 0
+        complete = bool(episode_amounts)
+        allocated = False
+        for key, amount in episode_amounts.items():
+            actual = cost_map.get(key)
+            if actual is None:
+                complete = False
+                continue
+            denominator = all_amounts.get(key, amount)
+            allocated = allocated or denominator != amount
+            total_cost += round(actual.total_cost * amount / denominator) if denominator else 0
+        net_profit = episode.summary.realized_profit - total_cost if complete and episode.summary.open_quantity == 0 and episode.summary.matched_cost else None
+        values.append(EpisodeTradeCost(total_cost, net_profit, complete, allocated))
+    return tuple(values)
 
 
 class TradeCostService:

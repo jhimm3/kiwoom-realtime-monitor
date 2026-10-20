@@ -147,6 +147,7 @@ class TradeAnalysisPreparationService:
         active_pack: AnalysisStrategyPack,
         strategy_packs: tuple[StrategyPackManifest, ...],
         result_mode: str,
+        on_snapshot_backfill_error: Callable[[str, Exception], None] | None = None,
     ) -> PreparedTradeAnalysis:
         code = episode.summary.stock_code
         base_day = episode.ended_at.date()
@@ -208,10 +209,14 @@ class TradeAnalysisPreparationService:
                 account_scope=origin_scope, canonical_scope=canonical_scope,
             )
 
+        snapshot_options = (
+            {"on_backfill_error": on_snapshot_backfill_error}
+            if on_snapshot_backfill_error is not None else {}
+        )
         entry_snapshots = (
-            self._snapshot_loader(code, episode.started_at, episode.ended_at)
+            self._snapshot_loader(code, episode.started_at, episode.ended_at, **snapshot_options)
             if account_scope == LEGACY_ACCOUNT_SCOPE
-            else self._snapshot_loader(code, episode.started_at, episode.ended_at, account_scope)
+            else self._snapshot_loader(code, episode.started_at, episode.ended_at, account_scope, **snapshot_options)
         )
         linked_news = self._linked_news_loader(episode.group_id, code, account_scope)
         execution_refs = tuple(dict.fromkeys((

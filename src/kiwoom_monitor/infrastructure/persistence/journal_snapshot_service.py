@@ -91,6 +91,7 @@ def load_episode_entry_snapshots(
     *,
     news_loader: NewsAtExecution = news_at_execution,
     account_scope: AccountScope | None = None,
+    on_backfill_error: Callable[[str, Exception], None] | None = None,
 ) -> tuple[TradeEntrySnapshot, ...]:
     """회차 주변 스냅샷을 읽고 뉴스가 비어 있을 때만 장후 자료를 연결한다."""
     try:
@@ -110,7 +111,7 @@ def load_episode_entry_snapshots(
 
     enriched: list[TradeEntrySnapshot] = []
     news_items_by_code: dict[str, tuple[StockNewsItem, ...]] = {}
-    for snapshot in snapshots:
+    for index, snapshot in enumerate(snapshots):
         if snapshot.news:
             enriched.append(snapshot)
             continue
@@ -121,7 +122,13 @@ def load_episode_entry_snapshots(
         else:
             news = news_loader(news_repository, snapshot)
         if news:
-            repository.save_snapshot_news_backfill(snapshot.execution_key, news)
+            try:
+                repository.save_snapshot_news_backfill(snapshot.execution_key, news)
+            except (OSError, sqlite3.Error) as error:
+                if on_backfill_error is None:
+                    raise
+                on_backfill_error(snapshot.execution_key, error)
+                return (*enriched, *snapshots[index:])
             snapshot = replace(snapshot, news=mark_news_backfilled(news))
         enriched.append(snapshot)
     return tuple(enriched)

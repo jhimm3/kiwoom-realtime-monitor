@@ -307,7 +307,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     if credential_runtime is not None and active.account_identity_registry_enabled:
         from .mock_runtime import MockCredentialOwner
 
-        def publish_mock_bundle(profile_id, bundle):
+        async def publish_mock_bundle(profile_id, bundle):
             nonlocal mock_bundle, mock_account_monitor, mock_account_realtime, mock_order_gateway
             if bundle is not None:
                 bundle.monitor.set_position_observation_listener(lambda: account_position_changed(bundle.account_ref))
@@ -326,6 +326,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                  [main_binding] if main_binding is not None else []) +
                 list(mock_owner.account_bindings())
             )
+            if mock_automation_supervisor is not None:
+                await mock_automation_supervisor.bundle_changed(profile_id, bundle)
 
         mock_owner = MockCredentialOwner(store, credential_vault,
             hmac_key=active.account_identity_key(), legacy_bundle=mock_bundle,

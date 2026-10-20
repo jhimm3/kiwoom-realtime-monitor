@@ -144,9 +144,9 @@ class JournalWindow(QMainWindow):
         self._trade_analysis_preparer = TradeAnalysisPreparationService(
             self._repo,
             monitor_db,
-            lambda code, started_at, ended_at, account_scope=None: load_episode_entry_snapshots(
+            lambda code, started_at, ended_at, account_scope=None, *, on_backfill_error=None: load_episode_entry_snapshots(
                 self._repo, self._snapshot_news_repo, code, started_at, ended_at,
-                account_scope=account_scope,
+                account_scope=account_scope, on_backfill_error=on_backfill_error,
             ),
             lambda group_id, code, account_scope: (
                 self._snapshot_news_repo.load_journal_linked(group_id, code, account_scope)
@@ -1545,8 +1545,9 @@ class JournalWindow(QMainWindow):
         closed = wins + losses
         tag_counts: dict[str, int] = {}
         rating_counts: dict[str, int] = {}
+        reviews = self._repo.load_reviews(tuple(episode.group_id for episode in self._episodes))
         for episode in self._episodes:
-            review = self._repo.load_review(episode.group_id)
+            review = reviews.get(episode.group_id, TradeReview(episode.group_id))
             rating_counts[review.rating] = rating_counts.get(review.rating, 0) + 1
             for tag in review.tags.replace("#", "").split(","):
                 normalized = tag.strip()
@@ -1981,12 +1982,14 @@ class JournalWindow(QMainWindow):
 
     def _show_trade_analysis(self, episode: TradeEpisode, rows: tuple[tuple[object, ...], ...]) -> None:
         self._journal_news_button.setEnabled(True)
+        backfill_errors: list[str] = []
         prepared = self._trade_analysis_preparer.prepare(
             episode,
             rows,
             active_pack=self._active_strategy_pack,
             strategy_packs=self._strategy_packs,
             result_mode=self._strategy_result_mode,
+            on_snapshot_backfill_error=lambda _key, error: backfill_errors.append(str(error)),
         )
         self._journal_news_button.setText(f"관련 뉴스 보기 · 고정 {len(prepared.linked_news)}건")
         analyses = analyze_trade_cycles(
@@ -2045,6 +2048,13 @@ class JournalWindow(QMainWindow):
             self._summary_table.setItem(row, 14, QTableWidgetItem(prepared.type_selection.selected_type_label))
         self._analysis_data_status.setText(view_model.data_status_text)
         self._analysis_label.setPlainText(view_model.analysis_text)
+        warning_prefix = "뉴스 보완 저장 실패"
+        if backfill_errors:
+            warning = f"{warning_prefix} · 저장된 스냅샷으로 표시 · {backfill_errors[0]}"
+            self._status.setText(warning)
+            self._analysis_data_status.setText(f"{view_model.data_status_text}\n{warning}")
+        elif self._status.text().startswith(warning_prefix):
+            self._status.setText("매매 분석 표시 완료")
 
     def _open_active_news(self) -> None:
         episode = self._active_episode

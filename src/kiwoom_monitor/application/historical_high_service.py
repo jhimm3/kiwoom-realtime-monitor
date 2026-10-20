@@ -10,6 +10,10 @@ from calendar import monthrange
 from typing import Any, Callable, Protocol
 
 
+# Direct-cache calculation basis, shared by factory eligibility and UI refresh.
+HISTORICAL_HIGH_BASIS_VERSION = "6"
+
+
 class HistoricalChartClient(Protocol):
     def request_with_continuation(self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str = "N", next_key: str = "") -> tuple[dict[str, Any], bool, str]: ...
 
@@ -75,40 +79,60 @@ class HistoricalHighService:
                 evidence.extend(self._load_market(f"{code}_NX", high_250, source_day))
             except Exception:
                 pass
-        if not evidence:
-            return HistoricalHighTarget(None, None, None)
-        winner = max(evidence, key=lambda item: item.high_price)
-        years = [int(item.trade_date[:4]) for item in evidence if item.trade_date[:4].isdigit()]
-        return HistoricalHighTarget(winner.high_price, min(years), max(years), winner.trade_date, tuple(evidence))
+        return self._target_from_evidence(evidence)
 
     def _load_incremental(
         self, code: str, cache: HistoricalHighCache, high_250: int | None, source_day: date,
     ) -> HistoricalHighTarget:
         checked = cache.checked_on.replace("-", "")[:8]
+        floor = max(cache.target.price or 0, high_250 or 0)
+        evidence = list(cache.target.evidence)
+        refined = False
+        markets = (code, f"{code}_NX") if self._include_nxt else (code,)
+        for market_code in markets:
+            try:
+                changes = self._load_incremental_market(
+                    market_code, checked, floor, source_day,
+                    # Legacy evidence has no per-market coverage. NXT may
+                    # previously have failed or have been omitted entirely.
+                    use_checked_cut=(market_code == code),
+                )
+            except Exception:
+                if market_code == code:
+                    raise
+                continue  # Same optional NXT fallback as the fresh path.
+            if changes is None:
+                return self._load_fresh(code, high_250, source_day)
+            market_evidence, market_refined = changes
+            evidence.extend(market_evidence)
+            refined = refined or market_refined
+        if high_250 is not None and (not refined or high_250 > max(item.high_price for item in evidence)):
+            evidence.append(HistoricalHighEvidence("250day", source_day.strftime("%Y%m%d"), high_250))
+        return self._target_from_evidence(evidence)
+
+    def _load_incremental_market(
+        self, code: str, checked: str, floor: int, source_day: date, *, use_checked_cut: bool,
+    ) -> tuple[list[HistoricalHighEvidence], bool] | None:
+        """Return this market's new evidence, or None when the old basis changed."""
         since_month = checked[:6]
         today = source_day.strftime("%Y%m%d")
-        yearly = self._load_rows("ka10094", "stk_yr_pole_chart_qry", code, today, since=checked[:4])
-        floor = max(cache.target.price or 0, high_250 or 0)
+        yearly = self._load_rows("ka10094", "stk_yr_pole_chart_qry", code, today,
+                                 since=checked[:4] if use_checked_cut else "")
         years_to_refine: set[str] = set()
         for row in yearly:
             high = _price(row.get("high_pric"))
             if _has_adjustment(row) or (high is not None and high > floor):
                 years_to_refine.add(_date_text(row)[:4])
         if not years_to_refine:
-            evidence = list(cache.target.evidence)
-            if high_250 is not None:
-                evidence.append(HistoricalHighEvidence("250day", today, high_250))
-            winner = max(evidence, key=lambda item: item.high_price)
-            years = [int(item.trade_date[:4]) for item in evidence if item.trade_date[:4].isdigit()]
-            return HistoricalHighTarget(winner.high_price, min(years), max(years), winner.trade_date, tuple(evidence))
+            return [], False
         monthly: list[dict[str, Any]] = []
         for year in sorted(year for year in years_to_refine if len(year) == 4 and year.isdigit()):
             # 과거 연말을 기준일로 쓰면 그 이후 액면분할·병합이 반영되지 않은
             # 당시 가격이 반환된다. 항상 오늘 기준 수정주가로 과거까지 거슬러
             # 조회한 뒤 필요한 연도만 고른다.
             rows = self._load_rows("ka10083", "stk_mth_pole_chart_qry", code, today, prefix=year)
-            monthly.extend(row for row in rows if year != checked[:4] or _date_text(row)[:6] >= since_month)
-        evidence = list(cache.target.evidence)
+            monthly.extend(row for row in rows if not use_checked_cut or year != checked[:4] or _date_text(row)[:6] >= since_month)
+        evidence: list[HistoricalHighEvidence] = []
         for month_row in sorted(monthly, key=_date_text):
             month = _date_text(month_row)[:6]
             if _has_adjustment(month_row):
@@ -118,14 +142,27 @@ class HistoricalHighService:
                     # 저장된 근거는 이전 조회일의 주식 단위다. 새 권리변동이
                     # 생기면 수정비율을 직접 곱하지 않고, 키움이 오늘 기준으로
                     # 보정한 전체 차트를 다시 받아 DB 근거를 통째로 교체한다.
-                    return self._load_fresh(code, high_250, source_day)
+                    return None
                 detailed = [item for row in daily if (item := _evidence("day", row)) is not None]
                 evidence.extend(detailed)
             elif (item := _evidence("month", month_row)) is not None:
                 evidence.append(item)
-        by_key = {(item.period, item.trade_date): item for item in evidence}
-        evidence = list(by_key.values())
+        return evidence, True
+
+    @staticmethod
+    def _target_from_evidence(evidence: list[HistoricalHighEvidence]) -> HistoricalHighTarget:
+        if not evidence:
+            return HistoricalHighTarget(None, None, None)
         winner = max(evidence, key=lambda item: item.high_price)
+        # The native evidence key has no market column. Keep the observed max
+        # for each key so INSERT OR REPLACE cannot discard the winning price.
+        # Select the winner before compaction to retain the first observed tie.
+        by_key: dict[tuple[str, str], HistoricalHighEvidence] = {}
+        for item in evidence:
+            key = (item.period, item.trade_date)
+            if key not in by_key or item.high_price > by_key[key].high_price:
+                by_key[key] = item
+        evidence = list(by_key.values())
         years = [int(item.trade_date[:4]) for item in evidence if item.trade_date[:4].isdigit()]
         return HistoricalHighTarget(winner.high_price, min(years), max(years), winner.trade_date, tuple(evidence))
 

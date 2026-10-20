@@ -20,6 +20,125 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQuery
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
+    def test_optional_snapshot_write_warns_manual_read_but_auto_fails_then_retries(self):
+        from dataclasses import replace
+        from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QSignalBlocker, QTimer, Qt
+        from PySide6.QtWidgets import QApplication, QTableWidgetItem
+        from qt_settings_test_support import wait_until
+        from kiwoom_monitor.application.news_analysis import NewsAssessment
+        from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import scoped_snapshot_execution_key
+        from kiwoom_monitor.presentation.journal_workers import AnalysisEnrichmentWorker
+        from tests.unit import test_journal_snapshot_service as snapshot_tests
+
+        type(self)._application = QApplication.instance() or QApplication([])
+        app = type(self)._application
+        origin = AccountScope("kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111")
+        canonical = AccountScope("kiwoom", AccountEnvironment.MOCK, "22222222-2222-4222-8222-222222222222")
+        at = datetime(2026, 9, 9, 9, 10)
+        current = [as_kst(at + timedelta(days=1))]
+        fills = (TradeFill("first", "000001", "fixture", "매수", at, 1, 1000, origin_scope=origin, canonical_scope=canonical),
+                 TradeFill("last", "000001", "fixture", "매도", at + timedelta(minutes=5), 1, 1010, origin_scope=origin, canonical_scope=canonical))
+        episode = group_trade_episodes(fills)[0]
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory); monitor, journal = root / "monitor.sqlite3", root / "journal.sqlite3"
+            Database(monitor).initialize()
+            settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+            settings.setValue("auto_history_sync_enabled", False)
+            with patch("kiwoom_monitor.journal_process.QSettings", return_value=settings), \
+                    patch("kiwoom_monitor.journal_process.create_query_client", return_value=SimpleNamespace(server_now=lambda: current[0])), \
+                    patch.object(QTimer, "singleShot"):
+                window = JournalWindow(monitor, journal, root / "api.json")
+            for timer in window.findChildren(QTimer): timer.stop()
+            workers = []
+            try:
+                window._active_episode = episode
+                window._repo.upsert_history_sync(fills, (), now=current[0], account_scope=origin)
+                values = tuple(replace(snapshot_tests.snapshot(scoped_snapshot_execution_key(str(index), origin), at + timedelta(seconds=index)),
+                    origin_scope=origin, canonical_scope=canonical) for index in range(3))
+                for value in values:
+                    window._repo.save_entry_snapshot(value, now=at, account_scope=origin)
+                item = StockNewsItem("original", "", "link", "", as_kst(at), NewsAssessment(True, "공시", "긍정", "reason", 7, 3))
+                window._snapshot_news_repo.upsert("000001", (item,), checked_at=current[0])
+                with closing(sqlite3.connect(journal)) as connection, connection:
+                    connection.execute("CREATE TRIGGER reject_optional BEFORE UPDATE ON trade_entry_snapshots "
+                        "WHEN NEW.execution_key=(SELECT execution_key FROM trade_entry_snapshots ORDER BY executed_at LIMIT 1 OFFSET 1) "
+                        "AND NEW.news_json<>OLD.news_json BEGIN SELECT RAISE(ABORT,'051 optional write fault'); END")
+                stack.enter_context(patch("kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository.kst_wall_now", side_effect=lambda: current[0]))
+                save = stack.enter_context(patch.object(window._repo, "save_snapshot_news_backfill", wraps=window._repo.save_snapshot_news_backfill))
+                with QSignalBlocker(window._summary_table):
+                    window._summary_table.setRowCount(1)
+                    item = QTableWidgetItem("selected episode")
+                    item.setData(Qt.ItemDataRole.UserRole, episode)
+                    window._summary_table.setItem(0, 0, item)
+                    window._summary_table.setCurrentCell(0, 0)
+                # Keep the real selection/render/status path; only external collection starts are isolated.
+                with patch.object(window, "_start_missing_backfill"), patch.object(window, "_start_bar_confirmation") as confirm:
+                    window._show_selected_summary()
+                confirm.assert_called_once_with("000001", at.date(), include_previous=True)
+                self.assertEqual(2, save.call_count)
+                self.assertIn("직전 거래일 분봉 보완 중", window._status.text())
+                self.assertIn("뉴스 보완 저장 실패", window._analysis_data_status.text())
+                self.assertIn("051 optional write fault", window._analysis_data_status.text())
+                self.assertTrue(window._analysis_label.toPlainText())
+                stored = window._repo.load_entry_snapshots("000001", at, at + timedelta(minutes=1), canonical)
+                self.assertEqual((True, False, False), tuple(bool(value.news) for value in stored))
+                self.assertEqual(tuple(value.executed_at for value in values), tuple(value.executed_at for value in stored))
+                prefix = stored[0]
+                revisions = window._repo.load_journal_analysis_revisions(episode.group_id, canonical)
+                self.assertEqual(1, len(revisions))
+                first_revision = revisions[0]
+                ids = {}
+                for kind in ("derived_analysis", "post_trade_news"):
+                    task = window._journal_enrichment.register("trade_group", episode.group_id, kind, {}, now=current[0], account_scope=canonical)
+                    ids[kind] = task.task_id
+                window._analysis_enrichment_task_ids = {episode.group_id: ids}
+                counts = []
+                def run_worker():
+                    worker = AnalysisEnrichmentWorker(window._trade_analysis_preparer, ((episode, ()),),
+                        active_pack=window._active_strategy_pack, strategy_packs=window._strategy_packs, result_mode=window._strategy_result_mode)
+                    workers.append(worker)
+                    worker.item_started.connect(window._analysis_enrichment_started)
+                    worker.item_completed.connect(window._analysis_enrichment_completed)
+                    worker.item_failed.connect(window._analysis_enrichment_failed)
+                    worker.completed.connect(lambda success, failed: counts.append((success, failed)))
+                    worker.start()
+                    wait_until(lambda: not worker.isRunning() and len(counts) == len(workers))
+                    self.assertTrue(worker.wait(3000))
+                run_worker()
+                wait_until(lambda: all(window._repo.load_enrichment_task(value).state == "retryable_failed" for value in ids.values()))
+                self.assertEqual([(0, 1)], counts)
+                self.assertEqual(3, save.call_count)
+                failed = tuple(window._repo.load_enrichment_task(value) for value in ids.values())
+                self.assertTrue(all("051 optional write fault" in value.last_error for value in failed))
+                self.assertTrue(all(value.attempts == 1 for value in failed))
+                self.assertEqual(prefix, window._repo.load_entry_snapshots("000001", at, at + timedelta(minutes=1), canonical)[0])
+                self.assertEqual((first_revision,), window._repo.load_journal_analysis_revisions(episode.group_id, canonical))
+                with closing(sqlite3.connect(journal)) as connection, connection:
+                    connection.execute("DROP TRIGGER reject_optional")
+                current[0] = failed[0].next_retry_at
+                run_worker()
+                wait_until(lambda: all(window._repo.load_enrichment_task(value).state == "complete" for value in ids.values()))
+                self.assertEqual([(0, 1), (1, 0)], counts)
+                self.assertEqual(5, save.call_count)
+                final = window._repo.load_entry_snapshots("000001", at, at + timedelta(minutes=1), canonical)
+                self.assertTrue(all(value.news[0]["backfilled"] for value in final))
+                self.assertEqual(prefix, final[0])
+                self.assertIn(first_revision, window._repo.load_journal_analysis_revisions(episode.group_id, canonical))
+                window._status.setText("뉴스 보완 저장 실패 · 이전 호출")
+                window._show_trade_analysis(episode, ())
+                self.assertEqual(5, save.call_count)
+                self.assertNotIn("뉴스 보완 저장 실패", window._analysis_data_status.text())
+                self.assertEqual("매매 분석 표시 완료", window._status.text())
+            finally:
+                for worker in workers:
+                    worker.requestInterruption(); self.assertTrue(worker.wait(3000)); worker.deleteLater()
+                window._active_episode = None
+                window.close(); window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete); app.processEvents()
+                app.setProperty("journal_terminating", False)
+
     def test_backfill_failure_shares_receipt_with_native_status_and_retry(self) -> None:
         from kiwoom_monitor.application.journal_enrichment import JournalEnrichmentService
         from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
@@ -1035,6 +1154,38 @@ class JournalDetachedFlowTests(unittest.TestCase):
 
 
 class JournalReviewLifecycleTests(unittest.TestCase):
+    def test_statistics_batch_reads_current_reviews_after_dirty_selection_flush(self):
+        from PySide6.QtCore import Qt
+        repository = self.window._repo
+        with patch.object(repository, "load_review", wraps=repository.load_review) as single, \
+                patch.object(repository, "load_reviews", wraps=repository.load_reviews) as batch:
+            self.window._stats_unit.setCurrentText("주간")
+            with self.subTest(stage="one render uses one existing batch"):
+                single.assert_not_called()
+                self.assertEqual(1, batch.call_count)
+                self.assertEqual(tuple(episode.group_id for episode in self.window._episodes), batch.call_args.args[0])
+        self.assertIn("stored tags 2회", self.window._stats_summary.text())
+        self.assertEqual(2, len(self.window._episodes))
+        first = self.window._active_episode
+        self.edit()
+        other_row = next(row for row in range(self.window._summary_table.rowCount())
+                         if self.window._summary_table.item(row, 0).data(Qt.ItemDataRole.UserRole).group_id != first.group_id)
+        self.window._summary_table.setCurrentCell(other_row, 0)
+        self.assertFalse(self.window._review_dirty)
+        self.assertEqual(1, self.save.call_count)
+        self.assertEqual("edited tags", self.stored(first).tags)
+        self.window._stats_unit.setCurrentText("월간")
+        self.assertIn("edited tags 1회", self.window._stats_summary.text())
+        self.assertIn("stored tags 1회", self.window._stats_summary.text())
+        # No long-lived review cache: a later explicit statistics change sees native edits.
+        saved = self.stored(first)
+        repository.save_review(TradeReview(saved.group_id, saved.reason, saved.review, "fresh tag",
+            saved.rating, saved.status, saved.origin_scope, saved.canonical_scope), now=self.now, account_scope=self.origin)
+        self.window._stats_unit.setCurrentText("일간")
+        self.assertIn("fresh tag 1회", self.window._stats_summary.text())
+        self.assertNotIn("edited tags", self.window._stats_summary.text())
+        self.assertFalse(self.errors)
+
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication

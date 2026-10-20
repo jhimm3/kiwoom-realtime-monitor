@@ -121,7 +121,9 @@ from kiwoom_monitor.application.secondary_data_schedule import (
     minute_history_candidates,
     nxt_eligibility_candidates,
 )
-from kiwoom_monitor.application.historical_high_service import HistoricalHighTarget
+from kiwoom_monitor.application.historical_high_service import (
+    HISTORICAL_HIGH_BASIS_VERSION, HistoricalHighTarget,
+)
 from kiwoom_monitor.application.trade_strength import StockFundamentals, trade_strength_percent
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
@@ -1466,8 +1468,10 @@ class MainWindow(QMainWindow):
     def _schedule_google_drive_upload(self, target_override: str = "") -> None:
         if self._google_drive_sync is None or self._closing:
             return
-        if target_override == "both":
-            self._google_drive_pending_target = "both"
+        self._google_drive_pending_target = (
+            "both" if target_override == "both" or self._google_drive_pending_target == "both"
+            else "settings"
+        )
         self._google_drive_dirty = True
         self._settings.set("google_drive_unsynced_changes", "1")
         self._settings.set("google_drive_local_changed_at", self._google_drive_timestamp_now())
@@ -1525,18 +1529,23 @@ class MainWindow(QMainWindow):
         if operation == "upload" and (self._google_drive_pending_target or self._has_newer_local_google_drive_changes()):
             # 미동기 변경은 설정과 최신 테마 프로필을 한 세대로 함께 올린다.
             target = "both"
-        if not self._google_drive_worker_controller.start(
-            service,
-            operation,
-            target,
-            interactive,
-        ):
+        pending_target = self._google_drive_pending_target
+        if operation == "upload":
+            self._google_drive_pending_target = ""
+        started = False
+        try:
+            started = self._google_drive_worker_controller.start(
+                service, operation, target, interactive,
+            )
+        finally:
+            if operation == "upload" and not started:
+                if pending_target == "both" or not self._google_drive_pending_target:
+                    self._google_drive_pending_target = pending_target
+        if not started:
             self._google_drive_operation = ""
             self._google_drive_show_completion = False
             return
         self._google_drive_active_target = target if operation == "upload" else ""
-        if operation == "upload":
-            self._google_drive_pending_target = ""
         if close_after:
             self._google_drive_close_pending = True
         self.statusBar().showMessage("Google Drive 동기화 중…")
@@ -1614,8 +1623,9 @@ class MainWindow(QMainWindow):
         self._google_drive_operation = ""
         self._google_drive_show_completion = False
         if operation == "upload":
-            self._google_drive_dirty = False
-            self._settings.set("google_drive_unsynced_changes", "0")
+            if not self._google_drive_pending_target:
+                self._google_drive_dirty = False
+                self._settings.set("google_drive_unsynced_changes", "0")
             self._settings.set("google_drive_last_upload_success_at", self._google_drive_timestamp_now())
             self._google_drive_active_target = ""
         elif operation == "restore" and result.status == "staged":
@@ -1656,8 +1666,15 @@ class MainWindow(QMainWindow):
             elif self._initial_ranking_waits_for_google_drive:
                 self._app_controller.start_initial_ranking()
             return
-        if self._google_drive_close_pending and operation != "upload":
+        if self._google_drive_close_pending and (
+            operation != "upload" or self._google_drive_pending_target
+        ):
             self._start_google_drive_sync("upload", close_after=True)
+        elif (operation == "upload" and self._google_drive_pending_target
+              and not self._closing and not self._google_drive_strict_restore_staged
+              and self._google_drive_sync is not None and self._google_drive_sync.connected
+              and self._settings.get("google_drive_auto_upload") == "1"):
+            self._google_drive_debounce.start()
 
     def _apply_downloaded_google_drive_data(self) -> None:
         """실행 중 내려받은 설정·테마를 표와 예약 작업에 즉시 반영한다."""
@@ -4382,7 +4399,7 @@ class MainWindow(QMainWindow):
             return False
         if self._historical_high_worker_controller.is_running:
             return True
-        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != "5"
+        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != HISTORICAL_HIGH_BASIS_VERSION
         today = self._ranking_now().strftime("%Y-%m-%d")
         checked_today = (
             self._stock_lookup.historical_high_checked_today(codes, today)
@@ -4402,12 +4419,12 @@ class MainWindow(QMainWindow):
             return
         self._historical_high_prices[code] = target.price
         self._historical_high_refreshed_on[code] = self._ranking_now().date()
-        self._historical_high_refresh_received.add(code)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "update_historical_high_price"):
             self._stock_lookup.update_historical_high_price(
                 code, target.price, target.first_year, target.last_year, self._ranking_now().strftime("%Y-%m-%d"),
                 occurred_on=target.occurred_on, evidence=target.evidence,
             )
+        self._historical_high_refresh_received.add(code)
         if self._defer_table_update_while_modal():
             return
         self._render_new_high_price(code)
@@ -4416,7 +4433,7 @@ class MainWindow(QMainWindow):
     def _on_historical_high_worker_finished(self) -> None:
         if self._historical_high_refresh_expected:
             if self._historical_high_refresh_expected <= self._historical_high_refresh_received:
-                self._settings.set("historical_high_adjusted_basis_version", "5")
+                self._settings.set("historical_high_adjusted_basis_version", HISTORICAL_HIGH_BASIS_VERSION)
             self._historical_high_refresh_expected.clear()
             self._historical_high_refresh_received.clear()
 

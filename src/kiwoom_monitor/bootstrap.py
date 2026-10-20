@@ -42,7 +42,9 @@ from kiwoom_monitor.application.minute_chart_service import MinuteChartService
 from kiwoom_monitor.application.stock_fundamentals_service import StockFundamentalsService
 from kiwoom_monitor.application.daily_high_service import DailyHighService
 from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
-from kiwoom_monitor.application.historical_high_service import HistoricalHighService
+from kiwoom_monitor.application.historical_high_service import (
+    HISTORICAL_HIGH_BASIS_VERSION, HistoricalHighService,
+)
 from kiwoom_monitor.application.nxt_eligibility_service import NxtEligibilityService
 from kiwoom_monitor.application.investor_flow_service import InvestorFlowService
 from kiwoom_monitor.application.program_trade_service import ProgramTradeService
@@ -309,7 +311,7 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                     # 전 종목을 오늘 기준 수정주가로 한 번 다시 계산한다.
                     cache_loader=lambda code: (
                         stock_repository.load_historical_high_cache(code)
-                        if database.settings.get("historical_high_adjusted_basis_version") == "5"
+                        if database.settings.get("historical_high_adjusted_basis_version") == HISTORICAL_HIGH_BASIS_VERSION
                         else None
                     ),
                     high_250_loader=stock_repository.load_high_250_price,

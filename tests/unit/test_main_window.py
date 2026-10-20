@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import gc
+import json
+import threading
+import time
 import os
 import tempfile
 import unittest
@@ -9,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
+from unittest.mock import PropertyMock
+from contextlib import ExitStack
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -42,6 +47,196 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_drive_start_failure_and_reentrant_edit_preserve_pending_ack(self) -> None:
+        from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncResult
+
+        def owner(target="settings"):
+            values = {"google_drive_sync_target": target, "google_drive_auto_upload": "0",
+                      "google_drive_unsynced_changes": "0", "google_drive_local_changed_at": "",
+                      "google_drive_last_upload_success_at": ""}
+            state = SimpleNamespace(
+                _closing=False, _google_drive_sync=SimpleNamespace(configured=True, connected=True),
+                _google_drive_pending_target="", _google_drive_active_target="", _google_drive_dirty=False,
+                _google_drive_close_pending=False, _google_drive_operation="", _google_drive_show_completion=False,
+                _google_drive_strict_restore_staged=False, _google_drive_first_backup_pending=False,
+                _initial_ranking_waits_for_google_drive=False,
+                _settings=SimpleNamespace(get=lambda key: values.get(key, ""), set=lambda k, v: values.__setitem__(k, v)),
+                _google_drive_debounce=SimpleNamespace(start=lambda: self.fail("auto-disabled must stay pending")),
+                _google_drive_timestamp_now=lambda: "2030-01-02T09:00:00+09:00",
+                statusBar=lambda: SimpleNamespace(showMessage=lambda _: None), _refresh_google_drive_status=lambda: None,
+            )
+            state._has_newer_local_google_drive_changes = MethodType(MainWindow._has_newer_local_google_drive_changes, state)
+            state._schedule_google_drive_upload = MethodType(MainWindow._schedule_google_drive_upload, state)
+            state._start_google_drive_sync = MethodType(MainWindow._start_google_drive_sync, state)
+            state._google_drive_worker_controller = SimpleNamespace(is_running=False, start=lambda *_: True)
+            return state, values
+
+        for target in ("settings", "themes", "both"):
+            with self.subTest(target=target):
+                state, values = owner(target)
+                state._start_google_drive_sync("upload")
+                self.assertEqual(target, state._google_drive_active_target)
+                MainWindow._on_google_drive_sync_completed(state, GoogleDriveSyncResult("upload", "completed", "ok"))
+                self.assertFalse(state._google_drive_dirty)
+                self.assertEqual("0", values["google_drive_unsynced_changes"])
+
+        for result in (False, "raise", True):
+            with self.subTest(start=result):
+                state, values = owner()
+                state._schedule_google_drive_upload("both")
+                def start(*_args):
+                    state._schedule_google_drive_upload()
+                    if result == "raise":
+                        raise RuntimeError("start failed")
+                    return result
+                state._google_drive_worker_controller.start = start
+                if result == "raise":
+                    with self.assertRaisesRegex(RuntimeError, "start failed"):
+                        state._start_google_drive_sync("upload")
+                else:
+                    state._start_google_drive_sync("upload")
+                self.assertTrue(state._google_drive_pending_target)
+                self.assertTrue(state._google_drive_dirty)
+                if result is True:
+                    MainWindow._on_google_drive_sync_completed(state, GoogleDriveSyncResult("upload", "completed", "old ACK"))
+                    self.assertTrue(state._google_drive_dirty)
+                self.assertEqual("1", values["google_drive_unsynced_changes"])
+                self.assertEqual("2030-01-02T09:00:00+09:00", values["google_drive_local_changed_at"])
+
+        state, values = owner()
+        starts = []
+        state._google_drive_worker_controller.start = lambda *args: starts.append(args) or True
+        state._schedule_google_drive_upload("both")
+        state._start_google_drive_sync("upload")
+        state._schedule_google_drive_upload("both")
+        state._google_drive_first_backup_pending = True
+        state._google_drive_close_pending = True
+        state._closing = True
+        with patch.object(QMessageBox, "information") as notice:
+            MainWindow._on_google_drive_sync_completed(state, GoogleDriveSyncResult("upload", "completed", "first ACK"))
+        notice.assert_called_once()
+        self.assertFalse(state._google_drive_first_backup_pending)
+        self.assertEqual(2, len(starts))
+        self.assertTrue(state._google_drive_dirty)
+        self.assertEqual("1", values["google_drive_unsynced_changes"])
+
+    def test_drive_native_snapshot_old_ack_keeps_same_second_settings_and_theme_edits(self) -> None:
+        from shiboken6 import isValid
+        from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncService
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+
+        class Drive:
+            def __init__(self):
+                self.payloads, self.names, self.manifests = {}, {}, []
+                self.entered, self.release = threading.Event(), threading.Event()
+                self.blocked = False
+
+            def files(self):
+                return self
+
+            def create(self, *, body, media_body, **_kwargs):
+                name = body["name"]
+                file_id = f"file-{len(self.payloads)}"
+                return SimpleNamespace(execute=lambda **_kw: self.write(file_id, name, media_body))
+
+            def update(self, *, fileId, media_body, **_kwargs):
+                name = next(name for name, current in self.names.items() if current == fileId)
+                return SimpleNamespace(execute=lambda **_kw: self.write(fileId, name, media_body))
+
+            def write(self, file_id, name, content):
+                if not self.blocked:
+                    self.blocked = True
+                    self.entered.set()
+                    if not self.release.wait(20):
+                        raise OSError("test owner did not release upload")
+                self.payloads[file_id] = content
+                self.names[name] = file_id
+                if name == GoogleDriveSyncService.MANIFEST_REMOTE_NAME:
+                    self.manifests.append(json.loads(content))
+                return {"id": file_id}
+
+        def wait_until(predicate):
+            deadline = time.monotonic() + 20
+            while not predicate() and time.monotonic() < deadline:
+                QTest.qWait(10)
+            self.assertTrue(predicate(), "actual Drive worker/Qt owner did not settle")
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            database.settings.set_many({"decimal_strength": "2", "google_drive_auto_upload": "0",
+                                        "google_drive_auto_upload_on_exit": "0"})
+            StockRepository(database.settings.database_path).upsert("005930", "fixture", "KOSPI")
+            themes = ThemeRepository(database.settings.database_path)
+            themes.replace_for_stock("005930", ("old theme",))
+            service = GoogleDriveSyncService(database.settings.database_path)
+            drive = Drive()
+            stack.enter_context(patch.object(GoogleDriveSyncService, "configured", new_callable=PropertyMock, return_value=True))
+            stack.enter_context(patch.object(GoogleDriveSyncService, "connected", new_callable=PropertyMock, return_value=True))
+            stack.enter_context(patch.object(service, "_drive_service", return_value=drive))
+            stack.enter_context(patch.object(service, "_ensure_sync_folder", return_value="folder"))
+            stack.enter_context(patch.object(service, "_find_remote_file", side_effect=lambda _drive, _folder, name: drive.names.get(name)))
+            stack.enter_context(patch.object(service, "_download_remote_bytes", side_effect=lambda _drive, file_id: drive.payloads[file_id]))
+            stack.enter_context(patch.object(service, "_media_upload", side_effect=lambda content: content))
+            stack.enter_context(patch.object(AppController, "start_initial_ranking"))
+            loader = FakeRankingLoader()
+            loader.server_now = lambda: datetime.fromisoformat("2030-01-02T09:00:00+09:00")
+            window = MainWindow(database.settings, loader, theme_store=themes, google_drive_sync=service)
+            window._google_drive_timestamp_now = lambda: "2030-01-02T09:00:00+09:00"
+            worker = None
+            try:
+                window._schedule_google_drive_upload("both")
+                window._start_google_drive_sync("upload")
+                worker = window._google_drive_worker
+                wait_until(drive.entered.is_set)
+                database.settings.set("decimal_strength", "3")
+                database.settings.set("google_drive_auto_upload", "1")
+                window._schedule_google_drive_upload()
+                themes.replace_for_stock("005930", ("new theme",))
+                window._on_themes_changed()
+                # The first debounce opportunity expires while the original owner is busy.
+                window._google_drive_debounce.timeout.emit()
+                window._google_drive_debounce.stop()
+                drive.release.set()
+                wait_until(lambda: len(drive.manifests) == 1
+                           and not window._google_drive_worker_controller.is_running
+                           and not window._google_drive_operation)
+                first = drive.manifests[0]["components"]
+                first_settings = json.loads(drive.payloads[first["settings"]["file_id"]])
+                first_themes = json.loads(drive.payloads[first["themes"]["file_id"]])["theme_data"]
+                self.assertEqual("2", first_settings["settings"]["decimal_strength"])
+                self.assertEqual("3", database.settings.get("decimal_strength"))
+                self.assertEqual(["old theme"], [row["theme"] for profile in first_themes["profiles"] for row in profile["stock_themes"]])
+                self.assertEqual(("new theme",), themes.themes_for_stock("005930"))
+                self.assertTrue(window._google_drive_dirty)
+                self.assertEqual("1", database.settings.get("google_drive_unsynced_changes"))
+                self.assertEqual("2030-01-02T09:00:00+09:00", database.settings.get("google_drive_local_changed_at"))
+                self.assertTrue(window._google_drive_debounce.isActive())
+                wait_until(lambda: len(drive.manifests) == 2
+                           and not window._google_drive_worker_controller.is_running
+                           and not window._google_drive_operation)
+                self.assertFalse(window._google_drive_dirty)
+                self.assertFalse(window._google_drive_debounce.isActive())
+                self.assertEqual("0", database.settings.get("google_drive_unsynced_changes"))
+                for index, expected in enumerate(("2", "3")):
+                    manifest = drive.manifests[index]
+                    settings = json.loads(drive.payloads[manifest["components"]["settings"]["file_id"]])
+                    theme_data = json.loads(drive.payloads[manifest["components"]["themes"]["file_id"]])["theme_data"]
+                    self.assertEqual(expected, settings["settings"]["decimal_strength"])
+                    self.assertNotIn("google_drive_unsynced_changes", settings["settings"])
+                    assignments = [row["theme"] for profile in theme_data["profiles"] for row in profile["stock_themes"]]
+                    self.assertEqual(["old theme" if index == 0 else "new theme"], assignments)
+            finally:
+                drive.release.set()
+                for current in (worker, window._google_drive_worker):
+                    if current is not None and isValid(current):
+                        self.assertTrue(current.wait(20000))
+                window._google_drive_debounce.stop()
+                window.close()
+                window.deleteLater()
+                QApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+
     def test_geometry_timer_batches_four_values_and_close_restores_them(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "monitor.sqlite3")
