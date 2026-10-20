@@ -1,5 +1,7 @@
 **R3-051/056/068/074 계약(2026-10-20, `736fce8`).** DDL/transaction owner 변경0. 선택 backfill 수동 경고/자동 strict rollback·부분 receipt, Drive 전송 후 새 편집의 unsynced 보존, 기존 historical evidence(period,date)별 최대값·native 성공 후 local-only version6, review batch/동일 비용 분모를 확인했다. 필요 두번째 전송/수동 분석 revision 비용은 허용하며 전체 쓰기 감소로 보고하지 않는다. NAS authoritative partial evidence의 직접모드 cache 전환은068 미해결.
 
+**R3 열네번째 통합(2026-10-21, `fbbb96a0cdbab65d476dd352a90745ba30a1eae4`):** R3-076 공통 UI 탐색 등록범위 검증 완료, 032/033/050/075/081은 국소 보완·진행 유지. 현재 관련448건/25모듈과 구조·소비/증분 실행 gate 통과. 전체 85개: 검증 완료 62 / 진행 18 / 대기 1 / 명시 보류 4, 미완료 23개. 기존 실제PG5 미실행·053 진단 실패·미확정 정체는 보존. 다음은033 COMMIT 후 예외 경계의 제한 재현이다. 새 push/CI/NAS/전체로컬회귀는 미실행. [정본 백로그](REFACTOR_BACKLOG.md)·[책임 계약](docs/architecture/r3-ownership.md). DDL/테이블/index/migration·native transaction owner 변경0.033은 원래 history 두 COMMIT 중 sync 실패 뒤 필요한 purge만 추가하며075 metadata receipt·050 query 계약은 보존한다.
+
 **R3 열세번째 국소 통합(2026-10-21, `b16c386d107b08218b2f97dc4d305f3d55ebc632`):** 039부터13제품slice/053진단. 현재PC관련1301건·62모듈PASS,증분47기록·6161정의(추가33/수정6)·구조1364/위반0. 실제PG필수5미실행으로전체실행증거gate는실패이며053CLI진단1FAIL을보존한다. 전체R3는61완료/24미완료,다음준비는076 UI공통탐색순서다. 새push/CI/NAS/운영/전체로컬회귀는미실행. [정본백로그](REFACTOR_BACKLOG.md)·[책임계약](docs/architecture/r3-ownership.md)을관련기능군만참조한다.
 
 새table/schema/index/migration은없다. 039recent는기존native reader,075는raw8필드동일UPDATE만생략하고metadata receipt를유지,076는기존catalog native factory/FK와transaction을유지한다.

@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+**R3 열네번째 통합(2026-10-21, `fbbb96a0cdbab65d476dd352a90745ba30a1eae4`):** R3-076 공통 UI 탐색 등록범위 검증 완료, 032/033/050/075/081은 국소 보완·진행 유지. 현재 관련448건/25모듈과 구조·소비/증분 실행 gate 통과. 전체 85개: 검증 완료 62 / 진행 18 / 대기 1 / 명시 보류 4, 미완료 23개. 기존 실제PG5 미실행·053 진단 실패·미확정 정체는 보존. 다음은033 COMMIT 후 예외 경계의 제한 재현이다. 새 push/CI/NAS/전체로컬회귀는 미실행. [정본 백로그](REFACTOR_BACKLOG.md)·[책임 계약](docs/architecture/r3-ownership.md). 새 모듈/계층 없이 기존 theme UI·dispatcher·writer·Supervisor·journal store·chart owner만 보완했다.
+
 **R3 열세번째 국소 통합(2026-10-21, `b16c386d107b08218b2f97dc4d305f3d55ebc632`):** 039부터13제품slice/053진단. 현재PC관련1301건·62모듈PASS,증분47기록·6161정의(추가33/수정6)·구조1364/위반0. 실제PG필수5미실행으로전체실행증거gate는실패이며053CLI진단1FAIL을보존한다. 전체R3는61완료/24미완료,다음준비는076 UI공통탐색순서다. 새push/CI/NAS/운영/전체로컬회귀는미실행. [정본백로그](REFACTOR_BACKLOG.md)·[책임계약](docs/architecture/r3-ownership.md)을관련기능군만참조한다.
 
 **2026-10-21 R3 18개 국소slice `7e4fb607ceb09479f6b9c9ed2c03cbf6cdc42bbb`:** 기존owner/transaction/DB schema를유지했다. [R3 백로그](REFACTOR_BACKLOG.md)의013/017/019/027/032/033/041/047/049/050/053/057/059/071/075/076/077/081과[책임계약](docs/architecture/r3-ownership.md)을관련기능군만선택참조한다. purge는기존writer FIFO,theme preview는같은owner의요청bulk,news refresh는ACK된owner,일지는실제selectedmanifest와prepare-local draft를쓴다. 새Service/Manager/테이블/주문정책없음. root1060관련검증/전체감사깊이는별개다.
