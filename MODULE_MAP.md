@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+**2026-10-21 R3 18개 국소slice `7e4fb607ceb09479f6b9c9ed2c03cbf6cdc42bbb`:** 기존owner/transaction/DB schema를유지했다. [R3 백로그](REFACTOR_BACKLOG.md)의013/017/019/027/032/033/041/047/049/050/053/057/059/071/075/076/077/081과[책임계약](docs/architecture/r3-ownership.md)을관련기능군만선택참조한다. purge는기존writer FIFO,theme preview는같은owner의요청bulk,news refresh는ACK된owner,일지는실제selectedmanifest와prepare-local draft를쓴다. 새Service/Manager/테이블/주문정책없음. root1060관련검증/전체감사깊이는별개다.
+
 2026-10-20 `736fce8`: 기존 credential owner→app→Supervisor의 awaited Runner drain, news/Drive의 pending ACK, 일지 snapshot optional write/배치 review·비용, historical high 직접 NXT 증분·native evidence를 기존 owner 안에서 정리했다. 새 제품 파일/계층/worker/schema0. 공유 JournalWindow3메서드/MainWindow6메서드만 병합, 다른 기존 메서드는 AST 동일. 068 전환 경계와033/039/041은 진행이다.
 
 2026-10-20 `8cc2d19`: 기존ThemeBackupService revision의stock소유projection·CentralContentSyncService 컬렉션별manifest 의미만정리,settings저장소import/SettingsDialog deadbody 제거. 새파일/계층/상태owner/시계/schema0. 영향F10/F22/F23/F24의관련native소비와미검증은R3정본의열번째통합참조.

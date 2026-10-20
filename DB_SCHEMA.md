@@ -1,5 +1,7 @@
 **R3-051/056/068/074 계약(2026-10-20, `736fce8`).** DDL/transaction owner 변경0. 선택 backfill 수동 경고/자동 strict rollback·부분 receipt, Drive 전송 후 새 편집의 unsynced 보존, 기존 historical evidence(period,date)별 최대값·native 성공 후 local-only version6, review batch/동일 비용 분모를 확인했다. 필요 두번째 전송/수동 분석 revision 비용은 허용하며 전체 쓰기 감소로 보고하지 않는다. NAS authoritative partial evidence의 직접모드 cache 전환은068 미해결.
 
+**2026-10-21 R3 18개 국소slice `7e4fb607ceb09479f6b9c9ed2c03cbf6cdc42bbb`:** 기존owner/transaction/DB schema를유지했다. [R3 백로그](REFACTOR_BACKLOG.md)의013/017/019/027/032/033/041/047/049/050/053/057/059/071/075/076/077/081과[책임계약](docs/architecture/r3-ownership.md)을관련기능군만선택참조한다. purge는기존writer FIFO,theme preview는같은owner의요청bulk,news refresh는ACK된owner,일지는실제selectedmanifest와prepare-local draft를쓴다. 새Service/Manager/테이블/주문정책없음. root1060관련검증/전체감사깊이는별개다.
+
 **R3-029/045 계약(2026-10-20, `8cc2d19`).** DDL/트랜잭션owner/DB필드변경0. 테마revision은stocks code/name/market만소유하고시장값/전용수신시각을제외,실제편집CAS와가격/시총/전용receipt보존. 일반stocks.updated_at의기존import SQL 재작성은유지·사업시각완료로확대하지않는다. theme_metadata 유효backup의생성시각만내용hash에서제외하며wire/history/remote완료시각은불변,기존hash전환최초1회재전송후no-op0.
 
 **R3-051/055 계약(2026-10-20, `d6da121`).** schema/DDL/transaction owner/원본시계 변경0. snapshot별 보완쓰기와 provenance receipt는 각각 유지(뉴스 read만10→1). hidden custom minute/daily의 필수 native 복사·metadata는 유지하고 monitor 원본purge 뒤 journal 소비값이 같다. 순수hidden read/aggregate만 생략하며075 보존·주기/051 선택write오류정책은 별도다.
