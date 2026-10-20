@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+**R3 열세번째 국소 통합(2026-10-21, `b16c386d107b08218b2f97dc4d305f3d55ebc632`):** 039부터13제품slice/053진단. 현재PC관련1301건·62모듈PASS,증분47기록·6161정의(추가33/수정6)·구조1364/위반0. 실제PG필수5미실행으로전체실행증거gate는실패이며053CLI진단1FAIL을보존한다. 전체R3는61완료/24미완료,다음준비는076 UI공통탐색순서다. 새push/CI/NAS/운영/전체로컬회귀는미실행. [정본백로그](REFACTOR_BACKLOG.md)·[책임계약](docs/architecture/r3-ownership.md)을관련기능군만참조한다.
+
 **2026-10-21 R3 18개 국소slice `7e4fb607ceb09479f6b9c9ed2c03cbf6cdc42bbb`:** 기존owner/transaction/DB schema를유지했다. [R3 백로그](REFACTOR_BACKLOG.md)의013/017/019/027/032/033/041/047/049/050/053/057/059/071/075/076/077/081과[책임계약](docs/architecture/r3-ownership.md)을관련기능군만선택참조한다. purge는기존writer FIFO,theme preview는같은owner의요청bulk,news refresh는ACK된owner,일지는실제selectedmanifest와prepare-local draft를쓴다. 새Service/Manager/테이블/주문정책없음. root1060관련검증/전체감사깊이는별개다.
 
 2026-10-20 `736fce8`: 기존 credential owner→app→Supervisor의 awaited Runner drain, news/Drive의 pending ACK, 일지 snapshot optional write/배치 review·비용, historical high 직접 NXT 증분·native evidence를 기존 owner 안에서 정리했다. 새 제품 파일/계층/worker/schema0. 공유 JournalWindow3메서드/MainWindow6메서드만 병합, 다른 기존 메서드는 AST 동일. 068 전환 경계와033/039/041은 진행이다.

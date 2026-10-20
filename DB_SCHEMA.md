@@ -1,5 +1,9 @@
 **R3-051/056/068/074 계약(2026-10-20, `736fce8`).** DDL/transaction owner 변경0. 선택 backfill 수동 경고/자동 strict rollback·부분 receipt, Drive 전송 후 새 편집의 unsynced 보존, 기존 historical evidence(period,date)별 최대값·native 성공 후 local-only version6, review batch/동일 비용 분모를 확인했다. 필요 두번째 전송/수동 분석 revision 비용은 허용하며 전체 쓰기 감소로 보고하지 않는다. NAS authoritative partial evidence의 직접모드 cache 전환은068 미해결.
 
+**R3 열세번째 국소 통합(2026-10-21, `b16c386d107b08218b2f97dc4d305f3d55ebc632`):** 039부터13제품slice/053진단. 현재PC관련1301건·62모듈PASS,증분47기록·6161정의(추가33/수정6)·구조1364/위반0. 실제PG필수5미실행으로전체실행증거gate는실패이며053CLI진단1FAIL을보존한다. 전체R3는61완료/24미완료,다음준비는076 UI공통탐색순서다. 새push/CI/NAS/운영/전체로컬회귀는미실행. [정본백로그](REFACTOR_BACKLOG.md)·[책임계약](docs/architecture/r3-ownership.md)을관련기능군만참조한다.
+
+새table/schema/index/migration은없다. 039recent는기존native reader,075는raw8필드동일UPDATE만생략하고metadata receipt를유지,076는기존catalog native factory/FK와transaction을유지한다.
+
 **2026-10-21 R3 18개 국소slice `7e4fb607ceb09479f6b9c9ed2c03cbf6cdc42bbb`:** 기존owner/transaction/DB schema를유지했다. [R3 백로그](REFACTOR_BACKLOG.md)의013/017/019/027/032/033/041/047/049/050/053/057/059/071/075/076/077/081과[책임계약](docs/architecture/r3-ownership.md)을관련기능군만선택참조한다. purge는기존writer FIFO,theme preview는같은owner의요청bulk,news refresh는ACK된owner,일지는실제selectedmanifest와prepare-local draft를쓴다. 새Service/Manager/테이블/주문정책없음. root1060관련검증/전체감사깊이는별개다.
 
 **R3-029/045 계약(2026-10-20, `8cc2d19`).** DDL/트랜잭션owner/DB필드변경0. 테마revision은stocks code/name/market만소유하고시장값/전용수신시각을제외,실제편집CAS와가격/시총/전용receipt보존. 일반stocks.updated_at의기존import SQL 재작성은유지·사업시각완료로확대하지않는다. theme_metadata 유효backup의생성시각만내용hash에서제외하며wire/history/remote완료시각은불변,기존hash전환최초1회재전송후no-op0.
