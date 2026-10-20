@@ -273,6 +273,15 @@ class PaddleThemeOcr:
             return str(model_path)
 
     def extract_lines(self, image_path: Path) -> tuple[str, ...]:
+        return tuple(
+            str(text).strip()
+            for data in self._predict_pages(image_path)
+            for text in data.get("rec_texts", ())
+            if str(text).strip()
+        )
+
+    def _predict_pages(self, image_path: Path) -> tuple[dict, ...]:
+        """Initialize the existing engine and consume one whole-image prediction."""
         if not image_path.is_file():
             raise ValueError("선택한 이미지 파일을 찾을 수 없습니다.")
         if self._ocr is None:
@@ -307,15 +316,14 @@ class PaddleThemeOcr:
                 options["ocr_version"] = "PP-OCRv5"
             self._ocr = PaddleOCR(**options)
         result = self._ocr.predict(str(image_path))
-        lines: list[str] = []
+        pages: list[dict] = []
         for page in result:
             payload = page.json if hasattr(page, "json") else page
             if callable(payload):
                 payload = payload()
             data = payload.get("res", payload) if isinstance(payload, dict) else {}
-            texts = data.get("rec_texts", ()) if isinstance(data, dict) else ()
-            lines.extend(str(text).strip() for text in texts if str(text).strip())
-        return tuple(lines)
+            pages.append(data if isinstance(data, dict) else {})
+        return tuple(pages)
 
     @staticmethod
     def _has_badge_background(image: Image.Image, points: list[object]) -> bool:
@@ -337,21 +345,17 @@ class PaddleThemeOcr:
 
     def extract_rows(self, image_path: Path, mode: str = "theme_column", theme_header: str = "테마") -> tuple[ImageThemeRow, ...]:
         """Use OCR positions to split a screenshot according to the selected theme layout."""
-        if self._ocr is None:
-            self.extract_lines(image_path)
-        result = self._ocr.predict(str(image_path))
+        return self._rows_from_pages(image_path, self._predict_pages(image_path), mode, theme_header)
+
+    def _rows_from_pages(self, image_path: Path, pages: tuple[dict, ...], mode: str, theme_header: str) -> tuple[ImageThemeRow, ...]:
         try:
             image = Image.open(image_path).convert("RGB")
         except OSError as error:
             raise ValueError("이미지 파일을 읽을 수 없습니다.") from error
         tokens: list[_OcrToken] = []
-        for page in result:
-            payload = page.json if hasattr(page, "json") else page
-            if callable(payload):
-                payload = payload()
-            data = payload.get("res", payload) if isinstance(payload, dict) else {}
-            texts = data.get("rec_texts", ()) if isinstance(data, dict) else ()
-            polygons = data.get("rec_polys", ()) if isinstance(data, dict) else ()
+        for data in pages:
+            texts = data.get("rec_texts", ())
+            polygons = data.get("rec_polys", ())
             for text, polygon in zip(texts, polygons):
                 points = list(polygon)
                 if not points:
@@ -436,9 +440,9 @@ class ImageThemeOcrWorker(QThread):
                     raise ValueError("선택한 이미지가 없습니다.")
                 ocr = PaddleThemeOcr()
                 self.progress.emit("OCR 엔진을 준비하고 있습니다…")
-                # extract_rows()가 처음 실행될 때 내부적으로 수행하던 초기 인식 단계를
-                # 분리해, 화면에 현재 단계를 알려 준다.
-                ocr.extract_lines(self._image_paths[0])
+                # 준비 단계의 첫 추론은 기존 취소/오류 경계에서 끝내고,
+                # 같은 결과를 첫 이미지의 위치/배지 분석에 한 번만 사용한다.
+                first_pages = ocr._predict_pages(self._image_paths[0])
                 if self.isInterruptionRequested():
                     return
                 all_rows: list[ImageThemeRow] = []
@@ -448,7 +452,11 @@ class ImageThemeOcrWorker(QThread):
                         return
                     self.progress.emit(f"이미지 {index}/{total} · {image_path.name}의 테마와 색상 배지를 분석하고 있습니다…")
                     try:
-                        all_rows.extend(ocr.extract_rows(image_path, self._mode, self._theme_header))
+                        if index == 1:
+                            all_rows.extend(ocr._rows_from_pages(image_path, first_pages, self._mode, self._theme_header))
+                            first_pages = ()
+                        else:
+                            all_rows.extend(ocr.extract_rows(image_path, self._mode, self._theme_header))
                     except Exception as error:
                         raise ValueError(f"{image_path.name}: {error}") from error
                 rows = _merge_theme_rows(all_rows)

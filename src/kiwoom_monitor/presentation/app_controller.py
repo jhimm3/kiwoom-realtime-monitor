@@ -957,12 +957,15 @@ class AppController(QObject):
             return True
         if self._shutdown_stage == "cache_failed":
             writer = self.market_cache_writer
-            if writer is not None and writer.isRunning():
+            if self._running_writers():
                 return False
             # A fresh user close request retries the same stopped writer and RAM
             # buffers; producers stay stopped and normal save timers stay off.
             if writer is not None:
                 writer.start()
+            entry_writer = self.entry_snapshot_writer
+            if entry_writer is not None and entry_writer.has_pending_work():
+                entry_writer.start()
             self._drain_writers()
             if not self._running_writers():
                 self._shutdown_stage = "writer_signals"
@@ -1076,7 +1079,8 @@ class AppController(QObject):
     def _complete_shutdown(self, *, notify: bool) -> None:
         actions = self._shutdown_actions
         assert actions is not None
-        if self._price_cache_retries or (
+        entry_writer = self.entry_snapshot_writer
+        if (entry_writer is not None and entry_writer.has_pending_work()) or self._price_cache_retries or (
             self._shutdown_cache_failed and self.market_cache_writer is not None and (
                 self.pending_minutes or self.pending_market_minutes or self.pending_minute_gaps
             )

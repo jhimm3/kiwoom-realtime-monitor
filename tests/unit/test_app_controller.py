@@ -63,6 +63,9 @@ class FakeWriter:
         self.running = not self.completes
         return self.completes
 
+    def has_pending_work(self):
+        return False
+
 
 class CapturingCacheWriter(QObject):
     minute_saved = Signal()
@@ -776,6 +779,7 @@ class AppControllerTests(unittest.TestCase):
             self.assertEqual(["signals_connected", "cache_start", "entry_start"], events)
             cache.return_value.isRunning.return_value = False
             entry.return_value.isRunning.return_value = False
+            entry.return_value.has_pending_work.return_value = False
             self.assertFalse(controller.request_close())
             self.wait_until(lambda: "ready" in events)
             controller.start_market_cache_writer()
@@ -825,6 +829,101 @@ class AppControllerTests(unittest.TestCase):
         self.assertNotIn("ready", events)  # Entry writer still alive.
         entry.running = False
         self.wait_until(lambda: "ready" in events)
+
+    def test_entry_backfill_native_failure_blocks_close_and_retries_retained_jobs(self):
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
+            TradeEntrySnapshot, scoped_snapshot_execution_key,
+        )
+        for kind in ("program", "investor"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "journal.sqlite3"
+                repository = JournalRepository(path)
+                scope = AccountScope("kiwoom", AccountEnvironment.MOCK, "00000000-0000-4000-8000-000000000031")
+                at = datetime(2026, 10, 19, 10, 30)
+                snapshot = TradeEntrySnapshot(
+                    scoped_snapshot_execution_key("entry-031", scope), "order-031",
+                    "005930", "삼성전자", "매수", at, 70000, 1, "KRX",
+                    origin_scope=scope, market_state={"source": "original"},
+                )
+                repository.save_entry_snapshot(snapshot, account_scope=scope)
+                from dataclasses import replace
+                prefix = replace(snapshot, execution_key=scoped_snapshot_execution_key("prefix-031", scope),
+                                 stock_code="000001", stock_name="prefix")
+                repository.save_entry_snapshot(prefix, account_scope=scope)
+                with closing(sqlite3.connect(path)) as con:
+                    con.execute("CREATE TRIGGER fail_backfill BEFORE UPDATE OF investor_flow_json "
+                                "ON trade_entry_snapshots WHEN OLD.stock_code='005930' "
+                                "BEGIN SELECT RAISE(ABORT,'031 native fault'); END")
+                    con.commit()
+                entered, release = Event(), Event()
+                loads = []
+                def loader(_code, observed):
+                    if kind == "investor" and observed.time().hour != 20:
+                        return {}
+                    loads.append(_code)
+                    entered.set()
+                    if not release.wait(3):
+                        raise AssertionError("backfill was not released")
+                    value = {"available": True, "source": f"031-{kind}", "trade_time": "102900",
+                             "as_of_date": "20261019", "foreign_net_buy_quantity": 1,
+                             "institution_net_buy_quantity": 2}
+                    return (value,) if kind == "program" else value
+                events, failures = [], []
+                controller = self.controller(events, journal_database_path=path,
+                    **({"program_trade_loader": loader} if kind == "program"
+                       else {"entry_investor_loader": loader}))
+                writer = controller.entry_snapshot_writer
+                writer.failed.connect(failures.append)
+                getattr(writer, f"enqueue_{kind}_backfill")(at.date(), ("000001", "005930"))
+                # This following job must remain available after a backfill fault.
+                following = replace(snapshot, execution_key=scoped_snapshot_execution_key("following-031", scope),
+                                    stock_code="000660", stock_name="SK하이닉스")
+                writer.enqueue(following)
+                controller.start_entry_snapshot_writer()
+                try:
+                    self.assertTrue(entered.wait(2))
+                    self.assertFalse(controller.request_close())
+                    release.set()
+                    self.wait_until(lambda: not writer.isRunning())
+                    self.wait_until(lambda: controller._shutdown_stage in {"ready", "cache_failed"})
+                    self.assertNotIn("ready", events,
+                        f"stage={controller._shutdown_stage}, queue={writer._queue.qsize()}, failures={failures}")
+                    self.assertEqual("cache_failed", controller._shutdown_stage)
+                    self.assertTrue(any("031 native fault" in message for message in failures))
+                    self.assertNotIn("auxiliaries", events)
+                    # Already observed payloads survive removal of their provider.
+                    getattr(writer, f"set_{kind}_loader")(None)
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(lambda: controller._shutdown_stage in {"cache_failed", "ready"})
+                    self.assertEqual("cache_failed", controller._shutdown_stage)
+                    self.assertNotIn("ready", events)
+                    self.assertEqual(["000001", "005930"], loads)
+                    with closing(sqlite3.connect(path)) as con:
+                        con.execute("DROP TRIGGER fail_backfill")
+                        con.commit()
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(lambda: "ready" in events)
+                    self.assertFalse(writer.isRunning())
+                    self.assertFalse(writer.has_pending_work())
+                    self.assertEqual({}, writer._pending_backfill_values)
+                    self.assertEqual(["000001", "005930"], loads)
+                    stored = repository.load_entry_snapshots("005930", at, at + timedelta(seconds=1), scope)[0]
+                    value = stored.investor_flow["program_trade"] if kind == "program" else stored.investor_flow
+                    self.assertTrue(value["backfilled"])
+                    self.assertEqual(f"031-{kind}", value["source"])
+                    self.assertEqual(snapshot.market_state, stored.market_state)
+                    self.assertEqual(scope, stored.origin_scope)
+                    completed_prefix = repository.load_entry_snapshots("000001", at, at + timedelta(seconds=1), scope)[0]
+                    prefix_value = (completed_prefix.investor_flow["program_trade"] if kind == "program"
+                                    else completed_prefix.investor_flow)
+                    self.assertTrue(prefix_value["backfilled"])
+                    self.assertEqual(1, len(repository.load_entry_snapshots("000660", at, at + timedelta(seconds=1), scope)))
+                finally:
+                    release.set()
+                    writer.requestInterruption()
+                    self.assertTrue(writer.wait(4000))
 
     def test_thread_still_running_after_controller_reference_release_is_waited(self):
         events = []

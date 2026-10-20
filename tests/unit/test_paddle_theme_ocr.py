@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+# Load the native parser dependency before provider sys.modules patches restore
+# their snapshot; reimporting a removed cv2 Python package leaves native types stale.
+import cv2
 from PIL import Image, ImageDraw
 
 from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import (
     PaddleThemeOcr,
+    ImageThemeOcrWorker,
     _OcrToken,
     _badge_regions,
     _merge_badge_tokens,
@@ -19,6 +24,138 @@ from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import (
 
 
 class ThemeImageLayoutTests(unittest.TestCase):
+    def test_lazy_rows_and_worker_read_each_image_once_in_all_layout_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = tuple(Path(directory) / name for name in ("first.png", "second.png"))
+            for path in paths:
+                _save_ocr_image(path)
+            for mode, theme in (("theme_column", "반도체"), ("reason_badges", "AI"), ("both", "AI")):
+                with self.subTest(mode=mode, entry="extract_rows"):
+                    engine = _CountingOcrEngine()
+                    factory = Mock(return_value=engine)
+                    with patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=factory)}):
+                        rows = PaddleThemeOcr().extract_rows(paths[0], mode, "관련 테마")
+                    self.assertEqual((_row("심텍", theme),), rows)
+                    self.assertEqual([str(paths[0])], engine.images)
+                    self.assertEqual(int(mode != "theme_column"), engine.badges)
+                    factory.assert_called_once()
+                    self.assertEqual("PP-OCRv5_mobile_det", factory.call_args.kwargs["text_detection_model_name"])
+                    self.assertFalse(factory.call_args.kwargs["use_doc_orientation_classify"])
+                with self.subTest(mode=mode, entry="worker"):
+                    engine = _CountingOcrEngine()
+                    factory = Mock(return_value=engine)
+                    worker = ImageThemeOcrWorker(paths, mode, "관련 테마")
+                    completed, failed, progress = [], [], []
+                    worker.completed.connect(completed.append)
+                    worker.failed.connect(failed.append)
+                    worker.progress.connect(progress.append)
+                    with patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=factory)}):
+                        worker.run()
+                    self.assertEqual([(_row("심텍", theme),)], completed)
+                    self.assertEqual([], failed)
+                    self.assertEqual(list(map(str, paths)), engine.images)
+                    self.assertEqual(2 * int(mode != "theme_column"), engine.badges)
+                    self.assertEqual(3, len(progress))
+                    self.assertIn("엔진", progress[0])
+                    self.assertIn("1/2", progress[1])
+                    self.assertIn("2/2", progress[2])
+                    factory.assert_called_once()
+
+    def test_extract_lines_keeps_page_formats_and_does_not_reuse_a_previous_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "theme.png"
+            _save_ocr_image(path)
+            engine = _CountingOcrEngine()
+            engine.pages = (
+                {"rec_texts": ("  심텍 ", "", "반도체")},
+                SimpleNamespace(json={"res": {"rec_texts": ("AI",)}}),
+                SimpleNamespace(json=lambda: {"res": {"rec_texts": ("PCB",)}}),
+                {"res": []},
+                "invalid page",
+            )
+            factory = Mock(return_value=engine)
+            with patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=factory)}):
+                ocr = PaddleThemeOcr()
+                self.assertEqual(("심텍", "반도체", "AI", "PCB"), ocr.extract_lines(path))
+                self.assertEqual(("심텍", "반도체", "AI", "PCB"), ocr.extract_lines(path))
+            self.assertEqual([str(path), str(path)], engine.images)
+            factory.assert_called_once()
+
+    def test_worker_keeps_preparation_and_image_failure_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = (Path(directory) / name for name in ("first.png", "second.png"))
+            _save_ocr_image(first)
+            _save_ocr_image(second)
+            cases = (
+                ((), None, None, "선택한 이미지가 없습니다.", 0),
+                ((Path(directory) / "missing.png",), None, None, "선택한 이미지 파일을 찾을 수 없습니다.", 0),
+                ((first,), "model", None, "model failed", 1),
+                ((first,), None, 1, "predict failed", 1),
+                ((first, second), None, str(second), "second.png: predict failed", 1),
+            )
+            for paths, model_failure, failed_call, expected, constructor_count in cases:
+                with self.subTest(expected=expected):
+                    engine = _CountingOcrEngine(failed_call=failed_call)
+                    factory = Mock(return_value=engine, side_effect=RuntimeError("model failed") if model_failure else None)
+                    worker = ImageThemeOcrWorker(paths, "theme_column", "관련 테마")
+                    failed, completed = [], []
+                    worker.failed.connect(failed.append)
+                    worker.completed.connect(completed.append)
+                    with patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=factory)}):
+                        worker.run()
+                    self.assertEqual([expected], failed)
+                    self.assertEqual([], completed)
+                    self.assertEqual(constructor_count, factory.call_count)
+            first.write_bytes(b"not an image")
+            engine = _CountingOcrEngine()
+            worker = ImageThemeOcrWorker((first,), "theme_column", "관련 테마")
+            failed = []
+            worker.failed.connect(failed.append)
+            with patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=lambda **_options: engine)}):
+                worker.run()
+            self.assertEqual(["first.png: 이미지 파일을 읽을 수 없습니다."], failed)
+
+    def test_worker_cancel_after_initial_inference_does_not_parse_badges_or_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "theme.png"
+            _save_ocr_image(path)
+            engine = _CountingOcrEngine()
+            worker = ImageThemeOcrWorker((path,), "both", "관련 테마")
+            completed, failed, progress = [], [], []
+            worker.completed.connect(completed.append)
+            worker.failed.connect(failed.append)
+            worker.progress.connect(progress.append)
+            with (
+                patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=lambda **_options: engine)}),
+                patch.object(worker, "isInterruptionRequested", return_value=True),
+            ):
+                worker.run()
+            self.assertEqual([str(path)], engine.images)
+            self.assertEqual(0, engine.badges)
+            self.assertEqual([], completed)
+            self.assertEqual([], failed)
+            self.assertEqual(1, len(progress))
+
+    def test_worker_preserves_preparation_page_error_and_allows_a_fresh_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "theme.png"
+            _save_ocr_image(path)
+            broken, healthy = _CountingOcrEngine(), _CountingOcrEngine()
+            broken.pages = (SimpleNamespace(json=Mock(side_effect=ValueError("page failed"))),)
+            factory = Mock(side_effect=(broken, healthy))
+            with patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=factory)}):
+                for expected_error in ("page failed", None):
+                    worker = ImageThemeOcrWorker((path,), "theme_column", "관련 테마")
+                    failed, completed = [], []
+                    worker.failed.connect(failed.append)
+                    worker.completed.connect(completed.append)
+                    worker.run()
+                    self.assertEqual([expected_error] if expected_error else [], failed)
+                    self.assertEqual([] if expected_error else [(_row("심텍", "반도체"),)], completed)
+            self.assertEqual(2, factory.call_count)
+            self.assertEqual([str(path)], broken.images)
+            self.assertEqual([str(path)], healthy.images)
+
     def test_uses_current_app_data_directory_for_local_models(self) -> None:
         data_dir = Path("C:/user-data")
         with patch(
@@ -193,3 +330,38 @@ class ThemeImageLayoutTests(unittest.TestCase):
 def _row(name: str, themes: str):
     from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import ImageThemeRow
     return ImageThemeRow(name, themes)
+
+
+def _save_ocr_image(path: Path) -> None:
+    image = Image.new("RGB", (800, 120), "white")
+    ImageDraw.Draw(image).rectangle((470, 48, 530, 72), fill=(246, 238, 255))
+    image.save(path)
+
+
+class _CountingOcrEngine:
+    def __init__(self, failed_call: int | str | None = None) -> None:
+        self.images: list[str] = []
+        self.badges = 0
+        self.failed_call = failed_call
+        self.pages = None
+
+    def predict(self, source):
+        # A one-shot iterator catches accidental consumption of the first result
+        # while keeping real image/token/badge parsing in the production code.
+        if isinstance(source, str):
+            self.images.append(source)
+            if len(self.images) == self.failed_call or source == self.failed_call:
+                raise RuntimeError("predict failed")
+            texts = ("종목명", "관련 테마", "이유", "심텍", "반도체")
+            coordinates = ((50, 20), (320, 20), (650, 20), (50, 60), (320, 60))
+        else:
+            self.badges += 1
+            texts, coordinates = ("AI",), ((1000, 120),)
+        pages = self.pages or ({"res": {
+            "rec_texts": texts,
+            "rec_polys": tuple(
+                ((x - 10, y - 4), (x + 10, y - 4), (x + 10, y + 4), (x - 10, y + 4))
+                for x, y in coordinates
+            ),
+        }},)
+        yield from pages
