@@ -346,7 +346,7 @@ class MockAutomationSupervisor:
             spec = await drain_thread_call(
                 self._repository.load_mock_automation_spec, account_ref, spec_id,
             )
-            admission = await asyncio.to_thread(
+            admission = await drain_thread_call(
                 self._repository.load_mock_automation_admission_for_spec, account_ref, spec_id,
             )
             if spec is None or admission is None:

@@ -758,6 +758,213 @@ class MarketCacheWriterTests(unittest.TestCase):
                 self.assertEqual(int(cleanup == "delete"), len(observed["after_drain"]["bars"]))
                 self.assertEqual(int(cleanup == "delete"), len(observed["after_drain"]["index"]))
 
+    def _observe_metadata_only_retention(self, kind, mode, *, day="expired", variant=None, cleanup=None, recover=False, applied=True):
+        from datetime import timedelta
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+
+        now = as_kst(datetime(2026, 10, 21, 10))
+        kept = now - timedelta(days=30)
+        minute = {"expired": kept - timedelta(days=1), "cutoff": kept, "current": now - timedelta(minutes=1)}[day]
+        code = "KEEP" if variant == "skip" else "market:kospi" if variant == "legacy" else "TARGET"
+        minutes = () if variant in {"empty", "legacy", "empty_dict"} else (kept,) if variant == "skip" else (minute,)
+        gaps = {} if variant == "empty_dict" else {code: minutes}
+        native_connect = sqlite3.connect
+        clock_calls, statements, connections, commits, failures, acks, data_acks, events = [], [], [], [], [], [], [], []
+
+        def clock():
+            clock_calls.append(1)
+            return now
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path, now_provider=clock)
+            repository.upsert_bars("KEEP", (MinuteOhlcv(kept, 100, 110, 90, 105, 10),))
+            repository.upsert_market_index_minutes({("kosdaq", kept): (1., 2., 1., 2., 10.)})
+            repository.record_history_sync("KEEP", kept.date(), kept, 1)
+            if variant == "legacy":
+                repository.upsert_market_index_minutes({("kospi", now - timedelta(minutes=1)): (3., 4., 2., 3., 20.)})
+
+            def state():
+                with closing(native_connect(path)) as connection:
+                    return {
+                        "metadata": connection.execute("SELECT * FROM market_data_observation_meta WHERE subject=? ORDER BY observation_key", (code,)).fetchall(),
+                        "bars": connection.execute("SELECT * FROM minute_bars ORDER BY trade_date,stock_code,minute").fetchall(),
+                        "index": connection.execute("SELECT * FROM market_index_minute_bars ORDER BY trade_date,market,minute").fetchall(),
+                        "receipt": connection.execute("SELECT * FROM minute_history_sync_log ORDER BY trade_date,stock_code").fetchall(),
+                        "keeper": (
+                            connection.execute("SELECT * FROM minute_bars WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kosdaq'").fetchall(),
+                            connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject,observation_key").fetchall()),
+                    }
+
+            initial = state()
+            writer = MarketCacheWriter(path, now_provider=clock)
+            if applied:
+                writer.enqueue_minute_retention(kept.date())
+                writer.start()
+                self.assertTrue(writer.stop_and_drain())
+            self.assertEqual(kept.date() if applied else None, writer._minute_retention_cutoff)
+            message = "native metadata INSERT failed" if mode == "precommit" else "native metadata COMMIT return lost"
+            cleanup_message = "native cleanup metadata DELETE failed" if cleanup == "precommit" else "native cleanup COMMIT return lost"
+            failed_prefixes = []
+
+            def failed(*args):
+                label = "gap_failed" if kind == "gap" else "history_failed"
+                failures.append((label, repr(args[0]), args[-1]))
+                events.append((label, args[-1]))
+                failed_prefixes.append(state())
+
+            def acknowledged(received_code, value):
+                acks.append((received_code, value, state()))
+                events.append(("quality", received_code, value))
+
+            writer.gap_failed.connect(failed, Qt.ConnectionType.DirectConnection)
+            writer.history_failed.connect(failed, Qt.ConnectionType.DirectConnection)
+            writer.retention_failed.connect(lambda cutoff, error: (failures.append(("retention_failed", cutoff.isoformat(), error)), events.append(("retention_failed", error))), Qt.ConnectionType.DirectConnection)
+            writer.history_quality_saved.connect(acknowledged, Qt.ConnectionType.DirectConnection)
+            writer.history_saved.connect(lambda *args: data_acks.append(args), Qt.ConnectionType.DirectConnection)
+            writer.minute_saved.connect(lambda *args: data_acks.append(args), Qt.ConnectionType.DirectConnection)
+            with closing(native_connect(path)) as connection:
+                if mode == "precommit":
+                    connection.execute(f"CREATE TRIGGER reject_metadata BEFORE INSERT ON market_data_observation_meta WHEN NEW.subject='{code}' BEGIN SELECT RAISE(ABORT,'{message}'); END")
+                if cleanup == "precommit":
+                    connection.execute(f"CREATE TRIGGER reject_cleanup BEFORE DELETE ON market_data_observation_meta WHEN OLD.subject='{code}' AND substr(OLD.observation_key,1,10)<'2026-09-21' BEGIN SELECT RAISE(ABORT,'{cleanup_message}'); END")
+                connection.commit()
+
+            class NativeReturnConnection(sqlite3.Connection):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.role = None
+                    connections.append(1)
+                    self.set_trace_callback(statements.append)
+
+                def execute(self, sql, *args, **kwargs):
+                    upper = sql.lstrip().upper()
+                    if upper.startswith("DELETE FROM MINUTE_BARS"):
+                        self.role = "cleanup"
+                    elif upper.startswith("INSERT INTO MARKET_DATA_OBSERVATION_META"):
+                        self.role = "metadata"
+                    return super().execute(sql, *args, **kwargs)
+
+                def committed(self):
+                    commits.append({"boundary": "explicit commit" if kind == "gap" else "native context __exit__", "in_transaction": self.in_transaction, "state": state()})
+                    if mode == "postcommit":
+                        raise OSError(message)
+
+                def commit(self):
+                    super().commit()
+                    if self.role == "cleanup":
+                        if cleanup == "postcommit":
+                            raise OSError(cleanup_message)
+                    elif kind == "gap":
+                        self.committed()
+
+                def __exit__(self, *args):
+                    result = super().__exit__(*args)  # CPython's native context COMMIT, not Python .commit().
+                    if args[0] is None and kind == "empty":
+                        self.committed()
+                    return result
+
+            def connect(*args, **kwargs):
+                kwargs["factory"] = NativeReturnConnection
+                return native_connect(*args, **kwargs)
+
+            def enqueue():
+                if kind == "gap":
+                    writer.enqueue_gap_minutes(gaps)
+                else:
+                    writer.enqueue_empty_coverage(code, minutes, 29)
+
+            original_payload = repr(gaps if kind == "gap" else (code, minutes, 29))
+            clock_calls.clear()
+            with patch("sqlite3.connect", side_effect=connect):
+                enqueue()
+                writer.start()
+                self.assertTrue(writer.stop_and_drain())
+            final = state()
+            self.assertEqual([], data_acks)
+            self.assertEqual(original_payload, repr(gaps if kind == "gap" else (code, minutes, 29)))
+            for key in ("bars", "index", "receipt", "keeper"):
+                self.assertEqual(initial[key], final[key], key)
+            attempted = variant != "empty_dict"
+            self.assertEqual(int(attempted), len(clock_calls))
+            expected_failure = int(attempted and mode != "success")
+            self.assertEqual(expected_failure, len(failed_prefixes))
+            self.assertEqual(int(kind == "empty" and mode == "success"), len(acks))
+            if expected_failure:
+                self.assertEqual(message, failures[0][-1])
+                self.assertEqual(repr(gaps) if kind == "gap" else repr(code), failures[0][1])
+            if acks:
+                expected_minutes = () if variant in {"empty", "skip"} else minutes
+                self.assertEqual((code, {"generation": 29, "minutes": expected_minutes, "empty": True}), acks[0][:2])
+            self.assertEqual(int(attempted and mode != "precommit"), len(commits))
+            if commits:
+                self.assertFalse(commits[0]["in_transaction"])
+                if mode == "postcommit":
+                    self.assertEqual(commits[0]["state"], failed_prefixes[0])
+                if acks:
+                    self.assertEqual(commits[0]["state"], acks[0][2])
+            if not variant and mode != "precommit":
+                rows = commits[0]["state"]["metadata"]
+                self.assertEqual(1, len(rows))
+                self.assertEqual(minute, datetime.fromisoformat(rows[0][3]))
+                self.assertEqual(now, datetime.fromisoformat(rows[0][4]))
+                self.assertEqual(minute.isoformat(timespec="minutes"), rows[0][2])
+                self.assertEqual("estimated", rows[0][7])
+                self.assertEqual(("missing", "realtime", "subscriber-gap") if kind == "gap" else ("complete", "query", "kiwoom-ka10080-coverage-empty"), tuple(rows[0][8:11]))
+            counts = {key: sum(sql.lstrip().upper().startswith(key.upper()) for sql in statements) for key in ("select", "delete", "begin", "commit", "rollback")}
+            result = {"kind": kind, "mode": mode, "day": day, "variant": variant, "cleanup": cleanup, "applied": applied,
+                      "connections": len(connections), **counts, "clock": len(clock_calls), "sql": statements,
+                      "original_payload": original_payload, "commits": commits, "failure_prefixes": failed_prefixes,
+                      "failures": failures.copy(), "quality_acks": acks.copy(), "data_acks": data_acks.copy(),
+                      "events": events.copy(), "after_drain": final, "initial": initial,
+                      "cutoff": writer._minute_retention_cutoff.isoformat() if writer._minute_retention_cutoff is not None else None}
+            if recover:
+                with closing(native_connect(path)) as connection:
+                    connection.execute("DROP TRIGGER IF EXISTS reject_metadata")
+                    connection.execute("DROP TRIGGER IF EXISTS reject_cleanup")
+                    connection.commit()
+                enqueue()
+                writer.start()
+                self.assertTrue(writer.stop_and_drain())
+                self.assertEqual(result["failures"], failures)
+                self.assertEqual(int(kind == "empty"), len(acks))
+                if acks:
+                    self.assertEqual((code, {"generation": 29, "minutes": minutes, "empty": True}), acks[-1][:2])
+                self.assertEqual([], state()["metadata"])
+                self.assertEqual(initial["keeper"], state()["keeper"])
+                self.assertEqual(kept.date(), writer._minute_retention_cutoff)
+                result["same_writer_retry"] = {"after_retry": state(), "quality_acks": acks.copy()}
+            return result
+
+    def test_gap_and_empty_metadata_only_jobs_preserve_original_outcome_then_reapply_existing_cutoff(self):
+        for kind in ("gap", "empty"):
+            for mode in ("success", "precommit", "postcommit"):
+                with self.subTest(kind=kind, mode=mode):
+                    observed = self._observe_metadata_only_retention(kind, mode, recover=mode != "success")
+                    self.assertEqual([], observed["after_drain"]["metadata"])
+                    self.assertEqual(int(mode != "success"), len(observed["failures"]))
+            for cleanup in ("precommit", "postcommit"):
+                with self.subTest(kind=kind, cleanup=cleanup):
+                    observed = self._observe_metadata_only_retention(kind, "postcommit", cleanup=cleanup, recover=True)
+                    self.assertEqual(["gap_failed" if kind == "gap" else "history_failed", "retention_failed"], [row[0] for row in observed["failures"]])
+                    self.assertEqual("2026-09-21", observed["failures"][1][1])
+                    self.assertEqual(int(cleanup == "precommit"), len(observed["after_drain"]["metadata"]))
+        for cleanup in ("precommit", "postcommit"):
+            with self.subTest(empty_success_cleanup=cleanup):
+                observed = self._observe_metadata_only_retention("empty", "success", cleanup=cleanup)
+                self.assertEqual(["quality", "retention_failed"], [event[0] for event in observed["events"]])
+                self.assertEqual(["retention_failed"], [event[0] for event in observed["failures"]])
+                self.assertEqual(1, len(observed["quality_acks"]))
+                self.assertEqual(int(cleanup == "precommit"), len(observed["after_drain"]["metadata"]))
+        for kind, variant in (("gap", "empty"), ("gap", "empty_dict"), ("gap", "legacy"), ("empty", "empty"), ("empty", "skip")):
+            with self.subTest(kind=kind, variant=variant):
+                observed = self._observe_metadata_only_retention(kind, "success", day="current", variant=variant)
+                self.assertEqual([], observed["failures"])
+                self.assertEqual(0, observed["connections"] if variant == "empty_dict" else observed["delete"])
+
     def test_stop_drains_minute_and_price_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "monitor.sqlite3"

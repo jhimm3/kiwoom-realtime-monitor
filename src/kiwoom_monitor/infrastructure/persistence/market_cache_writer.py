@@ -120,6 +120,9 @@ class MarketCacheWriter(QThread):
                     minute_repository.mark_gap_minutes(job[1])
                 except Exception as error:
                     self.gap_failed.emit(job[1], str(error))
+                cutoff = self._minute_retention_cutoff
+                if cutoff is not None and any(minute.date() < cutoff for minutes in job[1].values() for minute in minutes):
+                    self._purge_minute_retention(minute_repository, cutoff)
             elif job[0] == "empty_coverage":
                 try:
                     committed = minute_repository.confirm_empty_minutes(job[1], job[2])
@@ -127,6 +130,9 @@ class MarketCacheWriter(QThread):
                     self.history_failed.emit(job[1], str(error))
                 else:
                     self.history_quality_saved.emit(job[1], {"generation": job[3], "minutes": committed, "empty": True})
+                cutoff = self._minute_retention_cutoff
+                if cutoff is not None and any(minute.date() < cutoff for minute in job[2]):
+                    self._purge_minute_retention(minute_repository, cutoff)
             elif job[0] == "daily_high":
                 self._save_daily_high(stock_repository, daily_repository, job[1], job[2], job[3], job[4])
             elif job[0] == "fundamentals":

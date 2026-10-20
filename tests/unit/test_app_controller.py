@@ -1636,7 +1636,7 @@ class AppControllerTests(unittest.TestCase):
 
     def _bootstrap_settings_desktop(self, during_loop, after_exit=None, *,
                                     content_service=None, expected_error=SystemExit,
-                                    source_mode="local_server"):
+                                    source_mode="local_server", before_run=None):
         import json
         import sys
         import threading
@@ -1764,6 +1764,8 @@ class AppControllerTests(unittest.TestCase):
                 stack.enter_context(active)
             bootstrap.QTimer.singleShot.side_effect = single_shot
             try:
+                if before_run is not None:
+                    before_run(fixture)
                 with self.assertRaises(expected_error) as exited:
                     bootstrap._main_with_restore_gate()
                 fixture.exit_error = exited.exception
@@ -1791,7 +1793,7 @@ class AppControllerTests(unittest.TestCase):
         return fixture
 
     def _bootstrap_content_case(self, *, stage="sqlite", exit_mode="quit", fail_http=False,
-                                source_mode="local_server"):
+                                source_mode="local_server", setup_read_failure=False):
         import json
         import threading
         from kiwoom_monitor import bootstrap
@@ -1803,6 +1805,7 @@ class AppControllerTests(unittest.TestCase):
             entered=Event(), release=Event(), completed=Event(), lease_released=Event(),
             stopped=Event(), errors=[], events=[], threads=[], observer=None, calls=0,
             connections=0, sql=[], timed_out=False, observed=None,
+            local=threading.local(), setup_error=None, denied_reads=0,
         )
         now = "2030-01-02T10:00:00+09:00"
 
@@ -1850,6 +1853,13 @@ class AppControllerTests(unittest.TestCase):
         thread_type = threading.Thread
         thread_start = thread_type.start
         lease_close = AppDataLease.close
+        all_by_name = bootstrap.DatabaseThemeRepository.all_by_name
+
+        def authorize(action, table, *_args):
+            if action == sqlite3.SQLITE_READ and table == "stocks":
+                state.denied_reads += 1
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
 
         def trace(statement):
             state.sql.append(statement)
@@ -1861,7 +1871,23 @@ class AppControllerTests(unittest.TestCase):
             if threading.current_thread().name == "central-content-sync":
                 state.connections += 1
                 value.set_trace_callback(trace)
+            if getattr(state.local, "setup_read", False):
+                value.set_authorizer(authorize)
             return value
+
+        def setup_read(owner):
+            if not setup_read_failure:
+                return all_by_name(owner)
+            self.assertTrue(state.entered.wait(2))
+            state.local.setup_read = True
+            try:
+                return all_by_name(owner)
+            except sqlite3.DatabaseError as error:
+                state.setup_error = error
+                during_loop(state.fixture)
+                raise
+            finally:
+                state.local.setup_read = False
 
         def start_thread(worker):
             if worker.name == "central-content-sync":
@@ -1902,7 +1928,7 @@ class AppControllerTests(unittest.TestCase):
             if exit_mode == "normal":
                 fixture.window.close()
                 self.wait_until(lambda: fixture.window._app_controller._shutdown_stage == "ready")
-            state.events.append("app.exec.leaving")
+            state.events.append("setup.failed" if setup_read_failure else "app.exec.leaving")
 
             if stage is not None:
                 def observe():
@@ -1929,6 +1955,12 @@ class AppControllerTests(unittest.TestCase):
             if state.errors:
                 raise state.errors[0]
             self.assertTrue(fixture.restore_available())
+            if setup_read_failure:
+                self.assertIs(state.setup_error, fixture.exit_error)
+                self.assertEqual(sqlite3.SQLITE_AUTH, state.setup_error.sqlite_errorcode)
+                self.assertEqual(1, state.denied_reads)
+                self.assertEqual([], fixture.windows)
+                self.assertNotIn("app.exec.leaving", state.events)
             if source_mode == "local":
                 self.assertEqual([], state.threads)
                 self.assertEqual(0, state.calls)
@@ -1949,11 +1981,14 @@ class AppControllerTests(unittest.TestCase):
 
         with patch.object(thread_type, "start", start_thread), \
                 patch.object(sqlite3, "connect", side_effect=connection), \
+                patch.object(bootstrap.DatabaseThemeRepository, "all_by_name", setup_read), \
                 patch.object(AppDataLease, "close", close_lease):
             try:
                 self._bootstrap_settings_desktop(
                     during_loop, after_exit, content_service=service, source_mode=source_mode,
-                    expected_error=RuntimeError if exit_mode == "error" else SystemExit,
+                    expected_error=(sqlite3.DatabaseError if setup_read_failure else
+                                    RuntimeError if exit_mode == "error" else SystemExit),
+                    before_run=(lambda fixture: setattr(state, "fixture", fixture)) if setup_read_failure else None,
                 )
             finally:
                 state.release.set()
@@ -1969,6 +2004,8 @@ class AppControllerTests(unittest.TestCase):
                     "events": state.events, "http_calls": state.calls,
                     "connections": state.connections, "sql_count": len(state.sql),
                     "timed_out": state.timed_out,
+                    "setup_read_failure": setup_read_failure, "denied_reads": state.denied_reads,
+                    "setup_error": str(state.setup_error) if state.setup_error is not None else None,
                 }))
         self.assertFalse(state.timed_out)
 
@@ -1989,6 +2026,9 @@ class AppControllerTests(unittest.TestCase):
 
     def test_bootstrap_content_disabled_source_has_no_thread_or_http(self):
         self._bootstrap_content_case(stage=None, source_mode="local")
+
+    def test_bootstrap_setup_read_error_keeps_content_and_restore_lease(self):
+        self._bootstrap_content_case(setup_read_failure=True)
 
     def test_bootstrap_settings_close_preserves_inflight_dependency_and_restore_lease(self):
         def close_while_http_is_running(fixture):

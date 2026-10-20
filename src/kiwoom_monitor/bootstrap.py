@@ -350,96 +350,96 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
     theme_store = DatabaseThemeRepository(paths.database_path, database.settings.get("theme_active_profile"))
     if central_theme_sync is not None:
         theme_store.set_change_callback(central_theme_sync.notify)
-    themes = theme_store.all_by_name()
-    window = MainWindow(
-        settings=database.settings,
-        ranking_loader=api_runtime.get("ranking_loader"),
-        realtime_worker_factory=api_runtime.get("realtime_worker_factory"),
-        minute_history_worker_factory=api_runtime.get("minute_history_worker_factory"),
-        fundamentals_worker_factory=api_runtime.get("fundamentals_worker_factory"),
-        daily_high_worker_factory=api_runtime.get("daily_high_worker_factory"),
-        historical_high_worker_factory=api_runtime.get("historical_high_worker_factory"),
-        nxt_eligibility_worker_factory=api_runtime.get("nxt_eligibility_worker_factory"),
-        minute_aggregator=MinuteTradeValueAggregator(),
-        minute_bar_repository=minute_bar_repository,
-        daily_bar_repository=daily_bar_repository,
-        themes=themes,
-        columns=ColumnSettingsRepository(paths.database_path),
-        stock_lookup=StockRepository(paths.database_path),
-        theme_store=theme_store,
-        google_drive_sync=google_drive_sync,
-        initial_google_drive_download=initial_google_drive_download,
-        api_runtime_factory=build_api_runtime,
-        news_config_path=paths.data_dir / "naver_news.dat",
-        news_database_path=paths.news_database_path,
-        journal_database_path=paths.journal_database_path,
-        monitor_database_path=paths.database_path,
-        entry_investor_loader=api_runtime.get("entry_investor_loader"),
-        program_trade_loader=api_runtime.get("program_trade_loader"),
-        candidate_client=candidate_client,
-        candidate_settings_client=candidate_settings_client,
-        mock_automation_credentials_client=mock_automation_credentials_client,
-        market_data_client=api_runtime.get("market_data_client"),
-        research_data_dir=paths.data_dir / "research",
-    )
-    window.show()
-    if restore_outcome is not None:
-        dialog = QMessageBox.warning if restore_outcome.state == "ROLLED_BACK" else QMessageBox.information
-        QTimer.singleShot(0, lambda: dialog(window, "Google Drive 복원", restore_outcome.message))
-
-    def retain_market_bars_after_startup() -> None:
-        if window._app_controller.closing:
-            return
-
-        def run() -> None:
-            try:
-                minute_bar_repository.purge_before(kst_wall_now().date() - timedelta(days=30))
-            except sqlite3.Error as error:
-                logging.getLogger(__name__).warning("시작 후 분봉 보존 정리를 건너뜁니다: %s", error)
-            try:
-                daily_bar_repository.retain_latest(250)
-            except sqlite3.Error as error:
-                logging.getLogger(__name__).warning("시작 후 일봉 보존 정리를 건너뜁니다: %s", error)
-
-        worker = SettingsRequestWorker(run, window._app_controller)
-        worker.start()
-
-    # 실제 크기 DB에서 분봉/일봉 정리가 각각 약 0.65초/0.12초까지 걸렸다.
-    # 첫 화면과 최초 순위 처리를 먼저 시작한 뒤 한 번 실행해 보존 정책은 유지한다.
-    QTimer.singleShot(30_000, retain_market_bars_after_startup)
-    central_settings_worker: SettingsRequestWorker | None = None
     central_settings_timer: QTimer | None = None
-    if central_settings_sync is not None:
-        def schedule_central_settings_sync() -> None:
-            nonlocal central_settings_worker
-            if window._app_controller.closing or central_settings_worker is not None:
+    try:
+        themes = theme_store.all_by_name()
+        window = MainWindow(
+            settings=database.settings,
+            ranking_loader=api_runtime.get("ranking_loader"),
+            realtime_worker_factory=api_runtime.get("realtime_worker_factory"),
+            minute_history_worker_factory=api_runtime.get("minute_history_worker_factory"),
+            fundamentals_worker_factory=api_runtime.get("fundamentals_worker_factory"),
+            daily_high_worker_factory=api_runtime.get("daily_high_worker_factory"),
+            historical_high_worker_factory=api_runtime.get("historical_high_worker_factory"),
+            nxt_eligibility_worker_factory=api_runtime.get("nxt_eligibility_worker_factory"),
+            minute_aggregator=MinuteTradeValueAggregator(),
+            minute_bar_repository=minute_bar_repository,
+            daily_bar_repository=daily_bar_repository,
+            themes=themes,
+            columns=ColumnSettingsRepository(paths.database_path),
+            stock_lookup=StockRepository(paths.database_path),
+            theme_store=theme_store,
+            google_drive_sync=google_drive_sync,
+            initial_google_drive_download=initial_google_drive_download,
+            api_runtime_factory=build_api_runtime,
+            news_config_path=paths.data_dir / "naver_news.dat",
+            news_database_path=paths.news_database_path,
+            journal_database_path=paths.journal_database_path,
+            monitor_database_path=paths.database_path,
+            entry_investor_loader=api_runtime.get("entry_investor_loader"),
+            program_trade_loader=api_runtime.get("program_trade_loader"),
+            candidate_client=candidate_client,
+            candidate_settings_client=candidate_settings_client,
+            mock_automation_credentials_client=mock_automation_credentials_client,
+            market_data_client=api_runtime.get("market_data_client"),
+            research_data_dir=paths.data_dir / "research",
+        )
+        window.show()
+        if restore_outcome is not None:
+            dialog = QMessageBox.warning if restore_outcome.state == "ROLLED_BACK" else QMessageBox.information
+            QTimer.singleShot(0, lambda: dialog(window, "Google Drive 복원", restore_outcome.message))
+
+        def retain_market_bars_after_startup() -> None:
+            if window._app_controller.closing:
                 return
 
             def run() -> None:
                 try:
-                    central_settings_sync.sync(paths.database_path)
-                    database.settings.clear_cache()
-                except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
-                    logging.getLogger(__name__).warning("공통 설정 중앙 동기화 실패(로컬 설정 유지): %s", error)
+                    minute_bar_repository.purge_before(kst_wall_now().date() - timedelta(days=30))
+                except sqlite3.Error as error:
+                    logging.getLogger(__name__).warning("시작 후 분봉 보존 정리를 건너뜁니다: %s", error)
+                try:
+                    daily_bar_repository.retain_latest(250)
+                except sqlite3.Error as error:
+                    logging.getLogger(__name__).warning("시작 후 일봉 보존 정리를 건너뜁니다: %s", error)
 
             worker = SettingsRequestWorker(run, window._app_controller)
-
-            def finished() -> None:
-                nonlocal central_settings_worker
-                if central_settings_worker is worker:
-                    central_settings_worker = None
-
-            worker.finished.connect(finished)
-            central_settings_worker = worker
             worker.start()
 
-        central_settings_timer = QTimer(window._app_controller)
-        central_settings_timer.setInterval(60_000)
-        central_settings_timer.timeout.connect(schedule_central_settings_sync)
-        window._app_controller.add_shutdown_timer(central_settings_timer)
-        central_settings_timer.start()
-        QTimer.singleShot(1_000, schedule_central_settings_sync)
-    try:
+        # 실제 크기 DB에서 분봉/일봉 정리가 각각 약 0.65초/0.12초까지 걸렸다.
+        # 첫 화면과 최초 순위 처리를 먼저 시작한 뒤 한 번 실행해 보존 정책은 유지한다.
+        QTimer.singleShot(30_000, retain_market_bars_after_startup)
+        central_settings_worker: SettingsRequestWorker | None = None
+        if central_settings_sync is not None:
+            def schedule_central_settings_sync() -> None:
+                nonlocal central_settings_worker
+                if window._app_controller.closing or central_settings_worker is not None:
+                    return
+
+                def run() -> None:
+                    try:
+                        central_settings_sync.sync(paths.database_path)
+                        database.settings.clear_cache()
+                    except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                        logging.getLogger(__name__).warning("공통 설정 중앙 동기화 실패(로컬 설정 유지): %s", error)
+
+                worker = SettingsRequestWorker(run, window._app_controller)
+
+                def finished() -> None:
+                    nonlocal central_settings_worker
+                    if central_settings_worker is worker:
+                        central_settings_worker = None
+
+                worker.finished.connect(finished)
+                central_settings_worker = worker
+                worker.start()
+
+            central_settings_timer = QTimer(window._app_controller)
+            central_settings_timer.setInterval(60_000)
+            central_settings_timer.timeout.connect(schedule_central_settings_sync)
+            window._app_controller.add_shutdown_timer(central_settings_timer)
+            central_settings_timer.start()
+            QTimer.singleShot(1_000, schedule_central_settings_sync)
         exit_code = app.exec()
     finally:
         if central_settings_timer is not None:
