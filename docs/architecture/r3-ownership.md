@@ -108,6 +108,8 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 <a id="execution"></a>
 ## 계좌·Risk·Execution — F14/F16/F17/F18
 
+**2026-10-20 `964ddbe` 추가계약.** 기존최대원화낙폭을그대로두고같은순회에서relative numerator/peak 두정수로최대비율을따로추적한다. 정수교차곱/마지막ppm내림1회,기존fold/event/carry·양수peak없음/음수equity범위를유지한다. 100→50→200은250000→500000ppm,원화50동일;실제report생성→native불변저장/재조회→candidate→한도판정에서검증했다. Fraction독립655입력일치/원화655동일·120비율정정. 1000event곱셈1001→3001/나눗셈1유지·추가state2정수는정확성계산비용이다. 기존저장report/package는옛수치를보존하며자동rewrite/새차단정책/운영임계값·Risk·주문승인변경0이다.
+
 **2026-10-20 `0a54c35` 추가계약.** R3-066 검증 완료: 기존 variadic drain을 모든context에 한번적용해 producer를멈추고 monitor/writer/read를실제합류한뒤에만 dependency를닫는다. closing예외조건을제거해 미저장pending/실패를정상종료로보고하지않는다. 이미끝난failed close에대한새명시close만 완료된noncancelled eventwriter로원본pending/queue를drain한다. closing/admission/binding/settings/order gate는닫힌채유지,자동retry/REST재조회/새queue없음. 실제native precommit/ACKloss 두실패+두event복구 save4/행2/dependency close0→1,추가REST0. waiter취소/동시close는같은살아있는owner를합류한다. native event readback/diagnostic archive까지검증했고 genericcontent route는이collection을노출하지않아실제일지/API end-to-end는확인하지못했다. processkill RAM유실·직접ownertask취소·socket자동복구는해결범위밖이다.
 
 **2026-10-20 `8f3bade` 추가계약.** R3-040 유지·검증완료: 제품변경0. 첫read뒤기존offline unowned apply가native JSON의account/run을바꿀수있고reader가그JSON을소비하므로두번째최신scope read를제거하지않았다. frozen DTO는native불변성을보장하지않는다. 실제활성lease/독립두store의normal/state/account/run반례와둘째read제거음성대조2assertion실패로지속검사를보강했다. 정상/state는기존첫record반환·추가transport/refresh0,scope변경은거절한다. SELECT2/실행loop동기I/O는그대로이며제거완료나지연개선으로보고하지않는다. R3-009안전조회근거에연결하고042owner/047runner·legacyHTTP오류매핑은별도다.
@@ -125,18 +127,22 @@ R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를
 <a id="research"></a>
 ## 연구 — F15/F21
 
+**2026-10-20 `964ddbe` 추가계약.** 기존 ResearchRepository start/finish/fail/cancel의 상태SELECT 앞에서 같은 native연결에 BEGIN IMMEDIATE를 사용한다. 7개실제두writer반례를기존순차상태/hash계약으로직렬화하며 API/owner/generation/시계/schema/결과publication정책은변경0이다. 정상write의연결/SELECT/BEGIN/COMMIT/반영/clock 각1유지, no-op write API는writer예약·BEGIN/COMMIT0→1,거절은BEGIN/ROLLBACK0→1(반영0/clock0). 필요한정합성비용이며latency절감주장0. nativeCOMMIT거절/ACK유실4메서드·resume/immutablehash/기존final·campaign·child를검증했다. 기존180초묶음timeout은0보고통과로보존하고동일소스를모듈분할하여전부재실행했다. 이미재개한뒤새로호출된옛generation fail/cancel을새fence로구분하거나실운영writer contention/전원복구까지해결한것은아니다. 기존최대원화낙폭을그대로두고같은순회에서relative numerator/peak 두정수로최대비율을따로추적한다. 정수교차곱/마지막ppm내림1회,기존fold/event/carry·양수peak없음/음수equity범위를유지한다. 100→50→200은250000→500000ppm,원화50동일;실제report생성→native불변저장/재조회→candidate→한도판정에서검증했다. Fraction독립655입력일치/원화655동일·120비율정정. 1000event곱셈1001→3001/나눗셈1유지·추가state2정수는정확성계산비용이다. 기존저장report/package는옛수치를보존하며자동rewrite/새차단정책/운영임계값·Risk·주문승인변경0이다.
+
 **2026-10-20 `64a74e0` 계약 보완.** R3-046 검증 완료: 일반 research CLI의 request/result/cancel resolved alias를 parsing/오류 게시 전에 보호하고, 기존 request 경로 helper로 선언된 DB/dataset도 보존한다. 정상 독립 오류 envelope/atomic result·등록/leader/final/validation/comparison 기존 분기는 유지한다. 기존 보호계약을 재사용했고 새 path 계층/설정/시계/DB 호출은 없다. 원본20 subcase 실패→수정 후 통과; 실제 child4개 conflict/success/cancel/resume 종료2/0/2/0과 원본 bytes·결과 소비를 확인했다. 일반 GUI가 평소 충돌한다는 증거는 없고 전체 ResearchDialog 클릭·동시 파일교체 보안 경계의 수락으로 확대하지 않는다.
 
 **현재 책임.** ResearchDialog/CLI가 명시 request와 입력을 선택하고 `research_process`가 child 실행·등록/claim·진행/중단·복구·결과 게시를 조정한다. 기존 연구 실행기는 Family 판단과 simulation 원장을, 평가기는 outcome/짝 비교/report를 소유한다. ResearchRepository는 동결 입력·run/lease/generation·결과/최종평가의 native 저장을 소유한다. 후보 package/specification 게시 이후에도 별도 admission·Risk·Execution을 통과한다.
 
 **상태·실패·공식 경계.** 기존 request/typed split·dataset·Family registry, repository의 owned claim/finish 계약과 후보 게시 API를 사용한다. 실제 지원하는 봉 해상도·정책·입력 가용시점을 명시하고 분봉을 가짜 틱/초봉으로 바꾸지 않는다. 개발/최종평가·과거 완결 결과와 현재 가용 관측을 분리한다. retry/재시작은 원래 run identity·owner·결과 불변성을 보존하고 source/result 경로를 혼용하지 않는다. child는 stop/checkpoint와 실제 완료를 부모에게 전달한다.
 
-**남은 연구 범위.** 일반 request=result 충돌046은로컬검증완료, terminal전이063/최대낙폭067은격리검증제출·메인통합대기다. R3-024의 feedback/context/thesis producer 및 일반 연구→live 적용 범위는 미완료다. 수동 전략팩의 일지 사후분석을 이 Family/자동매매 경로와 합치지 않는다.
+**남은 연구 범위.** 일반 request=result 충돌046은로컬검증완료, terminal전이063/최대낙폭067도등록경계로컬검증완료다. 과거잘못된수치의불변보고서및일반API의옛generation새호출은잔여로구분한다. R3-024의 feedback/context/thesis producer 및 일반 연구→live 적용 범위는 미완료다. 수동 전략팩의 일지 사후분석을 이 Family/자동매매 경로와 합치지 않는다.
 
 **관련 검사.** [연구 process](../../tests/unit/test_research_process.py), [연구 저장소](../../tests/unit/test_research_repository.py), [실행](../../tests/unit/test_research_execution.py), [평가](../../tests/unit/test_research_evaluation.py). 고정 입력/분할·소유권·중단/복원·원본/결과 보존과 후속 후보 소비를 확인한다.
 
 <a id="news"></a>
 ## 뉴스·장전 — F19/F20
+
+**2026-10-20 `964ddbe` 추가계약.** 기존자동판정의 provider!=none && (local credentials OR central client)를같은news_execution모듈의순수함수로공유해detail/start/finished를일치시켰다. 실제Qt수동·자동→기존AINewsWorker→인증client의제어POST→native결과/usage→표시가2회,중복/busy/한도추가POST0·localfallback0이다. 링크/busy/기존quota·ChatGPTpause/manualqueue/server키·permission·수명정책을유지한다. 선택/idlefinished의dailyDB조회추가0,finished는현재설정1회확인비용이필요하다. client존재는라우팅가능성일뿐실제서버권한/키/구독/NAS성공을보장하지않으며원격POST취소·late결과폐기는이번범위밖이다.
 
 **2026-10-20 `64a74e0` 계약 보완.** R3-043 진행(PC 구현통합·실제PG 대기): 기존 claim attempts를 필수 keyword로 모든 finish/retry caller와 QueryStore/CentralNewsStore 계약에 전달한다. native WHERE job_key/RUNNING/attempt 일치 때만 상태·output_ref를 갱신하고 실제 matched PENDING commit 뒤에만 깨운다. 정상 retry SELECT1→0, UPDATE/연결/BEGIN/COMMIT 각1 유지. 120초 stale/3회 FAILED/None 반환·immutable 원문과 결과는 보존한다. old/new 성공·실패 역순, ACK 유실/취소복구를 native SQLite와 PG SQL/rollback fixture로 확인했다. 행 삭제 후 같은 key 재생성 ABA는 보장 범위 밖이다. R3-043 실제 PostgreSQL 변경2 ID 및 해당87건 모듈은 미실행이다. 전용 diagnostic DSN 부재로 증분 실행 증거 검사는 누락을 감지해 실패했으며 성공 처리하지 않았다. 기존 push/PR의 필수 postgres-integration이 postgres_required 전체 모듈을 실행하고 실패·누락을 required 증거로 전달하는 본문만 확인했다. 현재 hosted CI 실행은 없다.
 
@@ -148,7 +154,7 @@ R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/
 
 **상태·실패·공식 경계.** 기존 news 수집/page/history·job claim/finish/retry·인증 AI API와 PC worker 신호를 사용한다. native 저장소가 revision·job 상태·transaction을 소유하고 AI service가 accepted 요청/실행 lock을 소유한다. UI용 그룹 대표와 NAS의 저장 body revision 입력을 섞지 않는다. 미확인 자료는 원값과 확인 상태를 함께 보존한다. 장전 context의 `advisory_only/consumer_binding=not_connected`는 실시간 판단/주문 연결과 구분하며 공급자 호출이나 polling task를 소비자마다 복제하지 않는다.
 
-**남은 뉴스 범위.** 073동일기사쓰기등록경계는완료,043terminal은PC통합·실제PG대기,072가용성은격리검증제출·메인통합대기다. 019read/error·020프로세스결합·084body/projection소비계약은남는다. 장전 결과와 외부 지연시세(060/061)는 서로 다른 입력 경계다.
+**남은 뉴스 범위.** 073동일기사쓰기등록경계는완료,043terminal은PC통합·실제PG대기,072가용성은등록UI연결로컬검증완료다. 서버실제권한/키및remote취소수락은별도다. 019read/error·020프로세스결합·084body/projection소비계약은남는다. 장전 결과와 외부 지연시세(060/061)는 서로 다른 입력 경계다.
 
 **관련 검사.** [CentralNewsService](../../tests/unit/test_central_news_service.py), [news jobs](../../tests/unit/test_news_jobs.py), [기사 저장소](../../tests/unit/test_stock_news_repository.py), [장전 계약](../../tests/unit/test_morning_market_brief.py). 원문 revision·중복/실패·가용시각·선택한 provider/버튼과 실제 worker 입력을 대조한다.
 
@@ -236,6 +242,8 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 ```
 
 ### 재현 가능한 실제 비용 기준
+
+**일곱번째 통합:** 현재 통합 소스 관련20모듈 고유231건/317.202 worker초 통과(연구153·뉴스65·기존구조차단13). 변경8 ID·전체 계획/실행/통과, 현재 전체지문/동결9파일, worker/tree종료·nativeTEMP제거를 대조했다. 구조1374고유site-key/위반0·retirable0. 063terminal3키의허용execute횟수만2→3으로승인review1건을추가했고adopted/rules/기존review이력은동일하다(start는기존site재사용). 기존차단13건도재사용통과했다. 증분41기록6009→6016/추가7·기존availability검사보강1/삭제0,과거40기록·미결49보존·실행증거검사통과. 동적full_required495/external32/불확실성7은자동실행하지않고실제owner/소비/실패·종료의관련20모듈만선정했다. 필요한063writer예약/067교차곱/072설정확인증가와절감은구분한다. 실제PG(043변경2건포함)·키움/장중/실계좌/주문·운영DB·외부provider/NAS/network·push/hostedCI/배포·로컬전수회귀는미실행이다. 과거 immutable연구결과 재작성/재승인과 원격POST취소·late결과폐기는수락하지않았다.
 
 **여섯번째 통합:** 현재 통합 소스 관련 27개 실제 모듈 고유394건/431.634 worker초 통과(journal167/index112/real115). 변경14 ID·계획/실행/통과, 전체 소스 지문, 동결9파일과035 기존본문을 보존한065 추가2메서드 병합, worker/자식 종료·native TEMP 제거를 대조했다. 구조1374site/위반0·retirable0/guard변경0. 증분40번째기록5996→6009/추가13·기존socket실패검사보강1·삭제0, 이전39기록·미결49보존. 기존socket실패assertion은유지하고close실패/owner보존을추가했으며finally에서는주입한socket실패만원복해실제fixture종료한다. full_required495/external32/불확실성7은자동실행하지않고실제변경caller/owner/native/consumer/실패·종료의27모듈과앱종료기존1ID만선정했다. 전체확장범위통과로보고하지않는다. 030필요새provider조회/이후hit0,064metadata시도11→10·native tx1유지,065오류시write/replace1→0,066명시실패2+event2복구save4/행2/REST0. 실제 키움/장중·실제PG(기존043 변경2 ID 포함)·운영 DB/계좌/주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀·물리I/O/운영발생률은 미검증이다. 이번 증거 검사 통과는 이전043의 외부검증 미완료를 해소하지 않는다.
 

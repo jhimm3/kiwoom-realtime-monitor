@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 `964ddbe`: 기존ResearchRepository는run전이원자성,같은research_evaluation은원화/상대낙폭,news_execution은provider/credential가용성공통판정을소유한다. 새모듈/계층/schema없음. 관련20모듈231건·F15/F17/F19/F21/F23/F24·필요안전비용/잔여는R3정본참조.
+
 2026-10-20 `0a54c35`: 기존EntrySnapshotWriter는provider-cache세대,JournalSnapshotRepository는뉴스/metadata원자보존,JsonRecordOutbox는파일read실패,RealCredentialOwner는all-contextdrain/명시close retry를소유한다. 새module/계층/schema없음. 실제event소비는native/diagnostic까지이며일지API전체는미확인. 관련27모듈394건·계약/잔여는R3정본참조.
 
 2026-10-20 `64a74e0`: AutonomousTop20의 collector RAM critical section과 기존 outbox/native 수명을 분리하고, NewsJobRunner→QueryStore/native의 필수 claim-attempt 전이를 연결했다(실제PG 대기). 일반 research CLI는 기존 경로 helper로 입력 alias를 보호한다. 새 모듈/계층/schema 없음. 관련20모듈305건/실제PG2건 미실행, R036 replay 관측계약 및 새084 소비 cut 계약확인은 정본 참조.
