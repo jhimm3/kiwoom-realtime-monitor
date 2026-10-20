@@ -4576,7 +4576,9 @@ class CentralServerAppTests(unittest.TestCase):
                     "https://in-process.test", "private-token", opener=opener,
                 )
                 self.assertGreater(CentralJournalSyncService(client).sync(source_path), 0)
-                self.assertGreater(CentralJournalSyncService(client).sync(target_path), 0)
+                # sync returns uploaded rows. The imported snapshot already
+                # exists centrally; successful local merge needs no echo POST.
+                self.assertEqual(0, CentralJournalSyncService(client).sync(target_path))
 
             self.assertEqual(
                 {"fill-1": "manual:round-trip"}, target.load_group_overrides(),

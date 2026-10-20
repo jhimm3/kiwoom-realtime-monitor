@@ -394,15 +394,16 @@ class CentralNewsService:
                     )
                     if saved and isinstance(saved[0].get("document"), dict):
                         document = {**document, **saved[0]["document"]}
-                await self._collect(
+                owner_items = await self._collect(
                     code, name, since, self._client if self._naver_api_enabled else None,
                     self._dart_client if self._dart_enabled else None,
+                    owner_only=True,
                 )
-                owner_items = await asyncio.to_thread(self._load_cached, code, name, since)
                 await self._auto_analyze(code, name, owner_items, document)
                 refreshed += 1
             except Exception:
                 # 한 종목 또는 공급자의 실패가 나머지 자동 수집을 중단하지 않는다.
+                LOGGER.exception("Stock news refresh failed code=%s", code)
                 continue
             await asyncio.sleep(0.7)
         return refreshed
@@ -495,7 +496,10 @@ class CentralNewsService:
             except TimeoutError:
                 continue
 
-    async def _collect(self, code: str, name: str, since: datetime | None, client, dart_client) -> list[dict[str, Any]]:
+    async def _collect(
+        self, code: str, name: str, since: datetime | None, client, dart_client,
+        *, owner_only: bool = False,
+    ) -> list[dict[str, Any]]:
         sync_rows = await asyncio.to_thread(self._store.load_documents, "news_sync", code, 1)
         sync_document = sync_rows[0].get("document", {}) if sync_rows else {}
         checked_at = None
@@ -509,6 +513,8 @@ class CentralNewsService:
                 and self._now() - checked_at.astimezone(UTC)
                 < timedelta(seconds=self.SELECTED_STOCK_CACHE_SECONDS)
             ):
+                if owner_only:
+                    return await asyncio.to_thread(self._load_cached, code, name, since)
                 cached = await asyncio.to_thread(self._load_cached, code, name, None)
                 return await asyncio.to_thread(self._merge_confirmed, code, name, cached, since)
         provider_since = since
@@ -573,6 +579,8 @@ class CentralNewsService:
             cached = await asyncio.to_thread(self._load_cached, code, name, None)
             stored = await asyncio.to_thread(self._merge_confirmed, code, name, cached, since)
             if stored:
+                if owner_only:
+                    return await asyncio.to_thread(self._load_cached, code, name, since)
                 return stored
             raise RuntimeError(" / ".join(str(error) for error in errors))
         unique = {
@@ -590,6 +598,9 @@ class CentralNewsService:
             "owner": code, "key": "latest",
             "document": {**site_state, "checked_at": self._now().isoformat()},
         }])
+        if owner_only:
+            # Automatic AI consumes committed owner revisions, not the fresh/confirmed display merge.
+            return await asyncio.to_thread(self._load_cached, code, name, since)
         cached = await asyncio.to_thread(self._load_cached, code, name, None)
         fresh = [value for value, _collector in documents]
         fresh_identities = {_identity(value) for value in fresh}

@@ -2616,11 +2616,34 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runner._protection_pending())  # Submission is not actual liquidation.
 
     async def test_duplicate_notifications_and_idle_polls_do_not_repeat_full_gate(self):
+        from dataclasses import asdict
+        from kiwoom_monitor.application.position_target import _json_value
         inputs = await self.prepare()
-        with self.count_native() as offer:
+        # Preserve the pre-refactoring canonical encoding independently of the offer.
+        expected = {key: asdict(value) for key, value in inputs.items()}
+        risk = inputs['risk']
+        expected['risk'] = risk.to_dict()
+        expected['observation']['risk_snapshot'] = risk.to_dict()
+        expected_payload = json.dumps(
+            expected, sort_keys=True, separators=(',', ':'), default=_json_value,
+        ).encode()
+        expected_identity = hashlib.sha256(expected_payload).hexdigest()
+        native_risk_to_dict = type(risk).to_dict
+        native_dumps = json.dumps
+        payloads = []
+        def encode(*args, **kwargs):
+            value = native_dumps(*args, **kwargs)
+            payloads.append(value.encode())
+            return value
+        with self.count_native() as offer, patch.object(type(risk), 'to_dict',
+                autospec=True, side_effect=native_risk_to_dict) as convert, patch(
+                'kiwoom_monitor.central_server.mock_automation_runner.json.dumps', side_effect=encode):
             self.assertTrue(self.runner.offer_unfilled_execution_inputs(**inputs))
             for _ in range(100):
                 self.assertFalse(self.runner.offer_unfilled_execution_inputs(**inputs))
+        self.assertEqual(expected_identity, self.runner._unfilled_input_identity[2])
+        self.assertEqual([expected_payload] * 101, payloads)
+        self.assertEqual(101, convert.call_count)
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, offer)
         await self.runner.run_once()
         with patch.object(self.runner, '_execute_unfilled_replacement_locked', side_effect=AssertionError('repeat gate')):

@@ -57,12 +57,6 @@ class SecondaryDataFollowupCoordinator:
             self._start_daily_high_phase(codes)
         return SecondaryStartPhase.MINUTE_HISTORY
 
-    def minute_history_finished(self, codes: tuple[str, ...], *, forced: bool) -> None:
-        if forced:
-            self._start_daily_high(codes, True)
-        else:
-            self._start_daily_high_phase(codes)
-
     def daily_high_finished(self, codes: tuple[str, ...]) -> None:
         self._start_fundamentals_phase(codes)
 

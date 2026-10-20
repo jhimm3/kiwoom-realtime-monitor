@@ -175,6 +175,32 @@ class ThemeRepository:
             connection.close()
         return tuple(str(row[0]) for row in rows)
 
+    def themes_for_stocks(self, codes: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+        """Read the requested memberships once for the active profile."""
+        themes: dict[str, list[str]] = {code: [] for code in codes}
+        if not themes:
+            return {}
+        connection = self._connect()
+        try:
+            profile_id = self._profile_id(connection)
+            requested = tuple(themes)
+            # Reserve one binding for the profile; retain SQLite's own limit.
+            chunk_size = max(1, connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - 1)
+            for offset in range(0, len(requested), chunk_size):
+                chunk = requested[offset:offset + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    "SELECT stock_code, theme_name FROM profile_stock_themes "
+                    f"WHERE profile_id=? AND stock_code IN ({placeholders}) "
+                    "ORDER BY stock_code, theme_name",
+                    (profile_id, *chunk),
+                ).fetchall()
+                for code, name in rows:
+                    themes[str(code)].append(str(name))
+        finally:
+            connection.close()
+        return {code: tuple(names) for code, names in themes.items()}
+
     def find_code_by_name(self, name: str) -> str | None:
         connection = self._connect()
         try:

@@ -72,15 +72,11 @@ class SecondaryDataScheduleTests(unittest.TestCase):
         calls: list[tuple[object, ...]] = []
         coordinator = self.coordinator(calls)
 
-        coordinator.minute_history_finished(("A",), forced=False)
-        coordinator.minute_history_finished(("B",), forced=True)
         coordinator.daily_high_finished(("C",))
         coordinator.fundamentals_finished(("D",), after_hours_pause=False)
         coordinator.fundamentals_finished(("E",), after_hours_pause=True)
 
         self.assertEqual([
-            ("daily_phase", ("A",)),
-            ("daily", ("B",), True),
             ("fundamentals_phase", ("C",)),
             ("nxt", ("D",)),
             ("nxt", ("E",)),

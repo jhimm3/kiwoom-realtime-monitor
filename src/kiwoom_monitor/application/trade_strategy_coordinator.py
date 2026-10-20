@@ -55,10 +55,11 @@ def classify_with_strategy_packs(
     *,
     base: TradeSetupClassification | None = None,
     evaluator: StrategyEvaluator = evaluate_strategy_pack,
+    on_selected_pack: Callable[[StrategyPackManifest | None], None] | None = None,
 ) -> tuple[TradeSetupClassification, tuple[str, ...]]:
     """활성·승인 전략팩만 평가하고 현재 표시 방식으로 최종 후보를 고른다."""
     base_result = base or default_pack.classify(episode, minute_rows, daily_rows)
-    candidates: list[tuple[str, TradeSetupClassification]] = [("기본분석", base_result)]
+    candidates: list[tuple[StrategyPackManifest | None, TradeSetupClassification]] = [(None, base_result)]
     for pack in packs:
         if pack.pack_id == "mimosa_v1" or not pack.enabled or pack.review_status != "approved":
             continue
@@ -67,12 +68,18 @@ def classify_with_strategy_packs(
             continue
         result = evaluator(pack, draft, episode, minute_rows, daily_rows)
         if result is not None:
-            candidates.append((pack.name, result))
-    selected_name, selected = select_strategy_candidate(tuple(candidates), result_mode)
+            candidates.append((pack, result))
+    # A candidate's display name is not its identity, even within one evaluation.
+    selected_key, selected = select_strategy_candidate(tuple(
+        (str(index), result) for index, (_pack, result) in enumerate(candidates)
+    ), result_mode)
+    selected_index = int(selected_key)
+    if on_selected_pack is not None:
+        on_selected_pack(candidates[selected_index][0])
     comparison = tuple(
-        f"{name} {result.setup_type} {result.confidence}%"
-        + ("(최종)" if name == selected_name else "")
-        for name, result in candidates
+        f"{pack.name if pack is not None else '기본분석'} {result.setup_type} {result.confidence}%"
+        + ("(최종)" if index == selected_index else "")
+        for index, (pack, result) in enumerate(candidates)
     )
     return selected, (f"표시방식 {result_mode_label(result_mode)}", *comparison)
 

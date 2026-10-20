@@ -19,6 +19,53 @@ from kiwoom_monitor.infrastructure.persistence.market_cache_writer import Market
 
 
 class MarketCacheWriterTests(unittest.TestCase):
+    def test_retention_follows_dirty_minutes_and_preserves_cutoff_rows_and_metadata(self) -> None:
+        from threading import get_ident
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path)
+            old, kept = datetime(2026, 9, 19, 10), datetime(2026, 9, 20, 10)
+            repository.upsert_many({"005930": tuple(
+                MinuteOhlcv(minute, 100, 110, 90, 105, 10) for minute in (old, kept))})
+            repository.mark_gap_minutes({"005930": (old, kept)})
+            repository.upsert_market_index_minutes({("kospi", minute): (1., 2., 1., 2., 10.)
+                for minute in (old, kept)})
+            for minute in (old, kept):
+                repository.record_history_sync("005930", minute.date(), minute, 1)
+            with closing(sqlite3.connect(path)) as connection:
+                kept_metadata = connection.execute(
+                    "SELECT * FROM market_data_observation_meta WHERE substr(observation_key,1,10)=? ORDER BY subject",
+                    (kept.date().isoformat(),)).fetchall()
+            original = MinuteBarRepository.purge_before
+            purges, failures = [], []
+
+            def purge(current, cutoff):
+                with closing(sqlite3.connect(path)) as connection:
+                    dirty = connection.execute("SELECT close_price FROM minute_bars WHERE stock_code='dirty'").fetchone()
+                purges.append((get_ident(), cutoff, dirty))
+                original(current, cutoff)
+
+            writer = MarketCacheWriter(path)
+            writer.retention_failed.connect(lambda *values: failures.append(values), Qt.ConnectionType.DirectConnection)
+            writer.minute_failed.connect(lambda *values: failures.append(values), Qt.ConnectionType.DirectConnection)
+            writer.enqueue_minute_bars({("dirty", old): MinuteOhlcv(old, 50, 50, 50, 50, 1)}, {})
+            writer.enqueue_minute_retention(kept.date())
+            with patch.object(MinuteBarRepository, "purge_before", purge):
+                writer.start()
+                self.assertTrue(writer.stop_and_drain())
+            self.assertEqual([], failures)
+            self.assertEqual([(kept.date(), (50,))], [(cutoff, dirty) for _, cutoff, dirty in purges])
+            self.assertNotEqual(get_ident(), purges[0][0])
+            with closing(sqlite3.connect(path)) as connection:
+                for table in ("minute_bars", "minute_history_sync_log", "market_index_minute_bars"):
+                    self.assertEqual([(kept.date().isoformat(),)], connection.execute(
+                        f"SELECT DISTINCT trade_date FROM {table}").fetchall(), table)
+                self.assertEqual(kept_metadata, connection.execute(
+                    "SELECT * FROM market_data_observation_meta ORDER BY subject").fetchall())
+
     def test_repeated_market_cap_jobs_skip_row_changes_but_preserve_price_receipts_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

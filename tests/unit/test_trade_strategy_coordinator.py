@@ -66,6 +66,37 @@ class TradeStrategyCoordinatorTests(unittest.TestCase):
         self.assertEqual([], loaded)
         self.assertEqual(("표시방식 전략팩 우선", "기본분석 돌파 70%(최종)"), comparison)
 
+    def test_selected_manifest_follows_candidate_identity_in_every_display_mode(self) -> None:
+        first_result = TradeSetupClassification("눌림", 60, (), subtype="unrelated display text")
+        second_result = TradeSetupClassification("눌림", 90, (), subtype="unrelated display text")
+        for names in (("전략", "전략확장"), ("동명이름", "동명이름"), ("기본분석", "기본분석")):
+            packs = (manifest("first", names[0]), manifest("second", names[1]))
+            for mode in ("together", "base_priority", "auto_replace", "strategy_priority"):
+                with self.subTest(names=names, mode=mode):
+                    received = []
+                    selected, comparison = classify_with_strategy_packs(
+                        default_strategy_pack(), packs, mode, lambda _key: ExtractedStrategyDraft((), {}),
+                        self.episode, (), base=self.base,
+                        evaluator=lambda pack, *_args: first_result if pack.pack_id == "first" else second_result,
+                        on_selected_pack=received.append,
+                    )
+                    custom_selected = mode in {"auto_replace", "strategy_priority"}
+                    self.assertIs(second_result if custom_selected else self.base, selected)
+                    self.assertEqual(1, len(received))
+                    self.assertIs(packs[1] if custom_selected else None, received[0])
+                    self.assertEqual(1, sum(value.endswith("(최종)") for value in comparison))
+
+        # Even reusing the same evaluator result object cannot merge two candidate identities.
+        received = []
+        selected, comparison = classify_with_strategy_packs(
+            default_strategy_pack(), packs, "strategy_priority", lambda _key: ExtractedStrategyDraft((), {}),
+            self.episode, (), base=self.base, evaluator=lambda *_args: second_result,
+            on_selected_pack=received.append,
+        )
+        self.assertIs(second_result, selected)
+        self.assertIs(packs[0], received[0])
+        self.assertEqual(1, sum(value.endswith("(최종)") for value in comparison))
+
     def test_legacy_single_type_becomes_cycle_override(self) -> None:
         cycle = (TradeSetupClassification("기타", 40, ()),)
 

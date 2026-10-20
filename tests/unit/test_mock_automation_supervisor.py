@@ -751,6 +751,77 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({}, self.supervisor._runner_close_tasks)
         self.transport.submit.assert_not_called()
 
+    async def test_cancelled_activation_joins_native_recovery_before_shutdown_retires_owner(self):
+        await self.supervisor.bundle_changed(self.profile, None)
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        native_controls = []
+
+        def recovery(repository, runtime, *args, **kwargs):
+            # Only eligibility is controlled. Both reads use the actual app's
+            # native store and admitted control; no order/provider call occurs.
+            native_controls.append(repository.load_mock_automation_control(self.account_ref))
+            entered.set()
+            try:
+                if not release.wait(5):
+                    raise AssertionError("cancelled activation native barrier was not released")
+                native_controls.append(repository.load_mock_automation_control(self.account_ref))
+            finally:
+                finished.set()
+
+        with patch("kiwoom_monitor.central_server.mock_automation_supervisor.admit_mock_automation"), \
+             patch("kiwoom_monitor.central_server.mock_automation_supervisor.record_mock_automation_recovery_from_risk", side_effect=recovery), \
+             patch.object(self.store, "close", wraps=self.store.close) as close_store:
+            activation = asyncio.create_task(self.supervisor.activate(credential_profile_id=self.profile,
+                account_ref=self.account_ref, spec_id=self.spec.spec_id,
+                expected_settings_revision=self.settings["revision"], credential_revision=1))
+            shutdown = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                activation.cancel()
+                await asyncio.sleep(0)
+                shutdown = asyncio.create_task(self.close_app())
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.2)
+                except TimeoutError:
+                    pass
+                # Repeated request cancellation must still leave the one native
+                # call protected by the existing account serialization lock.
+                activation.cancel()
+                await asyncio.sleep(0)
+                activation.cancel()
+                await asyncio.sleep(0)
+                observed = {
+                    "activation_pending": not activation.done(),
+                    "account_lock_held": self.supervisor._locks[self.account_ref].locked(),
+                    "shutdown_pending": not shutdown.done(),
+                    "owner_closing": self.owner._closing,
+                    "runtime_retired": self.bundle.runtime._retired,
+                    "store_close_calls": close_store.call_count,
+                    "native_pending": not finished.is_set(),
+                }
+            finally:
+                release.set()
+                outcome = await asyncio.gather(activation, return_exceptions=True)
+                if shutdown is not None:
+                    await shutdown
+                self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+
+        self.assertEqual({
+            "activation_pending": True, "account_lock_held": True,
+            "shutdown_pending": True, "owner_closing": False,
+            "runtime_retired": False, "store_close_calls": 0,
+            "native_pending": True,
+        }, observed)
+        self.assertIsInstance(outcome[0], asyncio.CancelledError)
+        self.assertEqual([self.control, self.control], native_controls)
+        self.assertTrue(self.bundle.runtime._retired)
+        self.assertEqual("completed", self.app.state.shutdown_status["state"])
+        self.assertEqual({}, self.supervisor._runners)
+        self.assertEqual({}, self.supervisor._runner_close_tasks)
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
     async def test_post_switch_admission_failure_records_original_error_and_closes_current_order_gate(self):
         failure = ValueError("controlled existing approval rejection")
         with patch.object(self.runner, "close", wraps=self.runner.close) as close:

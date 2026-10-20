@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -102,6 +103,34 @@ class MockAutomationRiskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "crossed"):
             self.snapshot((event(1, "foreign", "BUY", 1, 100, now, account=OTHER),), (),
                           positions={}, observed=now)
+
+    def test_owned_net_quantities_ignore_input_order_other_runs_and_oversold_basis(self):
+        now = datetime(2026, 9, 21, 1, tzinfo=UTC)
+        # Accepted-order ownership and chronological account FIFO deliberately differ.
+        facts = (
+            ("005930", "run-a", "BUY", 2, 100, 4),
+            ("005930", "run-a", "SELL", 5, 120, 1),
+            ("005930", "run-a", "BUY", 4, 101, 3),
+            ("005930", "run-b", "BUY", 7, 90, 0),
+            ("000660", "run-a", "BUY", 3, 200, 2),
+            ("000660", "run-a", "SELL", 3, 210, 5),
+            ("035420", "run-a", "SELL", 2, 300, 0),
+            ("035420", "run-a", "BUY", 1, 290, 6),
+            ("051910", "run-b", "BUY", 9, 400, 0),
+            ("068270", "run-a", "BUY", 5, 500, 3),
+        )
+        values = tuple(replace(event(sequence, f"fill-{sequence}", side, quantity, price,
+            now.replace(second=second), run=run), symbol=symbol)
+            for sequence, (symbol, run, side, quantity, price, second) in enumerate(facts, 1))
+        # Independent inventory totals: (2+4)-5=1, 3-3=0, 1-2=-1, other run=0, 5=5.
+        expected = (("005930", 1), ("068270", 5))
+        for ordered in (values, tuple(reversed(values)), tuple(sorted(values, key=lambda value: value.occurred_at))):
+            with self.subTest(order=tuple(value.accepted_sequence for value in ordered)):
+                snapshot = self.snapshot(ordered, (), positions={}, observed=now.replace(second=10))
+                self.assertEqual(expected, snapshot.owned_position_quantities)
+                self.assertEqual((("068270", 500),), snapshot.owned_entry_prices)
+                self.assertIsNone(snapshot.daily_net_pnl_won)
+                self.assertFalse(snapshot.reconciliation_complete)
 
     def test_kst_date_rollover_and_repository_current_revision(self):
         before = datetime(2026, 9, 20, 14, 59, tzinfo=UTC)

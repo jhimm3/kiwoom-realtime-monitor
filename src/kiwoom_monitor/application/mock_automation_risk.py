@@ -600,7 +600,7 @@ def _has_unresolved_aggregate(events: Sequence[AccountExecutionEvent]) -> bool:
 
 def _run_positions(events: Sequence[AccountExecutionEvent], run_id: str) -> dict[str, int]:
     values: dict[str, int] = {}
-    for event in sorted(events, key=lambda item: (item.occurred_at, item.accepted_sequence)):
+    for event in events:
         if event.run_id != run_id:
             continue
         change = event.quantity if event.side == "BUY" else -event.quantity

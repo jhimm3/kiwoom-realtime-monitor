@@ -78,6 +78,9 @@ class MinuteChart(QWidget):
         self._text_color = QColor("#263238")
         self._text_size = 12
         self._moving_average_styles = dict(MOVING_AVERAGE_DEFAULTS)
+        self._moving_average_rows: tuple[tuple[object, ...], ...] | None = None
+        self._moving_average_periods: tuple[int, ...] = ()
+        self._moving_average_values: dict[int, dict[int, float]] = {}
         self._text_editor: QLineEdit | None = None
         self._editing_text_index: int | None = None
         self._selected_annotation: int | None = None
@@ -344,6 +347,27 @@ class MinuteChart(QWidget):
     def setup_types(self) -> tuple[str, ...]:
         return self._setup_types
 
+    def _moving_average_data(self) -> dict[int, dict[int, float]]:
+        """화면 밖 warmup을 포함한 최신 전체 봉의 수치 한 벌만 재사용한다."""
+        periods = tuple(period for period, (enabled, _color, _width) in self._moving_average_styles.items() if enabled)
+        if self._moving_average_rows is self._all_rows and self._moving_average_periods == periods:
+            return self._moving_average_values
+        closes = [float(row[4]) for row in self._all_rows]
+        averages: dict[int, dict[int, float]] = {}
+        for period in periods:
+            if len(closes) < period:
+                continue
+            rolling = sum(closes[:period])
+            values: dict[int, float] = {period - 1: rolling / period}
+            for absolute_index in range(period, len(closes)):
+                rolling += closes[absolute_index] - closes[absolute_index - period]
+                values[absolute_index] = rolling / period
+            averages[period] = values
+        self._moving_average_rows = self._all_rows
+        self._moving_average_periods = periods
+        self._moving_average_values = averages
+        return averages
+
     def paintEvent(self, event: object) -> None:
         painter = QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), self._background)
@@ -467,15 +491,11 @@ class MinuteChart(QWidget):
             painter.fillRect(QRectF(x - max(0.5, width * 0.35), volume_bottom - volume_height, max(1.0, width * 0.7), volume_height), volume_color)
 
         # 화면 왼쪽 첫 봉도 이전 봉을 포함한 정확한 평균값을 쓰도록 전체 구간에서 계산한다.
-        closes = [float(row[4]) for row in self._all_rows]
+        averages = self._moving_average_data()
         for period, (enabled, color_text, line_width) in self._moving_average_styles.items():
-            if not enabled or len(closes) < period:
+            if not enabled or period not in averages:
                 continue
-            rolling = sum(closes[:period])
-            values: dict[int, float] = {period - 1: rolling / period}
-            for absolute_index in range(period, len(closes)):
-                rolling += closes[absolute_index] - closes[absolute_index - period]
-                values[absolute_index] = rolling / period
+            values = averages[period]
             points = [
                 QPoint(int(left + (visible_index + 0.5) * width), int(y(values[self._view_start + visible_index])))
                 for visible_index in range(len(self._rows))

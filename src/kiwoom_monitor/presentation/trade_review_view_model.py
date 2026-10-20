@@ -206,6 +206,7 @@ def build_trade_analysis_view_model(
     draft_rule_counts: dict[str, int],
     total_return_rate: float,
     research_links: tuple[JournalResearchLink, ...] = (),
+    cycle_selected_packs: tuple[StrategyPackManifest | None, ...] = (),
 ) -> TradeAnalysisViewModel:
     """저장소나 Qt 객체 없이 자동분석 화면 전체에 필요한 값을 만든다."""
     overrides = type_selection.override_map()
@@ -256,7 +257,10 @@ def build_trade_analysis_view_model(
     blocks = [format_daily_analysis_summary(analyses, total_return_rate)]
     blocks.extend(format_linked_news_blocks(linked_news))
     for index, analysis in enumerate(analyses):
-        selected_pack = strategy_pack_for_result(cycle_setups[index], packs)
+        selected_pack = (
+            cycle_selected_packs[index] if cycle_selected_packs
+            else strategy_pack_for_result(cycle_setups[index], packs)
+        )
         reference = strategy_review_reference(
             selected_types[index],
             default_pack=active_pack,

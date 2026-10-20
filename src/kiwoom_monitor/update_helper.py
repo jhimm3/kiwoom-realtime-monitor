@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -156,39 +157,143 @@ def apply_archives(archive_paths: tuple[Path, ...], target_root: Path, progress:
     """
     if not archive_paths or not target_root.is_dir():
         raise UpdateError("업데이트 대상 경로를 확인할 수 없습니다.")
-    for index, archive_path in enumerate(archive_paths, start=1):
+    for archive_path in archive_paths:
         if not archive_path.is_file():
             raise UpdateError("업데이트 파일을 찾을 수 없습니다.")
-        staging = archive_path.parent / f"staging-{os.getpid()}-{index}"
+
+    workspace = Path(tempfile.mkdtemp(prefix=f"staging-{os.getpid()}-", dir=archive_paths[0].parent))
+    originals: dict[Path, Path | None] = {}
+    applied: list[Path] = []
+    created_directories: set[Path] = set()
+    temporary_files: set[Path] = set()
+    preserve_recovery = False
+
+    def replace_file(source: Path, destination: Path) -> None:
+        descriptor, name = tempfile.mkstemp(prefix=".kiwoom-update-", suffix=".tmp", dir=destination.parent)
+        temporary = Path(name)
+        temporary_files.add(temporary)
+        os.close(descriptor)
         try:
+            if source.is_symlink():
+                temporary.unlink()
+            shutil.copy2(source, temporary, follow_symlinks=False)
+            temporary.replace(destination)
+            temporary_files.remove(temporary)
+        finally:
+            if temporary in temporary_files:
+                temporary.unlink(missing_ok=True)
+                temporary_files.remove(temporary)
+
+    try:
+        prepared: list[tuple[Path, list[Path], list[Path]]] = []
+        for index, archive_path in enumerate(archive_paths, start=1):
+            staging = workspace / str(index)
             if progress is not None:
                 progress.show(f"업데이트 {index}/{len(archive_paths)} 파일을 준비하고 있습니다…", int(5 + 90 * (index - 1) / len(archive_paths)))
             _extract_archive(archive_path, staging)
             changed, deleted = _read_manifest(staging)
-            total_size = sum((staging / item).stat().st_size for item in changed)
-            copied_size = 0
-            for relative in changed:
-                source, destination = staging / relative, target_root / relative
-                if not _inside(destination, target_root):
-                    raise UpdateError("허용되지 않은 교체 대상 경로입니다.")
-                if progress is not None:
-                    within_archive = copied_size / max(1, total_size)
-                    progress.show(f"업데이트 {index}/{len(archive_paths)} 파일을 교체하고 있습니다…", int(5 + 90 * ((index - 1 + within_archive) / len(archive_paths))))
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-                copied_size += source.stat().st_size
-                if log_path is not None:
-                    _write_log(log_path, f"{index}/{len(archive_paths)} 교체 완료: {relative.as_posix()}")
-            for relative in deleted:
+            for relative in (*changed, *deleted):
+                if not _inside(target_root / relative, target_root):
+                    raise UpdateError("허용되지 않은 업데이트 대상 경로입니다.")
+                originals.setdefault(relative, None)
+            prepared.append((staging, changed, deleted))
+
+        # 같은 파일이 여러 릴리즈에 등장해도 batch 시작 전 원본은 한 번만 보존한다.
+        for relative in originals:
+            destination = target_root / relative
+            if destination.exists() or destination.is_symlink():
+                backup = workspace / "originals" / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(destination, backup, follow_symlinks=False)
+                originals[relative] = backup
+
+        try:
+            for index, (staging, changed, deleted) in enumerate(prepared, start=1):
+                total_size = sum((staging / item).stat().st_size for item in changed)
+                copied_size = 0
+                for relative in changed:
+                    source, destination = staging / relative, target_root / relative
+                    if progress is not None:
+                        within_archive = copied_size / max(1, total_size)
+                        progress.show(f"업데이트 {index}/{len(archive_paths)} 파일을 교체하고 있습니다…", int(5 + 90 * ((index - 1 + within_archive) / len(archive_paths))))
+                    parent = destination.parent
+                    while parent != target_root and not parent.exists():
+                        created_directories.add(parent)
+                        parent = parent.parent
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    replace_file(source, destination)
+                    applied.append(relative)
+                    copied_size += source.stat().st_size
+                    if log_path is not None:
+                        _write_log(log_path, f"{index}/{len(archive_paths)} 교체 완료: {relative.as_posix()}")
+                for relative in deleted:
+                    (target_root / relative).unlink(missing_ok=True)
+                    applied.append(relative)
+                    if log_path is not None:
+                        _write_log(log_path, f"{index}/{len(archive_paths)} 삭제 처리: {relative.as_posix()}")
+        except Exception as error:
+            rollback_errors: list[str] = []
+            for relative in dict.fromkeys(reversed(applied)):
                 destination = target_root / relative
-                if not _inside(destination, target_root):
-                    raise UpdateError("허용되지 않은 삭제 대상 경로입니다.")
-                destination.unlink(missing_ok=True)
-                if log_path is not None:
-                    _write_log(log_path, f"{index}/{len(archive_paths)} 삭제 처리: {relative.as_posix()}")
-            archive_path.unlink(missing_ok=True)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+                try:
+                    backup = originals[relative]
+                    if backup is None:
+                        destination.unlink(missing_ok=True)
+                    else:
+                        if destination in created_directories and destination.is_dir():
+                            destination.rmdir()
+                            created_directories.remove(destination)
+                        replace_file(backup, destination)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"{relative.as_posix()}: {rollback_error}")
+            for temporary in tuple(temporary_files):
+                try:
+                    temporary.unlink(missing_ok=True)
+                    temporary_files.remove(temporary)
+                except OSError as rollback_error:
+                    rollback_errors.append(f"{temporary}: {rollback_error}")
+            for directory in sorted(created_directories, key=lambda path: len(path.parts), reverse=True):
+                try:
+                    if directory.exists():
+                        directory.rmdir()
+                except OSError as rollback_error:
+                    rollback_errors.append(f"{directory}: {rollback_error}")
+            if rollback_errors:
+                preserve_recovery = True
+                recovery = {
+                    "target": str(target_root.resolve()), "error": str(error),
+                    "originals": {relative.as_posix(): str(backup.relative_to(workspace)) if backup else None for relative, backup in originals.items()},
+                    "applied": [relative.as_posix() for relative in applied],
+                    "created_directories": [str(path) for path in sorted(created_directories)],
+                    "temporary_files": [str(path) for path in sorted(temporary_files)],
+                    "rollback_errors": rollback_errors,
+                }
+                try:
+                    (workspace / "recovery.json").write_text(json.dumps(recovery, ensure_ascii=False, indent=2), encoding="utf-8")
+                except OSError as recovery_error:
+                    rollback_errors.append(f"복구 설명 저장 실패: {recovery_error}")
+                raise UpdateError(f"업데이트 실패 후 일부 파일을 복원하지 못했습니다. 복구 자료: {workspace.resolve()} ({'; '.join(rollback_errors)})") from error
+            raise
+
+        try:
+            for archive_path in archive_paths:
+                archive_path.unlink(missing_ok=True)
+        except OSError as error:
+            preserve_recovery = True
+            recovery = {
+                "phase": "archive_cleanup", "product_state": "new",
+                "target": str(target_root.resolve()), "error": str(error),
+                "remaining_archives": [str(path.resolve()) for path in archive_paths if path.exists()],
+            }
+            detail = str(error)
+            try:
+                (workspace / "recovery.json").write_text(json.dumps(recovery, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError as recovery_error:
+                detail += f"; 복구 설명 저장 실패: {recovery_error}"
+            raise UpdateError(f"프로그램 파일 적용은 완료됐지만 업데이트 ZIP 정리에 실패했습니다. 보존 자료: {workspace.resolve()} ({detail})") from error
+    finally:
+        if not preserve_recovery:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 def apply_update(wait_pid: int, archive_paths: tuple[Path, ...], target_root: Path, executable: Path, log_path: Path) -> None:

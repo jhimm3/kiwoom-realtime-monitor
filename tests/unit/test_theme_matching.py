@@ -2,11 +2,58 @@ from __future__ import annotations
 
 import unittest
 
-from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, match_theme_rows, split_concatenated_stock_name
+from kiwoom_monitor.application.theme_matching import MatchedThemeRow, extract_known_stocks_and_unknown_fragments, match_theme_rows, split_concatenated_stock_name
+from kiwoom_monitor.application.theme_preview import ThemeChange, preview_theme_changes
 from kiwoom_monitor.domain.theme_import import ThemeImportRow
 
 
 class ThemeMatchingTests(unittest.TestCase):
+    def test_preview_preserves_rows_and_legacy_reader_contract(self) -> None:
+        class Memberships:
+            def __init__(self):
+                self.calls = []
+
+            def themes_for_stock(self, code):
+                self.calls.append(code)
+                return {"A": ("AI", "반도체"), "B": ("로봇",)}.get(code, ())
+
+        rows = (
+            MatchedThemeRow("A", "첫 이름", ("반도체", "ai")),
+            MatchedThemeRow("B", "둘째", ("신규 테마",)),
+            MatchedThemeRow("A", "중복 행", ("다른 테마",)),
+            MatchedThemeRow("missing", "없는 종목", ()),
+        )
+        legacy = Memberships()
+        expected = (
+            ThemeChange("A", "첫 이름", ("AI", "반도체"), ("반도체", "ai"), "변경 없음"),
+            ThemeChange("B", "둘째", ("로봇",), ("신규 테마",), "테마 변경"),
+            ThemeChange("A", "중복 행", ("AI", "반도체"), ("다른 테마",), "테마 변경"),
+            ThemeChange("missing", "없는 종목", (), (), "변경 없음"),
+        )
+        self.assertEqual(expected, preview_theme_changes(rows, legacy))
+        self.assertEqual(["A", "B", "A", "missing"], legacy.calls)
+
+        class BatchMemberships(Memberships):
+            def themes_for_stocks(self, codes):
+                self.calls.append(codes)
+                return {code: {"A": ("AI", "반도체"), "B": ("로봇",)}.get(code, ()) for code in codes}
+
+        batch = BatchMemberships()
+        self.assertEqual(expected, preview_theme_changes(rows, batch))
+        self.assertEqual([("A", "B", "missing")], batch.calls)
+
+    def test_preview_empty_input_and_batch_failure_do_not_fall_back_to_point_reads(self) -> None:
+        class Memberships:
+            def themes_for_stocks(self, _codes):
+                raise ValueError("batch failed")
+
+            def themes_for_stock(self, _code):
+                raise AssertionError("point read must not hide a batch failure")
+
+        self.assertEqual((), preview_theme_changes((), Memberships()))
+        with self.assertRaisesRegex(ValueError, "batch failed"):
+            preview_theme_changes((MatchedThemeRow("A", "종목", ("테마",)),), Memberships())
+
     def test_returns_unmatched_rows_for_user_correction(self) -> None:
         class Stocks:
             def find_code_by_name(self, name: str) -> str | None:

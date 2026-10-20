@@ -2017,6 +2017,7 @@ class JournalWindow(QMainWindow):
             draft_rule_counts=prepared.draft_rule_counts,
             total_return_rate=episode.summary.return_rate,
             research_links=prepared.research_links,
+            cycle_selected_packs=prepared.cycle_selected_packs,
         )
         self._setup_label.setPlainText(view_model.setup_summary_text)
         self._history_chart.set_setup_types(view_model.selected_types)
@@ -2243,6 +2244,8 @@ class JournalWindow(QMainWindow):
         now = observed_at.replace(tzinfo=None)
         try:
             self._repo.import_live_bars(self._monitor_db, self._live_code, now, observed_at=observed_at)
+            if not self._live_page.isVisible():
+                return
             rows = self._repo.load_bars(self._live_code, now)
             chart_rows = self._repo.load_chart_bars(self._live_code, now)
         except Exception:

@@ -47,6 +47,83 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_dated_high_warm_cache_rollover_and_late_history_keep_gui_retention_off_thread(self):
+        import sqlite3
+        from threading import get_ident
+        from kiwoom_monitor.domain.time_basis import as_kst
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "monitor.sqlite3"
+        database = Database(path)
+        database.initialize()
+        stocks, minutes = StockRepository(path), MinuteBarRepository(path)
+        stocks.upsert("005930", "삼성전자", "KOSPI")
+        now = [as_kst(datetime(2026, 10, 19, 10))]
+        stocks.update_intraday_highs({"005930": 100}, now[0].date())
+        loader = SimpleNamespace(load_top_stocks=FakeRankingLoader().load_top_stocks,
+            server_now=lambda: now[0])
+        self.enterContext(patch.object(MainWindow, "_start_top20_market_repair"))
+        with patch.object(AppController, "start_initial_ranking"):
+            window = MainWindow(database.settings, loader, stock_lookup=stocks,
+                minute_bar_repository=minutes, monitor_database_path=path)
+        controller = window._app_controller
+        controller.ranking.completed.emit(loader.load_top_stocks())
+        window._historical_high_prices["005930"] = 999
+        self.assertEqual(100, window._today_high_prices["005930"])
+        self.assertEqual(now[0].date(), window._today_high_prices_date)
+        # Storage has not seen its first tick, but the source-dated warm high is valid.
+        self.assertIsNone(window._minute_bar_storage_date)
+        gui_thread, statements = get_ident(), []
+        original_connect = sqlite3.connect
+
+        def connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(lambda sql: statements.append((get_ident(), sql)))
+            return connection
+
+        with patch("sqlite3.connect", side_effect=connect):
+            controller.realtime.trade_received.emit(TradeTick("005930", 90, 100, None, None, 90, "100000"))
+            self.assertEqual(100, window._today_high_prices["005930"])
+            self.assertEqual({}, controller.pending_highs)
+            now[0] += timedelta(days=1)
+            controller.realtime.trade_received.emit(TradeTick("005930", 50, 100, None, None, 50, "100000"))
+            self.assertEqual(50, window._today_high_prices["005930"])
+            self.assertEqual({(now[0].date(), "005930"): 50}, controller.pending_highs)
+            self.assertEqual(999, window._historical_high_prices["005930"])
+            # A queued old-day history payload uses the current receiver clock;
+            # it cannot relabel its high200 as today's observation.
+            old = now[0] - timedelta(days=1)
+            window._on_history_received("005930", (MinuteOhlcv(old, 90, 200, 90, 100, 1),))
+            self.assertEqual((now[0].date(), 50),
+                (window._today_high_prices_date, window._today_high_prices["005930"]))
+            current = now[0] - timedelta(minutes=1)
+            window._on_history_received("005930", (MinuteOhlcv(current, 50, 60, 50, 55, 1),))
+            self.assertEqual({(now[0].date(), "005930"): 60}, controller.pending_highs)
+            controller.flush_price_cache()
+            controller.flush_minute_cache()
+            self.assertTrue(controller.market_cache_writer.stop_and_drain())
+        self.assertTrue(any(sql.lstrip().upper().startswith("DELETE") for _, sql in statements))
+        self.assertEqual([], [sql for thread, sql in statements
+            if thread == gui_thread and sql.lstrip().upper().startswith("DELETE")])
+        self.assertEqual({"005930": 100}, stocks.load_intraday_highs(("005930",), old.date()))
+        self.assertEqual({"005930": 60}, stocks.load_intraday_highs(("005930",), now[0].date()))
+        window.close()
+        QTest.qWait(20)
+        with patch.object(AppController, "start_initial_ranking"):
+            reopened = MainWindow(database.settings, loader, stock_lookup=stocks,
+                minute_bar_repository=minutes, monitor_database_path=path)
+        reopened._app_controller.ranking.completed.emit(loader.load_top_stocks())
+        reopened._app_controller.realtime.trade_received.emit(TradeTick("005930", 55, 100, None, None, 55, "100000"))
+        self.assertEqual(60, reopened._today_high_prices["005930"])
+        self.assertEqual({}, reopened._app_controller.pending_highs)
+        reopened._app_controller.flush_price_cache()
+        reopened._app_controller.flush_minute_cache()
+        self.assertTrue(reopened._app_controller.market_cache_writer.stop_and_drain())
+        reopened.close()
+
+
     def test_drive_start_failure_and_reentrant_edit_preserve_pending_ack(self) -> None:
         from kiwoom_monitor.infrastructure.persistence.google_drive_sync import GoogleDriveSyncResult
 
@@ -752,6 +829,168 @@ class MainWindowTest(unittest.TestCase):
             self.assertFalse(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
             window.close()
 
+    def test_trade_render_reads_selected_periods_once_and_refreshes_after_input_changes(self) -> None:
+        from kiwoom_monitor.domain.market_data_contract import (
+            DataCompleteness, MarketDataMetadata, ObservationOrigin,
+        )
+        from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            database.settings.set_many({
+                "strength_show_icon": "0", "decimal_strength": "2",
+                "trade_value_alert_enabled": "1", "trade_value_1m_alert_eok": "25",
+            })
+            window = MainWindow(database.settings, FakeRankingLoader())
+            now = datetime(2026, 10, 9, 10, 7, 10)
+            window._ranking_now = lambda: now
+            window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
+            window._minute_aggregator = type(window._minute_aggregator)()
+            window._fundamentals["005930"] = StockFundamentals(1000, 50, float_shares=100_000_000)
+            window._current_prices["005930"] = 100
+            window._previous_day_close_prices["005930"] = 50
+            window._previous_day_trade_values["005930"] = 211
+            bars = tuple(
+                MinuteOhlcv(now.replace(hour=hour, minute=minute, second=0), 100, 100, 100, 100, 1, value,
+                    MarketDataMetadata(effective_at=now.replace(hour=hour, minute=minute, second=0),
+                        available_at=now, completeness=DataCompleteness.COMPLETE,
+                        origin=ObservationOrigin.REALTIME, source="fixture"))
+                for hour, minute, value in ((9, 5, 7), (9, 59, 11), (10, 0, 13),
+                    (10, 4, 17), (10, 5, 19), (10, 6, 23), (10, 7, 29))
+            )
+            aggregator = window._minute_aggregator
+            aggregator.seed("005930", bars, now, include_current_snapshot=True)
+            periods = ("1m", "5m", "60m", "day")
+            # Independent arithmetic: aligned buckets, not rolling last-N bars.
+            live = (29, 71, 101, 119)
+            completed = (23, 30, 18, 211)
+            with patch.object(aggregator, "bucket_trade_value_eok", wraps=aggregator.bucket_trade_value_eok) as bucket, \
+                    patch.object(aggregator, "today_trade_value_eok", wraps=aggregator.today_trade_value_eok) as today, \
+                    patch.object(window, "_trade_value_quality", wraps=window._trade_value_quality) as quality, \
+                    patch.object(window._table, "setItem", wraps=window._table.setItem) as set_item:
+                for mask in range(16):
+                    modes = tuple(bool(mask & (1 << index)) for index in range(4))
+                    database.settings.set_many({f"trade_display_{period}_mode": "completed" if modes[index] else "live"
+                        for index, period in enumerate(periods)})
+                    for live_only in (False, True):
+                        with self.subTest(modes=modes, live_only=live_only):
+                            bucket.reset_mock(); today.reset_mock(); quality.reset_mock(); set_item.reset_mock()
+                            untouched = tuple(window._table.item(0, column) for column in (7, 8, 9, 10, 11, 12))
+                            window._render_trade_values("005930", live_only=live_only)
+                            indices = (0,) if live_only else range(4)
+                            for index in indices:
+                                expected = completed[index] if modes[index] else live[index]
+                                self.assertEqual(expected, float(window._table.item(0, 6 + index).text()))
+                                strength_column = (4, 10, 11, 12)[index]
+                                strength = float(window._table.item(0, strength_column).text().rstrip("%"))
+                                self.assertAlmostEqual(expected * (2 if index == 3 and modes[index] else 1), strength)
+                            self.assertEqual(not modes[0], window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
+                            self.assertEqual(1 if live_only else 3, bucket.call_count)
+                            self.assertEqual(0 if live_only or modes[3] else 1, today.call_count)
+                            self.assertEqual(list(periods[:1] if live_only else periods),
+                                [call.args[1] for call in quality.call_args_list])
+                            self.assertEqual(2 if live_only else 8, set_item.call_count)
+                            self.assertEqual([(1, modes[0])] if live_only else [(1, modes[0]), (5, modes[1]), (60, modes[2])],
+                                [(call.args[1], call.kwargs.get("previous", False)) for call in bucket.call_args_list])
+                            if live_only:
+                                self.assertEqual(untouched,
+                                    tuple(window._table.item(0, column) for column in (7, 8, 9, 10, 11, 12)))
+
+            database.settings.set_many({f"trade_display_{period}_mode": "live" for period in periods})
+            first = TradeTick("005930", 100, None, 1000, 10, None, "100710")
+            window._on_trade_tick(first)
+            window._on_trade_tick(replace(first, cumulative_trade_value=1100))
+            window._flush_trade_tick_updates()
+            self.assertEqual(30, float(window._table.item(0, 6).text()))
+            self.assertEqual(30, float(window._table.item(0, 4).text().rstrip("%")))
+            gap = RealtimeGap(1, (GapRange("trade", "005930", "KRX", now, now),), False)
+            window._on_realtime_gap(gap.document())
+            self.assertIn("partial", window._table.item(0, 6).toolTip())
+            self.assertEqual(30, float(window._table.item(0, 6).text()))
+            self.assertTrue(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
+            now += timedelta(minutes=1)
+            database.settings.set("trade_display_1m_mode", "completed")
+            window._render_trade_values("005930")
+            self.assertEqual(30, float(window._table.item(0, 6).text()))
+            generation = aggregator.gap_generation("005930")
+            window._minute_recovery_requests["005930"] = generation
+            window._minute_bar_repository = SimpleNamespace()
+            writer = SimpleNamespace(enqueue_history_bars=Mock())
+            restored = replace(bars[-1], trade_value_eok_override=37,
+                metadata=replace(bars[-1].metadata, available_at=now, origin=ObservationOrigin.QUERY, source="kiwoom-ka10080"))
+            with patch.object(MainWindow, "_market_cache_writer", PropertyMock(return_value=writer)):
+                window._on_history_received("005930", (restored,))
+            self.assertEqual(generation, writer.enqueue_history_bars.call_args.kwargs["recovery_generation"])
+            self.assertEqual(37, float(window._table.item(0, 6).text()))
+            self.assertIn("recovering", window._table.item(0, 6).toolTip())
+            # The existing commit callback, rather than history seeding, clears the gap.
+            window._on_history_cache_saved("005930")
+            window._on_history_quality_saved("005930", {"generation": generation, "minutes": (restored.minute,)})
+            self.assertEqual(37, float(window._table.item(0, 6).text()))
+            self.assertIn("complete", window._table.item(0, 6).toolTip())
+            self.assertIn("recovered", window._table.item(0, 6).toolTip())
+            window._minute_bar_repository = None
+            window._fundamentals.clear()
+            with patch.object(window, "_trade_value_quality", wraps=window._trade_value_quality) as quality, \
+                    patch.object(window._table, "setItem", wraps=window._table.setItem) as set_item:
+                window._render_trade_values("005930", live_only=True)
+                self.assertEqual(1, quality.call_count)
+                self.assertEqual(1, set_item.call_count)
+            window.close()
+
+    def test_theme_summary_reuses_live_inputs_and_keeps_excluded_only_reads_narrow(self) -> None:
+        from kiwoom_monitor.application.theme_ranking import top_theme_trade_values
+        from kiwoom_monitor.domain.market_data_contract import (
+            DataCompleteness, MarketDataMetadata, ObservationOrigin,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings, FakeRankingLoader())
+            now = datetime(2026, 10, 9, 10, 7, 10)
+            window._ranking_now = lambda: now
+            window._ranked_stock_names = {"005930": "삼성전자", "000660": "SK하이닉스", "000001": "원전주"}
+            window._themes = {"삼성전자": "반도체", "SK하이닉스": "반도체", "원전주": "원전"}
+            aggregator = window._minute_aggregator
+            for code, value in (("005930", 29), ("000660", 41), ("000001", 17)):
+                bars = tuple(MinuteOhlcv(minute, 100, 100, 100, 100, 1, amount,
+                    MarketDataMetadata(effective_at=minute, available_at=now, completeness=DataCompleteness.COMPLETE,
+                        origin=ObservationOrigin.REALTIME, source="fixture"))
+                    for minute, amount in ((now.replace(hour=9, minute=0, second=0), 5), (now.replace(second=0), value)))
+                aggregator.seed(code, bars, now, include_current_snapshot=True)
+            # Summary inputs stay live even when every table column selects completed data.
+            database.settings.set_many({f"trade_display_{period}_mode": "completed" for period in ("1m", "5m", "60m", "day")})
+            with patch.object(aggregator, "bucket_trade_value_eok", wraps=aggregator.bucket_trade_value_eok) as bucket, \
+                    patch.object(aggregator, "today_trade_value_eok", wraps=aggregator.today_trade_value_eok) as today, \
+                    patch("kiwoom_monitor.presentation.main_window.top_theme_trade_values", wraps=top_theme_trade_values) as top:
+                for period in ("1m", "5m", "60m", "day", "invalid"):
+                    for show, show_excluded in ((True, True), (True, False), (False, True), (False, False)):
+                        for exclusion, excluded_codes in (("005930", {"005930"}), ("SK 하이닉스", {"000660"}), ("미등록", set()), ("", set())):
+                            with self.subTest(period=period, show=show, show_excluded=show_excluded, exclusion=exclusion):
+                                database.settings.set_many({"theme_trade_summary_period": period,
+                                    "theme_trade_summary_enabled": str(int(show)),
+                                    "theme_trade_summary_excluded_enabled": str(int(show_excluded)),
+                                    "theme_trade_summary_excluded_stocks": exclusion})
+                                bucket.reset_mock(); today.reset_mock(); top.reset_mock()
+                                window._refresh_theme_trade_summary()
+                                day = period in {"day", "invalid"}
+                                entries = [(code, name, value + (5 if day else 0)) for (code, name), value in
+                                    zip(window._ranked_stock_names.items(), (29, 41, 17))]
+                                remaining = [entry for entry in entries if entry[0] not in excluded_codes]
+                                expected_count = 3 if show else len(remaining) if show_excluded and exclusion else 0
+                                self.assertEqual(expected_count, today.call_count if day else bucket.call_count)
+                                self.assertEqual(0, bucket.call_count if day else today.call_count)
+                                self.assertTrue(all(not call.kwargs.get("previous", False) for call in bucket.call_args_list))
+                                expected_inputs = ([entries] if show else []) + ([remaining] if show_excluded and exclusion else [])
+                                self.assertEqual(expected_inputs, [list(call.args[0]) for call in top.call_args_list])
+                                if show:
+                                    self.assertIn("80.00억" if day else "70.00억", window._theme_trade_summary.text())
+                                if show_excluded and not exclusion:
+                                    self.assertIn("제외 종목 목록을 입력", window._theme_trade_excluded_summary.text())
+            window.close()
+
     def test_after_hours_daily_restore_only_reads_missing_nas_proof(self) -> None:
         from kiwoom_monitor.application.secondary_data_schedule import SecondaryStartPhase
         now = datetime(2026, 10, 1, 21, 0)
@@ -1394,6 +1633,7 @@ class MainWindowTest(unittest.TestCase):
             database.initialize()
             window = MainWindow(database.settings)
             window._minute_bar_repository = FailingRepository()
+            window._app_controller.minute_bar_repository = window._minute_bar_repository
             now = window._ranking_now()
             bars = (MinuteOhlcv(now.replace(second=0, microsecond=0), 100, 102, 99, 101, 10),)
 

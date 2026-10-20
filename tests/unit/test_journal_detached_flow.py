@@ -20,6 +20,86 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQuery
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
+    def test_hidden_live_refresh_keeps_copy_retry_dates_and_visible_consumption(self):
+        from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QTimer
+        from PySide6.QtWidgets import QApplication
+        from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+
+        type(self)._application = QApplication.instance() or QApplication([])
+        app = type(self)._application
+        current = [as_kst(datetime(2026, 10, 21, 10))]
+        clock = Mock(side_effect=lambda: current[0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); monitor, target = root / "monitor.sqlite3", root / "journal.sqlite3"
+            Database(monitor).initialize()
+            minute = datetime(2026, 10, 21, 9)
+            first = MinuteOhlcv(minute, 100, 110, 90, 105, 10, 1.0)
+            second = MinuteOhlcv(minute + timedelta(minutes=1), 200, 210, 190, 205, 20, 2.0)
+            source = MinuteBarRepository(monitor, now_provider=lambda: current[0])
+            source.upsert_bars("005930", (first,))
+            settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+            settings.setValue("auto_history_sync_enabled", False)
+            with patch("kiwoom_monitor.journal_process.QSettings", return_value=settings), \
+                    patch("kiwoom_monitor.journal_process.create_query_client", return_value=SimpleNamespace(server_now=clock)), \
+                    patch.object(QTimer, "singleShot"):
+                window = JournalWindow(monitor, target, root / "api.json")
+            for timer in window.findChildren(QTimer): timer.stop()
+            try:
+                with patch.object(window, "_start_bar_confirmation") as confirmation:
+                    window.set_stock("005930", "fixture")
+                confirmation.assert_called_once_with("005930", current[0].date(), include_previous=True)
+                self.assertEqual(1_000, window._refresh_timer.interval())
+                self.assertEqual(-1, window._tabs.indexOf(window._live_page))
+                self.assertFalse(window._live_page.isVisible())
+                source.upsert_bars("005930", (second,))
+                clock.reset_mock()
+                with patch.object(window._repo, "load_bars", wraps=window._repo.load_bars) as raw_read, \
+                        patch.object(window._repo, "load_chart_bars", wraps=window._repo.load_chart_bars) as chart_read, \
+                        patch.object(window._chart, "set_rows", wraps=window._chart.set_rows) as render:
+                    window._refresh_timer.timeout.emit()
+                clock.assert_called_once_with()
+                raw_read.assert_not_called(); chart_read.assert_not_called(); render.assert_not_called()
+                stored = window._repo.load_bars("005930", current[0])
+                self.assertEqual((105, 205), tuple(row[4] for row in stored))
+                receipt = MarketDataMetadataRepository(target).load(MarketDatasetKind.MINUTE_BAR, "005930", stored[1][0])
+                self.assertEqual(current[0], receipt.available_at)
+                monitor.unlink()
+                self.assertEqual(stored, window._repo.load_bars("005930", current[0]))
+                window._live_page.show(); app.processEvents()
+                window._refresh_timer.timeout.emit()
+                self.assertEqual(stored, tuple(window._chart._raw_rows))
+                self.assertEqual(2, window._table.rowCount())
+
+                # Existing busy-copy handling retries through the next timer, retaining the view on failure.
+                Database(monitor).initialize()
+                source.upsert_bars("005930", (first, second))
+                with patch.object(window._repo, "import_live_bars", side_effect=sqlite3.OperationalError("busy")):
+                    window._refresh_timer.timeout.emit()
+                self.assertEqual(stored, tuple(window._chart._raw_rows))
+                window._refresh_timer.timeout.emit()
+                self.assertEqual(stored, tuple(window._chart._raw_rows))
+
+                window._live_page.hide()
+                current[0] += timedelta(days=1)
+                next_minute = minute + timedelta(days=1)
+                source.upsert_bars("005930", (MinuteOhlcv(next_minute, 300, 310, 290, 305, 30, 3.0),))
+                window._refresh_timer.timeout.emit()
+                self.assertEqual((305,), tuple(row[4] for row in window._repo.load_bars("005930", current[0])))
+                self.assertEqual(stored, window._repo.load_bars("005930", current[0] - timedelta(days=1)))
+                window._live_page.show(); app.processEvents()
+                window._refresh_timer.timeout.emit()
+                self.assertEqual((105, 205, 305), tuple(row[4] for row in window._chart._raw_rows))
+            finally:
+                window.shutdown()
+                window._live_page.close(); window._live_page.deleteLater()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                app.processEvents()
+
     def test_optional_snapshot_write_warns_manual_read_but_auto_fails_then_retries(self):
         from dataclasses import replace
         from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QSignalBlocker, QTimer, Qt
@@ -440,6 +520,27 @@ class JournalDetachedFlowTests(unittest.TestCase):
                 revisions = window._repo.load_journal_analysis_revisions(current_episode.group_id)
                 self.assertEqual((first_revision,), revisions)
                 self.assertEqual(first_revision.revision_id, received[0][1].analysis_revision_id)
+
+                from kiwoom_monitor.application.strategy_pack import StrategyPackManifest
+                from kiwoom_monitor.application.strategy_pack_extraction import ExtractedStrategyDraft, StrategyRuleDraft
+                packs = tuple(StrategyPackManifest(
+                    key, name, 1, True, 20, ("눌림",), ("분봉",), source_description=f"window source:{key}",
+                ) for key, name in (("short", "전략"), ("long", "전략확장")))
+                short_rule = StrategyRuleDraft("진입 조건", "unmatched fixture", "short", "1", (), True,
+                                               "entry_time_hhmm", ">=", 9999)
+                long_rule = StrategyRuleDraft("진입 조건", "matched fixture", "long", "1", (), True,
+                                              "entry_time_hhmm", ">=", 0)
+                note = StrategyRuleDraft("설명", "reference only", "long", "2", (), False)
+                window._repo.save_strategy_pack_draft("short", ExtractedStrategyDraft((short_rule,), {}), now=as_kst(updated.return_value))
+                window._repo.save_strategy_pack_draft("long", ExtractedStrategyDraft((long_rule, note, note), {}), now=as_kst(updated.return_value))
+                window._strategy_packs = packs
+                window._strategy_result_mode = "strategy_priority"
+                with patch("kiwoom_monitor.presentation.trade_review_view_model.strategy_pack_for_result",
+                           side_effect=AssertionError("window omitted selected manifest")):
+                    window._show_trade_analysis(current_episode, (("2026-09-09T09:10", 100, 110, 90, 100, 10, 1.0, "confirmed"),))
+                document = window._analysis_label.toPlainText()
+                self.assertIn("전략팩: 전략확장\n적용 강의: window source:long\n구조화 강의항목 3개", document)
+                self.assertNotIn("window source:short", document)
             finally:
                 if worker is not None:
                     worker.requestInterruption()
@@ -674,6 +775,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
                         table = SimpleNamespace(setRowCount=lambda *args: None,
                                                 setItem=lambda *args: None, scrollToBottom=lambda: None)
                         JournalWindow.refresh(SimpleNamespace(**base, _live_code="005930", _table=table,
+                                                              _live_page=SimpleNamespace(isVisible=lambda: True),
                                                               _chart=SimpleNamespace(set_rows=lambda rows: None)))
                     else:
                         episode = SimpleNamespace(summary=SimpleNamespace(stock_code="000660"),

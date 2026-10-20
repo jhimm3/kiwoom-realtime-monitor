@@ -28,6 +28,7 @@ from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository imp
 )
 
 from .mock_automation_runner import MockAutomationRunner
+from .observation_frame_recovery import drain_thread_call
 from .mock_runtime import (
     MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION,
     MockAccountRuntimeMode,
@@ -187,7 +188,7 @@ class MockAutomationSupervisor:
                     return self.status(account_ref, credential_profile_id=credential_profile_id)
                 await self._close_runner(existing_runner)
 
-            spec = await asyncio.to_thread(
+            spec = await drain_thread_call(
                 self._repository.load_mock_automation_spec, account_ref, spec_id,
             )
             if spec is None:
@@ -201,7 +202,7 @@ class MockAutomationSupervisor:
             bundle = self._owner.bundle(credential_profile_id)
             if bundle is None or bundle.account_ref != account_ref:
                 raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
-            control = await asyncio.to_thread(
+            control = await drain_thread_call(
                 self._repository.load_mock_automation_control, account_ref,
             )
             if control is not None and (
@@ -210,7 +211,7 @@ class MockAutomationSupervisor:
             ):
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_EXPLICIT_HANDOFF_REQUIRED")
             requested_at = self._now()
-            admission = await asyncio.to_thread(
+            admission = await drain_thread_call(
                 self._repository.load_mock_automation_admission_for_spec, account_ref, spec_id,
             )
             if admission is None:
@@ -237,7 +238,7 @@ class MockAutomationSupervisor:
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
 
             try:
-                await asyncio.to_thread(
+                await drain_thread_call(
                     admit_mock_automation,
                     self._repository,
                     self._repository,
@@ -247,12 +248,12 @@ class MockAutomationSupervisor:
                     requested_at=requested_at,
                 )
                 recovery = await bundle.monitor.refresh_recovery()
-                risk = await asyncio.to_thread(
+                risk = await drain_thread_call(
                     self._repository.load_latest_mock_automation_risk, account_ref,
                 )
                 if risk is None:
                     raise RuntimeError("MOCK_AUTOMATION_RISK_MISSING")
-                await asyncio.to_thread(
+                await drain_thread_call(
                     record_mock_automation_recovery_from_risk,
                     self._repository,
                     bundle.runtime,

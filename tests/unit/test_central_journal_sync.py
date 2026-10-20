@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from copy import deepcopy
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from kiwoom_monitor.infrastructure.central_content_client import (
 )
 from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
 from kiwoom_monitor.infrastructure.persistence.journal_schema import initialize_journal_database
+from kiwoom_monitor.infrastructure.persistence.journal_backup import JournalBackupService
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 
@@ -38,7 +40,231 @@ class _Client:
         return len(documents)
 
 
+class _SnapshotClient(_Client):
+    """Detached HTTP snapshots with the server's unique owner/key storage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.uploads: list[tuple[str, list[dict[str, object]]]] = []
+
+    def load_all(self, collection: str) -> list[dict[str, object]]:
+        return deepcopy(super().load_all(collection))
+
+    def upsert(self, collection: str, documents: list[dict[str, object]]) -> int:
+        self.uploads.append((collection, deepcopy(documents)))
+        rows = {
+            (value["owner"], value["key"]): value
+            for value in self.remote.get(collection, [])
+        }
+        rows.update({(value["owner"], value["key"]): deepcopy(value) for value in documents})
+        self.remote[collection] = list(rows.values())
+        return len(documents)
+
+
+def _settings_rows(path: Path) -> None:
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS journal_settings("
+            "setting_key TEXT PRIMARY KEY,value_json TEXT,updated_at TEXT)"
+        )
+        connection.executemany("INSERT INTO journal_settings VALUES(?,?,?)", (
+            (f"k{index}", f'"value-{index}"', "2026-09-13T09:00:00+09:00")
+            for index in range(3)
+        ))
+
+
 class CentralJournalSyncServiceTests(unittest.TestCase):
+    def test_same_round_snapshot_skips_unchanged_and_sends_only_full_document_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "journal.sqlite3"
+            _settings_rows(path)
+            client = _SnapshotClient()
+            service = CentralJournalSyncService(client)  # type: ignore[arg-type]
+            self.assertEqual(3, service.sync(path))
+            self.assertEqual(0, service.sync(path))
+            self.assertEqual(0, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            self.assertEqual(1, len(client.uploads))
+
+            # A content edit at the same revision is still an upload; a revision
+            # alone is also part of the transmitted document, never excluded.
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("UPDATE journal_settings SET value_json=? WHERE setting_key='k1'", ('"edited"',))
+            self.assertEqual(1, service.sync(path))
+            self.assertEqual(["k1"], [row["key"] for row in client.uploads[-1][1]])
+            self.assertEqual('"edited"', client.uploads[-1][1][0]["document"]["value_json"])
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("UPDATE journal_settings SET updated_at=? WHERE setting_key='k2'", (
+                    "2026-09-13T09:01:00+09:00",
+                ))
+            self.assertEqual(1, service.sync(path))
+            self.assertEqual(["k2"], [row["key"] for row in client.uploads[-1][1]])
+            self.assertEqual("2026-09-13T09:01:00+09:00", client.uploads[-1][1][0]["document"]["updated_at"])
+            self.assertEqual(0, service.sync(path))
+            self.assertEqual({"journal.sqlite3"}, {item.name for item in Path(temporary).iterdir()})
+
+    def test_wire_identity_and_every_json_document_value_are_compared(self) -> None:
+        for difference in ("none", "owner", "key", "missing-field", "boolean-vs-integer"):
+            with self.subTest(difference=difference), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "journal.sqlite3"
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("CREATE TABLE journal_settings(setting_key TEXT PRIMARY KEY,value_json TEXT,updated_at TEXT,flag INTEGER)")
+                    connection.execute("INSERT INTO journal_settings VALUES(?,?,?,?)", (
+                        "setting", '"kept"', "2026-09-13T09:00:00+09:00", 0,
+                    ))
+                document = {"flag": 0, "updated_at": "2026-09-13T09:00:00+09:00", "value_json": '"kept"', "setting_key": "setting"}
+                remote = {"owner": "default", "key": "setting", "updated_at": 123.0, "document": document}
+                if difference in {"owner", "key"}:
+                    remote[difference] = "other"
+                elif difference == "missing-field":
+                    del document["flag"]
+                elif difference == "boolean-vs-integer":
+                    document["flag"] = False
+                client = _SnapshotClient()
+                client.remote["journal_settings"] = [remote]
+                self.assertEqual(int(difference != "none"), CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+                if difference != "none":
+                    self.assertEqual(("journal_settings", "default", "setting"), (
+                        client.uploads[-1][0], client.uploads[-1][1][0]["owner"], client.uploads[-1][1][0]["key"],
+                    ))
+                    self.assertIs(type(client.uploads[-1][1][0]["document"]["flag"]), int)
+
+    def test_partial_batch_and_lost_ack_refetch_before_retrying_only_missing_documents(self) -> None:
+        for lost_ack in (False, True):
+            with self.subTest(lost_ack=lost_ack), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "journal.sqlite3"
+                _settings_rows(path)
+
+                class FailingClient(_SnapshotClient):
+                    attempts = 0
+
+                    def upsert(self, collection, documents):
+                        self.attempts += 1
+                        if self.attempts == 2:
+                            if lost_ack:
+                                super().upsert(collection, documents)
+                            raise RuntimeError("lost ACK" if lost_ack else "batch rejected")
+                        return super().upsert(collection, documents)
+
+                client = FailingClient()
+                with self.assertRaisesRegex(RuntimeError, "lost ACK|batch rejected"):
+                    CentralJournalSyncService(client, batch_size=1).sync(path)  # type: ignore[arg-type]
+                completed = len(client.uploads)
+                self.assertEqual(1 if lost_ack else 2, CentralJournalSyncService(client, batch_size=1).sync(path))  # type: ignore[arg-type]
+                self.assertEqual(["k2"] if lost_ack else ["k1", "k2"], [
+                    rows[0]["key"] for _, rows in client.uploads[completed:]
+                ])
+                self.assertEqual({"k0", "k1", "k2"}, {row["key"] for row in client.remote["journal_settings"]})
+                self.assertEqual(0, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+
+    def test_edit_during_upload_survives_old_snapshot_and_is_sent_on_next_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "journal.sqlite3"
+            _settings_rows(path)
+
+            class EditingClient(_SnapshotClient):
+                def upsert(self, collection, documents):
+                    saved = super().upsert(collection, documents)
+                    if len(self.uploads) == 1:
+                        with closing(sqlite3.connect(path)) as connection, connection:
+                            connection.execute("UPDATE journal_settings SET value_json=?,updated_at=? WHERE setting_key='k0'", (
+                                '"during-upload"', "2026-09-13T09:02:00+09:00",
+                            ))
+                    return saved
+
+            client = EditingClient()
+            service = CentralJournalSyncService(client, batch_size=1)  # type: ignore[arg-type]
+            self.assertEqual(3, service.sync(path))
+            self.assertEqual('"value-0"', client.remote["journal_settings"][0]["document"]["value_json"])
+            self.assertEqual(1, service.sync(path))
+            self.assertEqual("k0", client.uploads[-1][1][0]["key"])
+            self.assertEqual('"during-upload"', client.uploads[-1][1][0]["document"]["value_json"])
+            self.assertEqual(0, service.sync(path))
+
+    def test_legacy_and_v2_delete_state_snapshots_skip_only_unchanged_scoped_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            real = AccountScope("kiwoom", AccountEnvironment.REAL, "11111111-1111-4111-8111-111111111111")
+            mock = AccountScope("kiwoom", AccountEnvironment.MOCK, "22222222-2222-4222-8222-222222222222")
+            with closing(sqlite3.connect(path)) as connection, connection:
+                repository._record_sync_state(connection, "journal_group_overrides", "same", True, "2026-09-13T09:00:00+09:00")
+                for scope in (real, mock):
+                    repository._record_sync_state(connection, "journal_group_overrides", "same", True, "2026-09-13T09:00:00+09:00", scope)
+
+            class V2Client(_SnapshotClient):
+                def capabilities(self):
+                    return {"journal_v2_sync": True}
+
+            client = V2Client()
+            self.assertEqual(3, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            self.assertEqual({("journal_sync_states", "legacy"), ("journal_v2_sync_states", real.account_ref), ("journal_v2_sync_states", mock.account_ref)}, {
+                (collection, row["owner"]) for collection, rows in client.uploads for row in rows
+            })
+            self.assertEqual(0, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            with closing(sqlite3.connect(path)) as connection, connection:
+                repository._record_sync_state(connection, "journal_group_overrides", "same", True, "2026-09-13T09:01:00+09:00", real)
+            self.assertEqual(1, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            self.assertEqual("journal_v2_sync_states", client.uploads[-1][0])
+            self.assertEqual([real.account_ref], [row["owner"] for row in client.uploads[-1][1]])
+            self.assertTrue(client.uploads[-1][1][0]["document"]["is_deleted"])
+            self.assertEqual(0, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+
+    def test_restored_database_refetches_newer_remote_without_persistent_ack_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "journal.sqlite3"
+            JournalRepository(path)
+            _settings_rows(path)
+            backup = Path(temporary) / "before.sqlite3"
+            JournalBackupService(path).export_to(backup)
+            client = _SnapshotClient()
+            self.assertEqual(3, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("UPDATE journal_settings SET value_json=?,updated_at=? WHERE setting_key='k1'", (
+                    '"newer"', "2026-09-13T09:01:00+09:00",
+                ))
+            self.assertEqual(1, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            JournalBackupService(path).import_from(backup)
+            # Importing a newer setting creates the existing non-deleted sync
+            # state. Send that new state once, while the setting itself has no echo.
+            self.assertEqual(1, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            self.assertEqual(("journal_sync_states", [{
+                "owner": "legacy", "key": "k1", "document": {
+                    "collection": "journal_settings", "owner": "legacy", "document_key": "k1",
+                    "origin_broker": "legacy", "origin_environment": "unknown",
+                    "origin_account_ref": "legacy-unassigned", "canonical_account_ref": "legacy-unassigned",
+                    "is_deleted": False, "updated_at": "2026-09-13T09:01:00+09:00",
+                },
+            }]), client.uploads[-1])
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(('"newer"', "2026-09-13T09:01:00+09:00"), connection.execute(
+                    "SELECT value_json,updated_at FROM journal_settings WHERE setting_key='k1'",
+                ).fetchone())
+            self.assertEqual(0, CentralJournalSyncService(client).sync(path))  # type: ignore[arg-type]
+            self.assertEqual(3, len(client.uploads))
+
+    def test_missing_v2_state_keeps_legacy_delta_and_pending_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "journal.sqlite3"
+            repository = JournalRepository(path)
+            repository.assign_group(("fill-1",), "manual:local")
+
+            class OldV2Client(_SnapshotClient):
+                def capabilities(self):
+                    return {"journal_v2_sync": True}
+
+                def load_all(self, collection):
+                    if collection == "journal_v2_sync_states":
+                        raise CentralContentHttpError(404, "unsupported")
+                    return super().load_all(collection)
+
+            client = OldV2Client()
+            service = CentralJournalSyncService(client)  # type: ignore[arg-type]
+            self.assertEqual(2, service.sync(path))
+            self.assertEqual(("journal_v2_sync_states",), service.pending_collections)
+            self.assertEqual(0, service.sync(path))
+            self.assertEqual(("journal_v2_sync_states",), service.pending_collections)
+            self.assertTrue(all(not collection.startswith("journal_v2_") for collection, _ in client.uploads))
+
     def test_legacy_import_receipt_uses_client_clock_and_seen_revision_keeps_original_receipt(self) -> None:
         fixed = datetime.fromisoformat("2030-01-02T09:01:30+09:00")
         for supplied in (fixed, fixed.replace(tzinfo=None), fixed.astimezone(timezone.utc)):

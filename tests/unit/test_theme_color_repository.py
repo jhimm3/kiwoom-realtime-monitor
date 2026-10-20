@@ -1,16 +1,101 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
+from contextlib import closing
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from kiwoom_monitor.application.theme_matching import MatchedThemeRow
+from kiwoom_monitor.application.theme_preview import preview_theme_changes
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
 from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
 
 
 class ThemeColorRepositoryTests(unittest.TestCase):
+    def test_preview_reads_only_requested_memberships_in_one_profile_and_chunks_native_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            stocks = StockRepository(path)
+            for code in ("A", "B", "C", "not-requested"):
+                stocks.upsert(code, code)
+            repository = ThemeRepository(path)
+            repository.replace_many((("A", ("반도체", "AI")), ("B", ("로봇",)), ("not-requested", ("비공개",))))
+            rows = (
+                MatchedThemeRow("A", "첫 행", ("반도체", "ai")),
+                MatchedThemeRow("missing", "미등록", ("신규",)),
+                MatchedThemeRow("A", "반복", ()),
+                MatchedThemeRow("B", "둘째", ("로봇",)),
+                MatchedThemeRow("C", "빈 테마", ()),
+            )
+            expected = tuple(repository.themes_for_stock(row.code) for row in rows)
+            connect = repository._connect
+            statements = []
+
+            def limited_connection():
+                connection = connect()
+                connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 3)
+                connection.set_trace_callback(statements.append)
+                return connection
+
+            with patch.object(repository, "_connect", side_effect=limited_connection) as opened:
+                changes = preview_theme_changes(rows, repository)
+            self.assertEqual(1, opened.call_count)
+            self.assertEqual(expected, tuple(change.before for change in changes))
+            self.assertEqual(("변경 없음", "신규", "테마 변경", "변경 없음", "변경 없음"), tuple(change.status for change in changes))
+            reads = [sql for sql in statements if sql.startswith("SELECT stock_code, theme_name")]
+            self.assertEqual(2, len(reads))  # Four unique codes, two plus profile per statement.
+            self.assertTrue(all("not-requested" not in sql for sql in reads))
+            self.assertEqual(3, sum(sql.startswith("SELECT") for sql in statements))
+            self.assertFalse(any(sql.startswith(("INSERT", "UPDATE", "DELETE", "BEGIN", "COMMIT")) for sql in statements))
+            with patch.object(repository, "_connect", side_effect=AssertionError("empty read")):
+                self.assertEqual({}, repository.themes_for_stocks(()))
+
+            repository.create_profile("회사", copy_current=False)
+            repository.select_profile("회사")
+            repository.replace_for_stock("A", ("회사 테마",))
+            self.assertEqual(("회사 테마",), preview_theme_changes(rows, repository)[0].before)
+            repository.select_profile("기본 테마")
+            self.assertEqual(("AI", "반도체"), preview_theme_changes(rows, repository)[0].before)
+
+    def test_preview_read_error_closes_connection_and_preserves_atomic_approved_save_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            stocks = StockRepository(path)
+            for code in ("A", "B"):
+                stocks.upsert(code, code)
+            repository = ThemeRepository(path)
+            repository.replace_many((("A", ("원본 A",)), ("B", ("원본 B",))))
+            rows = (MatchedThemeRow("A", "A", ("새 A",)), MatchedThemeRow("B", "B", ("새 B",)))
+            changes = preview_theme_changes(rows, repository)
+            notifications = []
+            repository.set_change_callback(lambda: notifications.append(True))
+            connection = repository._connect()
+            connection.set_authorizer(lambda action, *_: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ else sqlite3.SQLITE_OK)
+            with patch.object(repository, "_connect", return_value=connection):
+                with self.assertRaises(sqlite3.DatabaseError):
+                    preview_theme_changes(rows, repository)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+            self.assertEqual(("원본 A",), repository.themes_for_stock("A"))
+
+            with closing(sqlite3.connect(path)) as trigger:
+                trigger.execute("CREATE TRIGGER fail_second BEFORE INSERT ON profile_stock_themes WHEN NEW.stock_code='B' BEGIN SELECT RAISE(ABORT, 'save failed'); END")
+            approved = tuple((change.code, change.after) for change in changes)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "save failed"):
+                repository.replace_many(approved)
+            self.assertEqual([], notifications)
+            self.assertEqual((("원본 A",), ("원본 B",)), tuple(repository.themes_for_stock(code) for code in ("A", "B")))
+            with closing(sqlite3.connect(path)) as trigger:
+                trigger.execute("DROP TRIGGER fail_second")
+            repository.replace_many(approved)
+            self.assertEqual((("새 A",), ("새 B",)), tuple(repository.themes_for_stock(code) for code in ("A", "B")))
+            self.assertEqual([True], notifications)
+
     def test_reviews_pending_former_name_and_then_matches_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

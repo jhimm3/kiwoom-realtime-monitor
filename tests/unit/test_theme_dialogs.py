@@ -27,6 +27,57 @@ class ThemePreviewDialogTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_manual_import_batches_preview_and_only_saves_approved_changed_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            stocks = StockRepository(path)
+            stocks.upsert("005930", "삼성전자")
+            stocks.upsert("000660", "SK하이닉스")
+            store = ThemeRepository(path)
+            store.replace_many((("005930", ("AI", "반도체")), ("000660", ("원본",))))
+            changed = []
+            dialog = ThemeManagerDialog(store, database.settings, stock_lookup=stocks,
+                                        on_themes_changed=lambda: changed.append(True))
+            observed = []
+
+            class Preview:
+                approve = False
+
+                def __init__(self, changes, *_args):
+                    self._changes = changes
+                    observed.append(changes)
+
+                def exec(self):
+                    return self.approve
+
+                def changes(self, _separators):
+                    return self._changes
+
+            try:
+                with patch("kiwoom_monitor.presentation.theme_dialogs.ThemePreviewDialog", Preview), \
+                        patch("kiwoom_monitor.presentation.theme_dialogs.QMessageBox.information"), \
+                        patch.object(store, "themes_for_stocks", wraps=store.themes_for_stocks) as batch, \
+                        patch.object(store, "replace_many", wraps=store.replace_many) as save:
+                    raw = (("삼성전자", "반도체,ai"), ("SK하이닉스", "신규"))
+                    dialog._apply_import_rows(raw, ",", "theme_new_import_exclusions")
+                    self.assertEqual((), tuple(changed))
+                    save.assert_not_called()
+                    self.assertEqual(("원본",), store.themes_for_stock("000660"))
+                    Preview.approve = True
+                    dialog._apply_import_rows(raw, ",", "theme_new_import_exclusions")
+                    wait_until(lambda: dialog._save_request is None)
+                    self.assertEqual(2, batch.call_count)
+                    save.assert_called_once_with((("000660", ("신규",)),))
+                self.assertEqual(observed[0], observed[1])
+                self.assertEqual(("변경 없음", "테마 변경"), tuple(change.status for change in observed[0]))
+                self.assertEqual(("AI", "반도체"), store.themes_for_stock("005930"))
+                self.assertEqual(("신규",), store.themes_for_stock("000660"))
+                self.assertEqual([True], changed)
+            finally:
+                dialog.close()
+
     def test_image_ocr_review_returns_only_approved_changes_without_saving(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

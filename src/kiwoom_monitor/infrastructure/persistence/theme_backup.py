@@ -226,28 +226,6 @@ class ThemeBackupService:
         finally:
             connection.close()
 
-    def _export_all_profiles(self, path: Path) -> None:
-        connection = sqlite3.connect(self._database_path)
-        try:
-            profiles = []
-            for profile_id, name in connection.execute("SELECT profile_id, profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE"):
-                profiles.append({
-                    "name": name,
-                    "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
-                    "stock_themes": [{"code": code, "theme": theme, "color": color} for code, theme, color in connection.execute("SELECT stock_code, theme_name, custom_color FROM profile_stock_themes WHERE profile_id=? ORDER BY stock_code, theme_name", (profile_id,))],
-                    "theme_name_decisions": self._decision_documents(connection, profile_id),
-                    "theme_suggestions": self._suggestion_documents(connection, profile_id),
-                })
-            document = {
-                "format": self.FORMAT, "version": self.VERSION, "created_at": kst_wall_now().isoformat(timespec="seconds"),
-                "profiles": profiles,
-                "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
-                "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
-            }
-        finally:
-            connection.close()
-        write_json_backup(path, document)
-
     def _import_all_profiles(self, document: dict[object, object], *,
                              expected_revision: str | None = None) -> None:
         self.validate_document(document)
@@ -323,8 +301,7 @@ class ThemeBackupService:
         except (sqlite3.Error, TypeError, ValueError) as error:
             raise ThemeBackupError("테마 DB 백업 파일을 적용할 수 없습니다.") from error
         finally:
-            if owns_connection:
-                connection.close()
+            connection.close()
 
     def _apply_all_profiles(self, connection: sqlite3.Connection,
                             document: dict[object, object]) -> None:

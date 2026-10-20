@@ -115,6 +115,58 @@ class JournalChartStyleTests(unittest.TestCase):
         self.assertIn("전일 종가 대비 +11.11%", close_text)
         self.assertNotIn("시가", close_text)
 
+    def test_moving_average_preserves_offscreen_warmup_after_rows_change(self) -> None:
+        chart = MinuteChart()
+        chart.set_moving_average_styles({period: (period == 5, "#ff00aa", 1.5) for period in (5, 10, 20, 60, 120)})
+        start = datetime(2026, 8, 28, 9)
+        rows = tuple(
+            ((start + timedelta(minutes=index)).isoformat(), close, close + 1, close - 1, close, 1, 1.0, "확정")
+            for index, close in enumerate((10, 20, 30, 40, 50, 60, 70))
+        )
+        chart.set_rows(rows); chart.set_view_count(3); chart.set_view_start(4)
+        visible = chart._rows
+        self.assertEqual({5: {4: 30.0, 5: 40.0, 6: 50.0}}, chart._moving_average_data())
+        chart.set_view_start(3)
+        self.assertEqual({5: {4: 30.0, 5: 40.0, 6: 50.0}}, chart._moving_average_data())
+        first = rows[0]
+        chart.set_rows(((first[0], 100, 101, 99, 100, *first[5:]), *rows[1:]))
+        self.assertEqual(visible, chart._rows)
+        self.assertEqual({5: {4: 48.0, 5: 40.0, 6: 50.0}}, chart._moving_average_data())
+
+    def test_repaint_reuses_average_input_with_current_view_and_line_style(self) -> None:
+        conversions: list[float] = []
+
+        class ObservedClose(float):
+            def __float__(self) -> float:
+                conversions.append(1.0)
+                return super().__float__()
+
+        chart = MinuteChart(); chart.resize(900, 420)
+        styles = {period: (period == 5, "#ff00aa", 1.5) for period in (5, 10, 20, 60, 120)}
+        chart.set_moving_average_styles(styles)
+        start = datetime(2026, 8, 28, 9)
+        chart.set_rows(tuple(
+            ((start + timedelta(minutes=index)).isoformat(), 1_000 + index,
+             1_200 if index == 25 else 1_010 + index, 990 + index,
+             ObservedClose(1_005) if index == 0 else 1_150 if index == 25 else 1_005 + index, 1, 1.0, "확정")
+            for index in range(40)
+        ))
+        chart.set_view_count(10); chart.set_view_start(30)
+        original = chart.grab().toImage()
+        self.assertEqual(1, len(conversions))
+        self.assertEqual(original, chart.grab().toImage())
+        self.assertEqual(1, len(conversions))
+        chart.set_view_start(20)
+        self.assertNotEqual(original, chart.grab().toImage())
+        self.assertEqual(1, len(conversions))
+        before_style = chart.grab().toImage()
+        chart.set_moving_average_styles({**styles, 5: (True, "#00ffaa", 4.0)})
+        self.assertNotEqual(before_style, chart.grab().toImage())
+        self.assertEqual(1, len(conversions))
+        chart.set_moving_average_styles({**styles, 10: (True, "#1976D2", 1.5)})
+        chart.grab()
+        self.assertEqual(2, len(conversions))
+
     def test_effective_date_chart_separates_regular_close_and_full_day_final(self) -> None:
         fill = TradeFill("1", "001210", "금호전기", "매수", datetime(2026, 9, 14, 16, 5), 10, 105, "", "KRX")
         rows = (

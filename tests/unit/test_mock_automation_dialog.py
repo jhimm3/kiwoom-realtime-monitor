@@ -81,6 +81,110 @@ class FakeContent:
 
 
 class MockAutomationDialogPolicyTests(unittest.TestCase):
+    def test_operational_refresh_and_commands_never_load_publication_shadow_history(self):
+        content, credentials = FakeContent(), FakeCredentials()
+        content.load_candidate_events = Mock(side_effect=AssertionError("operational Shadow read"))
+        credentials.load = Mock(wraps=credentials.load)
+        for operation in ("refresh", "refresh", "start", "stop", "resume", "publish_spec"):
+            with self.subTest(operation=operation):
+                if operation != "refresh":
+                    name = "publish_mock_automation_spec" if operation == "publish_spec" else f"{operation}_mock_automation"
+                    setattr(content, name, Mock(return_value={"status": "acknowledged"}))
+                completed, failed = Mock(), Mock()
+                worker = MockAutomationWorker(content, credentials, operation)
+                worker.completed.connect(completed); worker.failed.connect(failed)
+                worker.run()
+                completed.assert_called_once(); failed.assert_not_called()
+                context = completed.call_args.args[1]
+                self.assertEqual(("mock-one", "ready", 7, 2), (
+                    context["selected_profile"]["profile_id"], context["selected_spec_id"],
+                    context["account_settings"]["revision"], context["candidate_binding"]["binding_revision"],
+                ))
+                self.assertNotIn("shadow_events", context)
+                self.assertTrue(operation_availability(context)["start"])
+        self.assertEqual(6, credentials.load.call_count)
+        content.load_candidate_events.assert_not_called()
+
+    def test_worker_distinguishes_command_failure_from_ack_followup_read_failure(self):
+        for operation in ("start", "stop", "resume", "publish_spec"):
+            for failure in ("command", "context", "status"):
+                with self.subTest(operation=operation, failure=failure):
+                    content, credentials = FakeContent(), FakeCredentials()
+                    command = Mock(return_value={"status": "acknowledged"})
+                    setattr(content, "publish_mock_automation_spec" if operation == "publish_spec" else f"{operation}_mock_automation", command)
+                    if failure == "command":
+                        command.side_effect = RuntimeError("command rejected")
+                    elif failure == "context":
+                        credentials.load = Mock(side_effect=OSError("followup unavailable"))
+                    else:
+                        content.load_mock_automation_status = Mock(side_effect=RuntimeError("status unavailable"))
+                    completed, failed = Mock(), Mock()
+                    worker = MockAutomationWorker(content, credentials, operation, {"account_ref": "same"})
+                    worker.completed.connect(completed); worker.failed.connect(failed)
+                    worker.run()
+                    command.assert_called_once_with(account_ref="same")
+                    if failure == "command":
+                        failed.assert_called_once_with(operation, "command rejected")
+                        completed.assert_not_called()
+                    else:
+                        completed.assert_called_once(); failed.assert_not_called()
+                        context = completed.call_args.args[1]
+                        self.assertIn("unavailable", context["status"]["status_query_error"])
+                        self.assertEqual(failure == "context", "context_refresh_error" in context)
+                        self.assertEqual({"start": False, "stop": False, "resume": False}, operation_availability(context))
+
+    def test_publication_demand_read_rechecks_selection_and_keeps_existing_page_guards(self):
+        selected = candidate_documents()
+        other = candidate_documents(minimum_closed_trades=1)
+        values = {"account_ref": PROFILE["account_ref"], "credential_profile_id": PROFILE["profile_id"],
+                  "candidate_publication": deepcopy(selected)}
+        content, credentials = FakeContent(), FakeCredentials()
+        original_load = content.load_mock_automation_candidates
+        content.load_mock_automation_candidates = Mock(side_effect=lambda *args, **kwargs: {
+            **original_load(*args, **kwargs), "candidates": [deepcopy(other), deepcopy(selected)],
+        })
+        content.load_candidate_events = Mock(side_effect=(
+            {"events": [{"event_id": "first"}], "has_more": True, "next_cursor": 1},
+            {"events": [{"event_id": "second"}], "has_more": False, "next_cursor": None},
+        ))
+        completed, failed = Mock(), Mock()
+        worker = MockAutomationWorker(content, credentials, "prepare_publication", values)
+        worker.completed.connect(completed); worker.failed.connect(failed); worker.run()
+        failed.assert_not_called(); completed.assert_called_once()
+        self.assertEqual(selected, completed.call_args.args[1]["publication_candidate"])
+        self.assertEqual(["first", "second"], [row["event_id"] for row in completed.call_args.args[1]["shadow_events"]])
+        self.assertEqual([{"after_sequence": 0, "limit": 1000}, {"after_sequence": 1, "limit": 1000}],
+                         [call.kwargs for call in content.load_candidate_events.call_args_list])
+        for changed in ("candidate", "profile", "account"):
+            with self.subTest(changed=changed):
+                changed_credentials = FakeCredentials()
+                if changed != "candidate":
+                    changed_credentials.load = Mock(return_value={"profiles": [{**PROFILE, {
+                        "profile": "profile_id", "account": "account_ref"}[changed]: "other"}]})
+                content.load_mock_automation_candidates = Mock(side_effect=lambda *args, **kwargs: {
+                    **original_load(*args, **kwargs), "candidates": [deepcopy(other)] if changed == "candidate" else [deepcopy(selected)],
+                })
+                content.load_candidate_events.reset_mock()
+                completed, failed = Mock(), Mock()
+                worker = MockAutomationWorker(content, changed_credentials, "prepare_publication", values)
+                worker.completed.connect(completed); worker.failed.connect(failed); worker.run()
+                completed.assert_not_called(); failed.assert_called_once()
+                content.load_candidate_events.assert_not_called()
+        for page, message, expected_calls in (
+            ({"events": {}, "has_more": False}, "형식", 1),
+            ({"events": [], "has_more": True, "next_cursor": 0}, "전진", 1),
+            ({"events": [], "has_more": True, "next_cursor": "invalid"}, "invalid", 1),
+            (None, "100,000", 100),
+        ):
+            with self.subTest(page=page):
+                content.load_candidate_events = Mock(side_effect=lambda *, after_sequence, limit: page if page is not None else {
+                    "events": [], "has_more": True, "next_cursor": after_sequence + 1,
+                })
+                worker = MockAutomationWorker(content, credentials, "refresh")
+                with self.assertRaisesRegex((RuntimeError, ValueError), message):
+                    worker._load_shadow_events()
+                self.assertEqual(expected_calls, content.load_candidate_events.call_count)
+
     def test_only_configured_active_mock_profiles_are_selectable(self):
         values = available_mock_profiles(FakeCredentials().load())
 
@@ -202,6 +306,196 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         self.assertTrue(self.dialog._stop.isEnabled())
         self.assertFalse(self.dialog._start.isEnabled())
 
+    def test_ack_followup_failure_keeps_ack_message_and_closes_stale_controls(self):
+        for operation, text in (("start", "시작 요청이 반영"), ("stop", "신규 자동 주문을 중지"),
+                                ("resume", "재개 요청이 반영"), ("publish_spec", "명세를 게시")):
+            for full_context in (True, False):
+                with self.subTest(operation=operation, full_context=full_context):
+                    self.dialog._completed("refresh", deepcopy(self.context))
+                    context = deepcopy(self.context) if full_context else {"context_refresh_error": "followup unavailable"}
+                    context["status"] = {"status_query_error": "followup unavailable"}
+                    self.dialog._completed(operation, context)
+                    self.dialog._set_busy(False)
+                    self.assertIn(text, self.dialog._message.text())
+                    self.assertIn("확인하지 못했습니다", self.dialog._message.text())
+                    self.assertNotIn("요청 실패", self.dialog._message.text())
+                    self.assertFalse(any(button.isEnabled() for button in (self.dialog._start, self.dialog._stop, self.dialog._resume)))
+
+    def test_publication_review_waits_for_thread_finish_and_posts_exact_fresh_selection(self):
+        import sys
+        import threading
+        from datetime import datetime, timezone
+        from PySide6.QtCore import QTimer
+        from qt_settings_test_support import wait_until
+        from kiwoom_monitor.presentation import mock_automation_dialog as module
+
+        profile, selected, other, event = publication_thread_inputs()
+        content, credentials = self.dialog._content, self.dialog._credentials
+        credentials.load = Mock(return_value={"profiles": [profile]})
+        original_candidates, original_specs = content.load_mock_automation_candidates, content.load_mock_automation_specs
+        reads = []
+        def candidates(*args, **kwargs):
+            value = original_candidates(*args, **kwargs)
+            reads.append(value)
+            value["binding"]["binding_revision"] = 2 if len(reads) == 1 else 3
+            value["candidates"] = deepcopy([other, selected])
+            return value
+        content.load_mock_automation_candidates = Mock(side_effect=candidates)
+        content.load_candidate_events = Mock(return_value={"events": [event], "has_more": False, "next_cursor": None})
+        content.publish_mock_automation_spec = Mock(return_value={"status": "saved", "orders_started": False})
+        def specs(account_ref):
+            if content.publish_mock_automation_spec.called:
+                raise RuntimeError("publication followup unavailable")
+            return original_specs(account_ref)
+        content.load_mock_automation_specs = Mock(side_effect=specs)
+        for operation in ("start", "stop", "resume"):
+            setattr(content, f"{operation}_mock_automation", Mock())
+        self.dialog._request("refresh")
+        wait_until(lambda: self.dialog._worker is None)
+        self.dialog._candidate.setCurrentIndex(1)
+        self.dialog.show(); self.app.processEvents()
+        emitted, release = threading.Event(), threading.Event()
+        original_run, original_review = MockAutomationWorker.run, module.MockAutomationPublicationDialog
+        workers, reviews, documents, errors, barrier_errors = [], [], [], [], []
+        def run(worker):
+            workers.append(worker)
+            original_run(worker)
+            if worker._operation == "prepare_publication":
+                emitted.set()
+                if not release.wait(5):
+                    barrier_errors.append("prepare thread finish was not released")
+        def review(*args):
+            self.assertIsNone(self.dialog._worker)
+            self.assertFalse(workers[0].isRunning())
+            self.assertEqual(selected, args[0])
+            self.assertEqual(3, args[1]["binding_revision"])
+            self.assertEqual((event,), args[3])
+            value = original_review(*args)
+            reviews.append(value)
+            original_values = value.publication_values
+            def values():
+                result = original_values()
+                documents.append(deepcopy(result))
+                return result
+            value.publication_values = values
+            QTimer.singleShot(0, value.accept)
+            return value
+        try:
+            with patch.object(MockAutomationWorker, "run", run), patch.object(module, "MockAutomationPublicationDialog", side_effect=review) as modal, \
+                    patch.object(module, "kst_now", return_value=datetime(2026, 10, 20, tzinfo=timezone.utc)), \
+                    patch.object(sys, "excepthook", side_effect=lambda _type, error, _trace: errors.append(error)):
+                self.dialog._publish.click()
+                first = self.dialog._worker
+                wait_until(emitted.is_set)
+                self.assertTrue(first.isRunning())
+                modal.assert_not_called()
+                self.dialog._publish_selected_candidate()
+                self.dialog._request("refresh")
+                self.assertIs(first, self.dialog._worker)
+                self.assertEqual(1, content.load_candidate_events.call_count)
+                release.set()
+                wait_until(lambda: content.publish_mock_automation_spec.call_count == 1 and self.dialog._worker is None)
+                modal.assert_called_once()
+                self.assertEqual(1, len(documents))
+                content.publish_mock_automation_spec.assert_called_once_with(**documents[0])
+                self.assertEqual((profile["account_ref"], profile["profile_id"], 3, event["event_id"]), (
+                    documents[0]["account_ref"], documents[0]["credential_profile_id"],
+                    documents[0]["expected_binding_revision"], documents[0]["shadow_event_id"],
+                ))
+                self.assertEqual(selected["eligibility_receipt"]["receipt_id"], documents[0]["stage_revisions"][1]["evidence_refs"][0])
+                self.assertEqual(1, content.load_candidate_events.call_count)
+                self.assertEqual(3, content.load_mock_automation_candidates.call_count)
+                self.assertNotIn("shadow_events", self.dialog._context)
+                self.assertNotIn("_publication_request", self.dialog._context)
+                self.assertNotIn("_publication_request", json.dumps(documents[0]))
+                self.assertEqual(selected, self.dialog._candidate.currentData())
+                self.assertIn("명세를 게시", self.dialog._message.text())
+                self.assertIn("최신 상태를 확인하지 못했습니다", self.dialog._message.text())
+                self.assertFalse(any(button.isEnabled() for button in (self.dialog._start, self.dialog._stop, self.dialog._resume)))
+                for operation in ("start", "stop", "resume"):
+                    getattr(content, f"{operation}_mock_automation").assert_not_called()
+                self.assertEqual([], errors)
+                self.assertEqual([], barrier_errors)
+        finally:
+            release.set()
+            if self.dialog._worker is not None:
+                self.dialog.stop()
+            self.app.processEvents()
+            for value in reviews:
+                value.close(); value.deleteLater()
+            self.dialog.hide()
+
+    def test_hidden_closed_or_stopped_publication_preparation_never_opens_review(self):
+        import sys
+        import threading
+        from qt_settings_test_support import wait_until
+        from kiwoom_monitor.presentation import mock_automation_dialog as module
+
+        profile, selected, _other, event = publication_thread_inputs()
+        for action in ("hide", "close", "close_reopen", "stop", "finished_stop", "restored_context"):
+            with self.subTest(action=action):
+                content, credentials = FakeContent(), FakeCredentials()
+                credentials.load = Mock(return_value={"profiles": [profile]})
+                original_candidates = content.load_mock_automation_candidates
+                content.load_mock_automation_candidates = Mock(side_effect=lambda *args, **kwargs: {
+                    **original_candidates(*args, **kwargs), "candidates": [deepcopy(selected)],
+                })
+                entered, release = threading.Event(), threading.Event()
+                barriers, errors = [], []
+                def page(**_kwargs):
+                    entered.set()
+                    if not release.wait(5):
+                        barriers.append("Shadow read was not released")
+                    return {"events": [event], "has_more": False, "next_cursor": None}
+                content.load_candidate_events = Mock(side_effect=page)
+                content.publish_mock_automation_spec = Mock()
+                with patch.object(module, "QSettings") as settings:
+                    settings.return_value.value.return_value = None
+                    dialog = MockAutomationDialog(content, credentials)
+                dialog._request("refresh")
+                wait_until(lambda: dialog._worker is None)
+                dialog.show(); self.app.processEvents()
+                try:
+                    with patch.object(module, "MockAutomationPublicationDialog") as modal, \
+                            patch.object(sys, "excepthook", side_effect=lambda _type, error, _trace: errors.append(error)):
+                        dialog._publish.click()
+                        wait_until(entered.is_set)
+                        worker = dialog._worker
+                        if action == "stop":
+                            releaser = threading.Timer(0.05, release.set)
+                            releaser.start()
+                            try:
+                                dialog.stop()
+                            finally:
+                                releaser.join()
+                        elif action == "finished_stop":
+                            release.set()
+                            self.assertTrue(worker.wait(3000))
+                            self.assertFalse(worker.isInterruptionRequested())
+                            self.assertIs(worker, dialog._worker)
+                            dialog.stop()
+                        elif action in {"close_reopen", "restored_context"}:
+                            previous = dict(dialog._context)
+                            dialog.close()
+                            if action == "restored_context":
+                                dialog._completed("refresh", previous)
+                            dialog.show(); self.app.processEvents()
+                            release.set()
+                        else:
+                            getattr(dialog, action)()
+                            release.set()
+                        wait_until(lambda: dialog._worker is None)
+                        modal.assert_not_called()
+                        content.publish_mock_automation_spec.assert_not_called()
+                        self.assertEqual(1, content.load_candidate_events.call_count)
+                        self.assertNotIn("게시했습니다", dialog._message.text())
+                        self.assertNotIn("shadow_events", dialog._context)
+                        self.assertNotIn("_publication_request", dialog._context)
+                        self.assertEqual([], errors)
+                        self.assertEqual([], barriers)
+                finally:
+                    release.set(); dialog.stop(); dialog.hide(); dialog.deleteLater(); self.app.processEvents()
+
     def test_failed_request_does_not_reenable_stale_start_after_worker_finishes(self):
         self.assertTrue(self.dialog._start.isEnabled())
         self.dialog._set_busy(True)
@@ -259,6 +553,25 @@ def candidate_documents(**changes):
     policy = _policy(package, **changes)
     receipt = evaluate_candidate_eligibility(package, policy, account_ref=PROFILE["account_ref"])
     return {"package": package.to_dict(), "eligibility_policy": policy.to_dict(), "eligibility_receipt": receipt.to_dict()}
+
+
+def publication_thread_inputs():
+    from kiwoom_monitor.application.breakout_strategy import default_shadow_breakout_config
+    from kiwoom_monitor.application.research_families import shadow_monitor_id_for_config
+
+    profile = {**PROFILE, "account_ref": "11111111-1111-4111-8111-111111111111"}
+    package = _package()
+    documents = []
+    for changes in ({}, {"minimum_closed_trades": 1}):
+        policy = _policy(package, **changes)
+        receipt = evaluate_candidate_eligibility(package, policy, account_ref=profile["account_ref"])
+        documents.append({"package": package.to_dict(), "eligibility_policy": policy.to_dict(), "eligibility_receipt": receipt.to_dict()})
+    family = package.candidate_spec["family"]
+    strategy_id, strategy_version = family.rsplit("/", 1)
+    event = {"event_id": "selected-shadow-event", "transition": "flat->candidate", "quantity": 1,
+             "available_at": "2026-09-21T10:00:00+09:00", "strategy_id": strategy_id, "strategy_version": strategy_version,
+             "run_id": shadow_monitor_id_for_config(family, default_shadow_breakout_config(), "krx-regular/v1")}
+    return profile, documents[0], documents[1], event
 
 
 class MockCandidateFileWorkflowTests(unittest.TestCase):

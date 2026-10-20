@@ -187,6 +187,18 @@ class TradeReviewViewModelTests(unittest.TestCase):
         self.assertIn("[1차 · 깊은 눌림] 전략팩: 눌림팩", model.analysis_text)
         self.assertIn("구조화 강의항목 12개", model.analysis_text)
 
+        # Explicit None means that the coordinator selected the default candidate,
+        # even if its display subtype happens to begin with a custom pack's name.
+        explicit_default = build_trade_analysis_view_model(
+            overall_setup=setup, pack_results=(), type_selection=selection,
+            cycles=(cycle,), cycle_setups=(setup,), analyses=(analysis,),
+            entry_snapshots=(), linked_news=(), active_pack=default_strategy_pack(),
+            packs=(pack,), structured_rules=(), personal_rule_count=0,
+            draft_rule_counts={"custom": 12}, total_return_rate=0, cycle_selected_packs=(None,),
+        )
+        self.assertIn("전략팩: 미모사 기본 전략팩", explicit_default.analysis_text)
+        self.assertNotIn("사용자 강의", explicit_default.analysis_text)
+
 
 if __name__ == "__main__":
     unittest.main()

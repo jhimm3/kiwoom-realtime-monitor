@@ -109,6 +109,7 @@ class CentralJournalSyncService:
             )
             sync_states_enabled = "journal_sync_states" in tables
             if sync_states_enabled:
+                remote_v2_states: list[dict[str, Any]] = []
                 try:
                     remote_states = self._client.load_all(_SYNC_STATE_COLLECTION)
                 except RuntimeError as error:
@@ -118,14 +119,14 @@ class CentralJournalSyncService:
                     return 0
                 if v2_enabled:
                     try:
-                        remote_states.extend(self._client.load_all("journal_v2_sync_states"))
+                        remote_v2_states = self._client.load_all("journal_v2_sync_states")
                     except RuntimeError as error:
                         if not is_missing_collection_error(error):
                             raise
                         pending.append("journal_v2_sync_states")
                         v2_enabled = False
                 with connection:
-                    self._merge_sync_states(connection, remote_states)
+                    self._merge_sync_states(connection, [*remote_states, *remote_v2_states])
                     self._apply_deleted_states(connection)
             specs = (*_V1_SPECS, *(_V2_SPECS if v2_enabled else ()))
             for spec in specs:
@@ -141,7 +142,10 @@ class CentralJournalSyncService:
                     self._document(spec, dict(row))
                     for row in self._rows_for_spec(connection, spec)
                 ]
-                saved += upload_documents(self._client, spec.collection, documents, self._batch_size)
+                saved += upload_documents(
+                    self._client, spec.collection,
+                    self._changed_documents(documents, remote), self._batch_size,
+                )
             if sync_states_enabled:
                 state_rows = list(connection.execute(
                     "SELECT collection,owner,document_key,origin_broker,origin_environment,"
@@ -162,7 +166,8 @@ class CentralJournalSyncService:
                     if not str(row[0]).startswith("journal_v2_") and str(row[1]) == "legacy"
                 ]
                 saved += upload_documents(
-                    self._client, _SYNC_STATE_COLLECTION, legacy_states, self._batch_size,
+                    self._client, _SYNC_STATE_COLLECTION,
+                    self._changed_documents(legacy_states, remote_states), self._batch_size,
                 )
                 if v2_enabled:
                     v2_states = [
@@ -181,12 +186,33 @@ class CentralJournalSyncService:
                         and str(row[1]) == str(row[5]) and str(row[3]) == "kiwoom"
                     ]
                     saved += upload_documents(
-                        self._client, "journal_v2_sync_states", v2_states, self._batch_size,
+                        self._client, "journal_v2_sync_states",
+                        self._changed_documents(v2_states, remote_v2_states), self._batch_size,
                     )
             self._pending_collections = tuple(pending)
         finally:
             connection.close()
         return saved
+
+    @staticmethod
+    def _changed_documents(
+        documents: list[dict[str, Any]], remote: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        # Both lists belong to the same wire collection and this sync attempt.
+        # Compare every document field, including revisions and account scope;
+        # the server's envelope updated_at is only its receipt metadata.
+        existing = {
+            (str(value.get("owner", "")), str(value.get("key", ""))): json.dumps(
+                value["document"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+            for value in remote if isinstance(value.get("document"), dict)
+        }
+        return [
+            value for value in documents
+            if existing.get((str(value["owner"]), str(value["key"]))) != json.dumps(
+                value["document"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+        ]
 
     def _merge_remote(self, connection: sqlite3.Connection, spec: _TableSpec,
                       values: list[dict[str, Any]], *,

@@ -28,6 +28,7 @@ class MarketCacheWriter(QThread):
     gap_failed = Signal(object, str)
     daily_high_failed = Signal(str, str)
     fundamentals_failed = Signal(str, str)
+    retention_failed = Signal(object, str)
 
     def __init__(self, database_path: Path, *, now_provider=None) -> None:
         super().__init__()
@@ -67,6 +68,9 @@ class MarketCacheWriter(QThread):
     def enqueue_gap_minutes(self, minutes: dict[str, tuple[datetime, ...]]) -> None:
         if minutes:
             self._queue.put(("gap", dict(minutes)))
+
+    def enqueue_minute_retention(self, cutoff: date) -> None:
+        self._queue.put(("retention", cutoff))
 
     def enqueue_empty_coverage(self, code: str, minutes: tuple[datetime, ...], generation: int) -> None:
         self._queue.put(("empty_coverage", code, minutes, generation))
@@ -117,6 +121,11 @@ class MarketCacheWriter(QThread):
                 self._save_daily_high(stock_repository, daily_repository, job[1], job[2], job[3], job[4])
             elif job[0] == "fundamentals":
                 self._save_fundamentals(stock_repository, job[1], job[2], job[3], job[4], job[5])
+            elif job[0] == "retention":
+                try:
+                    minute_repository.purge_before(job[1])
+                except Exception as error:
+                    self.retention_failed.emit(job[1], str(error))
 
     def _save_fundamentals(self, repository: StockRepository, code: str,
                            market_cap_eok: float | None, float_ratio_percent: float | None,

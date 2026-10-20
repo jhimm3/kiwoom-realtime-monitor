@@ -5,7 +5,7 @@ from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -182,6 +182,7 @@ class AppController(QObject):
         self.pending_market_caps: dict[str, float] = {}
         self.pending_minutes: dict[tuple[str, datetime], MinuteOhlcv] = {}
         self.pending_minute_gaps: dict[str, tuple[datetime, ...]] = {}
+        self.pending_minute_retention: date | None = None
         self.pending_market_minutes: dict[
             tuple[str, datetime], tuple[float, float, float, float, float | None]
         ] = {}
@@ -198,6 +199,7 @@ class AppController(QObject):
             self.market_cache_writer.minute_failed.connect(self.on_minute_cache_failed)
             self.market_cache_writer.gap_failed.connect(self.on_minute_gap_failed)
             self.market_cache_writer.price_failed.connect(self.on_price_cache_failed)
+            self.market_cache_writer.retention_failed.connect(self.on_minute_retention_failed)
         self.top20_nas_workers: set[QThread] = set()
         self._started_writers: set[str] = set()
         self._closing = False
@@ -523,8 +525,13 @@ class AppController(QObject):
             self._secondary_actions.start_catalog()
 
     def _on_minute_history_finished(self, codes: tuple[str, ...], forced: bool) -> None:
-        if self.secondary_data is not None:
-            self.secondary_data.minute_history_finished(codes, forced=forced)
+        actions = self._secondary_actions
+        if actions is None:
+            return
+        if forced:
+            actions.start_daily_high(codes, True)
+        else:
+            self.start_daily_high_phase(codes)
 
     def _stop_ranking_timers(self) -> None:
         for timer in (self.ranking_timer, self.ranking_preparation_timer, self.realtime_session_timer,
@@ -665,7 +672,7 @@ class AppController(QObject):
 
     def flush_minute_cache(self) -> None:
         """실시간 체결을 1초 단위로 묶어 SQLite에 저장한다."""
-        if not self.pending_minutes and not self.pending_market_minutes and not self.pending_minute_gaps:
+        if not self.pending_minutes and not self.pending_market_minutes and not self.pending_minute_gaps and self.pending_minute_retention is None:
             return
         if self.minute_bar_repository is None:
             return
@@ -679,26 +686,49 @@ class AppController(QObject):
             except Exception as error:
                 self.on_minute_gap_failed(gaps, str(error))
         market_pending, self.pending_market_minutes = self.pending_market_minutes, {}
+        cutoff, self.pending_minute_retention = self.pending_minute_retention, None
         if self.market_cache_writer is not None:
             self.market_cache_writer.enqueue_minute_bars(pending, market_pending)
+            if cutoff is not None:
+                self.market_cache_writer.enqueue_minute_retention(cutoff)
             return
-        grouped: dict[str, list[MinuteOhlcv]] = {}
-        for (code, _), bar in pending.items():
-            grouped.setdefault(code, []).append(bar)
-        try:
-            self.minute_bar_repository.upsert_many(
-                {code: tuple(bars) for code, bars in grouped.items()}
-            )
-            self.minute_bar_repository.upsert_market_index_minutes(market_pending)
-            self.minute_cache_saved.emit()
-        except Exception as error:
-            # 저장 호출 중에는 GUI 이벤트가 처리되지 않지만, 향후 구현이
-            # 비동기로 바뀌어도 새 값이 우선하도록 현재 대기분 뒤에 병합한다.
-            self.pending_minutes = {**pending, **self.pending_minutes}
-            self.pending_market_minutes = {
-                **market_pending, **self.pending_market_minutes,
-            }
-            logger.warning("실시간 분봉 DB 저장 실패: %s", error)
+        if pending or market_pending or gaps:
+            grouped: dict[str, list[MinuteOhlcv]] = {}
+            for (code, _), bar in pending.items():
+                grouped.setdefault(code, []).append(bar)
+            try:
+                self.minute_bar_repository.upsert_many(
+                    {code: tuple(bars) for code, bars in grouped.items()}
+                )
+                self.minute_bar_repository.upsert_market_index_minutes(market_pending)
+                self.minute_cache_saved.emit()
+            except Exception as error:
+                # 저장 호출 중에는 GUI 이벤트가 처리되지 않지만, 향후 구현이
+                # 비동기로 바뀌어도 새 값이 우선하도록 현재 대기분 뒤에 병합한다.
+                self.pending_minutes = {**pending, **self.pending_minutes}
+                self.pending_market_minutes = {
+                    **market_pending, **self.pending_market_minutes,
+                }
+                logger.warning("실시간 분봉 DB 저장 실패: %s", error)
+        if cutoff is not None:
+            try:
+                self.minute_bar_repository.purge_before(cutoff)
+            except Exception as error:
+                self.on_minute_retention_failed(cutoff, str(error))
+
+    def queue_minute_retention(self, cutoff: date) -> None:
+        previous = self.pending_minute_retention
+        self.pending_minute_retention = max(previous, cutoff) if previous is not None else cutoff
+        self.flush_minute_cache()
+
+    def on_minute_retention_failed(self, cutoff: date, message: str) -> None:
+        previous = self.pending_minute_retention
+        self.pending_minute_retention = max(previous, cutoff) if previous is not None else cutoff
+        if self.closing:
+            self._shutdown_cache_failed = True
+        elif not self.minute_cache_timer.isActive():
+            self.minute_cache_timer.start()
+        logger.warning("오래된 분봉 DB 정리 실패: %s", message)
 
     def on_minute_cache_failed(
         self, pending: object, market_pending: object, message: str,
@@ -925,6 +955,12 @@ class AppController(QObject):
             raise RuntimeError("application shutdown is already configured")
         self._shutdown_actions = actions
 
+    def add_shutdown_timer(self, timer: QTimer) -> None:
+        actions = self._shutdown_actions
+        if actions is None or self.closing:
+            raise RuntimeError("application shutdown timers cannot be changed now")
+        self._shutdown_actions = replace(actions, timers=(*actions.timers, timer))
+
     def _producer_workers(self) -> tuple[tuple[QThread | None, str], ...]:
         # Read current references on every check, including dynamically created NAS workers.
         workers = (
@@ -1080,7 +1116,7 @@ class AppController(QObject):
         actions = self._shutdown_actions
         assert actions is not None
         entry_writer = self.entry_snapshot_writer
-        if (entry_writer is not None and entry_writer.has_pending_work()) or self._price_cache_retries or (
+        if (entry_writer is not None and entry_writer.has_pending_work()) or self._price_cache_retries or self.pending_minute_retention is not None or (
             self._shutdown_cache_failed and self.market_cache_writer is not None and (
                 self.pending_minutes or self.pending_market_minutes or self.pending_minute_gaps
             )

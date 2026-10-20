@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -17,7 +18,110 @@ from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepo
 from kiwoom_monitor.application.theme_suggestions import ThemeSuggestion
 
 
+class _CloseTrackingConnection(sqlite3.Connection):
+    close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+        super().close()
+
+
 class ThemeBackupServiceTest(unittest.TestCase):
+    def test_single_profile_public_round_trip_preserves_other_profiles_and_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            StockRepository(path).upsert("005930", "삼성전자", "KOSPI")
+            repository = ThemeRepository(path)
+            repository.replace_for_stock("005930", ("다른 프로필 테마",))
+            original_profiles = ThemeBackupService(path).export_document()["profiles"]
+            repository.create_profile("개별 백업")
+            repository.select_profile("개별 백업")
+            repository.replace_for_stock("005930", ("반도체",))
+            repository.set_color("반도체", "#123456")
+            repository.set_stock_theme_color("005930", "반도체", "#654321")
+            repository.set_theme_alias("칩", "반도체")
+            service = ThemeBackupService(path, profile_name="개별 백업")
+            backup_path = Path(directory) / "profile.json"
+            service.export_to(backup_path)
+            document = json.loads(backup_path.read_text(encoding="utf-8"))
+            self.assertEqual("개별 백업", document["profile"])
+            self.assertNotIn("profiles", document)
+            repository.replace_for_stock("005930", ("바뀐 테마",))
+
+            connection = sqlite3.connect(path, factory=_CloseTrackingConnection)
+            try:
+                with patch(
+                    "kiwoom_monitor.infrastructure.persistence.theme_backup.sqlite3.connect",
+                    return_value=connection,
+                ) as connect:
+                    service.import_from(backup_path)
+                connect.assert_called_once_with(path)
+                self.assertEqual(1, connection.close_count)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connection.execute("SELECT 1")
+            finally:
+                if not connection.close_count:
+                    connection.close()
+
+            self.assertEqual(("반도체",), repository.themes_for_stock("005930"))
+            self.assertEqual("#123456", repository.color_for_theme("반도체"))
+            self.assertEqual("#654321", repository.color_for_stock_theme("005930", "반도체"))
+            self.assertEqual(("반도체",), repository.resolve_theme_names("칩"))
+            profiles = ThemeBackupService(path).export_document()["profiles"]
+            for profile in original_profiles:
+                self.assertIn(profile, profiles)
+            restored_path = Path(directory) / "restored-profile.json"
+            service.export_to(restored_path)
+            restored = json.loads(restored_path.read_text(encoding="utf-8"))
+            document.pop("created_at")
+            restored.pop("created_at")
+            self.assertEqual(document, restored)
+
+    def test_single_profile_native_failure_rolls_back_preserves_cause_and_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            StockRepository(path).upsert("005930", "삼성전자", "KOSPI")
+            repository = ThemeRepository(path)
+            repository.create_profile("개별 백업")
+            repository.select_profile("개별 백업")
+            repository.replace_for_stock("005930", ("실패 테마",))
+            service = ThemeBackupService(path, profile_name="개별 백업")
+            backup_path = Path(directory) / "profile.json"
+            service.export_to(backup_path)
+            repository.replace_for_stock("005930", ("기존 테마",))
+            repository.set_theme_alias("기존 별칭", "기존 테마")
+            revision = ThemeBackupService(path).revision()
+            with closing(sqlite3.connect(path)) as setup, setup:
+                setup.execute(
+                    "CREATE TRIGGER fail_single_profile BEFORE INSERT ON profile_themes "
+                    "WHEN NEW.theme_name='실패 테마' "
+                    "BEGIN SELECT RAISE(ABORT,'native profile import fault'); END",
+                )
+
+            connection = sqlite3.connect(path, factory=_CloseTrackingConnection)
+            try:
+                with patch(
+                    "kiwoom_monitor.infrastructure.persistence.theme_backup.sqlite3.connect",
+                    return_value=connection,
+                ) as connect:
+                    with self.assertRaises(ThemeBackupError) as failure:
+                        service.import_from(backup_path)
+                connect.assert_called_once_with(path)
+                self.assertIsInstance(failure.exception.__cause__, sqlite3.IntegrityError)
+                self.assertEqual("native profile import fault", str(failure.exception.__cause__))
+                self.assertEqual(1, connection.close_count)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connection.execute("SELECT 1")
+            finally:
+                if not connection.close_count:
+                    connection.close()
+
+            self.assertEqual(revision, ThemeBackupService(path).revision())
+            self.assertEqual(("기존 테마",), repository.themes_for_stock("005930"))
+            self.assertEqual(("기존 테마",), repository.resolve_theme_names("기존 별칭"))
+
     def test_revision_keeps_exported_edits_and_rolls_back_failed_remote_import(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"

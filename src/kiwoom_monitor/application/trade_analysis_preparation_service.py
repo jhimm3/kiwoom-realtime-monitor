@@ -32,7 +32,6 @@ from kiwoom_monitor.application.trade_strategy_coordinator import (
     CycleTypeSelection,
     classify_with_strategy_packs,
     resolve_cycle_type_selection,
-    strategy_pack_for_result,
 )
 
 
@@ -119,6 +118,7 @@ class PreparedTradeAnalysis:
     research_links: tuple[JournalResearchLink, ...] = ()
     analysis_revision_id: str = ""
     daily_bar_count: int = 0
+    cycle_selected_packs: tuple[StrategyPackManifest | None, ...] = ()
 
 
 class TradeAnalysisPreparationService:
@@ -160,9 +160,16 @@ class TradeAnalysisPreparationService:
             pass
         daily_rows = self._repository.load_daily_bars(code, base_day)
 
+        drafts: dict[str, ExtractedStrategyDraft | None] = {}
+
+        def load_draft(pack_id: str) -> ExtractedStrategyDraft | None:
+            if pack_id not in drafts:
+                drafts[pack_id] = self._repository.load_strategy_pack_draft(pack_id)
+            return drafts[pack_id]
+
         overall_setup, pack_results = classify_with_strategy_packs(
             active_pack, strategy_packs, result_mode,
-            self._repository.load_strategy_pack_draft, episode, minute_rows, daily_rows,
+            load_draft, episode, minute_rows, daily_rows,
         )
         account_scope = episode.summary.account_scope
         origin_scope = episode.fills[0].origin_scope
@@ -176,11 +183,13 @@ class TradeAnalysisPreparationService:
 
         base_cycle_setups = active_pack.classify_cycles(episode, minute_rows, daily_rows)
         cycles = split_trade_episode_cycles(episode)
+        cycle_selected_packs: list[StrategyPackManifest | None] = []
         cycle_setups = tuple(
             classify_with_strategy_packs(
                 active_pack, strategy_packs, result_mode,
-                self._repository.load_strategy_pack_draft, cycle, minute_rows, daily_rows,
+                load_draft, cycle, minute_rows, daily_rows,
                 base=base_cycle_setups[index],
+                on_selected_pack=cycle_selected_packs.append,
             )[0]
             for index, cycle in enumerate(cycles)
         )
@@ -233,11 +242,10 @@ class TradeAnalysisPreparationService:
             if callable(link_loader) else ()
         )
         draft_rule_counts: dict[str, int] = {}
-        for cycle_setup in cycle_setups:
-            selected_pack = strategy_pack_for_result(cycle_setup, strategy_packs)
+        for selected_pack in cycle_selected_packs:
             if selected_pack is None or selected_pack.pack_id in draft_rule_counts:
                 continue
-            draft = self._repository.load_strategy_pack_draft(selected_pack.pack_id)
+            draft = load_draft(selected_pack.pack_id)
             draft_rule_counts[selected_pack.pack_id] = len(draft.rules) if draft else 0
 
         active_manifest = active_pack.manifest
@@ -289,4 +297,5 @@ class TradeAnalysisPreparationService:
             research_links,
             revision.revision_id,
             len(daily_rows),
+            tuple(cycle_selected_packs),
         )

@@ -1638,10 +1638,10 @@ class MockAutomationRunner:
                 or any(not 0 <= (now - cut).total_seconds() <= frozen.max_snapshot_age_seconds
                        for cut in (target.decision_time, risk.observed_at, observation.observed_at))):
             raise ValueError('unfilled_current_input_scope_or_time_mismatch')
-        encoded_values = {key: asdict(value) for key, value in snapshot.items()}
+        encoded_values = {key: asdict(value) for key, value in snapshot.items() if key != 'risk'}
         encoded_values['risk'] = risk.to_dict()
         # The observation carries the same typed Risk, including trading_date.
-        encoded_values['observation']['risk_snapshot'] = risk.to_dict()
+        encoded_values['observation']['risk_snapshot'] = encoded_values['risk']
         encoded = json.dumps(encoded_values,
                              sort_keys=True, separators=(',', ':'), default=_json_value).encode()
         if len(encoded) > 1024 * 1024:

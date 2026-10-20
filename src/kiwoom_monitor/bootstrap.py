@@ -59,6 +59,7 @@ from kiwoom_monitor.infrastructure.persistence.strict_restore import (
 )
 from kiwoom_monitor.infrastructure.persistence.news_database import migrate_legacy_news_database
 from kiwoom_monitor.presentation.main_window import APP_DISPLAY_NAME, MainWindow
+from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 
 
 def _application_icon_path() -> Path:
@@ -398,13 +399,13 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
     # 실제 크기 DB에서 분봉/일봉 정리가 각각 약 0.65초/0.12초까지 걸렸다.
     # 첫 화면과 최초 순위 처리를 먼저 시작한 뒤 한 번 실행해 보존 정책은 유지한다.
     QTimer.singleShot(30_000, retain_market_bars_after_startup)
-    central_settings_running = threading.Event()
+    central_settings_worker: SettingsRequestWorker | None = None
     central_settings_timer: QTimer | None = None
     if central_settings_sync is not None:
         def schedule_central_settings_sync() -> None:
-            if central_settings_running.is_set():
+            nonlocal central_settings_worker
+            if window._app_controller.closing or central_settings_worker is not None:
                 return
-            central_settings_running.set()
 
             def run() -> None:
                 try:
@@ -412,14 +413,22 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                     database.settings.clear_cache()
                 except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
                     logging.getLogger(__name__).warning("공통 설정 중앙 동기화 실패(로컬 설정 유지): %s", error)
-                finally:
-                    central_settings_running.clear()
 
-            threading.Thread(target=run, name="central-app-settings-sync", daemon=True).start()
+            worker = SettingsRequestWorker(run, window._app_controller)
 
-        central_settings_timer = QTimer()
+            def finished() -> None:
+                nonlocal central_settings_worker
+                if central_settings_worker is worker:
+                    central_settings_worker = None
+
+            worker.finished.connect(finished)
+            central_settings_worker = worker
+            worker.start()
+
+        central_settings_timer = QTimer(window._app_controller)
         central_settings_timer.setInterval(60_000)
         central_settings_timer.timeout.connect(schedule_central_settings_sync)
+        window._app_controller.add_shutdown_timer(central_settings_timer)
         central_settings_timer.start()
         QTimer.singleShot(1_000, schedule_central_settings_sync)
     try:

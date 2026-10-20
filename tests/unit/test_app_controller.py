@@ -77,12 +77,14 @@ class CapturingCacheWriter(QObject):
     gap_failed = Signal(object, str)
     daily_high_failed = Signal(str, str)
     fundamentals_failed = Signal(str, str)
+    retention_failed = Signal(object, str)
 
     def __init__(self):
         super().__init__()
         self.enqueue_price_cache = Mock()
         self.enqueue_minute_bars = Mock()
         self.enqueue_gap_minutes = Mock()
+        self.enqueue_minute_retention = Mock()
         self.start = Mock()
 
     def isRunning(self):
@@ -579,6 +581,88 @@ class AppControllerTests(unittest.TestCase):
                 repair.assert_called_once_with()
                 window.close()
 
+    def test_minute_history_finished_signal_keeps_forced_false_result_and_normal_fallback(self):
+        codes = ("005930", "000660")
+        for forced, expected in (
+            (False, [("daily", codes, False), ("fundamentals", codes),
+                     ("secondary_nxt", codes), "catalog"]),
+            (True, [("daily", codes, True)]),
+        ):
+            with self.subTest(forced=forced):
+                events = []
+                controller, _, _ = self.ranking_controller(events)
+                controller.minute_history.finished.emit(codes, forced)
+                self.assertEqual(expected, events)
+        events = []
+        unconfigured = self.controller(events)
+        unconfigured.minute_history.finished.emit(codes, False)
+        unconfigured.minute_history.finished.emit(codes, True)
+        self.assertEqual([], events)
+
+    def test_minute_worker_failure_keeps_daily_followup_and_late_signal_boundaries(self):
+        from kiwoom_monitor.application.daily_high_service import DailyHighTargets
+        from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHighWorker
+        from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import MinuteHistoryWorker
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        codes = ("005930",)
+        now = as_kst(datetime(2026, 10, 6, 10, 0))
+        for forced in (False, True):
+            with self.subTest(forced=forced):
+                database = Database(Path(temporary.name) / f"monitor-{forced}.sqlite3")
+                database.initialize()
+                minute_load = Mock(side_effect=ValueError("controlled minute failure"))
+                daily_load = Mock(return_value=DailyHighTargets(None, None, None))
+                minute_factory = Mock(side_effect=lambda requested: MinuteHistoryWorker(
+                    SimpleNamespace(load_today_with_completion=minute_load), requested,
+                    now_provider=lambda: now))
+                daily_factory = Mock(side_effect=lambda requested: DailyHighWorker(
+                    SimpleNamespace(load=daily_load), requested))
+                with patch.object(MainWindow, "_open_api_settings"), \
+                        patch.object(MainWindow, "_start_fundamentals_loading", return_value=False) as fundamentals, \
+                        patch.object(MainWindow, "_start_nxt_eligibility_loading", return_value=False), \
+                        patch.object(MainWindow, "_start_daily_krx_catalog_sync"):
+                    window = MainWindow(database.settings,
+                        minute_history_worker_factory=minute_factory,
+                        daily_high_worker_factory=daily_factory)
+                    self.windows.append(window)
+                    controller = window._app_controller
+                    controller.ranking_loader = SimpleNamespace(server_now=lambda: now)
+                    failures, completed = [], []
+                    controller.minute_history.failed.connect(failures.append)
+                    controller.daily_high.finished.connect(completed.append)
+
+                    self.assertTrue(window._start_minute_history_loading(codes, force=forced))
+                    self.wait_until(lambda: completed == [codes]
+                        and controller.minute_history.worker is None
+                        and controller.daily_high.worker is None)
+                    minute_factory.assert_called_once_with(codes)
+                    daily_factory.assert_called_once_with(codes)
+                    minute_load.assert_called_once_with(codes[0], now)
+                    daily_load.assert_called_once_with(codes[0])
+                    self.assertEqual(1, len(failures))
+                    self.assertIn("controlled minute failure", failures[0])
+
+                    completed_fundamentals = fundamentals.call_count
+                    for boundary in ("close", "reload", "priority"):
+                        with self.subTest(boundary=boundary):
+                            controller._closing = boundary == "close"
+                            controller._api_reloading = boundary == "reload"
+                            if boundary in {"reload", "priority"}:
+                                controller.ranking_execution.begin_priority_preparation()
+                            try:
+                                controller.minute_history.finished.emit(codes, forced)
+                                daily_factory.assert_called_once_with(codes)
+                                self.assertEqual(completed_fundamentals, fundamentals.call_count)
+                            finally:
+                                controller._closing = False
+                                controller._api_reloading = False
+                                controller.ranking_execution.end_priority_preparation()
+                    window.close()
+                    self.wait_until(controller.request_close)
+                    self.assertTrue(window.close())
+
     def test_ranking_signal_applies_before_nas_history_subscription_and_secondary(self):
         events = []
         controller, _, _ = self.ranking_controller(events)
@@ -988,6 +1072,82 @@ class AppControllerTests(unittest.TestCase):
             QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
             self.windows.remove(window)
 
+    def test_retention_failure_keeps_original_cutoff_for_timer_and_explicit_close_retry(self):
+        for after_commit in (False, True):
+            with self.subTest(after_commit=after_commit), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                Database(path).initialize()
+                repository = MinuteBarRepository(path)
+                old = datetime(2026, 9, 19, 10)
+                repository.upsert_many({"005930": (MinuteOhlcv(old, 100, 100, 100, 100, 1),)})
+                events = []
+                controller = self.controller(events, monitor_database_path=path,
+                    minute_bar_repository=repository)
+                controller.start_market_cache_writer()
+                writer = controller.market_cache_writer
+                cutoff = date(2026, 9, 20)
+                calls, timer_states = [], []
+                original = MinuteBarRepository.purge_before
+
+                def purge(current, requested):
+                    calls.append(requested)
+                    if len(calls) <= 3:
+                        if after_commit:
+                            original(current, requested)
+                        raise OSError("controlled retention failure")
+                    original(current, requested)
+
+                def observed_failure(*_):
+                    timer_states.append(controller.minute_cache_timer.isActive())
+                    # Drive the existing timeout signal explicitly, without a sleep race.
+                    controller.minute_cache_timer.stop()
+
+                writer.retention_failed.connect(observed_failure, Qt.ConnectionType.QueuedConnection)
+                with patch.object(MinuteBarRepository, "purge_before", purge):
+                    controller.queue_minute_retention(cutoff)
+                    self.wait_until(lambda: len(timer_states) == 1)
+                    self.assertEqual(cutoff, controller.pending_minute_retention)
+                    self.assertEqual([True], timer_states)
+                    controller.minute_cache_timer.timeout.emit()
+                    self.wait_until(lambda: len(timer_states) == 2)
+                    self.assertEqual(cutoff, controller.pending_minute_retention)
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    self.assertEqual(cutoff, controller.pending_minute_retention)
+                    self.assertEqual([True, True, False], timer_states)
+                    self.assertNotIn("ready", events)
+                    self.assertNotIn("auxiliaries", events)
+                    self.assertFalse(controller.minute_cache_timer.isActive())
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual(int(not after_commit), connection.execute(
+                            "SELECT COUNT(*) FROM minute_bars").fetchone()[0])
+                    self.assertFalse(controller.request_close())
+                    self.wait_until(controller.request_close)
+                self.assertIs(writer, controller.market_cache_writer)
+                self.assertEqual([cutoff] * 4, calls)
+                self.assertIsNone(controller.pending_minute_retention)
+                self.assertEqual(1, events.count("ready"))
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM minute_bars").fetchone()[0])
+
+        # Explicit embedded/offline mode retains its synchronous repository path.
+        repository = Mock(spec=["purge_before"])
+        repository.purge_before.side_effect = OSError("offline retention failure")
+        events = []
+        controller = self.controller(events, minute_bar_repository=repository)
+        saved = Mock()
+        controller.minute_cache_saved.connect(saved)
+        controller.queue_minute_retention(cutoff)
+        self.assertEqual(cutoff, controller.pending_minute_retention)
+        self.assertFalse(controller.request_close())
+        self.assertEqual("cache_failed", controller._shutdown_stage)
+        self.assertNotIn("ready", events)
+        repository.purge_before.side_effect = None
+        self.assertFalse(controller.request_close())
+        self.wait_until(controller.request_close)
+        self.assertIsNone(controller.pending_minute_retention)
+        saved.assert_not_called()  # Retention itself is not a minute-data ACK.
+
     def test_gap_metadata_failure_blocks_close_until_existing_writer_retry_commits(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
@@ -1289,6 +1449,247 @@ class AppControllerTests(unittest.TestCase):
             worker.wait(1000)
             self.wait_until(lambda: window._app_controller.request_close())
             self.assertTrue(completed.is_set())
+
+    def _bootstrap_settings_desktop(self, during_loop, after_exit=None):
+        import json
+        import sys
+        import threading
+        from contextlib import ExitStack
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.app_paths import AppPaths
+        from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsSyncService
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease, StrictRestoreError
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        paths = AppPaths(root, root / "logs", root / "monitor.sqlite3")
+        JournalRepository(paths.journal_database_path)
+        StockNewsRepository(paths.news_database_path)
+        fixture = SimpleNamespace(
+            paths=paths, entered=Event(), release=Event(), completed=Event(), events=[],
+            callbacks=[], timers=[], windows=[], http_calls=0, fail_http=False,
+        )
+        now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+
+        class Response:
+            headers = {"X-Kiwoom-Server-Time": now.isoformat()}
+
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.value).encode()
+
+        def http(request, **_kwargs):
+            if "/app_settings?" in request.full_url:
+                fixture.http_calls += 1
+                fixture.events.append("settings.http")
+                fixture.entered.set()
+                if not fixture.release.wait(4):
+                    raise RuntimeError("settings HTTP fixture was not released")
+                if fixture.fail_http:
+                    raise OSError("settings HTTP fixture failure")
+                return Response({"documents": [{
+                    "owner": "default", "key": "rank_query_type", "document": {
+                        "key": "rank_query_type", "value": "4", "updated_at": now.isoformat(),
+                    },
+                }]})
+            if request.get_method() == "GET":
+                return Response({"documents": []})
+            return Response({"saved": len(json.loads(request.data)["documents"])})
+
+        class TrackedSync(CentralSettingsSyncService):
+            def sync(self, path):
+                try:
+                    return super().sync(path)
+                finally:
+                    fixture.events.append("settings.finished")
+                    fixture.completed.set()
+
+        def timer(*args, **kwargs):
+            value = QTimer(*args, **kwargs)
+            fixture.timers.append(value)
+            return value
+
+        def window(*args, **kwargs):
+            value = MainWindow(*args, **kwargs)
+            fixture.windows.append(value)
+            self.windows.append(value)
+            return value
+
+        def restore_available():
+            try:
+                lease = AppDataLease(root, exclusive=True, timeout=0)
+            except StrictRestoreError:
+                return False
+            lease.close()
+            return True
+
+        fixture.restore_available = restore_available
+
+        def loop():
+            fixture.window = fixture.windows[0]
+            fixture.schedule = next(
+                callback for _delay, callback in fixture.callbacks
+                if getattr(callback, "__name__", "") == "schedule_central_settings_sync"
+            )
+            fixture.timer = fixture.timers[-1]
+            during_loop(fixture)
+            return 0
+
+        application = Mock()
+        application.exec.side_effect = loop
+        server = Mock()
+        server.stop.side_effect = lambda: fixture.events.append("server.stop")
+        service = Mock()
+        service.pull.return_value = SimpleNamespace(total=0)
+        service.push.return_value = SimpleNamespace(total=0)
+        source = DataSourceSettings(mode="local_server", server_url="https://fixture.invalid", access_token="fixture")
+        single_shot = lambda delay, callback: fixture.callbacks.append((delay, callback))
+        with ExitStack() as stack:
+            for active in (
+                patch.dict(os.environ), patch.object(sys, "excepthook"),
+                patch.object(bootstrap, "_set_taskbar_app_id"),
+                patch.object(bootstrap, "configure_logging"),
+                patch.object(bootstrap.AppPaths, "for_current_user", return_value=paths),
+                patch.object(bootstrap.DataSourceConfig, "load", return_value=source),
+                patch.object(bootstrap, "LocalCentralServerProcess", return_value=server),
+                patch.object(bootstrap, "CentralContentSyncService", return_value=service),
+                patch.object(bootstrap, "CentralContentClient", side_effect=lambda *args, **kwargs:
+                             CentralContentClient(*args, opener=http, **kwargs)),
+                patch.object(bootstrap, "CentralSettingsSyncService", TrackedSync),
+                patch.object(bootstrap, "create_query_client", return_value=SimpleNamespace(server_now=lambda: now)),
+                patch.object(bootstrap, "QApplication", return_value=application),
+                patch.object(bootstrap, "MainWindow", side_effect=window),
+                patch.object(QTimer, "singleShot", side_effect=single_shot),
+                patch.object(bootstrap, "QTimer", side_effect=timer),
+            ):
+                stack.enter_context(active)
+            bootstrap.QTimer.singleShot.side_effect = single_shot
+            try:
+                with self.assertRaises(SystemExit) as exited:
+                    bootstrap._main_with_restore_gate()
+                self.assertEqual(0, exited.exception.code)
+                fixture.lease_released_while_running = (
+                    not fixture.completed.is_set() and restore_available()
+                )
+                fixture.before_release = list(fixture.events)
+                if after_exit is not None:
+                    after_exit(fixture)
+            finally:
+                fixture.release.set()
+                for worker in threading.enumerate():
+                    if worker.name in {"central-content-sync", "central-app-settings-sync"}:
+                        worker.join(5)
+                        self.assertFalse(worker.is_alive())
+                for value in fixture.windows:
+                    self.wait_until(lambda value=value: not any(
+                        worker.isRunning() for worker in value._app_controller.findChildren(QThread)
+                    ))
+                self.app.processEvents()
+        return fixture
+
+    def test_bootstrap_settings_close_preserves_inflight_dependency_and_restore_lease(self):
+        def close_while_http_is_running(fixture):
+            fixture.schedule()
+            self.assertTrue(fixture.entered.wait(1))
+            fixture.initial_close_accepted = fixture.window.close()
+            fixture.timer_active_after_close = fixture.timer.isActive()
+            fixture.schedule()
+            deadline = time.monotonic() + 1
+            while not fixture.window._app_controller.request_close() and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.005)
+            fixture.ready_while_http_running = fixture.window._app_controller.request_close()
+            controller = fixture.window._app_controller
+            fixture.close_state = {
+                "stage": controller._shutdown_stage,
+                "shutdown_timer_active": controller._shutdown_timer.isActive(),
+                "shutdown_timer_remaining": controller._shutdown_timer.remainingTime(),
+                "running_producers": [(type(worker).__name__, label) for worker, label
+                                      in controller._producer_workers() if worker is not None and worker.isRunning()],
+                "running_writers": [type(worker).__name__ for worker in controller._running_writers()],
+                "entry_pending": controller.entry_snapshot_writer.has_pending_work(),
+            }
+            if not fixture.ready_while_http_running:
+                self.assertFalse(fixture.restore_available())
+                self.assertNotIn("server.stop", fixture.events)
+                fixture.release.set()
+                self.wait_until(lambda: fixture.window._app_controller.request_close())
+
+        def assert_before_cleanup(fixture):
+            self.assertEqual(
+                (False, False, False, 1, ["settings.http", "settings.finished", "server.stop"]),
+                (fixture.ready_while_http_running, fixture.timer_active_after_close,
+                 fixture.lease_released_while_running, fixture.http_calls, fixture.before_release),
+                fixture.close_state,
+            )
+
+        fixture = self._bootstrap_settings_desktop(close_while_http_is_running, assert_before_cleanup)
+        self.assertTrue(fixture.restore_available())
+        with closing(sqlite3.connect(fixture.paths.database_path)) as connection:
+            self.assertEqual("4", connection.execute(
+                "SELECT value FROM settings WHERE key='rank_query_type'",
+            ).fetchone()[0])
+
+    def test_bootstrap_settings_failure_retries_and_close_rejects_delayed_start(self):
+        def retry_after_http_failure(fixture):
+            settings = fixture.window._settings
+            before = settings.get("rank_query_type")
+            fixture.fail_http = True
+            fixture.schedule()
+            self.assertTrue(fixture.entered.wait(1))
+            fixture.schedule()
+            self.assertEqual(1, fixture.http_calls)
+            fixture.release.set()
+            self.assertTrue(fixture.completed.wait(2))
+            self.wait_until(lambda: not any(
+                worker.isRunning() for worker in fixture.window._app_controller.findChildren(SettingsRequestWorker)
+            ))
+            self.app.processEvents()
+            with closing(sqlite3.connect(fixture.paths.database_path)) as connection:
+                self.assertEqual(before, connection.execute(
+                    "SELECT value FROM settings WHERE key='rank_query_type'",
+                ).fetchone()[0])
+            self.assertEqual(before, settings.get("rank_query_type"))
+
+            fixture.fail_http = False
+            fixture.entered.clear()
+            fixture.completed.clear()
+            fixture.release.clear()
+            fixture.schedule()
+            self.assertTrue(fixture.entered.wait(1))
+            fixture.schedule()
+            self.assertEqual(2, fixture.http_calls)
+            self.assertFalse(fixture.window.close())
+            self.assertFalse(fixture.timer.isActive())
+            self.assertFalse(fixture.restore_available())
+            self.assertNotIn("server.stop", fixture.events)
+            fixture.release.set()
+            self.wait_until(lambda: fixture.window._app_controller.request_close())
+            self.assertTrue(fixture.window._app_controller.request_close())
+            self.app.processEvents()
+            fixture.schedule()
+            self.assertEqual(2, fixture.http_calls)
+            self.assertEqual("4", settings.get("rank_query_type"))
+
+        def assert_before_cleanup(fixture):
+            self.assertEqual([
+                "settings.http", "settings.finished", "settings.http", "settings.finished", "server.stop",
+            ], fixture.before_release)
+            self.assertFalse(fixture.lease_released_while_running)
+
+        fixture = self._bootstrap_settings_desktop(retry_after_http_failure, assert_before_cleanup)
+        self.assertTrue(fixture.restore_available())
 
     def test_runtime_provider_swap_and_view_rollback_use_public_setter_without_old_cache_publication(self):
         import threading

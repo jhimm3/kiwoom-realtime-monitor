@@ -1471,6 +1471,38 @@
         "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.fail_run|connection.execute": 3,
         "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.cancel_run|connection.execute": 3
       }
+    },
+    {
+      "id": "R3-041-demand-review-dialog-20261021",
+      "reason": "Relocate the same one dialog.exec source site to the existing demand-prepared callback; ordinary refresh no longer loads Shadow pages. No new UI layer or event-loop site.",
+      "connection": "Existing dialog selection -> same Qt worker -> token/current selection verification -> same review modal and publication client/server gates.",
+      "validation": "Frozen WT related54 and independent code review; root integrated source must be revalidated. Already open modal stop/accept is a preexisting residual, actual HTTP/SQL/NAS are unverified.",
+      "limits": {
+        "dynamic|src/kiwoom_monitor/presentation/mock_automation_dialog.py|MockAutomationDialog._publish_prepared_candidate|dialog.exec": 1,
+        "dynamic|src/kiwoom_monitor/presentation/mock_automation_dialog.py|MockAutomationDialog._publish_selected_candidate|dialog.exec": 0
+      },
+      "retired": [
+        "dynamic|src/kiwoom_monitor/presentation/mock_automation_dialog.py|MockAutomationDialog._publish_selected_candidate|dialog.exec"
+      ]
+    },
+    {
+      "id": "R3-076-preview-batch-owner-20261021",
+      "reason": "One exact SQL site for request-scoped bulk memberships within the existing ThemeRepository, replacing per-code preview queries. No inventory reset, new owner, cache, transaction or hot-path I/O.",
+      "connection": "Existing OCR/Excel/manual/text approved import -> common preview -> same current-profile native repository reader with bounded binding chunks -> existing explicit apply/rollback.",
+      "validation": "Frozen WT related48 and native existing-profile preview connections20->1/SELECT40->2, matcher-inclusive40->21/60->22; DML0 in existing profile. Root integrated source revalidation required; lazy profile creation and separately approved alias writes remain.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.themes_for_stocks|connection.execute": 1
+      }
+    },
+    {
+      "id": "R3-077-retire-unused-profile-export-20261021",
+      "reason": "Retire only unused private _export_all_profiles duplicate; keep public individual-profile file capability and whole-profile document. Ratchet the removed two existing source-site budgets to0 without adoption/rules/history reset.",
+      "connection": "Existing ThemeBackupService public file APIs -> same individual-profile exporter/importer and native target-profile transaction. Importer owns its connection and now closes it unconditionally. Whole-profile CAS, settings caller transaction, Drive/strict restore, manifest/revision and theme repository paths unchanged.",
+      "validation": "Frozen WT related7 modules84 PASS plus separate native comparison1 PASS, exact IDs/source/tree exit/native TEMP cleanup. Original success-after-commit and rollback both NameError/explicitclose0; fixed success or ThemeBackupError with IntegrityError cause/close1. Native success SQL9 and fault SQL10, connect1/transaction1/total_changes5 or3 unchanged. Initial independent AST plan83 omitted an existing async test; corrected static receipt84, unchanged worker/source, original discrepancy preserved. Root integrated source must be checked separately; external scripts and actual cloud/NAS unverified.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._export_all_profiles|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._export_all_profiles|sqlite3.connect": 0
+      }
     }
   ]
 }

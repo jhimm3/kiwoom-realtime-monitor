@@ -117,19 +117,43 @@ class MockAutomationWorker(QThread):
         self._values = dict(values or {})
 
     def run(self) -> None:
+        command_acknowledged = False
         try:
             if self._operation == "publish_spec":
                 self._content.publish_mock_automation_spec(**self._values)
-            elif self._operation != "refresh":
+                command_acknowledged = True
+            elif self._operation not in {"refresh", "prepare_publication"}:
                 method = getattr(self._content, f"{self._operation}_mock_automation")
                 method(**self._values)
+                command_acknowledged = True
             context = self._load_context(
                 str(self._values.get("credential_profile_id", "")),
                 str(self._values.get("spec_id", "")),
             )
+            if self._operation == "prepare_publication":
+                selected = context.get("selected_profile")
+                if not isinstance(selected, dict) or (
+                    selected.get("profile_id") != self._values.get("credential_profile_id")
+                    or selected.get("account_ref") != self._values.get("account_ref")
+                ):
+                    raise RuntimeError("선택한 모의계좌와 프로필을 다시 확인하세요.")
+                candidate = next((value for value in context.get("candidate_publications", ())
+                    if value == self._values.get("candidate_publication")), None)
+                if candidate is None:
+                    raise RuntimeError("선택한 후보 문서가 변경됐습니다. 새로 확인 후 다시 선택하세요.")
+                context["publication_candidate"] = candidate
+                context["shadow_events"] = self._load_shadow_events()
+                if self.isInterruptionRequested():
+                    return
             self.completed.emit(self._operation, context)
         except (RuntimeError, ValueError, OSError) as error:
-            self.failed.emit(self._operation, str(error))
+            if command_acknowledged:
+                self.completed.emit(self._operation, {
+                    "context_refresh_error": str(error),
+                    "status": {"status_query_error": str(error) or "상태 미확인"},
+                })
+            else:
+                self.failed.emit(self._operation, str(error))
 
     def _load_context(self, preferred_profile: str, preferred_spec: str) -> dict[str, Any]:
         profiles = available_mock_profiles(self._credentials.load())
@@ -148,7 +172,6 @@ class MockAutomationWorker(QThread):
         binding = candidates_document.get("binding")
         if not isinstance(candidates, list) or not isinstance(binding, dict):
             raise RuntimeError("NAS 후보 목록 형식이 올바르지 않습니다.")
-        shadow_events = self._load_shadow_events()
         specs_document = self._content.load_mock_automation_specs(account_ref)
         specs = specs_document.get("specs", [])
         if not isinstance(specs, list):
@@ -181,13 +204,14 @@ class MockAutomationWorker(QThread):
             "account_settings": account_settings, "specs": specs,
             "selected_spec_id": selected_spec, "status": status,
             "candidate_publications": candidates, "candidate_binding": binding,
-            "shadow_events": shadow_events,
         }
 
     def _load_shadow_events(self) -> list[dict[str, Any]]:
         values: list[dict[str, Any]] = []
         cursor = 0
         for _ in range(100):
+            if self.isInterruptionRequested():
+                return []
             page = self._content.load_candidate_events(after_sequence=cursor, limit=1000)
             rows = page.get("events", [])
             if not isinstance(rows, list):
@@ -473,9 +497,49 @@ class MockAutomationDialog(QDialog):
         if not isinstance(selected, dict) or not isinstance(candidate, dict) or not isinstance(binding, dict):
             self._message.setText("게시 가능한 모의계좌 후보를 먼저 선택하세요.")
             return
+        self._set_busy(True)
+        worker = MockAutomationWorker(self._content, self._credentials, "prepare_publication", {
+            "account_ref": str(selected["account_ref"]),
+            "credential_profile_id": str(selected["profile_id"]),
+            "spec_id": str(self._spec.currentData() or ""),
+            "candidate_publication": candidate,
+        }, self)
+        request_token = object()
+        self._context["_publication_request"] = request_token
+        prepared: list[dict[str, Any]] = []
+        worker.completed.connect(lambda _operation, context: prepared.append(context))
+        worker.failed.connect(self._failed)
+
+        def finished() -> None:
+            current_request = self._worker is worker and self._context.get("_publication_request") is request_token
+            if self._context.get("_publication_request") is request_token:
+                self._context.pop("_publication_request")
+            interrupted = worker.isInterruptionRequested()
+            self._worker_finished(worker)
+            if not current_request or not prepared or interrupted or not self.isVisible():
+                return
+            context = prepared[0]
+            self._completed("prepare_publication", {
+                key: value for key, value in context.items()
+                if key not in {"publication_candidate", "shadow_events"}
+            })
+            self._publish_prepared_candidate(context)
+
+        worker.finished.connect(finished)
+        self._worker = worker
+        worker.start()
+
+    def _publish_prepared_candidate(self, context: dict[str, Any]) -> None:
+        selected = context["selected_profile"]
+        candidate = context["publication_candidate"]
+        binding = context["candidate_binding"]
+        for index in range(self._candidate.count()):
+            if self._candidate.itemData(index) == candidate:
+                self._candidate.setCurrentIndex(index)
+                break
         events = matching_shadow_events(
             candidate,
-            tuple(value for value in self._context.get("shadow_events", ()) if isinstance(value, dict)),
+            tuple(value for value in context.get("shadow_events", ()) if isinstance(value, dict)),
         )
         if not events:
             self._message.setText("이 후보 설정과 일치하는 실제 Shadow 후보 기록이 아직 없습니다.")
@@ -483,7 +547,8 @@ class MockAutomationDialog(QDialog):
         dialog = MockAutomationPublicationDialog(
             candidate, binding, str(selected["profile_id"]), events, self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (dialog.exec() != QDialog.DialogCode.Accepted
+                or not self.isVisible() or self._worker is not None):
             return
         try:
             values = dialog.publication_values()
@@ -501,18 +566,31 @@ class MockAutomationDialog(QDialog):
         worker.start()
 
     def _completed(self, operation: str, context: dict[str, Any]) -> None:
-        self._context = context
-        self._apply_context()
+        if "_publication_request" in context:
+            context = {key: value for key, value in context.items() if key != "_publication_request"}
         messages = {
             "refresh": "NAS의 최신 모의 자동운용 상태를 확인했습니다.",
             "start": "모의 자동운용 시작 요청이 반영됐습니다.",
             "stop": "신규 자동 주문을 중지했습니다.",
             "resume": "모의 자동운용 재개 요청이 반영됐습니다.",
             "publish_spec": "READY 모의운용 명세를 게시했습니다. 주문은 아직 시작되지 않았습니다.",
+            "prepare_publication": "현재 선택한 후보의 게시 근거를 확인했습니다.",
         }
+        if context.get("context_refresh_error"):
+            self._context["status"] = context["status"]
+            self._runtime.setText("상태를 확인할 수 없습니다. 새로 확인 후 제어할 수 있습니다.")
+            self._apply_button_state()
+            self._message.setText(
+                f"{messages[operation]} 최신 상태를 확인하지 못했습니다. 새로 확인 후 제어하세요. "
+                f"· {context['context_refresh_error']}"
+            )
+            return
+        self._context = context
+        self._apply_context()
         status = context.get("status")
         if isinstance(status, dict) and status.get("status_query_error"):
-            self._message.setText("NAS 운용 상태를 확인하지 못했습니다. 새로 확인 후 제어하세요.")
+            acknowledged = messages[operation] + " " if operation in {"start", "stop", "resume", "publish_spec"} else ""
+            self._message.setText(acknowledged + "NAS 운용 상태를 확인하지 못했습니다. 새로 확인 후 제어하세요.")
         else:
             self._message.setText(messages.get(operation, "완료"))
 
@@ -653,6 +731,7 @@ class MockAutomationDialog(QDialog):
 
     def stop(self) -> None:
         self._window_settings.setValue("geometry", self.saveGeometry())
+        self._context.pop("_publication_request", None)
         if self._candidate_files_dialog is not None:
             self._candidate_files_dialog.stop()
         if self._worker is not None and self._worker.isRunning():
@@ -661,5 +740,6 @@ class MockAutomationDialog(QDialog):
 
     def closeEvent(self, event) -> None:
         self._window_settings.setValue("geometry", self.saveGeometry())
+        self._context.pop("_publication_request", None)
         event.ignore()
         self.hide()

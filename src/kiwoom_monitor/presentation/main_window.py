@@ -158,8 +158,6 @@ from kiwoom_monitor.presentation.app_metadata import (
 )
 from kiwoom_monitor.presentation.background_workers import (
     GoogleDriveSyncWorker,
-    UpdateCheckWorker,
-    UpdateDownloadWorker,
 )
 from kiwoom_monitor.presentation.daily_high_worker_controller import (
     DailyHighWorkerController,
@@ -242,7 +240,6 @@ from kiwoom_monitor.presentation.theme_dialogs import (
     review_image_theme_rows,
 )
 from kiwoom_monitor.presentation.top20_trade_value import (
-    Top20MarketRepairWorker,
     Top20NasDataWorker,
     Top20TradeValueChart,
     Top20TradeValueWindow,
@@ -272,8 +269,6 @@ from kiwoom_monitor.application.top20_trade_value_collector import (
 )
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 from kiwoom_monitor.infrastructure.news_ai import DEFAULT_MODELS, MODEL_OPTIONS
-from kiwoom_monitor.infrastructure.ocr.paddle_theme_ocr import ImageThemeOcrWorker
-from kiwoom_monitor.infrastructure.krx.stock_catalog_worker import KrxStockCatalogWorker
 from kiwoom_monitor.infrastructure.update_planner import UpdatePlan, UpdateStep, build_update_plan
 
 class RankingLoader(Protocol):
@@ -444,64 +439,9 @@ class MainWindow(QMainWindow):
         return self._ranking_worker_controller.worker
 
     @property
-    def _realtime_worker(self) -> RealtimeTradeWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._realtime_worker_controller.worker
-
-    @property
-    def _minute_history_worker(self) -> MinuteHistoryWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._minute_history_worker_controller.worker
-
-    @property
-    def _daily_high_worker(self) -> DailyHighWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._daily_high_worker_controller.worker
-
-    @property
-    def _fundamentals_worker(self) -> FundamentalsWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._fundamentals_worker_controller.worker
-
-    @property
-    def _historical_high_worker(self) -> HistoricalHighWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._historical_high_worker_controller.worker
-
-    @property
-    def _nxt_eligibility_worker(self) -> NxtEligibilityWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._nxt_eligibility_worker_controller.worker
-
-    @property
-    def _krx_stock_catalog_worker(self) -> KrxStockCatalogWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._krx_stock_catalog_worker_controller.worker
-
-    @property
-    def _top20_repair_worker(self) -> Top20MarketRepairWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._top20_repair_worker_controller.worker
-
-    @property
-    def _image_theme_ocr_worker(self) -> ImageThemeOcrWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._image_theme_ocr_worker_controller.worker
-
-    @property
     def _google_drive_worker(self) -> GoogleDriveSyncWorker | None:
         """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
         return self._google_drive_worker_controller.worker
-
-    @property
-    def _update_check_worker(self) -> UpdateCheckWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._update_worker_controller.check_worker
-
-    @property
-    def _update_download_worker(self) -> UpdateDownloadWorker | None:
-        """기존 종료 처리와 GUI 회귀 테스트용 읽기 전용 호환 접근자."""
-        return self._update_worker_controller.download_worker
 
     def __init__(
         self,
@@ -714,6 +654,7 @@ class MainWindow(QMainWindow):
         # 0B FID 311 수신값. 장중 표 시가총액에는 ka10001 캐시보다 우선한다.
         self._realtime_market_caps: dict[str, float] = {}
         self._today_high_prices: dict[str, int] = {}
+        self._today_high_prices_date: date | None = None
         self._near_high_codes: set[str] = set()
         self._near_high_levels: dict[str, str] = {}
         self._near_high_sound_last_played: dict[tuple[str, str], float] = {}
@@ -2664,9 +2605,11 @@ class MainWindow(QMainWindow):
         self._visible_theme_frequency = visible_theme_frequency(stocks, self._themes)
         self._prepare_top20_trade_value_index(codes, self._ranking_now())
         saved_nxt: dict[str, bool] = {}
+        high_date = self._ranking_now().date()
+        self._ensure_intraday_high_date(high_date)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_ranking_cache"):
             cached = self._stock_lookup.load_ranking_cache(
-                codes, self._top20_realtime_codes(codes), self._ranking_now().date(),
+                codes, self._top20_realtime_codes(codes), high_date,
             )
             self._stock_markets.update(cached.markets)
             self._current_prices.update(cached.last_prices)
@@ -2680,7 +2623,7 @@ class MainWindow(QMainWindow):
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_last_prices"):
                 self._current_prices.update(self._stock_lookup.load_last_prices(codes))
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_intraday_highs"):
-                self._today_high_prices.update(self._stock_lookup.load_intraday_highs(codes, self._ranking_now().date()))
+                self._today_high_prices.update(self._stock_lookup.load_intraday_highs(codes, high_date))
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_fundamentals"):
                 self._fundamentals.update(self._stock_lookup.load_fundamentals(codes))
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_nxt_enabled"):
@@ -3026,19 +2969,22 @@ class MainWindow(QMainWindow):
             self._render_trade_values(code)
         self.statusBar().showMessage(f"{label} 거래대금·{label}강도: " + (f"직전 완료 {label}" if completed else f"실시간 진행 중 {label}"))
 
+    def _ensure_intraday_high_date(self, today: date) -> None:
+        if self._today_high_prices_date != today:
+            self._today_high_prices.clear()
+            self._today_high_prices_date = today
+
     def _ensure_today_minute_bar_storage(self, now: datetime) -> None:
-        """날짜가 바뀌면 메모리를 비우고, DB에서는 30일보다 오래된 분봉만 정리한다."""
+        """날짜별 RAM을 정리하고 기존 저장 경로에 30일 보존 작업을 넘긴다."""
         today = now.date()
+        self._ensure_intraday_high_date(today)
         if self._minute_bar_storage_date == today:
             return
         self._app_controller.flush_minute_cache()
         self._minute_aggregator.discard_before(today)
         self._minute_history_codes.clear()
         if self._minute_bar_repository is not None:
-            try:
-                self._minute_bar_repository.purge_before(today - timedelta(days=30))
-            except Exception as error:
-                logger.warning("오래된 분봉 DB 정리 실패: %s", error)
+            self._app_controller.queue_minute_retention(today - timedelta(days=30))
         self._minute_bar_storage_date = today
 
 
@@ -3072,6 +3018,7 @@ class MainWindow(QMainWindow):
             while pressure and pressure[0][0] < cutoff:
                 pressure.popleft()
         if tick.current_price is not None:
+            self._ensure_today_minute_bar_storage(observed_at)
             self._current_prices[tick.code] = tick.current_price
             self._app_controller.queue_price_cache(tick.code, price=tick.current_price)
             if tick.high_price and tick.high_price > 0:
@@ -3079,7 +3026,6 @@ class MainWindow(QMainWindow):
                 if tick.high_price > previous_high:
                     self._today_high_prices[tick.code] = tick.high_price
                     self._app_controller.queue_price_cache(tick.code, high=tick.high_price, observed_at=observed_at)
-            self._ensure_today_minute_bar_storage(observed_at)
             bar = self._minute_aggregator.ingest(tick, observed_at)
             if bar is not None:
                 self._app_controller.queue_minute_bar(tick.code, bar)
@@ -4462,26 +4408,22 @@ class MainWindow(QMainWindow):
         if row is None:
             return
         now = self._ranking_now()
-        live_values = (
-            self._minute_aggregator.bucket_trade_value_eok(code, 1, now),
-            self._minute_aggregator.bucket_trade_value_eok(code, 5, now),
-            self._minute_aggregator.bucket_trade_value_eok(code, 60, now),
-            self._minute_aggregator.today_trade_value_eok(code, now),
-        )
-        completed_values = (
-            self._minute_aggregator.bucket_trade_value_eok(code, 1, now, previous=True),
-            self._minute_aggregator.bucket_trade_value_eok(code, 5, now, previous=True),
-            self._minute_aggregator.bucket_trade_value_eok(code, 60, now, previous=True),
-            self._previous_day_trade_values.get(code, 0.0),
-        )
-        periods = ("1m", "5m", "60m", "day")
-        values = tuple(
-            completed_values[index] if self._trade_display_mode(period) == "completed" else live_values[index]
-            for index, period in enumerate(periods)
-        )
-        visible_values = zip(range(6, 7), ("1m",), values[:1]) if live_only else zip(range(6, 10), ("1m", "5m", "60m", "day"), values)
+        periods = ("1m",) if live_only else ("1m", "5m", "60m", "day")
+        display_modes = {period: self._trade_display_mode(period) for period in periods}
+        minutes = {"1m": 1, "5m": 5, "60m": 60}
+        values: list[float] = []
+        qualities: dict[str, DataCompleteness] = {}
+        for period in periods:
+            previous = display_modes[period] == "completed"
+            if period == "day":
+                value = self._previous_day_trade_values.get(code, 0.0) if previous else self._minute_aggregator.today_trade_value_eok(code, now)
+            else:
+                value = self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now, previous=previous)
+            values.append(value)
+            qualities[period] = self._trade_value_quality(code, period, now)
+        visible_values = zip((6,) if live_only else range(6, 10), periods, values)
         for column, period, value in visible_values:
-            quality = self._trade_value_quality(code, period, now)
+            quality = qualities[period]
             item = QTableWidgetItem(f"{value:.{self._decimal_places('trade_value')}f}")
             item.setToolTip(
                 f"수신값으로 표시·강도·알림 계산\n자료 상태: {self._minute_quality_label(code, quality).rstrip(' · ') or '정상'}"
@@ -4498,11 +4440,10 @@ class MainWindow(QMainWindow):
             self._table.setItem(row, column, item)
         fundamentals = self._fundamentals.get(code)
         if fundamentals:
-            strength_source = values
-            strength_values = zip((4,), ("1m",), strength_source[:1]) if live_only else zip((4, 10, 11, 12), ("1m", "5m", "60m", "day"), strength_source)
+            strength_values = zip((4,) if live_only else (4, 10, 11, 12), periods, values)
             for column, period, value in strength_values:
-                quality = self._trade_value_quality(code, period, now)
-                previous_day = period == "day" and self._trade_display_mode("day") == "completed"
+                quality = qualities[period]
+                previous_day = period == "day" and display_modes[period] == "completed"
                 # 유통주식 수와 현재가가 있으면 직접 계산하고, 그렇지 않으면
                 # 장중 0B 시가총액(311)·유통비율, 마지막으로 ka10001 캐시를 쓴다.
                 strength = trade_strength_percent(
@@ -4612,29 +4553,30 @@ class MainWindow(QMainWindow):
         ) else ""
         for summary in (self._theme_trade_summary, self._theme_trade_excluded_summary):
             summary.setToolTip(f"{quality_notice}수신 거래대금 기준 합계\n클릭하면 1분 · 5분 · 60분 · 1일 기준으로 전환합니다.")
+        excluded_names = parse_themes(self._settings.get("theme_trade_summary_excluded_stocks"), ",/|;")
+        excluded = {"".join(value.split()).casefold() for value in excluded_names}
+        entries: list[tuple[str, str, float]] = []
+        for code, name in self._ranked_stock_names.items():
+            if not show_summary and (not excluded or code.casefold() in excluded or "".join(name.split()).casefold() in excluded):
+                continue
+            value = self._minute_aggregator.today_trade_value_eok(code, now) if period == "day" else self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
+            entries.append((code, name, value))
         if show_summary:
-            entries: list[tuple[str, str, float]] = []
-            for code, name in self._ranked_stock_names.items():
-                value = self._minute_aggregator.today_trade_value_eok(code, now) if period == "day" else self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
-                entries.append((code, name, value))
             top = top_theme_trade_values(entries, self._themes)
             if not top:
                 self._theme_trade_summary.setText("상위 테마 거래대금: 테마가 지정된 종목이 없습니다.")
             else:
                 values = self._theme_trade_summary_values(top, digits)
                 self._theme_trade_summary.setText(f"상위 테마 거래대금 (실시간 조회 상위 20종목 · {period_labels[period]}): {values}")
-        excluded_names = parse_themes(self._settings.get("theme_trade_summary_excluded_stocks"), ",/|;")
-        excluded = {"".join(value.split()).casefold() for value in excluded_names}
         if not show_excluded_summary:
             return
         if not excluded:
             self._theme_trade_excluded_summary.setText("제외 종목 반영 상위 테마 거래대금: 제외 종목 목록을 입력하세요.")
             return
         excluded_entries: list[tuple[str, str, float]] = []
-        for code, name in self._ranked_stock_names.items():
+        for code, name, value in entries:
             if code.casefold() in excluded or "".join(name.split()).casefold() in excluded:
                 continue
-            value = self._minute_aggregator.today_trade_value_eok(code, now) if period == "day" else self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
             excluded_entries.append((code, name, value))
         excluded_top = top_theme_trade_values(
             excluded_entries, self._themes, excluded_values=excluded_names,
