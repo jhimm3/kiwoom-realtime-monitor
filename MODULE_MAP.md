@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+2026-10-20 `9955a24`: Collector실패복원은동일pending owner의새도착을보존, historical_backfill initializer는기존URL upgrade뒤동일index생성, SettingsDialog는기존SimilarStockDialog parent를명시한다. MainWindow는수집/저장/구독뒤숨김TOP20표시만생략(027일부). 새파일/계층/상태owner/schema없음. 관련7모듈157건,034/069/070완료·[준비큐](REFACTOR_BACKLOG.md#의존성-기반-병렬-실행-원장--2026-10-20)유지.
+
 2026-10-20 병렬 통합 `fba8994`: realtime_routes가 sender합류의오류와무관하게 기존Hub해제를보장하고 database_top20_reconciliation은같은snapshot의coverage만batch조회한다. 새파일/owner/driverconnection없음. 관련4모듈89건,037구독잔류해소·078 SELECT44→5(20code). F04/F24·F09 갱신,나머지는[의존성 준비큐](REFACTOR_BACKLOG.md#의존성-기반-병렬-실행-원장--2026-10-20).
 
 2026-10-20 R3-012: MainWindow header/표시·ColumnManager→기존 MainTableColumnController/ColumnSettingsRepository의 native 조건부 값/version 저장→Qt 복원·중앙 sync 경계를 유지한다. 새 owner/schema/수명 없음. 로컬 `47e780d`·관련9모듈152건; 동일16열32→0/한 열32→2, reset·폭 revision 의미 보존. 후속 DAG 준비큐, [범위/한계](REFACTOR_BACKLOG.md#r3-012-열-설정-변경행revision-저장-완료--2026-10-20).

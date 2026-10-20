@@ -1,5 +1,21 @@
 # 현재 상태 요약
 
+## 2026-10-20 병렬 두 번째 통합: 034·069·070 완료 / 027 일부
+
+로컬 제품·검사 `9955a24`. 현재 소스 관련7모듈 **고유157건/79.485 worker초 통과**(수집/과거자료/테마74+화면83, 중복0). 계획=실행=통과ID·현재 소스/frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다.
+
+완료24/미완료59. 준비후보23(실행/검증제출포함),계약/영향확인29(027잔여포함),선행·의미대기3,명시보류4(006/008/020/024)다. root는036보완/040안전조회유지/073저장조건의제출결과를검토·통합하고,보조3개는031실패저장/038page범위/080OCR중복을독립개발한다. 036이최종통합되기전035는대기,042→047과058지표의미선행은그대로다.
+
+R3-027 일부: MainWindow의 숨김 TOP20 주기 처리만 collector.advance→완료 native 저장→cohort 구독 이후에 종료한다. 실제 Qt timeout4회에서 동일120행의집계4회/처리480행/렌더4회→0, NAS periodic set_series/data4→0이며 네트워크요청은원래도0이다. 완료분60억·시장별30/30·구독·열기/날짜/모드·재오픈 최신값은유지한다. 이미진행중인 NAS callback은숨김에서도렌더할수있다. 표/테마 same-cut·기간계산의남은027은미완료다.
+
+R3-034 완료: Collector의 stock-reference와 account-day entry 저장실패 복원에 기존 다른 snapshot과 같은 setdefault를 사용한다. awaited native 저장중 도착한 최신pending은그대로두고없는key만복원한다. KRX/NXT 양방향·precommit/ACK유실·원거래일/다음날·credential drain/close의원본9개실패반례가통과하며, writer호출2/3과기존arrival순서·day key를보존한다. 원본FILL원장/봉delta coalescing정책은변경하지않았다.
+
+R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/portal_url 기존ALTER 이후에 생성한다. URL열0/1/2개 legacy·기존index·fresh logical schema31·원행/URL/시각보존과 ALTER/index실패후닫기/같은DB재시도를검증했다. 기존SQL의위치만옮겨같은schema/index·연결/commit을유지한다. executescript의부분DDL영속은그대로며초기화전체rollback/운영archive수락을주장하지않는다.
+
+R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를명시해 QWidget이themes로전달되던TypeError를복구했다. 실제 MainWindow→Settings→modal검색/선택·중복/취소/없음→기존worker/native저장→테마총140억/제외40억·정렬40→재오픈을검증했다. 올바른themes 명시import caller·원래dialog시그니처는유지했다. F22는일반설정저장소간접공유만확인했고원격sync를새로수락하지않는다.
+
+영향받은 F02/F06/F07/F09/F10/F19/F21/F22/F23/F24의해당경계와책임·비용계약을갱신했다. F부모운영판정을승격하지않는다. 실제 PostgreSQL·키움/장중·NAS/외부망/운영 DB/실계좌·주문·앱 전체 수락·push/GitHub CI·배포·로컬 전수 회귀는 미실행이다.
+
 ## 2026-10-20 병렬 첫 통합: R3-037·078 완료
 
 로컬 제품·검사 `fba8994`. 현재 소스 관련4모듈 **고유89건/12.839 worker초 통과**(WS51+reconciliation38, 중복0). 계획/실행/통과ID·5개 변경ID·현재 소스와 frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다.

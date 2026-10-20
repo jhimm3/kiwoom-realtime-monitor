@@ -1,3 +1,5 @@
+**R3-034/069 저장 계약(2026-10-20, `9955a24`).** Collector의reference/account-day 실패재시도는같은key의최신arrival pending을보존하고없는key만복원한다. 테이블/키/원거래일/native writer계약은그대로다. 과거뉴스의identity index SQL은기존URL열ALTER뒤로이동했으며fresh logical schema31/기존index/원행/URL/시각동일·중간DDL실패후같은DB재시도확인. 스키마추가/전체DDLrollback·운영archive마이그레이션수락은아니다.
+
 **R3-078 coverage 조회 계약(2026-10-20, `fba8994`).** 기존 central_documents의 collection=market_data_coverage/document_key=complete와 정확한 day:code:venue owner를 같은read snapshot에서200code(400owner)씩IN조회한다. PK/schema/DDL·문서/시계·누락/빈coverage의의미는 변경하지 않았다. 20code SELECT44→5,201code409→9·반환내용/연결·transaction동일,실제PG/물리IO수락은별도다.
 
 # 데이터베이스 스키마 지도

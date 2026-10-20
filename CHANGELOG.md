@@ -1,3 +1,7 @@
+## 2026-10-20 R3-034·069·070 / 027 일부 (로컬 미배포)
+
+`9955a24`: 실패복원시새pending을보존하고,legacy뉴스열업그레이드후기존index를생성하며,설정의제외종목찾기인자를복구했다. 숨김TOP20 periodic집계4→0도반영했으나027전체는진행중이다. 현재 소스 관련7모듈 **고유157건/79.485 worker초 통과**(수집/과거자료/테마74+화면83, 중복0). 계획=실행=통과ID·현재 소스/frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다. 백로그/F·책임계약갱신. 실제 PostgreSQL·키움/장중·NAS/외부망/운영 DB/실계좌·주문·앱 전체 수락·push/GitHub CI·배포·로컬 전수 회귀는 미실행이다.
+
 ## 2026-10-20 R3-037·078 첫 병렬 통합 (로컬 미배포)
 
 `fba8994`: sender 오류 뒤 구독 잔류를 nested finally로 해소하고 TOP20 coverage 조회를200code batch로 줄였다(20code SELECT44→5/201code409→9). 현재 소스 관련4모듈 **고유89건/12.839 worker초 통과**(WS51+reconciliation38, 중복0). 계획/실행/통과ID·5개 변경ID·현재 소스와 frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다. F04/F09/F24·책임/비용 계약 갱신. 다른 worktree는 통합 전이며 실제 PostgreSQL·키움/장중·다중PC/NAS/운영 DB/계좌/주문·앱 전체 수락·push/GitHub CI·NAS 배포·로컬 전수 회귀는 미실행이다.
