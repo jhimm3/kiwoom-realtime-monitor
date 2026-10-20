@@ -30,6 +30,8 @@
 <a id="composition"></a>
 ## 조립·시계·수명 — F01/F23/F24
 
+R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를명시해 QWidget이themes로전달되던TypeError를복구했다. 실제 MainWindow→Settings→modal검색/선택·중복/취소/없음→기존worker/native저장→테마총140억/제외40억·정렬40→재오픈을검증했다. 올바른themes 명시import caller·원래dialog시그니처는유지했다. F22는일반설정저장소간접공유만확인했고원격sync를새로수락하지않는다.
+
 **현재 책임.** `bootstrap`은 실행 모드, client와 worker factory를 조립한다. MainWindow는 UI 선택과 신호 수신/표시를, AppController는 주입된 action·worker controller·pending buffer와 API 교체/종료 순서를 소유한다. 서버는 `app.create_app`/lifespan이 store·broker·collector·각 runtime owner를 조립하고 닫는다. 작은 worker controller의 중복 실행 방지·신호·결과 신선도·수명 책임은 유지한다.
 
 **상태·실패·공식 경계.** PC는 `configure_runtime/configure_ranking/configure_shutdown`, `request_close` 등 기존 controller 경계를 쓴다. producer 정지 → 도착 중인 결과 처리 → pending flush → 실제 writer 종료와 queued ACK 확인 순서를 보존한다. 실패 pending이 남은 종료와 정상 종료를 구분하며 API 교체도 구 producer의 결과/loader 수명을 함께 처리한다. 서버 설정 저장 revision과 실제 적용 revision은 구분하고, 요청 시작에 선택한 runtime/gateway를 응답 중 임의 교체하지 않는다. transaction은 settings/native store에 남긴다.
@@ -55,6 +57,8 @@
 
 <a id="market-data"></a>
 ## 실시간·저장·복구 — F04~F09
+
+**2026-10-20 `8f3bade` 추가계약.** R3-036 완료: 기존지수pending의caller진입key cut을전용flush lock으로직렬화하고동일service의shield save task가실제native수명을소유한다. 같은cut의native/연결/BEGIN/COMMIT/provider각2→1·INSERT/DELETE각4→2·반영행4→2,최종snapshot동일. 새caller는진입cut의최신payload를저장한뒤반환하고진입후다른key를무한drain하지않는다. 원본barrier PASS→중간합류-only FAIL→최종PASS를보존했다. 취소/실패합류/명시retry/ACK유실/outbox제거실패/start복구·실제RuntimeScope task/thread drain을검증했다. close는진행owner join만하고새강제retry0,collector/outbox lock범위와기존11메서드는그대로다. R3-038 완료: 분봉COMPLETE-only page는불필요한ACTUAL사전조회없이기존native권한판단을따르고,IN_PROGRESS는기존metadata 시간범위로좁힌다. SOR는실제소비page의기존start/end reader를쓴다. 동일120행 fixture에서metadata반환120→1(혼합)/0(완결),SOR120→2;완결연결5→4/SELECT4→3,Python commit호출5→4지만실제BEGIN/COMMIT각2→2다. 최종전체봉/meta/비교문서·반영행/시계동일,UTC-KST/23:59/lateSOR/component merge/필수사전조회실패와저장뒤SOR실패를구분했다. 다른venue component가필요한기존owner문서전체조회와sparse범위내중간행은남는다.
 
 **034 완료·027 일부(2026-10-20, `9955a24`).** R3-027 일부: MainWindow의 숨김 TOP20 주기 처리만 collector.advance→완료 native 저장→cohort 구독 이후에 종료한다. 실제 Qt timeout4회에서 동일120행의집계4회/처리480행/렌더4회→0, NAS periodic set_series/data4→0이며 네트워크요청은원래도0이다. 완료분60억·시장별30/30·구독·열기/날짜/모드·재오픈 최신값은유지한다. 이미진행중인 NAS callback은숨김에서도렌더할수있다. 표/테마 same-cut·기간계산의남은027은미완료다. R3-034 완료: Collector의 stock-reference와 account-day entry 저장실패 복원에 기존 다른 snapshot과 같은 setdefault를 사용한다. awaited native 저장중 도착한 최신pending은그대로두고없는key만복원한다. KRX/NXT 양방향·precommit/ACK유실·원거래일/다음날·credential drain/close의원본9개실패반례가통과하며, writer호출2/3과기존arrival순서·day key를보존한다. 원본FILL원장/봉delta coalescing정책은변경하지않았다.
 
@@ -96,6 +100,8 @@
 <a id="execution"></a>
 ## 계좌·Risk·Execution — F14/F16/F17/F18
 
+**2026-10-20 `8f3bade` 추가계약.** R3-040 유지·검증완료: 제품변경0. 첫read뒤기존offline unowned apply가native JSON의account/run을바꿀수있고reader가그JSON을소비하므로두번째최신scope read를제거하지않았다. frozen DTO는native불변성을보장하지않는다. 실제활성lease/독립두store의normal/state/account/run반례와둘째read제거음성대조2assertion실패로지속검사를보강했다. 정상/state는기존첫record반환·추가transport/refresh0,scope변경은거절한다. SELECT2/실행loop동기I/O는그대로이며제거완료나지연개선으로보고하지않는다. R3-009안전조회근거에연결하고042owner/047runner·legacyHTTP오류매핑은별도다.
+
 **R3-010 per-key 저장 책임.** typed profile/report/spec/admission/gate/feedback 검증·Mapping 변환은 기존 ForwardEvaluationRepository, key별 불변 insert/equality/conflict·첫 receipt·transaction/commit ACK는 같은 native QueryStore가 소유한다. 기존 latest stage/binding/STOP/Risk·native claim의 안전 확인은 유지한다. stage의 current-stage 값 비교/append는 기존 native transaction에서 수행하고 binding은 기존 identity owner의 scoped latest 조회를 쓴다. 다중 문서 게시를 원자화했다고 보지 않는다. native 동시2store·ACK retry·기존 admission/Risk/Runner 소비 검사는 [forward report](../../tests/unit/test_forward_report.py), [specification](../../tests/unit/test_mock_automation_specification.py), 기존 Risk/Runner 모듈을 재사용한다. 실제 PG는 미검증이며 generic native SQLite commit 전후의 소유 child 강제종료는 후속 진단2건으로 확인했다. stage 자체/전원 차단 내구성으로 확대하지 않는다.
 
 **현재 책임.** 기존 credential/runtime owner가 계좌 신원·binding/revision·선택과 account query/recovery의 수명을 소유한다. AccountMonitor는 계좌 사건/대사와 ACK된 Risk 관측을 만든다. Gateway는 인증된 명령·멱등 요청·owned command, ExecutionRuntime은 run/lease·operation lock·gate, OrderLifecycle은 QUEUED/UNKNOWN/취소/체결 전이를 소유한다. ExecutionRepository/native store는 원장·control/claim fence·transaction을 소유한다. Supervisor/Runner는 등록된 자동 모의운용과 보호의 수명/상태를 연결한다.
@@ -119,6 +125,10 @@
 
 <a id="news"></a>
 ## 뉴스·장전 — F19/F20
+
+**2026-10-20 `8f3bade` 추가계약.** R3-073 완료: 기존StockNewsRepository의11개UPDATE필드를DB현재행과NULL-safe IS NOT으로비교한다. 동일5기사의article반영5→0·필수receipt1유지로총6→1,정정1건포함총6→2/partial2총3→1. 연결/ID SELECT/BEGIN/COMMIT각1과raw원행/first_seen/발행시각·pin/retention/limit·새건수반환은보존한다. 각11필드외부DB정정/NULL·새identity·receipt trigger실패전체rollback/retry와기존201건pin검사를확인했다. actualsearch/prepare→기존창/contentsync소비는그대로이며같은기사라도확인시각저장을생략하지않는다.
+
+R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/portal_url 기존ALTER 이후에 생성한다. URL열0/1/2개 legacy·기존index·fresh logical schema31·원행/URL/시각보존과 ALTER/index실패후닫기/같은DB재시도를검증했다. 기존SQL의위치만옮겨같은schema/index·연결/commit을유지한다. executescript의부분DDL영속은그대로며초기화전체rollback/운영archive수락을주장하지않는다.
 
 **현재 책임.** CentralNewsService/공급자 수집은 기사 revision을 저장하고, 기존 job runner가 BODY/RULE/AI와 retry를 진행한다. 원문/body/AI/event revision은 서로 다른 원본·가용시각을 가진다. PC 뉴스 창/worker는 조회·그룹/대표 기사 선택·수동/자동 분석 요청·표시를 소유한다. 장전 service는 별도의 외부 공통 시황 request/예약·claim·raw/result·latest/context를 소유한다.
 
@@ -207,12 +217,16 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 
 ### 재현 가능한 실제 비용 기준
 
+**036/038/040/073 최신증거:** 현재 통합소스 관련21모듈 **고유479건/428.669 worker초 통과**(index90+ingest/app241+gateway90+news58,중복0). 계획/실행/통과·14개변경ID/현재전체지문·frozen7파일·worker/tree종료/nativeTEMP제거를대조했다. 구조1374site/위반0·retirable0,기존guard/rules/승인이력변경0. 증분37번째기록5965→5978/추가13·기존pin검사1보강·삭제0,이전36기록/미결49유지. 자동full_required495/external32/불확실성7은미실행으로보존했다. root는nativeDB/app모듈을현재전체발견73/88건으로실행해WT038의선택8/3건보다150건많고,WT들의329건단순합계를현재479건과혼용하지않는다. 040은안전상SELECT2유지,실제비용증가는필요근거와함께판단한다. 실제 PostgreSQL·장중/키움/운영 DB/실계좌·주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀와물리IO/WAL/운영latency는미검증이다. [통합정본](../../REFACTOR_BACKLOG.md#r3-036038040073-세-번째-병렬-통합--2026-10-20).
+
+**선택검증/비용.** 현재 소스 관련7모듈 **고유157건/79.485 worker초 통과**(수집/과거자료/테마74+화면83, 중복0). 계획=실행=통과ID·현재 소스/frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다. 구조1374site/위반0·retirable0. 069의같은DDL 이동에따른정확한connection.execute source key12→13만review로추가하고기존adopted/rules/승인이력은그대로다(실행SQL증가아님). 증분36번째기록5957→5965/추가8/기존본문수정0·삭제0,이전35기록/미결49유지. 현재기록의금액단위표기만60billion→60억(6billion KRW),140/40billion→140/40억으로정정했으며제품/검사값은동일하다. v1통과와정정후현재지문v2를분리보존한다. 자동full_required495·external32/동적불확실성7은미실행으로남기고선정한7모듈만검증했다. 실제 PostgreSQL·키움/장중·NAS/외부망/운영 DB/실계좌·주문·앱 전체 수락·push/GitHub CI·배포·로컬 전수 회귀는 미실행이다. 069는F19/F21의archive 초기화와F22의간접파일경계,070은F02/F06/F23의실제설정소비와F22간접공유만수락한다.
+
 | 범위 | 현재 정상 기준과 oracle | 재사용 위치 |
 | --- | --- | --- |
 | R3-001 live metadata | 20종목 native SELECT20, BEGIN IMMEDIATE/COMMIT 경계와 값/metadata·rollback/retry | `test_minute_bar_repository.MinuteBarRepositoryTests.test_live_batch_reads_each_metadata_row_once_inside_the_writer_transaction` 및 같은 파일의 authority/실패 검사 |
 | R3-002 price batch | 연결/BEGIN/COMMIT 각1, SELECT0; empty/partial·전체 rollback·retry·process exit | `test_stock_repository.StockRepositoryTests.test_price_cache_uses_one_transaction_and_keeps_field_and_date_contracts`와 같은 파일의 실패 검사. 원거래일·원batch시각/latefailure·명시종료128건 검증. 복수날짜도1transaction은 `test_two_high_dates_share_one_transaction_without_cross_day_max_or_extra_reads`가 보호한다. 넓은023시계 잔여는 별도 |
 | R3-004 RAM minute | 20종목/400행 중 실제 native 반환200행(`[10]*20`); 무제한 양성 대조400행(`[20]*20`), 8소비자/100회 조회/close에 추가 read0·native 무쓰기 | `test_candidate_monitor.CrossThemeH1SharingTests.test_minute_primary_uses_existing_sqlite_reader_without_writes_or_consumer_scaling` 기존 검사 보강. 과거9000→200 측정과 이번400→200 fixture는 구분 |
-| 미해결 반복 비용/정합성 | R3-038/039/041, 063~082 등의 반례는 개선 목표이며 정상 budget으로 승인하지 않음 | 기존 R3 항목의 재현/완료 기준에서 수정 후 관련 비용 검사를 선택·승격 |
+| 미해결 반복 비용/정합성 | R3-039/041 및 063~082 중 미완료 항목의 반례는 개선 목표이며 정상 budget으로 승인하지 않음 | 기존 R3 항목의 재현/완료 기준에서 수정 후 관련 비용 검사를 선택·승격 |
 
 wall time·WAL/디스크 쓰기·실제 PG/장중 지연은 위 호출·행 수로 추정하지 않는다. 입력 규모·단위/metadata·ACK·최종 내용이 같다는 증거와 함께 비용을 비교하고 필요한 비용 증가는 계약/테스트 기대값과 이유를 함께 갱신한다. 미해결 반례를 통과시키는 현행 버그 기대값을 정상 CI 기준으로 옮기지 않는다.
 
@@ -227,11 +241,3 @@ R3-083이 이 체계의 진행 원장이다. 다른 R3 개선을 중단시키는
 **R3-010 비용/검증 기준(2026-10-20).** `2bd43df`: 신규 native 문서 연결3→1·SELECT2→1·INSERT/COMMIT/clock1; 최초 existing duplicate 연결1/SELECT1·쓰기/clock0, 늦은 경합 loser는 추가 비교가 필요하다. 관련18모듈 739건/worker 합계 629.437초이며 실제SQL/PG fixture와 nativeSQLite를 구분한다. 비용 회귀는 기존 forward/candidate/centralDB 모듈에 있고 새 주기 검사/관리 계층은 없다. 자동 선정의 full_required는 남기고 로컬 명시 관련 범위와 구분한다. [정본과 잔여](../../REFACTOR_BACKLOG.md#r3-010-불변-저장충돌ack-경계--2026-10-20).
 
 **R3-010 stage/binding 완료 계약(2026-10-20).** stage의 같은 이전 단계 확인과 append를 기존 native writer transaction으로 묶었다. 기존 동일 ID는 읽기 전용으로 재시도하며 SQLite BEGIN IMMEDIATE, PG의 해당 transaction만 READ COMMITTED→strategy scoped advisory lock→단건 key 재확인→기존 reader와 같은 이력 범위/순서→단계 비교/insert→commit 순서다. broker-mock PASSED report gate·원래 hash·계좌/증거·단계/시각 정책은 유지한다. 동일 시점에 stale stage와 missing report가 겹치면 거절 오류의 우선순위만 달라질 수 있다. 기존 identity owner에 load_latest_account_binding(profile, broker, environment)를 추가해 native 인덱스/LIMIT1을 쓰고 route helper와 Forward의 승인 사양/후보 게시 3개 caller를 연결했다. account_ref나 기대 revision으로 조회를 좁히면 rotation을 숨기므로 사용하지 않는다. 기존 full history API·각 안전시점의 독립 최신 조회·STOP/Risk/control/native claim은 유지한다. stage 신규 native SQLite 연결3→2·SELECT3/INSERT1/BEGIN1/COMMIT1/clock1 유지, 기존 동일 ID는 연결1/SELECT1·쓰기/BEGIN/COMMIT/clock0이다. binding fixture는 실제 native 반환·변환1031→1, SELECT/연결 각1·쓰기/clock0이며 기존 index SEARCH를 확인했다. 물리 I/O·WAL/장중 latency는 미측정이다. PG stage의 명시 isolation/lock 추가 SQL은 올바른 snapshot과 직렬화를 위한 안전비용이다. 기존 execution_activation/central_server_database/mock_automation_specification 검사를 보강해 현재17모듈 546건으로 연결·실패·재시도를 확인했다. native lock/시각/반환량 변경 시 해당 비용과 stage/current binding 검사를 함께 갱신한다. context 캐시나 추가 relay·주기 전수 검사는 만들지 않는다. [최신 판정/실측/한계](../../REFACTOR_BACKLOG.md#r3-010-stagebinding-등록-개선-완료--2026-10-20).
-
-### 2026-10-20 병렬 통합 계약 보완: 기존 owner 유지
-
-R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/portal_url 기존ALTER 이후에 생성한다. URL열0/1/2개 legacy·기존index·fresh logical schema31·원행/URL/시각보존과 ALTER/index실패후닫기/같은DB재시도를검증했다. 기존SQL의위치만옮겨같은schema/index·연결/commit을유지한다. executescript의부분DDL영속은그대로며초기화전체rollback/운영archive수락을주장하지않는다.
-
-R3-070 완료: 제외종목찾기의 SimilarStockDialog 호출에 parent=self를명시해 QWidget이themes로전달되던TypeError를복구했다. 실제 MainWindow→Settings→modal검색/선택·중복/취소/없음→기존worker/native저장→테마총140억/제외40억·정렬40→재오픈을검증했다. 올바른themes 명시import caller·원래dialog시그니처는유지했다. F22는일반설정저장소간접공유만확인했고원격sync를새로수락하지않는다.
-
-**선택검증/비용.** 현재 소스 관련7모듈 **고유157건/79.485 worker초 통과**(수집/과거자료/테마74+화면83, 중복0). 계획=실행=통과ID·현재 소스/frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다. 구조1374site/위반0·retirable0. 069의같은DDL 이동에따른정확한connection.execute source key12→13만review로추가하고기존adopted/rules/승인이력은그대로다(실행SQL증가아님). 증분36번째기록5957→5965/추가8/기존본문수정0·삭제0,이전35기록/미결49유지. 현재기록의금액단위표기만60billion→60억(6billion KRW),140/40billion→140/40억으로정정했으며제품/검사값은동일하다. v1통과와정정후현재지문v2를분리보존한다. 자동full_required495·external32/동적불확실성7은미실행으로남기고선정한7모듈만검증했다. 실제 PostgreSQL·키움/장중·NAS/외부망/운영 DB/실계좌·주문·앱 전체 수락·push/GitHub CI·배포·로컬 전수 회귀는 미실행이다. 069는F19/F21의archive 초기화와F22의간접파일경계,070은F02/F06/F23의실제설정소비와F22간접공유만수락한다.

@@ -1,3 +1,7 @@
+## 2026-10-20 R3-036·038·040·073 (로컬 미배포)
+
+`8f3bade`: 같은cut지수저장2→1/caller완료·native수명보존,분봉page metadata120→1/0·SOR120→2,동일5기사총반영6→1(receipt유지). 주문의최신scope재조회는native반례에따라유지하며제품변경0이다. 현재 통합소스 관련21모듈 **고유479건/428.669 worker초 통과**(index90+ingest/app241+gateway90+news58,중복0). 계획/실행/통과·14개변경ID/현재전체지문·frozen7파일·worker/tree종료/nativeTEMP제거를대조했다. 실제 PostgreSQL·장중/키움/운영 DB/실계좌·주문·외부망/NAS·push/GitHub CI·배포·로컬 전수 회귀와물리IO/WAL/운영latency는미검증이다.
+
 ## 2026-10-20 R3-034·069·070 / 027 일부 (로컬 미배포)
 
 `9955a24`: 실패복원시새pending을보존하고,legacy뉴스열업그레이드후기존index를생성하며,설정의제외종목찾기인자를복구했다. 숨김TOP20 periodic집계4→0도반영했으나027전체는진행중이다. 현재 소스 관련7모듈 **고유157건/79.485 worker초 통과**(수집/과거자료/테마74+화면83, 중복0). 계획=실행=통과ID·현재 소스/frozen worktree SHA·worker/자식 종료·native TEMP 제거를 대조했다. 백로그/F·책임계약갱신. 실제 PostgreSQL·키움/장중·NAS/외부망/운영 DB/실계좌·주문·앱 전체 수락·push/GitHub CI·배포·로컬 전수 회귀는 미실행이다.
