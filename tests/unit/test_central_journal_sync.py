@@ -673,6 +673,108 @@ class CentralJournalSyncServiceTests(unittest.TestCase):
 
         self.assertFalse(runner.schedule())
         self.assertFalse(runner.is_running)
+        runner.close()
+        runner.close()
+        self.assertFalse(runner.schedule())
+
+    def test_runner_close_joins_actual_thread_outside_lock_and_refuses_later_work(self) -> None:
+        entered, release, closed = (threading.Event() for _ in range(3))
+        calls = []
+
+        class Service:
+            def sync(self, path: Path) -> int:
+                calls.append(path)
+                entered.set()
+                release.wait(2)
+                return 1
+
+        runner = CentralJournalSyncRunner(Service(), Path("journal.sqlite3"))  # type: ignore[arg-type]
+        closer = threading.Thread(target=lambda: (runner.close(), closed.set()))
+        try:
+            self.assertTrue(runner.schedule())
+            self.assertTrue(entered.wait(1))
+            closer.start()
+            self.assertFalse(closed.wait(0.05))
+            self.assertTrue(runner.is_running)
+        finally:
+            release.set()
+            if closer.ident is not None:
+                closer.join(2)
+            runner.close()
+        self.assertFalse(closer.is_alive())
+        self.assertTrue(closed.is_set())
+        self.assertFalse(runner.is_running)
+        runner.close()
+        self.assertFalse(runner.schedule())
+        self.assertEqual([Path("journal.sqlite3")], calls)
+
+    def test_runner_start_failure_preserves_exception_and_restores_retry_or_close(self) -> None:
+        from unittest.mock import Mock, patch
+        for retry in (False, True):
+            with self.subTest(retry=retry):
+                service = Mock()
+                sentinel = RuntimeError("controlled native thread start failure")
+                runner = CentralJournalSyncRunner(service, Path("journal.sqlite3"))
+                with patch.object(threading.Thread, "start", side_effect=sentinel):
+                    with self.assertRaises(RuntimeError) as caught:
+                        runner.schedule()
+                self.assertIs(sentinel, caught.exception)
+                self.assertFalse(runner.is_running)
+                if retry:
+                    self.assertTrue(runner.schedule())
+                runner.close()
+                runner.close()
+                self.assertFalse(runner.schedule())
+                self.assertEqual(int(retry), service.sync.call_count)
+
+    def test_runner_close_serializes_with_in_progress_start_and_prevents_new_admission(self) -> None:
+        from unittest.mock import Mock, patch
+        start_entered, allow_start, service_entered, release_service, closed = (
+            threading.Event() for _ in range(5))
+        real_start = threading.Thread.start
+        results = []
+
+        class Service:
+            def sync(self, _path: Path) -> int:
+                service_entered.set()
+                release_service.wait(2)
+                return 1
+
+        def start(thread):
+            if thread.name == "central-journal-settings-sync":
+                start_entered.set()
+                allow_start.wait(2)
+            return real_start(thread)
+
+        runner = CentralJournalSyncRunner(Service(), Path("journal.sqlite3"))  # type: ignore[arg-type]
+        scheduler = threading.Thread(target=lambda: results.append(runner.schedule()))
+        closer = threading.Thread(target=lambda: (runner.close(), closed.set()))
+        try:
+            with patch.object(threading.Thread, "start", start):
+                scheduler.start()
+                self.assertTrue(start_entered.wait(1))
+                closer.start()
+                self.assertFalse(closed.wait(0.05))
+                allow_start.set()
+                self.assertTrue(service_entered.wait(1))
+                self.assertFalse(closed.is_set())
+        finally:
+            allow_start.set()
+            release_service.set()
+            scheduler.join(2)
+            if closer.ident is not None:
+                closer.join(2)
+            runner.close()
+        self.assertFalse(scheduler.is_alive())
+        self.assertFalse(closer.is_alive())
+        self.assertEqual([True], results)
+        self.assertTrue(closed.is_set())
+        self.assertFalse(runner.schedule())
+        never_started = CentralJournalSyncRunner(Mock(), Path("journal.sqlite3"))
+        never_started.close()
+        with patch.object(threading.Thread, "start") as launch:
+            self.assertFalse(never_started.schedule())
+        launch.assert_not_called()
 
     def test_newer_local_strategy_setting_is_preserved_and_uploaded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -702,13 +702,7 @@ class AppController(QObject):
                 self.minute_bar_repository.upsert_market_index_minutes(market_pending)
                 self.minute_cache_saved.emit()
             except Exception as error:
-                # 저장 호출 중에는 GUI 이벤트가 처리되지 않지만, 향후 구현이
-                # 비동기로 바뀌어도 새 값이 우선하도록 현재 대기분 뒤에 병합한다.
-                self.pending_minutes = {**pending, **self.pending_minutes}
-                self.pending_market_minutes = {
-                    **market_pending, **self.pending_market_minutes,
-                }
-                logger.warning("실시간 분봉 DB 저장 실패: %s", error)
+                self.on_minute_cache_failed(pending, market_pending, str(error))
         if cutoff is not None:
             try:
                 self.minute_bar_repository.purge_before(cutoff)
@@ -1116,7 +1110,7 @@ class AppController(QObject):
         assert actions is not None
         entry_writer = self.entry_snapshot_writer
         if (entry_writer is not None and entry_writer.has_pending_work()) or self._price_cache_retries or self.pending_minute_retention is not None or (
-            self._shutdown_cache_failed and self.market_cache_writer is not None and (
+            self._shutdown_cache_failed and (
                 self.pending_minutes or self.pending_market_minutes or self.pending_minute_gaps
             )
         ):

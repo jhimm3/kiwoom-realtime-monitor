@@ -555,22 +555,41 @@ class CentralJournalSyncRunner:
         self._service = service
         self._database_path = database_path
         self._on_error = on_error
-        self._running = threading.Event()
+        self._state_lock = threading.Lock()
+        self._closed = False
+        self._thread: threading.Thread | None = None
 
     @property
     def is_running(self) -> bool:
-        return self._running.is_set()
+        with self._state_lock:
+            return self._thread is not None and self._thread.is_alive()
 
     def schedule(self) -> bool:
-        if self._service is None or self._running.is_set():
-            return False
-        self._running.set()
-        threading.Thread(
-            target=self._run,
-            name="central-journal-settings-sync",
-            daemon=True,
-        ).start()
+        with self._state_lock:
+            if self._closed or self._service is None or (
+                self._thread is not None and self._thread.is_alive()
+            ):
+                return False
+            thread = threading.Thread(
+                target=self._run,
+                name="central-journal-settings-sync",
+                daemon=True,
+            )
+            self._thread = thread
+            try:
+                thread.start()
+            except BaseException:
+                if thread.ident is None:
+                    self._thread = None
+                raise
         return True
+
+    def close(self) -> None:
+        with self._state_lock:
+            self._closed = True
+            thread = self._thread
+        if thread is not None:
+            thread.join()
 
     def _run(self) -> None:
         try:
@@ -579,5 +598,3 @@ class CentralJournalSyncRunner:
         except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
             if self._on_error is not None:
                 self._on_error(error)
-        finally:
-            self._running.clear()

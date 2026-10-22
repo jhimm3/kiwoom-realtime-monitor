@@ -1167,6 +1167,217 @@ class AppControllerTests(unittest.TestCase):
             QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
             self.windows.remove(window)
 
+    def _observe_public_writer_free_failure(self, stage, *, closing=True, latest=False, recover=False):
+        from contextlib import closing as closing_connection, nullcontext
+
+        now = as_kst(datetime(2026, 10, 21, 10))
+        minute = now - timedelta(minutes=1)
+        original_connect = sqlite3.connect
+        gap = stage.startswith("gap")
+        failed = stage not in {"success", "gap_success"}
+        clock_calls, job_connections, committed_prefixes, ack_prefixes = [], [], [], []
+
+        def clock():
+            clock_calls.append(1)
+            return now
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            repository = MinuteBarRepository(path, now_provider=clock)
+            repository.upsert_bars("KEEP", (MinuteOhlcv(minute, 200, 220, 190, 210, 30),))
+            repository.upsert_market_index_minutes({("kosdaq", minute): (1., 2., 1., 2., 10.)})
+            repository.record_history_sync("KEEP", now.date(), now, 1)
+            window = MainWindow(database.settings, minute_bar_repository=repository,
+                                ranking_loader=SimpleNamespace(server_now=clock, load_top_stocks=lambda: ()))
+            controller = window._app_controller
+            controller._initial_ranking_timer.stop()
+            self.assertIsNone(window._monitor_database_path)
+            self.assertIsNone(controller.market_cache_writer)
+            self.assertIs(repository, controller.minute_bar_repository)
+
+            def state():
+                with closing_connection(original_connect(path)) as connection:
+                    return {
+                        "bars": connection.execute("SELECT * FROM minute_bars WHERE stock_code='TARGET' ORDER BY minute").fetchall(),
+                        "index": connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kospi' ORDER BY minute").fetchall(),
+                        "metadata": connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('TARGET','market:kospi') ORDER BY subject,observation_key").fetchall(),
+                        "keeper": (
+                            connection.execute("SELECT * FROM minute_bars WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_index_minute_bars WHERE market='kosdaq'").fetchall(),
+                            connection.execute("SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'").fetchall(),
+                            connection.execute("SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject,observation_key").fetchall()),
+                    }
+
+            initial = state()
+            old = MinuteOhlcv(minute, 100, 110, 90, 105, 10)
+            newer = MinuteOhlcv(minute, 100, 120, 90, 115, 20)
+            if gap:
+                controller.pending_minute_gaps = {"TARGET": (minute,)}
+            else:
+                controller.queue_minute_bar("TARGET", old)
+                controller.queue_market_index("kospi", minute, 2500., 12.)
+            controller._stop_storage_timers()
+            original_pending = repr((controller.pending_minutes, controller.pending_market_minutes, controller.pending_minute_gaps))
+            message = "native fallback INSERT failed: " + stage if stage.endswith("insert") else "native fallback COMMIT return lost: " + stage
+            with closing_connection(original_connect(path)) as connection:
+                if stage.endswith("insert"):
+                    table = "market_data_observation_meta" if gap else "minute_bars" if stage == "stock_insert" else "market_index_minute_bars"
+                    connection.execute(f"CREATE TRIGGER reject_fallback BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'{message}'); END")
+                connection.commit()
+            injected = []
+
+            def new_input():
+                if latest and "latest" not in injected:
+                    injected.append("latest")
+                    controller.queue_minute_bar("TARGET", newer)
+                    controller.queue_market_index("kospi", minute, 2510., 13.)
+
+            class NativeFallbackConnection(sqlite3.Connection):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.role, self.job, self.sealed, self.sql = None, False, False, []
+                    self.set_trace_callback(self.sql.append)
+
+                def execute(self, sql, *args, **kwargs):
+                    upper = sql.lstrip().upper()
+                    if "MARKET_DATA_OBSERVATION_META" in upper or "MINUTE_BARS" in upper or "MARKET_INDEX_MINUTE_BARS" in upper:
+                        self.job = True
+                    if gap and upper.startswith("INSERT INTO MARKET_DATA_OBSERVATION_META"):
+                        self.role = "gap"
+                    return super().execute(sql, *args, **kwargs)
+
+                def executemany(self, sql, *args, **kwargs):
+                    upper = sql.lstrip().upper()
+                    if upper.startswith("INSERT INTO MINUTE_BARS"):
+                        self.role, self.job = "stock", True
+                    elif upper.startswith("INSERT INTO MARKET_INDEX_MINUTE_BARS"):
+                        self.role, self.job = "index", True
+                    if self.role is not None and stage == self.role + "_insert":
+                        new_input()
+                    return super().executemany(sql, *args, **kwargs)
+
+                def commit(self):
+                    super().commit()
+                    if self.role is not None and stage == self.role + "_commit" and "commit" not in injected:
+                        injected.append("commit")
+                        committed_prefixes.append({"in_transaction": self.in_transaction, "state": state()})
+                        new_input()
+                        raise OSError(message)
+
+                def close(self):
+                    if self.job and not self.sealed:
+                        self.sealed = True
+                        job_connections.append({"role": self.role, "sql": self.sql.copy()})
+                    return super().close()
+
+            def connect(*args, **kwargs):
+                kwargs["factory"] = NativeFallbackConnection
+                return original_connect(*args, **kwargs)
+
+            controller.minute_cache_saved.connect(lambda: ack_prefixes.append(state()))
+            clock_calls.clear()
+            try:
+                with patch.object(window._news_window, "stop", wraps=window._news_window.stop) as auxiliary_stop:
+                    log_context = self.assertLogs("kiwoom_monitor.presentation.app_controller", level="WARNING") if failed else nullcontext()
+                    with log_context as logged, patch("sqlite3.connect", side_effect=connect):
+                        if closing:
+                            event = QCloseEvent()
+                            window.closeEvent(event)
+                            accepted = event.isAccepted()
+                        else:
+                            controller.flush_minute_cache()
+                            accepted = None
+                    final = state()
+                    messages = [record.getMessage() for record in logged.records] if failed else []
+                    self.assertEqual([("분봉 누락 품질 저장 실패: " if gap else "실시간 분봉 DB 저장 실패: ") + message] if failed else [], messages)
+                    self.assertEqual(initial["keeper"], final["keeper"])
+                    self.assertEqual(int(not failed or gap), len(ack_prefixes))
+                    if failed:
+                        if gap:
+                            self.assertEqual({"TARGET": (minute,)}, controller.pending_minute_gaps)
+                        else:
+                            self.assertEqual(newer if latest else old, controller.pending_minutes["TARGET", minute])
+                            self.assertEqual(2510. if latest else 2500., controller.pending_market_minutes["kospi", minute][3])
+                    if stage.endswith("commit"):
+                        self.assertEqual(1, len(committed_prefixes))
+                        self.assertFalse(committed_prefixes[0]["in_transaction"])
+                        self.assertEqual(committed_prefixes[0]["state"], final)
+                    statements = [sql for connection in job_connections for sql in connection["sql"]]
+                    counts = {key: sum(sql.lstrip().upper().startswith(key.upper()) for sql in statements) for key in ("select", "delete", "begin", "commit", "rollback")}
+                    result = {"stage": stage, "closing": closing, "latest": latest, "accepted": accepted,
+                              "shutdown_stage": controller._shutdown_stage, "shutdown_cache_failed": controller._shutdown_cache_failed,
+                              "timer_active": controller.minute_cache_timer.isActive(), "auxiliary_stops": auxiliary_stop.call_count,
+                              "pending": repr((controller.pending_minutes, controller.pending_market_minutes, controller.pending_minute_gaps)),
+                              "original_pending": original_pending, "messages": messages, "ack_prefixes": ack_prefixes.copy(),
+                              "committed_prefixes": committed_prefixes, "after_attempt": final,
+                              "connections": len(job_connections), **counts, "clock": len(clock_calls), "sql": statements}
+                    if recover:
+                        with closing_connection(original_connect(path)) as connection:
+                            connection.execute("DROP TRIGGER IF EXISTS reject_fallback")
+                            connection.commit()
+                        if closing:
+                            retry = QCloseEvent()
+                            window.closeEvent(retry)
+                            self.assertFalse(retry.isAccepted())
+                            self.wait_until(lambda: controller._shutdown_stage == "ready")
+                        else:
+                            self.assertTrue(controller.minute_cache_timer.isActive())
+                            controller.minute_cache_timer.stop()  # Consume the already scheduled single-shot timeout deterministically.
+                            controller.minute_cache_timer.timeout.emit()
+                            self.assertEqual({}, controller.pending_minutes)
+                            self.assertEqual({}, controller.pending_market_minutes)
+                            close = QCloseEvent()
+                            window.closeEvent(close)
+                            self.wait_until(lambda: controller._shutdown_stage == "ready")
+                        self.assertEqual({}, controller.pending_minutes)
+                        self.assertEqual({}, controller.pending_market_minutes)
+                        self.assertEqual({}, controller.pending_minute_gaps)
+                        self.assertFalse(controller.minute_cache_timer.isActive())
+                        self.assertEqual(1, auxiliary_stop.call_count)
+                        if not gap:
+                            self.assertEqual(115 if latest else 105, state()["bars"][0][6])
+                            self.assertEqual(2510. if latest else 2500., state()["index"][0][6])
+                        self.assertEqual(initial["keeper"], state()["keeper"])
+                        self.assertIsNone(controller.market_cache_writer)
+                        result["recovery"] = {"stage": controller._shutdown_stage, "state": state(), "ack_count": len(ack_prefixes), "auxiliary_stops": auxiliary_stop.call_count}
+                    return result
+            finally:
+                # Observation is complete; close admission before draining queued startup work.
+                controller._closing = True
+                controller._initial_ranking_timer.stop()
+                controller._stop_timers()
+                controller._shutdown_timer.stop()
+                self.app.processEvents()
+                producers = controller._producer_workers()
+                if controller.top20_repair.worker is not None:
+                    self.assertIn(controller.top20_repair.worker, [worker for worker, _ in producers])
+                for worker, _ in producers:
+                    if worker is not None and worker.isRunning():
+                        worker.requestInterruption()
+                        self.assertTrue(worker.wait(4000))
+                self.app.processEvents()
+                self.assertEqual([], [worker for worker in window.findChildren(QThread) if worker.isRunning()])
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
+    def test_public_writer_free_native_failure_preserves_pending_timer_and_explicit_close_retry(self):
+        for stage in ("stock_insert", "stock_commit", "index_insert", "index_commit", "gap_insert", "gap_commit"):
+            with self.subTest(stage=stage):
+                result = self._observe_public_writer_free_failure(stage, latest=stage == "stock_commit", recover=True)
+                self.assertFalse(result["accepted"])
+                self.assertEqual("cache_failed", result["shutdown_stage"])
+                self.assertTrue(result["shutdown_cache_failed"])
+                self.assertFalse(result["timer_active"])
+                self.assertEqual(0, result["auxiliary_stops"])
+        for stage in ("stock_insert", "stock_commit"):
+            with self.subTest(open_failure=stage):
+                result = self._observe_public_writer_free_failure(stage, closing=False, latest=stage == "stock_commit", recover=True)
+                self.assertTrue(result["timer_active"])
+                self.assertFalse(result["shutdown_cache_failed"])
+
     def test_retention_failure_keeps_original_cutoff_for_timer_and_explicit_close_retry(self):
         for after_commit in (False, True):
             with self.subTest(after_commit=after_commit), tempfile.TemporaryDirectory() as directory:
@@ -1636,7 +1847,7 @@ class AppControllerTests(unittest.TestCase):
 
     def _bootstrap_settings_desktop(self, during_loop, after_exit=None, *,
                                     content_service=None, expected_error=SystemExit,
-                                    source_mode="local_server", before_run=None):
+                                    source_mode="local_server", before_run=None, cleanup_window=False):
         import json
         import sys
         import threading
@@ -1784,7 +1995,7 @@ class AppControllerTests(unittest.TestCase):
                         worker.join(5)
                         self.assertFalse(worker.is_alive())
                 for value in fixture.windows:
-                    if content_service is not None:
+                    if content_service is not None or cleanup_window:
                         value.close()
                     self.wait_until(lambda value=value: not any(
                         worker.isRunning() for worker in value._app_controller.findChildren(QThread)
@@ -2123,11 +2334,12 @@ class AppControllerTests(unittest.TestCase):
         fixture = self._bootstrap_settings_desktop(retry_after_http_failure, assert_before_cleanup)
         self.assertTrue(fixture.restore_available())
 
-    def _bootstrap_retention_case(self, *, fail_minute=False):
+    def _bootstrap_retention_case(self, *, fail_minute=False, exit_mode="normal", finish_before_exit=False):
         import json
         import threading
         from kiwoom_monitor import bootstrap
         from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
 
         fixed = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
         cutoff = fixed.date() - timedelta(days=30)
@@ -2136,10 +2348,19 @@ class AppControllerTests(unittest.TestCase):
         state = SimpleNamespace(
             entered=Event(), release=Event(), done=Event(), phase=threading.local(),
             traces=[], connections=0, timed_out=False, begin_count=0, cutoffs=[], limits=[],
+            lease_released=Event(), stopped=Event(), observer=None, errors=[], observed=None,
         )
         connect = sqlite3.connect
         purge = MinuteBarRepository.purge_before
         retain = DailyBarRepository.retain_latest
+        lease_close = AppDataLease.close
+
+        def close_lease(lease):
+            shared = not lease._exclusive and not lease._stream.closed
+            lease_close(lease)
+            if shared and exit_mode != "normal":
+                state.fixture.events.append("lease.released")
+                state.lease_released.set()
 
         def trace(statement):
             phase = state.phase.value
@@ -2148,7 +2369,7 @@ class AppControllerTests(unittest.TestCase):
                 state.begin_count += 1
                 state.fixture.events.append("retention.begin")
                 state.entered.set()
-                if not state.release.wait(4):
+                if not finish_before_exit and not state.release.wait(4):
                     state.timed_out = True
 
         def connection(*args, **kwargs):
@@ -2182,6 +2403,14 @@ class AppControllerTests(unittest.TestCase):
 
         def close_while_native_begin_is_running(fixture):
             state.fixture = fixture
+            if exit_mode != "normal":
+                stop = fixture.server.stop.side_effect
+
+                def stop_server():
+                    stop()
+                    state.stopped.set()
+
+                fixture.server.stop.side_effect = stop_server
             repository = MinuteBarRepository(fixture.paths.database_path, now_provider=lambda: fixed)
             repository.upsert_bars("A", (
                 MinuteOhlcv(old_minute, 100, 110, 90, 105, 10),
@@ -2202,11 +2431,42 @@ class AppControllerTests(unittest.TestCase):
             fixture.retention_callback = callback
             callback()
             try:
-                if fail_minute:
+                if fail_minute or finish_before_exit:
                     self.assertTrue(state.done.wait(2))
+                    if finish_before_exit:
+                        def worker_released():
+                            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                            return not fixture.window._app_controller.findChildren(SettingsRequestWorker)
+
+                        self.wait_until(worker_released)
                 else:
                     self.assertTrue(state.entered.wait(1))
                     self.assertEqual(1, state.begin_count)
+            except BaseException:
+                state.release.set()
+                raise
+
+            if exit_mode != "normal":
+                if not state.done.is_set():
+                    def observe():
+                        try:
+                            state.lease_released.wait(0.15)
+                            state.observed = (state.stopped.is_set(), state.lease_released.is_set(),
+                                              fixture.restore_available())
+                            self.assertEqual((False, False, False), state.observed, fixture.events)
+                            self.assertFalse(state.done.is_set())
+                        except BaseException as error:
+                            state.errors.append(error)
+                        finally:
+                            state.release.set()
+
+                    state.observer = threading.Thread(target=observe, name="retention-close-observer")
+                    state.observer.start()
+                if exit_mode == "error":
+                    raise RuntimeError("controlled retention app.exec failure")
+                return
+
+            try:
                 fixture.window.close()
                 deadline = time.monotonic() + 1
                 while not fixture.window._app_controller.request_close() and time.monotonic() < deadline:
@@ -2224,6 +2484,20 @@ class AppControllerTests(unittest.TestCase):
 
         def assert_before_cleanup(fixture):
             try:
+                if exit_mode != "normal":
+                    if state.observer is not None:
+                        state.observer.join(5)
+                        self.assertFalse(state.observer.is_alive())
+                    if state.errors:
+                        raise state.errors[0]
+                    self.assertTrue(state.done.is_set())
+                    self.assertLess(fixture.before_release.index("retention.daily.closed"),
+                                    fixture.before_release.index("server.stop"))
+                    self.assertLess(fixture.before_release.index("server.stop"),
+                                    fixture.before_release.index("lease.released"))
+                    if exit_mode == "error":
+                        self.assertEqual("controlled retention app.exec failure", str(fixture.exit_error))
+                    return
                 state.lease_released_while_running = not state.done.is_set() and fixture.restore_available()
                 self.assertFalse(state.timed_out)
                 self.assertEqual(0, fixture.http_calls, "settings sync must not be started by this retention test")
@@ -2242,15 +2516,26 @@ class AppControllerTests(unittest.TestCase):
         try:
             with patch.object(bootstrap, "kst_wall_now", return_value=fixed), \
                     patch.object(sqlite3, "connect", side_effect=connection), \
+                    patch.object(AppDataLease, "close", close_lease), \
                     patch.object(MinuteBarRepository, "purge_before", purge_minute), \
                     patch.object(DailyBarRepository, "retain_latest", retain_daily):
                 try:
-                    fixture = self._bootstrap_settings_desktop(close_while_native_begin_is_running, assert_before_cleanup)
+                    fixture = self._bootstrap_settings_desktop(
+                        close_while_native_begin_is_running, assert_before_cleanup,
+                        expected_error=RuntimeError if exit_mode == "error" else SystemExit,
+                        cleanup_window=exit_mode != "normal",
+                    )
                     with patch.object(bootstrap, "SettingsRequestWorker", wraps=SettingsRequestWorker) as start:
                         fixture.retention_callback()
                         start.assert_not_called()
                 finally:
                     state.release.set()
+                    if state.observer is not None:
+                        state.observer.join(5)
+                        self.assertFalse(state.observer.is_alive())
+                    if getattr(state, "fixture", None) is not None:
+                        for worker in state.fixture.window._app_controller.findChildren(SettingsRequestWorker):
+                            self.assertTrue(worker.wait(5000))
                     for worker in threading.enumerate():
                         if worker.name == "market-bar-retention":
                             worker.join(5)
@@ -2262,6 +2547,8 @@ class AppControllerTests(unittest.TestCase):
                 "lease_released_while_running": getattr(state, "lease_released_while_running", None),
                 "events_before_cleanup": getattr(getattr(state, "fixture", None), "before_release", None),
                 "done_after_cleanup": state.done.is_set(), "timed_out": state.timed_out,
+                "exit_mode": exit_mode, "finish_before_exit": finish_before_exit,
+                "observed": state.observed,
                 "native_cost": {"connections": state.connections, **{
                     operation: sum(statement.lstrip().upper().startswith(operation.upper())
                                    for _phase, statement in state.traces)
@@ -2289,6 +2576,18 @@ class AppControllerTests(unittest.TestCase):
 
     def test_bootstrap_retention_close_preserves_native_begin_and_restore_lease(self):
         self._bootstrap_retention_case()
+
+    def test_bootstrap_retention_quit_keeps_native_begin_and_restore_lease(self):
+        self._bootstrap_retention_case(exit_mode="quit")
+
+    def test_bootstrap_retention_exec_exception_keeps_native_begin_and_restore_lease(self):
+        self._bootstrap_retention_case(exit_mode="error")
+
+    def test_bootstrap_retention_finished_deleted_worker_does_not_restart(self):
+        self._bootstrap_retention_case(exit_mode="quit", finish_before_exit=True)
+
+    def test_bootstrap_retention_quit_after_minute_failure_keeps_daily_cleanup(self):
+        self._bootstrap_retention_case(exit_mode="quit", fail_minute=True)
 
     def test_bootstrap_retention_minute_sql_failure_keeps_daily_cleanup_and_blocks_late_start(self):
         self._bootstrap_retention_case(fail_minute=True)

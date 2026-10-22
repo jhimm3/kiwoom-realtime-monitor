@@ -351,6 +351,7 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
     if central_theme_sync is not None:
         theme_store.set_change_callback(central_theme_sync.notify)
     central_settings_timer: QTimer | None = None
+    window: MainWindow | None = None
     try:
         themes = theme_store.all_by_name()
         window = MainWindow(
@@ -404,6 +405,7 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                     logging.getLogger(__name__).warning("시작 후 일봉 보존 정리를 건너뜁니다: %s", error)
 
             worker = SettingsRequestWorker(run, window._app_controller)
+            worker.setObjectName("startup-market-bar-retention")
             worker.start()
 
         # 실제 크기 DB에서 분봉/일봉 정리가 각각 약 0.65초/0.12초까지 걸렸다.
@@ -444,6 +446,11 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
     finally:
         if central_settings_timer is not None:
             central_settings_timer.stop()
+        if window is not None:
+            for worker in window._app_controller.findChildren(
+                SettingsRequestWorker, "startup-market-bar-retention",
+            ):
+                worker.wait()
         if central_theme_sync is not None:
             central_theme_sync.close()
         if central_content_thread is not None:

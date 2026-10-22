@@ -2463,6 +2463,7 @@ def _run_journal_process(arguments: list[str]) -> int:
     try:
         return app.exec()
     finally:
+        window._central_journal_sync_runner.close()
         try:
             state_pid, state_token = read_process_identity(state_path)
             own_identity = process_identity_document()

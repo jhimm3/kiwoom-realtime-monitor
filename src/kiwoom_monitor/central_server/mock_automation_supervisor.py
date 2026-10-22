@@ -376,7 +376,7 @@ class MockAutomationSupervisor:
             elif bundle.automation_context != context:
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
             recovery = await bundle.monitor.refresh_recovery()
-            risk = await asyncio.to_thread(
+            risk = await drain_thread_call(
                 self._repository.load_latest_mock_automation_risk, account_ref,
             )
             if risk is None:

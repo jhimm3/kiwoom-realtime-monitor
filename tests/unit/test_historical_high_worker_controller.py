@@ -109,6 +109,7 @@ class HistoricalHighDesktopConnectionTests(unittest.TestCase):
                 patch.object(bootstrap, "create_query_client", return_value=client), \
                 patch.object(bootstrap.LocalApiConfig, "load", return_value=SimpleNamespace(environment="mock")):
             construct.return_value = Mock()
+            construct.return_value._app_controller.findChildren.return_value = []
             with self.assertRaises(SystemExit) as exited:
                 bootstrap._run_desktop(paths, None)
             self.assertEqual(0, exited.exception.code)

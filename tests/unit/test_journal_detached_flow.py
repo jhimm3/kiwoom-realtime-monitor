@@ -1585,6 +1585,149 @@ class JournalReviewLifecycleTests(unittest.TestCase):
     def test_parent_loss_does_not_ack_failed_review_or_automatically_retry(self):
         self._assert_process_exit_waits_for_review("parent-loss")
 
+    def _assert_process_exit_joins_native_central_sync(self, mode):
+        import os
+        import threading
+        from PySide6.QtCore import QTimer
+        from PySide6.QtGui import QCloseEvent
+        from kiwoom_monitor import journal_process
+        from kiwoom_monitor.infrastructure import central_journal_sync
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease, StrictRestoreError
+
+        class Client:
+            def capabilities(self):
+                return {"journal_v2_sync": False}
+
+            def load_all(self, collection):
+                return [{"owner": "legacy", "key": "lifetime_probe", "document": {
+                    "setting_key": "lifetime_probe", "value_json": '"remote-value"',
+                    "updated_at": "2026-10-21T10:00:00+09:00"}}] if collection == "journal_settings" else []
+
+            def upsert(self, _collection, documents):
+                return len(documents)
+
+            def server_now(client):
+                return self.now
+
+        runner = central_journal_sync.CentralJournalSyncRunner(
+            central_journal_sync.CentralJournalSyncService(Client()), self.window._journal_db)
+        self.window._central_journal_sync_runner = runner
+        entered, exiting, lease_released, connection_closed = (threading.Event() for _ in range(4))
+        observed, workers, timers = {}, [], []
+        real_connect, real_lease_close = sqlite3.connect, AppDataLease.close
+        sentinel = OSError("controlled journal exec failure")
+        pid_path = self.root / "journal_process.pid"
+        previous_hook, previous_last_window = sys.excepthook, self.app.quitOnLastWindowClosed()
+
+        class Connection(sqlite3.Connection):
+            def close(connection):
+                super().close()
+                connection_closed.set()
+
+        def connect(*args, **kwargs):
+            connection = real_connect(*args, factory=Connection, **kwargs)
+            connection.set_trace_callback(lambda sql: entered.set()
+                if sql.startswith("INSERT INTO journal_settings(") else None)
+            return connection
+
+        def lease_close(lease):
+            real_lease_close(lease)
+            if not lease._exclusive:
+                lease_released.set()
+
+        def command_timer():
+            timer = QTimer()
+            timers.append(timer)
+            return timer
+
+        with closing(real_connect(self.window._journal_db, check_same_thread=False)) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+
+            def observe_then_release():
+                try:
+                    observed["exit_reached"] = exiting.wait(2)
+                    observed["lease_released"] = lease_released.wait(0.1)
+                    observed["pid_removed"] = not pid_path.exists()
+                    observed["running"] = runner.is_running
+                    observed["connection_closed"] = connection_closed.is_set()
+                    try:
+                        with AppDataLease(self.root, exclusive=True, timeout=0.05):
+                            observed["exclusive_restore"] = True
+                    except StrictRestoreError:
+                        observed["exclusive_restore"] = False
+                finally:
+                    blocker.rollback()
+
+            def execute():
+                self.window._schedule_central_journal_sync()
+                self.assertTrue(entered.wait(2))
+                workers.extend(thread for thread in threading.enumerate()
+                               if thread.name == "central-journal-settings-sync")
+                self.assertEqual(1, len(workers))
+                exiting.set()
+                if mode == "window-close":
+                    event = QCloseEvent()
+                    self.window.closeEvent(event)
+                    self.assertTrue(event.isAccepted())
+                    return 0
+                raise sentinel
+
+            observer = threading.Thread(target=observe_then_release)
+            try:
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(central_journal_sync.sqlite3, "connect", side_effect=connect))
+                    stack.enter_context(patch.object(AppDataLease, "close", lease_close))
+                    application = stack.enter_context(patch.object(journal_process, "QApplication", return_value=self.app))
+                    application.instance.return_value = self.app
+                    stack.enter_context(patch.object(journal_process, "JournalWindow", return_value=self.window))
+                    stack.enter_context(patch.object(journal_process, "QTimer", side_effect=command_timer))
+                    stack.enter_context(patch.object(journal_process, "_set_taskbar_app_id"))
+                    shutdown = stack.enter_context(patch.object(self.window, "shutdown", wraps=self.window.shutdown))
+                    stack.enter_context(patch.object(self.app, "exec", side_effect=execute))
+                    observer.start()
+                    arguments = ["--monitor-database", str(self.window._monitor_db),
+                        "--journal-database", str(self.window._journal_db), "--config", str(self.window._config),
+                        "--command-file", str(self.root / "commands.json"), "--parent-pid", str(os.getpid())]
+                    if mode == "window-close":
+                        self.assertEqual(0, journal_process.main(arguments))
+                    else:
+                        with self.assertRaises(OSError) as caught:
+                            journal_process.main(arguments)
+                        self.assertIs(sentinel, caught.exception)
+                    self.assertEqual(int(mode == "window-close"), shutdown.call_count)
+            finally:
+                blocker.rollback()
+                observer.join(3)
+                runner.close()
+                for worker in workers:
+                    worker.join(2)
+                for timer in timers:
+                    timer.stop()
+                    timer.deleteLater()
+                sys.excepthook = previous_hook
+                self.app.setQuitOnLastWindowClosed(previous_last_window)
+        self.assertFalse(observer.is_alive())
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual({"exit_reached": True, "lease_released": False, "pid_removed": False,
+            "running": True, "connection_closed": False, "exclusive_restore": False}, observed)
+        self.assertTrue(connection_closed.is_set())
+        self.assertFalse(pid_path.exists())
+        self.assertFalse(runner.is_running)
+        self.assertFalse(runner.schedule())
+        self.window._schedule_central_journal_sync()  # A pending 500ms callback cannot admit another run.
+        self.assertFalse(runner.is_running)
+        with AppDataLease(self.root, exclusive=True, timeout=0.05):
+            pass
+        with closing(real_connect(self.window._journal_db)) as connection:
+            self.assertEqual(('"remote-value"', "2026-10-21T10:00:00+09:00"), connection.execute(
+                "SELECT value_json,updated_at FROM journal_settings WHERE setting_key='lifetime_probe'").fetchone())
+
+    def test_actual_window_close_joins_native_sync_before_pid_and_outer_lease_release(self):
+        self._assert_process_exit_joins_native_central_sync("window-close")
+
+    def test_direct_exec_error_joins_native_sync_and_preserves_error_before_lease_release(self):
+        self._assert_process_exit_joins_native_central_sync("exec-error")
+
 
 if __name__ == "__main__":
     unittest.main()
