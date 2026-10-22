@@ -4,6 +4,8 @@
 
 작업을 시작할 때 `DEVELOPMENT_GUARDRAILS.md`와 수정 대상에 해당하는 `MODULE_MAP.md`를 먼저 확인한다.
 
+- **로컬 커밋은 사용자가 명시적으로 요청할 때만 실행한다.** 작업 완료·검사 통과나 과거의 커밋 요청을 새 커밋 권한으로 해석하지 않는다. 요청이 없으면 변경을 미커밋 상태로 보존한다(2026-10-23 사용자 정정).
+
 ## 구조 퇴행 방지 — R3 이후에도 적용
 
 - 전체 감사 원장을 매번 읽지 않는다. Git diff → [기능별 책임 계약](docs/architecture/r3-ownership.md#필요한-기능군부터-읽기)의 관련 기능군 → 변경된 caller/상태 owner/저장·소비/실패·종료만 확인한다. 기존 owner·RAM·native transaction·worker 수명을 우선 재사용하고 중복 구현·불필요한 relay를 만들지 않는다.
