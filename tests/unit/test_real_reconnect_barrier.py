@@ -272,31 +272,6 @@ class ReconnectSaveBoundaryTests(unittest.IsolatedAsyncioTestCase):
         collector._store = None
         await collector.close()
 
-    async def test_drain_waits_for_accepted_market_close_action(self):
-        entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-        class Events:
-            async def close_krx_regular_session(self, session):
-                entered.set()
-                await release.wait()
-                finished.set()
-
-        collector = CentralRealtimeCollector(lambda: "fake", "real", RealtimeHub(),
-            lambda: datetime(2026, 9, 15, 15, 30), market_events=Events())
-        await collector.start()
-        pausing = None
-        try:
-            await asyncio.wait_for(entered.wait(), 2)
-            pausing = asyncio.create_task(collector.begin_credential_change())
-            await asyncio.sleep(.025)
-            self.assertFalse(pausing.done())
-            release.set()
-            await pausing
-            self.assertTrue(finished.is_set())
-            self.assertIn("2026-09-15", collector._regular_close_notified)
-        finally:
-            release.set()
-            await collector.close()
 
 
 class AccountReconnectBoundaryTests(unittest.IsolatedAsyncioTestCase):

@@ -56,8 +56,7 @@ WS_BASE_URLS = {
 }
 
 # 키움 실시간 REG의 data.item은 한 행당 최대 100개다. 중앙 서버는
-# TOP20뿐 아니라 당일/익일 15% 조건 코호트도 함께 구독하므로 타입별로
-# 그룹을 나눠 한 그룹의 종목 등록 한도를 넘기지 않는다.
+# 타입별로 그룹을 나눠 한 그룹의 종목 등록 한도를 넘기지 않는다.
 REALTIME_ITEMS_PER_GROUP = 100
 REALTIME_ITEMS_PER_TYPE = 200
 REALTIME_REG_INTERVAL_SECONDS = 0.25
@@ -129,19 +128,6 @@ def _registered_trade_sources(
     return result
 
 
-def contains_krx_observation(message: dict[str, Any]) -> bool:
-    """키움의 data=null REAL 응답은 빈 관측으로 취급한다."""
-    rows = message.get("data") or ()
-    return any(
-        isinstance(row, dict) and (
-            row.get("type") in {"0J", "0U"}
-            or (
-                row.get("type") == "0B"
-                and not str(row.get("item", "")).endswith(("_NX", "_AL"))
-            )
-        )
-        for row in rows
-    )
 
 logger = logging.getLogger(__name__)
 
@@ -211,8 +197,6 @@ class CentralRealtimeCollector:
         self._abnormal_disconnects = 0
         self._reconnects = 0
         self._connected_once = False
-        self._regular_close_notified: set[str] = set()
-        self._full_day_close_notified: set[str] = set()
         self._last_registration_sent_at = 0.0
         self._credential_paused = False
         self._credential_shutdown = False
@@ -224,7 +208,6 @@ class CentralRealtimeCollector:
         self._token_tasks: set[asyncio.Task] = set()
         self._flush_tasks: set[asyncio.Task] = set()
         self._flush_lock = asyncio.Lock()
-        self._boundary_task: asyncio.Task | None = None
         self._planned_reconnect = False
         self._reconnect_deadline = 0.0
         self._reconnect_expiry_task: asyncio.Task | None = None
@@ -433,8 +416,6 @@ class CentralRealtimeCollector:
                     self._task = None
         if self._token_tasks:
             await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._token_tasks)), return_exceptions=True)
-        if self._boundary_task is not None:
-            await asyncio.shield(self._boundary_task)
         self._hub.set_upstream_ready((), False)
         self._mark_capture_gap(clear_continuous=True)
         self._continuous_from.clear()
@@ -611,14 +592,11 @@ class CentralRealtimeCollector:
         await self._flush_snapshots()
         if self._token_tasks:
             await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._token_tasks)), return_exceptions=True)
-        if self._boundary_task is not None:
-            await asyncio.shield(self._boundary_task)
         self._hub.set_upstream_ready((), False)
         self._credential_phase = "STOPPED"
 
     async def _run(self) -> None:
         while not self._credential_paused:
-            await self._notify_market_event_boundaries()
             codes, nxt_codes = self._hub.requested_codes()
             session = self._market_session()
             event_only = session == "KRX" and self._market_events is not None
@@ -693,7 +671,6 @@ class CentralRealtimeCollector:
                 while self._market_session() is not None:
                     if self._credential_paused or generation != self._connection_generation:
                         return
-                    await self._notify_market_event_boundaries()
                     codes, nxt_codes = self._hub.requested_codes()
                     target = realtime_subscription_target(
                         codes, set(nxt_codes), self._now_provider(), environment=self._environment)
@@ -706,10 +683,6 @@ class CentralRealtimeCollector:
                     if event_only and not market_events_connected:
                         await self._market_events.on_ws_connected(websocket)
                         market_events_connected = True
-                    elif market_events_connected:
-                        poll = getattr(self._market_events, "poll_condition_updates", None)
-                        if poll is not None:
-                            await poll(websocket)
                     desired = self._subscription_groups(session, target.active_codes, target.nxt_codes, program, priority)
                     wanted = all_atoms(desired)
                     if progress is None:
@@ -792,8 +765,6 @@ class CentralRealtimeCollector:
                             admitted = filter_message(message, allowed)
                             if market_events_connected:
                                 await self._market_events.handle_ws_message(admitted, websocket)
-                                if kind == 'REAL' and contains_krx_observation(admitted):
-                                    self._market_events.mark_krx_session_observed(self._now_provider().date().isoformat())
                             self._publish_parsed(admitted)
                     if committed and progress.done:
                         groups = progress.plan.groups
@@ -818,7 +789,6 @@ class CentralRealtimeCollector:
                         connection_approved = True
                         subscribed = target.active_codes
                         published_codes = subscribed
-                await self._notify_market_event_boundaries()
             except BaseException as error:
                 if progress is not None:
                     recording.end_batch(self, batch, encode_groups(progress.groups),
@@ -1640,37 +1610,6 @@ class CentralRealtimeCollector:
         if target.nxt_codes:
             return "NXT"
         return None
-
-    async def _notify_market_event_boundaries(self) -> None:
-        if self._market_events is None:
-            return
-        if self._boundary_task is None:
-            self._boundary_task = owned_create_task(
-                self._notify_market_event_boundary_cycle(), name="realtime-owned-market-close")
-            def completed(done):
-                if self._boundary_task is done:
-                    self._boundary_task = None
-                if not done.cancelled():
-                    done.exception()
-            self._boundary_task.add_done_callback(completed)
-        await asyncio.shield(self._boundary_task)
-
-    async def _notify_market_event_boundary_cycle(self) -> None:
-        if self._market_events is None:
-            return
-        now = self._now_provider()
-        session_id = now.date().isoformat()
-        current = now.time().replace(tzinfo=None)
-        if current >= clock_time(15, 30) and session_id not in self._regular_close_notified:
-            close_regular = getattr(self._market_events, "close_krx_regular_session", None)
-            if close_regular is not None:
-                await close_regular(session_id)
-            self._regular_close_notified.add(session_id)
-        if current >= clock_time(20) and session_id not in self._full_day_close_notified:
-            close_day = getattr(self._market_events, "close_observation_day", None)
-            if close_day is not None:
-                await close_day(session_id)
-            self._full_day_close_notified.add(session_id)
 
     def _publish_diagnostics(self, reason: str) -> None:
         self._hub.publish({"type": "diagnostics", "payload": {

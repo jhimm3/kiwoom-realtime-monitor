@@ -673,7 +673,8 @@ class MockAccountMonitor:
             if len(self._risk_events) >= 100_000:
                 raise RuntimeError("MOCK_AUTOMATION_EVENT_HISTORY_LIMIT")
         self._risk_event_cursor = cursor
-        events = tuple(self._risk_events)
+        # The recovery lock owns this read-only history through the Risk ACK.
+        events = self._risk_events
         now = self._aware_now()
         kst_today = now.astimezone(KST).date()
         fill_days = [

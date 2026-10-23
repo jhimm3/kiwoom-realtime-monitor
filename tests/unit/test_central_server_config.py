@@ -43,8 +43,6 @@ class CentralServerSettingsTests(unittest.TestCase):
             "NEWS_QUERY_SET_REQUEST_LIMIT": "16000",
             "MARKET_EVENT_COLLECTION_ENABLED": "true",
             "AUTONOMOUS_TOP20_MINUTE_BACKFILL_ENABLED": "1",
-            "HOT_COHORT_CONDITION_NAME": "",
-            "HOT_COHORT_CONDITION_SUBSTRING": "15%",
             "SHADOW_CANDIDATE_ENABLED": "0",
             "SHADOW_CANDIDATE_POLL_SECONDS": "2",
             "SHADOW_CANDIDATE_UNIVERSE_MAX_AGE_SECONDS": "0",
@@ -60,6 +58,8 @@ class CentralServerSettingsTests(unittest.TestCase):
         }
         for key, default in expected.items():
             self.assertIn(f"${{{key}:-{default}}}", compose)
+        self.assertNotIn("HOT_COHORT_CONDITION_NAME", compose)
+        self.assertNotIn("HOT_COHORT_CONDITION_SUBSTRING", compose)
 
     def test_loads_required_environment(self) -> None:
         with patch.dict(os.environ, {
@@ -81,7 +81,7 @@ class CentralServerSettingsTests(unittest.TestCase):
                                           settings.news_query_set_request_limit))
         self.assertTrue(settings.market_event_collection_enabled)
         self.assertTrue(settings.autonomous_top20_minute_backfill_enabled)
-        self.assertEqual("15%", settings.hot_cohort_condition_substring)
+        self.assertFalse(hasattr(settings, "hot_cohort_condition_substring"))
 
     def test_rejects_missing_server_secret(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -113,15 +113,15 @@ class CentralServerSettingsTests(unittest.TestCase):
             settings = CentralServerSettings.from_environment()
         self.assertFalse(settings.news_history_jobs_enabled)
 
-    def test_market_event_collection_and_condition_name_are_configurable(self) -> None:
+    def test_market_event_collection_is_configurable_and_retired_condition_env_is_ignored(self) -> None:
         with patch.dict(os.environ, {
             "MONITOR_SERVER_ACCESS_TOKEN": "token", "MARKET_EVENT_COLLECTION_ENABLED": "false",
             "HOT_COHORT_CONDITION_NAME": "정확한 15% 조건", "HOT_COHORT_CONDITION_SUBSTRING": "급등",
         }, clear=True):
             settings = CentralServerSettings.from_environment()
         self.assertFalse(settings.market_event_collection_enabled)
-        self.assertEqual("정확한 15% 조건", settings.hot_cohort_condition_name)
-        self.assertEqual("급등", settings.hot_cohort_condition_substring)
+        self.assertFalse(hasattr(settings, "hot_cohort_condition_name"))
+        self.assertFalse(hasattr(settings, "hot_cohort_condition_substring"))
 
     def test_autonomous_top20_minute_backfill_can_be_disabled_independently(self) -> None:
         with patch.dict(os.environ, {

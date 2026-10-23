@@ -18,7 +18,7 @@ from time import perf_counter
 from threading import Lock
 from dataclasses import asdict, fields, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from kiwoom_monitor.application.breakout_strategy import (
     StrategyDecision, StrategyState, session_entry_time_rejection,
@@ -249,6 +249,52 @@ class MockAutomationRunner:
                     monitor.clear_automation_risk_listener(self._native_risk_listener)
                     self._native_risk_listener = None
                 raise
+
+    @property
+    def account_ref(self) -> str:
+        return self._bundle.account_ref
+
+    @property
+    def credential_profile_id(self) -> str:
+        return self._bundle.credential_profile_id
+
+    def is_bound_to(self, bundle: Any) -> bool:
+        """Compare the borrowed bundle identity, without claiming its lease."""
+        return self._bundle is bundle
+
+    def position_shadow_observation(self, base, *, is_current: Callable[[], bool]):
+        """Enrich an account-only cut from this runner's existing RAM owners.
+
+        The supervisor supplies its registry/closing fence; this owner checks
+        the monitor epoch between copies. Neither fence grants order authority.
+        """
+        from kiwoom_monitor.application.position_target import (
+            PositionAccountObservation, PositionRunnerAccountObservation,
+            PositionStudyRunnerAccountObservation,
+        )
+        matches = getattr(getattr(self._bundle, "monitor", None), "position_observation_matches", None)
+        if not callable(matches) or not matches(base):
+            return base
+        state = self.position_study_state(base)
+        if not is_current() or state is None or not matches(base):
+            return base
+        getter = getattr(self._bundle.monitor, "position_study_portfolio", None)
+        portfolio = getter(base) if callable(getter) else None
+        if not is_current() or not matches(base):
+            return base
+        if isinstance(portfolio, dict) and portfolio.get("version") == "native-position-study-portfolio/v1":
+            policy_getter = getattr(self, "position_study_policy", None)
+            policy = policy_getter(base, state) if callable(policy_getter) else None
+            if not is_current() or not matches(base):
+                return base
+            return PositionStudyRunnerAccountObservation(
+                **{field.name: getattr(base, field.name) for field in fields(PositionAccountObservation)},
+                runner_state=state, study_portfolio=portfolio, native_study_policy=policy,
+            )
+        return PositionRunnerAccountObservation(
+            **{field.name: getattr(base, field.name) for field in fields(PositionAccountObservation)},
+            runner_state=state,
+        )
 
     @property
     def status(self) -> dict[str, Any]:

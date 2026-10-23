@@ -72,7 +72,6 @@ class AutonomousTop20Store(Protocol):
 
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
 
-    def load_hot_cohort(self, *, active_only: bool = False) -> list[dict[str, Any]]: ...
 
     def load_daily_bars(
         self, code: str, market: str = "", limit: int = 250,
@@ -645,13 +644,10 @@ class AutonomousTop20Service:
         account_entries = await owned_to_thread(
             self._store.load_documents, "account_entry_symbols_daily", day, 5000,
         )
-        cohort = await owned_to_thread(self._store.load_hot_cohort, active_only=False)
         codes = tuple(dict.fromkeys([
             *first_seen,
             *(str(value.get("key", "")) for value in documents if value.get("key")),
             *(str(value.get("key", "")) for value in account_entries if value.get("key")),
-            *(str(value.get("stock_code", "")) for value in cohort
-              if value.get("stock_code") and value.get("entry_session") == day),
         ]))
         for code in codes:
             if self._now().time().replace(tzinfo=None) >= clock_time(7, 40) and self._now().date().isoformat() != day:

@@ -353,6 +353,79 @@ class AccountWideObservationMonitorTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "_connect", side_effect=AssertionError("RAM getter accessed DB")):
             for _ in range(8): self.assertEqual(observation.input_ref, self.monitor.latest_position_observation.input_ref)
 
+    async def test_concurrent_risk_refresh_keeps_history_cut_until_ack_and_listener_consumption(self):
+        from dataclasses import replace
+        from tests.unit.test_mock_automation_risk import ACCOUNT, SCOPE
+        from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
+        await self.monitor.close(); self.runtime.stop()
+        self.repository = ExecutionRepository(self.store)
+        self.runtime = ExecutionRuntime(OrderLifecycle(self.repository, None, now_provider=lambda: NOW), self.repository,
+            account_ref=ACCOUNT, run_id='run-current', owner_token='owner-1')
+        self.runtime.start()
+        self.reader.recovery = replace(self.reader.recovery,
+            account=replace(self.reader.recovery.account, account_ref=ACCOUNT, positions={'005930': 1}))
+        entered, release = asyncio.Event(), asyncio.Event()
+        cost_calls = []
+        async def read_costs(*_args):
+            quantity = self.reader.calls
+            cost_calls.append(quantity)
+            if len(cost_calls) == 1:
+                entered.set()
+                await asyncio.wait_for(release.wait(), 3)
+            return ({'trst_ovrl_trde_prps_array': [{
+                'cntr_dt': NOW.strftime('%Y%m%d'), 'trde_dt': NOW.strftime('%Y%m%d'),
+                'stk_cd': '005930', 'io_tp_nm': '매수', 'trde_amt': str(quantity * 100),
+                'exct_amt': str(quantity * 100), 'cmsn': str(quantity), 'tax_sum_cmsn': str(quantity),
+            }]},)
+        self.reader.read_trade_cost_pages = read_costs
+        risk_repository = ForwardEvaluationRepository(self.store)
+        self.monitor = MockAccountMonitor(self.reader, self.runtime, self.repository, now_provider=lambda: NOW,
+            automation_risk_repository=risk_repository, automation_binding_revision=1, automation_account_scope=SCOPE)
+        consumed, saved = [], []
+        self.monitor.set_automation_risk_listener(lambda cut: consumed.append(cut['risk']))
+        def seed_fill(number):
+            unowned = ExecutionRepository(self.store)
+            intent = OrderIntent(f'cut-{number}', 'run-current', f'decision-{number}', ACCOUNT, 'mock', '005930', 'KRX',
+                OrderSide.BUY, 1, OrderType.LIMIT, 100, NOW, NOW + timedelta(minutes=1), 'policy-v1')
+            record = unowned.create(intent)
+            unowned.apply(record, order_event(intent.intent_id, 'FILL', OrderState.FILLED, NOW, NOW,
+                broker_order_id=f'cut-order-{number}', broker_execution_id=f'cut-fill-{number}', quantity=1, price=100),
+                broker_order_id=f'cut-order-{number}', filled_quantity=1, detailed_filled_quantity=1,
+                fill_ids=(f'cut-fill-{number}',), last_broker_as_of=NOW)
+        native_save = risk_repository.save_mock_automation_risk_snapshot
+        def save_with_ack(snapshot):
+            self.assertEqual(len(saved), len(consumed))
+            result = native_save(snapshot)
+            saved.append(snapshot)
+            return result
+        tasks = []
+        seed_fill(1)
+        with patch.object(self.repository, 'account_events', wraps=self.repository.account_events) as reads, \
+             patch.object(risk_repository, 'save_mock_automation_risk_snapshot', side_effect=save_with_ack):
+            try:
+                tasks.append(asyncio.create_task(self.monitor.refresh_recovery()))
+                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.to_thread(seed_fill, 2)
+                self.reader.recovery = replace(self.reader.recovery,
+                    account=replace(self.reader.recovery.account, positions={'005930': 2}))
+                tasks.append(asyncio.create_task(self.monitor.refresh_recovery()))
+                await asyncio.sleep(0); await asyncio.sleep(0)
+                self.assertFalse(tasks[1].done())
+                self.assertEqual(1, reads.call_count)
+                self.assertEqual([], consumed)
+            finally:
+                release.set()
+                await asyncio.gather(*tasks)
+            self.assertEqual(2, reads.call_count)
+        self.assertEqual([1, 2], cost_calls)
+        self.assertEqual([1, 2], [value.execution_event_high_watermark for value in consumed])
+        self.assertEqual([1, 2], [value.reconciliation_revision for value in consumed])
+        self.assertEqual([(('005930', 1),), (('005930', 2),)], [value.owned_position_quantities for value in consumed])
+        self.assertTrue(all(value.reconciliation_complete and value.cost_complete for value in consumed))
+        self.assertEqual(saved, consumed)
+        self.assertEqual(consumed[-1], risk_repository.load_latest_mock_automation_risk(ACCOUNT))
+        self.assertEqual(consumed[-1], self.monitor.latest_position_observation.risk_snapshot)
+
     async def test_other_run_is_read_and_confirmed_without_writing_its_ledger(self):
         unowned = ExecutionRepository(self.store)
         intent = OrderIntent("retired", "run-old", "decision-old", "account-1", "mock", "005930", "KRX",

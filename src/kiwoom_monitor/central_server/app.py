@@ -38,7 +38,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 )
 
 
-SERVER_BUILD = "2026.10.18-r3-bar-clock-v1"
+SERVER_BUILD = "2026.10.23-runner-public-owner-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -171,9 +171,6 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         "external_market_poll_seconds": active.external_market_poll_seconds,
         "external_market_auto_roll_enabled": active.external_market_auto_roll_enabled,
         "external_market_roll_confirmations": active.external_market_roll_confirmations,
-        "hot_cohort_condition_enabled": True,
-        "hot_cohort_condition_name": active.hot_cohort_condition_name,
-        "hot_cohort_condition_substring": active.hot_cohort_condition_substring,
         "news_processing_excluded_providers": list(
             active.parsed_news_processing_excluded_providers()
         ),
@@ -198,7 +195,11 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         operational["shadow_candidate_config"] = document_leader_breakout_policy().to_dict()
     saved_operational = store.load_documents("server_operational_settings", "global", 1)
     if saved_operational and isinstance(saved_operational[0].get("document"), dict):
-        operational.update(saved_operational[0]["document"])
+        operational.update({
+            key: value for key, value in saved_operational[0]["document"].items()
+            if key not in {"hot_cohort_condition_enabled", "hot_cohort_condition_name",
+                           "hot_cohort_condition_substring"}
+        })
     try:
         shadow_document = operational.get("shadow_candidate_config")
         if not isinstance(shadow_document, dict):
@@ -261,10 +262,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             )
         if active.market_event_collection_enabled:
             market_event_service = MarketEventService(
-                broker, realtime_hub, store,
-                exact_condition_name=str(operational["hot_cohort_condition_name"]),
-                condition_substring=str(operational["hot_cohort_condition_substring"]),
-                condition_enabled=bool(operational["hot_cohort_condition_enabled"]),
+                broker, store,
                 now_provider=server_now,
             )
         def realtime_account_scope(raw):
@@ -1013,7 +1011,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         app.state.candidate_monitor = monitor
 
     operational_read_router, operational_update_router = create_operational_settings_routers(
-        store, authorize, operational_state, market_event_service, external_market_service,
+        store, authorize, operational_state, external_market_service,
         ai_service, news_service, publish_candidate_monitor, logger,
         now_provider=server_now,
         get_ram_shadow_selection=get_ram_shadow_selection,
@@ -1102,7 +1100,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
 
     app.include_router(create_market_live_read_router(store, authorize, lambda: app.state.realtime_collector))
 
-    app.include_router(create_market_event_read_router(store, authorize, market_event_service))
+    app.include_router(create_market_event_read_router(store, authorize))
 
     app.include_router(create_market_archive_read_router(store, authorize, now_provider=server_now))
 

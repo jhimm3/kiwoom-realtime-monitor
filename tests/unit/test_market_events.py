@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import tempfile
 import threading
 import unittest
@@ -10,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.central_server.market_events import MarketEventService, select_condition
+from kiwoom_monitor.central_server.market_events import MarketEventService
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 from kiwoom_monitor.central_server.rest_broker import BrokerResult
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick, parse_vi_events
@@ -41,58 +40,9 @@ class _Broker:
         raise AssertionError(f"unexpected request {api_id}")
 
 
-class _HeldConditionStatusStore:
-    """Observe the real status store call while holding only its first attempt."""
-
-    def __init__(self, native, *, fail_first=False, commit_before_error=False):
-        self.native = native
-        self.fail_first = fail_first
-        self.commit_before_error = commit_before_error
-        self.error = OSError("controlled condition status write failure")
-        self.entered, self.release = threading.Event(), threading.Event()
-        self.first_finished, self.second_entered = threading.Event(), threading.Event()
-        self.attempts = []
-        self.active = self.max_active = 0
-        self._lock = threading.Lock()
-
-    def __getattr__(self, name):
-        return getattr(self.native, name)
-
-    def upsert_documents(self, collection, values):
-        if collection != "condition_search_status":
-            return self.native.upsert_documents(collection, values)
-        with self._lock:
-            self.attempts.append(deepcopy(values))
-            ordinal = len(self.attempts)
-            self.active += 1
-            self.max_active = max(self.max_active, self.active)
-        try:
-            if ordinal == 1:
-                self.entered.set()
-                if not self.release.wait(5):
-                    raise TimeoutError("test did not release condition status commit")
-                if self.fail_first:
-                    if self.commit_before_error:
-                        self.native.upsert_documents(collection, values)
-                    raise self.error
-            else:
-                self.second_entered.set()
-            return self.native.upsert_documents(collection, values)
-        finally:
-            with self._lock:
-                self.active -= 1
-            if ordinal == 1:
-                self.first_finished.set()
 
 
 class MarketEventContractTests(unittest.TestCase):
-    def test_condition_selection_never_guesses(self) -> None:
-        values = [("1", "급등 15%"), ("2", "거래량")]
-        self.assertEqual(("1", "급등 15%"), select_condition(values)[0])
-        self.assertEqual("NO_MATCH", select_condition([("2", "거래량")])[1])
-        self.assertEqual("AMBIGUOUS", select_condition(values + [("3", "15% 돌파")])[1])
-        self.assertEqual(("2", "거래량"), select_condition(values, exact_name="거래량")[0])
-        self.assertEqual("EXACT_NOT_FOUND", select_condition(values, exact_name="없는조건")[1])
 
     def test_vi_wire_parser_preserves_official_fields(self) -> None:
         values = {"9001": "A005930", "302": "삼성전자", "9068": "1", "1225": "2",
@@ -114,7 +64,7 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         self.broker = _Broker()
         self.now = [datetime(2026, 9, 11, 10, 0, tzinfo=timezone(timedelta(hours=9)))]  # 금요일 KST
         self.service = MarketEventService(
-            self.broker, self.hub, self.store, now_provider=lambda: self.now[0],
+            self.broker, self.store, now_provider=lambda: self.now[0],
         )
         await self.service.start()
 
@@ -123,132 +73,9 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.temp.cleanup()
 
-    async def test_condition_status_serializes_frozen_revisions_across_reconnect(self) -> None:
-        held = _HeldConditionStatusStore(self.store)
-        self.service._store = held
-        socket = _Socket()
-        old = latest = None
-        try:
-            await self.service.on_ws_connected(socket)
-            await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
-            old = self.service._condition_status_tail
-            self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
-            self.assertFalse(old.done())
-            self.now[0] += timedelta(seconds=1)
-            self.service.update_operational_settings(enabled=True, exact_name="새조건", substring="")
-            await self.service.on_ws_connected(socket)
-            await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["8", "새조건"]]}, socket)
-            latest = self.service._condition_status_tail
-            await asyncio.sleep(0)
-            self.assertEqual(("8", 1), (self.service._pending_condition.selected[0], self.service._pending_condition.revision))
-            self.assertFalse(held.second_entered.is_set(), "new revision started before the old native ACK")
-            self.assertEqual(1, len(held.attempts))
-            before = held.attempts[0][0]["document"]
-            self.assertEqual(("", 0, ["7", "상승 15%"]),
-                             (before["configured_exact_name"], before["runtime"]["policy_revision"], before["selected"]))
-        finally:
-            held.release.set()
-            if latest is not None or old is not None:
-                await asyncio.wait_for(asyncio.shield(latest or old), 3)
-        current = self.store.load_documents("condition_search_status", "hot_cohort", 1)[0]["document"]
-        self.assertEqual(("새조건", 1, ["8", "새조건"], self.now[0].timestamp()),
-                         (current["configured_exact_name"], current["runtime"]["policy_revision"],
-                          current["selected"], current["updated_at"]))
-        self.assertEqual([0, 1], [rows[0]["document"]["runtime"]["policy_revision"] for rows in held.attempts])
-        self.assertEqual((2, 1, 0), (len(held.attempts), held.max_active, held.active))
 
-    async def test_condition_status_failure_reaches_poll_once_and_reconnect_retries(self) -> None:
-        for lost_ack in (False, True):
-            with self.subTest(lost_ack=lost_ack):
-                held = _HeldConditionStatusStore(self.store, fail_first=True, commit_before_error=lost_ack)
-                self.service._store = held
-                socket = _Socket()
-                try:
-                    await self.service.on_ws_connected(socket)
-                    await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
-                    first = self.service._condition_status_tail
-                    self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
-                    await self.service.on_ws_connected(socket)
-                    await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["19", "상승 15%"]]}, socket)
-                    await asyncio.sleep(0)
-                    self.assertFalse(held.second_entered.is_set())
-                finally:
-                    held.release.set()
-                with self.assertRaises(OSError) as failed:
-                    await asyncio.wait_for(asyncio.shield(first), 3)
-                self.assertIs(held.error, failed.exception)
-                await asyncio.wait_for(asyncio.shield(self.service._condition_status_tail), 3)
-                self.assertEqual(["19", "상승 15%"], self.store.load_documents(
-                    "condition_search_status", "hot_cohort", 1)[0]["document"]["selected"])
-                with self.assertRaises(OSError) as propagated:
-                    await self.service.poll_condition_updates(socket)
-                self.assertIs(held.error, propagated.exception)
-                await self.service.poll_condition_updates(socket)
-                self.assertEqual(2, len(held.attempts), "status failure introduced an independent retry")
-                await self.service.on_ws_connected(socket)
-                await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
-                await asyncio.wait_for(asyncio.shield(self.service._condition_status_tail), 3)
-                self.assertEqual(["7", "상승 15%"], self.store.load_documents(
-                    "condition_search_status", "hot_cohort", 1)[0]["document"]["selected"])
-                self.assertEqual((3, 1, 0), (len(held.attempts), held.max_active, held.active))
 
-    async def test_cancelled_condition_status_and_close_waiter_join_actual_native_ack(self) -> None:
-        held = _HeldConditionStatusStore(self.store)
-        self.service._store = held
-        socket = _Socket()
-        closing = None
-        try:
-            await self.service.on_ws_connected(socket)
-            await self.service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
-            self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
-            owner = self.service._condition_status_tail
-            owner.cancel()
-            await asyncio.sleep(0)
-            self.assertFalse(owner.done(), "cancelled status owner retired an actual native write")
-            closing = asyncio.create_task(self.service.close())
-            await asyncio.sleep(0)
-            closing.cancel()
-            await asyncio.sleep(0)
-            self.assertFalse(closing.done())
-            self.assertFalse(held.first_finished.is_set())
-        finally:
-            held.release.set()
-            if closing is not None:
-                with self.assertRaises(asyncio.CancelledError):
-                    await closing
-            else:
-                await self.service.close()
-        await self.service.close()
-        self.assertTrue(owner.cancelled())
-        self.assertTrue(held.first_finished.is_set())
-        self.assertEqual((1, 1, 0), (len(held.attempts), held.max_active, held.active))
-        self.assertEqual(["7", "상승 15%"], self.store.load_documents(
-            "condition_search_status", "hot_cohort", 1)[0]["document"]["selected"])
-        self.assertFalse(self.service._background)
 
-    async def test_condition_status_failure_is_not_a_successful_close(self) -> None:
-        for lost_ack in (False, True):
-            with self.subTest(lost_ack=lost_ack):
-                held = _HeldConditionStatusStore(self.store, fail_first=True, commit_before_error=lost_ack)
-                service = MarketEventService(self.broker, self.hub, held, now_provider=lambda: self.now[0])
-                socket = _Socket()
-                closing = None
-                try:
-                    await service.on_ws_connected(socket)
-                    await service.handle_ws_message({"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket)
-                    self.assertTrue(await asyncio.to_thread(held.entered.wait, 2))
-                    closing = asyncio.create_task(service.close())
-                    await asyncio.sleep(0)
-                    self.assertFalse(closing.done())
-                finally:
-                    held.release.set()
-                    with self.assertRaises(OSError) as failed:
-                        await (closing if closing is not None else service.close())
-                self.assertIs(held.error, failed.exception)
-                self.assertTrue(held.first_finished.is_set())
-                self.assertEqual((1, 1, 0), (len(held.attempts), held.max_active, held.active))
-                self.assertFalse(service._background)
-                self.assertFalse(service._tasks)
 
     async def test_null_realtime_data_is_ignored(self) -> None:
         handled = await self.service.handle_ws_message(
@@ -256,172 +83,32 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(handled)
-
-    async def test_initial_continuation_realtime_delete_and_seq_change(self) -> None:
+        # A historical condition cohort must not revive subscriptions at restart.
+        await self.service.close()
+        self.store.record_hot_cohort_revision({
+            "revision_id": "retired-condition", "revision_key": "retired-condition",
+            "stock_code": "005930", "event_type": "ENTER", "session_id": "2026-09-11",
+            "effective_at": 1.0, "available_at": 1.0,
+        }, current={"stock_code": "005930", "stock_name": "historical",
+                    "first_seen_at": 1.0, "entry_session": "2026-09-11",
+                    "last_signal_at": 1.0, "active": True})
+        self.service = MarketEventService(self.broker, self.store, now_provider=lambda: self.now[0])
+        with patch.object(self.store, "load_hot_cohort", side_effect=AssertionError("retired cohort read")):
+            await self.service.start()
+        self.assertEqual(((), ()), self.hub.requested_codes())
         socket = _Socket()
         await self.service.on_ws_connected(socket)
-        await self.service.handle_ws_message(
-            {"trnm": "CNSRLST", "data": [["7", "상승 15%"]]}, socket,
-        )
-        self.assertEqual({"trnm": "CNSRREQ", "seq": "7", "search_type": "1", "stex_tp": "K"},
-                         socket.messages[-1])
-        await self.service.handle_ws_message(
-            {"trnm": "CNSRREQ", "data": [{"jmcode": "A005930"}],
-             "cont_yn": "Y", "next_key": "page2"}, socket,
-        )
-        self.assertEqual("Y", socket.messages[-1]["cont_yn"])
-        await self.service.handle_ws_message({"trnm": "REAL", "data": [{
-            "type": "02", "values": {"841": "7", "9001": "A005930", "843": "D"},
-        }]}, socket)
-        await self.service.handle_ws_message({"trnm": "CNSRREQ", "seq": "7", "data": [], "cont_yn": "N"}, socket)
-        await asyncio.wait_for(self.service._signal_queue.join(), timeout=2)
-        current = self.store.load_hot_cohort(active_only=True)
-        self.assertEqual(1, len(current))
-        self.assertEqual("D", current[0]["last_signal"])
-        # 재연결 뒤 같은 이름의 변경된 seq를 다시 해석한다.
-        await self.service.on_ws_connected(socket)
-        await self.service.handle_ws_message(
-            {"trnm": "CNSRLST", "data": [["19", "상승 15%"]]}, socket,
-        )
-        self.assertEqual("19", socket.messages[-1]["seq"])
+        self.assertFalse(await self.service.handle_ws_message({"trnm": "CNSRLST", "data": []}, socket))
+        self.assertEqual([], socket.messages)
+        self.assertEqual(1, len(self.store.load_hot_cohort(active_only=True)))
 
-    async def test_metadata_snapshot_cannot_overwrite_later_condition_signal(self) -> None:
-        metadata_entered, release_metadata = asyncio.Event(), asyncio.Event()
-        delete_started, delete_store_entered = asyncio.Event(), asyncio.Event()
-        native_to_thread = asyncio.to_thread
 
-        async def controlled_to_thread(function, *args, **kwargs):
-            if getattr(function, "__name__", "") == "record_hot_cohort_revision":
-                if args[0]["event_type"] == "ELIGIBILITY":
-                    metadata_entered.set()
-                    await release_metadata.wait()
-                elif args[0]["event_type"] == "D":
-                    delete_store_entered.set()
-            return await native_to_thread(function, *args, **kwargs)
 
-        async def delete():
-            delete_started.set()
-            await self.service.record_condition_signal("005930", "D", source="REAL")
 
-        self.service._selected = ("7", "상승 15%")
-        signal_time = self.now[0]
-        deleting = None
-        with patch("kiwoom_monitor.central_server.market_events.asyncio.to_thread",
-                   side_effect=controlled_to_thread):
-            try:
-                await self.service.record_condition_signal("005930", "I", source="INITIAL")
-                await asyncio.wait_for(metadata_entered.wait(), 5)
-                deleting = asyncio.create_task(delete())
-                # The started waiter resumes after delete reaches its first await.
-                # Metadata still owns the old snapshot and has not reached DB ACK.
-                await asyncio.wait_for(delete_started.wait(), 5)
-                self.assertFalse(delete_store_entered.is_set(), "signal write bypassed metadata state ownership")
-                self.now[0] = datetime(2026, 9, 12, 0, 1, tzinfo=signal_time.tzinfo)
-            finally:
-                release_metadata.set()
-                if deleting is not None:
-                    await asyncio.wait_for(deleting, 5)
-                await asyncio.wait_for(self.service._metadata_queue.join(), 5)
-        current = self.store.load_hot_cohort(active_only=True)[0]
-        self.assertEqual("D", current["last_signal"])
-        self.assertEqual(signal_time.timestamp(), current["last_signal_at"])
-        self.assertTrue(current["nxt_eligible"])
-        self.assertEqual("D", self.service._cohort["005930"]["last_signal"])
-        history = self.store.load_market_event_history("cohort", code="005930", limit=10)
-        self.assertEqual({"ENTERED", "ELIGIBILITY", "D"}, {row["event_type"] for row in history})
-        self.assertEqual("2026-09-11", next(row for row in history if row["event_type"] == "D")["session_id"])
 
-    async def test_retention_uses_next_observed_session_not_calendar(self) -> None:
-        self.service._selected = ("7", "상승 15%")
-        await self.service.record_condition_signal("005930", "I", source="INITIAL")
-        self.service.mark_krx_session_observed("2026-09-11")
-        await self.service.close_krx_session("2026-09-11")
-        self.assertTrue(self.store.load_hot_cohort(active_only=True))
-        # 월요일이 휴일이었다는 가정: 실제로 관측된 화요일 세션 종료 때만 만료된다.
-        self.now[0] = datetime(2026, 9, 15, 15, 30, tzinfo=self.now[0].tzinfo)
-        self.service.mark_krx_session_observed("2026-09-15")
-        await self.service.close_krx_session("2026-09-15")
-        self.assertFalse(self.store.load_hot_cohort(active_only=True))
-        self.assertEqual("next_observed_krx_session_close",
-                         self.store.load_market_event_history("cohort", code="005930")[0]["basis"])
 
-    async def test_regular_close_does_not_expire_cohort_before_full_day_close(self) -> None:
-        self.service._selected = ("7", "상승 15%")
-        await self.service.record_condition_signal("005930", "I", source="INITIAL")
-        self.service.mark_krx_session_observed("2026-09-11")
-        await self.service.close_observation_day("2026-09-11")
-        self.now[0] = datetime(2026, 9, 14, 15, 30, tzinfo=self.now[0].tzinfo)
-        self.service.mark_krx_session_observed("2026-09-14")
-        await self.service.close_krx_regular_session("2026-09-14")
-        self.assertTrue(self.store.load_hot_cohort(active_only=True))
-        self.now[0] = datetime(2026, 9, 14, 20, 0, tzinfo=self.now[0].tzinfo)
-        await self.service.close_observation_day("2026-09-14")
-        self.assertFalse(self.store.load_hot_cohort(active_only=True))
 
-    async def test_nxt_after_tick_cannot_be_used_as_krx_regular_close(self) -> None:
-        self.service._selected = ("7", "상승 15%")
-        await self.service.record_condition_signal("005930", "I", source="INITIAL")
-        await asyncio.wait_for(self.service._metadata_queue.join(), timeout=2)
-        self.service.mark_krx_session_observed("2026-09-11")
-        nxt_tick = TradeTick(
-            "005930", 130000, 1, 1, 1, 130000, "195959", 20.0, market="NXT",
-        )
-        self.service._last_ticks[("005930", "NXT")] = nxt_tick
-        await self.service.close_krx_regular_session("2026-09-11")
-        statuses = {
-            value["status"] for value in self.store.load_market_event_history("upper_limit", code="005930")
-        }
-        self.assertNotIn("CLOSED_AT_LIMIT", statuses)
 
-    async def test_hub_union_nxt_and_upper_limit_facts_are_deduplicated(self) -> None:
-        top20 = self.hub.connect()
-        self.hub.update_subscription(top20, ["005930"], ["005930"])
-        self.service._selected = ("7", "상승 15%")
-        await self.service.record_condition_signal("005930", "I", source="INITIAL")
-        await asyncio.wait_for(self.service._metadata_queue.join(), timeout=2)
-        codes, nxt = self.hub.requested_codes()
-        self.assertEqual(("005930",), codes)
-        self.assertEqual(("005930",), nxt)
-        below = TradeTick("005930", 120000, 1, 1, 1, 125000, "095900", 14.0)
-        await self.service.observe_trade(below)
-        self.assertTrue(self.store.load_hot_cohort(active_only=True))
-        tick = TradeTick("005930", 130000, 1, 1, 1, 130000, "100000", 29.97)
-        await self.service.observe_trade(tick)
-        await self.service.observe_trade(tick)
-        self.service._last_ticks["005930"] = tick
-        self.service.mark_krx_session_observed("2026-09-11")
-        await self.service.close_krx_session("2026-09-11")
-        history = self.store.load_market_event_history("upper_limit", code="005930")
-        self.assertEqual({"UNKNOWN", "TOUCHED", "CURRENT", "CLOSED_AT_LIMIT"},
-                         {value["status"] for value in history})
-        self.assertEqual(4, len(history))
-        self.assertFalse(any(api_id.lower().startswith(("kt", "order")) for api_id, _ in self.broker.calls))
-
-    async def test_reset_change_rate_does_not_create_fact_from_old_upper_limit(self) -> None:
-        self.service._cohort["005930"] = {"active": True}
-        self.service._upper_limits["005930"] = 130_000
-
-        await self.service.observe_trade(
-            TradeTick("005930", 130_000, 1, 1, 1, 130_000, "163000", 0.0),
-        )
-
-        self.assertEqual(
-            [], self.store.load_market_event_history("upper_limit", code="005930"),
-        )
-
-    async def test_0g_replaces_upper_limit_basis_for_tracked_stock(self) -> None:
-        self.service._cohort["005930"] = {"active": True}
-        self.service._upper_limits["005930"] = 130_000
-
-        handled = await self.service.handle_ws_message({
-            "trnm": "REAL",
-            "data": [{"type": "0g", "item": "005930", "values": {
-                "305": "+135000", "306": "-73000", "307": "104000",
-            }}],
-        }, _Socket())
-
-        self.assertTrue(handled)
-        self.assertEqual(135_000, self.service._upper_limits["005930"])
 
     async def test_vi_live_and_backfill_resends_are_immutable_deduplicated(self) -> None:
         socket = _Socket()

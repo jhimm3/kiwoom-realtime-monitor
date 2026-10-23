@@ -220,7 +220,7 @@ class _Owner:
 
 class _Runner:
     def __init__(self, store, bundle, spec, *, poll_seconds, price_source=None, now_provider=None, leader_context_source=None):
-        self._bundle = bundle
+        self._bound_bundle = bundle
         self.now_provider = now_provider
         self.leader_context_source = leader_context_source
         self.started = False
@@ -230,6 +230,17 @@ class _Runner:
             "spec_id": spec.spec_id,
             "state": "WARMUP",
         }
+
+    @property
+    def account_ref(self):
+        return self._bound_bundle.account_ref
+
+    @property
+    def credential_profile_id(self):
+        return self._bound_bundle.credential_profile_id
+
+    def is_bound_to(self, bundle):
+        return self._bound_bundle is bundle
 
     async def start(self):
         self.started = True
@@ -362,7 +373,7 @@ class MockAutomationSupervisorTests(unittest.IsolatedAsyncioTestCase):
         current = self.supervisor._runners[ACCOUNT_REF]
         self.assertTrue(old.closed)
         self.assertIsNot(old, current)
-        self.assertIs(self.owner.current, current._bundle)
+        self.assertTrue(current.is_bound_to(self.owner.current))
         self.assertEqual(2, len(self.owner.switch_calls))
         self.assertEqual({}, self.supervisor._runner_close_tasks)
 
@@ -431,6 +442,9 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
             credential_directory=str(root / "vault"),
             account_identity_registry_enabled=True, account_identity_hmac_key="x" * 32,
             autonomous_top20_enabled=False, market_event_collection_enabled=False,
+            # Account cancellation barriers must not race the unrelated live
+            # news collector and its shared-store processing workers.
+            news_naver_market_enabled=False, news_history_jobs_enabled=False,
         ))
         self.lifespan = self.app.router.lifespan_context(self.app)
         await self.lifespan.__aenter__()
@@ -1294,6 +1308,631 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(target_risk, spec_before, admission_before, control_before, receipts_before, False)], native_results)
         self.assertEqual({}, self.supervisor._runners)
         self.assertTrue(current.runtime._retired)
+        self.assertEqual("completed", self.app.state.shutdown_status["state"])
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def _assert_cancelled_resume_native_return_retains_owner(self, *, final_cas):
+        from kiwoom_monitor.application.mock_automation_admission import (
+            MockAutomationControl, build_mock_automation_lease_receipt,
+        )
+        from kiwoom_monitor.application.mock_automation_recovery import (
+            MockAutomationRecoveryDecision, mock_account_recovery_fingerprint,
+        )
+        from kiwoom_monitor.application.mock_automation_risk import MockAutomationRiskSnapshot
+        from kiwoom_monitor.central_server import mock_automation_supervisor as supervisor_module
+
+        repository = self.supervisor._repository
+        # Complete only these tests' previously approved fixture lineage. The
+        # original builder/store validate the immutable receipt; this does not
+        # exercise or replace admission issuance.
+        receipt = build_mock_automation_lease_receipt(
+            self.admission, admitted_at=self.admission.requested_at,
+        )
+        self.assertTrue(repository.save_mock_automation_lease_receipt(receipt))
+        self.assertEqual((receipt,), repository.load_mock_automation_lease_receipts(self.account_ref))
+        self.assertEqual(receipt, repository.load_mock_automation_lease_for_admission(
+            self.account_ref, self.admission.admission_id,
+        ))
+        response = await self.http.post("/api/v1/mock-automation/stop", json={
+            "credential_profile_id": self.profile, "account_ref": self.account_ref,
+            "spec_id": self.spec.spec_id, "expected_control_revision": self.control.control_revision,
+            "reason": "prepare stopped control for cancelled resume native return",
+        })
+        self.assertEqual(200, response.status_code)
+        control_before = repository.load_mock_automation_control(self.account_ref)
+        receipts_before = repository.load_mock_automation_stop_revisions(self.account_ref)
+        self.assertEqual(MockAutomationDesiredState.STOPPED, control_before.desired_state)
+        self.assertEqual(1, len(receipts_before))
+        response = await self.put_settings()
+        self.assertEqual(200, response.status_code)
+        response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
+        self.assertEqual(200, response.status_code)
+        settings_revision = response.json()["applied_revision"]
+        manual = self.owner.bundle(self.profile)
+        self.assertEqual(MockAccountRuntimeMode.MANUAL, manual.runtime_mode)
+        self.assertIsNone(manual.automation_context)
+        refresh_recovery = type(manual.monitor).refresh_recovery
+        refreshed = []
+        target_bundles, native_results, native_errors = [], [], []
+        dispatched, accepted, release, finished = (
+            threading.Event(), threading.Event(), threading.Event(), threading.Event()
+        )
+        self.addCleanup(release.set)
+        target_name = "resume_mock_automation" if final_cas else "record_mock_automation_recovery_from_risk"
+        original = getattr(supervisor_module, target_name)
+
+        async def observed_refresh(monitor):
+            recovery = await refresh_recovery(monitor)
+            refreshed.append((monitor, recovery, monitor.latest_automation_risk_cut))
+            return recovery
+
+        def held_native_return(*args, **kwargs):
+            target_bundles.append(self.owner.bundle(self.profile))
+            dispatched.set()
+            try:
+                result = original(*args, **kwargs)
+                native_results.append((result,
+                    repository.load_latest_mock_automation_recovery(self.account_ref, self.admission.admission_id),
+                    repository.load_mock_automation_control(self.account_ref),
+                    repository.load_mock_automation_spec(self.account_ref, self.spec.spec_id),
+                    repository.load_mock_automation_admission_for_spec(self.account_ref, self.spec.spec_id),
+                    repository.load_mock_automation_stop_revisions(self.account_ref),
+                    repository.load_mock_automation_lease_for_admission(self.account_ref, self.admission.admission_id)))
+                # The original native body has completed, including its actual
+                # immutable write or CAS. Only the worker's return is held; no
+                # database connection/transaction or runtime guard is blocked.
+                accepted.set()
+                if not release.wait(5):
+                    raise AssertionError("cancelled resume native-return barrier was not released")
+                return result
+            except BaseException as error:
+                native_errors.append(repr(error))
+                raise
+            finally:
+                finished.set()
+
+        with patch.object(type(manual.monitor), "refresh_recovery", new=observed_refresh), \
+             patch.object(supervisor_module, target_name, side_effect=held_native_return) as target, \
+             patch.object(repository, "save_mock_automation_recovery_decision", wraps=repository.save_mock_automation_recovery_decision) as recovery_write, \
+             patch.object(repository, "save_mock_automation_control", wraps=repository.save_mock_automation_control) as control_cas, \
+             patch.object(self.store, "close", wraps=self.store.close) as close_store:
+            request = asyncio.create_task(self.http.post("/api/v1/mock-automation/resume", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_control_revision": control_before.control_revision,
+                "expected_settings_revision": settings_revision, "credential_revision": 1,
+                "reason": "cancel during resume native return",
+            }))
+            shutdown = None
+            try:
+                if final_cas:
+                    self.assertTrue(await asyncio.to_thread(dispatched.wait, 3),
+                        f"target dispatched={dispatched.is_set()}, errors={native_errors}")
+                self.assertTrue(await asyncio.to_thread(accepted.wait, 3),
+                    f"target dispatched={dispatched.is_set()}, accepted={accepted.is_set()}, errors={native_errors}")
+                current = target_bundles[0]
+                self.assertIs(current, self.owner.bundle(self.profile))
+                self.assertIsNot(current, manual)
+                self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, current.runtime_mode)
+                self.assertEqual(control_before.control_revision, current.automation_context.control_revision)
+                self.assertIs(refreshed[-1][0], current.monitor)
+                risk = refreshed[-1][2]["risk"]
+                self.assertIsInstance(risk, MockAutomationRiskSnapshot)
+                self.assertEqual(risk, repository.load_latest_mock_automation_risk(self.account_ref))
+                self.assertEqual(current.run_id, risk.execution_run_id)
+                result, decision, control, spec, admission, stop_receipts, stored_receipt = native_results[0]
+                self.assertIsInstance(decision, MockAutomationRecoveryDecision)
+                self.assertEqual(receipt.receipt_id, decision.lease_receipt_id)
+                self.assertEqual(self.admission.admission_id, decision.admission_id)
+                self.assertEqual(self.spec.spec_id, decision.spec_id)
+                self.assertEqual(risk.snapshot_id, decision.risk_snapshot_id)
+                self.assertEqual(risk.reconciliation_revision, decision.risk_reconciliation_revision)
+                self.assertEqual(mock_account_recovery_fingerprint(refreshed[-1][1]), decision.recovery_fingerprint)
+                self.assertEqual((decision,), repository.load_mock_automation_recovery_decisions(self.account_ref))
+                self.assertEqual((self.spec, self.admission, receipts_before, receipt),
+                                 (spec, admission, stop_receipts, stored_receipt))
+                if final_cas:
+                    self.assertIsInstance(result, MockAutomationControl)
+                    self.assertEqual(result, control)
+                    self.assertEqual(MockAutomationDesiredState.RUNNING, control.desired_state)
+                    self.assertEqual(control_before.control_revision + 1, control.control_revision)
+                    self.assertEqual("cancel during resume native return", control.reason)
+                else:
+                    self.assertEqual(result, decision)
+                    self.assertEqual(control_before, control)
+                self.assertEqual(1, target.call_count)
+                self.assertEqual(1, recovery_write.call_count)
+                self.assertEqual(int(final_cas), control_cas.call_count)
+                self.assertFalse(current.runtime._new_orders_enabled)
+                self.assertEqual({}, self.supervisor._runners)
+                request.cancel()
+                await asyncio.sleep(0)
+                shutdown = asyncio.create_task(self.close_app())
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.2)
+                except TimeoutError:
+                    pass
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()
+                await asyncio.sleep(0)
+                observed = {
+                    "request_pending": not request.done(),
+                    "account_lock_held": self.supervisor._locks[self.account_ref].locked(),
+                    "shutdown_pending": not shutdown.done(),
+                    "owner_closing": self.owner._closing,
+                    "runtime_retired": current.runtime._retired,
+                    "store_close_calls": close_store.call_count,
+                    "native_pending": not finished.is_set(),
+                }
+            finally:
+                release.set()
+                outcome = await asyncio.gather(request, return_exceptions=True)
+                if shutdown is not None:
+                    await shutdown
+                if dispatched.is_set():
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+
+        self.assertEqual({
+            "request_pending": True, "account_lock_held": True,
+            "shutdown_pending": True, "owner_closing": False,
+            "runtime_retired": False, "store_close_calls": 0,
+            "native_pending": True,
+        }, observed)
+        self.assertIsInstance(outcome[0], asyncio.CancelledError)
+        self.assertEqual([], native_errors)
+        self.assertEqual(1, len(native_results))
+        self.assertEqual({}, self.supervisor._runners)
+        self.assertTrue(current.runtime._retired)
+        self.assertEqual("completed", self.app.state.shutdown_status["state"])
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def test_cancelled_resume_recovery_record_retains_owner_until_original_native_finishes(self):
+        await self._assert_cancelled_resume_native_return_retains_owner(final_cas=False)
+
+    async def test_cancelled_resume_control_cas_retains_owner_until_original_native_finishes(self):
+        await self._assert_cancelled_resume_native_return_retains_owner(final_cas=True)
+
+    async def test_cancelled_mode_switch_settings_read_retains_owner_until_original_query_finishes(self):
+        response = await self.put_settings()
+        self.assertEqual(200, response.status_code)
+        response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
+        self.assertEqual(200, response.status_code)
+        settings_revision = response.json()["applied_revision"]
+        manual = self.owner.bundle(self.profile)
+        self.assertEqual(MockAccountRuntimeMode.MANUAL, manual.runtime_mode)
+        self.assertNotIn(self.account_ref, self.supervisor._runners)
+        repository = self.supervisor._repository
+        control_before = repository.load_mock_automation_control(self.account_ref)
+        settings_before = self.store.load_account_settings(self.scope)
+        load_settings = self.store.load_account_settings
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        native_results, native_errors = [], []
+
+        def held_settings_return(scope):
+            try:
+                result = load_settings(scope)
+                native_results.append(result)
+                # The original native query has completed. Hold its return to
+                # the existing mode-switch await; no open SQL connection is held.
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("cancelled mode-switch settings-return barrier was not released")
+                native_results.append(repository.load_mock_automation_control(self.account_ref))
+                return result
+            except BaseException as error:
+                native_errors.append(repr(error))
+                raise
+            finally:
+                finished.set()
+
+        with patch.object(self.store, "load_account_settings", side_effect=held_settings_return) as load, \
+             patch.object(self.store, "close", wraps=self.store.close) as close_store:
+            request = asyncio.create_task(self.http.post("/api/v1/mock-automation/start", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_settings_revision": settings_revision,
+                "credential_revision": 1,
+            }))
+            shutdown = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3), str(native_errors))
+                self.assertEqual([settings_before], native_results)
+                self.assertIs(manual, self.owner.bundle(self.profile))
+                self.assertNotIn(self.profile, self.owner._pending_profiles)
+                self.assertFalse(self.owner._account_locks[self.account_ref].locked())
+                request.cancel()
+                await asyncio.sleep(0)
+                shutdown = asyncio.create_task(self.close_app())
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.2)
+                except TimeoutError:
+                    pass
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()
+                await asyncio.sleep(0)
+                observed = {
+                    "request_pending": not request.done(),
+                    "account_lock_held": self.supervisor._locks[self.account_ref].locked(),
+                    "shutdown_pending": not shutdown.done(),
+                    "owner_closing": self.owner._closing,
+                    "runtime_retired": manual.runtime._retired,
+                    "store_close_calls": close_store.call_count,
+                    "native_pending": not finished.is_set(),
+                }
+            finally:
+                release.set()
+                outcome = await asyncio.gather(request, return_exceptions=True)
+                if shutdown is not None:
+                    await shutdown
+                if entered.is_set():
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+
+        self.assertEqual({
+            "request_pending": True, "account_lock_held": True,
+            "shutdown_pending": True, "owner_closing": False,
+            "runtime_retired": False, "store_close_calls": 0,
+            "native_pending": True,
+        }, observed)
+        self.assertIsInstance(outcome[0], asyncio.CancelledError)
+        self.assertEqual(1, load.call_count)
+        self.assertEqual([settings_before, control_before], native_results)
+        self.assertEqual([], native_errors)
+        self.assertEqual(MockAutomationDesiredState.RUNNING, control_before.desired_state)
+        self.assertEqual({}, self.supervisor._runners)
+        self.assertTrue(manual.runtime._retired)
+        self.assertEqual("completed", self.app.state.shutdown_status["state"])
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def _assert_cancelled_inner_mode_switch_read_retains_owner(self, *, after_new_start):
+        if after_new_start:
+            response = await self.http.post("/api/v1/mock-automation/stop", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_control_revision": self.control.control_revision,
+                "reason": "prepare stopped control for inner mode-switch read",
+            })
+            self.assertEqual(200, response.status_code)
+        response = await self.put_settings()
+        self.assertEqual(200, response.status_code)
+        response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
+        self.assertEqual(200, response.status_code)
+        settings_revision = response.json()["applied_revision"]
+        manual = self.owner.bundle(self.profile)
+        self.assertEqual(MockAccountRuntimeMode.MANUAL, manual.runtime_mode)
+        self.assertIs(manual, self.owner._contexts[self.profile])
+        self.assertNotIn(self.account_ref, self.supervisor._runners)
+        repository = self.supervisor._repository
+        control_before = repository.load_mock_automation_control(self.account_ref)
+        receipts_before = repository.load_mock_automation_stop_revisions(self.account_ref)
+        settings_before = self.store.load_account_settings(self.scope)
+        self.assertEqual(MockAutomationDesiredState.STOPPED if after_new_start
+                         else MockAutomationDesiredState.RUNNING, control_before.desired_state)
+        load_settings = self.store.load_account_settings
+        close_bundle = type(manual).close
+        target_read = 3 if after_new_start else 2
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        reads, native_results, native_errors, closed = [], [], [], []
+
+        def held_inner_settings_return(scope):
+            result = load_settings(scope)
+            reads.append(result)
+            if len(reads) != target_read:
+                return result
+            try:
+                # The selected original query has completed. Hold its return,
+                # without claiming an open SQL connection or backend wait.
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("inner mode-switch settings-return barrier was not released")
+                native_results.append((repository.load_mock_automation_control(self.account_ref),
+                    repository.load_mock_automation_stop_revisions(self.account_ref)))
+                return result
+            except BaseException as error:
+                native_errors.append(repr(error))
+                raise
+            finally:
+                finished.set()
+
+        async def observed_close(bundle, *, close_broker=True):
+            closed.append((bundle, finished.is_set()))
+            await close_bundle(bundle, close_broker=close_broker)
+
+        with patch.object(self.store, "load_account_settings", side_effect=held_inner_settings_return) as load, \
+             patch.object(type(manual), "close", new=observed_close), \
+             patch.object(self.store, "close", wraps=self.store.close) as close_store:
+            payload = {
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_settings_revision": settings_revision,
+                "credential_revision": 1,
+            }
+            if after_new_start:
+                payload.update(expected_control_revision=control_before.control_revision,
+                               reason="cancel during started context settings read")
+            request = asyncio.create_task(self.http.post(
+                "/api/v1/mock-automation/resume" if after_new_start else "/api/v1/mock-automation/start",
+                json=payload,
+            ))
+            shutdown = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3), str(native_errors))
+                self.assertEqual([settings_before] * target_read, reads)
+                context = self.owner._contexts[self.profile]
+                self.assertIsNone(self.owner.bundle(self.profile))
+                self.assertTrue(manual.runtime._retired)
+                self.assertTrue(self.owner._account_locks[self.account_ref].locked())
+                self.assertIn(self.profile, self.owner._pending_profiles)
+                if after_new_start:
+                    self.assertIsNot(manual, context)
+                    self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, context.runtime_mode)
+                    self.assertEqual(manual.account_ref, context.account_ref)
+                    self.assertEqual(self.admission.execution_run_id, context.run_id)
+                    self.assertEqual(control_before.control_revision, context.automation_context.control_revision)
+                    self.assertTrue(context._start_task.done())
+                    self.assertTrue(context.monitor.is_started)
+                    self.assertTrue(context.runtime._active)
+                    self.assertFalse(context.runtime._retired)
+                    self.assertFalse(context.runtime._new_orders_enabled)
+                else:
+                    self.assertIs(manual, context)
+                request.cancel()
+                await asyncio.sleep(0)
+                shutdown = asyncio.create_task(self.close_app())
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.2)
+                except TimeoutError:
+                    pass
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()
+                await asyncio.sleep(0)
+                observed = {
+                    "request_pending": not request.done(),
+                    "supervisor_lock_held": self.supervisor._locks[self.account_ref].locked(),
+                    "owner_lock_held": self.owner._account_locks[self.account_ref].locked(),
+                    "profile_pending": self.profile in self.owner._pending_profiles,
+                    "shutdown_pending": not shutdown.done(),
+                    "owner_closing": self.owner._closing,
+                    "context_retained": self.owner._contexts[self.profile] is context,
+                    "context_retired": context.runtime._retired,
+                    "bundle_unpublished": self.owner.bundle(self.profile) is None,
+                    "store_close_calls": close_store.call_count,
+                    "native_pending": not finished.is_set(),
+                }
+            finally:
+                release.set()
+                if not entered.is_set() and not request.done():
+                    request.cancel()
+                outcome = await asyncio.gather(request, return_exceptions=True)
+                if shutdown is not None:
+                    await shutdown
+                if entered.is_set():
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+
+        self.assertEqual({
+            "request_pending": True, "supervisor_lock_held": True,
+            "owner_lock_held": True, "profile_pending": True,
+            "shutdown_pending": True, "owner_closing": False,
+            "context_retained": True, "context_retired": not after_new_start,
+            "bundle_unpublished": True, "store_close_calls": 0, "native_pending": True,
+        }, observed)
+        self.assertIsInstance(outcome[0], asyncio.CancelledError)
+        self.assertEqual(target_read, load.call_count)
+        self.assertEqual([settings_before] * target_read, reads)
+        self.assertEqual([(control_before, receipts_before)], native_results)
+        self.assertEqual([], native_errors)
+        self.assertIs(context, self.owner._contexts[self.profile])
+        self.assertTrue(context.runtime._retired)
+        self.assertFalse(self.owner._account_locks[self.account_ref].locked())
+        self.assertNotIn(self.profile, self.owner._pending_profiles)
+        if after_new_start:
+            self.assertEqual([(context, True)], [row for row in closed if row[0] is context])
+            self.assertFalse(context.monitor.is_started)
+        else:
+            self.assertTrue(all(bundle is manual for bundle, _ in closed))
+        self.assertEqual({}, self.supervisor._runners)
+        self.assertEqual("completed", self.app.state.shutdown_status["state"])
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def test_cancelled_mode_switch_post_close_read_retains_locks_until_native_finishes(self):
+        await self._assert_cancelled_inner_mode_switch_read_retains_owner(after_new_start=False)
+
+    async def test_cancelled_mode_switch_started_context_read_retains_owner_until_native_finishes(self):
+        await self._assert_cancelled_inner_mode_switch_read_retains_owner(after_new_start=True)
+
+    async def test_stop_status_keeps_fresh_query_failure_and_projects_actual_replacement_on_loop(self):
+        repository = self.supervisor._repository
+        original = repository.load_mock_automation_control
+        failure_reason = "STOP committed before final status query failure"
+        failed_queries = []
+
+        def fail_final_query(account_ref):
+            control = original(account_ref)
+            if control.reason == failure_reason:
+                failed_queries.append(control)
+                raise RuntimeError("controlled final status read failure")
+            return control
+
+        with patch.object(repository, "load_mock_automation_control", side_effect=fail_final_query):
+            response = await self.http.post("/api/v1/mock-automation/stop", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_control_revision": self.control.control_revision,
+                "reason": failure_reason,
+            })
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("controlled final status read failure", response.json()["detail"])
+        stopped = original(self.account_ref)
+        self.assertEqual([stopped], failed_queries)
+        self.assertEqual(MockAutomationDesiredState.STOPPED, stopped.desired_state)
+        self.assertEqual(self.control.control_revision + 1, stopped.control_revision)
+        self.assertEqual(1, len(repository.load_mock_automation_stop_revisions(self.account_ref)))
+        self.assertFalse(self.bundle.runtime._new_orders_enabled)
+
+        loop_thread = threading.get_ident()
+        entered, replaced, release = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        reason = "fresh STOP status after actual owner replacement"
+        final_queries, projections, heartbeat = [], [], []
+        stop_heartbeat = asyncio.Event()
+        project = self.supervisor._status_from_control
+
+        async def beat():
+            while not stop_heartbeat.is_set():
+                heartbeat.append(None)
+                await asyncio.sleep(0.005)
+
+        def release_independently():
+            entered.wait(3)
+            replaced.wait(3)
+            release.set()
+
+        def hold_final_query(account_ref):
+            control = original(account_ref)
+            if control.reason != reason:
+                return control
+            final_queries.append((control, threading.get_ident(), len(heartbeat)))
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("replacement status query was not independently released")
+            return control
+
+        def observed_projection(account_ref, *, credential_profile_id, control):
+            projections.append((threading.get_ident(), self.owner.bundle(self.profile),
+                                self.supervisor._runners.get(self.account_ref)))
+            return project(account_ref, credential_profile_id=credential_profile_id, control=control)
+
+        releaser = threading.Thread(target=release_independently, daemon=True)
+        heartbeat_task = asyncio.create_task(beat())
+        releaser.start()
+        with patch.object(repository, "load_mock_automation_control", side_effect=hold_final_query), \
+             patch.object(self.supervisor, "_status_from_control", side_effect=observed_projection):
+            request = asyncio.create_task(self.http.post("/api/v1/mock-automation/stop", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_control_revision": stopped.control_revision,
+                "reason": reason,
+            }))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                self.assertNotEqual(loop_thread, final_queries[0][1])
+                self.assertTrue(self.supervisor._locks[self.account_ref].locked())
+                settings_response = await self.put_settings()
+                self.assertEqual(200, settings_response.status_code)
+                current = self.owner.bundle(self.profile)
+                self.assertIsNot(self.bundle, current)
+                self.assertTrue(self.runner._closing)
+                self.assertIsNone(self.runner._task)
+                self.assertNotIn(self.account_ref, self.supervisor._runners)
+                self.assertTrue(self.bundle.runtime._retired)
+                self.assertGreater(len(heartbeat), final_queries[0][2])
+                replaced.set()
+                response = await request
+            finally:
+                replaced.set()
+                release.set()
+                await asyncio.gather(request, return_exceptions=True)
+                stop_heartbeat.set()
+                await heartbeat_task
+                await asyncio.to_thread(releaser.join, 3)
+        self.assertFalse(releaser.is_alive())
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, len(final_queries))
+        latest = original(self.account_ref)
+        self.assertEqual(stopped.control_revision + 1, latest.control_revision)
+        self.assertEqual(final_queries[0][0].to_dict(), response.json()["control"])
+        self.assertEqual(latest.to_dict(), response.json()["control"])
+        self.assertEqual("MANUAL", response.json()["runtime_mode"])
+        self.assertIsNone(response.json()["runner"])
+        self.assertEqual([(loop_thread, current, None)], projections)
+        self.assertEqual(2, len(repository.load_mock_automation_stop_revisions(self.account_ref)))
+        self.assertFalse(self.bundle.runtime._new_orders_enabled)
+        self.assertIsNone(current.gateway)
+        status = await self.http.get(f"/api/v1/mock-automation/accounts/{self.account_ref}",
+                                     params={"credential_profile_id": self.profile})
+        self.assertEqual(200, status.status_code)
+        self.assertEqual(response.json(), status.json())
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def test_cancelled_stop_final_status_query_retains_native_owner_until_shutdown(self):
+        repository = self.supervisor._repository
+        original = repository.load_mock_automation_control
+        reason = "cancel while final STOP status native query returns"
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        final_queries, receipts = [], []
+
+        def held_final_query(account_ref):
+            control = original(account_ref)
+            if control.reason != reason:
+                return control
+            final_queries.append(control)
+            entered.set()
+            try:
+                if not release.wait(5):
+                    raise AssertionError("cancelled final STOP status query was not released")
+                receipts.extend(repository.load_mock_automation_stop_revisions(self.account_ref))
+                return control
+            finally:
+                finished.set()
+
+        with patch.object(repository, "load_mock_automation_control", side_effect=held_final_query), \
+             patch.object(self.supervisor, "_status_from_control", wraps=self.supervisor._status_from_control) as project, \
+             patch.object(self.store, "close", wraps=self.store.close) as close_store:
+            request = asyncio.create_task(self.http.post("/api/v1/mock-automation/stop", json={
+                "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_control_revision": self.control.control_revision,
+                "reason": reason,
+            }))
+            shutdown = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                control = final_queries[0]
+                self.assertEqual(MockAutomationDesiredState.STOPPED, control.desired_state)
+                self.assertEqual(self.control.control_revision + 1, control.control_revision)
+                self.assertEqual(32400, int(control.changed_at.utcoffset().total_seconds()))
+                self.assertFalse(self.bundle.runtime._new_orders_enabled)
+                request.cancel()
+                await asyncio.sleep(0)
+                shutdown = asyncio.create_task(self.close_app())
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.2)
+                except TimeoutError:
+                    pass
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()
+                await asyncio.sleep(0)
+                observed = {
+                    "request_pending": not request.done(),
+                    "account_lock_held": self.supervisor._locks[self.account_ref].locked(),
+                    "shutdown_pending": not shutdown.done(), "owner_closing": self.owner._closing,
+                    "runtime_retired": self.bundle.runtime._retired,
+                    "store_close_calls": close_store.call_count, "native_pending": not finished.is_set(),
+                }
+            finally:
+                release.set()
+                if not entered.is_set() and not request.done():
+                    request.cancel()
+                outcome = await asyncio.gather(request, return_exceptions=True)
+                if shutdown is not None:
+                    await shutdown
+                if entered.is_set():
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 3))
+        self.assertEqual({
+            "request_pending": True, "account_lock_held": True, "shutdown_pending": True,
+            "owner_closing": False, "runtime_retired": False, "store_close_calls": 0, "native_pending": True,
+        }, observed)
+        self.assertIsInstance(outcome[0], asyncio.CancelledError)
+        self.assertEqual(1, len(final_queries))
+        self.assertEqual(1, len(receipts))
+        self.assertEqual(reason, receipts[0].reason)
+        self.assertFalse(receipts[0].new_orders_enabled)
+        project.assert_not_called()
+        self.assertTrue(self.bundle.runtime._retired)
         self.assertEqual("completed", self.app.state.shutdown_status["state"])
         self.transport.submit.assert_not_called()
         self.transport.cancel.assert_not_called()

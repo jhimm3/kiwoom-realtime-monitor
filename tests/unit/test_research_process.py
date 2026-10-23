@@ -378,5 +378,109 @@ class ResearchProcessTests(unittest.TestCase):
                 load_research_process_request(path)
 
 
+    def test_cli_reuses_parsed_request_with_native_input_and_result_oracles(self) -> None:
+        from io import StringIO
+        from kiwoom_monitor import research_process
+        from kiwoom_monitor.application.leader_breakout import document_leader_breakout_policy
+        from research_test_support import write_campaign_request
+
+        modes = ("single_run", "rank_comparison", "limited_search", "leader_breakout",
+                 "invalid-json", "nonobject", "read-error")
+        for mode in modes:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if mode == "limited_search":
+                    request_path, _ = write_campaign_request(root, max_trials=1)
+                else:
+                    _write_empty_dataset(root)
+                    request_path = root / "request.json"
+                    if mode == "leader_breakout":
+                        document = {"mode": mode, "dataset": "dataset", "session_profile": "krx-regular/v1",
+                                    "policy": document_leader_breakout_policy().to_dict()}
+                    else:
+                        document = {**_request_document(), "mode": mode}
+                    if mode != "read-error":
+                        request_path.write_text(
+                            "{invalid-json" if mode == "invalid-json" else "[]" if mode == "nonobject"
+                            else json.dumps(document), encoding="utf-8",
+                        )
+                contents = request_path.read_text(encoding="utf-8") if request_path.exists() else None
+                protected = {path: path.read_bytes() for path in (
+                    root / "dataset/manifest.json", root / "dataset/observations.jsonl",
+                    *((request_path,) if request_path.exists() else ()),
+                )}
+                result_path = root / "result.json"
+                old_result = b'{"status":"previous-result"}\n'
+                result_path.write_bytes(old_result)
+                counts = {"read": 0, "parse": 0}
+                requests, replacements = [], []
+                native_read, native_parse, native_replace = Path.read_text, json.loads, Path.replace
+                native_execute = research_process.execute_process_request
+
+                def read(path, *args, **kwargs):
+                    if path.resolve() == request_path.resolve():
+                        counts["read"] += 1
+                    return native_read(path, *args, **kwargs)
+
+                def parse(encoded, *args, **kwargs):
+                    if isinstance(encoded, str) and encoded == contents:
+                        counts["parse"] += 1
+                    return native_parse(encoded, *args, **kwargs)
+
+                def execute(request, *args, **kwargs):
+                    requests.append(request)
+                    return native_execute(request, *args, **kwargs)
+
+                def publish(temporary, target):
+                    if target == result_path:
+                        self.assertEqual(old_result, target.read_bytes())
+                        self.assertIn("status", native_parse(native_read(temporary, encoding="utf-8")))
+                        replacements.append((temporary, target))
+                    return native_replace(temporary, target)
+
+                with patch.object(Path, "read_text", read), patch.object(json, "loads", parse), \
+                        patch.object(Path, "replace", publish), patch("sys.stdout", new=StringIO()), \
+                        patch.object(research_process, "execute_process_request", side_effect=execute):
+                    code = research_process._run_research_process([
+                        "--request", str(request_path), "--result", str(result_path),
+                    ])
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                self.assertEqual(protected, {path: path.read_bytes() for path in protected})
+                self.assertEqual(1, len(replacements))
+                self.assertFalse(replacements[0][0].exists())
+                self.assertEqual([], list(root.glob("*.tmp")))
+                if mode in {"invalid-json", "nonobject", "read-error"}:
+                    self.assertEqual((1, "failed", []), (code, result["status"], requests))
+                    self.assertEqual(
+                        "ValueError: research request must be a JSON object" if mode == "nonobject"
+                        else "ValueError: research request cannot be read", result["reason"],
+                    )
+                    self.assertEqual({"read": 2, "parse": 0 if mode == "read-error" else 2}, counts)
+                    continue
+                self.assertEqual((0, "ok", mode), (code, result["status"], result["kind"]))
+                self.assertEqual(1, len(requests))
+                converted = requests[0]
+                self.assertEqual((mode, (root / "dataset").resolve()), (converted.mode, converted.dataset))
+                if mode == "leader_breakout":
+                    self.assertIsInstance(converted, research_process.LeaderBreakoutProcessRequest)
+                    self.assertEqual("krx-regular/v1", converted.session_profile)
+                    self.assertEqual(("1m", 0, False, False), (
+                        result["input_mode"], result["bar_count"], result["performance_verified"], result["order_authorized"],
+                    ))
+                else:
+                    self.assertIsInstance(converted, research_process.ResearchProcessRequest)
+                    self.assertEqual((root / "output/research.sqlite3").resolve(), converted.database)
+                    self.assertEqual((2, 1_000_000, "chronological_holdout/v1"), (
+                        converted.strategy.lookback_bars, converted.execution.initial_cash_won, converted.evaluation.version,
+                    ))
+                    if mode == "limited_search":
+                        self.assertEqual((1, "completed", 1), (
+                            converted.search.max_trials, result["job_status"], result["budget"]["used_trials"],
+                        ))
+                    else:
+                        self.assertTrue(Path(result["manifest"]).is_file())
+                self.assertEqual({"read": 1, "parse": 1}, counts)
+
+
 if __name__ == "__main__":
     unittest.main()

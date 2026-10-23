@@ -48,6 +48,16 @@ _NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL = (
     + f"AND a.collection_scope IN ({_NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL})) "
     + _NEWS_JOB_CLAIM_ORDER_AND_LOCK_SQL
 )
+# Return the locked candidate's pre-claim values: the shared row decoder
+# increments attempts and uses its original updated_at as queued_at.
+_NEWS_JOB_CLAIM_SQL = (
+    "WITH candidates AS MATERIALIZED (" + _NEWS_JOB_CLAIM_SELECT_SQL + "), "
+    "claimed AS (UPDATE central_news_jobs AS jobs "
+    "SET state='RUNNING',attempts=jobs.attempts+1,updated_at=%s "
+    "FROM candidates WHERE jobs.job_key=candidates.job_key "
+    "RETURNING candidates.*) SELECT * FROM claimed "
+    + _NEWS_JOB_CLAIM_ORDER_AND_LOCK_SQL.replace("FOR UPDATE SKIP LOCKED LIMIT %s", "")
+)
 _NEWS_JOB_CLAIM_READ_ONLY_SQL = _NEWS_JOB_CLAIM_SELECT_SQL.replace(
     "FOR UPDATE SKIP LOCKED LIMIT %s", "LIMIT %s",
 )
@@ -202,21 +212,17 @@ class PostgresNewsJobStoreMixin:
             ))
             priority = str(priority_stock_code or "").strip()
 
-            def select_candidates():
+            ordering = (preferred_stage, preferred_stage,
+                        priority, priority, priority, priority, priority, priority)
+
+            def claim_candidates():
                 cursor.execute(
-                    _NEWS_JOB_CLAIM_SELECT_SQL,
-                    (claimed_at, preferred_stage, preferred_stage,
-                     priority, priority, priority, priority, priority, priority,
-                     bounded_limit(limit, 4)),
+                    _NEWS_JOB_CLAIM_SQL,
+                    (claimed_at, *ordering, bounded_limit(limit, 4), claimed_at, *ordering),
                 )
                 return cursor.fetchall()
 
-            rows = run_phase("select_candidates", select_candidates)
-            for row in rows:
-                run_phase("mark_running", lambda: cursor.execute(
-                    "UPDATE central_news_jobs SET state='RUNNING',attempts=attempts+1,updated_at=%s "
-                    "WHERE job_key=%s", (claimed_at, row[0]),
-                ))
+            rows = run_phase("claim_candidates", claim_candidates)
         from .diagnostic_metrics import record_writer_transaction
         record_writer_transaction("news_job_claim", len(rows),
                                   round((monotonic() - started_at) * 1000),

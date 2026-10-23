@@ -48,7 +48,6 @@ from kiwoom_monitor.central_server.postgres_access import (
     DBWriterContext, ObservedDBCursor, open_observed_connection,
 )
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
-from kiwoom_monitor.central_server.market_events import MarketEventService
 from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
 from kiwoom_monitor.central_server.external_market_collector import YahooDelayedMarketCollector
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
@@ -1595,8 +1594,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         with self.store._connect() as connection, connection.cursor() as cursor:
             for key, code, state, updated_at in (
                 (stale_key, stale_code, "RUNNING", -200.0),
-                (first_key, ready_code, "PENDING", 0.0),
-                (second_key, ready_code, "PENDING", 0.0),
+                (first_key, ready_code, "PENDING", -2.0),
+                (second_key, ready_code, "PENDING", -1.0),
             ):
                 cursor.execute(
                     "INSERT INTO central_news_jobs"
@@ -1626,14 +1625,23 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual({first_key, second_key},
                          {job["job_key"] for batch in results for job in batch})
         self.assertTrue(all(len(batch) == 1 for batch in results))
+        returned = {job["job_key"]: job for job in (*recovered, *(job for batch in results for job in batch))}
+        self.assertEqual({stale_key: 1.0, first_key: -2.0, second_key: -1.0}, {
+            key: job["queued_at"] for key, job in returned.items()
+        })
+        self.assertTrue(all(job["attempts"] == 1 for job in returned.values()))
 
         with self.store._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT job_key,state,attempts FROM central_news_jobs "
+                "SELECT job_key,state,attempts,updated_at FROM central_news_jobs "
                 "WHERE job_key=ANY(%s)", (self.news_keys,),
             )
+            records = cursor.fetchall()
             rows = {str(key): (state, attempts)
-                    for key, state, attempts in cursor.fetchall()}
+                    for key, state, attempts, _ in records}
+        self.assertEqual({key: (returned[key]["attempts"], claimed_at) for key in returned}, {
+            str(key): (attempts, float(updated_at)) for key, _, attempts, updated_at in records
+        })
         self.assertEqual({key: ("RUNNING", 1) for key in self.news_keys}, rows)
 
         calls = [
@@ -1645,7 +1653,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertTrue(all(
             call["writer_kind"] == "news_job_claim"
             and call["outcome"] == "committed"
-            and call["sql_calls"] == 3
+            and call["sql_calls"] == 2
             and call["commits"] == 1
             and call["backend_pid"] is not None
             and call["rows_attempted"] is None
@@ -1659,14 +1667,75 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
 
         for call in calls:
             phases = call["phase_diagnostics"]
-            self.assertEqual(["recover_stale", "select_candidates", "mark_running"],
+            self.assertEqual(["recover_stale", "claim_candidates"],
                              [phase["phase"] for phase in phases])
             self.assertTrue(all(phase["backend_pid"] == call["backend_pid"]
                                 and not phase["exception_type"] for phase in phases))
-            self.assertEqual([1, 1], [phase["rowcount"] for phase in phases[1:]])
+            self.assertEqual([1], [phase["rowcount"] for phase in phases[1:]])
             sample = next(sample for sample in samples if sample["db_call_id"] == call["call_id"])
             self.assertEqual({phase["phase"]: phase["duration_ms"] for phase in phases},
                              sample["domain_phase_ms"])
+
+        # Fail the real mark-running UPDATE after stale recovery has executed.
+        # All objects and rows are UUID-scoped inside the existing disposable DB.
+        trigger = f"diag_news_claim_{token}"
+        function = f"diag_news_claim_fail_{token}"
+        error_message = f"diagnostic_mark_running_{token}"
+        owned_keys = (stale_key, first_key, second_key)
+        try:
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT current_database()")
+                self.assertEqual("kiwoom_monitor_diagnostic_test", cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT * FROM central_news_jobs WHERE job_key=ANY(%s) ORDER BY job_key",
+                    (list(owned_keys),),
+                )
+                before_failure = cursor.fetchall()
+                cursor.execute(
+                    f"CREATE FUNCTION public.{function}() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                    f"BEGIN RAISE EXCEPTION '{error_message}'; RETURN NEW; END; $$"
+                )
+                cursor.execute(
+                    f"CREATE TRIGGER {trigger} BEFORE UPDATE ON public.central_news_jobs "
+                    f"FOR EACH ROW WHEN (NEW.job_key='{stale_key}' AND NEW.state='RUNNING') "
+                    f"EXECUTE FUNCTION public.{function}()"
+                )
+            failed_started = time.time() - 1
+            with self.assertRaisesRegex(psycopg.errors.RaiseException, error_message) as failure:
+                self.store.claim_news_jobs(now=claimed_at + 121.0,
+                                           priority_stock_code=stale_code)
+            self.assertEqual("P0001", failure.exception.sqlstate)
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM central_news_jobs WHERE job_key=ANY(%s) ORDER BY job_key",
+                    (list(owned_keys),),
+                )
+                self.assertEqual(before_failure, cursor.fetchall(),
+                                 "the failed claim committed stale recovery or a partial mark")
+            failed_calls = [
+                call for call in summarize_db_calls(failed_started, time.time() + 1, mode="raw")["calls"]
+                if call["writer_family"] == "news.job_claim" and call["outcome"] == "rolled_back"
+            ]
+            self.assertEqual(1, len(failed_calls))
+            failed = failed_calls[0]
+            self.assertEqual((2, 0, 1),
+                             (failed["sql_calls"], failed["commits"], failed["rollbacks"]))
+            self.assertIsNotNone(failed["backend_pid"])
+            self.assertEqual(["recover_stale", "claim_candidates"],
+                             [phase["phase"] for phase in failed["phase_diagnostics"]])
+            self.assertEqual(3, failed["phase_diagnostics"][0]["rowcount"])
+            self.assertEqual("RaiseException", failed["phase_diagnostics"][1]["exception_type"])
+        finally:
+            with self.store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(f"DROP TRIGGER IF EXISTS {trigger} ON public.central_news_jobs")
+                cursor.execute(f"DROP FUNCTION IF EXISTS public.{function}()")
+                cursor.execute("SELECT to_regprocedure(%s)", (f"public.{function}()",))
+                self.assertIsNone(cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT COUNT(*) FROM pg_trigger WHERE tgrelid='public.central_news_jobs'::regclass "
+                    "AND tgname=%s", (trigger,),
+                )
+                self.assertEqual(0, cursor.fetchone()[0])
 
     def test_news_job_claim_candidate_preserves_postgres_selection_and_skip_locked(self) -> None:
         token = uuid.uuid4().hex
@@ -1684,7 +1753,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             self.news_keys.append(job_key)
             jobs.append((job_key, article_id, stage, scope))
         with self.store._connect() as connection, connection.cursor() as cursor:
-            for job_key, article_id, stage, scope in jobs:
+            for index, (job_key, article_id, stage, scope) in enumerate(jobs):
                 cursor.execute(
                     "INSERT INTO central_news_article_revisions("
                     "article_revision_id,stock_code,identity,content_hash,collector_id,"
@@ -1698,11 +1767,13 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                     "processing_version,attempts,next_retry_at,state,output_ref,error,"
                     "payload_json,updated_at) "
                     "VALUES(%s,%s,%s,%s,%s,%s,'diagnostic',0,0,'PENDING','','',"
-                    "'{}'::jsonb,0)",
-                    (job_key, article_id, code, code, stage, article_id),
+                    "%s::jsonb,%s)",
+                    (job_key, article_id, code, code, stage, article_id,
+                     json.dumps({"diagnostic_index": index, "scope": scope}), float(index + 1)),
                 )
 
-        parameters = (1.0, "DIAG", "DIAG", code, code, code, code, code, code, 3)
+        claimed_at = 10.0
+        parameters = (claimed_at, "RULE", "RULE", code, code, code, code, code, code, 3)
         expected = {jobs[index][0] for index in (0, 1, 4)}
         with self.store._connect() as connection, connection.cursor() as cursor:
             cursor.execute(_NEWS_JOB_CLAIM_SELECT_SQL, parameters)
@@ -1711,7 +1782,9 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             candidate = [row[0] for row in cursor.fetchall()]
             self.assertEqual(original, candidate)
             self.assertEqual(expected, set(candidate))
+            self.assertEqual([jobs[index][0] for index in (1, 0, 4)], candidate)
 
+        started = time.time() - 1
         first = self.store._connect()
         second = self.store._connect()
         try:
@@ -1724,11 +1797,69 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                 self.assertNotEqual(first_key, second_key)
                 self.assertIn(first_key, expected)
                 self.assertIn(second_key, expected)
+                self.assertEqual((jobs[1][0], jobs[0][0]), (first_key, second_key))
+                skipped = self.store.claim_news_jobs(
+                    limit=4, now=claimed_at, priority_stock_code=code, preferred_stage="RULE",
+                )
+                self.assertEqual([jobs[4][0]], [job["job_key"] for job in skipped],
+                                 "the real combined claim did not skip both raw locked peers")
+                self.assertEqual((1, 5.0), (skipped[0]["attempts"], skipped[0]["queued_at"]))
         finally:
             first.rollback()
             second.rollback()
             first.close()
             second.close()
+
+        # Restore only the already-verified claimed AI row for an independent
+        # multi-row order/return oracle over the same five fixed input scopes.
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_key,state,attempts,updated_at FROM central_news_jobs WHERE job_key=ANY(%s)",
+                (self.news_keys,),
+            )
+            self.assertEqual({
+                job_key: ("RUNNING", 1, claimed_at) if index == 4
+                else ("PENDING", 0, float(index + 1))
+                for index, (job_key, _, _, _) in enumerate(jobs)
+            }, {key: (state, attempts, float(updated_at))
+                for key, state, attempts, updated_at in cursor.fetchall()})
+            cursor.execute(
+                "UPDATE central_news_jobs SET state='PENDING',attempts=0,updated_at=5.0 WHERE job_key=%s",
+                (jobs[4][0],),
+            )
+            self.assertEqual(1, cursor.rowcount)
+        claimed = self.store.claim_news_jobs(
+            limit=4, now=claimed_at, priority_stock_code=code, preferred_stage="RULE",
+        )
+        self.assertEqual([jobs[index][0] for index in (1, 0, 4)],
+                         [job["job_key"] for job in claimed])
+        for job, index in zip(claimed, (1, 0, 4), strict=True):
+            job_key, article_id, stage, scope = jobs[index]
+            self.assertEqual({
+                "job_key": job_key, "article_revision_id": article_id,
+                "stock_code": code, "target_id": code, "stage": stage,
+                "input_hash": article_id, "processing_version": "diagnostic", "attempts": 1,
+                "payload": {"diagnostic_index": index, "scope": scope}, "queued_at": float(index + 1),
+            }, job)
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_key,state,attempts,updated_at FROM central_news_jobs WHERE job_key=ANY(%s)",
+                (self.news_keys,),
+            )
+            self.assertEqual({
+                job_key: ("RUNNING", 1, claimed_at) if job_key in expected
+                else ("PENDING", 0, float(index + 1))
+                for index, (job_key, _, _, _) in enumerate(jobs)
+            }, {key: (state, attempts, float(updated_at))
+                for key, state, attempts, updated_at in cursor.fetchall()})
+        calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                 if call["writer_family"] == "news.job_claim"]
+        self.assertEqual(2, len(calls))
+        self.assertTrue(all((call["sql_calls"], call["commits"], call["rollbacks"]) == (2, 1, 0)
+                            and call["backend_pid"] is not None for call in calls))
+        self.assertTrue(all([phase["phase"] for phase in call["phase_diagnostics"]]
+                            == ["recover_stale", "claim_candidates"] for call in calls))
+        self.assertEqual([1, 3], sorted(call["phase_diagnostics"][1]["rowcount"] for call in calls))
 
     def test_news_request_budget_serializes_parallel_claims_and_observes_limits(self) -> None:
         budget_date = "2099-12-31"
@@ -2771,6 +2902,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         repository.clear_group_assignments((real_fill_key,), account_scope=real)
 
         case = self
+        changed_fill_name = "diagnostic changed fill"
 
         class StoreClient:
             def __init__(self) -> None:
@@ -2795,6 +2927,13 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                     self.keys.add(identity)
                     case.document_keys.append(identity)
                 if self.fail_v2_fills and collection == "journal_v2_fills":
+                    case.assertEqual(2, len(documents))
+                    case.assertEqual({real.account_ref, mock.account_ref}, {
+                        document["owner"] for document in documents
+                    })
+                    case.assertEqual({changed_fill_name}, {
+                        document["document"]["stock_name"] for document in documents
+                    })
                     documents = [*documents, {"owner": real.account_ref, "key": f"bad-{suffix}"}]
                 case.store.upsert_documents(collection, documents)
                 return len(documents)
@@ -2821,7 +2960,20 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             identity: self.store.load_document(*identity) for identity in client.keys
         }
         self.assertTrue(all(value is not None for value in first_rows.values()))
-        self.assertEqual(6, service.sync(path))
+        posted_before_replay = list(client.posted)
+        writes_before_replay = [
+            call["call_id"] for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+            if call["access_mode"] == "write"
+            and str(call["writer_kind"]).startswith("document:journal")
+        ]
+        # A fresh remote read remains required; unchanged documents add no write.
+        self.assertEqual(0, service.sync(path))
+        self.assertEqual(posted_before_replay, client.posted)
+        self.assertEqual(writes_before_replay, [
+            call["call_id"] for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+            if call["access_mode"] == "write"
+            and str(call["writer_kind"]).startswith("document:journal")
+        ])
         self.assertEqual(first_rows, {
             identity: self.store.load_document(*identity) for identity in client.keys
         })
@@ -2832,6 +2984,14 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                     "UPDATE journal_settings SET value_json=?,updated_at=? WHERE setting_key=?",
                     ('["newer"]', "2026-09-28T11:00:00", f"diagnostic-{suffix}"),
                 )
+                # Both scoped fills must differ so dedupe reaches the existing
+                # native batch failure, rather than bypassing the fault fixture.
+                changed_fills = connection.execute(
+                    "UPDATE trade_fills SET stock_name=? WHERE fill_key IN (?,?)",
+                    (changed_fill_name, *(identity[2] for identity in first_rows
+                      if identity[0] == "journal_v2_fills")),
+                ).rowcount
+                self.assertEqual(2, changed_fills)
         client.fail_v2_fills = True
         with self.assertRaises(KeyError):
             service.sync(path)
@@ -4222,109 +4382,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             {sample["db_call_id"] for sample in samples}
         ))
 
-    def test_condition_search_status_replay_preserves_reader_and_correlates_metrics(self) -> None:
-        class WebSocket:
-            def __init__(self) -> None:
-                self.messages: list[str] = []
 
-            async def send(self, message: str) -> None:
-                self.messages.append(message)
-
-        started = time.time() - 1
-        service = MarketEventService(
-            None, None, self.store, condition_substring="15%",
-            now_provider=lambda: datetime(2026, 9, 28, 10, 0, tzinfo=KST),
-        )
-        service._list_policy = (0, "", "15%")
-        websocket = WebSocket()
-        async def save_status():
-            await service._condition_list({
-                "return_code": 0,
-                "data": [["17", "TOP 15% value"]],
-            }, websocket)
-            await service.close()
-
-        asyncio.run(save_status())
-        first = self.store.load_documents("condition_search_status", "hot_cohort", 1)
-        self.assertEqual("UNIQUE_SUBSTRING", first[0]["document"]["status"])
-        self.assertEqual(["17", "TOP 15% value"], first[0]["document"]["selected"])
-        self.assertEqual(1, len(websocket.messages))
-
-        value = {"owner": "hot_cohort", "key": "current", "document": first[0]["document"]}
-        self.store.upsert_documents("condition_search_status", [value])
-        replay = self.store.load_documents("condition_search_status", "hot_cohort", 1)
-        self.assertEqual(first, replay)
-        self.assertEqual(value["document"], replay[0]["document"])
-
-        calls = [
-            call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_kind"] == "document:condition_search_status" and call["access_mode"] == "write"
-        ]
-        self.assertEqual(2, len(calls))
-        self.assertTrue(all(
-            call["writer_family"] == "document.collection"
-            and call["operation"] == "upsert_documents"
-            and call["outcome"] == "committed"
-            and call["rows_attempted"] == 1
-            and call["sql_calls"] == 1
-            and call["commits"] == 1
-            and call["backend_pid"] is not None
-            for call in calls
-        ))
-        legacy = summarize_market_bar_saves(started, time.time() + 1)
-        samples = legacy["writer_transactions"]["document:condition_search_status"]["call_samples"]
-        self.assertTrue({call["call_id"] for call in calls}.issubset(
-            {sample["db_call_id"] for sample in samples}
-        ))
-
-    def test_market_event_session_markers_preserve_writer_boundaries_and_correlate_metrics(self) -> None:
-        session_id = f"diagnostic-{uuid.uuid4().hex}"
-        self.document_keys.append(("market_event_sessions", "krx", session_id))
-        service = MarketEventService(
-            None, None, self.store,
-            now_provider=lambda: datetime(2026, 9, 28, 15, 30, tzinfo=KST),
-        )
-        started = time.time() - 1
-
-        async def close_session_phases() -> None:
-            service.mark_krx_session_observed(session_id)
-            pending = tuple(service._background)
-            if pending:
-                await asyncio.gather(*pending)
-            await service.close_krx_regular_session(session_id)
-            await service.close_observation_day(session_id)
-
-        asyncio.run(close_session_phases())
-        first = self.store.load_documents("market_event_sessions", "krx", 1)
-        self.assertEqual(session_id, first[0]["document"]["session_id"])
-        self.assertTrue(first[0]["document"]["observed"])
-        self.assertIn("full_day_closed_at", first[0]["document"])
-
-        value = {"owner": "krx", "key": session_id, "document": first[0]["document"]}
-        self.store.upsert_documents("market_event_sessions", [value])
-        replay = self.store.load_documents("market_event_sessions", "krx", 1)
-        self.assertEqual(first, replay)
-
-        calls = [
-            call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_kind"] == "document:market_event_sessions" and call["access_mode"] == "write"
-        ]
-        self.assertEqual(4, len(calls))
-        self.assertTrue(all(
-            call["writer_family"] == "document.collection"
-            and call["operation"] == "upsert_documents"
-            and call["outcome"] == "committed"
-            and call["rows_attempted"] == 1
-            and call["sql_calls"] == 1
-            and call["commits"] == 1
-            and call["backend_pid"] is not None
-            for call in calls
-        ))
-        legacy = summarize_market_bar_saves(started, time.time() + 1)
-        samples = legacy["writer_transactions"]["document:market_event_sessions"]["call_samples"]
-        self.assertTrue({call["call_id"] for call in calls}.issubset(
-            {sample["db_call_id"] for sample in samples}
-        ))
 
     def test_market_event_revision_batch_preserves_replay_projection_and_rollback(self) -> None:
         token = uuid.uuid4().hex
@@ -5191,6 +5249,14 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             self.assertNotIn(secret, json.dumps(calls))
 
     def test_mock_automation_risk_history_and_current_recover_separate_writes(self) -> None:
+        native_sql = {}
+        original_run = ObservedDBCursor._run
+
+        def observe_sql(cursor, method, operation, args, kwargs):
+            native_sql.setdefault(cursor._owner.call_id, []).append(str(args[0]).split(None, 1)[0].upper())
+            return original_run(cursor, method, operation, args, kwargs)
+
+        self.enterContext(patch.object(ObservedDBCursor, "_run", new=observe_sql))
         account_ref = f"diagnostic-{uuid.uuid4().hex}"
         observed = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
         recovery = MockAccountRecovery(AccountSnapshot(
@@ -5237,38 +5303,58 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "monotonically"):
             repository.save_mock_automation_risk_snapshot(first)
 
-        calls = [
-            call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_kind"] in {
-                "document:execution_mock_automation_risk_snapshots",
-                "document:execution_mock_automation_current_risk",
-            } and call["access_mode"] == "write"
-        ]
-        self.assertEqual(4, len(calls))
-        for kind in (
+        kinds = (
             "document:execution_mock_automation_risk_snapshots",
             "document:execution_mock_automation_current_risk",
-        ):
-            selected = [call for call in calls if call["writer_kind"] == kind]
-            self.assertEqual(2, len(selected))
-            self.assertTrue(all(
-                call["writer_family"] == "document.collection"
-                and call["operation"] == "upsert_documents"
-                and call["outcome"] == "committed"
-                and call["rows_attempted"] == 1
-                and call["sql_calls"] == 1
-                and call["commits"] == 1
-                and call["backend_pid"] is not None
-                for call in selected
+        )
+        calls = [
+            call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+            if call["writer_kind"] in kinds and call["access_mode"] == "write"
+        ]
+        # New immutable rows use SELECT + INSERT; same-key ACKs still own one
+        # SELECT/COMMIT. The failed current projection never enters its store.
+        expected = [
+            (kinds[0], "document.immutable", 2),
+            (kinds[1], "document.collection", 1),
+            (kinds[0], "document.immutable", 1),
+            (kinds[0], "document.immutable", 2),
+            (kinds[0], "document.immutable", 1),
+            (kinds[1], "document.collection", 1),
+        ]
+        self.assertEqual(expected, [
+            (call["writer_kind"], call["writer_family"], call["sql_calls"])
+            for call in calls
+        ])
+        self.assertEqual([
+            ["SELECT", "INSERT"], ["INSERT"], ["SELECT"],
+            ["SELECT", "INSERT"], ["SELECT"], ["INSERT"],
+        ], [native_sql[call["call_id"]] for call in calls])
+        self.assertEqual(len(expected), len({call["call_id"] for call in calls}))
+        for call in calls:
+            operation = ("insert_immutable_document" if call["writer_family"] == "document.immutable"
+                         else "upsert_documents")
+            self.assertEqual((operation, "committed", 1, 1, 1, 0), (
+                call["operation"], call["outcome"], call["rows_attempted"],
+                call["transactions"], call["commits"], call["rollbacks"],
             ))
-            samples = summarize_market_bar_saves(started, time.time() + 1)[
-                "writer_transactions"
-            ][kind]["call_samples"]
-            self.assertTrue({call["call_id"] for call in selected}.issubset(
-                {sample["db_call_id"] for sample in samples}
-            ))
+            self.assertIsNotNone(call["backend_pid"])
+        current_calls = [call for call in calls if call["writer_kind"] == kinds[1]]
+        samples = summarize_market_bar_saves(started, time.time() + 1)[
+            "writer_transactions"
+        ][kinds[1]]["call_samples"]
+        self.assertTrue({call["call_id"] for call in current_calls}.issubset(
+            {sample["db_call_id"] for sample in samples}
+        ))
 
     def test_mock_automation_recovery_preserves_lineage_and_separate_projection(self) -> None:
+        native_sql = {}
+        original_run = ObservedDBCursor._run
+
+        def observe_sql(cursor, method, operation, args, kwargs):
+            native_sql.setdefault(cursor._owner.call_id, []).append(str(args[0]).split(None, 1)[0].upper())
+            return original_run(cursor, method, operation, args, kwargs)
+
+        self.enterContext(patch.object(ObservedDBCursor, "_run", new=observe_sql))
         account_ref = str(uuid.uuid4())
         observed = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
         repository = ForwardEvaluationRepository(self.store)
@@ -5400,53 +5486,66 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(second, repository.load_latest_mock_automation_recovery(
             account_ref, admission.admission_id,
         ))
+        self.assertEqual(decisions, repository.load_mock_automation_recovery_decisions(account_ref))
         with self.assertRaisesRegex(RuntimeError, "latest mock automation risk snapshot changed"):
             record_mock_automation_recovery_from_risk(
                 repository, runtime, recovery, first_risk,
                 account_ref=account_ref, spec_id=spec.spec_id,
             )
 
+        kinds = (
+            "document:execution_mock_automation_recovery_decisions",
+            "document:execution_mock_automation_current_recovery",
+        )
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_family"] == "document.collection"
-            and call["writer_kind"] in {
-                "document:execution_mock_automation_recovery_decisions",
-                "document:execution_mock_automation_current_recovery",
-            }
+            if call["writer_kind"] in kinds and call["access_mode"] == "write"
         ]
-        self.assertEqual(5, len(calls))
-        self.assertEqual(5, len({call["call_id"] for call in calls}))
+        # Both replayed history ACKs are native SELECT/COMMIT transactions;
+        # current projection replay remains a separate mutable transaction.
+        expected = [
+            (kinds[0], "document.immutable", 2),
+            (kinds[1], "document.collection", 1),
+            (kinds[0], "document.immutable", 1),
+            (kinds[1], "document.collection", 1),
+            (kinds[0], "document.immutable", 2),
+            (kinds[0], "document.immutable", 1),
+            (kinds[1], "document.collection", 1),
+        ]
+        self.assertEqual(expected, [
+            (call["writer_kind"], call["writer_family"], call["sql_calls"])
+            for call in calls
+        ])
         self.assertEqual([
-            "document:execution_mock_automation_recovery_decisions",
-            "document:execution_mock_automation_current_recovery",
-            "document:execution_mock_automation_current_recovery",
-            "document:execution_mock_automation_recovery_decisions",
-            "document:execution_mock_automation_current_recovery",
-        ], [call["writer_kind"] for call in calls])
-        for kind, count in (
-            ("document:execution_mock_automation_recovery_decisions", 2),
-            ("document:execution_mock_automation_current_recovery", 3),
-        ):
-            selected = [call for call in calls if call["writer_kind"] == kind]
-            self.assertEqual(count, len(selected))
-            self.assertTrue(all(
-                call["writer_family"] == "document.collection"
-                and call["operation"] == "upsert_documents"
-                and call["outcome"] == "committed"
-                and call["rows_attempted"] == 1
-                and call["sql_calls"] == 1
-                and call["commits"] == 1
-                and call["backend_pid"] is not None
-                for call in selected
+            ["SELECT", "INSERT"], ["INSERT"], ["SELECT"], ["INSERT"],
+            ["SELECT", "INSERT"], ["SELECT"], ["INSERT"],
+        ], [native_sql[call["call_id"]] for call in calls])
+        self.assertEqual(len(expected), len({call["call_id"] for call in calls}))
+        for call in calls:
+            operation = ("insert_immutable_document" if call["writer_family"] == "document.immutable"
+                         else "upsert_documents")
+            self.assertEqual((operation, "committed", 1, 1, 1, 0), (
+                call["operation"], call["outcome"], call["rows_attempted"],
+                call["transactions"], call["commits"], call["rollbacks"],
             ))
-            samples = summarize_market_bar_saves(started, time.time() + 1)[
-                "writer_transactions"
-            ][kind]["call_samples"]
-            self.assertTrue({call["call_id"] for call in selected}.issubset(
-                {sample["db_call_id"] for sample in samples}
-            ))
+            self.assertIsNotNone(call["backend_pid"])
+        current_calls = [call for call in calls if call["writer_kind"] == kinds[1]]
+        samples = summarize_market_bar_saves(started, time.time() + 1)[
+            "writer_transactions"
+        ][kinds[1]]["call_samples"]
+        self.assertTrue({call["call_id"] for call in current_calls}.issubset(
+            {sample["db_call_id"] for sample in samples}
+        ))
 
     def test_mock_automation_decision_gate_preserves_approval_boundary(self) -> None:
+        native_sql = {}
+        original_run = ObservedDBCursor._run
+
+        def observe_sql(cursor, method, operation, args, kwargs):
+            native_sql.setdefault(cursor._owner.call_id, []).append(str(args[0]).split(None, 1)[0].upper())
+            return original_run(cursor, method, operation, args, kwargs)
+
+        self.enterContext(patch.object(ObservedDBCursor, "_run", new=observe_sql))
         account_ref = str(uuid.uuid4())
         observed = datetime(2026, 9, 16, 0, 0, tzinfo=timezone.utc)
         repository = ForwardEvaluationRepository(self.store)
@@ -5594,17 +5693,25 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertIsNone(repository.load_mock_automation_approved_gate(
             account_ref, blocked.intent_id,
         ))
-        original_upsert = self.store.upsert_documents
+        original_insert = self.store.insert_immutable_document
 
-        def fail_approved_projection(collection, values):
+        def fail_approved_projection(collection, owner, key, document):
             if collection == repository.MOCK_AUTOMATION_APPROVED_GATE_COLLECTION:
                 raise RuntimeError("injected approved gate projection failure")
-            return original_upsert(collection, values)
+            return original_insert(collection, owner, key, document)
 
-        with patch.object(self.store, "upsert_documents",
-                          side_effect=fail_approved_projection):
+        with patch.object(self.store, "insert_immutable_document",
+                          side_effect=fail_approved_projection) as immutable_insert:
             with self.assertRaisesRegex(RuntimeError, "approved gate projection failure"):
                 repository.save_mock_automation_decision_gate(retried)
+        self.assertEqual([
+            repository.MOCK_AUTOMATION_GATE_COLLECTION,
+            repository.MOCK_AUTOMATION_APPROVED_GATE_COLLECTION,
+        ], [call.args[0] for call in immutable_insert.call_args_list])
+        immutable_insert.assert_any_call(
+            repository.MOCK_AUTOMATION_APPROVED_GATE_COLLECTION,
+            account_ref, retried.intent_id, retried.to_dict(),
+        )
         history = repository.load_mock_automation_decision_gates(account_ref)
         self.assertEqual({approved.gate_id, blocked.gate_id, retried.gate_id},
                          {item.gate_id for item in history})
@@ -5615,6 +5722,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(retried, repository.load_mock_automation_approved_gate(
             account_ref, retried.intent_id,
         ))
+        self.assertEqual(history, repository.load_mock_automation_decision_gates(account_ref))
 
         newer_risk = build_mock_automation_risk_snapshot(
             recovery, (), (), (), execution_run_id=admission.execution_run_id,
@@ -5633,33 +5741,41 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         )
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_family"] == "document.collection"
+            if call["writer_family"] == "document.immutable"
             and call["writer_kind"] in kinds
         ]
-        self.assertEqual([kinds[0], kinds[1], kinds[0], kinds[0], kinds[1]],
-                         [call["writer_kind"] for call in calls])
-        self.assertEqual(5, len({call["call_id"] for call in calls}))
-        for kind, count in ((kinds[0], 3), (kinds[1], 2)):
-            selected = [call for call in calls if call["writer_kind"] == kind]
-            self.assertEqual(count, len(selected))
-            self.assertTrue(all(
-                call["writer_family"] == "document.collection"
-                and call["operation"] == "upsert_documents"
-                and call["outcome"] == "committed"
-                and call["rows_attempted"] == 1
-                and call["sql_calls"] == 1
-                and call["commits"] == 1
-                and call["backend_pid"] is not None
-                for call in selected
+        # Initial approval, duplicate ACKs, blocked gate, failed projection,
+        # then repair: history and approved-by-intent keep separate ownership.
+        expected = [
+            (kinds[0], 2), (kinds[1], 2),
+            (kinds[0], 1), (kinds[1], 1),
+            (kinds[0], 2), (kinds[0], 2),
+            (kinds[0], 1), (kinds[1], 2),
+        ]
+        self.assertEqual(expected, [
+            (call["writer_kind"], call["sql_calls"]) for call in calls
+        ])
+        self.assertEqual([
+            ["SELECT", "INSERT"], ["SELECT", "INSERT"], ["SELECT"], ["SELECT"],
+            ["SELECT", "INSERT"], ["SELECT", "INSERT"], ["SELECT"], ["SELECT", "INSERT"],
+        ], [native_sql[call["call_id"]] for call in calls])
+        self.assertEqual(len(expected), len({call["call_id"] for call in calls}))
+        for call in calls:
+            self.assertEqual(("insert_immutable_document", "write", "committed", 1, 1, 1, 0), (
+                call["operation"], call["access_mode"], call["outcome"],
+                call["rows_attempted"], call["transactions"], call["commits"], call["rollbacks"],
             ))
-            samples = summarize_market_bar_saves(started, time.time() + 1)[
-                "writer_transactions"
-            ][kind]["call_samples"]
-            self.assertTrue({call["call_id"] for call in selected}.issubset(
-                {sample["db_call_id"] for sample in samples}
-            ))
+            self.assertIsNotNone(call["backend_pid"])
 
     def test_mock_automation_dispatch_receipt_recovers_separate_intent_projection(self) -> None:
+        native_sql = {}
+        original_run = ObservedDBCursor._run
+
+        def observe_sql(cursor, method, operation, args, kwargs):
+            native_sql.setdefault(cursor._owner.call_id, []).append(str(args[0]).split(None, 1)[0].upper())
+            return original_run(cursor, method, operation, args, kwargs)
+
+        self.enterContext(patch.object(ObservedDBCursor, "_run", new=observe_sql))
         account_ref = str(uuid.uuid4())
         observed = datetime(2026, 9, 16, 0, 0, tzinfo=timezone.utc)
         repository = ForwardEvaluationRepository(self.store)
@@ -5711,17 +5827,26 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.store.upsert_documents(repository.MOCK_AUTOMATION_GATE_COLLECTION, [{
             "owner": account_ref, "key": gate.gate_id, "document": gate.to_dict(),
         }])
-        original_upsert = self.store.upsert_documents
+        original_insert = self.store.insert_immutable_document
 
-        def fail_intent_projection(collection, values):
+        def fail_intent_projection(collection, owner, key, document):
             if collection == repository.MOCK_AUTOMATION_DISPATCH_BY_INTENT_COLLECTION:
                 raise RuntimeError("injected dispatch intent projection failure")
-            return original_upsert(collection, values)
+            return original_insert(collection, owner, key, document)
 
         started = time.time() - 1
-        with patch.object(self.store, "upsert_documents", side_effect=fail_intent_projection):
+        with patch.object(self.store, "insert_immutable_document",
+                          side_effect=fail_intent_projection) as immutable_insert:
             with self.assertRaisesRegex(RuntimeError, "intent projection failure"):
                 repository.save_mock_automation_dispatch_receipt(receipt)
+        self.assertEqual([
+            repository.MOCK_AUTOMATION_DISPATCH_COLLECTION,
+            repository.MOCK_AUTOMATION_DISPATCH_BY_INTENT_COLLECTION,
+        ], [call.args[0] for call in immutable_insert.call_args_list])
+        immutable_insert.assert_any_call(
+            repository.MOCK_AUTOMATION_DISPATCH_BY_INTENT_COLLECTION,
+            account_ref, intent_id, receipt.to_dict(),
+        )
         self.assertEqual((receipt,), repository.load_mock_automation_dispatch_receipts(
             account_ref,
         ))
@@ -5743,21 +5868,27 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         )
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_family"] == "document.collection"
+            if call["writer_family"] == "document.immutable"
             and call["writer_kind"] in kinds
         ]
-        self.assertEqual(list(kinds), [call["writer_kind"] for call in calls])
-        self.assertEqual(2, len({call["call_id"] for call in calls}))
-        for kind, call in zip(kinds, calls):
-            self.assertEqual(("document.collection", "upsert_documents", "committed", 1, 1, 1), (
-                call["writer_family"], call["operation"], call["outcome"],
-                call["rows_attempted"], call["sql_calls"], call["commits"],
+        # Retry ACKs read the existing immutable row; they must not rewrite it.
+        expected = [
+            (kinds[0], 2), (kinds[0], 1), (kinds[1], 2),
+            (kinds[0], 1), (kinds[1], 1),
+        ]
+        self.assertEqual(expected, [
+            (call["writer_kind"], call["sql_calls"]) for call in calls
+        ])
+        self.assertEqual([
+            ["SELECT", "INSERT"], ["SELECT"], ["SELECT", "INSERT"], ["SELECT"], ["SELECT"],
+        ], [native_sql[call["call_id"]] for call in calls])
+        self.assertEqual(len(expected), len({call["call_id"] for call in calls}))
+        for call in calls:
+            self.assertEqual(("insert_immutable_document", "write", "committed", 1, 1, 1, 0), (
+                call["operation"], call["access_mode"], call["outcome"],
+                call["rows_attempted"], call["transactions"], call["commits"], call["rollbacks"],
             ))
             self.assertIsNotNone(call["backend_pid"])
-            samples = summarize_market_bar_saves(started, time.time() + 1)[
-                "writer_transactions"
-            ][kind]["call_samples"]
-            self.assertIn(call["call_id"], {sample["db_call_id"] for sample in samples})
 
     def test_mock_automation_control_cas_preserves_native_transactions(self) -> None:
         account_ref = str(uuid.uuid4())
@@ -5841,6 +5972,14 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             self.assertIsNotNone(call["backend_pid"])
 
     def test_mock_automation_stop_preserves_closed_control_and_recovers_projection(self) -> None:
+        native_sql = {}
+        original_run = ObservedDBCursor._run
+
+        def observe_sql(cursor, method, operation, args, kwargs):
+            native_sql.setdefault(cursor._owner.call_id, []).append(str(args[0]).split(None, 1)[0].upper())
+            return original_run(cursor, method, operation, args, kwargs)
+
+        self.enterContext(patch.object(ObservedDBCursor, "_run", new=observe_sql))
         account_ref = str(uuid.uuid4())
         observed = datetime(2026, 9, 16, 0, 0, tzinfo=timezone.utc)
         repository = ForwardEvaluationRepository(self.store)
@@ -5939,21 +6078,33 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         )
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_family"] == "document.collection"
-            and call["writer_kind"] in kinds
+            if call["writer_kind"] in kinds and call["access_mode"] == "write"
         ]
-        self.assertEqual(list(kinds), [call["writer_kind"] for call in calls])
-        self.assertEqual(2, len({call["call_id"] for call in calls}))
-        for kind, call in zip(kinds, calls):
-            self.assertEqual(("document.collection", "upsert_documents", "committed", 1, 1, 1), (
-                call["writer_family"], call["operation"], call["outcome"],
-                call["rows_attempted"], call["sql_calls"], call["commits"],
+        expected = [
+            (kinds[0], "document.immutable", 2),
+            (kinds[0], "document.immutable", 1),
+            (kinds[1], "document.collection", 1),
+        ]
+        self.assertEqual(expected, [
+            (call["writer_kind"], call["writer_family"], call["sql_calls"])
+            for call in calls
+        ])
+        self.assertEqual([
+            ["SELECT", "INSERT"], ["SELECT"], ["INSERT"],
+        ], [native_sql[call["call_id"]] for call in calls])
+        self.assertEqual(len(expected), len({call["call_id"] for call in calls}))
+        for call in calls:
+            operation = ("insert_immutable_document" if call["writer_family"] == "document.immutable"
+                         else "upsert_documents")
+            self.assertEqual((operation, "committed", 1, 1, 1, 0), (
+                call["operation"], call["outcome"], call["rows_attempted"],
+                call["transactions"], call["commits"], call["rollbacks"],
             ))
             self.assertIsNotNone(call["backend_pid"])
-            samples = summarize_market_bar_saves(started, time.time() + 1)[
-                "writer_transactions"
-            ][kind]["call_samples"]
-            self.assertIn(call["call_id"], {sample["db_call_id"] for sample in samples})
+        samples = summarize_market_bar_saves(started, time.time() + 1)[
+            "writer_transactions"
+        ][kinds[1]]["call_samples"]
+        self.assertIn(calls[-1]["call_id"], {sample["db_call_id"] for sample in samples})
 
     def test_mock_automation_checkpoint_restores_state_without_extra_write(self) -> None:
         account_ref = f"diagnostic-{uuid.uuid4().hex}"

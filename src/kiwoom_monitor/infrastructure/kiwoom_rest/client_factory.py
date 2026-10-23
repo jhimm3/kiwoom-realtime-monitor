@@ -7,6 +7,7 @@ from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 
 from .client import KiwoomRestClient
 from .local_config import LocalApiConfig
+from .settings import KiwoomSettings
 from .remote_client import RemoteKiwoomRestClient
 from .failover_client import FailoverKiwoomRestClient
 from .validation_client import ParallelValidationClient
@@ -36,6 +37,7 @@ def _with_verified_local_account(
 def create_query_client(
     api_config_path: Path, data_source_path: Path | None = None,
     source_settings: DataSourceSettings | None = None,
+    *, local_settings: KiwoomSettings | None = None,
 ) -> QueryClient:
     """데이터 모드에 맞는 키움 조회 클라이언트를 만든다."""
     source_path = data_source_path or api_config_path.with_name("data_source.json")
@@ -45,7 +47,7 @@ def create_query_client(
         if source.mode == "personal_server" and (
             source.local_fallback_enabled or source.parallel_validation_enabled
         ):
-            local_settings = LocalApiConfig(api_config_path).load()
+            local_settings = local_settings if local_settings is not None else LocalApiConfig(api_config_path).load()
             if local_settings.app_key and local_settings.secret_key:
                 local = KiwoomRestClient(local_settings)
                 account_local = _with_verified_local_account(local, local_settings, api_config_path)
@@ -57,6 +59,6 @@ def create_query_client(
                     fallback_on_unavailable=source.local_fallback_enabled,
                 )
         return remote
-    local_settings = LocalApiConfig(api_config_path).load()
+    local_settings = local_settings if local_settings is not None else LocalApiConfig(api_config_path).load()
     local = KiwoomRestClient(local_settings)
     return _with_verified_local_account(local, local_settings, api_config_path)

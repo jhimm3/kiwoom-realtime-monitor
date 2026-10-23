@@ -141,13 +141,6 @@ class ApiSettingsDialog(QDialog):
         self._nas_external_poll = QSpinBox(); self._nas_external_poll.setRange(60, 86_400); self._nas_external_poll.setSuffix("초")
         self._nas_external_roll = QCheckBox("자동 월물 전환 사용")
         self._nas_external_confirmations = QSpinBox(); self._nas_external_confirmations.setRange(1, 100)
-        self._nas_condition_available = False
-        self._nas_condition_enabled = QCheckBox("조건검색 종목 추적 사용")
-        self._nas_condition_name = QLineEdit(); self._nas_condition_name.setMaxLength(120)
-        self._nas_condition_name.setPlaceholderText("입력하면 이 이름을 우선 사용")
-        self._nas_condition_substring = QLineEdit(); self._nas_condition_substring.setMaxLength(120)
-        self._nas_condition_status = QLabel("지원 여부 확인 전")
-        self._nas_condition_status.setWordWrap(True); self._nas_condition_status.setTextFormat(Qt.TextFormat.PlainText)
         self._nas_resource_status = QLabel("확인 전")
         self._nas_resource_status.setWordWrap(True)
         self._nas_resource_worker: SettingsRequestWorker | None = None
@@ -255,11 +248,6 @@ class ApiSettingsDialog(QDialog):
             query_note = QLabel("검색어는 한 줄에 하나씩 입력합니다. 공통 검색은 종목별 수집과 별도로 실행되며 하루 요청 한도 안에서 수집합니다.")
             query_note.setWordWrap(True)
             layout.addRow(query_note)
-            layout.addRow(_section_title("조건검색"))
-            layout.addRow(self._nas_condition_enabled)
-            layout.addRow("조건식 정확한 이름", self._nas_condition_name)
-            layout.addRow("이름에 포함된 문자열", self._nas_condition_substring)
-            layout.addRow("조건식 적용 상태", self._nas_condition_status)
             layout.addRow(_section_title("해외 지연 시세"))
             layout.addRow(self._nas_external_enabled)
             layout.addRow("수집 주기", self._nas_external_poll)
@@ -427,8 +415,6 @@ class ApiSettingsDialog(QDialog):
             "news_naver_api_enabled", "news_naver_stock_enabled", "news_naver_market_enabled",
             "news_naver_stock_url", "news_naver_flash_url", "news_naver_world_url",
         ))
-        self._nas_condition_available = values.get("condition_runtime_supported") is True and all(name in values for name in (
-            "hot_cohort_condition_enabled", "hot_cohort_condition_name", "hot_cohort_condition_substring"))
         self._nas_external_available = all(name in values for name in (
             "external_market_enabled", "external_market_poll_seconds", "external_market_auto_roll_enabled",
             "external_market_roll_confirmations"))
@@ -453,17 +439,6 @@ class ApiSettingsDialog(QDialog):
         self._nas_query_enabled.setChecked(bool(values.get("news_query_set_enabled", False)))
         self._nas_query_text.setPlainText("\n".join(str(query) for query in values.get("news_query_set", [])))
         self._nas_query_refresh.setValue(int(values.get("news_query_set_refresh_seconds", 300)))
-        self._nas_condition_enabled.setChecked(bool(values.get("hot_cohort_condition_enabled", True)))
-        self._nas_condition_name.setText(str(values.get("hot_cohort_condition_name", "")))
-        self._nas_condition_substring.setText(str(values.get("hot_cohort_condition_substring", "15%")))
-        condition = values.get("condition_status")
-        phase = condition.get("apply_status") if isinstance(condition, dict) else None
-        phase_label = {"ACTIVE": "조건식 등록 완료", "OFF": "조건검색 추적 중지 · 기존 종목 자료 유지",
-            "RECOVERY_REQUIRED": "조건식 적용 확인 필요 · 다시 저장해 재확인", "WAITING_CLEAR": "이전 조건식 해제 대기",
-            "WAITING_LIST": "조건식 목록 확인 대기", "WAITING_REGISTER": "새 조건식 등록 대기",
-            "WAITING_CONNECTION": "키움 WebSocket 연결 대기"}.get(phase, "이 NAS의 조건검색 운영 연결을 확인하세요.")
-        active = condition.get("active") if isinstance(condition, dict) else None
-        self._nas_condition_status.setText(phase_label + (f"\n현재 활성 조건식: {active[1]}" if isinstance(active, list) and len(active) == 2 else ""))
         self._nas_external_enabled.setChecked(bool(values.get("external_market_enabled", False)))
         self._nas_external_poll.setValue(int(values.get("external_market_poll_seconds", 300)))
         self._nas_external_roll.setChecked(bool(values.get("external_market_auto_roll_enabled", True)))
@@ -499,8 +474,6 @@ class ApiSettingsDialog(QDialog):
         for widget in (self._nas_external_enabled, self._nas_external_poll,
                        self._nas_external_roll, self._nas_external_confirmations):
             widget.setEnabled(enabled and self._nas_external_available)
-        for widget in (self._nas_condition_enabled, self._nas_condition_name, self._nas_condition_substring):
-            widget.setEnabled(enabled and self._nas_condition_available)
         for widget in (self._nas_query_enabled, self._nas_query_text, self._nas_query_refresh):
             widget.setEnabled(enabled and self._nas_query_available)
         for widget in (self._nas_stock_search_enabled, self._nas_stock_site_enabled,
@@ -521,10 +494,6 @@ class ApiSettingsDialog(QDialog):
                 external_market_poll_seconds=self._nas_external_poll.value(),
                 external_market_auto_roll_enabled=self._nas_external_roll.isChecked(),
                 external_market_roll_confirmations=self._nas_external_confirmations.value())
-        if self._nas_condition_available:
-            values.update(hot_cohort_condition_enabled=self._nas_condition_enabled.isChecked(),
-                hot_cohort_condition_name=self._nas_condition_name.text().strip(),
-                hot_cohort_condition_substring=self._nas_condition_substring.text().strip())
         if self._nas_query_available:
             values.update(news_query_set_enabled=self._nas_query_enabled.isChecked(),
                 news_query_set=list(dict.fromkeys(query.strip() for query in self._nas_query_text.toPlainText().splitlines() if query.strip())),

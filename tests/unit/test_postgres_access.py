@@ -1069,7 +1069,11 @@ class PostgresAccessTests(unittest.TestCase):
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):
             self.assertEqual([], store.claim_news_jobs(now=300.0))
-        self.assertEqual(["UPDATE", "SELECT"], [item[0] for item in raw.statements])
+        self.assertEqual(["UPDATE", "WITH"], [item[0] for item in raw.statements])
+        self.assertEqual((300.0, 180.0), raw.statements[0][1])
+        ordering = ("", "", "", "", "", "", "", "")
+        self.assertEqual((300.0, *ordering, 1, 300.0, *ordering),
+                         raw.statements[1][1])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
         call = self._calls()[0]
         self.assertEqual(("news.job_claim", "news_job_claim", "committed", 2, 1, None),
@@ -1080,7 +1084,7 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertTrue(any(sample["db_call_id"] == call["call_id"] for sample in samples))
 
         phases = call["phase_diagnostics"]
-        self.assertEqual(["recover_stale", "select_candidates"],
+        self.assertEqual(["recover_stale", "claim_candidates"],
                          [phase["phase"] for phase in phases])
         self.assertTrue(all(phase["backend_pid"] == 321 and not phase["exception_type"]
                             for phase in phases))
@@ -1091,35 +1095,63 @@ class PostgresAccessTests(unittest.TestCase):
     def test_news_job_claim_updates_selected_row_in_same_context(self) -> None:
         raw = self._native_context_connection()
         raw.rows = [("job-1", "revision-1", "005930", "005930", "BODY",
-                     "hash", "version", 0, {}, 100.0)]
+                     "hash", "version", 2, {"source": "existing"}, 100.0)]
+        cursor = raw.cursor()
+        cursor.execute = Mock(wraps=cursor.execute)
+        raw.cursor = lambda: cursor
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):
-            jobs = store.claim_news_jobs(now=300.0)
-        self.assertEqual(["job-1"], [job["job_key"] for job in jobs])
-        self.assertEqual(1, jobs[0]["attempts"])
-        self.assertEqual(["UPDATE", "SELECT", "UPDATE"],
-                         [item[0] for item in raw.statements])
+            jobs = store.claim_news_jobs(now=300.0, limit=20,
+                                        priority_stock_code=" 005930 ", preferred_stage="RULE")
+        self.assertEqual([{
+            "job_key": "job-1", "article_revision_id": "revision-1",
+            "stock_code": "005930", "target_id": "005930", "stage": "BODY",
+            "input_hash": "hash", "processing_version": "version",
+            "attempts": 3, "payload": {"source": "existing"}, "queued_at": 100.0,
+        }], jobs)
+        self.assertEqual(["UPDATE", "WITH"], [item[0] for item in raw.statements])
+        self.assertEqual((300.0, 180.0), raw.statements[0][1])
+        ordering = ("RULE", "RULE", "005930", "005930", "005930", "005930", "005930", "005930")
+        self.assertEqual((300.0, *ordering, 4, 300.0, *ordering),
+                         raw.statements[1][1])
+        recovery_sql = cursor.execute.call_args_list[0].args[0]
+        self.assertIn("WHERE state='RUNNING' AND updated_at<%s", recovery_sql)
+        claim_sql = cursor.execute.call_args_list[1].args[0]
+        self.assertTrue(claim_sql.startswith("WITH candidates AS MATERIALIZED ("))
+        self.assertIn("FOR UPDATE SKIP LOCKED LIMIT %s", claim_sql)
+        self.assertIn("SET state='RUNNING',attempts=jobs.attempts+1,updated_at=%s", claim_sql)
+        self.assertIn("FROM candidates WHERE jobs.job_key=candidates.job_key "
+                      "RETURNING candidates.*", claim_sql)
+        self.assertIn("SELECT * FROM claimed ORDER BY CASE", claim_sql)
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
-        self.assertEqual(("committed", 3, 1),
-                         (self._calls()[0]["outcome"], self._calls()[0]["sql_calls"],
-                          self._calls()[0]["commits"]))
+        call = self._calls()[0]
+        self.assertEqual(("news.job_claim", "claim_news_jobs", "committed", 2, 1, 1, 0, 321),
+                         (call["writer_family"], call["operation"], call["outcome"],
+                          call["sql_calls"], call["transactions"], call["commits"],
+                          call["rollbacks"], call["backend_pid"]))
+        self.assertEqual(["recover_stale", "claim_candidates"],
+                         [phase["phase"] for phase in call["phase_diagnostics"]])
 
     def test_news_job_claim_select_failure_preserves_native_rollback(self) -> None:
         raw = self._native_context_connection()
-        raw.fail_execute = 2
+        raw.fail_execute = 2  # Fail the combined candidate claim after stale recovery.
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):
             with self.assertRaisesRegex(ValueError, "statement failed"):
                 store.claim_news_jobs(now=300.0)
-        self.assertEqual(["UPDATE", "SELECT"], [item[0] for item in raw.statements])
+        self.assertEqual(["UPDATE", "WITH"], [item[0] for item in raw.statements])
+        self.assertEqual((300.0, 180.0), raw.statements[0][1])
+        ordering = ("", "", "", "", "", "", "", "")
+        self.assertEqual((300.0, *ordering, 1, 300.0, *ordering),
+                         raw.statements[1][1])
         self.assertEqual((0, 1, 1), (raw.commits, raw.rollbacks, raw.closes))
-        self.assertEqual(("rolled_back", 0, 1),
-                         (self._calls()[0]["outcome"], self._calls()[0]["commits"],
-                          self._calls()[0]["rollbacks"]))
-        self.assertEqual(["recover_stale", "select_candidates"],
-                         [phase["phase"] for phase in self._calls()[0]["phase_diagnostics"]])
-        self.assertEqual("ValueError",
-                         self._calls()[0]["phase_diagnostics"][-1]["exception_type"])
+        call = self._calls()[0]
+        self.assertEqual(("rolled_back", 2, 1, 0, 1, 321),
+                         (call["outcome"], call["sql_calls"], call["transactions"],
+                          call["commits"], call["rollbacks"], call["backend_pid"]))
+        self.assertEqual(["recover_stale", "claim_candidates"],
+                         [phase["phase"] for phase in call["phase_diagnostics"]])
+        self.assertEqual("ValueError", call["phase_diagnostics"][-1]["exception_type"])
 
     def test_news_job_claim_capture_off_does_not_start_probe_or_change_transaction(self) -> None:
         self.control.unlink()
@@ -1144,9 +1176,15 @@ class PostgresAccessTests(unittest.TestCase):
             thread.return_value.start.side_effect = RuntimeError("probe unavailable")
             jobs = store.claim_news_jobs(now=300.0)
         self.assertEqual(["job-1"], [job["job_key"] for job in jobs])
+        self.assertEqual((1, 100.0), (jobs[0]["attempts"], jobs[0]["queued_at"]))
+        self.assertEqual(["UPDATE", "WITH"], [item[0] for item in raw.statements])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
-        phases = self._calls()[0]["phase_diagnostics"]
-        self.assertEqual(["recover_stale", "select_candidates", "mark_running"],
+        call = self._calls()[0]
+        self.assertEqual(("committed", 2, 1, 1, 0, 321),
+                         (call["outcome"], call["sql_calls"], call["transactions"],
+                          call["commits"], call["rollbacks"], call["backend_pid"]))
+        phases = call["phase_diagnostics"]
+        self.assertEqual(["recover_stale", "claim_candidates"],
                          [phase["phase"] for phase in phases])
         self.assertTrue(all(phase["probe_errors"] == ["RuntimeError"] for phase in phases))
 

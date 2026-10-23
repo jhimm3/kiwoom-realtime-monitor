@@ -679,7 +679,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 return []
 
             def load_hot_cohort(self, *, active_only):
-                return []
+                raise AssertionError("retired condition cohort must not expand backfill")
 
         store = CohortStore()
         service = AutonomousTop20Service(

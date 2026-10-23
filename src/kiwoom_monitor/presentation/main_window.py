@@ -4005,6 +4005,7 @@ class MainWindow(QMainWindow):
                     self._minute_aggregator.confirm_history_saved(code, generation)
             except Exception as error:
                 logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
+            self._app_controller.enforce_minute_retention(bar.minute for bar in bars)
         if stored:
             self._minute_history_codes.add(code)
         if self._defer_table_update_while_modal():
@@ -4041,6 +4042,7 @@ class MainWindow(QMainWindow):
                 self._on_history_cache_failed(code, str(error))
             else:
                 self._minute_aggregator.confirm_history_saved(code, generation, committed, empty=True)
+            self._app_controller.enforce_minute_retention(minutes)
         else:
             self._minute_aggregator.confirm_history_saved(code, generation, minutes, empty=True)
 

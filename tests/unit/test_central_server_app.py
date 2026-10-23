@@ -914,7 +914,6 @@ def operations_contract_app(app_factory, database_path, configured):
             events.append({"action": name + "-apply", "args": args, "kwargs": kwargs})
         service.update_operational_settings = AsyncMock(side_effect=update) if name == "external" else MagicMock(side_effect=update)
     condition = {"apply_status": "ACTIVE"}
-    services["condition"].condition_status.side_effect = lambda: dict(condition)
     broker = MagicMock(spec=CentralRestBroker)
     broker.start, broker.close = AsyncMock(), AsyncMock()
     broker._client = MagicMock()
@@ -1017,10 +1016,9 @@ def capture_operations_http_contract(client, app, store, request_store, services
         failed_save.assert_called_once()
     preserved = request("state-after-failed-save", "GET")
     assert preserved == changed
-    request("condition-not-ready-or-empty-selection", status=422, json={"hot_cohort_condition_enabled": True,
+    request("retired-condition-fields-ignored", json={"hot_cohort_condition_enabled": True,
         "hot_cohort_condition_name": "", "hot_cohort_condition_substring": ""})
     if configured:
-        request("condition-change", json={"hot_cohort_condition_enabled": True, "hot_cohort_condition_name": "Contract condition"})
         request("external-change", json={"external_market_enabled": True, "external_market_poll_seconds": 120,
             "external_market_auto_roll_enabled": False, "external_market_roll_confirmations": 3})
         original = services["news"].update_operational_settings.side_effect
@@ -1034,10 +1032,6 @@ def capture_operations_http_contract(client, app, store, request_store, services
         services["news"].update_operational_settings.side_effect = original
         recovered = request("retry-same-persisted-revision", json={"expected_revision": pending["revision"]})
         assert recovered["revision"] == pending["revision"] and recovered["apply_status"] == "ACTIVE"
-        condition["apply_status"] = "RECOVERY_REQUIRED"
-        request("condition-runtime-pending", "GET")
-        request("condition-recovery-reapply", json={})
-        condition["apply_status"] = "ACTIVE"
     else:
         request("external-unconfigured", status=422, json={"external_market_enabled": True})
     request("candidate-enable", json={"shadow_candidate_enabled": True})
@@ -1344,7 +1338,6 @@ def market_event_contract_app(app_factory, database_path, *, configured):
     if service is not None:
         service.start = AsyncMock()
         service.close = AsyncMock()
-        service.condition_status.return_value = {"apply_status": "ACTIVE", "policy_revision": 3}
 
     class FixedNow(datetime):
         @classmethod
@@ -1401,8 +1394,6 @@ def capture_market_event_http_contract(client, store, service, database_path, re
     cases = []
 
     def request(name, params, *, authenticated=True, status=200, path="/api/v1/market/events"):
-        if service is not None:
-            service.condition_status.reset_mock()
         with patch.object(request_store, "load_market_event_history", wraps=request_store.load_market_event_history) as history, \
                 patch.object(request_store, "load_hot_cohort", wraps=request_store.load_hot_cohort) as current, \
                 patch.object(request_store, "load_documents", wraps=request_store.load_documents) as documents:
@@ -1412,12 +1403,9 @@ def capture_market_event_http_contract(client, store, service, database_path, re
             raise AssertionError((name, response.status_code, response.text))
         if stored_hash() != before:
             raise AssertionError((name, "event read changed persistent state"))
-        runtime_calls = service.condition_status.call_count if service is not None else 0
-        expected_calls = int(service is not None and status == 200 and params.get("kind") == "cohort")
-        if runtime_calls != expected_calls:
-            raise AssertionError((name, "runtime invocation mismatch", runtime_calls, expected_calls))
+        runtime_calls = 0
         valid = status == 200
-        cohort = valid and params.get("kind") == "cohort"
+        cohort = False
         expected_history = [((params["kind"],), {"code": params.get("code", ""), "limit": params.get("limit", 100)})] if valid else []
         if [(call.args, call.kwargs) for call in history.call_args_list] != expected_history:
             raise AssertionError((name, "history query arguments", history.call_args_list))
@@ -1431,7 +1419,7 @@ def capture_market_event_http_contract(client, store, service, database_path, re
             "store_calls": {key: [{"args": call.args, "kwargs": call.kwargs} for call in spy.call_args_list]
                             for key, spy in (("history", history), ("current", current), ("condition", documents))}})
 
-    for kind in ("vi", "cohort", "upper_limit"):
+    for kind in ("vi",):
         request(kind + "-auth", {"kind": kind}, authenticated=False, status=401)
         for label, params in (("all", {}), ("filter-limit", {"code": "005930", "limit": 1}),
                               ("missing", {"code": "999999"}), ("inactive", {"code": "000660"})):
@@ -1445,10 +1433,8 @@ def capture_market_event_http_contract(client, store, service, database_path, re
     store.upsert_documents("condition_search_status", [{"owner": "hot_cohort", "key": "status",
         "document": {"status": "OBSERVED", "condition_name": "fixture-condition"}}])
     before = stored_hash()
-    request("stored-condition", {"kind": "cohort"})
-    if service is not None:
-        service.condition_status.return_value = {"apply_status": "RECOVERY_REQUIRED", "policy_revision": 4}
-        request("changed-runtime-condition", {"kind": "cohort"})
+    request("stored-condition", {"kind": "cohort"}, status=422)
+    request("retired-upper-limit", {"kind": "upper_limit"}, status=422)
     return cases
 
 
@@ -3753,6 +3739,7 @@ class CentralServerAppTests(unittest.TestCase):
 
     def test_operational_settings_can_be_changed_and_are_persisted(self) -> None:
         from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
                 f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
@@ -3769,8 +3756,29 @@ class CentralServerAppTests(unittest.TestCase):
             with TestClient(create_app(settings)) as client:
                 self.assertEqual(401, client.get("/api/v1/settings/operations").status_code)
                 self.assertEqual(200, client.put("/api/v1/settings/operations", headers=headers, json=body).status_code)
+            seed = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            saved = seed.load_documents("server_operational_settings", "global", 1)[0]
+            saved["document"].update(hot_cohort_condition_enabled=True,
+                hot_cohort_condition_name="historical15%", hot_cohort_condition_substring="15%")
+            seed.upsert_documents("server_operational_settings", [saved])
+            seed.upsert_documents("condition_search_status", [{"owner": "hot_cohort", "key": "current",
+                "document": {"selected": ["17", "historical15%"], "status": "UNIQUE_SUBSTRING"}}])
+            legacy_document = seed.load_documents("server_operational_settings", "global", 1)
+            legacy_status = seed.load_documents("condition_search_status", "hot_cohort", 1)
+            seed.close()
             with TestClient(create_app(settings)) as client:
                 loaded = client.get("/api/v1/settings/operations", headers=headers).json()
+                ignored = client.put("/api/v1/settings/operations", headers=headers,
+                    json={"hot_cohort_condition_enabled": True})
+                self.assertEqual(200, ignored.status_code)
+                self.assertEqual(loaded, ignored.json())
+            seed = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
+            self.assertEqual(legacy_document, seed.load_documents("server_operational_settings", "global", 1))
+            self.assertEqual(legacy_status, seed.load_documents("condition_search_status", "hot_cohort", 1))
+            seed.close()
+            for key in ("hot_cohort_condition_enabled", "hot_cohort_condition_name",
+                        "hot_cohort_condition_substring", "condition_status", "condition_runtime_supported"):
+                self.assertNotIn(key, loaded)
             for key, value in body.items():
                 self.assertEqual(value, loaded[key])
             self.assertFalse(loaded["shadow_candidate_enabled"])
@@ -4066,8 +4074,7 @@ class CentralServerAppTests(unittest.TestCase):
                     "/api/v1/market/events?kind=cohort",
                     headers={"Authorization": "Bearer private-token"},
                 )
-        self.assertEqual(200, response.status_code)
-        self.assertEqual("NOT_OBSERVED", response.json()["condition"]["status"])
+        self.assertEqual(422, response.status_code)
 
     def test_daily_bars_endpoint_is_authenticated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

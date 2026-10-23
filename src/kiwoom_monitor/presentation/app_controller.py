@@ -4,9 +4,10 @@ from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -183,6 +184,7 @@ class AppController(QObject):
         self.pending_minutes: dict[tuple[str, datetime], MinuteOhlcv] = {}
         self.pending_minute_gaps: dict[str, tuple[datetime, ...]] = {}
         self.pending_minute_retention: date | None = None
+        self._minute_retention_cutoff: date | None = None
         self.pending_market_minutes: dict[
             tuple[str, datetime], tuple[float, float, float, float, float | None]
         ] = {}
@@ -703,11 +705,30 @@ class AppController(QObject):
                 self.minute_cache_saved.emit()
             except Exception as error:
                 self.on_minute_cache_failed(pending, market_pending, str(error))
+        if cutoff is None or (
+            self._minute_retention_cutoff is not None and cutoff < self._minute_retention_cutoff
+        ):
+            self.enforce_minute_retention(chain(
+                (bar.minute for bar in pending.values()),
+                (minute for _, minute in market_pending),
+                (minute for minutes in gaps.values() for minute in minutes),
+            ))
         if cutoff is not None:
-            try:
-                self.minute_bar_repository.purge_before(cutoff)
-            except Exception as error:
-                self.on_minute_retention_failed(cutoff, str(error))
+            self._purge_minute_retention(cutoff)
+
+    def _purge_minute_retention(self, cutoff: date) -> None:
+        try:
+            self.minute_bar_repository.purge_before(cutoff)
+        except Exception as error:
+            self.on_minute_retention_failed(cutoff, str(error))
+        else:
+            previous = self._minute_retention_cutoff
+            self._minute_retention_cutoff = max(previous, cutoff) if previous is not None else cutoff
+
+    def enforce_minute_retention(self, minutes: Iterable[datetime]) -> None:
+        cutoff = self._minute_retention_cutoff
+        if cutoff is not None and any(minute.date() < cutoff for minute in minutes):
+            self._purge_minute_retention(cutoff)
 
     def queue_minute_retention(self, cutoff: date) -> None:
         previous = self.pending_minute_retention

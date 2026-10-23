@@ -100,10 +100,16 @@ class NativeRunnerStateTests(unittest.TestCase):
         from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
         self.fill(1,'BUY',2,1000);observation=self.observation()
         owner=MockAutomationSupervisor(self.base.store,SimpleNamespace());owner._runners[native.ACCOUNT_REF]=self.runner
-        first=owner.position_shadow_observation(observation)
+        with patch.object(self.runner,'position_shadow_observation',wraps=self.runner.position_shadow_observation) as public:
+            first=owner.position_shadow_observation(observation)
+        public.assert_called_once()
+        self.assertEqual(observation,public.call_args.args[0])
+        current=public.call_args.kwargs['is_current']
+        self.assertTrue(current())
         self.assertIsInstance(first,PositionRunnerAccountObservation)
         self.assertEqual(asdict(observation),{k:v for k,v in asdict(first).items() if k!='runner_state'})
         owner._runners.clear();base=owner.position_shadow_observation(first)
+        self.assertFalse(current())
         self.assertIs(type(base),PositionAccountObservation);self.assertNotIn('runner_state',asdict(base))
         owner._runners[native.ACCOUNT_REF]=self.runner;owner._closing=True
         self.assertIs(type(owner.position_shadow_observation(observation)),PositionAccountObservation)
@@ -119,6 +125,41 @@ class NativeRunnerStateTests(unittest.TestCase):
             result=original(value);owner._runners.clear();return result
         with patch.object(self.runner,'position_study_state',side_effect=replaced):
             self.assertIs(type(owner.position_shadow_observation(observation)),PositionAccountObservation)
+
+        for retired_at in ('portfolio','policy'):
+            with self.subTest(retired_at=retired_at):
+                owner._runners[native.ACCOUNT_REF]=self.runner
+                owner._closing=False
+                def portfolio(value):
+                    if retired_at=='portfolio':owner._runners.clear()
+                    return {'version':'native-position-study-portfolio/v1'}
+                def policy(value,state):
+                    owner._closing=True
+                    return None
+                with (patch.object(self.base.bundle.monitor,'position_study_portfolio',side_effect=portfolio,create=True) as read,
+                      patch.object(self.runner,'position_study_policy',side_effect=policy) as read_policy,
+                      patch('sqlite3.connect',side_effect=AssertionError('observation must remain RAM-only'))):
+                    result=owner.position_shadow_observation(observation)
+                self.assertIs(type(result),PositionAccountObservation)
+                self.assertEqual(asdict(observation),asdict(result))
+                read.assert_called_once_with(observation)
+                self.assertEqual(0 if retired_at=='portfolio' else 1,read_policy.call_count)
+
+    def test_public_bundle_contract_is_readonly_identity_without_status_or_io(self):
+        self.base.bundle.credential_profile_id='profile-a'
+        same_values=SimpleNamespace(**vars(self.base.bundle))
+        self.assertEqual(self.base.bundle,same_values)
+        def status_forbidden(value):
+            raise AssertionError('identity lookup must not build status')
+        with (patch('sqlite3.connect',side_effect=AssertionError('identity lookup DB')),
+              patch.object(MockAutomationRunner,'status',property(status_forbidden))):
+            self.assertEqual(native.ACCOUNT_REF,self.runner.account_ref)
+            self.assertEqual('profile-a',self.runner.credential_profile_id)
+            self.assertTrue(self.runner.is_bound_to(self.base.bundle))
+            self.assertFalse(self.runner.is_bound_to(same_values))
+            self.assertFalse(self.runner.is_bound_to(None))
+            for field in ('account_ref','credential_profile_id'):
+                with self.assertRaises(AttributeError):setattr(self.runner,field,'different')
 
     def test_monitor_epoch_check_uses_existing_ram_without_an_extra_borrow(self):
         from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor

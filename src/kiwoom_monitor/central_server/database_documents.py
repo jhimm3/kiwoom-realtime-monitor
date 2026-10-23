@@ -389,6 +389,9 @@ class PostgresDocumentStoreMixin:
             "execution_mock_automation_current_stop": (
                 "document:execution_mock_automation_current_stop"
             ),
+            "execution_mock_automation_clock_current": (
+                "document:execution_mock_automation_clock_current"
+            ),
         }
         writer_kind = observed_kinds.get(collection)
         if writer_kind is not None:

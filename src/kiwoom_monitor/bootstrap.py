@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst
 
 import sys
 import logging
@@ -244,18 +244,24 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
         # 로컬 서버 시작에 실패한 경우 이번 실행은 기존 직접 연결로 복구한다.
         if source.mode == "local_server" and local_central_server is None:
             source = DataSourceSettings()
+        local_settings = (
+            LocalApiConfig(local_api).load()
+            if source.mode == "local" or (
+                source.mode == "personal_server" and (
+                    source.local_fallback_enabled or source.parallel_validation_enabled
+                )
+            ) else None
+        )
         client = create_query_client(
-            local_api, paths.data_dir / "data_source.json", source_settings=source,
+            local_api, paths.data_dir / "data_source.json", source_settings=source, local_settings=local_settings,
         )
         if source.mode == "local":
-            settings = LocalApiConfig(local_api).load()
             realtime_factory = lambda codes: RealtimeTradeWorker(
-                client.get_access_token, settings.environment, codes, client.server_now,
+                client.get_access_token, local_settings.environment, codes, client.server_now,
             )
         elif source.mode == "personal_server" and (
             source.local_fallback_enabled or source.parallel_validation_enabled
         ):
-            local_settings = LocalApiConfig(local_api).load()
             if local_settings.app_key and local_settings.secret_key:
                 # 중앙 서버와 로컬 WebSocket을 동시에 열지 않는다. 중앙 연결이
                 # 연속 실패한 동안에만 직접 연결을 잠시 실행한다. 조회 fallback과
@@ -396,7 +402,7 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
 
             def run() -> None:
                 try:
-                    minute_bar_repository.purge_before(kst_wall_now().date() - timedelta(days=30))
+                    minute_bar_repository.purge_before(as_kst(window._app_controller.ranking_now()).date() - timedelta(days=30))
                 except sqlite3.Error as error:
                     logging.getLogger(__name__).warning("시작 후 분봉 보존 정리를 건너뜁니다: %s", error)
                 try:
@@ -426,6 +432,7 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
                         logging.getLogger(__name__).warning("공통 설정 중앙 동기화 실패(로컬 설정 유지): %s", error)
 
                 worker = SettingsRequestWorker(run, window._app_controller)
+                worker.setObjectName("central-settings-sync")
 
                 def finished() -> None:
                     nonlocal central_settings_worker
@@ -447,10 +454,9 @@ def _run_desktop(paths: AppPaths, restore_outcome: RestoreOutcome | None) -> Non
         if central_settings_timer is not None:
             central_settings_timer.stop()
         if window is not None:
-            for worker in window._app_controller.findChildren(
-                SettingsRequestWorker, "startup-market-bar-retention",
-            ):
-                worker.wait()
+            for name in ("startup-market-bar-retention", "central-settings-sync"):
+                for worker in window._app_controller.findChildren(SettingsRequestWorker, name):
+                    worker.wait()
         if central_theme_sync is not None:
             central_theme_sync.close()
         if central_content_thread is not None:

@@ -11,7 +11,6 @@ from .candidate_monitor import CandidateMonitor
 if TYPE_CHECKING:
     from fastapi import APIRouter
     from .database_observation_readers import ObservationRevisionPage
-    from .market_events import MarketEventService
     from .external_market_collector import YahooDelayedMarketCollector
     from .news_service import CentralNewsService
     from .ai_service import CentralAIService
@@ -50,7 +49,6 @@ class OperationalSettingsState:
 
 def create_operational_settings_routers(
     store: "OperationalSettingsStore", authorize: Callable[..., None], state: OperationalSettingsState,
-    market_event_service: "MarketEventService | None",
     external_market_service: "YahooDelayedMarketCollector | None",
     ai_service: "CentralAIService | None", news_service: "CentralNewsService | None",
     publish_candidate_monitor: Callable[[CandidateMonitor | None], None], logger: Any,
@@ -146,9 +144,6 @@ def create_operational_settings_routers(
         external_market_poll_seconds: int | None = Field(default=None, ge=60, le=86_400, strict=True)
         external_market_auto_roll_enabled: bool | None = Field(default=None, strict=True)
         external_market_roll_confirmations: int | None = Field(default=None, ge=1, le=100, strict=True)
-        hot_cohort_condition_enabled: bool | None = Field(default=None, strict=True)
-        hot_cohort_condition_name: str | None = Field(default=None, max_length=120, strict=True)
-        hot_cohort_condition_substring: str | None = Field(default=None, max_length=120, strict=True)
         shadow_candidate_enabled: bool | None = None
         shadow_candidate_config: dict[str, Any] | None = None
         shadow_candidate_poll_seconds: float | None = Field(default=None, ge=0.5, le=60)
@@ -156,13 +151,9 @@ def create_operational_settings_routers(
 
     def operational_document() -> dict[str, object]:
         revision = int(operational["revision"])
-        condition = market_event_service.condition_status() if market_event_service is not None else None
         return {
             **operational, "applied_revision": state.applied_revision,
-            "apply_status": "ACTIVE" if revision == state.applied_revision and
-                (condition is None or condition["apply_status"] != "RECOVERY_REQUIRED") else "RECOVERY_REQUIRED",
-            "condition_runtime_supported": market_event_service is not None,
-            "condition_status": condition,
+            "apply_status": "ACTIVE" if revision == state.applied_revision else "RECOVERY_REQUIRED",
         }
 
     @read_router.get("/api/v1/settings/operations", dependencies=[Depends(authorize)])
@@ -194,15 +185,6 @@ def create_operational_settings_routers(
                         or parsed.password or parsed.query or parsed.fragment or not parsed.path):
                     raise HTTPException(status_code=422, detail=f"{field}: HTTPS API 주소를 입력하세요.")
                 proposed[field] = endpoint
-            condition_fields = {"hot_cohort_condition_enabled", "hot_cohort_condition_name", "hot_cohort_condition_substring"}
-            if condition_fields.intersection(changes) and market_event_service is None:
-                raise HTTPException(status_code=422, detail="CONDITION_RUNTIME_NOT_READY")
-            if proposed["hot_cohort_condition_enabled"] and not (
-                    str(proposed["hot_cohort_condition_name"]).strip() or str(proposed["hot_cohort_condition_substring"]).strip()):
-                raise HTTPException(status_code=422, detail="CONDITION_SELECTION_REQUIRED")
-            condition_recovery = market_event_service is not None and market_event_service.condition_status()["apply_status"] == "RECOVERY_REQUIRED"
-            condition_changed = condition_recovery or any(
-                name in changes and proposed[name] != operational[name] for name in condition_fields)
             external_fields = {"external_market_enabled", "external_market_poll_seconds",
                                "external_market_auto_roll_enabled", "external_market_roll_confirmations"}
             if proposed["external_market_enabled"] and external_market_service is None:
@@ -213,7 +195,6 @@ def create_operational_settings_routers(
                 "shadow_candidate_universe_max_age_seconds",
             }
             recovery_required = int(operational["revision"]) != state.applied_revision
-            condition_changed = condition_changed or (recovery_required and market_event_service is not None)
             external_changed = recovery_required or any(
                 name in changes and proposed[name] != operational[name] for name in external_fields)
             shadow_changed = recovery_required or any(
@@ -237,7 +218,7 @@ def create_operational_settings_routers(
             elif shadow_changed:
                 replacement = None
             changed = any(proposed[name] != operational.get(name) for name in changes)
-            if not changed and not recovery_required and not condition_recovery:
+            if not changed and not recovery_required:
                 return operational_document()
             proposed["revision"] = int(operational["revision"]) + (1 if changed else 0)
             try:
@@ -249,12 +230,6 @@ def create_operational_settings_routers(
                 raise HTTPException(status_code=503, detail="OPERATIONAL_SETTINGS_SAVE_FAILED") from error
             operational.update(proposed)
             try:
-                if condition_changed:
-                    market_event_service.update_operational_settings(
-                        enabled=bool(proposed["hot_cohort_condition_enabled"]),
-                        exact_name=str(proposed["hot_cohort_condition_name"]),
-                        substring=str(proposed["hot_cohort_condition_substring"]),
-                    )
                 if external_changed and external_market_service is not None:
                     await external_market_service.update_operational_settings(
                         enabled=bool(proposed["external_market_enabled"]),

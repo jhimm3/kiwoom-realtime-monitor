@@ -3804,7 +3804,7 @@
                   "required": true,
                   "schema": {
                     "type": "string",
-                    "pattern": "^(vi|cohort|upper_limit)$",
+                    "pattern": "^vi$",
                     "title": "Kind"
                   }
                 },
@@ -6538,41 +6538,6 @@
                     }
                   ],
                   "title": "External Market Roll Confirmations"
-                },
-                "hot_cohort_condition_enabled": {
-                  "anyOf": [
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "title": "Hot Cohort Condition Enabled"
-                },
-                "hot_cohort_condition_name": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "maxLength": 120
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "title": "Hot Cohort Condition Name"
-                },
-                "hot_cohort_condition_substring": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "maxLength": 120
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "title": "Hot Cohort Condition Substring"
                 },
                 "shadow_candidate_enabled": {
                   "anyOf": [
@@ -10819,7 +10784,7 @@
                   "required": true,
                   "schema": {
                     "type": "string",
-                    "pattern": "^(vi|cohort|upper_limit)$",
+                    "pattern": "^vi$",
                     "title": "Kind"
                   }
                 },
@@ -13553,41 +13518,6 @@
                     }
                   ],
                   "title": "External Market Roll Confirmations"
-                },
-                "hot_cohort_condition_enabled": {
-                  "anyOf": [
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "title": "Hot Cohort Condition Enabled"
-                },
-                "hot_cohort_condition_name": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "maxLength": 120
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "title": "Hot Cohort Condition Name"
-                },
-                "hot_cohort_condition_substring": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "maxLength": 120
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "title": "Hot Cohort Condition Substring"
                 },
                 "shadow_candidate_enabled": {
                   "anyOf": [

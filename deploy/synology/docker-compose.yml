@@ -15,7 +15,7 @@ services:
       retries: 10
 
   server:
-    image: kiwoom-monitor-server:2026.10.18-r3-bar-clock-v1
+    image: kiwoom-monitor-server:2026.10.23-runner-public-owner-v1
     build:
       context: ../..
       dockerfile: deploy/synology/server.Dockerfile
@@ -72,8 +72,6 @@ services:
       SHADOW_CANDIDATE_CONFIG_JSON: "${SHADOW_CANDIDATE_CONFIG_JSON:-}"
       SHADOW_CANDIDATE_POLL_SECONDS: ${SHADOW_CANDIDATE_POLL_SECONDS:-2}
       SHADOW_CANDIDATE_UNIVERSE_MAX_AGE_SECONDS: ${SHADOW_CANDIDATE_UNIVERSE_MAX_AGE_SECONDS:-0}
-      HOT_COHORT_CONDITION_NAME: "${HOT_COHORT_CONDITION_NAME:-}"
-      HOT_COHORT_CONDITION_SUBSTRING: "${HOT_COHORT_CONDITION_SUBSTRING:-15%}"
       DART_ENABLED: ${DART_ENABLED}
       DART_API_KEY: ${DART_API_KEY}
       DART_CACHE_PATH: ${DART_CACHE_PATH}

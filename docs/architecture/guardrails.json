@@ -1534,6 +1534,17 @@
         "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.__init__|sqlite3.connect": 1,
         "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.find_codes_by_names|con.execute": 1
       }
+    },
+    {
+      "id": "R3-006-news-claim-roundtrip-20261023",
+      "reason": "Merge locked candidate SELECT and the same-row RUNNING updates into one bounded PostgreSQL statement. Retire two old source-site limits and allow only the renamed existing claim cursor site; no new runtime I/O owner or connection.",
+      "connection": "NewsJobRunner.run_once(limit1) -> existing PostgresNewsJobStoreMixin.claim_news_jobs native transaction. Recover120s remains first; selected pre-update attempts/queued_at, priority, SKIP LOCKED, decoder, commit and rollback remain. Phase claim_candidates represents the actual combined statement.",
+      "validation": "PC PostgreSQL17.11 same-fixture4 x12 paired observations: empty2->2SQL, one3->2, four6->2; connections/commit1, full returned/stored rows/order equal. Total wall/CPU/NAS improvement unproven. Current frozen source92ce20cd related89PASS, native2 verifies parallel SKIP LOCKED and genuine SQL error P0001/full recovery rollback; unit63+worker17+metadata7, skip0/worker-tree/TEMP/PG cleanup verified. Source-site initial rejection retained; consumer414 unchanged. data/diagnostics/r3-news-claim-20261023/verification.json. No recorder/replay execution or changes; cumulative/global execution acceptance is separate.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.claim_news_jobs|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.claim_news_jobs.select_candidates|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.claim_news_jobs.claim_candidates|cursor.execute": 1
+      }
     }
   ]
 }

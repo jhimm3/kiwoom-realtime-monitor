@@ -60,5 +60,40 @@ class KiwoomClientFactoryTests(unittest.TestCase):
         self.assertIsInstance(client, ParallelValidationClient)
 
 
+    def test_local_client_reuses_injected_profile_without_reloading_config(self) -> None:
+        settings = KiwoomSettings("profile-key", "profile-secret", "real")
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            LocalApiConfig, "load", side_effect=AssertionError("profile already loaded"),
+        ):
+            client = create_query_client(
+                Path(directory) / "api.env", source_settings=DataSourceSettings(),
+                local_settings=settings,
+            )
+        self.assertIs(settings, client._settings)
+        self.assertEqual("real", client.environment)
+
+    def test_personal_server_reuses_injected_profile_for_opt_in_clients(self) -> None:
+        settings = KiwoomSettings("profile-key", "profile-secret", "real")
+        for fallback, validation in ((True, False), (False, True), (True, True)):
+            with self.subTest(fallback=fallback, validation=validation), \
+                    tempfile.TemporaryDirectory() as directory, patch.object(
+                        LocalApiConfig, "load", side_effect=AssertionError("profile already loaded"),
+                    ):
+                source = DataSourceSettings(
+                    "personal_server", "https://nas.example.test", "server-token",
+                    fallback, validation,
+                )
+                client = create_query_client(
+                    Path(directory) / "api.env", source_settings=source, local_settings=settings,
+                )
+                if validation:
+                    self.assertIsInstance(client, ParallelValidationClient)
+                    self.assertIs(settings, client._local._settings)
+                    self.assertEqual(fallback, client._fallback_on_unavailable)
+                else:
+                    self.assertIsInstance(client, FailoverKiwoomRestClient)
+                    self.assertIs(settings, client._fallback._settings)
+
+
 if __name__ == "__main__":
     unittest.main()

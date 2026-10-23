@@ -52,8 +52,6 @@ class CentralServerSettings:
     autonomous_top20_minute_backfill_enabled: bool = True
     market_event_collection_enabled: bool = True
     research_observation_history_enabled: bool = True
-    hot_cohort_condition_name: str = ""
-    hot_cohort_condition_substring: str = "15%"
     external_market_enabled: bool = False
     external_market_poll_seconds: int = 300
     external_market_symbols: str = "NASDAQ_FUTURES:MNQU26.CME,WTI_FUTURES:CLV26.NYM"
@@ -245,10 +243,6 @@ class CentralServerSettings:
             research_observation_history_enabled=os.environ.get(
                 "RESEARCH_OBSERVATION_HISTORY_ENABLED", "true",
             ).strip().casefold() in {"1", "true", "yes", "on"},
-            hot_cohort_condition_name=os.environ.get("HOT_COHORT_CONDITION_NAME", "").strip(),
-            hot_cohort_condition_substring=os.environ.get(
-                "HOT_COHORT_CONDITION_SUBSTRING", "15%",
-            ).strip() or "15%",
             external_market_enabled=os.environ.get("EXTERNAL_MARKET_ENABLED", "0").strip().casefold()
             in {"1", "true", "yes", "on"},
             external_market_poll_seconds=external_market_poll_seconds,

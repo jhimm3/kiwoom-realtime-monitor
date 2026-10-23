@@ -334,6 +334,8 @@ class ApiSettingsDialogTests(unittest.TestCase):
                 dialog._load_nas_operational_settings()
                 wait_until(lambda: dialog._operations_worker is None)
 
+            self.assertFalse(hasattr(dialog, "_nas_condition_enabled"))
+            self.assertFalse(any(key.startswith("hot_cohort_condition_") for key in dialog._nas_operation_values()))
             self.assertEqual("gemini", news.load_ai().provider)
             self.assertEqual(321, news.load_ai().daily_limit)
             self.assertEqual("ai-secret", news.load_ai().api_key)

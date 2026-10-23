@@ -55,7 +55,9 @@ def inventory(root: Path) -> dict:
         relative = path.relative_to(root).as_posix()
         module = relative[:-3].replace('/', '.')
         tree = ast.parse(path.read_text(encoding='utf-8-sig'), filename=relative)
-        support = copy.deepcopy(tree)
+        # Hashing only reads descendants; copy the roots whose fields change.
+        support = copy.copy(tree)
+        support.body = [copy.copy(node) if isinstance(node, ast.ClassDef) else node for node in tree.body]
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):
                 continue
@@ -65,7 +67,7 @@ def inventory(root: Path) -> dict:
                 case_id = f'{module}.{node.name}.{method.name}'
                 if case_id in result['tests']:
                     result['duplicates'].append(case_id)
-                normalized = copy.deepcopy(method)
+                normalized = copy.copy(method)
                 normalized.name = 'test_identity'
                 result['tests'][case_id] = {
                     'file': relative, 'body': tree_key(method), 'identity_free_body': tree_key(normalized),
@@ -397,13 +399,13 @@ def query_summary(result: dict, limit: int = 20, offset: int = 0) -> dict:
             'more_details': max(0, len(details) - offset - limit), 'source': result['source']['lf_sha256']}
 
 
-def execution_ids(root: Path, paths: list[Path]) -> set[str]:
+def execution_ids(root: Path, paths: list[Path], *, validated_reports: list[dict] | None = None) -> set[str]:
     """Read existing runner evidence, never invoke a test runner here."""
     from scripts.run_regression import _code_tree_identity
     current_source = _code_tree_identity()['lf_sha256']
     covered = set()
     for path in paths:
-        report = read_json(path)
+        raw_report = report = read_json(path)
         if 'source_start' in report:  # Existing Linux/PG report, same identity vocabulary.
             if not report.get('planned') or report.get('planned') != report.get('ran'):
                 raise ValueError(f'Platform discovery/execution mismatch: {path}')
@@ -434,6 +436,8 @@ def execution_ids(root: Path, paths: list[Path]) -> set[str]:
         if duplicates:
             raise ValueError(f'Duplicate executed test IDs: {duplicates}')
         covered.update(all_ids)
+        if validated_reports is not None:
+            validated_reports.append(raw_report)
     return covered
 
 
@@ -478,7 +482,8 @@ def check(root: Path, *, executions: list[Path] | None = None, base_ref: str = '
         # mechanical adoption anchor are incremental, never retroactive approval.
         names = subprocess.check_output(['git', 'diff', '--name-only', base_ref], cwd=root, text=True).splitlines()
         names += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], cwd=root, text=True).splitlines()
-        covered = execution_ids(root, executions)
+        validated_reports = []
+        covered = execution_ids(root, executions, validated_reports=validated_reports)
         for name in names:
             if name in code_reviews:
                 selected[name] = code_reviews[name]['tests']
@@ -502,8 +507,7 @@ def check(root: Path, *, executions: list[Path] | None = None, base_ref: str = '
                 if issue['status'] == 'resolved' and set(issue['tests']) - covered:
                     raise ValueError(f'Finding resolution tests not executed: {issue["id"]}')
         observed = {}
-        for path in executions:
-            report = read_json(path)
+        for report in validated_reports:
             observed.update(report.get('discovered', {}))
             for row in report.get('module_test_counts', []):
                 observed[row['module']] = row['test_count']

@@ -159,8 +159,6 @@
   ],
   "profiles": {
     "recorded-workload-p0": [
-      "tests.unit.test_market_event_worker_delivery",
-      "tests.unit.test_market_event_fact_delivery",
       "tests.unit.test_observation_delivery",
       "tests.unit.test_observation_frame_recovery",
       "tests.unit.test_replay_content_comparison"
@@ -272,8 +270,7 @@
       "tests.unit.test_mock_automation_specification",
       "tests.unit.test_mock_automation_supervisor",
       "tests.unit.test_market_role_change",
-      "tests.unit.test_planned_reconnect",
-      "tests.unit.test_condition_runtime"
+      "tests.unit.test_planned_reconnect"
     ],
     "dependency-audit-p2-functional-discovery": [
       "tests.unit.test_classify_historical_stock_adjustments",
@@ -337,7 +334,6 @@
       "tests.unit.test_causal_capture_capacity"
     ],
     "main-observation-delivery-contracts": [
-      "tests.unit.test_market_event_fact_delivery",
       "tests.unit.test_observation_delivery",
       "tests.unit.test_observation_frame_recovery",
       "tests.unit.test_replay_content_comparison"

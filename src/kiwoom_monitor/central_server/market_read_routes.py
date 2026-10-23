@@ -16,7 +16,6 @@ from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind, Covera
 if TYPE_CHECKING:
     from fastapi import APIRouter
     from .realtime_collector import CentralRealtimeCollector
-    from .market_events import MarketEventService
 
 
 class MarketReadStore(Protocol):
@@ -41,10 +40,6 @@ class MarketReadStore(Protocol):
 
 class MarketEventReadStore(Protocol):
     def load_market_event_history(self, kind: str, *, code: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
-
-    def load_hot_cohort(self, *, active_only: bool = False) -> list[dict[str, Any]]: ...
-
-    def load_documents(self, collection: str, owner: str = "", limit: int = 1000) -> list[dict[str, Any]]: ...
 
 
 def create_market_live_read_router(
@@ -166,16 +161,15 @@ def create_market_live_read_router(
 
 def create_market_event_read_router(
     store: MarketEventReadStore, authorize: Callable[..., None],
-    market_event_service: MarketEventService | None,
 ) -> APIRouter:
-    """Read history and the app-owned condition runtime without owning producers."""
+    """Read VI history without owning its producer."""
     from fastapi import APIRouter, Depends, Query
 
     router = APIRouter()
 
     @router.get("/api/v1/market/events", dependencies=[Depends(authorize)])
     async def market_events(
-        kind: str = Query(pattern=r"^(vi|cohort|upper_limit)$"),
+        kind: str = Query(pattern=r"^vi$"),
         code: str = Query(default="", max_length=12),
         limit: int = Query(default=100, ge=1, le=1000),
     ) -> dict[str, object]:
@@ -183,15 +177,6 @@ def create_market_event_read_router(
             store.load_market_event_history, kind, code=code, limit=limit,
         )
         result: dict[str, object] = {"kind": kind, "code": code, "history": history}
-        if kind == "cohort":
-            current = await asyncio.to_thread(store.load_hot_cohort, active_only=False)
-            result["current"] = [value for value in current if not code or value.get("stock_code") == code]
-            diagnostic = await asyncio.to_thread(
-                store.load_documents, "condition_search_status", "hot_cohort", 1,
-            )
-            result["condition"] = diagnostic[0]["document"] if diagnostic else {"status": "NOT_OBSERVED"}
-            if market_event_service is not None:
-                result["condition"]["runtime"] = market_event_service.condition_status()
         return result
 
     return router

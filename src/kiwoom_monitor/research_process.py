@@ -2261,6 +2261,7 @@ def _run_research_process(argv: list[str] | None = None) -> int:
         if args.result.resolve() in protected or (args.cancel is not None and args.cancel.resolve() in protected):
             parser.error('comparison result/cancel must not overwrite request or database')
     leader_request = None
+    request_header = None
     if args.request is not None:
         request_path = args.request.resolve()
         outputs = tuple(path.resolve() for path in (args.result, args.cancel) if path is not None)
@@ -2272,7 +2273,7 @@ def _run_research_process(argv: list[str] | None = None) -> int:
             request_header = None
         if isinstance(request_header, dict) and request_header.get("mode") == "leader_breakout":
             try:
-                leader_request = load_research_process_request(args.request)
+                leader_request = _process_request_from_document(request_header, request_path.parent)
             except (OSError, ValueError, TypeError) as error:
                 parser.error(str(error))
             if any(_is_within(path, leader_request.dataset) for path in outputs):
@@ -2311,7 +2312,10 @@ def _run_research_process(argv: list[str] | None = None) -> int:
             claim = {'campaign_id': args.campaign, 'owner_token': args.worker_token, 'generation': args.worker_generation} if args.worker_token else None
             result = run_campaign_worker(args.database, args.campaign, args.runs_dir, args.result, cancel_path=args.cancel, worker_claim=claim)
         else:
-            request = leader_request or load_research_process_request(args.request)
+            request = leader_request or (
+                _process_request_from_document(request_header, request_path.parent)
+                if isinstance(request_header, dict) else load_research_process_request(args.request)
+            )
             if args.register_campaign:
                 if request.database is None:
                     raise ValueError("campaign registration requires an explicit database and runs_dir")

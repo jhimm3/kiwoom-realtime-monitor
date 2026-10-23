@@ -1378,6 +1378,430 @@ class AppControllerTests(unittest.TestCase):
                 self.assertTrue(result["timer_active"])
                 self.assertFalse(result["shutdown_cache_failed"])
 
+    def _observe_public_writer_free_applied_cutoff(self, kind, *, day="expired", postcommit=False, cleanup=None):
+        import json
+        from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap
+
+        now = as_kst(datetime(2026, 10, 23, 10))
+        kept = now - timedelta(days=30)
+        minute = {"expired": kept - timedelta(days=1), "cutoff": kept,
+                  "current": now - timedelta(minutes=1)}[day]
+        original_connect = sqlite3.connect
+        statements, connections, commits, acks, purges = [], [], [], [], []
+        injection = {"write": postcommit, "cleanup": cleanup is not None}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            repository = MinuteBarRepository(path, now_provider=lambda: now)
+            repository.upsert_bars("KEEP", (MinuteOhlcv(kept, 200, 220, 190, 210, 30),))
+            repository.upsert_market_index_minutes({("kosdaq", kept): (1., 2., 1., 2., 10.)})
+            repository.record_history_sync("KEEP", kept.date(), kept, 1)
+            with patch.object(AppController, "start_initial_ranking"), \
+                    patch.object(MainWindow, "_start_top20_market_repair"):
+                window = MainWindow(database.settings, minute_bar_repository=repository,
+                    ranking_loader=SimpleNamespace(server_now=lambda: now, load_top_stocks=lambda: ()))
+            controller = window._app_controller
+            self.assertIsNone(window._monitor_database_path)
+            self.assertIsNone(controller.market_cache_writer)
+            window._ensure_today_minute_bar_storage(now)
+
+            def state():
+                with closing(original_connect(path)) as connection:
+                    return {
+                        "expired": tuple(connection.execute(sql, (kept.date().isoformat(),)).fetchall() for sql in (
+                            "SELECT * FROM minute_bars WHERE trade_date<? ORDER BY stock_code,minute",
+                            "SELECT * FROM market_index_minute_bars WHERE trade_date<? ORDER BY market,minute",
+                            "SELECT * FROM market_data_observation_meta WHERE dataset_kind='minute_bar' AND substr(observation_key,1,10)<? ORDER BY subject,observation_key",
+                            "SELECT * FROM minute_history_sync_log WHERE trade_date<? ORDER BY stock_code",
+                        )),
+                        "keeper": tuple(connection.execute(sql).fetchall() for sql in (
+                            "SELECT * FROM minute_bars WHERE stock_code='KEEP'",
+                            "SELECT * FROM market_index_minute_bars WHERE market='kosdaq'",
+                            "SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'",
+                            "SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject,observation_key",
+                        )),
+                        "receipt": connection.execute("SELECT trade_date,stock_code,bar_count FROM minute_history_sync_log WHERE stock_code='TARGET'").fetchall(),
+                    }
+
+            if kind == "empty":
+                gap = RealtimeGap(1, (GapRange("trade", "EMPTY", "KRX", minute, minute),), False)
+                window._minute_aggregator.mark_gap(gap, ("EMPTY",), now)
+                generation = window._minute_aggregator.gap_generation("EMPTY")
+                window._minute_recovery_requests["EMPTY"] = generation
+                controller.minute_history.history_received.emit("EMPTY", ())
+            initial = state()
+            self.assertEqual(([], [], [], []), initial["expired"])
+            controller.minute_cache_saved.connect(lambda: acks.append(state()))
+            native_purge = repository.purge_before
+
+            def purge(cutoff):
+                purges.append(cutoff)
+                return native_purge(cutoff)
+
+            class NativeReturnConnection(sqlite3.Connection):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.role = None
+                    connections.append(1)
+                    self.set_trace_callback(statements.append)
+
+                def execute(self, sql, *args, **kwargs):
+                    upper = sql.lstrip().upper()
+                    if upper.startswith("DELETE FROM MINUTE_BARS"):
+                        self.role = "cleanup"
+                        if cleanup == "precommit" and injection["cleanup"]:
+                            self.set_authorizer(lambda action, *_:
+                                sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_DELETE else sqlite3.SQLITE_OK)
+                    elif upper.startswith("INSERT INTO MINUTE_HISTORY_SYNC_LOG"):
+                        self.role = "history"
+                    elif upper.startswith("INSERT INTO MARKET_DATA_OBSERVATION_META") and kind in {"gap", "empty"}:
+                        self.role = kind
+                    return super().execute(sql, *args, **kwargs)
+
+                def executemany(self, sql, *args, **kwargs):
+                    upper = sql.lstrip().upper()
+                    if upper.startswith("INSERT INTO MINUTE_BARS"):
+                        self.role = "stock"
+                    elif upper.startswith("INSERT INTO MARKET_INDEX_MINUTE_BARS"):
+                        self.role = "index"
+                    return super().executemany(sql, *args, **kwargs)
+
+                def after_commit(self):
+                    if self.role == "cleanup":
+                        if cleanup == "postcommit" and injection["cleanup"]:
+                            raise OSError("native cleanup COMMIT return lost")
+                    elif injection["write"] and self.role == kind:
+                        injection["write"] = False
+                        commits.append({"role": self.role, "in_transaction": self.in_transaction, "state": state()})
+                        raise OSError("native expired " + kind + " COMMIT return lost")
+
+                def commit(self):
+                    super().commit()
+                    self.after_commit()
+
+                def __exit__(self, *args):
+                    result = super().__exit__(*args)
+                    if args[0] is None and self.role == "empty":
+                        self.after_commit()
+                    return result
+
+            def connect(*args, **kwargs):
+                kwargs["factory"] = NativeReturnConnection
+                return original_connect(*args, **kwargs)
+
+            def deliver():
+                if kind in {"batch", "stock", "index"}:
+                    controller.queue_minute_bar("TARGET", MinuteOhlcv(minute, 100, 110, 90, 105, 10))
+                    controller.queue_market_index("kospi", minute, 2500., 12.)
+                    controller.minute_cache_timer.stop()
+                    controller.flush_minute_cache()
+                elif kind == "gap":
+                    controller.queue_minute_gaps({"GAP": (minute,), "market:kospi": (minute,)})
+                elif kind == "history":
+                    controller.minute_history.history_received.emit("TARGET", (
+                        MinuteOhlcv(minute, 100, 110, 90, 105, 10),
+                        MinuteOhlcv(kept, 120, 130, 110, 125, 20),
+                        MinuteOhlcv(now - timedelta(minutes=1), 140, 150, 130, 145, 30),
+                    ))
+                else:
+                    controller.minute_history.coverage_received.emit("EMPTY", {
+                        "complete": True, "empty_authority": True,
+                        "checked_at": minute + timedelta(minutes=1), "present_minutes": (),
+                    })
+
+            try:
+                with patch.object(sqlite3, "connect", side_effect=connect), \
+                        patch.object(repository, "purge_before", purge):
+                    deliver()
+                    after_attempt = state()
+                    result = {"kind": kind, "day": day, "postcommit": postcommit, "cleanup": cleanup,
+                        "initial": initial, "after_attempt": after_attempt, "acks_after_attempt": acks.copy(),
+                        "commits": commits.copy(), "pending_cutoff": controller.pending_minute_retention,
+                        "timer_active": controller.minute_cache_timer.isActive(),
+                        "pending_data": bool(controller.pending_minutes or controller.pending_market_minutes or controller.pending_minute_gaps),
+                        "history_loaded": "TARGET" in window._minute_history_codes,
+                        "empty_quality": window._minute_aggregator.quality_for_range("EMPTY", minute, minute + timedelta(minutes=1)).value,
+                    }
+                    if cleanup is not None:
+                        controller.request_close()
+                        self.wait_until(lambda: controller._shutdown_stage in {"ready", "cache_failed"})
+                        result["failed_close_stage"] = controller._shutdown_stage
+                        result["cutoff_after_failed_close"] = controller.pending_minute_retention
+                        injection["cleanup"] = False
+                    elif controller.minute_cache_timer.isActive():
+                        controller.minute_cache_timer.stop()
+                        controller.minute_cache_timer.timeout.emit()
+                    controller.request_close()
+                    self.wait_until(controller.request_close)
+                    result.update(final=state(), purges=purges.copy(), acks=acks.copy(),
+                        final_pending_cutoff=controller.pending_minute_retention, close_stage=controller._shutdown_stage,
+                        native_cost={"connections": len(connections), **{operation: sum(
+                            sql.lstrip().upper().startswith(operation.upper()) for sql in statements)
+                            for operation in ("select", "delete", "begin", "commit", "rollback")}})
+                self.assertEqual(initial["keeper"], result["final"]["keeper"])
+                print("R033_FALLBACK_RETENTION_OBSERVATION " + json.dumps({
+                    key: value for key, value in result.items()
+                    if key not in {"initial", "after_attempt", "final", "acks", "acks_after_attempt", "commits"}
+                }, default=str))
+                return result
+            finally:
+                injection["write"] = injection["cleanup"] = False
+                controller.request_close()
+                self.wait_until(controller.request_close)
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
+    def test_public_writer_free_applied_cutoff_fences_late_native_batches(self):
+        for kind in ("batch", "gap"):
+            for day in ("expired", "cutoff", "current"):
+                with self.subTest(kind=kind, day=day):
+                    result = self._observe_public_writer_free_applied_cutoff(kind, day=day)
+                    self.assertEqual(([], [], [], []), result["after_attempt"]["expired"])
+                    self.assertEqual(1, len(result["acks_after_attempt"]))
+                    self.assertEqual(day == "expired", any(result["acks_after_attempt"][0]["expired"]))
+                    self.assertEqual([date(2026, 9, 23)] if day == "expired" else [], result["purges"])
+                    self.assertEqual("ready", result["close_stage"])
+
+    def test_public_writer_free_expired_commit_failure_keeps_cleanup_retry_before_close(self):
+        for kind in ("stock", "index", "gap"):
+            for cleanup in ("precommit", "postcommit"):
+                with self.subTest(kind=kind, cleanup=cleanup):
+                    result = self._observe_public_writer_free_applied_cutoff(kind, postcommit=True, cleanup=cleanup)
+                    self.assertEqual(1, len(result["commits"]))
+                    self.assertFalse(result["commits"][0]["in_transaction"])
+                    self.assertTrue(any(result["commits"][0]["state"]["expired"]))
+                    self.assertEqual(int(kind == "gap"), len(result["acks_after_attempt"]))
+                    self.assertTrue(result["pending_data"])
+                    self.assertEqual(date(2026, 9, 23), result["pending_cutoff"])
+                    self.assertTrue(result["timer_active"])
+                    self.assertEqual("cache_failed", result["failed_close_stage"])
+                    self.assertEqual(date(2026, 9, 23), result["cutoff_after_failed_close"])
+                    self.assertEqual(([], [], [], []), result["final"]["expired"])
+                    self.assertIsNone(result["final_pending_cutoff"])
+                    self.assertEqual([date(2026, 9, 23)] * 3, result["purges"])
+
+    def test_public_writer_free_history_and_empty_preserve_native_outcome_then_cutoff(self):
+        for kind in ("history", "empty"):
+            for postcommit, cleanup in ((False, None), (True, None), (False, "precommit")):
+                with self.subTest(kind=kind, postcommit=postcommit, cleanup=cleanup):
+                    result = self._observe_public_writer_free_applied_cutoff(kind, postcommit=postcommit, cleanup=cleanup)
+                    self.assertEqual(int(postcommit), len(result["commits"]))
+                    if postcommit:
+                        self.assertFalse(result["commits"][0]["in_transaction"])
+                        self.assertTrue(any(result["commits"][0]["state"]["expired"]))
+                    if kind == "history":
+                        self.assertEqual(not postcommit, result["history_loaded"])
+                        self.assertEqual([("2026-10-23", "TARGET", 3)], result["after_attempt"]["receipt"])
+                    else:
+                        self.assertEqual("partial" if postcommit else "complete", result["empty_quality"])
+                    if cleanup is not None:
+                        self.assertEqual(date(2026, 9, 23), result["pending_cutoff"])
+                        self.assertEqual("cache_failed", result["failed_close_stage"])
+                    else:
+                        self.assertEqual(([], [], [], []), result["after_attempt"]["expired"])
+                    self.assertEqual(([], [], [], []), result["final"]["expired"])
+                    self.assertEqual([], result["acks_after_attempt"])
+
+    def _observe_older_requested_retention(self, *, writer=False, kind="batch", requested=None,
+                                           minute=None, cleanup=None, write_failure=False):
+        import json
+
+        now = as_kst(datetime(2026, 10, 23, 10))
+        applied = date(2026, 9, 23)
+        requested = requested or date(2026, 9, 20)
+        minute = minute or datetime(2026, 9, 22, 10)
+        kept = datetime(2026, 9, 25, 10)
+        original_connect = sqlite3.connect
+        original_purge = MinuteBarRepository.purge_before
+        purges, statements, connections, acks, commits = [], [], [], [], []
+        injection = {"cleanup": cleanup is not None, "write": write_failure, "purge": None}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            repository = MinuteBarRepository(path, now_provider=lambda: now)
+            repository.upsert_bars("KEEP", (MinuteOhlcv(kept, 200, 220, 190, 210, 30),))
+            repository.upsert_market_index_minutes({("kosdaq", kept): (1., 2., 1., 2., 10.)})
+            repository.record_history_sync("KEEP", kept.date(), kept, 1)
+            controller = self.controller([], minute_bar_repository=repository,
+                monitor_database_path=path if writer else None,
+                ranking_loader=SimpleNamespace(server_now=lambda: now))
+
+            def state():
+                with closing(original_connect(path)) as connection:
+                    return {
+                        "expired": tuple(connection.execute(sql, (applied.isoformat(),)).fetchall() for sql in (
+                            "SELECT * FROM minute_bars WHERE trade_date<? ORDER BY stock_code,minute",
+                            "SELECT * FROM market_index_minute_bars WHERE trade_date<? ORDER BY market,minute",
+                            "SELECT * FROM market_data_observation_meta WHERE dataset_kind='minute_bar' AND substr(observation_key,1,10)<? ORDER BY subject,observation_key",
+                            "SELECT * FROM minute_history_sync_log WHERE trade_date<? ORDER BY stock_code",
+                        )),
+                        "keeper": tuple(connection.execute(sql).fetchall() for sql in (
+                            "SELECT * FROM minute_bars WHERE stock_code='KEEP'",
+                            "SELECT * FROM market_index_minute_bars WHERE market='kosdaq'",
+                            "SELECT * FROM minute_history_sync_log WHERE stock_code='KEEP'",
+                            "SELECT * FROM market_data_observation_meta WHERE subject IN ('KEEP','market:kosdaq') ORDER BY subject,observation_key",
+                        )),
+                    }
+
+            cache_writer = controller.market_cache_writer
+            if cache_writer is not None:
+                controller.start_market_cache_writer()
+            controller.queue_minute_retention(applied)
+            if cache_writer is not None:
+                self.wait_until(lambda: cache_writer._minute_retention_cutoff == applied)
+                cache_writer.minute_saved.connect(lambda: acks.append(state()), Qt.ConnectionType.DirectConnection)
+            else:
+                self.assertEqual(applied, controller._minute_retention_cutoff)
+                controller.minute_cache_saved.connect(lambda: acks.append(state()))
+            initial = state()
+
+            def purge(current, cutoff):
+                purges.append(cutoff)
+                injection["purge"] = cutoff
+                try:
+                    return original_purge(current, cutoff)
+                finally:
+                    injection["purge"] = None
+
+            class NativeConnection(sqlite3.Connection):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.role = None
+                    connections.append(1)
+                    self.set_trace_callback(statements.append)
+
+                def execute(self, sql, *args, **kwargs):
+                    if sql.lstrip().upper().startswith("DELETE FROM MINUTE_BARS"):
+                        self.role = "cleanup"
+                        if injection["cleanup"] and cleanup == "requested-pre" and injection["purge"] == requested:
+                            self.set_authorizer(lambda action, *_:
+                                sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_DELETE else sqlite3.SQLITE_OK)
+                        if injection["cleanup"] and cleanup == "applied-pre" and injection["purge"] == applied:
+                            self.set_authorizer(lambda action, *_:
+                                sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_DELETE else sqlite3.SQLITE_OK)
+                    return super().execute(sql, *args, **kwargs)
+
+                def executemany(self, sql, *args, **kwargs):
+                    if sql.lstrip().upper().startswith("INSERT INTO MINUTE_BARS"):
+                        self.role = "stock"
+                    return super().executemany(sql, *args, **kwargs)
+
+                def commit(self):
+                    super().commit()
+                    if self.role == "cleanup" and injection["cleanup"] and cleanup == "requested-post" and injection["purge"] == requested:
+                        commits.append(("cleanup", self.in_transaction))
+                        raise OSError("native requested retention COMMIT return lost")
+                    if self.role == "stock" and injection["write"]:
+                        injection["write"] = False
+                        commits.append(("stock", self.in_transaction))
+                        raise OSError("native stock COMMIT return lost")
+
+            def connect(*args, **kwargs):
+                kwargs["factory"] = NativeConnection
+                return original_connect(*args, **kwargs)
+
+            try:
+                with patch.object(sqlite3, "connect", side_effect=connect), \
+                        patch.object(MinuteBarRepository, "purge_before", purge):
+                    if kind == "batch":
+                        controller.queue_minute_bar("TARGET", MinuteOhlcv(minute, 100, 110, 90, 105, 10))
+                        controller.queue_market_index("kospi", minute, 2500., 12.)
+                    elif kind == "gap":
+                        controller.pending_minute_gaps = {"GAP": (minute,), "market:kospi": (minute,)}
+                    controller.queue_minute_retention(requested)
+                    if cache_writer is not None:
+                        self.assertTrue(cache_writer.stop_and_drain())
+                        self.app.processEvents()
+                    controller.minute_cache_timer.stop()
+                    result = {"after": state(), "purges": purges.copy(), "acks": acks.copy(),
+                        "pending": controller.pending_minute_retention,
+                        "pending_stock": dict(controller.pending_minutes),
+                        "pending_index": dict(controller.pending_market_minutes), "commits": commits.copy(),
+                        "applied": cache_writer._minute_retention_cutoff if cache_writer else controller._minute_retention_cutoff,
+                        "native_cost": {"connections": len(connections), **{operation: sum(
+                            sql.lstrip().upper().startswith(operation.upper()) for sql in statements)
+                            for operation in ("select", "delete", "insert", "begin", "commit", "rollback")}}}
+                    injection["cleanup"] = False
+                    if not writer:
+                        controller.request_close()
+                        self.wait_until(controller.request_close)
+                        result.update(final=state(), final_pending=controller.pending_minute_retention,
+                            close_stage=controller._shutdown_stage, final_purges=purges.copy())
+                self.assertEqual(initial["keeper"], result["after"]["keeper"])
+                print("R033_OLDER_REQUEST_OBSERVATION " + json.dumps({
+                    "writer": writer, "kind": kind, "requested": requested, "minute": minute,
+                    "cleanup": cleanup, "write_failure": write_failure,
+                    **{key: value for key, value in result.items() if key not in {"after", "final", "acks", "pending_stock", "pending_index"}},
+                    "expired_counts": [len(rows) for rows in result["after"]["expired"]],
+                    "ack_count": len(result["acks"]),
+                }, default=str))
+                return result
+            finally:
+                injection["cleanup"] = injection["write"] = False
+                if cache_writer is not None:
+                    self.assertTrue(cache_writer.stop_and_drain())
+                controller.request_close()
+                self.wait_until(controller.request_close)
+
+    def test_older_requested_cutoff_matches_native_fifo_late_input_fence(self):
+        for kind in ("batch", "gap"):
+            for writer in (True, False):
+                with self.subTest(kind=kind, writer=writer):
+                    result = self._observe_older_requested_retention(kind=kind, writer=writer)
+                    self.assertEqual([date(2026, 9, 23), date(2026, 9, 20)], result["purges"])
+                    self.assertEqual(([], [], [], []), result["after"]["expired"])
+                    self.assertEqual(date(2026, 9, 23), result["applied"])
+                    self.assertIsNone(result["pending"])
+                    self.assertEqual(int(kind == "batch" or not writer), len(result["acks"]))
+                    if result["acks"]:
+                        self.assertTrue(any(result["acks"][0]["expired"]))
+
+    def test_explicit_cutoff_controls_keep_requested_native_purge_without_extra_fence(self):
+        for requested, minute, kind in (
+            (date(2026, 9, 23), datetime(2026, 9, 22, 10), "batch"),
+            (date(2026, 9, 24), datetime(2026, 9, 22, 10), "batch"),
+            (date(2026, 9, 20), datetime(2026, 9, 23, 10), "batch"),
+            (date(2026, 9, 20), datetime(2026, 10, 23, 10), "gap"),
+            (date(2026, 9, 20), datetime(2026, 9, 22, 10), "none"),
+        ):
+            with self.subTest(requested=requested, minute=minute, kind=kind):
+                result = self._observe_older_requested_retention(requested=requested, minute=minute, kind=kind)
+                self.assertEqual([requested], result["purges"])
+                self.assertEqual(([], [], [], []), result["after"]["expired"])
+                self.assertEqual(max(date(2026, 9, 23), requested), result["applied"])
+                self.assertIsNone(result["pending"])
+
+    def test_older_requested_cutoff_preserves_native_failure_payload_and_explicit_retry(self):
+        for cleanup, write_failure in (("requested-pre", False), ("requested-post", False),
+                                       ("applied-pre", False), (None, True)):
+            with self.subTest(cleanup=cleanup, write_failure=write_failure):
+                result = self._observe_older_requested_retention(cleanup=cleanup, write_failure=write_failure)
+                self.assertEqual([date(2026, 9, 23), date(2026, 9, 20)], result["purges"])
+                expected = date(2026, 9, 23) if cleanup == "applied-pre" else date(2026, 9, 20) if cleanup else None
+                self.assertEqual(expected, result["pending"])
+                self.assertEqual(int(not write_failure), len(result["acks"]))
+                if cleanup != "applied-pre":
+                    self.assertEqual(([], [], [], []), result["after"]["expired"])
+                else:
+                    self.assertTrue(any(result["after"]["expired"]))
+                self.assertEqual(int(write_failure), len(result["pending_stock"]))
+                self.assertEqual(int(write_failure), len(result["pending_index"]))
+                if write_failure:
+                    self.assertEqual([("stock", False)], result["commits"])
+                    minute = datetime(2026, 9, 22, 10)
+                    self.assertEqual({("TARGET", minute): MinuteOhlcv(minute, 100, 110, 90, 105, 10)}, result["pending_stock"])
+                    self.assertEqual({("kospi", minute): (2500., 2500., 2500., 2500., 12.)}, result["pending_index"])
+                if cleanup == "requested-post":
+                    self.assertEqual([("cleanup", False)], result["commits"])
+                self.assertEqual([date(2026, 9, 23), date(2026, 9, 20),
+                    expected or date(2026, 9, 23)], result["final_purges"])
+                self.assertEqual(([], [], [], []), result["final"]["expired"])
+                self.assertIsNone(result["final_pending"])
+                self.assertEqual("ready", result["close_stage"])
+                self.assertEqual(date(2026, 9, 23), result["applied"])
+
     def test_retention_failure_keeps_original_cutoff_for_timer_and_explicit_close_retry(self):
         for after_commit in (False, True):
             with self.subTest(after_commit=after_commit), tempfile.TemporaryDirectory() as directory:
@@ -1847,7 +2271,8 @@ class AppControllerTests(unittest.TestCase):
 
     def _bootstrap_settings_desktop(self, during_loop, after_exit=None, *,
                                     content_service=None, expected_error=SystemExit,
-                                    source_mode="local_server", before_run=None, cleanup_window=False):
+                                    source_mode="local_server", before_run=None, cleanup_window=False,
+                                    query_client_factory=None):
         import json
         import sys
         import threading
@@ -1867,7 +2292,7 @@ class AppControllerTests(unittest.TestCase):
         StockNewsRepository(paths.news_database_path)
         fixture = SimpleNamespace(
             paths=paths, entered=Event(), release=Event(), completed=Event(), events=[],
-            callbacks=[], timers=[], windows=[], http_calls=0, fail_http=False,
+            callbacks=[], timers=[], windows=[], http_calls=0, fail_http=False, network_calls=0,
         )
         now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
 
@@ -1887,6 +2312,7 @@ class AppControllerTests(unittest.TestCase):
                 return json.dumps(self.value).encode()
 
         def http(request, **_kwargs):
+            fixture.network_calls += 1
             if "/app_settings?" in request.full_url:
                 fixture.http_calls += 1
                 fixture.events.append("settings.http")
@@ -1966,7 +2392,9 @@ class AppControllerTests(unittest.TestCase):
                 patch.object(bootstrap, "CentralContentClient", side_effect=lambda *args, **kwargs:
                              CentralContentClient(*args, opener=http, **kwargs)),
                 patch.object(bootstrap, "CentralSettingsSyncService", TrackedSync),
-                patch.object(bootstrap, "create_query_client", return_value=SimpleNamespace(server_now=lambda: now)),
+                (patch.object(bootstrap, "create_query_client", side_effect=query_client_factory)
+                 if query_client_factory is not None else
+                 patch.object(bootstrap, "create_query_client", return_value=SimpleNamespace(server_now=lambda: now))),
                 patch.object(bootstrap, "QApplication", return_value=application),
                 patch.object(bootstrap, "MainWindow", side_effect=window),
                 patch.object(QTimer, "singleShot", side_effect=single_shot),
@@ -2334,7 +2762,167 @@ class AppControllerTests(unittest.TestCase):
         fixture = self._bootstrap_settings_desktop(retry_after_http_failure, assert_before_cleanup)
         self.assertTrue(fixture.restore_available())
 
-    def _bootstrap_retention_case(self, *, fail_minute=False, exit_mode="normal", finish_before_exit=False):
+    def _bootstrap_settings_direct_exit_case(self, *, exit_mode, stage):
+        import json
+        import threading
+        from kiwoom_monitor.infrastructure.central_settings_sync import CentralSettingsSyncService
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        state = SimpleNamespace(
+            entered=Event(), release=Event(), lease_released=Event(), stopped=Event(),
+            active=threading.local(), observer=None, observed=None, timed_out=False,
+            traces=[], connections=0, closed=0, events=[], fixture=None,
+        )
+        sentinel = RuntimeError("controlled settings app.exec failure")
+        connect, sync, lease_close = sqlite3.connect, CentralSettingsSyncService.sync, AppDataLease.close
+
+        def trace(statement):
+            state.traces.append(statement)
+            if stage == "sqlite" and statement.startswith("INSERT INTO settings("):
+                state.events.append("settings.native.entered")
+                state.entered.set()
+                if not state.release.wait(4):
+                    state.timed_out = True
+
+        class Connection(sqlite3.Connection):
+            def close(connection):
+                super().close()
+                state.closed += 1
+                state.events.append("settings.connection.closed")
+
+        def connection(*args, **kwargs):
+            if not getattr(state.active, "value", False):
+                return connect(*args, **kwargs)
+            value = connect(*args, factory=Connection, **kwargs)
+            state.connections += 1
+            value.set_trace_callback(trace)
+            return value
+
+        def sync_settings(service, database_path):
+            state.active.value = True
+            try:
+                return sync(service, database_path)
+            finally:
+                state.active.value = False
+                state.events.append("settings.body.closed")
+
+        def close_lease(lease):
+            shared = not lease._exclusive and not lease._stream.closed
+            lease_close(lease)
+            if shared:
+                state.events.append("lease.released")
+                state.lease_released.set()
+
+        def leave_while_settings_is_running(fixture):
+            state.fixture = fixture
+            stop = fixture.server.stop.side_effect
+
+            def stop_server():
+                state.events.append("server.stop")
+                stop()
+                state.stopped.set()
+
+            fixture.server.stop.side_effect = stop_server
+            if stage != "http":
+                fixture.release.set()
+            fixture.schedule()
+            if stage == "finished":
+                self.assertTrue(fixture.completed.wait(2))
+
+                def worker_released():
+                    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                    return not fixture.window._app_controller.findChildren(SettingsRequestWorker)
+
+                self.wait_until(worker_released)
+            else:
+                try:
+                    self.assertTrue((fixture.entered if stage == "http" else state.entered).wait(1))
+                    self.assertFalse(fixture.completed.is_set())
+                except BaseException:
+                    fixture.release.set()
+                    state.release.set()
+                    raise
+
+                def observe():
+                    try:
+                        state.lease_released.wait(.15)
+                        state.observed = (
+                            state.stopped.is_set(), state.lease_released.is_set(),
+                            fixture.restore_available(), fixture.completed.is_set(),
+                        )
+                    finally:
+                        fixture.release.set()
+                        state.release.set()
+
+                state.observer = threading.Thread(target=observe, name="settings-exit-observer")
+                state.observer.start()
+            if exit_mode == "error":
+                raise sentinel
+
+        def after_exit(fixture):
+            if state.observer is not None:
+                state.observer.join(5)
+                self.assertFalse(state.observer.is_alive())
+            state.exit_error = fixture.exit_error
+
+        try:
+            with patch.object(sqlite3, "connect", side_effect=connection), \
+                    patch.object(CentralSettingsSyncService, "sync", sync_settings), \
+                    patch.object(AppDataLease, "close", close_lease):
+                try:
+                    fixture = self._bootstrap_settings_desktop(
+                        leave_while_settings_is_running, after_exit,
+                        expected_error=RuntimeError if exit_mode == "error" else SystemExit,
+                        cleanup_window=True,
+                    )
+                finally:
+                    state.release.set()
+                    if state.fixture is not None:
+                        state.fixture.release.set()
+                    if state.observer is not None:
+                        state.observer.join(5)
+                        self.assertFalse(state.observer.is_alive())
+            self.assertFalse(state.timed_out)
+            self.assertEqual((1, 1), (state.connections, state.closed))
+            self.assertEqual(1, fixture.http_calls)
+            self.assertTrue(fixture.completed.is_set())
+            self.assertTrue(fixture.restore_available())
+            if exit_mode == "error":
+                self.assertIs(sentinel, state.exit_error)
+            with closing(connect(fixture.paths.database_path)) as native:
+                self.assertEqual("4", native.execute(
+                    "SELECT value FROM settings WHERE key='rank_query_type'",
+                ).fetchone()[0])
+                self.assertEqual("2030-01-02T10:00:00+09:00", native.execute(
+                    "SELECT updated_at FROM central_setting_versions WHERE setting_key='rank_query_type'",
+                ).fetchone()[0])
+            if stage != "finished":
+                self.assertEqual((False, False, False, False), state.observed, state.events)
+            self.assertLess(state.events.index("settings.connection.closed"), state.events.index("server.stop"))
+            self.assertLess(state.events.index("server.stop"), state.events.index("lease.released"))
+        finally:
+            print("R032_SETTINGS_EXIT_OBSERVATION " + json.dumps({
+                "exit_mode": exit_mode, "stage": stage, "observed": state.observed,
+                "events": state.events, "timed_out": state.timed_out,
+                "native_cost": {"connections": state.connections, "closed": state.closed, **{
+                    operation: sum(statement.lstrip().upper().startswith(operation.upper())
+                                   for statement in state.traces)
+                    for operation in ("select", "insert", "begin", "commit")
+                }},
+            }))
+
+    def test_bootstrap_settings_direct_exec_return_preserves_sync_and_restore_lease(self):
+        for stage in ("http", "sqlite", "finished"):
+            with self.subTest(stage=stage):
+                self._bootstrap_settings_direct_exit_case(exit_mode="quit", stage=stage)
+
+    def test_bootstrap_settings_exec_error_preserves_sync_and_original_error(self):
+        for stage in ("http", "sqlite", "finished"):
+            with self.subTest(stage=stage):
+                self._bootstrap_settings_direct_exit_case(exit_mode="error", stage=stage)
+
+    def _bootstrap_retention_case(self, *, fail_minute=False, exit_mode="normal", finish_before_exit=False,
+                                  query_client_factory=None, before_retention=None, fallback_now=None):
         import json
         import threading
         from kiwoom_monitor import bootstrap
@@ -2429,6 +3017,8 @@ class AppControllerTests(unittest.TestCase):
             )
             self.assertEqual(30_000, delay)
             fixture.retention_callback = callback
+            if before_retention is not None:
+                before_retention(fixture)
             callback()
             try:
                 if fail_minute or finish_before_exit:
@@ -2514,7 +3104,7 @@ class AppControllerTests(unittest.TestCase):
                 state.release.set()
 
         try:
-            with patch.object(bootstrap, "kst_wall_now", return_value=fixed), \
+            with patch("kiwoom_monitor.domain.time_basis.kst_now", return_value=fallback_now or fixed), \
                     patch.object(sqlite3, "connect", side_effect=connection), \
                     patch.object(AppDataLease, "close", close_lease), \
                     patch.object(MinuteBarRepository, "purge_before", purge_minute), \
@@ -2524,6 +3114,7 @@ class AppControllerTests(unittest.TestCase):
                         close_while_native_begin_is_running, assert_before_cleanup,
                         expected_error=RuntimeError if exit_mode == "error" else SystemExit,
                         cleanup_window=exit_mode != "normal",
+                        query_client_factory=query_client_factory,
                     )
                     with patch.object(bootstrap, "SettingsRequestWorker", wraps=SettingsRequestWorker) as start:
                         fixture.retention_callback()
@@ -2591,6 +3182,56 @@ class AppControllerTests(unittest.TestCase):
 
     def test_bootstrap_retention_minute_sql_failure_keeps_daily_cleanup_and_blocks_late_start(self):
         self._bootstrap_retention_case(fail_minute=True)
+
+    def test_bootstrap_retention_uses_replaced_api_clock_in_kst(self):
+        import threading
+
+        main_thread = threading.get_ident()
+        for value in (datetime.fromisoformat("2030-01-01T15:05:00+00:00"),
+                      datetime(2030, 1, 2, 23, 5)):
+            with self.subTest(clock=value.isoformat()):
+                worker_clock_calls = []
+
+                def corrected_now():
+                    if threading.get_ident() != main_thread:
+                        worker_clock_calls.append(1)
+                    return value
+
+                old_client = SimpleNamespace(server_now=lambda: datetime(2030, 1, 1, 10))
+                new_client = SimpleNamespace(server_now=corrected_now)
+                clients = Mock(side_effect=(old_client, new_client))
+
+                def replace_runtime(fixture):
+                    controller = fixture.window._app_controller
+                    old_loader = controller.ranking_loader
+                    controller.restart_for_api_settings()
+                    controller._advance_api_reload()
+                    controller._advance_api_reload()
+                    controller._initial_ranking_timer.stop()
+                    self.assertFalse(controller.api_reloading)
+                    self.assertIsNot(old_loader, controller.ranking_loader)
+                    self.assertEqual(2, clients.call_count)
+                    self.assertEqual(date(2030, 1, 2), as_kst(controller.ranking_now()).date())
+
+                fixture, state = self._bootstrap_retention_case(
+                    query_client_factory=clients, before_retention=replace_runtime,
+                    fallback_now=as_kst(datetime(2030, 1, 3, 10)),
+                )
+                self.assertEqual((1, 0), (len(worker_clock_calls), fixture.network_calls))
+                self.assertEqual((2, 2, 6, 2, 2), (state.connections, *(
+                    sum(statement.lstrip().upper().startswith(operation)
+                        for _phase, statement in state.traces)
+                    for operation in ("SELECT", "DELETE", "BEGIN", "COMMIT")
+                )))
+
+    def test_bootstrap_retention_without_api_clock_uses_common_kst_fallback(self):
+        for mode in ("unconfigured", "offline"):
+            with self.subTest(mode=mode):
+                clients = (Mock(side_effect=ValueError("controlled unconfigured API"))
+                           if mode == "unconfigured" else Mock(return_value=SimpleNamespace()))
+                fixture, _state = self._bootstrap_retention_case(query_client_factory=clients)
+                clients.assert_called_once()
+                self.assertEqual(0, fixture.network_calls)
 
     def test_runtime_provider_swap_and_view_rollback_use_public_setter_without_old_cache_publication(self):
         import threading
@@ -2888,6 +3529,60 @@ class AppControllerTests(unittest.TestCase):
                 self.assertEqual([("reset", ("005930",)), ("reset", ("000660",))], events[-2:])
                 window.close()
                 QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+
+
+    def test_bootstrap_runtime_reads_one_encrypted_profile_per_build_and_reloads_environment(self):
+        from kiwoom_monitor.infrastructure.kiwoom_rest import local_config
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client_factory import create_query_client
+
+        original_load = local_config.LocalApiConfig.load
+        original_read = Path.read_text
+        reads, observed_counts, environments = [], [], []
+        profiles = local_config.ApiProfiles("mock-app", "mock-secret", "real-app", "real-secret", "mock")
+
+        def read(path, *args, **kwargs):
+            if path.name == "api.env":
+                reads.append(path)
+            return original_read(path, *args, **kwargs)
+
+        def setup(fixture):
+            local_config.LocalApiConfig(fixture.paths.data_dir / "api.env").save_profiles(profiles)
+
+        def capture(controller):
+            client = controller.market_data_client
+            worker = controller.realtime._worker_factory(("005930",))
+            worker.setParent(controller.realtime)
+            self.assertIs(client, worker._token_provider.__self__)
+            self.assertIs(client, worker._now_provider.__self__)
+            self.assertEqual(client.environment, worker._environment)
+            environments.append(worker._environment)
+            observed_counts.append((load.call_count, decrypt.call_count, len(reads)))
+
+        def during_loop(fixture):
+            controller = fixture.window._app_controller
+            capture(controller)
+            local_config.LocalApiConfig(fixture.paths.data_dir / "api.env").save_profiles(
+                local_config.ApiProfiles("mock-app", "mock-secret", "real-app", "real-secret", "real")
+            )
+            controller.restart_for_api_settings()
+            controller._advance_api_reload()
+            controller._advance_api_reload()
+            self.assertFalse(controller.api_reloading)
+            capture(controller)
+
+        with patch.object(local_config.LocalApiConfig, "load", autospec=True, side_effect=original_load) as load, \
+                patch.object(local_config, "_unprotect", wraps=local_config._unprotect) as decrypt, \
+                patch.object(Path, "read_text", autospec=True, side_effect=read), \
+                patch.object(MainWindow, "_refresh_rankings"), \
+                patch.object(MainWindow, "_restore_environment_selector"), \
+                patch.object(AppController, "schedule_next_ranking_refresh"), \
+                patch.object(AppController, "schedule_realtime_session_refresh"):
+            self._bootstrap_settings_desktop(
+                during_loop, source_mode="local", before_run=setup, cleanup_window=True,
+                query_client_factory=create_query_client,
+            )
+        self.assertEqual(["mock", "real"], environments)
+        self.assertEqual([(1, 1, 1), (2, 2, 2)], observed_counts)
 
 
 if __name__ == "__main__":

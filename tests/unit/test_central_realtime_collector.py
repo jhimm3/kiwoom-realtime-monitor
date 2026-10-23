@@ -16,7 +16,6 @@ from kiwoom_monitor.central_server.realtime_collector import (
     REALTIME_ITEMS_PER_TYPE,
     _registered_trade_sources,
     _next_latest_checkpoint,
-    contains_krx_observation,
 )
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 from kiwoom_monitor.domain.market_data_contract import (
@@ -731,7 +730,6 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         message = {"trnm": "REAL", "data": [{"type": "0B", "item": "005930_AL"}]}
         groups = {"1000": [{"item": ["005930_AL", "000660", "035420_NX"], "type": ["0B"]}]}
 
-        self.assertFalse(contains_krx_observation(message))
         self.assertEqual({
             ("005930", "SOR"), ("000660", "KRX"), ("035420", "NXT"),
         }, _registered_trade_sources(groups))
@@ -805,7 +803,6 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         )
         message = {"trnm": "REAL", "data": None}
 
-        self.assertFalse(contains_krx_observation(message))
         collector._publish_parsed(message)
 
     def test_market_operation_0s_is_published_without_changing_market_data_semantics(self) -> None:
@@ -919,24 +916,6 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         now[0] = datetime(2026, 9, 14, 20, 0)
         self.assertIsNone(collector._market_session())
 
-    def test_regular_close_and_full_day_close_are_notified_separately_once(self) -> None:
-        class Events:
-            def __init__(self): self.calls = []
-            async def close_krx_regular_session(self, session): self.calls.append(("regular", session))
-            async def close_observation_day(self, session): self.calls.append(("full", session))
-
-        now = [datetime(2026, 9, 14, 15, 30)]
-        events = Events()
-        collector = CentralRealtimeCollector(
-            lambda: "token", "real", RealtimeHub(), lambda: now[0], market_events=events,
-        )
-        asyncio.run(collector._notify_market_event_boundaries())
-        asyncio.run(collector._notify_market_event_boundaries())
-        now[0] = datetime(2026, 9, 14, 20, 0)
-        asyncio.run(collector._notify_market_event_boundaries())
-        self.assertEqual([
-            ("regular", "2026-09-14"), ("full", "2026-09-14"),
-        ], events.calls)
 
     def test_minute_capture_requires_subscription_from_window_start(self) -> None:
         now = datetime(2026, 9, 8, 10, 15, 30)

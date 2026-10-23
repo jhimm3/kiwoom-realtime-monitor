@@ -240,14 +240,20 @@ class TestChangeReviewTests(unittest.TestCase):
         record = self.draft()
         record['module_counts']['tests.unit.test_sample'] = 3
         self.append(record)
-        report = {'batch_results': [{'module_test_counts': [{'module': 'tests.unit.test_sample', 'test_count': 2}]}]}
+        ids = [CASE, 'tests.unit.test_sample.Sample.test_failure']
+        report = {'status': 'passed', 'code_tree_start': {'lf_sha256': 'current'},
+                  'code_tree_end': {'lf_sha256': 'current'}, 'batch_results': [{
+                      'status': 'passed', 'worker_exit_confirmed': True,
+                      'process_tree_exit_confirmed': True, 'test_count': 2,
+                      'planned_test_ids': ids, 'executed_test_ids': ids,
+                      'module_test_counts': [{'module': 'tests.unit.test_sample', 'test_count': 2}]}]}
         self.write('run.json', json.dumps(report))
         for changed in ('tests/unit/test_sample.py\n', ''):
             with self.subTest(changed=changed), patch.object(review, 'validate_history', return_value='base'), \
                     patch.object(review.subprocess, 'check_output', side_effect=[changed, '']), \
                     patch.object(review.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'', b'')), \
-                    patch.object(review, 'execution_ids', return_value={CASE}):
-                with self.assertRaisesRegex(ValueError, 'Unexpected runtime discovery count'):
+                    patch.object(run_regression, '_code_tree_identity', return_value={'lf_sha256': 'current'}):
+                with self.assertRaisesRegex(ValueError, 'Unexpected runtime discovery count: tests.unit.test_sample: expected 3, observed 2'):
                     review.check(self.root, executions=[self.root / 'run.json'], base_ref='base')
 
     def test_explicit_finding_update_preserves_original_and_reuses_identity(self):
@@ -288,6 +294,43 @@ class TestChangeReviewTests(unittest.TestCase):
                 patch.object(review, 'execution_ids', return_value=set()):
             with self.assertRaisesRegex(ValueError, 'Related tests not executed'):
                 review.check(self.root, executions=[], base_ref='base')
+
+    def test_execution_report_is_read_once_without_changing_raw_counts_or_failure_order(self):
+        self.write('tests/unit/test_sample.py', SOURCE.replace('compute(1, 2)', 'compute(1, 9)'))
+        self.append(self.draft())
+        ids = [CASE, 'tests.unit.test_sample.Sample.test_failure']
+        report = {'status': 'passed', 'planned': 2, 'ran': 2,
+                  'failures': 0, 'errors': 0, 'skipped': 0, 'expected_failures': 0, 'unexpected_successes': 0,
+                  'source_start': {'lf_sha256': 'current'}, 'source_end': {'lf_sha256': 'current'},
+                  'planned_test_ids': ids, 'executed_test_ids': ids,
+                  'discovered': {'tests.unit.test_sample': 9},
+                  'module_test_counts': [{'module': 'tests.unit.test_sample', 'test_count': 4}],
+                  'batch_results': [{'module_test_counts': [{'module': 'tests.unit.test_sample', 'test_count': 2}]}]}
+        path = self.root / 'platform.json'
+        self.write('platform.json', json.dumps(report))
+
+        def checked(paths):
+            with patch.object(review, 'validate_history', return_value='base'), \
+                    patch.object(review.subprocess, 'check_output', side_effect=['tests/unit/test_sample.py\n', '']), \
+                    patch.object(review.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'', b'')), \
+                    patch.object(run_regression, '_code_tree_identity', return_value={'lf_sha256': 'current'}):
+                return review.check(self.root, executions=paths, base_ref='base')
+
+        with patch.object(review, 'read_json', wraps=review.read_json) as reads:
+            self.assertEqual('passed', checked([path])['status'])
+            self.assertEqual(1, sum(call.args[0] == path for call in reads.call_args_list))
+        malformed = copy.deepcopy(report)
+        malformed['discovered'] = None
+        self.write('platform.json', json.dumps(malformed))
+        stale = copy.deepcopy(report)
+        stale['source_end']['lf_sha256'] = 'old'
+        self.write('stale.json', json.dumps(stale))
+        with self.assertRaisesRegex(ValueError, 'Stale/incomplete execution evidence'):
+            checked([path, self.root / 'stale.json'])
+        malformed.update(planned=1, ran=1, planned_test_ids=[ids[1]], executed_test_ids=[ids[1]])
+        self.write('platform.json', json.dumps(malformed))
+        with self.assertRaisesRegex(ValueError, 'Changed tests not executed'):
+            checked([path])
 
 
 if __name__ == '__main__':

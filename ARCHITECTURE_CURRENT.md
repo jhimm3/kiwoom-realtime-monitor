@@ -1,5 +1,7 @@
 # 현재 구현 아키텍처
 
+**현행/목표 구분(2026-10-23):** 이 문서의 구현 이력과 현재 책임은 보존한다. PC·NAS·공통 전체의 새 재평가와 목표 책임 배치·재사용/부분 교체·전환 계획은 [전체 목표 구조](docs/architecture/app-target-20261023.md)에 있으며 설계 승인 대기다. 현재 클래스 구성은 보존 조건이 아니고 새 owner는 아직 구현하지 않았다. 이번 평가는 오류·복구·기본 관측·보안·UX·개발/배포/복원 등 14개 품질 영역을 포함한다. 병목이 아직 해결되지 않았으므로 NAS 녹화·리플레이·정밀 진단은 현재 유지·사용한다. 이번 목표는 과거 뉴스·대신증권(CREON)의 일회성 수집/적재 도구까지 포함해 언제든 삭제 가능한 독립 경계를 만드는 것이며, 도구·운영 작업·적재 자료를 지금 삭제/중단하지 않는다. 자체 로컬 LLM 구축·학습·서빙 계획은 취소한다.
+
 현재 allocation의 원래 facts/계좌·Risk cut·모델 게시와 EV/출구/study refs를 한 input_bundle에 동결한다. INPUTS_BOUND는 현재 입력·보고된 source refs의 연결이고 모델 독립성/현재 조건 지원/실제 운영 승인이 아니다. R4는 같은 ref를 사용하며 기존 amount/quantity/비중 arithmetic은 바꾸지 않는다. 원래 quote/account/model lease를 유지하고 expired 조회는 current bundle/goals를 함께 제거한다. 기존 selected latest 기록은 같은 transaction으로 운용하며 history를 새로 수집하지 않는다. 개발 종료는 세 고정 묶음/실제 수락·승인은 별도다. [86단계](docs/AI_TRADING_SYSTEM_REDESIGN.md#86-개발-마무리-범위-고정과-공통-입력원본-근거-묶음)
 
 이하 단계 설명은 해당 시점의 기록이다.

@@ -28,6 +28,7 @@ from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository imp
 from .execution_runtime import ExecutionRuntime, ManualMockOrderGateway
 from .market_observations import KST, as_kst
 from .mock_account_monitor import MockAccountMonitor, MockAccountRealtimeCollector
+from .observation_frame_recovery import drain_thread_call
 from .rest_broker import CentralRestBroker, MOCK_ACCOUNT_ENDPOINTS
 from .credential_runtime import CredentialRuntimeHooks, CredentialOperationError, ValidatedCredential
 from .account_query import AccountQuerySessionManager
@@ -660,7 +661,7 @@ class MockCredentialOwner:
         ):
             raise CredentialOperationError("ACCOUNT_RUNTIME_CONTEXT_MISMATCH", 409)
         scope = self._scope(old.account_ref)
-        settings = await asyncio.to_thread(self.store.load_account_settings, scope)
+        settings = await drain_thread_call(self.store.load_account_settings, scope)
         if (
             settings["revision"] != expected_settings_revision
             or self._settings_revisions.get(profile_id) != expected_settings_revision
@@ -688,7 +689,7 @@ class MockCredentialOwner:
             self._bundles.pop(profile_id, None)
             await self._publish_change(profile_id, None)
             await old.close(close_broker=False)
-            latest = await asyncio.to_thread(self.store.load_account_settings, scope)
+            latest = await drain_thread_call(self.store.load_account_settings, scope)
             if latest["revision"] != expected_settings_revision:
                 raise RuntimeError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
             run_id = automation_context.execution_run_id if automation_context else old.run_id
@@ -713,7 +714,7 @@ class MockCredentialOwner:
             self._contexts[profile_id] = new
             new.set_position_order_observation_account(self._position_order_observation_account)
             await new.start()
-            latest = await asyncio.to_thread(self.store.load_account_settings, scope)
+            latest = await drain_thread_call(self.store.load_account_settings, scope)
             if latest["revision"] != expected_settings_revision:
                 await new.close(close_broker=False)
                 raise RuntimeError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
