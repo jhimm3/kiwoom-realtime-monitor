@@ -2328,10 +2328,14 @@ class MockCredentialProtectionContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_key_rotation_preserves_registered_protective_sell_and_native_cancel_retry(self):
         await self._exercise_rotation_protection()
 
+    async def test_rotation_retries_protective_cancel_after_superseded_risk_cut(self):
+        await self._exercise_rotation_protection(supersede_retry=True)
+
     async def test_actual_key_rotation_preserves_no_minute_incomplete_management_checkpoint(self):
         await self._exercise_rotation_protection(incomplete_before_rotation=True)
 
-    async def _exercise_rotation_protection(self, *, mutation=None, retry_mutation=False, incomplete_before_rotation=False):
+    async def _exercise_rotation_protection(self, *, mutation=None, retry_mutation=False,
+                                            incomplete_before_rotation=False, supersede_retry=False):
         from datetime import timedelta
         from kiwoom_monitor.application.breakout_strategy import StrategyDecision
         from kiwoom_monitor.application.mock_automation_admission import build_mock_automation_lease_receipt
@@ -2428,6 +2432,7 @@ class MockCredentialProtectionContinuityTests(unittest.IsolatedAsyncioTestCase):
             current = self.owner.bundle(self.profile)
             native_reached = threading.Event()
             native_errors = []
+            superseded_revisions = []
             if mutation is not None:
                 append = self.store.append_execution_event
                 injected = False
@@ -2451,6 +2456,29 @@ class MockCredentialProtectionContinuityTests(unittest.IsolatedAsyncioTestCase):
             await self.supervisor._restore_once()
             self.assertIn(self.account_ref, self.supervisor._runners, self.supervisor._restore_errors)
             restored = self.supervisor._runners[self.account_ref]
+            if supersede_retry:
+                episode = restored.episode
+                manage = episode._manage_unfilled_inputs
+
+                async def supersede_before_assessment(inputs, **options):
+                    cue = episode._cancel_recovery
+                    if cue and cue.get('reject_event_id') and not superseded_revisions:
+                        await current.monitor._queue.join()
+                        await current.monitor.refresh_recovery()
+                        revision = inputs['risk'].reconciliation_revision
+                        latest = current.monitor.latest_automation_risk_cut['risk'].reconciliation_revision
+                        self.assertGreater(latest, revision)
+                        superseded_revisions.extend((revision, latest))
+                        outcome = await manage(inputs, **options)
+                        self.assertEqual(('BLOCKED', 'unfilled_native_risk_superseded'), outcome)
+                        self.assertEqual(1, len(cancel_calls))
+                        return outcome
+                    return await manage(inputs, **options)
+
+                assessment_patch = patch.object(episode, '_manage_unfilled_inputs',
+                                                side_effect=supersede_before_assessment)
+                assessment_patch.start()
+                self.addCleanup(assessment_patch.stop)
             self.assertTrue(restored.episode.is_bound_to(current))
             self.assertIsNotNone(restored._task)
             self.assertEqual(restored._native_risk_listener, current.monitor._automation_risk_listener)
@@ -2510,6 +2538,10 @@ class MockCredentialProtectionContinuityTests(unittest.IsolatedAsyncioTestCase):
             starts = [event for event in events if event["event_type"] == "CANCEL_STARTED"]
             self.assertEqual(2, len(starts))
             self.assertEqual(2, starts[-1]["mock_cancel_retry_claim"]["attempt"])
+            if supersede_retry:
+                self.assertEqual(2, len(superseded_revisions))
+                self.assertGreaterEqual(starts[-1]["mock_cancel_retry_claim"]["risk_reconciliation_revision"],
+                                        superseded_revisions[-1])
             self.assertEqual(OrderState.CANCEL_PENDING, current.runtime.load_intent(open_sell.intent.intent_id).state)
             self.assertEqual(paused, repository.load_mock_automation_control(self.account_ref))
             self.assertEqual(2, self.transport.submit.call_count)

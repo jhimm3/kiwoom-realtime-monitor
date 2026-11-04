@@ -58,7 +58,7 @@ class DiagnosticCollectorReplayPostgresTests(unittest.TestCase):
             def save_minute_bars(self, values, *, observations=None):
                 self.attempts += 1
                 if self.attempts == 1:
-                    # Fails inside the native transaction after canonical writes.
+                    # Violates the inline metadata check after canonical writes.
                     first_key, first_observation = observations[0]
                     invalid_observation = replace(
                         first_observation,
@@ -80,7 +80,7 @@ class DiagnosticCollectorReplayPostgresTests(unittest.TestCase):
         self.assertEqual('complete', result['state'], result)
         self.assertTrue(result['fixture_verification']['passed'])
         failed = [call['error_type'] for call in result['calls'] if call['state'] == 'failed']
-        self.assertEqual(['NotNullViolation', 'OSError'], failed)
+        self.assertEqual(['CheckViolation', 'OSError'], failed)
         self.assertEqual(0, result['pending_records_after_drain'])
         self.assertEqual('passed', result['cleanup'])
         _preflight(url, build_collector_fixture(run_id))

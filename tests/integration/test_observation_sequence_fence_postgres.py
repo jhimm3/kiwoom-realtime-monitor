@@ -47,9 +47,9 @@ class ObservationSequenceFencePostgresTests(unittest.TestCase):
             release.set()
         self.pool.shutdown(wait=True)
         with self.store._connect() as connection, connection.cursor() as cursor:
-            cursor.execute('DELETE FROM central_observation_revisions WHERE subject=ANY(%s)', (self.subjects,))
-            cursor.execute('DELETE FROM central_market_data_observation_meta WHERE subject=ANY(%s)', (self.subjects,))
             cursor.execute('DELETE FROM central_dataset_snapshots WHERE subject=ANY(%s)', (self.subjects,))
+            cursor.execute('DELETE FROM central_market_data_observation_meta WHERE subject=ANY(%s)', (self.subjects,))
+            cursor.execute('DELETE FROM central_observation_revisions WHERE subject=ANY(%s)', (self.subjects,))
             cursor.execute('DELETE FROM central_minute_bar_operations WHERE operation_id=ANY(%s)',
                            (['fence-' + code for code in self.codes],))
             cursor.execute('DELETE FROM central_minute_bars WHERE code=ANY(%s)', (self.codes,))

@@ -24,6 +24,7 @@ from kiwoom_monitor.application.breakout_strategy import (
     StrategyDecision, StrategyState, session_entry_time_rejection,
 )
 from kiwoom_monitor.application.mock_automation_execution import (
+    MockAutomationRiskSuperseded,
     assess_mock_unfilled_gate_bundle_from_risk,
     dispatch_mock_automation_decision_from_risk,
     dispatch_mock_unfilled_replacement_from_risk,
@@ -537,9 +538,10 @@ class MockAutomationEpisode:
         await drain_thread_call(self._save_checkpoint, force=True)
 
     async def record_iteration_error(self, error) -> None:
+        reason = "RuntimeError" if isinstance(error, MockAutomationRiskSuperseded) else type(error).__name__
         self._status = {
             **(self._status if self._input_progress.recovering else {}),
-            "state": "ERROR", "reason": type(error).__name__,
+            "state": "ERROR", "reason": reason,
             "detail": str(error), "orders_enabled": False,
             "updated_at": self._now().isoformat(),
         }
@@ -1805,6 +1807,10 @@ class MockAutomationEpisode:
         if due and self._unfilled_source_recovery_deadline != deadline:
             self._unfilled_source_recovery_deadline = deadline
             monitor.request_automation_execution_recovery()
+        superseded_revision = (self._unfilled_source_status or {}).get('superseded_risk_revision')
+        if superseded_revision is not None and (
+                cut is None or cut['risk'].reconciliation_revision <= superseded_revision):
+            return  # The monitor must acknowledge a newer cut before another assessment.
         if cut is None:
             self._unfilled_source_status = {'state':'BLOCKED','reason':'native_account_cut_unavailable'}
             return  # Wait for owner's ACK callback, not a repeated broker request.
@@ -1895,7 +1901,7 @@ class MockAutomationEpisode:
             self._unfilled_source_pending = True
             self._unfilled_source_status = {'state':'BLOCKED','reason':'native_account_cut_superseded'}
             return  # A newer ACK callback must not be erased by this older cut.
-        self.offer_unfilled_execution_inputs(policy=policy, broker_snapshot=broker, target=target,
+        self.offer_unfilled_execution_inputs(_native=True, policy=policy, broker_snapshot=broker, target=target,
             observation=observation, assessment=assessment, recovery=recovery, risk=risk)
         self._unfilled_source_pending = False
         self._unfilled_alignment_price=None
@@ -2045,7 +2051,7 @@ class MockAutomationEpisode:
                         and row.filled_quantity == row.detailed_filled_quantity == row.broker_reported_filled_quantity == 0
                         for row in observation.open_orders))
 
-    def offer_unfilled_execution_inputs(self, **inputs) -> bool:
+    def offer_unfilled_execution_inputs(self, *, _native=False, **inputs) -> bool:
         """Replace one RAM cut and wake the existing owner; never grant authority.
 
         The producer must supply current typed evidence. No broker refresh,
@@ -2109,7 +2115,7 @@ class MockAutomationEpisode:
                         or identity[:2] == previous[:2]):
                     raise ValueError('unfilled_current_input_out_of_order_or_conflicting_cut')
             self._unfilled_input_identity = identity
-            self._unfilled_input = (identity[2], snapshot, cause)
+            self._unfilled_input = (identity[2], snapshot, cause, _native)
             self._unfilled_delivery = {'input_id': identity[2], 'decision_time': identity[0].isoformat(),
                                       'risk_revision': identity[1], 'state': 'PENDING', 'order_authorized': False}
             should_wake = cause != self._unfilled_processed_cause or self._unfilled_due() is not None
@@ -2178,7 +2184,7 @@ class MockAutomationEpisode:
             pending, self._unfilled_input = self._unfilled_input, None
         if pending is None:
             return False
-        identity, inputs, cause = pending
+        identity, inputs, cause, native = pending
         state, reason = 'PROCESSED', None
         try:
             now = self._bundle.runtime.server_now()
@@ -2198,7 +2204,7 @@ class MockAutomationEpisode:
             if self._unfilled_preflight is None:
                 await drain_thread_call(self._preview_unfilled_management_locked,
                     **{key: value for key, value in inputs.items() if key not in {'recovery', 'risk'}})
-            result = await self._manage_unfilled_inputs(inputs)
+            result = await self._manage_unfilled_inputs(inputs, native=native)
             state, reason = result
         except ValueError as error:
             state, reason = 'BLOCKED', str(error)
@@ -2222,13 +2228,32 @@ class MockAutomationEpisode:
                 return None
         return self._preview_unfilled_execution_locked(**inputs)
 
-    async def _manage_unfilled_inputs(self, inputs):
+    async def _manage_unfilled_inputs(self, inputs, *, native):
         if self._cancel_recovery is not None and inputs['policy'].purpose == 'PROTECTIVE_EXIT':
             record = await drain_thread_call(self._bundle.runtime.load_intent,self._cancel_recovery['managed_intent_id'])
             events = await drain_thread_call(self._cancel_lineage_events)
             self._set_cancel_recovery(protective_cancel_recovery(record,events,inputs['policy'],
                 self._spec.unfilled_execution_policy,self._bundle.runtime.server_now()),events,inputs['policy'])
-        plan = await drain_thread_call(self._assess_unfilled_action_locked, inputs)
+        try:
+            plan = await drain_thread_call(self._assess_unfilled_action_locked, inputs)
+        except MockAutomationRiskSuperseded:
+            cue = self._cancel_recovery
+            if (not native or self._closing or inputs['policy'].purpose != 'PROTECTIVE_EXIT'
+                    or not cue or cue['state'] != 'RETRY_READY'
+                    or self._unfilled_processed_deadline != cue['next_check_at']):
+                raise
+            # No native claim has started. Re-arm the same deadline and keep its
+            # existing recovery request deduplication and durable retry budget.
+            self._unfilled_source_deadline = None
+            self._unfilled_processed_deadline = None
+            self._unfilled_source_pending = True
+            reason = 'unfilled_native_risk_superseded'
+            self._unfilled_source_status = {'state': 'BLOCKED', 'reason': reason,
+                'superseded_risk_revision': inputs['risk'].reconciliation_revision}
+            notify = self._wake_notification()
+            if notify is not None:
+                notify()
+            return 'BLOCKED', reason
         if plan is not None:
             action = plan['result']['action']
             if action != 'REPRICE':

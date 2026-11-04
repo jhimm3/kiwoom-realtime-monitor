@@ -9,8 +9,12 @@ from unittest.mock import patch
 
 import psycopg
 
+from kiwoom_monitor.central_server import diagnostic_metrics
 from kiwoom_monitor.central_server.diagnostic_replay import (
     ReplayCall, ReplayProfile, TEST_DATABASE_NAME, run_replay,
+)
+from kiwoom_monitor.central_server.postgres_access import (
+    database_observer, install_database_observer,
 )
 
 
@@ -19,7 +23,8 @@ class DiagnosticReplayPostgresTests(unittest.TestCase):
         url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
         if not url:
             self.skipTest("dedicated PostgreSQL URL is required")
-        from kiwoom_monitor.central_server.diagnostic_metrics import record_writer_transaction
+        self.addCleanup(install_database_observer, database_observer())
+        diagnostic_metrics.install_postgres_observation()
         cases = [(900, 2, 3, 100, 1), (15, 3, 0, 5, 1),
                  (11, 2, 0, 4, 0), (10, 0, 0, 2, 1)]
         shapes = [{"bar_shape_version": 1, "observations": rows,
@@ -36,8 +41,8 @@ class DiagnosticReplayPostgresTests(unittest.TestCase):
         run_id = uuid4().hex
         gate, done = threading.Event(), threading.Event()
         gate.set(); done.set()
-        with patch("kiwoom_monitor.central_server.diagnostic_metrics.record_writer_transaction",
-                   wraps=record_writer_transaction) as observed:
+        with patch.object(diagnostic_metrics, "record_writer_transaction",
+                          wraps=diagnostic_metrics.record_writer_transaction) as observed:
             result = run_replay(profile, url, run_id, threading.Event(), threading.Event(), gate, done)
         self.assertEqual("complete", result["state"], result)
         measured = [call.kwargs["domain_counts"] for call in observed.call_args_list
@@ -104,7 +109,8 @@ class DiagnosticReplayPostgresTests(unittest.TestCase):
         url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
         if not url:
             self.skipTest("dedicated PostgreSQL URL is required")
-        from kiwoom_monitor.central_server.diagnostic_metrics import record_writer_transaction
+        self.addCleanup(install_database_observer, database_observer())
+        diagnostic_metrics.install_postgres_observation()
         for scenario in ("unchanged_page", "one_changed_bar", "fresh_page"):
             with self.subTest(scenario=scenario):
                 run_id = uuid4().hex
@@ -116,8 +122,8 @@ class DiagnosticReplayPostgresTests(unittest.TestCase):
                 ), {}, 0, 1, ("query_minute",), (), query_minute_scenario=scenario)
                 gate, done = threading.Event(), threading.Event()
                 gate.set(); done.set()
-                with patch("kiwoom_monitor.central_server.diagnostic_metrics.record_writer_transaction",
-                           wraps=record_writer_transaction) as observed:
+                with patch.object(diagnostic_metrics, "record_writer_transaction",
+                                  wraps=diagnostic_metrics.record_writer_transaction) as observed:
                     result = run_replay(profile, url, run_id, threading.Event(), threading.Event(), gate, done)
                 self.assertEqual("complete", result["state"], result)
                 self.assertEqual({"query_minute": 2}, result["completed_calls"])
