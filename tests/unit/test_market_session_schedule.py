@@ -15,12 +15,15 @@ from kiwoom_monitor.application.market_session_schedule import (
     MarketPhase,
     MarketSession,
     SessionSupport,
+    SessionWindow,
+    TradingDayEvidence,
     active_realtime_codes,
     after_hours_data_pause,
     full_day_close_at,
     is_nxt_only_session,
     mock_order_entry_decision,
     next_realtime_session_boundary,
+    next_trading_day,
     realtime_subscription_target,
     research_bar_allowed,
     research_session_profile_document,
@@ -28,7 +31,112 @@ from kiwoom_monitor.application.market_session_schedule import (
     session_window_at,
     top20_collection_available,
     top20_collection_open,
+    trading_day_as_of,
 )
+
+
+class TradingDayEvidenceTests(unittest.TestCase):
+    # Synthetic Friday decision, a weekend and Monday closure, then a delayed Tuesday.
+    friday = date(2026, 9, 11)
+    saturday = date(2026, 9, 12)
+    sunday = date(2026, 9, 13)
+    monday = date(2026, 9, 14)
+    tuesday = date(2026, 9, 15)
+    cut = datetime(2026, 9, 11, 6, 15, tzinfo=timezone.utc)
+
+    def window(self, day, start=time(10), end=time(16, 20), *, venue="KRX",
+               session=MarketSession.KRX_REGULAR, phase=MarketPhase.CONTINUOUS):
+        return SessionWindow(
+            venue, day, session, phase, datetime.combine(day, start, KST),
+            datetime.combine(day, end, KST), "fixture-calendar/v1", SessionSupport.SUPPORTED,
+        )
+
+    def evidence(self, day, sessions, *, venue="KRX", revision="announced", available=None):
+        return TradingDayEvidence(venue, day, available or self.cut, revision, "fixture:venue-notice", sessions)
+
+    def test_next_trading_day_crosses_explicit_closures_and_keeps_special_window(self) -> None:
+        tuesday = self.evidence(self.tuesday, (self.window(self.tuesday),))
+        nxt_monday = self.evidence(self.monday, (self.window(
+            self.monday, venue="NXT", session=MarketSession.NXT_MAIN_MARKET,
+        ),), venue="NXT")
+        weekend = tuple(self.evidence(day, ()) for day in (self.saturday, self.sunday))
+        self.assertEqual(tuesday, next_trading_day(
+            self.friday, venue="KRX", as_of=self.cut,
+            evidence=iter((tuesday, nxt_monday, *weekend, self.evidence(self.monday, ()))),
+        ))
+        self.assertEqual(datetime(2026, 9, 15, 10, tzinfo=KST), tuesday.sessions[0].starts_at)
+        self.assertEqual("fixture:venue-notice", tuesday.evidence_ref)
+
+    def test_next_trading_day_leaves_missing_unresolved_and_future_closures_unknown(self) -> None:
+        weekend = tuple(self.evidence(day, ()) for day in (self.saturday, self.sunday))
+        tuesday = self.evidence(self.tuesday, (self.window(self.tuesday),))
+        future = datetime(2026, 9, 11, 15, 16, tzinfo=KST)
+        for monday in ((), (self.evidence(self.monday, None),), (self.evidence(self.monday, (), available=future),)):
+            with self.subTest(monday=monday):
+                self.assertIsNone(next_trading_day(
+                    self.friday, venue="KRX", as_of=self.cut, evidence=(*weekend, *monday, tuesday),
+                ))
+        self.assertIsNone(next_trading_day(
+            self.friday, venue="KRX", as_of=self.cut, evidence=(tuesday,),
+        ))
+
+    def test_calendar_revision_uses_latest_available_instant_and_rejects_conflicts(self) -> None:
+        announced = self.evidence(self.monday, (self.window(self.monday),))
+        correction_time = datetime(2026, 9, 11, 15, 16, tzinfo=KST)
+        corrected = self.evidence(self.monday, (), revision="closure", available=correction_time)
+        tied = self.evidence(self.monday, None, revision="unknown", available=correction_time)
+        self.assertEqual(announced, trading_day_as_of(
+            self.monday, venue="KRX", as_of=self.cut, evidence=(corrected, announced, announced),
+        ))
+        self.assertEqual(corrected, trading_day_as_of(
+            self.monday, venue="KRX", as_of=correction_time, evidence=(announced, corrected),
+        ))
+        self.assertIsNone(trading_day_as_of(
+            self.monday, venue="KRX", as_of=correction_time, evidence=(announced, tied, corrected),
+        ))
+
+    def test_calendar_requires_timezone_and_matching_ordered_windows(self) -> None:
+        with self.assertRaisesRegex(ValueError, "timezone"):
+            self.evidence(self.monday, (), available=datetime(2026, 9, 11, 15, 16))
+        with self.assertRaisesRegex(ValueError, "timezone"):
+            next_trading_day(self.friday, venue="KRX", as_of=datetime(2026, 9, 11, 15, 16), evidence=())
+        with self.assertRaisesRegex(ValueError, "within their venue day"):
+            self.evidence(self.monday, (self.window(self.tuesday),))
+        with self.assertRaisesRegex(ValueError, "nonoverlapping"):
+            self.evidence(self.monday, (self.window(self.monday), self.window(self.monday)))
+
+    def test_strict_research_bars_require_visible_evidence_and_completed_special_session(self) -> None:
+        start = datetime(2026, 9, 15, 10, tzinfo=KST)
+        end = datetime(2026, 9, 15, 10, 1, tzinfo=KST)
+        early = datetime(2026, 9, 15, 9, 30, tzinfo=KST)
+        early_end = datetime(2026, 9, 15, 9, 31, tzinfo=KST)
+        special = self.evidence(self.tuesday, (self.window(self.tuesday),))
+        self.assertTrue(research_bar_allowed(early, early_end, venue="KRX"))
+        self.assertFalse(research_bar_allowed(early, early_end, venue="KRX", trading_day=special, decision_at=end))
+        self.assertTrue(research_bar_allowed(start, end, venue="KRX", trading_day=special, decision_at=end,
+                                             declared_schedule_version="fixture-calendar/v1"))
+        self.assertFalse(research_bar_allowed(start, end, venue="KRX", trading_day=special, decision_at=start))
+        self.assertFalse(research_bar_allowed(start, end, venue="KRX", trading_day=special, decision_at=end,
+                                              declared_schedule_version=CURRENT_SCHEDULE_VERSION))
+        for day in (None, self.evidence(self.tuesday, ()), self.evidence(self.tuesday, None),
+                    self.evidence(self.tuesday, (self.window(self.tuesday),),
+                                  available=datetime(2026, 9, 15, 10, 2, tzinfo=KST))):
+            with self.subTest(day=day):
+                self.assertFalse(research_bar_allowed(start, end, venue="KRX", trading_day=day, decision_at=end))
+
+    def test_strict_research_preserves_declared_auction_phase(self) -> None:
+        auction = self.window(self.tuesday, time(16, 20), time(16, 30),
+                              session=MarketSession.KRX_CLOSING_AUCTION, phase=MarketPhase.AUCTION_ORDER_ENTRY)
+        day = self.evidence(self.tuesday, (self.window(self.tuesday), auction))
+        self.assertTrue(research_bar_allowed(
+            auction.starts_at, auction.ends_at, venue="KRX", trading_day=day, decision_at=auction.ends_at,
+            declared_session=MarketSession.KRX_CLOSING_AUCTION.value,
+            declared_phase=MarketPhase.AUCTION_ORDER_ENTRY.value,
+        ))
+        self.assertFalse(research_bar_allowed(
+            auction.starts_at, auction.ends_at, venue="KRX", trading_day=day, decision_at=auction.ends_at,
+            declared_session=MarketSession.KRX_REGULAR.value, declared_phase=MarketPhase.CONTINUOUS.value,
+        ))
 
 
 class MarketSessionScheduleTests(unittest.TestCase):

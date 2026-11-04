@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Generic, TypeVar
+
+from kiwoom_monitor.domain.time_basis import KST
 
 
 ValueT = TypeVar("ValueT")
@@ -124,6 +127,113 @@ class MarketDataObservation(Generic[ValueT]):
     subject: str
     value: ValueT
     metadata: MarketDataMetadata
+
+
+class ListingType(StrEnum):
+    IPO = "ipo"
+    SPAC = "spac"
+    SPAC_MERGER = "spac_merger"
+    UNKNOWN = "unknown"
+
+
+class ListingEvidenceStatus(StrEnum):
+    AVAILABLE = "available"
+    UNKNOWN = "unknown"
+    INCOMPLETE = "incomplete"
+    CONFLICT = "conflict"
+
+
+class ListingPhase(StrEnum):
+    """Trading date relative to the reported date, independent of trading status."""
+
+    BEFORE_REPORTED_DATE = "before_reported_date"
+    LISTING_DAY = "listing_day"
+    AFTER_LISTING_DAY = "after_listing_day"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ListingEvidence:
+    symbol: str
+    listing_date: date | None
+    listing_type: ListingType
+    available_at: datetime | None
+    source: str
+    revision: str
+    evidence_id: str
+    completeness: DataCompleteness = DataCompleteness.COMPLETE
+
+    def __post_init__(self) -> None:
+        if not all(value.strip() for value in (self.symbol, self.source, self.revision, self.evidence_id)):
+            raise ValueError("listing evidence requires symbol, source, revision and evidence_id")
+        if self.listing_date is not None and type(self.listing_date) is not date:
+            raise ValueError("listing evidence date must be a calendar date")
+        if not isinstance(self.listing_type, ListingType) or not isinstance(self.completeness, DataCompleteness):
+            raise ValueError("listing evidence requires typed listing type and completeness")
+        if self.available_at is not None and self.available_at.utcoffset() is None:
+            raise ValueError("listing evidence availability must include its timezone")
+
+
+@dataclass(frozen=True)
+class ListingEvidenceSelection:
+    status: ListingEvidenceStatus
+    evidence: tuple[ListingEvidence, ...] = ()
+    phase: ListingPhase = ListingPhase.UNKNOWN
+
+
+def select_listing_evidence(
+    rows: Iterable[ListingEvidence], *, symbol: str, trading_date: date, as_of: datetime,
+) -> ListingEvidenceSelection:
+    """Select the latest known listing evidence for a strict replay cut.
+
+    A relevant row with unknown availability leaves the revision order unknown.
+    With known availability, determine the latest instant before checking quality.
+    This preserves incomplete corrections and conflicts at that instant.
+    """
+    if as_of.utcoffset() is None:
+        raise ValueError("listing evidence cutoff must include its timezone")
+    cutoff = as_of.astimezone(KST)
+    if cutoff.date() > trading_date:
+        raise ValueError("listing evidence cutoff follows the trading date")
+
+    unknown_time = set()
+    latest = set()
+    latest_at = None
+    for row in rows:
+        if row.symbol != symbol:
+            continue
+        if row.available_at is None:
+            unknown_time.add(row)
+            continue
+        available_at = row.available_at.astimezone(KST)
+        if available_at > cutoff:
+            continue
+        if latest_at is None or available_at > latest_at:
+            latest_at = available_at
+            latest = {row}
+        elif available_at == latest_at:
+            latest.add(row)
+
+    evidence = tuple(sorted(unknown_time or latest, key=lambda row: (
+        row.source, row.revision, row.evidence_id, row.listing_date.isoformat() if row.listing_date else "",
+        row.listing_type, row.completeness,
+    )))
+    if unknown_time or not evidence:
+        return ListingEvidenceSelection(ListingEvidenceStatus.UNKNOWN, evidence)
+
+    facts = {(row.listing_date, row.listing_type, row.completeness) for row in evidence}
+    if len(facts) != 1:
+        return ListingEvidenceSelection(ListingEvidenceStatus.CONFLICT, evidence)
+    listing_date, listing_type, completeness = next(iter(facts))
+    if listing_date is None or listing_type == ListingType.UNKNOWN or completeness != DataCompleteness.COMPLETE:
+        return ListingEvidenceSelection(ListingEvidenceStatus.INCOMPLETE, evidence)
+    if trading_date < listing_date:
+        phase = ListingPhase.BEFORE_REPORTED_DATE
+    elif trading_date == listing_date:
+        phase = ListingPhase.LISTING_DAY
+    else:
+        phase = ListingPhase.AFTER_LISTING_DAY
+    return ListingEvidenceSelection(ListingEvidenceStatus.AVAILABLE, evidence, phase)
 
 
 def metadata_from_legacy_capture_state(

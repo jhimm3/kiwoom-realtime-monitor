@@ -8,11 +8,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from kiwoom_monitor.application.research_replay import replay_krx_minute_bars
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_observations import ranking_observation
+from kiwoom_monitor.domain.market_data_contract import select_listing_evidence
 from kiwoom_monitor.infrastructure.research_data_source import (
     CentralResearchDataSource,
     load_frozen_research_export,
+    load_frozen_strategy_references,
 )
 
 
@@ -33,6 +36,61 @@ class _StoreClient:
 
 
 class ResearchDataSourceTests(unittest.TestCase):
+    def test_digest_pinned_strategy_references_replay_the_evidenced_window_at_each_receipt(self) -> None:
+        calendar = {
+            "venue": "KRX", "trading_date": "2026-11-05", "available_at": "2026-11-05T05:00:00Z",
+            "revision_id": "session-open", "evidence_ref": "fixture-exchange/notice-1",
+            "sessions": [{
+                "session": "KRX_CLOSING_AUCTION", "phase": "AUCTION_ORDER_ENTRY",
+                "starts_at": "2026-11-05T15:45:00+09:00", "ends_at": "2026-11-05T15:55:00+09:00",
+                "schedule_version": "fixture-session/v1", "support": "SUPPORTED",
+            }],
+        }
+        listing = {
+            "symbol": "005930", "listing_date": "2026-11-05", "listing_type": "ipo",
+            "available_at": "2026-11-05T15:44:00+09:00", "source": "fixture-exchange",
+            "revision": "listing-1", "evidence_id": "listing-record", "completeness": "complete",
+        }
+        correction = {**calendar, "revision_id": "session-corrected",
+                      "available_at": "2026-11-05T06:47:00Z", "sessions": []}
+        encoded = json.dumps({
+            "version": "strategy-reference/v1", "calendar": [calendar, correction], "listings": [listing],
+        }).encode()
+        digest = hashlib.sha256(encoded).hexdigest()
+        start = datetime(2026, 11, 5, 15, 45, tzinfo=KST)
+        end = start + timedelta(minutes=1)
+        observed = {
+            "kind": "minute_bar", "venue": "KRX", "subject": "005930",
+            "observation_key": "2026-11-05T15:45:00+09:00", "revision_id": "minute-r1",
+            "available_at": end.isoformat(), "completeness": "complete", "value_kind": "actual",
+            "payload": {
+                "code": "005930", "market": "KRX", "bar_start": start.isoformat(), "bar_end": end.isoformat(),
+                "open": 100, "high": 105, "low": 100, "close": 105, "volume": 8,
+                "trade_value_million_won": 1, "window_closed": True, "capture_quality": "complete",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "strategy-reference.json"
+            path.write_bytes(encoded)
+            references = load_frozen_strategy_references(path, expected_sha256=digest)
+            self.assertEqual(references.sha256, digest)
+            selection = select_listing_evidence(
+                references.listings, symbol="005930", trading_date=start.date(), as_of=start,
+            )
+            self.assertEqual(selection.evidence[0].evidence_id, "listing-record")
+            self.assertEqual(replay_krx_minute_bars((observed,)), ())
+            (bar,) = replay_krx_minute_bars(
+                (observed,), as_of=end + timedelta(minutes=2), calendar_evidence=references.calendar,
+            )
+            self.assertEqual((bar.market_session, bar.market_phase, bar.schedule_version),
+                             ("KRX_CLOSING_AUCTION", "AUCTION_ORDER_ENTRY", "fixture-session/v1"))
+            self.assertEqual(bar.research_session, "2026-11-05:KRX_REGULAR")
+            late = {**observed, "revision_id": "minute-r2", "available_at": correction["available_at"]}
+            self.assertEqual(replay_krx_minute_bars((observed, late), calendar_evidence=references.calendar), ())
+            path.write_bytes(encoded + b" ")
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                load_frozen_strategy_references(path, expected_sha256=digest)
+
     def test_file_export_is_verified_before_loading(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

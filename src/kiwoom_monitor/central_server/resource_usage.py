@@ -4,6 +4,7 @@ import os
 import shutil
 import time
 from pathlib import Path
+from sys import platform
 from typing import Any
 
 
@@ -33,37 +34,21 @@ def resource_usage(data_path: str | Path, database_size_bytes: int | None = None
 
 
 def _process_rss_bytes() -> int | None:
+    if platform == "win32":
+        try:
+            import psutil
+        except ImportError:
+            return None
+
+        try:
+            return psutil.Process().memory_info().rss
+        except (psutil.Error, OSError):
+            return None
     try:
         pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[1])
         return pages * int(os.sysconf("SC_PAGE_SIZE"))
     except (OSError, ValueError, IndexError, AttributeError):
-        if os.name == "nt":
-            return _windows_process_rss_bytes()
         return None
-
-
-def _windows_process_rss_bytes() -> int | None:
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        class MemoryCounters(ctypes.Structure):
-            _fields_ = [
-                ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
-                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
-            ]
-        counters = MemoryCounters()
-        counters.cb = ctypes.sizeof(counters)
-        if ctypes.windll.psapi.GetProcessMemoryInfo(
-            ctypes.windll.kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb,
-        ):
-            return int(counters.WorkingSetSize)
-    except (AttributeError, OSError):
-        pass
-    return None
 
 
 def _container_memory_bytes() -> tuple[int | None, int | None]:

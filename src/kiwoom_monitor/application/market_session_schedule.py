@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 from typing import Mapping
 from zoneinfo import ZoneInfo
@@ -110,6 +111,87 @@ class SessionWindow:
         if capability == "full_day_close":
             return False
         raise ValueError(f"unknown market-session capability: {capability}")
+
+
+@dataclass(frozen=True)
+class TradingDayEvidence:
+    """Venue calendar revision. None is unresolved, an empty tuple is a closure."""
+
+    venue: str
+    trading_date: date
+    available_at: datetime
+    revision_id: str
+    evidence_ref: str
+    sessions: tuple[SessionWindow, ...] | None
+
+    def __post_init__(self) -> None:
+        if self.venue not in {"KRX", "NXT"} or not self.revision_id.strip() or not self.evidence_ref.strip():
+            raise ValueError("calendar evidence requires a venue, revision and source reference")
+        _calendar_instant(self.available_at)
+        if self.sessions is None:
+            return
+        sessions = tuple(self.sessions)
+        previous_end = None
+        for window in sessions:
+            start = _calendar_instant(window.starts_at)
+            end = _calendar_instant(window.ends_at)
+            if (window.venue != self.venue or window.trading_date != self.trading_date
+                    or not window.session.value.startswith(f"{self.venue}_")
+                    or start.astimezone(KST).date() != self.trading_date
+                    or end.astimezone(KST).date() != self.trading_date
+                    or not window.schedule_version.strip() or start >= end
+                    or (previous_end is not None and start < previous_end)):
+                raise ValueError("calendar sessions must be ordered, nonoverlapping and within their venue day")
+            previous_end = end
+        object.__setattr__(self, "sessions", sessions)
+
+
+def _calendar_instant(value: datetime) -> datetime:
+    if value.utcoffset() is None:
+        raise ValueError("calendar evidence and decision times require a timezone")
+    return value.astimezone(timezone.utc)
+
+
+def _latest_calendar_revision(rows: list[TradingDayEvidence]) -> TradingDayEvidence | None:
+    if not rows:
+        return None
+    latest = max(rows, key=lambda row: _calendar_instant(row.available_at))
+    cutoff = _calendar_instant(latest.available_at)
+    if any(row != latest and _calendar_instant(row.available_at) == cutoff for row in rows):
+        return None
+    return latest
+
+
+def trading_day_as_of(
+    trading_date: date, *, venue: str, as_of: datetime, evidence: Iterable[TradingDayEvidence],
+) -> TradingDayEvidence | None:
+    """Read the latest visible venue-day revision, leaving ties unresolved."""
+    cutoff = _calendar_instant(as_of)
+    return _latest_calendar_revision([
+        row for row in evidence if row.venue == venue and row.trading_date == trading_date
+        and _calendar_instant(row.available_at) <= cutoff
+    ])
+
+
+def next_trading_day(
+    after_date: date, *, venue: str, as_of: datetime, evidence: Iterable[TradingDayEvidence],
+) -> TradingDayEvidence | None:
+    """Find the next evidenced trading day without skipping an unresolved day."""
+    cutoff = _calendar_instant(as_of)
+    visible: dict[date, list[TradingDayEvidence]] = {}
+    for row in evidence:
+        if row.venue == venue and row.trading_date > after_date and _calendar_instant(row.available_at) <= cutoff:
+            visible.setdefault(row.trading_date, []).append(row)
+
+    day = after_date
+    while day < date.max:
+        day += timedelta(days=1)
+        revision = _latest_calendar_revision(visible.get(day, []))
+        if revision is None or revision.sessions is None:
+            return None
+        if revision.sessions:
+            return revision
+    return None
 
 
 @dataclass(frozen=True)
@@ -285,14 +367,26 @@ def research_bar_allowed(
     declared_session: str | None = None,
     declared_phase: str | None = None,
     declared_schedule_version: str | None = None,
+    trading_day: TradingDayEvidence | None = None,
+    decision_at: datetime | None = None,
 ) -> bool:
-    """Gate strategy input independently from observation/subscription hours."""
+    """Use explicit calendar evidence when a decision cut is supplied."""
+    if trading_day is not None and decision_at is None:
+        raise ValueError("calendar evidence requires a decision cut")
     if session_profile == LEGACY_UNFILTERED_REPLAY_PROFILE:
+        if decision_at is not None:
+            raise ValueError("the unfiltered replay profile has no calendar contract")
         return str(venue).upper() == "KRX"
     if session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
         raise ValueError(f"unsupported research session profile: {session_profile}")
     if str(venue).upper() != "KRX" or bar_start.tzinfo is None or bar_end.tzinfo is None:
         return False
+    if decision_at is not None:
+        return calendar_research_bar_window(
+            bar_start, bar_end, trading_day=trading_day, decision_at=decision_at,
+            session_profile=session_profile, declared_session=declared_session,
+            declared_phase=declared_phase, declared_schedule_version=declared_schedule_version,
+        ) is not None
     start = bar_start.astimezone(KST)
     end = bar_end.astimezone(KST)
     if start.date() != end.date() or end <= start:
@@ -347,6 +441,46 @@ def research_bar_allowed(
     return declared_session in allowed_sessions and declared_phase in allowed_phases and (
         in_regular or in_after
     )
+
+
+def calendar_research_bar_window(
+    start: datetime,
+    end: datetime,
+    *,
+    trading_day: TradingDayEvidence | None,
+    decision_at: datetime,
+    session_profile: str,
+    declared_session: str | None = None,
+    declared_phase: str | None = None,
+    declared_schedule_version: str | None = None,
+) -> SessionWindow | None:
+    """Return the explicit calendar window that supports the completed KRX bar."""
+    if session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
+        raise ValueError(f"unsupported calendar research session profile: {session_profile}")
+    cutoff = _calendar_instant(decision_at)
+    if start.utcoffset() is None or end.utcoffset() is None:
+        return None
+    start = start.astimezone(KST)
+    end = end.astimezone(KST)
+    if (start.date() != end.date() or end <= start or trading_day is None
+            or trading_day.venue != "KRX" or trading_day.trading_date != start.date()
+            or _calendar_instant(trading_day.available_at) > cutoff or _calendar_instant(end) > cutoff):
+        return None
+    allowed_phases = {}
+    if session_profile in {KRX_REGULAR_RESEARCH_PROFILE, KRX_FULL_DAY_RESEARCH_PROFILE}:
+        allowed_phases[MarketSession.KRX_REGULAR] = MarketPhase.CONTINUOUS
+        allowed_phases[MarketSession.KRX_CLOSING_AUCTION] = MarketPhase.AUCTION_ORDER_ENTRY
+    if session_profile in {KRX_AFTER_RESEARCH_PROFILE, KRX_FULL_DAY_RESEARCH_PROFILE}:
+        allowed_phases[MarketSession.KRX_AFTER_MARKET] = MarketPhase.CONTINUOUS
+    return next((
+        window for window in trading_day.sessions or ()
+        if window.support is SessionSupport.SUPPORTED
+        and allowed_phases.get(window.session) is window.phase
+        and window.starts_at <= start and end <= window.ends_at
+        and declared_session in {None, "", window.session.value}
+        and declared_phase in {None, "", window.phase.value}
+        and declared_schedule_version in {None, "", window.schedule_version}
+    ), None)
 
 
 def research_session_key(at: datetime, *, session_profile: str) -> str | None:

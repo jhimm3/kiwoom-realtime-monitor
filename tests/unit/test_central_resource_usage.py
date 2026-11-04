@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from kiwoom_monitor.central_server import resource_usage as resources
 
@@ -18,6 +20,8 @@ class CentralResourceUsageTests(unittest.TestCase):
         self.assertGreaterEqual(result["data_disk_free_bytes"], 0)
         self.assertGreaterEqual(result["uptime_seconds"], 0)
         self.assertIn("process_memory_bytes", result)
+        if sys.platform == "win32":
+            self.assertGreater(result["process_memory_bytes"], 0)
         self.assertIn("container_memory_bytes", result)
         for current, raw_limit, expected in (("2048", "4096", 4096), ("2048", "max", None), ("2048", str(1 << 61), None)):
             for v1 in (False, True):
@@ -28,6 +32,32 @@ class CentralResourceUsageTests(unittest.TestCase):
                     if v1 and name.endswith(("memory.current", "memory.max")):
                         raise FileNotFoundError(name)
                     return current if name.endswith(("memory.current", "memory.usage_in_bytes")) else raw_limit
-                with self.subTest(v1=v1, limit=raw_limit), patch.object(Path, "read_text", read), patch.object(resources.os, "sysconf", return_value=4096, create=True):
+                with (
+                    self.subTest(v1=v1, limit=raw_limit),
+                    patch.object(resources, "platform", "linux"),
+                    patch.object(Path, "read_text", read),
+                    patch.object(resources.os, "sysconf", return_value=4096, create=True),
+                ):
                     measured = resource_usage(Path.cwd(), 12345)
                 self.assertEqual((12288, 2048, expected), tuple(measured[key] for key in ("process_memory_bytes", "container_memory_bytes", "container_memory_limit_bytes")))
+
+    def test_windows_rss_failure_preserves_other_diagnostics(self) -> None:
+        class ProcessReadError(Exception):
+            pass
+
+        def unavailable():
+            raise ProcessReadError("fixture process RSS unavailable")
+
+        psutil = SimpleNamespace(
+            Error=ProcessReadError, Process=lambda: SimpleNamespace(memory_info=unavailable),
+        )
+        for library in (None, psutil):
+            with (
+                self.subTest(library_available=library is not None),
+                patch.object(resources, "platform", "win32"),
+                patch.dict(sys.modules, {"psutil": library}),
+            ):
+                result = resource_usage(Path.cwd(), 12345)
+            self.assertIsNone(result["process_memory_bytes"])
+            self.assertGreater(result["data_disk_total_bytes"], 0)
+            self.assertEqual(12345, result["database_size_bytes"])

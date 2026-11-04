@@ -9,10 +9,14 @@ from typing import Any, Iterable, Mapping
 from kiwoom_monitor.application.market_session_schedule import (
     KST,
     KRX_REGULAR_RESEARCH_PROFILE,
+    MarketSession,
+    TradingDayEvidence,
+    calendar_research_bar_window,
     research_session_key,
     research_bar_allowed,
     schedule_version_for,
     session_window_at,
+    trading_day_as_of,
 )
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 
@@ -112,9 +116,16 @@ def replay_krx_minute_bars(
     observations: Iterable[Mapping[str, Any]], *, as_of: datetime | None = None,
     strict: bool = True,
     session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
+    calendar_evidence: Iterable[TradingDayEvidence] | None = None,
 ) -> tuple[KrxMinuteBarFrame, ...]:
-    """가상 시각과 명시 세션 프로필에 허용된 최신 KRX 분봉을 반환한다."""
+    """Read latest KRX minute revisions with their original availability cut."""
     cutoff = _utc_cutoff(as_of)
+    calendar_by_day = {}
+    calendar_at_receipt = {}
+    if calendar_evidence is not None:
+        for evidence in calendar_evidence:
+            if evidence.venue == "KRX":
+                calendar_by_day.setdefault(evidence.trading_date, []).append(evidence)
     latest: dict[tuple[str, str], Mapping[str, Any]] = {}
     for value in observations:
         if value.get("kind") != "minute_bar" or value.get("venue") != "KRX":
@@ -141,16 +152,17 @@ def replay_krx_minute_bars(
         available = _aware_datetime(value.get("available_at"))
         if bar_start is None or bar_end is None or available is None or bar_end <= bar_start:
             continue
-        if not research_bar_allowed(
-            bar_start,
-            bar_end,
-            venue=str(value.get("venue", "")),
-            session_profile=session_profile,
-            declared_session=_optional_text(payload.get("session")),
-            declared_phase=_optional_text(payload.get("phase")),
-            declared_schedule_version=_optional_text(payload.get("schedule_version")),
-        ):
-            continue
+        declared = {
+            "declared_session": _optional_text(payload.get("session")),
+            "declared_phase": _optional_text(payload.get("phase")),
+            "declared_schedule_version": _optional_text(payload.get("schedule_version")),
+        }
+        trading_date = bar_start.astimezone(KST).date()
+        if calendar_evidence is None:
+            if not research_bar_allowed(
+                bar_start, bar_end, venue="KRX", session_profile=session_profile, **declared,
+            ):
+                continue
         if strict and (
             payload.get("capture_quality") != "complete"
             or value.get("completeness") != "complete"
@@ -158,8 +170,29 @@ def replay_krx_minute_bars(
             or available < bar_end
         ):
             continue
-        try:
+        if calendar_evidence is None:
             scheduled = session_window_at(bar_start, venue="KRX")
+            session_key = (
+                research_session_key(bar_start.astimezone(KST), session_profile=session_profile) or ""
+                if session_profile != "legacy-unfiltered-krx/v0" else ""
+            )
+            schedule_version = schedule_version_for(trading_date)
+        else:
+            key = (trading_date, available.astimezone(timezone.utc))
+            if key not in calendar_at_receipt:
+                calendar_at_receipt[key] = trading_day_as_of(
+                    trading_date, venue="KRX", as_of=available, evidence=calendar_by_day.get(trading_date, ()),
+                )
+            scheduled = calendar_research_bar_window(
+                bar_start, bar_end, trading_day=calendar_at_receipt[key], decision_at=available,
+                session_profile=session_profile, **declared,
+            )
+            if scheduled is None:
+                continue
+            segment = "KRX_AFTER" if scheduled.session is MarketSession.KRX_AFTER_MARKET else "KRX_REGULAR"
+            session_key = f"{trading_date.isoformat()}:{segment}"
+            schedule_version = scheduled.schedule_version
+        try:
             result.append(KrxMinuteBarFrame(
                 revision_id=str(value.get("revision_id", "")),
                 observation_key=str(value.get("observation_key", "")),
@@ -174,18 +207,10 @@ def replay_krx_minute_bars(
                 capture_quality=str(payload.get("capture_quality", "")),
                 finalization_source=str(payload.get("finalization_source", "")),
                 session_profile=session_profile,
-                research_session=(
-                    research_session_key(
-                        bar_start.astimezone(KST), session_profile=session_profile,
-                    ) or ""
-                    if session_profile != "legacy-unfiltered-krx/v0" else ""
-                ),
-                market_session=_optional_text(payload.get("session")) or scheduled.session.value,
-                market_phase=_optional_text(payload.get("phase")) or scheduled.phase.value,
-                schedule_version=(
-                    _optional_text(payload.get("schedule_version"))
-                    or schedule_version_for(bar_start.astimezone(KST).date())
-                ),
+                research_session=session_key,
+                market_session=declared["declared_session"] or scheduled.session.value,
+                market_phase=declared["declared_phase"] or scheduled.phase.value,
+                schedule_version=declared["declared_schedule_version"] or schedule_version,
             ))
         except (KeyError, TypeError, ValueError):
             continue

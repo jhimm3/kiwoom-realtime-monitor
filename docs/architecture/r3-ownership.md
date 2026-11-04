@@ -660,6 +660,8 @@ S1 PC Top20 표시창 geometry는 명시 role INI를 사용한다. NAS index/out
 <a id="execution"></a>
 ## 계좌·Risk·Execution — F14/F16/F17/F18
 
+**12절의 익일 보유 격리 검증(2026-11-05).** 기존 명시 익일 보유 정책에서 마감 뒤 Runner와 lease를 닫고, 다음 합성 세션의 새 lease에서 이전 매수 FILL과 고정 보호 근거를 복구했다. 가짜 브로커의 청산 한 번과 매도 FILL 뒤 종결을 확인했다. 적용 범위는 기존 돌파 시험 명세의 보유 수명이다. [11.239](app-target-20261023.md#rss-and-section12-development).
+
 **F16/F17/F18 실행 명세 337.** native gate는 기존 저장소 조회의 명세 원문을 검사한다. 원문이 달라지면 추가 조회·불변 저장·전송 없이 충돌을 반환한다. 최신 계좌 binding·Risk·STOP·control과 일반 읽기·복구 경계는 유지한다. SQLite와 해당 Windows 연결 검사 범위다. [337 근거](app-target-20261023.md#c24-canonical-execution-spec337).
 
 **AR05-C11 현재선별NONE249(F14/F16/F17/F18/F24).** 사용자는옛앱자동매매를사용하지않아인계실행자료가없음을확정했다.선택execution/episode·두cursor/binding을반입하거나0으로만들지않고원DB/원문은보존한다.기존214실제query기동/재시작·166query/admin·order·account·credential·operations0·현재query조립/seed whitelist와MAIN119fresh역할경계를원소스범위로재사용해현재C11로컬종결을수락했다.기관계좌전체empty·현재주문/보유없음·새매매권한·전체인계/운영완료의뜻이아니다.향후실행활성화에는fresh계좌대조/단일owner·최신Risk·새승인/lease·명시재개를계속요구한다.다른저장복구/Drive/target/T0는별도미완료다. [249 근거](../../tmp/ar05-execution-none249-20261102/ROOT_SELECTION_AND_ACCEPTANCE249.json)·[현재 정본](app-target-20261023.md#0-현재-기준과-진행-현황).
@@ -768,6 +770,8 @@ S1 PC Top20 표시창 geometry는 명시 role INI를 사용한다. NAS index/out
 
 <a id="research"></a>
 ## 연구 — F15/F21
+
+**S12-01 거래일·상장 기준선(관련 F08/F11/F12).** 명시 해시의 거래일·상장 근거를 연구 입력에서 검증한다. 선택한 분봉 재생은 각 원래 가용시각의 달력 판본과 확인된 세션 창을 사용한다. 최신 가용 상장 근거에 불완전·충돌이 있으면 상태를 보존하며 종목의 실제 거래 가능 여부와 분리한다. 기존 연구 작업과 실시간 수신의 기본 경로를 유지한다. [근거](app-target-20261023.md#section12-input-baseline).
 
 **연구 해시 자원 현재 소스 근거 401(F15/F21).** 기존 연구 모듈 19건으로 명세의 원시 자원 20개·독립 해시·패키지 원시 바이트와 자원 누락 거절을 확인했다. 실제 설치물의 연구 소비는 기존 판본 근거로 유지한다. AR08-C18의 별도 Windows 관리형 서버 기동은 402에서 확인했다. 405의 동일 작업본 표준 검사에서 연구 모듈 전체 19건과 패키징 3 ID를 확인했다. 과거 시세 누락 감사의 별도 표준 8 ID로 원시각·누락·해시·재구성의 구분도 확인했다. [405 표준 근거](app-target-20261023.md#current-research-and-data-standard-405) · [401 검증](app-target-20261023.md#c24-research-packaging-and-installed-boundary-401).
 
@@ -1045,6 +1049,8 @@ R3-069 완료: 과거뉴스 initializer의 기존identity index를 original_url/
 
 <a id="diagnostics"></a>
 ## 진단 — F25
+
+**Windows 서버 RSS(2026-11-05).** 인증 진단은 기존 서버 측정 함수에서 현재 프로세스의 Windows RSS를 `psutil 7.2.2`로 읽는다. 기존 API와 Windows 설정 화면은 같은 바이트 필드와 측정 불가 상태를 소비한다. 연구 자원 제한과 프로세스 신원/수명은 기존 소유자가 맡는다. [비교·실패 근거](opensource-assessment-20261030.md#windows-server-rss-psutil).
 
 **NAS test/운영 수락 경계(F25/F23/F24, source181 로컬 통합·실제NAS 미수락):** 관리자는 optional test contract/image pin과 helper2+config의 exact3-target 갱신/원복을 소유한다. 기존 Operator는 pin 복사1회·selected/no-pause admission/cache 재검증·고정 image/parent report binding을 소유하며 test 결과로 prod gate를 쓰지 않는다. 기존 shared runner/runtime·prod contract/image·권한·PG/lease/정리 owner는 유지한다. 현재 main 관련81 PASS/정리·동일바이트 offline Linux25 PASS를 구분하고 기존 후보unit76은 중복 계산하지 않는다. 실제NAS의 기존 index/config/runner/runtime·source-mode/image 무결성은 관측했지만 version/lock 계약 항목이 없고 최신 test와 다르다. 실제 image package/CLI·source freeze·새3-target 적용 승인·NAS7/valid lease/post-fence는 미수락이다. NAS/운영 변경0이며 helper2-only 승인을 확대하지 않는다. [소스별 검증](../../tmp/ar-v1-wave58-20261101/nas-test-policy-integration181/acceptance181.json)·[실제NAS 관측](../../tmp/ar08-nas7-nonsecret-contract-inspection180-20261101/revision2/user-run001-receipt.json).
 

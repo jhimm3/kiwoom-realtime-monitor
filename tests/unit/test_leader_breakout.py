@@ -550,6 +550,59 @@ class LeaderBreakoutAutomationTests(unittest.IsolatedAsyncioTestCase):
             await self.runner.episode.advance_once()
             self.assertEqual(2, len(self.transport.calls))
 
+    async def test_session_rollover_restores_filled_position_and_pinned_exit(self):
+        from kiwoom_monitor.application.market_session_schedule import KST
+        from kiwoom_monitor.application.mock_automation_admission import admit_mock_automation
+        from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
+        from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+
+        await self.deliver(990)
+        await self.deliver(1001)
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+        self._fill_pending("BUY", 1001)
+        await self.runner.episode.advance_once()
+        self.assertEqual("open", self.runner.episode.status["strategy_state"])
+
+        self.clock = self.clock.astimezone(KST).replace(hour=15, minute=30, second=0, microsecond=0)
+        await self.deliver(990)
+        self.assertEqual("open", self.runner.episode.status["strategy_state"])
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+        await self.runner.close()
+        self.assertTrue(self.runtime.stop())
+
+        self.clock = self.clock.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        self.execution = ExecutionRepository(self.store)
+        self.runtime = ExecutionRuntime(
+            OrderLifecycle(self.execution, self.transport, now_provider=lambda: self.clock),
+            self.execution, account_ref=self.bundle.account_ref, run_id=self.run_id,
+            owner_token="next-session-owner", now_provider=lambda: self.clock,
+        )
+        self.addCleanup(self.runtime.stop)
+        admit_mock_automation(
+            self.repository, self.repository, self.runtime, account_ref=self.bundle.account_ref,
+            spec_id=self.spec.spec_id, requested_at=self.clock, lease_seconds=300,
+        )
+        self.bundle.repository = self.execution
+        self.bundle.runtime = self.runtime
+        self.live = None
+        self.runner = _prepared_runner(
+            self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+            leader_context_source=lambda: self.live,
+        )
+        self.addAsyncCleanup(self.runner.close)
+        await self.deliver(990, source="next-session:1")
+        self.assertEqual("open", self.runner.episode.status["strategy_state"])
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+
+        await self.deliver(940, source="next-session:1")
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+        self._fill_pending("SELL", 940)
+        await self.runner.episode.advance_once()
+        self.assertEqual("flat", self.runner.episode.status["strategy_state"])
+        await self.deliver(940, source="next-session:1")
+        self.assertEqual(2, len(self.transport.calls))
+
     async def test_generation_or_unapproved_gap_cannot_bridge_entry(self):
         await self.deliver(990, source="one")
         await self.deliver(1001, source="two")

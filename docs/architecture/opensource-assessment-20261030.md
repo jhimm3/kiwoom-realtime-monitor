@@ -1,6 +1,6 @@
 # 오픈소스 활용 후보 감사와 단계별 전환 계획
 
-> **도입 상태.** 후보 비교는 조사 근거다. 설치·교체·벤치마크·DB 변경은 승인된 개별 전환으로 관리한다. 현재 AR의 남은 검증은 정본에서 확인한다. [관련 계약](app-target-20261023.md#0-현재-기준과-진행-현황).
+> **도입 상태.** 2026-11-05에 첫 대상으로 선택한 Windows 서버 RSS를 비교 후 소스에 적용했다. 나머지 후보의 조사·도입 상태는 단계별 기록을 따른다. [Windows RSS 결과](#windows-server-rss-psutil) · [AR 현황](app-target-20261023.md#0-현재-기준과-진행-현황).
 
 확인일: **2026-10-30 KST**. 단계 **A — 조사/보고**. B는 경계 정리 제안, C는 미실행 비교 계획, D는 별도 승인 대상이다. 설치·버전 변경·제품 교체·DB schema 변경·benchmark·제품 회귀 실행은 하지 않았다.
 
@@ -401,3 +401,11 @@ RULE 자동화·과거 재분석·AI 정책을 새 matcher가 결정하지 않�
 **유지비 절감의 근거와 한계:** 기존 DB 기능·표준 API 재사용은 새 wrapper/동작 체계·업데이트 대상을 덜 늘린다. 형식·운반·암호화 backup 같은 범용 구현은 검증된 도구에 위임할 여지가 있지만 앱의 안전/작업/가용시각 책임은 남는다. 새로운 daemon/catalog/과학 스택은 배포·인증·권한·schema/compaction·backup·3OS native 조합 수를 늘린다. 그래서 단순한 라이브러리 LOC 감소보다 변경 경로·직접 의존 수·고유 상태/원장 수·해당 장애/업데이트 검증 비용을 합쳐 판단한다. 현재 인시·금액/CPU 절감률의 확정 수치는 없다.
 
 **현재 결론:** 기존 엔진/native·안전/저장/복구 계약 재사용을 유지한다. 누락된 실질 후보는 COPY/묶음 처리, restic, 역할별 uv 또는 pip-tools, 실제 비용/요구가 생긴 literal matcher·sampler 등이다. 기존1~9절의 OS 보조·Parquet/단일 reader/전송 후보와 경쟁/대안 관계로 관리하며 전부 필수 설치하지 않는다. 시계열 DB/catalog/broker/백테스트 전면교체는 지금 도입할 근거가 없다. 필요하면 역할별로 제거·교체할 수 있는 기존 경계만 유지한다. AR01~09의 완료 판정/조건·F 실제 연결·기존 비용/구조 가드·원실패는 바꾸지 않았다.
+
+<a id="windows-server-rss-psutil"></a>
+
+## 11. Windows 서버 RSS 첫 적용 — 2026-11-05
+
+- **C 비교.** 기본 저장소 `c1e42a2`, Windows Python 3.13.15, 기존 `psutil 7.2.2`에서 같은 프로세스의 RSS를 유휴 상태와 16 MiB 메모리 접근 뒤 각각 25회 비교했다. 기존 서버 값은 50회 모두 `None`이었다. 서버의 형식 미지정 핸들 호출에서 `0xc0000008`을 재현했고 같은 핸들에 Windows HANDLE 형식을 지정하면 성공했다. psutil의 RSS는 양수였으며 기존 연구 native 측정과 순차 호출의 차이는 0~69,632바이트였다. 같은 psutil 표본에서 `rss`와 Windows `wset`이 일치했다. [측정 기록](../../tmp/psutil-rss-c-20261105/comparison.json).
+- **비용.** 500회씩 5번의 평균 호출 시간 중앙값은 기존 정상 연구 native 1.316µs, psutil 객체 재사용 3.220µs, 매번 객체 생성 6.452µs였다. 별도 프로세스 5개의 psutil import와 첫 호출은 40~45ms, 호출 뒤 RSS 순증은 약 3.8~4.0 MiB였다. Windows 개발 환경에서 관측한 수치다.
+- **D 소스 적용.** [기존 서버 진단](../../src/kiwoom_monitor/central_server/resource_usage.py)의 Windows 분기에서 현재 프로세스 RSS를 psutil로 읽는다. 인증 API의 바이트 단위와 측정 불가 시 `null`을 유지한다. Windows `server`와 `full`에 기존 lock의 7.2.2를 직접 선언하고 기존 배포 고지를 재사용한다. 연구 native 측정, Linux `/proc`·cgroup, 프로세스 신원·핸들 수명은 각 기존 책임에 둔다. 설치물·macOS는 별도 검증 범위다. [고정 배포판](https://pypi.org/project/psutil/7.2.2/) · [F25 연결](app-target-20261023.md#rss-and-section12-development).
