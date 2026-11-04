@@ -292,7 +292,8 @@ class JournalBarRepositoryMixin:
             bar.minute.date().isoformat(), code, bar.minute.isoformat(timespec="minutes"),
             bar.open_price, bar.high_price, bar.low_price, bar.close_price, bar.volume,
             float(bar.trade_value_eok), ("realtime_partial" if bar.metadata is not None and not bar.metadata.is_complete else source),
-            confirmed_at.isoformat(timespec="seconds") if confirmed_at else None,
+            # Preserve receipt precision when a later live overlay reuses it.
+            confirmed_at.isoformat() if confirmed_at else None,
         ) for bar in bars]
         update_guard = (" WHERE journal_minute_bars.source NOT IN ('api_confirmed', 'after_close_confirmed')" if preserve_confirmed
                         else " WHERE journal_minute_bars.source NOT IN ('api_confirmed','after_close_confirmed') OR excluded.source IN ('api_confirmed','after_close_confirmed')")

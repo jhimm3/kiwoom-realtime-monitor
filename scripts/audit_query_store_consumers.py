@@ -28,6 +28,11 @@ OPTIONAL_METHODS = {
     "set_news_job_wakeup",
 }
 OWNED_THREAD_MODULE = "kiwoom_monitor.central_server.diagnostic_replay_runtime"
+# Both exact modules export the same dispatcher; retain the reviewed alias key.
+OWNED_THREAD_MODULES = {
+    OWNED_THREAD_MODULE,
+    "kiwoom_monitor.central_server.async_lifetime",
+}
 
 
 def _dotted(node: ast.AST) -> str:
@@ -114,8 +119,9 @@ def _owned_thread_imports(tree: ast.Module, relative: str) -> dict[str, str]:
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            direct = (module == OWNED_THREAD_MODULE and node.level == 0) or (
-                central and node.level == 1 and module == "diagnostic_replay_runtime")
+            direct = (module in OWNED_THREAD_MODULES and node.level == 0) or (
+                central and node.level == 1
+                and "kiwoom_monitor.central_server." + module in OWNED_THREAD_MODULES)
             package = (module == "kiwoom_monitor.central_server" and node.level == 0) or (
                 central and node.level == 1 and not module)
             for item in node.names:
@@ -123,13 +129,13 @@ def _owned_thread_imports(tree: ast.Module, relative: str) -> dict[str, str]:
                 imports = {key: value for key, value in imports.items() if key.split(".", 1)[0] != bound}
                 if direct and item.name == "owned_to_thread":
                     imports[item.asname or item.name] = OWNED_THREAD_MODULE + ".owned_to_thread"
-                elif package and item.name == "diagnostic_replay_runtime":
+                elif package and "kiwoom_monitor.central_server." + item.name in OWNED_THREAD_MODULES:
                     imports[(item.asname or item.name) + ".owned_to_thread"] = OWNED_THREAD_MODULE + ".owned_to_thread"
         elif isinstance(node, ast.Import):
             for item in node.names:
                 bound = item.asname or item.name.split(".", 1)[0]
                 imports = {key: value for key, value in imports.items() if key.split(".", 1)[0] != bound}
-                if item.name == OWNED_THREAD_MODULE:
+                if item.name in OWNED_THREAD_MODULES:
                     imports[(item.asname or item.name) + ".owned_to_thread"] = OWNED_THREAD_MODULE + ".owned_to_thread"
     return imports
 

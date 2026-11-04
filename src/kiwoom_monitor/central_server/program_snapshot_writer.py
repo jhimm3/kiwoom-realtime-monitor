@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
 
-from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
+from .async_lifetime import owned_create_task, owned_to_thread
 
 
 # Keep the operational log category used before moving the save owner.

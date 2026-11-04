@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Protocol
 from datetime import datetime, timedelta
 from kiwoom_monitor.domain.realtime_gap import GapRange, RealtimeGap, KST
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,13 +35,31 @@ class CapturedControlReceipt:
     compact_context: Any = field(default=None, compare=False, repr=False)
 
 
-class CapturedHubEvent(dict):
-    """Private queue metadata; JSON and public dictionary keys stay unchanged."""
+class PublishedHubEvent(dict):
+    """Product publication moment; private metadata never changes wire keys."""
+
+    def __init__(self, event, *, published_at=None):
+        super().__init__(event)
+        at = published_at if published_at is not None else getattr(event, "published_at", None)
+        self.published_at = as_kst(at) if isinstance(at, datetime) else at
+
+
+class CapturedHubEvent(PublishedHubEvent):
+    """Compatibility receipt carrier while Collector capture still consumes it."""
+
     def __init__(self, event, *, source=None, delivery=None):
         super().__init__(event)
         self.source_receipt = source
         self.delivery_receipt = delivery
-        self.published_at = getattr(event, "published_at", None) or datetime.now(KST)
+
+
+class HubObserver(Protocol):
+    def before_mutation(self, hub: Any) -> None: ...
+    def record_intent(self, hub: Any, subscriber: Any, action: str) -> None: ...
+    def prepare_publish(self, hub: Any, event: dict[str, Any]) -> tuple[
+        dict[str, Any], Callable[..., Any] | None, Callable[..., Any] | None,
+    ]: ...
+    def record_ready(self, hub: Any, codes: tuple[str, ...], ready: bool, approval: Any = None) -> Any: ...
 
 
 @dataclass(eq=False)
@@ -55,6 +74,7 @@ class RealtimeSubscriber:
     capture_epoch: str = ""
     capture_sequence: int = 0
     capture_context: Any = field(default=None, repr=False)
+    allowed_event_types: frozenset[str] | None = None
     gap_ranges: dict[tuple[str, str, str], GapRange] = field(default_factory=dict, repr=False)
     gap_scope_unknown: bool = False
 
@@ -100,41 +120,39 @@ class RealtimeSubscriber:
 class RealtimeHub:
     """키움 실시간 이벤트 한 벌을 여러 데스크톱 앱에 복제한다."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, now_provider: Callable[[], datetime] = kst_now,
+                 observer: HubObserver | None = None) -> None:
+        # The live composition supplies its existing corrected broker clock.
+        # kst_now is the existing offline/test or pre-sync local fallback.
+        self._now_provider = now_provider
+        self._observer = observer
         self._subscribers: set[RealtimeSubscriber] = set()
         self._upstream_codes: set[str] = set()
         self._upstream_ready = False
 
-    def connect(self, *, capture_component: str = "") -> RealtimeSubscriber:
-        from .diagnostic_top20_lifecycle_input import hub_initial, record_intent, reject
-        try:
-            hub_initial(self)
-        except Exception:
-            reject(self, "top20_realtime_initial_invalid")
-        subscriber = RealtimeSubscriber(capture_component=capture_component)
+    def connect(self, *, capture_component: str = "", allowed_event_types: frozenset[str] | None = None) -> RealtimeSubscriber:
+        if self._observer is not None:
+            self._observer.before_mutation(self)
+        subscriber = RealtimeSubscriber(capture_component=capture_component, allowed_event_types=allowed_event_types)
         self._subscribers.add(subscriber)
-        record_intent(self, subscriber, "connect")
+        if self._observer is not None:
+            self._observer.record_intent(self, subscriber, "connect")
         return subscriber
 
     def disconnect(self, subscriber: RealtimeSubscriber) -> None:
-        from .diagnostic_top20_lifecycle_input import hub_initial, record_intent, reject
-        try:
-            hub_initial(self)
-        except Exception:
-            reject(self, "top20_realtime_initial_invalid")
+        if self._observer is not None:
+            self._observer.before_mutation(self)
         self._subscribers.discard(subscriber)
-        record_intent(self, subscriber, "disconnect")
+        if self._observer is not None:
+            self._observer.record_intent(self, subscriber, "disconnect")
 
     def update_subscription(
         self, subscriber: RealtimeSubscriber, codes: list[str], nxt_codes: list[str],
         program_codes: list[str] | None = None,
         priority_codes: list[str] | None = None,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        from .diagnostic_top20_lifecycle_input import hub_initial, record_intent, reject
-        try:
-            hub_initial(self)
-        except Exception:
-            reject(self, "top20_realtime_initial_invalid")
+        if self._observer is not None:
+            self._observer.before_mutation(self)
         subscriber.codes = {str(code).strip() for code in codes if str(code).strip()}
         subscriber.nxt_codes = {str(code).strip() for code in nxt_codes if str(code).strip()}
         requested_program_codes = codes if program_codes is None else program_codes
@@ -145,7 +163,8 @@ class RealtimeHub:
             str(code).strip() for code in (priority_codes or ())
             if str(code).strip() in subscriber.codes
         ))
-        record_intent(self, subscriber, "update")
+        if self._observer is not None:
+            self._observer.record_intent(self, subscriber, "update")
         return self.requested_codes()
 
     def requested_codes(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -170,17 +189,18 @@ class RealtimeHub:
         return tuple(sorted(positions, key=lambda code: (positions[code], code)))
 
     def publish(self, event: dict[str, Any], code: str = "") -> None:
-        from .diagnostic_top20_lifecycle_input import record_hub_event
-        event = record_hub_event(self, event)
-        if not isinstance(event, CapturedHubEvent):
-            event = CapturedHubEvent(event)
-        capture_active = False
-        if any(subscriber.capture_component for subscriber in self._subscribers):
-            from .diagnostic_trace import input_token
-            capture_active = input_token("top20_inputs") is not None
-        if capture_active:
-            from .diagnostic_top20_input import queue_delivery, dropped_delivery
+        if not isinstance(event, PublishedHubEvent):
+            event = PublishedHubEvent(event)
+        if event.published_at is None:
+            event.published_at = as_kst(self._now_provider())
+        elif isinstance(event.published_at, datetime):
+            event.published_at = as_kst(event.published_at)
+        enqueue = drop = None
+        if self._observer is not None:
+            event, enqueue, drop = self._observer.prepare_publish(self, event)
         for subscriber in tuple(self._subscribers):
+            if subscriber.allowed_event_types is not None and event.get("type") not in subscriber.allowed_event_types:
+                continue
             if code and subscriber.codes and code not in subscriber.codes:
                 continue
             if subscriber.queue.full():
@@ -188,15 +208,15 @@ class RealtimeHub:
                     discarded = subscriber.queue.get_nowait()
                     subscriber.dropped_events += 1
                     subscriber.remember_drop(discarded)
-                    if capture_active:
-                        dropped_delivery(subscriber, discarded)
+                    if drop is not None:
+                        drop(subscriber, discarded)
                 except asyncio.QueueEmpty:
                     pass
-            subscriber.queue.put_nowait(queue_delivery(subscriber, event) if capture_active else event)
+            subscriber.queue.put_nowait(enqueue(subscriber, event) if enqueue is not None else event)
 
     def set_upstream_ready(self, codes: tuple[str, ...], ready: bool, *, approval=None) -> None:
-        from .diagnostic_top20_lifecycle_input import record_ready
-        record_ready(self, codes, ready, approval)
+        if self._observer is not None:
+            self._observer.record_ready(self, codes, ready, approval)
         self._upstream_codes = set(codes) if ready else set()
         self._upstream_ready = ready
 

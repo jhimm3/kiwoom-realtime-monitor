@@ -128,6 +128,7 @@ class HistoricalHighDesktopConnectionTests(unittest.TestCase):
         with patch.object(AppController, "start_initial_ranking"):
             window = MainWindow(kwargs["settings"], FakeRankingLoader(), stock_lookup=stocks,
                 historical_high_worker_factory=kwargs["historical_high_worker_factory"])
+            window.activate_startup()
         window._ranking_now = lambda: datetime.fromisoformat("2026-10-20T10:00:00+09:00")
         def close():
             window.close()
@@ -210,6 +211,29 @@ class HistoricalHighDesktopConnectionTests(unittest.TestCase):
         self.assertEqual((300, "2026-10-21"),
             (stocks.load_historical_high_cache("005930").target.price,
              stocks.load_historical_high_cache("005930").checked_on))
+
+    def test_missing_basis_reaches_bootstrap_factory_and_only_success_records_current_basis(self):
+        import sqlite3
+        from contextlib import closing
+
+        client, kwargs, stocks = self._desktop()
+        settings = kwargs["settings"]
+        with closing(sqlite3.connect(settings.database_path)) as connection, connection:
+            connection.execute("DELETE FROM settings WHERE key='historical_high_adjusted_basis_version'")
+        settings.clear_cache()
+        window = self._window(kwargs, stocks)
+        client.failures[("005930", "ka10094")] = OSError("controlled missing-basis failure")
+        with patch("kiwoom_monitor.application.historical_high_service.kst_today", return_value=date(2026, 10, 20)):
+            self.assertTrue(window._start_historical_high_loading(("005930",)))
+            self._finish(window)
+            with self.assertRaises(KeyError):
+                settings.get("historical_high_adjusted_basis_version")
+            client.failures.clear()
+            client.calls.clear()
+            self.assertTrue(window._start_historical_high_loading(("005930",)))
+            self._finish(window)
+        self.assertEqual(4, len(client.calls))
+        self.assertEqual("6", settings.get("historical_high_adjusted_basis_version"))
 
     def test_reassembled_nas_factory_keeps_authoritative_partial_result_during_basis_refresh(self):
         from kiwoom_monitor import bootstrap

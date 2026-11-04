@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.application.journal_enrichment import JournalResearchLink
-from kiwoom_monitor.application.research_families import (
+from kiwoom_monitor.domain.strategy_contract import (
     get_research_family,
     parse_strategy_config,
 )

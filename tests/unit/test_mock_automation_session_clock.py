@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests.unit.test_mock_automation_runner import _make_runner
+
+from tests.unit.test_mock_automation_runner import _prepared_runner, _apply_runner_fills
+
 import asyncio
 import json
 import os
@@ -8,8 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 import tempfile
+import threading
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -29,7 +34,8 @@ from kiwoom_monitor.application.mock_automation_session_clock import (
     clock_exit_decision, session_clock_assessment,
 )
 from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
-from kiwoom_monitor.central_server.mock_automation_runner import CLOCK_COLLECTION, MockAutomationRunner
+from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+from kiwoom_monitor.central_server.mock_automation_episode import CLOCK_COLLECTION
 from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot, BrokerFill, BrokerOrderSnapshot, OrderState,
     OrderIntent, OrderSide, OrderType,
@@ -59,16 +65,16 @@ def inspect_checkpoint_in_process(database_path: str, journal_path: str) -> dict
             account_ref=fixture.ACCOUNT_REF, run_id=run_id, repository=execution,
             automation_context=SimpleNamespace(spec_id=spec.spec_id, execution_run_id=run_id),
         )
-        runner = MockAutomationRunner(store, bundle, spec)
-        runner._apply_new_fills()
-        before = runner._state.to_dict()
-        cursor = runner.status["fill_cursor"]
-        runner._apply_new_fills()
-        assert runner._state.to_dict() == before, "persisted fills applied twice"
-        assert runner.status["fill_cursor"] == cursor, "fill cursor advanced twice"
+        runner = _prepared_runner(store, bundle, spec)
+        _apply_runner_fills(runner)
+        before = runner.episode._episode_position._state.to_dict()
+        cursor = runner.episode.status["fill_cursor"]
+        _apply_runner_fills(runner)
+        assert runner.episode._episode_position._state.to_dict() == before, "persisted fills applied twice"
+        assert runner.episode.status["fill_cursor"] == cursor, "fill cursor advanced twice"
         journal = fixture.JournalRepository(Path(journal_path))
         scope = spec.account_scope
-        now = datetime.fromisoformat(runner._state.opened_at) if runner._state.opened_at else fixture.NOW
+        now = datetime.fromisoformat(runner.episode._episode_position._state.opened_at) if runner.episode._episode_position._state.opened_at else fixture.NOW
         projection = fixture.sync_journal_execution_projection(
             fixture._ExecutionPageSource(execution, fixture.ACCOUNT_REF), journal,
             scope, page_limit=1000, now=now,
@@ -76,10 +82,10 @@ def inspect_checkpoint_in_process(database_path: str, journal_path: str) -> dict
         fills = journal.load_execution_fill_projections(scope)
         active = execution.active_intents("mock", fixture.ACCOUNT_REF, run_id)
         return {
-            "pid": os.getpid(), "state": runner._state.to_dict(),
-            "fill_cursor": runner.status["fill_cursor"],
-            "pending_intent_id": runner.status.get("pending_intent_id"),
-            "session_clock": runner.status.get("session_clock"),
+            "pid": os.getpid(), "state": runner.episode._episode_position._state.to_dict(),
+            "fill_cursor": runner.episode.status["fill_cursor"],
+            "pending_intent_id": runner.episode.status.get("pending_intent_id"),
+            "session_clock": runner.episode.status.get("session_clock"),
             "active_intents": [{"intent_id": row.intent.intent_id, "filled_quantity": row.filled_quantity}
                                for row in active],
             "new_journal_fills": projection.detailed_fill_count,
@@ -156,10 +162,10 @@ async def inspect_stopped_runtime_in_process(database_path: str, recovery_path: 
             account_ref=fixture.ACCOUNT_REF, run_id=run_id, repository=execution, runtime=runtime,
             automation_context=SimpleNamespace(spec_id=spec.spec_id, execution_run_id=run_id),
         )
-        runner = MockAutomationRunner(store, bundle, spec)
-        assert await runner.run_once() == 0
-        assert runner.status["state"] == "STOPPED"
-        assert runner._state.position_quantity == payload["positions"]["005930"]
+        runner = _prepared_runner(store, bundle, spec)
+        assert await runner.episode.advance_once() == 0
+        assert runner.episode.status["state"] == "STOPPED"
+        assert runner.episode._episode_position._state.position_quantity == payload["positions"]["005930"]
         gate, submitted, _ = fixture.dispatch_mock_automation_decision_from_risk(
             repository, runtime, fixture._automation_decision(run_id, "EXIT", now), recovery, risk,
             account_ref=fixture.ACCOUNT_REF, spec_id=spec.spec_id, strategy_ref=spec.strategy_ref,
@@ -187,8 +193,8 @@ async def inspect_stopped_runtime_in_process(database_path: str, recovery_path: 
         transport.submit.assert_not_called()
         transport.cancel.assert_not_called()
         return {
-            "pid": os.getpid(), "restored_position_quantity": runner._state.position_quantity,
-            "restored_fill_cursor": runner.status["fill_cursor"],
+            "pid": os.getpid(), "restored_position_quantity": runner.episode._episode_position._state.position_quantity,
+            "restored_fill_cursor": runner.episode.status["fill_cursor"],
             "control_before_explicit_resume": before_resume.to_dict(),
             "control_after_explicit_resume": resumed.to_dict(), "recovery_status": decision.status.value,
             "blocked_exit_reasons": list(gate.reasons), "stale_resume_rejected": True,
@@ -249,6 +255,118 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.bundle.gateway = ManualMockOrderGateway(self.runtime, self.execution, refresh_account)
         self.addAsyncCleanup(self.bundle.gateway.close)
 
+    async def test_prepare_rejects_invalid_clock_before_rewriting_bootstrap_checkpoint(self):
+        from kiwoom_monitor.application.mock_automation_session_clock import SESSION_CLOCK_VERSION
+        from tests.unit.test_mock_automation_runner import CHECKPOINT_COLLECTION
+
+        original_load = self.store.load_documents
+        for kind in ("version", "revision", "cancel_ids", "read_failure"):
+            with self.subTest(kind=kind):
+                # A malformed runner still uses the existing bootstrap policy,
+                # but its side effects must wait for the other restore input.
+                self.store.upsert_documents(CHECKPOINT_COLLECTION, [{
+                    "owner": fixture.ACCOUNT_REF, "key": "current",
+                    "document": {"version": "old-unmatched", "original": kind},
+                }])
+                clock = {"version": SESSION_CLOCK_VERSION, "spec_id": self.spec.spec_id,
+                         "execution_run_id": self.run_id, "candidate_package_hash": self.spec.candidate_package_hash,
+                         "control_revision": 1, "cancel_attempted_intent_ids": []}
+                if kind == "version": clock["version"] = "unsupported-version"
+                if kind == "revision": clock["control_revision"] = 0
+                if kind == "cancel_ids": clock["cancel_attempted_intent_ids"] = [None]
+                self.store.upsert_documents(CLOCK_COLLECTION, [{
+                    "owner": fixture.ACCOUNT_REF, "key": "current", "document": clock,
+                }])
+                before = {name: original_load(name, fixture.ACCOUNT_REF, 1)
+                          for name in (CHECKPOINT_COLLECTION, CLOCK_COLLECTION)}
+                failure = OSError("native clock read failed")
+                reads = []
+
+                def load(collection, *args, **kwargs):
+                    if collection in before: reads.append(collection)
+                    if kind == "read_failure" and collection == CLOCK_COLLECTION: raise failure
+                    return original_load(collection, *args, **kwargs)
+
+                runner = _make_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock)
+                with patch.object(self.store, "load_documents", side_effect=load), patch.object(
+                    self.store, "upsert_documents", wraps=self.store.upsert_documents,
+                ) as write:
+                    expected = OSError if kind == "read_failure" else RuntimeError if kind == "version" else ValueError
+                    with self.assertRaises(expected) as caught:
+                        await asyncio.to_thread(runner.episode.prepare_restore)
+                    if kind == "read_failure": self.assertIs(failure, caught.exception)
+                    else:
+                        self.assertEqual("unsupported_mock_session_clock_version" if kind == "version"
+                                         else "invalid_mock_session_clock_receipt", str(caught.exception))
+                    self.assertFalse(runner.episode._prepared)
+                    self.assertFalse(runner._inputs_attached)
+                    self.assertIsNone(runner.episode._session_clock)
+                    await runner.close()
+                    write.assert_not_called()
+                self.assertEqual([CHECKPOINT_COLLECTION, CLOCK_COLLECTION], reads)
+                self.assertEqual(before, {name: original_load(name, fixture.ACCOUNT_REF, 1) for name in before})
+                self.assertEqual([], self.transport.calls)
+                self.assertEqual([], self.cancel_calls)
+
+    async def test_repeated_cancel_and_close_join_the_actual_native_clock_read(self):
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+
+        entered, release = threading.Event(), threading.Event()
+        stage = threading.local()
+        native_load, native_connection = self.store.load_documents, self.store._connection
+        acquired = []
+
+        def load(collection, *args, **kwargs):
+            stage.clock = collection == CLOCK_COLLECTION
+            try: return native_load(collection, *args, **kwargs)
+            finally: stage.clock = False
+
+        @contextmanager
+        def connection():
+            with native_connection() as raw:
+                if getattr(stage, "clock", False):
+                    acquired.append(raw)
+                    entered.set()
+                    if not release.wait(5): raise AssertionError("native clock read barrier was not released")
+                yield raw
+
+        supervisor = MockAutomationSupervisor(self.store, SimpleNamespace(bundle=lambda _profile: self.bundle),
+                                              now_provider=lambda: self.clock)
+        operation = joined = None
+        try:
+            with patch.object(self.store, "load_documents", side_effect=load), patch.object(
+                self.store, "_connection", new=connection,
+            ):
+                operation = asyncio.create_task(supervisor._assemble_runner(self.bundle, self.spec, "clock-owner"))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                self.assertEqual(1, len(acquired))
+                runner, = supervisor._preparing_runners
+                for _ in range(3):
+                    operation.cancel()
+                    await asyncio.sleep(0)
+                joined = asyncio.create_task(supervisor.close())
+                for _ in range(10): await asyncio.sleep(0)
+                self.assertFalse(operation.done())
+                self.assertFalse(joined.done())
+                self.assertFalse(runner.episode._prepared)
+                self.assertFalse(runner._inputs_attached)
+                self.assertEqual({}, supervisor._runners)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError): await asyncio.wait_for(operation, 2)
+                await asyncio.wait_for(joined, 2)
+                with self.assertRaises(sqlite3.ProgrammingError): acquired[0].execute("SELECT 1")
+                self.assertEqual(set(), supervisor._preparing_runners)
+                self.assertEqual({}, supervisor._runners)
+                self.assertIsNone(runner._task)
+                self.assertFalse(runner._inputs_attached)
+                self.assertEqual([], self.transport.calls)
+                self.assertEqual([], self.cancel_calls)
+        finally:
+            release.set()
+            pending = [task for task in (operation, joined) if task is not None]
+            if pending: await asyncio.gather(*pending, return_exceptions=True)
+            await supervisor.close()
+
     async def _refresh_recovery(self):
         active = self.execution.active_intents("mock", fixture.ACCOUNT_REF, self.run_id)
         orders = tuple(BrokerOrderSnapshot(
@@ -296,8 +414,8 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def _open(self):
         await self._poll_bar(0, 71000, 71200)
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
-        intent_id = self.runner.status["pending_intent_id"]
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
+        intent_id = self.runner.episode.status["pending_intent_id"]
         self._fill(intent_id, 2)
         return intent_id
 
@@ -305,20 +423,20 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self._open()
         self.clock = self.clock.replace(hour=6, minute=19, second=2)  # 15:19:02 KST
         self._bar(self.clock - timedelta(minutes=1, seconds=2), 71100, 71300)
-        await self.runner.run_once()
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
-        return self.runner.status["pending_intent_id"]
+        await self.runner.episode.advance_once()
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
+        return self.runner.episode.status["pending_intent_id"]
 
     async def test_empty_feed_stops_at_max_hold_without_synthetic_exit(self):
         await self._open()
-        cursor = self.runner._cursor
+        cursor = self.runner.episode._input_progress._cursor
         self.clock += timedelta(minutes=10)
-        self.assertEqual(0, await self.runner.run_once())
-        self.assertEqual("STOPPED", self.runner.status["state"], self.runner.status)
-        self.assertIn("max_hold_reached", self.runner.status["session_clock"]["assessment"]["reasons"])
-        self.assertEqual("open", self.runner._state.status)
-        self.assertEqual(2, self.runner._state.position_quantity)
-        self.assertEqual(cursor, self.runner._cursor)
+        self.assertEqual(0, await self.runner.episode.advance_once())
+        self.assertEqual("STOPPED", self.runner.episode.status["state"], self.runner.episode.status)
+        self.assertIn("max_hold_reached", self.runner.episode.status["session_clock"]["assessment"]["reasons"])
+        self.assertEqual("open", self.runner.episode._episode_position._state.status)
+        self.assertEqual(2, self.runner.episode._episode_position._state.position_quantity)
+        self.assertEqual(cursor, self.runner.episode._input_progress._cursor)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_recent_cached_recovery_before_due_does_not_claim_exit_complete(self):
@@ -333,118 +451,118 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.clock = actual_now
         with patch.object(self.bundle.monitor, "refresh_recovery", side_effect=cached_recovery):
-            await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"], self.runner.status)
-        self.assertIn("predates_exit_due", self.runner.status["reason"])
-        self.assertEqual("open", self.runner._state.status)
-        self.assertEqual(2, self.runner._state.position_quantity)
+            await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"], self.runner.episode.status)
+        self.assertIn("predates_exit_due", self.runner.episode.status["reason"])
+        self.assertEqual("open", self.runner.episode._episode_position._state.status)
+        self.assertEqual(2, self.runner.episode._episode_position._state.position_quantity)
         self.assertEqual(1, len(self.transport.calls))
         stopped = self.repository.load_mock_automation_control(fixture.ACCOUNT_REF)
         self.assertEqual(MockAutomationDesiredState.STOPPED, stopped.desired_state)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"])
-        self.assertEqual(2, self.runner._state.position_quantity)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
+        self.assertEqual(2, self.runner.episode._episode_position._state.position_quantity)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_clock_exit_uses_real_price_once_and_only_fill_closes_position(self):
         sell_id = await self._fresh_clock_exit()
-        clock = self.runner.status["session_clock"]
+        clock = self.runner.episode.status["session_clock"]
         self.assertEqual(self.clock.isoformat(), clock["snapshot"]["price_reference"]["available_at"])
         self.assertEqual(["BUY", "SELL"], [row[1] for row in self.transport.calls])
-        self.assertEqual("open", self.runner._state.status)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
+        self.assertEqual("open", self.runner.episode._episode_position._state.status)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
         self.assertEqual(2, len(self.transport.calls))
         self.assertEqual([], self.cancel_calls)
         self._fill(sell_id, 2, 71100)
-        await self.runner.run_once()
-        self.assertEqual("cooldown", self.runner._state.status)
-        self.assertEqual("COMPLETED", self.runner.status["session_clock"]["phase"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("cooldown", self.runner.episode._episode_position._state.status)
+        self.assertEqual("COMPLETED", self.runner.episode.status["session_clock"]["phase"])
 
     async def test_expired_unfilled_buy_is_cancelled_once_even_after_unknown_and_restart(self):
         await self._poll_bar(0, 71000, 71200)
-        intent_id = self.runner.status["pending_intent_id"]
+        intent_id = self.runner.episode.status["pending_intent_id"]
         self.clock += timedelta(seconds=5)
         self.cancel_unknown = True
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"], self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"], self.runner.episode.status)
         self.assertEqual(OrderState.CANCEL_PENDING, self.execution.load(intent_id).state)
         self.assertEqual(1, len(self.cancel_calls))
-        self.assertNotEqual("open", self.runner._state.status)
+        self.assertNotEqual("open", self.runner.episode._episode_position._state.status)
         # Broker may still report accepted after a lost cancel response.
         self.clock += timedelta(seconds=1)
         self.runtime.reconcile(intent_id, BrokerOrderSnapshot(
             self.execution.load(intent_id).broker_order_id, fixture.ACCOUNT_REF, "005930",
             OrderState.ACCEPTED, 0, 2, self.clock, (),
         ))
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
-        await self.runner.run_once()
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(1, len(self.cancel_calls))
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_partial_buy_and_late_fill_remain_owned_after_cancel(self):
         await self._poll_bar(0, 71000, 71200)
-        intent_id = self.runner.status["pending_intent_id"]
+        intent_id = self.runner.episode.status["pending_intent_id"]
         self._fill(intent_id, 1)
         self.clock += timedelta(seconds=5)
-        await self.runner.run_once()
-        self.assertEqual(1, self.runner._state.position_quantity)
+        await self.runner.episode.advance_once()
+        self.assertEqual(1, self.runner.episode._episode_position._state.position_quantity)
         self.assertEqual(OrderState.CANCEL_PENDING, self.execution.load(intent_id).state)
         self._fill(intent_id, 1)
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"])
-        self.assertEqual(2, self.runner._state.position_quantity)
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
+        self.assertEqual(2, self.runner.episode._episode_position._state.position_quantity)
         self.assertEqual(1, len(self.cancel_calls))
 
     async def test_unknown_submission_is_stopped_without_cancel_or_resubmission(self):
         with patch.object(self.transport, "submit", side_effect=SubmissionUnknown("response lost")) as submit:
             await self._poll_bar(0, 71000, 71200)
-            intent_id = self.runner.status["pending_intent_id"]
+            intent_id = self.runner.episode.status["pending_intent_id"]
             self.clock += timedelta(seconds=5)
-            await self.runner.run_once()
-            self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
+            self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+            await self.runner.episode.advance_once()
             self.assertEqual(OrderState.SUBMISSION_UNKNOWN, self.execution.load(intent_id).state)
-            self.assertEqual("STOPPED", self.runner.status["state"])
+            self.assertEqual("STOPPED", self.runner.episode.status["state"])
             self.assertEqual(1, submit.call_count)
             self.assertEqual([], self.cancel_calls)
-            self.assertNotEqual("open", self.runner._state.status)
+            self.assertNotEqual("open", self.runner.episode._episode_position._state.status)
 
     async def test_broker_fill_before_cancel_transport_prevents_cancellation(self):
         await self._poll_bar(0, 71000, 71200)
-        intent_id = self.runner.status["pending_intent_id"]
+        intent_id = self.runner.episode.status["pending_intent_id"]
         self.clock += timedelta(seconds=5)
         async def filled_account():
             self._fill(intent_id, 2)
             return (await self._refresh_recovery()).account
         with patch.object(self.bundle.gateway, "_account_refresh", side_effect=filled_account):
-            await self.runner.run_once()
-        await self.runner.run_once()
+            await self.runner.episode.advance_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(OrderState.FILLED, self.execution.load(intent_id).state)
         self.assertEqual([], self.cancel_calls)
-        self.assertEqual(2, self.runner._state.position_quantity)
-        self.assertEqual("STOPPED", self.runner.status["state"])
+        self.assertEqual(2, self.runner.episode._episode_position._state.position_quantity)
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
 
     async def test_stop_write_failure_closes_gate_and_does_not_cancel(self):
         await self._poll_bar(0, 71000, 71200)
         self.clock += timedelta(seconds=5)
         self.runtime.set_new_orders_enabled(True)
-        with patch.object(self.runner._repository, "save_mock_automation_control",
+        with patch.object(self.runner.episode._repository, "save_mock_automation_control",
                           side_effect=OSError("controlled stop persistence failure")):
             with self.assertRaisesRegex(OSError, "stop persistence"):
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
         self.assertFalse(self.runtime._new_orders_enabled)
         self.assertEqual([], self.cancel_calls)
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
         self.assertEqual(1, len(self.cancel_calls))
 
     async def test_resume_requires_fresh_recovery_and_preserves_actual_position(self):
         await self._open()
         self.clock += timedelta(minutes=10)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         with self.assertRaisesRegex(RuntimeError, "fresh broker reconciliation"):
             resume_mock_automation(self.repository, self.runtime, account_ref=fixture.ACCOUNT_REF,
                                    spec_id=self.spec.spec_id, resumed_at=self.clock, reason="explicit resume")
@@ -458,23 +576,23 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
         resume_mock_automation(self.repository, self.runtime, account_ref=fixture.ACCOUNT_REF,
                                spec_id=self.spec.spec_id, resumed_at=self.clock, reason="explicit resume")
         self._bar(self.clock - timedelta(minutes=1, seconds=2), 71100, 71300)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
-        self.assertEqual("open", self.runner._state.status)
-        self.assertEqual(2, self.runner._state.position_quantity)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
+        self.assertEqual("open", self.runner.episode._episode_position._state.status)
+        self.assertEqual(2, self.runner.episode._episode_position._state.position_quantity)
         self.assertEqual(["BUY", "SELL"], [row[1] for row in self.transport.calls])
 
     async def test_subsequent_actual_position_gets_a_new_clock_decision(self):
         await self._open()
         self.clock += timedelta(minutes=10)
         self._bar(self.clock.replace(second=0) - timedelta(minutes=1), 71100, 71300)
-        await self.runner.run_once()
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
-        first_decision = self.runner.status["session_clock"]["decision"]["decision_id"]
-        self._fill(self.runner.status["pending_intent_id"], 2, 71100)
-        await self.runner.run_once()
-        self.assertEqual("COMPLETED", self.runner.status["session_clock"]["phase"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
+        first_decision = self.runner.episode.status["session_clock"]["decision"]["decision_id"]
+        self._fill(self.runner.episode.status["pending_intent_id"], 2, 71100)
+        await self.runner.episode.advance_once()
+        self.assertEqual("COMPLETED", self.runner.episode.status["session_clock"]["phase"])
         self.clock += timedelta(minutes=4)
         control = self.repository.load_mock_automation_control(fixture.ACCOUNT_REF)
         # A second actual O1 BUY fill, never a synthetic strategy-state change.
@@ -490,9 +608,9 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self._fill(intent.intent_id, 2, 71100)
         self.clock += timedelta(minutes=10)
         self._bar(self.clock.replace(second=0) - timedelta(minutes=1), 71200, 71400)
-        await self.runner.run_once()
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
-        self.assertNotEqual(first_decision, self.runner.status["session_clock"]["decision"]["decision_id"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
+        self.assertNotEqual(first_decision, self.runner.episode.status["session_clock"]["decision"]["decision_id"])
         self.assertEqual(["BUY", "SELL", "BUY", "SELL"], [row[1] for row in self.transport.calls])
 
     async def test_stale_clock_revision_cannot_overwrite_concurrent_user_stop(self):
@@ -511,30 +629,30 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_exit_is_preserved_until_expiry_then_stopped_and_cancelled(self):
         sell_id = await self._fresh_clock_exit()
         self.clock += timedelta(seconds=2)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual([], self.cancel_calls)
         self.clock += timedelta(seconds=3)
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
         self.assertEqual(sell_id, self.cancel_calls[0][0])
-        self.assertEqual("open", self.runner._state.status)
+        self.assertEqual("open", self.runner.episode._episode_position._state.status)
         self.assertEqual(2, len(self.transport.calls))
 
     async def test_exact_deadline_does_not_submit_new_exit(self):
         await self._open()
         self.clock = self.clock.replace(hour=6, minute=20, second=0)
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"])
-        self.assertIn("session_deadline_passed", self.runner.status["session_clock"]["assessment"]["reasons"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
+        self.assertIn("session_deadline_passed", self.runner.episode.status["session_clock"]["assessment"]["reasons"])
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_clock_operates_during_bootstrap_without_checkpointing_partial_seed(self):
         await self._open()
         checkpoint = self.store.load_documents("execution_mock_automation_runner_current")
-        self.runner._bootstrap_pending = True
+        self.runner.episode._input_progress._bootstrap_pending = True
         self.clock += timedelta(minutes=10)
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
         self.assertEqual(checkpoint, self.store.load_documents("execution_mock_automation_runner_current"))
         self.assertTrue(self.store.load_documents(CLOCK_COLLECTION))
 
@@ -544,8 +662,8 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
                                       account_ref=fixture.ACCOUNT_REF, spec_id=self.spec.spec_id,
                                       stopped_at=self.clock, reason="operator stop")
         self.clock += timedelta(minutes=10)
-        await self.runner.run_once()
-        self.assertEqual("STOPPED", self.runner.status["state"])
+        await self.runner.episode.advance_once()
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
         self.assertEqual([], self.cancel_calls)
         self.assertEqual([], self.store.load_documents(CLOCK_COLLECTION))
 
@@ -571,9 +689,9 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
             return original(collection, values)
         with patch.object(self.store, "upsert_documents", side_effect=fail_clock):
             with self.assertRaisesRegex(OSError, "clock persistence"):
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
         self.assertEqual([], self.cancel_calls)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(1, len(self.cancel_calls))
 
     async def test_shutdown_waits_for_cancel_and_its_clock_receipt(self):
@@ -587,7 +705,7 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return result
         with patch.object(self.bundle.gateway, "cancel", side_effect=blocked_cancel):
-            self.runner._task = asyncio.create_task(self.runner.run_once())
+            self.runner._task = asyncio.create_task(self.runner.episode.advance_once())
             await asyncio.wait_for(entered.wait(), 3)
             close = asyncio.create_task(self.runner.close())
             try:
@@ -604,30 +722,30 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_clock_exit_restart_finishes_once_and_projects_each_fill_to_journal(self):
         exit_id = await self._fresh_clock_exit()
         self._fill(exit_id, 1, price=71100)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual({"005930": 1}, self.positions)
-        self.assertEqual("open", self.runner.status["strategy_state"])
+        self.assertEqual("open", self.runner.episode.status["strategy_state"])
         self.assertEqual(2, len(self.transport.calls))
 
         # 실제 checkpoint와 체결 원장에서 부분 청산 상태를 복구한다.
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
-        self.assertEqual("open", self.runner.status["strategy_state"])
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
+        self.assertEqual("open", self.runner.episode.status["strategy_state"])
         self.assertEqual(2, len(self.transport.calls), "남은 매도 주문을 중복 제출하지 않는다")
         self.assertEqual([], self.cancel_calls)
         self._fill(exit_id, 1, price=71100)
-        await self.runner.run_once()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
+        await self.runner.episode.advance_once()
         self.assertEqual({}, self.positions)
-        self.assertEqual("cooldown", self.runner.status["strategy_state"])
+        self.assertEqual("cooldown", self.runner.episode.status["strategy_state"])
         self.assertEqual(2, len(self.transport.calls))
         self.assertEqual([], self.cancel_calls)
         self.assertEqual((), self.execution.active_intents("mock", fixture.ACCOUNT_REF, self.run_id))
 
         # 마지막 체결 후 다시 재시작해도 포지션과 주문이 되살아나지 않는다.
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
-        self.assertEqual("cooldown", self.runner.status["strategy_state"])
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
+        self.assertEqual("cooldown", self.runner.episode.status["strategy_state"])
         self.assertEqual(2, len(self.transport.calls))
         scope = fixture.AccountScope("kiwoom", fixture.AccountEnvironment.MOCK, fixture.ACCOUNT_REF)
         with tempfile.TemporaryDirectory() as directory:
@@ -650,8 +768,8 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_file_checkpoint_and_journal_restore_across_separate_processes(self):
         exit_id = await self._fresh_clock_exit()
         self._fill(exit_id, 1, price=71100)
-        await self.runner.run_once()
-        self.assertEqual(1, self.runner._state.position_quantity)
+        await self.runner.episode.advance_once()
+        self.assertEqual(1, self.runner.episode._episode_position._state.position_quantity)
         command = (
             "import json,sys; "
             "from tests.unit.test_mock_automation_session_clock import inspect_checkpoint_in_process; "
@@ -683,19 +801,19 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
             partial = await asyncio.to_thread(child)
             self.assertEqual("open", partial["state"]["status"])
             self.assertEqual(1, partial["state"]["position_quantity"])
-            self.assertEqual(json.loads(json.dumps(self.runner._state.to_dict())), partial["state"])
+            self.assertEqual(json.loads(json.dumps(self.runner.episode._episode_position._state.to_dict())), partial["state"])
             self.assertEqual([{"intent_id": exit_id, "filled_quantity": 1}], partial["active_intents"])
-            self.assertEqual(json.loads(json.dumps(self.runner.status["session_clock"])), partial["session_clock"])
+            self.assertEqual(json.loads(json.dumps(self.runner.episode.status["session_clock"])), partial["session_clock"])
             self.assertEqual(2, partial["new_journal_fills"])
             self.assertEqual((2, 1), (partial["journal_buy_quantity"], partial["journal_sell_quantity"]))
 
             self._fill(exit_id, 1, price=71100)
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
             snapshot()
             completed = await asyncio.to_thread(child)
             repeated = await asyncio.to_thread(child)
             self.assertEqual("cooldown", completed["state"]["status"])
-            self.assertEqual(json.loads(json.dumps(self.runner._state.to_dict())), completed["state"])
+            self.assertEqual(json.loads(json.dumps(self.runner.episode._episode_position._state.to_dict())), completed["state"])
             self.assertEqual([], completed["active_intents"])
             self.assertEqual(1, completed["new_journal_fills"])
             self.assertEqual(0, repeated["new_journal_fills"])
@@ -713,9 +831,9 @@ class ClockWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.repository, self.runtime, account_ref=fixture.ACCOUNT_REF,
             spec_id=self.spec.spec_id, stopped_at=self.clock, reason="operator stopped before restart",
         )
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         control = self.repository.load_mock_automation_control(fixture.ACCOUNT_REF)
-        self.assertEqual("STOPPED", self.runner.status["state"])
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
         self.runtime.stop()
         self.assertFalse(self.runtime._active)
         with tempfile.TemporaryDirectory() as directory:

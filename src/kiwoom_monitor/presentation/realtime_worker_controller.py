@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import RealtimeSourceTransition
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
 
 
@@ -18,6 +19,7 @@ class RealtimeWorkerController(QObject):
     diagnostics_changed = Signal(object)
     realtime_gap = Signal(object)
     status_changed = Signal(str)
+    source_changed = Signal(object)
     connection_failed = Signal(str)
     connection_opened = Signal(object)
     codes_added = Signal(object)
@@ -75,6 +77,9 @@ class RealtimeWorkerController(QObject):
         if gap_signal is not None:
             gap_signal.connect(self.realtime_gap.emit)
         worker.status_changed.connect(self.status_changed.emit)
+        source_signal = getattr(worker, "source_changed", None)
+        if source_signal is not None:
+            source_signal.connect(self._forward_source_changed)
         worker.connection_failed.connect(self.connection_failed.emit)
         worker.connection_opened.connect(self.connection_opened.emit)
         worker.codes_added.connect(self.codes_added.emit)
@@ -89,6 +94,13 @@ class RealtimeWorkerController(QObject):
         self._worker = worker
         worker.start()
         return True
+
+    @Slot(object)
+    def _forward_source_changed(self, transition: object) -> None:
+        # An old worker may already have queued its final source observation.
+        # Keep this check on the receiving Qt thread before publishing to the view.
+        if self.sender() is self._worker and isinstance(transition, RealtimeSourceTransition):
+            self.source_changed.emit(transition)
 
     def update_codes(
         self, active_codes: tuple[str, ...], nxt_codes: tuple[str, ...]

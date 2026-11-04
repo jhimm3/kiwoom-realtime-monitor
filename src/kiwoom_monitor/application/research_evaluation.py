@@ -9,11 +9,13 @@ from datetime import datetime, timedelta, timezone
 from statistics import median
 from fractions import Fraction
 from math import sqrt, isqrt
-from typing import Any, Iterable, Mapping, ClassVar
+from typing import Any, Iterable, Mapping, ClassVar, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from kiwoom_monitor.application.breakout_strategy import CandidateEvent
-from kiwoom_monitor.application.research_execution import ExecutionEvent, SimulationCostModel, SimulationExecutionConfig
+from kiwoom_monitor.domain.simulation_contract import SimulationCostModel, SimulationExecutionConfig
+if TYPE_CHECKING:
+    from kiwoom_monitor.application.breakout_strategy import CandidateEvent
+    from kiwoom_monitor.application.research_execution import ExecutionEvent
 from kiwoom_monitor.application.research_replay import KrxMinuteBarFrame
 from kiwoom_monitor.application.research_splits import (
     ResearchEvaluationSpec,

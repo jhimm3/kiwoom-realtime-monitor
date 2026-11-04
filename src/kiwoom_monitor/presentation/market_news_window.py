@@ -24,7 +24,7 @@ from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.naver_news import (
     LocalNaverNewsConfig, NaverNewsClient, StockNewsItem, is_excluded_news, news_provider,
 )
-from kiwoom_monitor.infrastructure.naver_stock_market_news import PAGE_SIZE, fetch_page
+from kiwoom_monitor.infrastructure.naver_stock_market_news_source import PAGE_SIZE, fetch_page
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 
@@ -286,14 +286,46 @@ class MarketNewsWindow(QDialog):
                 QDesktopServices.openUrl(QUrl(link))
 
     def shutdown(self) -> None:
-        self._window_settings.setValue("geometry", self.saveGeometry())
-        if self._settings_worker is not None:
-            self._settings_worker.requestInterruption()
-            self._settings_worker.wait(1000)
+        errors: list[tuple[str, BaseException]] = []
+
+        def cleanup(stage: str, action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                errors.append((stage, error))
+
+        cleanup("geometry", lambda: self._window_settings.setValue("geometry", self.saveGeometry()))
+
+        def drain_settings() -> None:
+            if self._settings_worker is not None:
+                cleanup("settings.interrupt", self._settings_worker.requestInterruption)
+                completed = False
+                try:
+                    completed = self._settings_worker.wait(1000)
+                finally:
+                    if not completed:
+                        self._settings_worker.wait()
+
+        cleanup("settings.wait", drain_settings)
         for worker in tuple(self._workers.values()):
-            worker.requestInterruption()
-            worker.wait(10_000)
-        self.close()
+            def drain_worker() -> None:
+                cleanup("worker.interrupt", worker.requestInterruption)
+                completed = False
+                try:
+                    completed = worker.wait(10_000)
+                finally:
+                    if not completed:
+                        worker.wait()
+
+            cleanup("worker.wait", drain_worker)
+        cleanup("close", self.close)
+        if errors:
+            failure = errors[0][1]
+            for stage, error in errors[1:]:
+                failure.add_note(f"NEWS_WINDOW_CLEANUP_FAILED:{stage}:{type(error).__name__}:{error}")
+                for note in getattr(error, "__notes__", ()):
+                    failure.add_note(note)
+            raise failure
 
     def closeEvent(self, event) -> None:
         self._window_settings.setValue("geometry", self.saveGeometry())

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.simulation_contract import (
+    COST_MODEL_VERSION, COST_MODEL_DECIMAL_VERSION, EXECUTION_MODEL_VERSION,
+    SAME_BAR_PATH_VERSION, SimulationCostModel, SimulationExecutionConfig, _aware_datetime,
+)
+
 import hashlib
 import json
 import re
@@ -28,12 +33,8 @@ from kiwoom_monitor.application.research_replay import KrxMinuteBarFrame
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 
 
-COST_MODEL_VERSION = "fixed_bps/v1"
-COST_MODEL_DECIMAL_VERSION = "fixed_bps/v2"
-EXECUTION_MODEL_VERSION = "next_tradable_bar_open/v1"
 POSITION_TARGET_EXECUTION_VERSION = "paper-position-target/v1"
 UNFILLED_EXECUTION_VERSION = "unfilled-paired-limit/v1"
-SAME_BAR_PATH_VERSION = "conservative_with_optimistic_bound/v1"
 FULL_EXIT_STRESS_VERSION = 'paper-full-exit-stress/v1'
 
 
@@ -206,86 +207,6 @@ def simulate_full_exit_stress(policy, source_bar, bars, *, execution, strategy, 
     else:
         result['status']='INCOMPLETE';reasons.append('full_position_exit_not_proven_in_every_declared_scenario')
     return result
-
-
-@dataclass(frozen=True)
-class SimulationCostModel:
-    version: str
-    commission_bps: int | Decimal
-    sell_tax_bps: int | Decimal
-    slippage_bps: int | Decimal
-    rate_basis: str = "unspecified"
-    source: str = ""
-    valid_from: str = ""
-    valid_to: str = ""
-
-    def __post_init__(self) -> None:
-        if self.version not in {COST_MODEL_VERSION, COST_MODEL_DECIMAL_VERSION}:
-            raise ValueError(f"unregistered cost model: {self.version}")
-        for field in ("commission_bps", "sell_tax_bps", "slippage_bps"):
-            value = getattr(self, field)
-            if self.version == COST_MODEL_VERSION:
-                if type(value) is not int:
-                    raise ValueError(f"{field} must be an integer in fixed_bps/v1")
-            else:
-                if not isinstance(value, (str, Decimal)):
-                    raise ValueError(f"{field} must be a canonical decimal string in fixed_bps/v2")
-                text = str(value)
-                if re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,2})?", text) is None:
-                    raise ValueError(f"{field} must be a canonical decimal string in fixed_bps/v2")
-                try:
-                    decimal_value = Decimal(text)
-                except InvalidOperation as exc:
-                    raise ValueError(f"{field} must be a decimal rate") from exc
-                if not decimal_value.is_finite() or decimal_value < 0:
-                    raise ValueError(f"{field} must be a canonical nonnegative rate in 0.01 bp units")
-                object.__setattr__(self, field, decimal_value)
-        if min(self.commission_bps, self.sell_tax_bps, self.slippage_bps) < 0:
-            raise ValueError("simulation cost rates must not be negative")
-        if self.slippage_bps >= 10_000:
-            raise ValueError("slippage_bps must be below 10000")
-        if self.rate_basis not in {
-            "unspecified", "official_period_rule", "account_actual", "model_estimate",
-        }:
-            raise ValueError(f"unsupported simulation cost rate basis: {self.rate_basis}")
-        if bool(self.valid_from) != bool(self.valid_to):
-            raise ValueError("simulation cost validity requires both valid_from and valid_to")
-        if self.valid_from:
-            start = _aware_datetime(self.valid_from)
-            end = _aware_datetime(self.valid_to)
-            if end <= start:
-                raise ValueError("simulation cost valid_to must be after valid_from")
-
-    def to_dict(self) -> dict[str, Any]:
-        result = asdict(self)
-        if self.version == COST_MODEL_DECIMAL_VERSION:
-            for field in ("commission_bps", "sell_tax_bps", "slippage_bps"):
-                result[field] = str(result[field])
-        return result
-
-
-@dataclass(frozen=True)
-class SimulationExecutionConfig:
-    version: str
-    same_bar_path_version: str
-    initial_cash_won: int
-    cost_model: SimulationCostModel | None
-
-    def __post_init__(self) -> None:
-        if self.version != EXECUTION_MODEL_VERSION:
-            raise ValueError(f"unregistered execution model: {self.version}")
-        if self.same_bar_path_version != SAME_BAR_PATH_VERSION:
-            raise ValueError(f"unregistered same-bar path model: {self.same_bar_path_version}")
-        if self.initial_cash_won <= 0:
-            raise ValueError("initial_cash_won must be positive")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "version": self.version,
-            "same_bar_path_version": self.same_bar_path_version,
-            "initial_cash_won": self.initial_cash_won,
-            "cost_model": self.cost_model.to_dict() if self.cost_model else None,
-        }
 
 
 @dataclass(frozen=True)
@@ -1329,10 +1250,3 @@ def _content_id(prefix: str, value: Mapping[str, Any]) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return f"{prefix}_{hashlib.sha256(encoded).hexdigest()}"
-
-
-def _aware_datetime(value: object) -> datetime:
-    parsed = datetime.fromisoformat(str(value))
-    if parsed.tzinfo is None:
-        raise ValueError("execution timestamps must be timezone-aware")
-    return parsed

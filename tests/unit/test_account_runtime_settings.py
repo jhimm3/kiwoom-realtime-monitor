@@ -83,7 +83,8 @@ class AccountRuntimeSettingsTests(unittest.TestCase):
         saved = self.store.save_account_settings(self.setting(monitor_enabled=False), expected_revision=1)
         before = self.store.load_documents("server_account_settings")
         rotated = self.store.finalize_credential_activation(self.activation(revision=2))
-        self.assertEqual(first["binding_revision"] + 1, rotated["binding_revision"])
+        self.assertEqual(first["binding_revision"], rotated["binding_revision"])
+        self.assertEqual((1, 2), (first["credential_revision"], rotated["credential_revision"]))
         self.assertEqual(saved, self.store.load_account_settings(self.scope))
         self.assertEqual(before, self.store.load_documents("server_account_settings"))
 

@@ -17,6 +17,7 @@ class LiveAllocationDialogTests(unittest.TestCase):
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()), \
              patch('kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start'):
             dialog=CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
         self.addCleanup(dialog.deleteLater);self.addCleanup(dialog.stop)
         return dialog
 

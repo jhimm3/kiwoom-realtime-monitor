@@ -1,5 +1,7 @@
 # TOP20 장중 집계와 장후 분봉 재계산
 
+> **장후 작업 구분.** 이 문서는 분봉 재계산 계약이다. 실행 컴퓨터의 당일 자료를 NAS에 인계하는 보관 전송은 별도의 receipt·재시도·복구 경계를 따른다. [관련 계약](architecture/app-target-20261023.md#portable-execution-target).
+
 상태: **2026-10-12 로컬 구현·검증 / NAS 미배포·전용 PostgreSQL gate 대기**. 사용자 결정은 장중 0B 집계, 장후 종목별 마감 1분봉 재계산, 30초 편입·이탈의 50% 배분이다. 현재 실행 코드와 검증 범위는 [CURRENT_STATUS](CURRENT_STATUS.md), 후속은 [OPEN_ITEMS](OPEN_ITEMS.md)를 따른다.
 
 ## 1. 사용자에게 보이는 동작

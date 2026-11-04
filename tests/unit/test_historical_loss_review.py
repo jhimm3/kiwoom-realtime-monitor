@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts import summarize_historical_baseline_results as review
+from kiwoom_monitor import research_candidate as candidate_review
 from scripts.prepare_historical_baseline_requests import prepare_daily_plan, prepare_daily_requests
 from tests.unit import test_historical_baseline_requests as request_fixtures
 
@@ -476,14 +477,14 @@ class DailyCostReferenceTests(unittest.TestCase):
         self.prepare_reference()
         before = {path: path.read_bytes() for directory in (self.output, self.source)
                   for path in directory.rglob("*") if path.is_file()}
-        result = review.inspect_daily_development_inputs(self.output, cost_reference=self.reference)
+        result = candidate_review.inspect_daily_development_inputs(self.output, cost_reference=self.reference)
         self.assertEqual(2, result["cost_reference"]["tax_mismatch_day_count"])
         self.assertTrue(result["cost_reference"]["commission_matches"])
         self.assertFalse(result["cost_reference"]["account_costs_verified"])
         self.assertFalse(result["cost_reference"]["slippage_verified"])
         self.assertEqual("20", result["cost_model"]["sell_tax_bps"])
         self.assertIn("model_costs_differ_from_date_reference", result["reasons"])
-        self.assertIn("불일치 2일", review.daily_input_review_text(result))
+        self.assertIn("불일치 2일", candidate_review.daily_input_review_text(result))
         self.assertEqual(before, {path: path.read_bytes() for directory in (self.output, self.source)
                                  for path in directory.rglob("*") if path.is_file()})
 
@@ -492,14 +493,14 @@ class DailyCostReferenceTests(unittest.TestCase):
         for row in document["dates"]:
             row["sell_tax_bps"] = "20.000"
         self.reference.write_text(json.dumps(document))
-        result = review.inspect_daily_development_inputs(self.output, cost_reference=self.reference)
+        result = candidate_review.inspect_daily_development_inputs(self.output, cost_reference=self.reference)
         self.assertEqual("MATCH", result["cost_reference"]["status"])
         self.assertFalse(result["broker_costs_verified"])
         self.assertIn("broker_costs_unverified", result["reasons"])
 
     def test_wrong_source_dates_and_invalid_reference_fail_closed(self):
         document = self.prepare_reference()
-        plan, _ = review._daily_development_requests(self.output)
+        plan, _ = candidate_review._daily_development_requests(self.output)
         manifest = json.loads((self.source / "manifest.json").read_text())
         costs = review.load_development_validation_request(self.output / "requests/daily-breakout.json").request.execution.cost_model
         bad_documents = []
@@ -518,7 +519,7 @@ class DailyCostReferenceTests(unittest.TestCase):
             with self.subTest(document=changed):
                 self.reference.write_text(json.dumps(changed))
                 with self.assertRaises(ValueError):
-                    review.assess_development_cost_reference(plan, manifest, costs, self.reference)
+                    candidate_review.assess_development_cost_reference(plan, manifest, costs, self.reference)
 
 
 class DailyInputReviewTests(unittest.TestCase):
@@ -528,8 +529,8 @@ class DailyInputReviewTests(unittest.TestCase):
         prepare_daily_requests(self.selection, self.source, self.output)
         before = {path: path.read_bytes() for directory in (self.source, self.output)
                   for path in directory.rglob("*") if path.is_file()}
-        with patch.object(review, "ResearchRepository", side_effect=AssertionError("no DB")):
-            result = review.inspect_daily_development_inputs(self.output)
+        with patch.object(candidate_review, "ResearchRepository", side_effect=AssertionError("no DB")):
+            result = candidate_review.inspect_daily_development_inputs(self.output)
         self.assertEqual(before, {path: path.read_bytes() for directory in (self.source, self.output)
                                  for path in directory.rglob("*") if path.is_file()})
         self.assertEqual("REVIEW_REQUIRED", result["status"])
@@ -549,7 +550,7 @@ class DailyInputReviewTests(unittest.TestCase):
         late = result["stock_days"][0]
         self.assertEqual("15:20:00", late["continuous_session_end"][11:19])
         self.assertGreater(late["outside_continuous_session_observations"], 0)
-        self.assertIn("미검증", review.daily_input_review_text(result))
+        self.assertIn("미검증", candidate_review.daily_input_review_text(result))
 
     def test_oos_plan_is_rejected_before_loading_any_source(self):
         prepare_daily_requests(self.selection, self.source, self.output)
@@ -557,9 +558,9 @@ class DailyInputReviewTests(unittest.TestCase):
         plan = json.loads(path.read_text())
         plan["evaluation"]["folds"][0]["role"] = "OOS"
         path.write_text(json.dumps(plan))
-        with patch.object(review, "load_daily_development_source", side_effect=AssertionError("no input")):
+        with patch.object(candidate_review, "load_daily_development_source", side_effect=AssertionError("no input")):
             with self.assertRaises(ValueError):
-                review.inspect_daily_development_inputs(self.output)
+                candidate_review.inspect_daily_development_inputs(self.output)
 
     def test_source_with_oos_date_is_rejected_before_payload_load(self):
         prepare_daily_requests(self.selection, self.source, self.output)
@@ -567,9 +568,9 @@ class DailyInputReviewTests(unittest.TestCase):
         manifest = json.loads(path.read_text())
         manifest["selected_dates"].append("2026-01-14")
         path.write_text(json.dumps(manifest))
-        with patch("scripts.prepare_historical_baseline_requests.load_research_input", side_effect=AssertionError("no input")):
+        with patch("kiwoom_monitor.infrastructure.research_data_source.load_research_input", side_effect=AssertionError("no input")):
             with self.assertRaisesRegex(ValueError, "OOS"):
-                review.inspect_daily_development_inputs(self.output)
+                candidate_review.inspect_daily_development_inputs(self.output)
 
     def test_request_source_identity_or_path_mismatch_fails(self):
         paths = prepare_daily_requests(self.selection, self.source, self.output)
@@ -585,7 +586,7 @@ class DailyInputReviewTests(unittest.TestCase):
                     value["request"]["execution"]["cost_model"]["commission_bps"] = "3"
                 path.write_text(json.dumps(value))
             with self.subTest(variant=variant), self.assertRaises(ValueError):
-                review.inspect_daily_development_inputs(self.output)
+                candidate_review.inspect_daily_development_inputs(self.output)
 
     def test_cost_period_mismatch_is_visible_and_source_label_is_not_proof(self):
         paths = prepare_daily_requests(self.selection, self.source, self.output)
@@ -596,7 +597,7 @@ class DailyInputReviewTests(unittest.TestCase):
             execution["cost_model"].update(valid_to="2024-09-04T00:00:00+09:00",
                                            rate_basis="official_period_rule", source="broker verified")
             path.write_text(json.dumps(document))
-        result = review.inspect_daily_development_inputs(self.output)
+        result = candidate_review.inspect_daily_development_inputs(self.output)
         self.assertFalse(result["cost_validity_covers_windows"])
         self.assertFalse(result["broker_costs_verified"])
         self.assertIn("cost_validity_does_not_cover_development_windows", result["reasons"])
@@ -605,7 +606,7 @@ class DailyInputReviewTests(unittest.TestCase):
         from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
         prepare_daily_requests(self.selection, self.source, self.output)
         plan = json.loads((self.output / "daily-plan.json").read_text())
-        dataset = review.load_daily_development_source(plan, self.source)
+        dataset = candidate_review.load_daily_development_source(plan, self.source)
         observations = [deepcopy(row) for row in dataset.observations]
         bar = next(row for row in observations if row["kind"] == "minute_bar")
         duplicate = deepcopy(bar)
@@ -616,9 +617,9 @@ class DailyInputReviewTests(unittest.TestCase):
                        and row["payload"]["code"] == "000660" and row["payload"]["bar_start"][11:16] == "09:03")
         observations.remove(removed)
         changed = FrozenResearchDataset(dataset.manifest, tuple(observations))
-        with patch.object(review, "load_daily_development_source", return_value=changed):
-            result = review.inspect_daily_development_inputs(self.output)
-        original = review.inspect_daily_development_inputs(self.output)
+        with patch.object(candidate_review, "load_daily_development_source", return_value=changed):
+            result = candidate_review.inspect_daily_development_inputs(self.output)
+        original = candidate_review.inspect_daily_development_inputs(self.output)
         self.assertEqual(original["stock_days"][0], result["stock_days"][0])
         early = result["stock_days"][1]
         self.assertEqual(1, len(early["internal_gaps"]))
@@ -642,17 +643,17 @@ class DailyInputReviewTests(unittest.TestCase):
         path = self.source / manifest["observations_file"]
         path.write_bytes(path.read_bytes() + b"\n")
         with self.assertRaisesRegex(ValueError, "hash"):
-            review.inspect_daily_development_inputs(self.output)
+            candidate_review.inspect_daily_development_inputs(self.output)
 
     def test_missing_bars_preserve_candidate_and_block_minimum_pair(self):
         from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
         prepare_daily_requests(self.selection, self.source, self.output)
         plan = json.loads((self.output / "daily-plan.json").read_text())
-        dataset = review.load_daily_development_source(plan, self.source)
+        dataset = candidate_review.load_daily_development_source(plan, self.source)
         observations = tuple(row for row in dataset.observations
                              if row["kind"] != "minute_bar" or row["payload"]["code"] != "000660")
-        with patch.object(review, "load_daily_development_source", return_value=FrozenResearchDataset(dataset.manifest, observations)):
-            result = review.inspect_daily_development_inputs(self.output)
+        with patch.object(candidate_review, "load_daily_development_source", return_value=FrozenResearchDataset(dataset.manifest, observations)):
+            result = candidate_review.inspect_daily_development_inputs(self.output)
         self.assertEqual(2, len(result["stock_days"]))
         row = result["stock_days"][1]
         self.assertEqual((0, 380, None), (row["observed_unique_minutes"], row["unobserved_minute_slots"], row["first_bar_start"]))
@@ -668,7 +669,7 @@ class DailyInputReviewTests(unittest.TestCase):
             if calls == 10:
                 raise RuntimeError("cancelled input review")
         with self.assertRaisesRegex(RuntimeError, "cancelled"):
-            review.inspect_daily_development_inputs(self.output, checkpoint=checkpoint)
+            candidate_review.inspect_daily_development_inputs(self.output, checkpoint=checkpoint)
         self.assertEqual(10, calls)
         self.assertFalse((self.output / "research.sqlite3").exists())
 

@@ -12,7 +12,7 @@
 | `docs/api-contract/2026-08-14_고가_기준_검증.md` | 8월 14일 API 실측 기록. 현행 API 계약과 구분해 보존 | [보존본](api-contract/2026-08-14_고가_기준_검증.md) · [승계](../../../API_CONTRACT.md) |
 | `docs/api-contract/2026-08-14_기본정보_및_거래대금_검증.md` | 8월 14일 API 실측 기록. 현행 API 계약과 구분해 보존 | [보존본](api-contract/2026-08-14_기본정보_및_거래대금_검증.md) · [승계](../../../API_CONTRACT.md) |
 | `docs/api-contract/2026-08-14_인증_검증.md` | 8월 14일 API 실측 기록. 현행 API 계약과 구분해 보존 | [보존본](api-contract/2026-08-14_인증_검증.md) · [승계](../../../API_CONTRACT.md) |
-| `docs/DOCUMENTATION_VALIDATION.md` | 이전 문서 정리의 검증 수치. 이번 검증 기록과 분리 | [보존본](reports/DOCUMENTATION_VALIDATION_20260922.md) · [승계](../../DOCUMENTATION_VALIDATION.md) |
+| `docs/DOCUMENTATION_VALIDATION.md` | 이전 문서 정리의 검증 수치. 이번 검증 기록과 분리 | [보존본](reports/DOCUMENTATION_VALIDATION_20260922.md) · [승계](../2026-11-05/documentation-validation-20261011.md) |
 | `docs/MAIN_WINDOW_APP_CONTROLLER_PLAN.md` | A-D 구현 완료 계획과 당시 검증. 현행 책임은 모듈 지도, 운영 잔여는 OPEN_ITEMS | [보존본](reports/MAIN_WINDOW_APP_CONTROLLER_PLAN.md) · [승계](../../../MODULE_MAP.md) |
 | `docs/MAIN_WINDOW_CONNECTION_BASELINE.json` | 완료한 AppController 작업의 변경 전 정적 증거 | [보존본](evidence/MAIN_WINDOW_CONNECTION_BASELINE.json) · [승계](../../../MODULE_MAP.md) |
 | `docs/MAIN_WINDOW_CONNECTION_COMPARISON.json` | 완료한 AppController 작업의 변경 후 정적 증거 | [보존본](evidence/MAIN_WINDOW_CONNECTION_COMPARISON.json) · [승계](../../../MODULE_MAP.md) |
@@ -38,7 +38,7 @@ API/DB/과거자료/연구/주문 계약, 진단 운영·원인 Replay 설계, �
 
 [문서별 전체 분류](document-inventory.json)는 정리 전 269개 문서/참조 원장을 빠짐없이 기록한다. [원문 ZIP](original-documents.zip)은 변경·이동한 54개 파일을 원래 경로와 바이트 그대로 보존한다. 현행·과거 설명문과 비교표는 한글화했으며 코드·식별자·공식 자료·라이선스는 원래 언어를 유지했다. 읽기용 아카이브는 안내·링크·언어를 갱신했으므로 원문 바이트 검증은 ZIP을 기준으로 한다.
 
-[이번 검증](../../DOCUMENTATION_VALIDATION.md) · [현재 문서 안내](../../README.md) · [남은 작업](../../OPEN_ITEMS.md).
+[이번 검증](../2026-11-05/documentation-validation-20261011.md) · [현재 문서 안내](../../README.md) · [남은 작업](../../OPEN_ITEMS.md).
 
 ## 추가 통합
 

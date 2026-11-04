@@ -1,6 +1,8 @@
 """Authenticated trace opt-ins reach native store and collector capture hooks."""
 from __future__ import annotations
 
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder, HubInputRecorder
+
 import asyncio
 import json
 import os
@@ -111,7 +113,9 @@ class DiagnosticTraceApiTests(unittest.TestCase):
                     self.assertEqual(started["trace_id"] if enabled else None, trace.input_token(key))
 
                 now = datetime(2026, 10, 6, 1, 4, 15, tzinfo=timezone.utc)
-                collector = CentralRealtimeCollector(lambda: "", "real", RealtimeHub(), lambda: now, store)
+                hub_observer = HubInputRecorder()
+                capture_hub = RealtimeHub(observer=hub_observer)
+                collector = CentralRealtimeCollector(lambda: "", "real", capture_hub, lambda: now, store, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
                 message = {"trnm": "REAL", "data": [
                     {"type": "0B", "item": "005930_AL", "values": {
                         "10": "10000", "13": "10", "14": "1", "15": "2", "17": "10000",

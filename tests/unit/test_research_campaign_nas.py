@@ -17,7 +17,7 @@ from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS, RESEARCH_SCHEMA_VERSION
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigrationRunner
 from kiwoom_monitor.research_process import execute_campaign_cycle, discover_campaign_inputs
-from scripts.export_research_dataset import prepare_campaign_nas_input
+from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
 import test_research_campaign_inputs as fixture_module
 from test_research_bundle import write_child
 
@@ -78,7 +78,7 @@ class CampaignNasTests(unittest.TestCase):
         self.assertIn('research_reference', storage['entries'][0]['protected_reasons'])
         self.assertFalse(storage['deletion_authorized'])
         self.assertTrue(list(self.watch.glob('nas-*/manifest.json')))
-        with patch('scripts.export_research_dataset.export_daily_dataset') as export:
+        with patch('kiwoom_monitor.infrastructure.research_data_source.export_daily_dataset') as export:
             second = self.scan(61)
         self.assertEqual([], second['errors'])
         export.assert_not_called()
@@ -172,7 +172,7 @@ class CampaignNasTests(unittest.TestCase):
     def test_cached_signature_survives_repository_restart(self):
         self.scan()
         self.fixture.repo = type(self.repo)(self.fixture.request.database)
-        with patch('scripts.export_research_dataset.export_daily_dataset') as export:
+        with patch('kiwoom_monitor.infrastructure.research_data_source.export_daily_dataset') as export:
             self.scan(61)
         export.assert_not_called()
         source = self.fixture.repo.load_campaign_input_sources('c')[0]
@@ -198,7 +198,7 @@ class CampaignNasTests(unittest.TestCase):
         manifest = json.loads(path.read_text())
         manifest['subject'] = '000660'
         path.write_text(json.dumps(manifest))
-        with patch('scripts.export_research_dataset.export_daily_dataset') as export:
+        with patch('kiwoom_monitor.infrastructure.research_data_source.export_daily_dataset') as export:
             result = self.scan()
         self.assertIn('scope', result['errors'][0])
         export.assert_not_called()
@@ -278,7 +278,7 @@ class RollingNasTests(unittest.TestCase):
         (self.remote / 'observations.jsonl').write_text('')
         path.write_text(json.dumps(manifest))
         self.scan()
-        with patch('scripts.export_research_dataset.export_daily_dataset') as export:
+        with patch('kiwoom_monitor.infrastructure.research_data_source.export_daily_dataset') as export:
             second = self.scan(61)
         export.assert_not_called()
         self.assertEqual([], second['errors'])

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 from typing import Any
+
+from kiwoom_monitor.domain.time_basis import as_kst
 
 
 MINUTE_BAR_COLUMNS = (
@@ -23,6 +26,24 @@ SECOND_TRADE_BAR_COLUMNS = (
     "volume", "trade_value_won", "trade_count", "available_at",
 )
 BAR_KEY_COLUMNS = frozenset({"trading_date", "minute", "code", "market"})
+
+
+# Metadata keeps its established naive-KST compatibility. Research availability
+# opts into explicit instants without changing any original stored timestamp.
+def _instant_time_key(value: object, *, require_aware: bool = False) -> str | None:
+    if value in (None, ""):
+        if require_aware:
+            raise ValueError("research observation timestamps must be timezone-aware")
+        return None
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if require_aware and (parsed.tzinfo is None or parsed.utcoffset() is None):
+            raise ValueError("research observation timestamps must be timezone-aware")
+        return as_kst(parsed).isoformat(timespec="microseconds")
+    except ValueError:
+        if require_aware:
+            raise
+        return None
 
 
 def bar_columns(*, minute: bool) -> tuple[str, ...]:

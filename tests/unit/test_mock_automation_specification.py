@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.unit.test_mock_automation_runner import _prepared_runner, _apply_runner_fills
+
 from dataclasses import replace
 
 import hashlib
@@ -62,6 +64,7 @@ from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
 from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
 from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
 from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
 from kiwoom_monitor.central_server.database_observation_readers import ObservationRevisionPage
 from kiwoom_monitor.domain.execution_activation import (
     ForwardCriteria,
@@ -301,16 +304,27 @@ PUBLICATION_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contr
 
 
 @contextmanager
-def mock_publication_contract_app(app_factory, database_path):
+def mock_publication_contract_app(app_factory, database_path, *, historical_identity_hash=None):
     from kiwoom_monitor.application.research_implementation import research_implementation_hash
     from kiwoom_monitor.central_server.database import create_query_store
+    from kiwoom_monitor.domain.research_contract import research_artifact_metadata_hash
+    from tests.unit.test_nas_source_runtime import selected_research_artifact_fixture
     fixed_now = datetime.fromtimestamp(1000.0,timezone(timedelta(hours=9)))
     store = SQLiteQueryStore(database_path, now_provider=lambda: fixed_now)
     store.initialize()
+    selected_file, selected = selected_research_artifact_fixture(database_path.parent)
+    if historical_identity_hash is not None:
+        # The historical HTTP transport oracle deliberately freezes its old
+        # trusted identity input. Actual raw-byte provenance is tested separately.
+        selected["implementation_hash"] = historical_identity_hash
+        selected["source_ref"] = "historical-http-contract-fixture"
+        selected["metadata_hash"] = research_artifact_metadata_hash(selected)
+        selected_file.write_text(json.dumps(selected), encoding="utf-8")
     settings = CentralServerSettings(
         f"sqlite:///{database_path}", "private-token", autonomous_top20_enabled=False,
         market_event_collection_enabled=False, news_history_jobs_enabled=False,
         news_query_set_enabled=False, news_naver_market_enabled=False,
+        selected_research_artifact_file=str(selected_file),
     )
     try:
         def fixed_store(*args, **kwargs):
@@ -418,6 +432,71 @@ def capture_mock_publication_http_contract(client, store, inputs):
 
 
 class MockPublicationHTTPContractTests(unittest.TestCase):
+    def test_explicit_selected_artifact_and_restart_revocation_preserve_only_complete_receipt(self):
+        from dataclasses import replace
+        from kiwoom_monitor.central_server.config import ProducerGrant
+        from kiwoom_monitor.domain.research_contract import encode_reported_result_owner
+        with tempfile.TemporaryDirectory() as directory:
+            with mock_publication_contract_app(lambda settings: settings,
+                    Path(directory) / "publication.sqlite3") as (settings, store, inputs):
+                candidate_path = "/api/v1/research/mock-automation-candidates"
+                headers = {"Authorization": "Bearer private-token"}
+                body = {"account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID,
+                    "expected_binding_revision": inputs.binding["binding_revision"],
+                    "package": inputs.package.to_dict(), "eligibility_policy": inputs.policy.to_dict(),
+                    "eligibility_receipt": inputs.receipt.to_dict()}
+                revoked = replace(settings, selected_research_artifact_file="",
+                                  research_result_grants=(ProducerGrant("test-engine", "result-token"),))
+                with TestClient(create_app(revoked)) as client:
+                    refused = client.post(candidate_path, headers=headers, json=body)
+                    self.assertEqual(409, refused.status_code)
+                    self.assertEqual([], store.load_documents(
+                        ForwardEvaluationRepository.MOCK_AUTOMATION_ELIGIBILITY_POLICY_COLLECTION, limit=1000))
+                    # Report storage has its own producer authority and never claims science/order approval.
+                    result_headers = {"Authorization": "Bearer result-token",
+                        "X-Kiwoom-Expected-Result-Owner": encode_reported_result_owner("test-engine")}
+                    document = {"version": 1, "kind": "research-run-report", "result_id": "unselected-result",
+                        "produced_at": NOW.isoformat(), "payload": {"format": "kiwoom-monitor-research-run",
+                            "version": 3, "run_id": "unselected-result", "spec": {"code_hash": "client-only"}}}
+                    reported = client.post("/api/v1/research/reported-results", headers=result_headers, json=document)
+                    self.assertEqual(200, reported.status_code)
+                    self.assertFalse(reported.json()["receipt"]["scientific_verified"])
+                    self.assertFalse(reported.json()["receipt"]["order_authorized"])
+                    loaded = client.get("/api/v1/research/reported-results/unselected-result", headers=result_headers)
+                    self.assertEqual(200, loaded.status_code)
+                selected_app = create_app(settings)
+                # This explicitly chosen startup snapshot is immutable until restart.
+                Path(settings.selected_research_artifact_file).unlink()
+                with patch("kiwoom_monitor.application.research_implementation.research_implementation_hash",
+                           side_effect=AssertionError("receiver scanned producer source")):
+                    with TestClient(selected_app) as client:
+                        accepted = client.post(candidate_path, headers=headers, json=body)
+                        self.assertEqual((200, "saved"), (accepted.status_code, accepted.json()["status"]))
+                    first = {collection: store.load_documents(collection, limit=1000) for collection in (
+                        ForwardEvaluationRepository.MOCK_AUTOMATION_ELIGIBILITY_POLICY_COLLECTION,
+                        ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION,
+                        ForwardEvaluationRepository.MOCK_AUTOMATION_ELIGIBILITY_RECEIPT_COLLECTION)}
+                    with TestClient(create_app(revoked)) as client:
+                        duplicate = client.post(candidate_path, headers=headers, json=body)
+                        self.assertEqual((200, "unchanged"), (duplicate.status_code, duplicate.json()["status"]))
+                        changed_policy = replace(inputs.policy, minimum_closed_trades=11)
+                        changed_receipt = evaluate_candidate_eligibility(inputs.package, changed_policy, account_ref=ACCOUNT_REF)
+                        conflict = client.post(candidate_path, headers=headers, json={**body,
+                            "eligibility_policy": changed_policy.to_dict(), "eligibility_receipt": changed_receipt.to_dict()})
+                        self.assertEqual(409, conflict.status_code)
+                        old_revision = client.post(candidate_path, headers=headers,
+                            json={**body, "expected_binding_revision": inputs.binding["binding_revision"] + 1})
+                        self.assertEqual(409, old_revision.status_code)
+                        listed = client.get(candidate_path + "/" + ACCOUNT_REF, headers=headers,
+                            params={"credential_profile_id": PROFILE_ID})
+                        self.assertEqual(200, listed.status_code)
+                        self.assertEqual(1, len(listed.json()["candidates"]))
+                    self.assertEqual(first, {collection: store.load_documents(collection, limit=1000) for collection in first})
+                self.assertIsNone(store.load_mock_automation_control(ACCOUNT_REF))
+                with store._connection() as connection:
+                    self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM central_execution_intents").fetchone()[0])
+                    self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM central_execution_runtime_leases").fetchone()[0])
+
     def test_scoped_binding_reads_recheck_rotation_for_publication_and_immutable_retry(self):
         from kiwoom_monitor.central_server import app as app_module
 
@@ -526,8 +605,9 @@ class MockPublicationHTTPContractTests(unittest.TestCase):
         # The separate native test below checks admission against the actual source hash.
         with patch("kiwoom_monitor.application.research_implementation.research_implementation_hash",
                    return_value=scientific_hash), tempfile.TemporaryDirectory() as directory:
-            with mock_publication_contract_app(create_app, Path(directory) / "publication.sqlite3") as (app, store, inputs):
-                with TestClient(app) as client:
+            with mock_publication_contract_app(create_app, Path(directory) / "publication.sqlite3",
+                    historical_identity_hash=scientific_hash) as (app, store, inputs):
+                with TestClient(app, headers={"X-Request-ID": "mock-publication-http-contract-v1"}) as client:
                     actual = capture_mock_publication_http_contract(client, store, inputs)
         self.assertEqual([case["name"] for case in expected["cases"]], [case["name"] for case in actual["cases"]])
         for original, observed in zip(expected["cases"], actual["cases"], strict=True):
@@ -576,6 +656,254 @@ class MockPublicationHTTPContractTests(unittest.TestCase):
                 documents = actual["stored"][ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION]
                 self.assertEqual(1, len(documents))
                 self.assertEqual(scientific_hash, documents[0]["document"]["scientific_implementation_hash"])
+
+    def test_publication_accepts_equivalent_binding_offset_and_preserves_original_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock_publication_contract_app(create_app, Path(directory) / "publication.sqlite3") as (app, store, inputs):
+                original_binding = dict(store.load_latest_account_binding(PROFILE_ID, "kiwoom", "mock"))
+                alternate = replace(inputs.spec, binding_verified_at=inputs.spec.binding_verified_at.astimezone(
+                    timezone(timedelta(hours=9))))
+                original_payload, original_id = alternate.to_dict(), alternate.spec_id
+                self.assertNotEqual(original_binding["verified_at"], alternate.binding_verified_at.isoformat())
+                self.assertEqual(datetime.fromisoformat(original_binding["verified_at"]), alternate.binding_verified_at)
+                with TestClient(app) as client:
+                    headers = {"Authorization": "Bearer private-token"}
+                    candidate = {
+                        "account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID,
+                        "expected_binding_revision": inputs.binding["binding_revision"],
+                        "package": inputs.package.to_dict(), "eligibility_policy": inputs.policy.to_dict(),
+                        "eligibility_receipt": inputs.receipt.to_dict(),
+                    }
+                    response = client.post("/api/v1/research/mock-automation-candidates", headers=headers, json=candidate)
+                    self.assertEqual(200, response.status_code, response.text)
+                    body = {
+                        "account_ref": ACCOUNT_REF, "credential_profile_id": PROFILE_ID,
+                        "expected_binding_revision": inputs.binding["binding_revision"],
+                        "shadow_event_id": inputs.shadow_event["event_id"],
+                        "forward_profile": inputs.profile.to_dict(),
+                        "stage_revisions": [stage.to_dict() for stage in inputs.stages],
+                        "operating_spec": original_payload,
+                    }
+                    for status in ("saved", "unchanged"):
+                        response = client.post("/api/v1/research/mock-automation-specs", headers=headers, json=body)
+                        self.assertEqual(200, response.status_code, response.text)
+                        self.assertEqual(status, response.json()["status"])
+                        self.assertFalse(response.json()["orders_started"])
+                    receipt = store.load_document(ForwardEvaluationRepository.MOCK_AUTOMATION_SPEC_COLLECTION,
+                                                  ACCOUNT_REF, original_id)
+                    self.assertEqual(original_payload, receipt["document"])
+                    self.assertEqual(original_payload, alternate.to_dict())
+                    self.assertEqual(original_id, alternate.spec_id)
+                    self.assertEqual(original_binding, store.load_latest_account_binding(PROFILE_ID, "kiwoom", "mock"))
+                    self.assertIsNone(store.load_mock_automation_control(ACCOUNT_REF))
+                    self.assertEqual((), inputs.repository.load_mock_automation_admissions(ACCOUNT_REF))
+
+
+class MockPublicationNativeLifetimeTests(unittest.IsolatedAsyncioTestCase):
+    """Actual immutable SQLite publication stays owned until native exit."""
+
+    async def _exercise_publication_native_lifetime(self, kind, scenario):
+        import asyncio
+        import sqlite3
+        from threading import Event
+        from kiwoom_monitor.application import mock_automation_specification as specification_module
+        from kiwoom_monitor.central_server.mock_publication_routes import (
+            MockAutomationCandidatePublicationRequest, MockAutomationSpecPublicationRequest,
+            create_mock_publication_router,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock_publication_contract_app(
+                lambda _settings: None, Path(directory) / "publication.sqlite3",
+            ) as (_app, store, inputs):
+                candidate = dict(
+                    account_ref=ACCOUNT_REF, credential_profile_id=PROFILE_ID,
+                    expected_binding_revision=inputs.binding["binding_revision"],
+                    package=inputs.package.to_dict(), eligibility_policy=inputs.policy.to_dict(),
+                    eligibility_receipt=inputs.receipt.to_dict(),
+                )
+                if kind == "spec":
+                    self.assertTrue(inputs.repository.publish_mock_automation_candidate(
+                        inputs.package, inputs.policy, inputs.receipt,
+                        credential_profile_id=PROFILE_ID,
+                        expected_binding_revision=inputs.binding["binding_revision"],
+                    ))
+                    body = MockAutomationSpecPublicationRequest(
+                        account_ref=ACCOUNT_REF, credential_profile_id=PROFILE_ID,
+                        expected_binding_revision=inputs.binding["binding_revision"],
+                        shadow_event_id=inputs.shadow_event["event_id"],
+                        forward_profile=inputs.profile.to_dict(),
+                        stage_revisions=[revision.to_dict() for revision in inputs.stages],
+                        operating_spec=inputs.spec.to_dict(),
+                    )
+                    path = "/api/v1/research/mock-automation-specs"
+                    target = specification_module
+                    method = "publish_ready_mock_automation_spec"
+                    expected_transactions = 5  # profile, ordered three stages, operating spec.
+                else:
+                    body = MockAutomationCandidatePublicationRequest(**candidate)
+                    path = "/api/v1/research/mock-automation-candidates"
+                    target = inputs.repository
+                    method = "publish_mock_automation_candidate"
+                    expected_transactions = 3  # anchored policy, package, eligibility receipt.
+                selected_identity = {"hash": inputs.package.scientific_implementation_hash}
+                router = create_mock_publication_router(store, inputs.repository, lambda: None,
+                    expected_implementation_hash=lambda profile: selected_identity["hash"]
+                        if profile == "krx-regular/v1" else None)
+                endpoint = next(route.endpoint for route in router.routes if route.path == path)
+                original_connection = store._connection
+                original_publication = getattr(target, method)
+                entered, release, connection_exited, mutation_exited, owner_released = (Event() for _ in range(5))
+                outcomes, exit_order = {"transactions": 0}, []
+                selected_transaction = 2 if scenario == "partial_failure" else expected_transactions
+                native_error = (sqlite3.OperationalError("fixture publication before commit")
+                                if scenario == "partial_failure" else
+                                OSError("fixture publication commit ACK lost")
+                                if scenario == "ack_loss" else None)
+
+                @contextmanager
+                def held_native_connection():
+                    selected = False
+                    try:
+                        with original_connection() as connection:
+                            yield connection
+                            if connection.in_transaction:
+                                outcomes["transactions"] += 1
+                                if outcomes["transactions"] == selected_transaction:
+                                    selected = True
+                                    outcomes["held_native_transaction"] = connection.in_transaction
+                                    entered.set()
+                                    if not release.wait(5):
+                                        raise AssertionError("native publication release was lost")
+                                    if scenario == "partial_failure":
+                                        raise native_error
+                        # The original context has committed and closed. Simulate
+                        # only its lost ACK; the actual durable bytes remain.
+                        if selected and scenario == "ack_loss":
+                            raise native_error
+                    finally:
+                        if selected:
+                            connection_exited.set()
+
+                def actual_publication(*args, **kwargs):
+                    try:
+                        outcomes["result"] = original_publication(*args, **kwargs)
+                        return outcomes["result"]
+                    except BaseException as error:
+                        outcomes["error"] = error
+                        raise
+                    finally:
+                        exit_order.append("native_mutation_exited")
+                        mutation_exited.set()
+
+                async def request_owner():
+                    try:
+                        return await endpoint(body)
+                    finally:
+                        exit_order.append("request_owner_released")
+                        owner_released.set()
+
+                with patch.object(store, "_connection", held_native_connection), patch.object(
+                    target, method, actual_publication,
+                ):
+                    task = asyncio.create_task(request_owner())
+                    try:
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                        self.assertTrue(outcomes["held_native_transaction"])
+                        task.cancel()
+                        await asyncio.sleep(0)
+                        task.cancel()
+                        await asyncio.sleep(0)
+                        self.assertFalse(task.done(), "request released its accepted native publication")
+                        self.assertFalse(owner_released.is_set())
+                        self.assertFalse(connection_exited.is_set())
+                        self.assertFalse(mutation_exited.is_set())
+                        release.set()
+                        with self.assertRaises(asyncio.CancelledError) as cancelled:
+                            await task
+                        self.assertIs(native_error, cancelled.exception.__cause__)
+                    finally:
+                        # The before-source counterexample also joins the real
+                        # abandoned thread before this fixture can close its DB.
+                        release.set()
+                        self.assertTrue(await asyncio.to_thread(mutation_exited.wait, 5))
+                        await asyncio.gather(task, return_exceptions=True)
+                self.assertTrue(connection_exited.is_set())
+                self.assertTrue(owner_released.is_set())
+                self.assertEqual(["native_mutation_exited", "request_owner_released"], exit_order)
+                self.assertEqual(selected_transaction, outcomes["transactions"])
+                self.assertIs(native_error, outcomes.get("error"))
+                if scenario == "success":
+                    if kind == "candidate":
+                        self.assertIs(True, outcomes["result"])
+                    else:
+                        self.assertEqual(("READY", True), (outcomes["result"][0].status.value, outcomes["result"][1]))
+
+                if scenario == "partial_failure":
+                    if kind == "candidate":
+                        self.assertEqual(inputs.policy, inputs.repository.load_mock_automation_eligibility_policy(
+                            inputs.policy.strategy_ref, inputs.package.package_hash,
+                        ))
+                        self.assertIsNone(inputs.repository.load_mock_automation_candidate_package(
+                            inputs.package.strategy_ref, inputs.package.package_hash,
+                        ))
+                        from fastapi import HTTPException
+                        selected_identity["hash"] = None
+                        with self.assertRaises(HTTPException) as withdrawn:
+                            await endpoint(body)
+                        self.assertEqual(409, withdrawn.exception.status_code)
+                        self.assertIsNone(inputs.repository.load_mock_automation_candidate_package(
+                            inputs.package.strategy_ref, inputs.package.package_hash,
+                        ))
+                        selected_identity["hash"] = inputs.package.scientific_implementation_hash
+                    else:
+                        self.assertEqual(inputs.profile, inputs.repository.load_profile(
+                            inputs.profile.strategy_ref, inputs.profile.profile_id,
+                        ))
+                        self.assertEqual((), inputs.repository.load_stage_revisions(inputs.spec.strategy_ref))
+                    self.assertEqual("saved", (await endpoint(body))["status"])
+
+                collections = (
+                    ForwardEvaluationRepository.MOCK_AUTOMATION_ELIGIBILITY_POLICY_COLLECTION,
+                    ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION,
+                    ForwardEvaluationRepository.MOCK_AUTOMATION_ELIGIBILITY_RECEIPT_COLLECTION,
+                    ForwardEvaluationRepository.PROFILE_COLLECTION,
+                    ForwardEvaluationRepository.STAGE_COLLECTION,
+                    ForwardEvaluationRepository.MOCK_AUTOMATION_SPEC_COLLECTION,
+                )
+                saved = {collection: store.load_documents(collection, limit=1000) for collection in collections}
+                expected_counts = (1, 1, 1, 1, 3, 1) if kind == "spec" else (1, 1, 1, 0, 0, 0)
+                self.assertEqual(expected_counts, tuple(len(saved[collection]) for collection in collections))
+                self.assertEqual(((inputs.package, inputs.policy, inputs.receipt),),
+                                 inputs.repository.load_mock_automation_candidate_publications(ACCOUNT_REF))
+                if kind == "spec":
+                    self.assertEqual(inputs.spec, inputs.repository.load_mock_automation_spec(ACCOUNT_REF, inputs.spec.spec_id))
+                    self.assertEqual(inputs.stages, inputs.repository.load_stage_revisions(inputs.spec.strategy_ref))
+                if kind == "candidate" and scenario == "ack_loss":
+                    selected_identity["hash"] = None
+                retry = await endpoint(body)
+                self.assertEqual("unchanged", retry["status"])
+                self.assertFalse(retry["orders_started"])
+                self.assertEqual(saved, {collection: store.load_documents(collection, limit=1000) for collection in collections})
+                self.assertIsNone(store.load_mock_automation_control(ACCOUNT_REF))
+                with store._connection() as connection:
+                    self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM central_execution_intents").fetchone()[0])
+                    self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM central_execution_runtime_leases").fetchone()[0])
+
+    async def test_candidate_and_spec_requests_join_actual_native_commit_after_repeated_cancel(self):
+        for kind in ("candidate", "spec"):
+            with self.subTest(kind=kind):
+                await self._exercise_publication_native_lifetime(kind, "success")
+
+    async def test_cancelled_partial_publication_preserves_native_failure_and_original_prefix_for_retry(self):
+        for kind in ("candidate", "spec"):
+            with self.subTest(kind=kind):
+                await self._exercise_publication_native_lifetime(kind, "partial_failure")
+
+    async def test_cancelled_commit_ack_loss_retains_exact_native_publication_for_unchanged_retry(self):
+        for kind in ("candidate", "spec"):
+            with self.subTest(kind=kind):
+                await self._exercise_publication_native_lifetime(kind, "ack_loss")
 
 
 class MockAutomationSpecificationTests(unittest.TestCase):
@@ -855,7 +1183,7 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
             runtime=self.runtime, monitor=SimpleNamespace(refresh_recovery=self._refresh_recovery),
             automation_context=SimpleNamespace(spec_id=self.spec.spec_id, execution_run_id=self.run_id),
         )
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
 
     def _rank(self, available):
         sequence = len(self.observations) + 1
@@ -905,10 +1233,10 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.heartbeat()
         self._rank(self.clock)
         self._bar(started_at, close, high)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
 
     def _fill_pending(self, side, price):
-        record = self.execution.load(self.runner.status["pending_intent_id"])
+        record = self.execution.load(self.runner.episode.status["pending_intent_id"])
         self.assertIsNotNone(record)
         self.clock += timedelta(seconds=1)
         self.runtime.reconcile(record.intent.intent_id, BrokerOrderSnapshot(
@@ -944,7 +1272,7 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shadow_and_runner_agree_on_entry_but_only_runner_applies_fills(self):
         shadow = CandidateMonitor(
-            self.store, self.runner._config, poll_seconds=1, universe_max_age_seconds=300,
+            self.store, self.runner.episode._config, poll_seconds=1, universe_max_age_seconds=300,
         )
         shadow_id = shadow.monitor_id
         self.assertNotEqual(self.run_id, shadow_id)
@@ -953,7 +1281,7 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             self.store, "save_shadow_evaluation", wraps=self.store.save_shadow_evaluation,
         ) as shadow_write, patch(
-            "kiwoom_monitor.central_server.mock_automation_runner."
+            "kiwoom_monitor.central_server.mock_automation_episode."
             "dispatch_mock_automation_decision_from_risk",
             wraps=dispatch_mock_automation_decision_from_risk,
         ) as dispatch:
@@ -976,17 +1304,17 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
         self.assertEqual("candidate", shadow._state.status)
-        self.assertEqual("candidate", self.runner._state.status)
+        self.assertEqual("candidate", self.runner.episode._episode_position._state.status)
         self._fill_pending("BUY", 71_000)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
         restarted_shadow = CandidateMonitor(
-            self.store, self.runner._config, poll_seconds=1, universe_max_age_seconds=300,
+            self.store, self.runner.episode._config, poll_seconds=1, universe_max_age_seconds=300,
         )
         self.assertEqual(0, restarted_shadow.run_once())
         self.assertEqual(shadow_id, restarted_shadow.monitor_id)
-        self.assertEqual("open", self.runner._state.status)
-        self.assertEqual(1, self.runner._state.position_quantity)
+        self.assertEqual("open", self.runner.episode._episode_position._state.status)
+        self.assertEqual(1, self.runner.episode._episode_position._state.position_quantity)
         self.assertEqual(shadow._state, restarted_shadow._state)
         self.assertIsNone(restarted_shadow._state.position_quantity)
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
@@ -1034,19 +1362,19 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_breakout_runner_round_trip_restart_and_journal(self):
         self.assertEqual([], self.transport.calls, "bootstrap must not trade historical bars")
         await self._poll_bar(0, 71_000, 71_200)
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
-        self.assertEqual("candidate", self.runner.status["strategy_state"])
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
+        self.assertEqual("candidate", self.runner.episode.status["strategy_state"])
         self._fill_pending("BUY", 71_000)
         # Restore the native checkpoint; the durable fill must create the position once.
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         await self._poll_bar(1, 75_000, 75_200)
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
-        self.assertEqual("open", self.runner.status["strategy_state"])
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
+        self.assertEqual("open", self.runner.episode.status["strategy_state"])
         self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
         self._fill_pending("SELL", 75_000)
-        await self.runner.run_once()
-        self.assertEqual("cooldown", self.runner.status["strategy_state"])
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
+        self.assertEqual("cooldown", self.runner.episode.status["strategy_state"])
+        await self.runner.episode.advance_once()
         self.assertEqual(2, len(self.transport.calls), "idle polling must not resubmit orders")
         with tempfile.TemporaryDirectory() as directory:
             journal = JournalRepository(Path(directory) / "journal.sqlite3")
@@ -1078,31 +1406,31 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(OSError, "checkpoint COMMIT failure"):
                 await self._poll_bar(0, 71_000, 71_200)
             self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
-            self.assertTrue(self.runner._checkpoint_pending)
-            consumed_cursor = self.runner._cursor
-            self.assertEqual(0, await self.runner.run_once())
-        self.assertFalse(self.runner._checkpoint_pending)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertEqual(consumed_cursor, self.runner._cursor)
-        self.assertEqual(0, await self.runner.run_once())
+            self.assertTrue(self.runner.episode._checkpoint.pending)
+            consumed_cursor = self.runner.episode._input_progress._cursor
+            self.assertEqual(0, await self.runner.episode.advance_once())
+        self.assertFalse(self.runner.episode._checkpoint.pending)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertEqual(consumed_cursor, self.runner.episode._input_progress._cursor)
+        self.assertEqual(0, await self.runner.episode.advance_once())
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
-        self.assertEqual("candidate", self.runner._state.status)
+        self.assertEqual("candidate", self.runner.episode._episode_position._state.status)
         self.assertEqual(1, len(self.execution.active_intents("mock", ACCOUNT_REF, self.run_id)))
         self.assertEqual(0, evidence["remaining"])
 
     async def test_unfilled_entry_blocks_new_signal_without_creating_position(self):
         await self._poll_bar(0, 71_000, 71_200)
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
         await self._poll_bar(1, 75_000, 75_200)
-        self.assertEqual("WAITING_ORDER", self.runner.status["state"])
-        self.assertNotEqual("open", self.runner.status["strategy_state"])
+        self.assertEqual("WAITING_ORDER", self.runner.episode.status["state"])
+        self.assertNotEqual("open", self.runner.episode.status["strategy_state"])
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_cost_query_failure_preserves_recovery_and_blocks_entry(self):
         self.bundle.monitor = self._cost_failing_monitor()
         await self._poll_bar(0, 71_000, 71_200)
-        self.assertEqual("BLOCKED", self.runner.status["state"], self.runner.status)
-        self.assertIn("DAILY_NET_PNL_UNKNOWN", self.runner.status["reason"])
+        self.assertEqual("BLOCKED", self.runner.episode.status["state"], self.runner.episode.status)
+        self.assertIn("DAILY_NET_PNL_UNKNOWN", self.runner.episode.status["reason"])
         risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
         self.assertIsNone(risk.daily_net_pnl_won)
         self.assertFalse(risk.cost_complete)
@@ -1112,11 +1440,11 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cost_query_failure_allows_exit_only_for_verified_held_quantity(self):
         await self._poll_bar(0, 71_000, 71_200)
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
         self._fill_pending("BUY", 71_000)
         self.bundle.monitor = self._cost_failing_monitor()
         await self._poll_bar(1, 75_000, 75_200)
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
         self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
         self.assertEqual(1, self.transport.calls[-1][3])
         self.assertIsNone(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).daily_net_pnl_won)
@@ -1150,27 +1478,27 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_submission_is_not_retried_after_new_bars_or_restart(self):
         with patch.object(self.transport, "submit", side_effect=SubmissionUnknown("response lost")) as submit:
             await self._poll_bar(0, 71_000, 71_200)
-            pending = self.execution.load(self.runner.status["pending_intent_id"])
+            pending = self.execution.load(self.runner.episode.status["pending_intent_id"])
             self.assertEqual(OrderState.SUBMISSION_UNKNOWN, pending.state)
-            self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+            self.runner = _prepared_runner(self.store, self.bundle, self.spec)
             await self._poll_bar(1, 75_000, 75_200)
-            await self.runner.run_once()
-            self.assertEqual("WAITING_ORDER", self.runner.status["state"])
+            await self.runner.episode.advance_once()
+            self.assertEqual("WAITING_ORDER", self.runner.episode.status["state"])
             self.assertEqual(1, submit.call_count)
-            self.assertNotEqual("open", self.runner.status["strategy_state"])
+            self.assertNotEqual("open", self.runner.episode.status["strategy_state"])
 
     async def test_persisted_stop_survives_restart_without_submitting_or_cancelling(self):
         await self._poll_bar(0, 71_000, 71_200)
-        self.assertEqual("ORDER_SUBMITTED", self.runner.status["state"], self.runner.status)
+        self.assertEqual("ORDER_SUBMITTED", self.runner.episode.status["state"], self.runner.episode.status)
         self._fill_pending("BUY", 71_000)
         emergency_stop_mock_automation(
             self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
             stopped_at=self.clock, reason="workflow stop",
         )
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         await self._poll_bar(1, 75_000, 75_200)
-        self.assertEqual("STOPPED", self.runner.status["state"])
-        self.assertEqual("open", self.runner.status["strategy_state"])
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
+        self.assertEqual("open", self.runner.episode.status["strategy_state"])
         self.assertEqual(1, len(self.transport.calls))
 
 
@@ -1230,7 +1558,7 @@ class MockUnfilledPurposeGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_original_buy_approval_is_required(self):
         await self.approved_buy()
         with patch.object(self.repository, 'load_mock_automation_approved_gate', return_value=None), patch.object(
-                self.runner._repository, 'load_mock_automation_approved_gate', return_value=None):
+                self.runner.episode._repository, 'load_mock_automation_approved_gate', return_value=None):
             plan = await MockUnfilledNativeAttemptTests.preview(self)
         self.assertIn('ORIGINAL_BUY_APPROVAL_LINEAGE_UNVERIFIED', plan['replacement_gate']['reasons'])
 
@@ -1257,7 +1585,7 @@ class MockUnfilledPurposeGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_protection_pending_blocks_opportunity_gate_without_changing_fixed_child(self):
         await self.approved_buy()
         first = await MockUnfilledNativeAttemptTests.preview(self)
-        self.runner.request_protection_review(reason='hard_risk', input_ref='risk:hard-1', requested_at=self.clock)
+        self.runner.episode.request_protection_review(reason='hard_risk', input_ref='risk:hard-1', requested_at=self.clock)
         second = await MockUnfilledNativeAttemptTests.preview(self)
         self.assertEqual(first['children'], second['children'])
         self.assertIn('PROTECTION_REVIEW_BLOCKS_OPPORTUNITY', second['replacement_gate']['reasons'])
@@ -1310,7 +1638,7 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
     def request(self, **changes):
         arguments = dict(reason='hard_risk_limit', input_ref='native-risk-cut-1', requested_at=self.clock)
         arguments.update(changes)
-        return self.runner.request_protection_review(**arguments)
+        return self.runner.episode.request_protection_review(**arguments)
 
     async def flat_cut(self):
         recovery = await self._refresh_recovery()
@@ -1321,55 +1649,55 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pending_request_preempts_observations_and_strategy_and_has_no_transport(self):
         first = self.request()
-        cursor = self.runner._cursor
+        cursor = self.runner.episode._input_progress._cursor
         with patch.object(self.store, 'load_observation_revisions_after', side_effect=AssertionError('loaded bars')), patch.object(
-                self.runner, '_family', SimpleNamespace(evaluate_bar=lambda **_: self.fail('evaluated strategy'))):
-            self.assertEqual(0, await self.runner.run_once())
-        self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.status['state'])
-        self.assertEqual(cursor, self.runner._cursor)
+                self.runner.episode, '_family', SimpleNamespace(evaluate_bar=lambda **_: self.fail('evaluated strategy'))):
+            self.assertEqual(0, await self.runner.episode.advance_once())
+        self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.episode.status['state'])
+        self.assertEqual(cursor, self.runner.episode._input_progress._cursor)
         self.assertEqual([], self.transport.calls)
         with patch.object(self.store, 'upsert_documents', wraps=self.store.upsert_documents) as writer:
             self.assertEqual(first, self.request())
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
             writer.assert_not_called()
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertEqual(first, self.runner.status['protection_review'])
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertEqual(first, self.runner.episode.status['protection_review'])
 
     async def test_existing_idle_loop_wakes_without_waiting_for_poll_or_a_new_bar(self):
         import asyncio
         self.runner._poll_seconds = 60
         idle = asyncio.Event(); processed = asyncio.Event()
-        original = self.runner.run_once
+        original = self.runner.episode.advance_once
         async def iteration():
             value = await original()
-            if self.runner._protection_pending():
+            if self.runner.episode._protection_pending():
                 processed.set()
             else:
                 idle.set()
             return value
-        with patch.object(self.runner, 'run_once', side_effect=iteration):
+        with patch.object(self.runner.episode, 'advance_once', side_effect=iteration):
             await self.runner.start()
             await asyncio.wait_for(idle.wait(), 3)
             self.request()
             await asyncio.wait_for(processed.wait(), 3)
-            self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.status['state'])
+            self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.episode.status['state'])
             await self.runner.close()
         self.assertEqual([], self.transport.calls)
 
     async def test_request_remains_immediately_visible_while_native_read_is_drained(self):
         import asyncio, threading
         entered = threading.Event(); release = threading.Event()
-        native = self.runner._apply_new_fills
-        def held():
-            entered.set(); release.wait(5); native()
-        with patch.object(self.runner, '_apply_new_fills', side_effect=held):
-            iteration = asyncio.create_task(self.runner.run_once())
+        native = self.runner.episode._episode_position.apply_new_fills
+        def held(*args, **kwargs):
+            entered.set(); release.wait(5); native(*args, **kwargs)
+        with patch.object(self.runner.episode._episode_position, 'apply_new_fills', side_effect=held):
+            iteration = asyncio.create_task(self.runner.episode.advance_once())
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))
             notice = self.request()
-            self.assertEqual(notice, self.runner.status['protection_review'])
+            self.assertEqual(notice, self.runner.episode.status['protection_review'])
             self.assertFalse(iteration.done())
             release.set(); await iteration
-        self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.status['state'])
+        self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.episode.status['state'])
         self.assertEqual([], self.transport.calls)
 
     async def test_request_during_broker_recovery_prevents_new_dispatch(self):
@@ -1382,22 +1710,22 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
             self.request()
             return recovery
         with patch.object(self.bundle.monitor, 'refresh_recovery', side_effect=interrupt):
-            await self.runner.run_once()
-        self.assertTrue(self.runner._protection_pending())
+            await self.runner.episode.advance_once()
+        self.assertTrue(self.runner.episode._protection_pending())
         self.assertEqual([], self.transport.calls)
 
     async def test_flat_resolution_requires_current_native_cut_and_rearms_on_restart(self):
         notice = self.request()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         recovery, risk = await self.flat_cut()
-        result = self.runner.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
+        result = self.runner.episode.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
         self.assertEqual('RESOLVED_FLAT', result['state'])
-        self.assertFalse(self.runner._protection_pending())
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertTrue(self.runner._protection_pending())
+        self.assertFalse(self.runner.episode._protection_pending())
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertTrue(self.runner.episode._protection_pending())
         self.clock += timedelta(seconds=6)
         with self.assertRaisesRegex(ValueError, 'native_flat_unverified'):
-            self.runner.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
+            self.runner.episode.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
 
     async def test_unknown_foreign_order_stop_and_superseding_request_cannot_clear_protection(self):
         notice = self.request()
@@ -1405,19 +1733,19 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
         for active in ((('foreign-queued-order',), True), ((), False)):
             with patch.object(self.execution, 'account_active_intents', return_value=active):
                 with self.assertRaisesRegex(ValueError, 'native_flat_unverified'):
-                    self.runner.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
+                    self.runner.episode.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
         self.request(input_ref='native-risk-cut-2')
         with self.assertRaisesRegex(ValueError, 'revision_changed'):
-            self.runner.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
+            self.runner.episode.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
         emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF,
                                        spec_id=self.spec.spec_id, stopped_at=self.clock, reason='test stop')
-        await self.runner.run_once()
-        self.assertEqual('STOPPED', self.runner.status['state'])
-        self.assertTrue(self.runner._protection_pending())
+        await self.runner.episode.advance_once()
+        self.assertEqual('STOPPED', self.runner.episode.status['state'])
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_ack_loss_and_native_change_cannot_silently_disarm_on_restart(self):
         notice = self.request()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         recovery, risk = await self.flat_cut()
         native = self.store.upsert_documents
         def lost_ack(collection, rows):
@@ -1425,14 +1753,14 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
             raise OSError('controlled protection ACK loss')
         with patch.object(self.store, 'upsert_documents', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK loss'):
-                self.runner.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
-        self.assertTrue(self.runner._protection_pending())
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertTrue(self.runner._protection_pending())
+                self.runner.episode.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
+        self.assertTrue(self.runner.episode._protection_pending())
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_new_request_during_resolution_ack_keeps_newer_revision_armed(self):
         notice = self.request()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         recovery, risk = await self.flat_cut()
         native = self.store.upsert_documents
         def new_risk_during_ack(collection, rows):
@@ -1440,21 +1768,21 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
             self.request(input_ref='new-hard-risk-cut')
         with patch.object(self.store, 'upsert_documents', side_effect=new_risk_during_ack):
             with self.assertRaisesRegex(ValueError, 'native_state_changed'):
-                self.runner.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
-        self.assertTrue(self.runner._protection_pending())
-        self.assertEqual(2, self.runner.status['protection_review']['revision'])
+                self.runner.episode.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
+        self.assertTrue(self.runner.episode._protection_pending())
+        self.assertEqual(2, self.runner.episode.status['protection_review']['revision'])
 
     async def test_protection_notice_is_durable_even_while_bootstrap_is_not_ready(self):
-        self.runner._bootstrap_pending = True
+        self.runner.episode._input_progress._bootstrap_pending = True
         self.request()
-        await self.runner.run_once()
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertTrue(self.runner._bootstrap_pending)
-        self.assertTrue(self.runner._protection_pending())
+        await self.runner.episode.advance_once()
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertTrue(self.runner.episode._input_progress._bootstrap_pending)
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_resolution_rechecks_owner_and_risk_age_after_slow_ack(self):
         notice = self.request()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         recovery, risk = await self.flat_cut()
         native = self.store.upsert_documents
         def slow_ack(collection, rows):
@@ -1462,13 +1790,13 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
             self.clock += timedelta(seconds=6)
         with patch.object(self.store, 'upsert_documents', side_effect=slow_ack):
             with self.assertRaisesRegex(ValueError, 'cut_expired_during_ack'):
-                self.runner.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
-        self.assertTrue(self.runner._protection_pending())
+                self.runner.episode.resolve_protection_review(expected_revision=notice['revision'], recovery=recovery, risk=risk)
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_resolution_keeps_ram_armed_until_native_ack_and_revalidation(self):
         import asyncio, threading
         notice = self.request()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         recovery, risk = await self.flat_cut()
         entered, release = threading.Event(), threading.Event()
         native = self.store.upsert_documents
@@ -1476,28 +1804,28 @@ class MockProtectionReviewTests(unittest.IsolatedAsyncioTestCase):
             entered.set(); release.wait(5)
             return native(collection, rows)
         with patch.object(self.store, 'upsert_documents', side_effect=held_ack):
-            work = asyncio.create_task(asyncio.to_thread(self.runner.resolve_protection_review,
+            work = asyncio.create_task(asyncio.to_thread(self.runner.episode.resolve_protection_review,
                 expected_revision=notice['revision'], recovery=recovery, risk=risk))
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, 3))
-                self.assertTrue(self.runner._protection_pending())
-                self.assertTrue(self.runner.status['protection_review_required'])
+                self.assertTrue(self.runner.episode._protection_pending())
+                self.assertTrue(self.runner.episode.status['protection_review_required'])
             finally:
                 release.set()
             result = await work
         self.assertEqual('RESOLVED_FLAT', result['state'])
-        self.assertFalse(self.runner._protection_pending())
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertTrue(self.runner._protection_pending())
+        self.assertFalse(self.runner.episode._protection_pending())
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_malformed_checkpoint_and_closed_runner_do_not_drop_or_accept_requests(self):
         self.request()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         rows = self.store.load_documents('execution_mock_automation_runner_current', ACCOUNT_REF, 1)
         rows[0]['document']['protection_review']['account_ref'] = 'wrong-account'
         self.store.upsert_documents('execution_mock_automation_runner_current', rows)
         with self.assertRaisesRegex(ValueError, 'invalid_mock_protection_review'):
-            MockAutomationRunner(self.store, self.bundle, self.spec)
+            _prepared_runner(self.store, self.bundle, self.spec)
         await self.runner.close()
         with self.assertRaisesRegex(RuntimeError, 'CLOSED'):
             self.request()
@@ -1528,9 +1856,10 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.reader = Reader()
         self.monitor = MockAccountMonitor(self.reader, self.runtime, self.execution, now_provider=lambda: self.clock,
             automation_risk_repository=self.repository, automation_binding_revision=self.spec.binding_revision,
-            automation_account_scope=self.spec.account_scope, new_orders_enabled_on_start=False)
+            automation_account_scope=self.spec.account_scope, new_orders_enabled_on_start=False,
+            capture_scope=captured_workload_scope)
         self.bundle.monitor = self.monitor
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
 
     async def asyncTearDown(self):
         await self.runner.close()
@@ -1563,12 +1892,12 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
         import asyncio
         self.runner._poll_seconds = 60
         idle, processed = asyncio.Event(), asyncio.Event()
-        native = self.runner.run_once
+        native = self.runner.episode.advance_once
         async def iteration():
             result = await native()
-            (processed if self.runner._protection_pending() else idle).set()
+            (processed if self.runner.episode._protection_pending() else idle).set()
             return result
-        with patch.object(self.runner, 'run_once', side_effect=iteration):
+        with patch.object(self.runner.episode, 'advance_once', side_effect=iteration):
             await self.runner.start()
             await asyncio.wait_for(idle.wait(), 3)
             self.make_loss()
@@ -1576,10 +1905,10 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(self.store, 'load_observation_revisions_after', side_effect=AssertionError('Risk waited for bars')):
                 await self.monitor.refresh_recovery()
                 await asyncio.wait_for(processed.wait(), 3)
-        notice = self.runner.status['protection_review']
+        notice = self.runner.episode.status['protection_review']
         self.assertEqual('EXIT_REQUIRED', notice['risk_trigger']['disposition'])
         self.assertEqual(['DAILY_LOSS_LIMIT_REACHED'], notice['risk_trigger']['reasons'])
-        self.assertEqual(1, self.runner._state.position_quantity)
+        self.assertEqual(1, self.runner.episode._episode_position._state.position_quantity)
         self.assertFalse(notice['order_authorized'])
         self.assertEqual(calls, len(self.transport.calls))
 
@@ -1590,24 +1919,24 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
         await self.monitor.refresh_recovery()
         self.assertIn('position', notifications)
         self.assertEqual(self.monitor._runtime_order_changed, self.runtime._observation_listener)
-        self.assertTrue(self.runner._protection_pending())
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_repeated_native_revision_coalesces_and_ram_reads_have_no_db(self):
         self.make_loss()
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
-        first = deepcopy(self.runner.status['protection_review'])
+        await self.runner.episode.advance_once()
+        first = deepcopy(self.runner.episode.status['protection_review'])
         await self.monitor.refresh_recovery()
-        self.assertEqual(first, self.runner.status['protection_review'])
+        self.assertEqual(first, self.runner.episode.status['protection_review'])
         with patch.object(self.store, '_connect', side_effect=AssertionError('RAM delivery queried DB')):
             for _ in range(100):
                 cut = self.monitor.latest_automation_risk_cut
-                self.runner._on_native_risk(cut)
+                self.runner.episode.observe_native_risk(cut)
                 self.assertEqual({'risk', 'account'}, set(cut))
                 cut['account'].positions['005930'] = 999
         self.assertEqual(1, self.monitor.latest_automation_risk_cut['account'].positions['005930'])
         with patch.object(self.store, 'upsert_documents', wraps=self.store.upsert_documents) as writes:
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
             writes.assert_not_called()
 
     async def test_ack_failure_does_not_publish_an_unconfirmed_risk_cut(self):
@@ -1619,27 +1948,27 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(OSError, 'ACK lost'):
                 await self.monitor.refresh_recovery()
         self.assertIsNone(self.monitor.latest_automation_risk_cut)
-        self.assertFalse(self.runner._protection_pending())
+        self.assertFalse(self.runner.episode._protection_pending())
         self.assertIsNotNone(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF))
 
     async def test_repeated_same_balance_mismatch_counter_does_not_create_new_requests(self):
         self.positions = {'005930': 1}  # Broker position with no run-owned FILL.
         await self.monitor.refresh_recovery()
-        first = deepcopy(self.runner.status['protection_review'])
+        first = deepcopy(self.runner.episode.status['protection_review'])
         await self.monitor.refresh_recovery()
         self.assertGreaterEqual(self.monitor.latest_automation_risk_cut['risk'].balance_mismatch_count, 2)
-        self.assertEqual(first, self.runner.status['protection_review'])
+        self.assertEqual(first, self.runner.episode.status['protection_review'])
         self.positions = {'005930': 2}  # Actual exposure changed: wake a new review.
         await self.monitor.refresh_recovery()
-        self.assertEqual(2, self.runner.status['protection_review']['revision'])
+        self.assertEqual(2, self.runner.episode.status['protection_review']['revision'])
 
     async def test_first_recovery_before_runner_registration_is_delivered_without_another_read(self):
         await self.runner.close()
         self.make_loss()
         await self.monitor.refresh_recovery()
         counts = self.reader.calls, self.reader.cost_calls
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertTrue(self.runner._protection_pending())
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertTrue(self.runner.episode._protection_pending())
         self.assertEqual(counts, (self.reader.calls, self.reader.cost_calls))
 
     async def test_unknown_exposure_reconciles_first_and_does_not_duplicate_submission(self):
@@ -1651,8 +1980,8 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.submit_automation_intent(intent, AccountSnapshot(ACCOUNT_REF, self.cash, 0, {}, self.clock),
                                                  spec_id=self.spec.spec_id, control_revision=1)
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
-        trigger = self.runner.status['protection_review']['risk_trigger']
+        await self.runner.episode.advance_once()
+        trigger = self.runner.episode.status['protection_review']['risk_trigger']
         self.assertEqual('RECONCILE_REQUIRED', trigger['disposition'])
         self.assertIn('UNKNOWN_EXPOSURE', trigger['reasons'])
         self.assertEqual([], self.transport.calls)
@@ -1663,14 +1992,14 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
         for change in ({'binding_revision': self.spec.binding_revision + 1}, {'execution_run_id': 'other-run'},
                        {'account_ref': '11111111-1111-4111-8111-111111111111'}):
             with self.assertRaisesRegex(ValueError, 'mismatch'):
-                self.runner._on_native_risk({**cut, 'risk': replace(cut['risk'], **change)})
-        self.assertFalse(self.runner._protection_pending())
+                self.runner.episode.observe_native_risk({**cut, 'risk': replace(cut['risk'], **change)})
+        self.assertFalse(self.runner.episode._protection_pending())
 
     async def test_cost_outage_alone_does_not_create_a_false_hard_exit(self):
         self.make_loss()
         with patch.object(self.reader, 'read_trade_cost_pages', side_effect=OSError('cost outage')):
             await self.monitor.refresh_recovery()
-        self.assertFalse(self.runner._protection_pending())
+        self.assertFalse(self.runner.episode._protection_pending())
         risk = self.monitor.latest_automation_risk_cut['risk']
         self.assertIsNone(risk.daily_net_pnl_won)
         self.assertTrue(risk.reconciliation_complete)
@@ -1680,22 +2009,22 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
         emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF,
             spec_id=self.spec.spec_id, stopped_at=self.clock, reason='native risk stop test')
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
-        self.assertEqual('STOPPED', self.runner.status['state'])
-        self.assertTrue(self.runner._protection_pending())
+        await self.runner.episode.advance_once()
+        self.assertEqual('STOPPED', self.runner.episode.status['state'])
+        self.assertTrue(self.runner.episode._protection_pending())
         self.assertEqual(2, len(self.transport.calls))
 
     async def test_listener_ownership_close_and_restart_preserve_the_armed_trigger(self):
         self.make_loss()
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         with self.assertRaisesRegex(RuntimeError, 'ALREADY_OWNED'):
-            MockAutomationRunner(self.store, self.bundle, self.spec)
+            _prepared_runner(self.store, self.bundle, self.spec)
         self.assertEqual(self.runner._native_risk_listener, self.monitor._automation_risk_listener)
         await self.runner.close()
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertEqual(1, self.runner.status['protection_review']['revision'])
-        self.assertTrue(self.runner._protection_pending())
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertEqual(1, self.runner.episode.status['protection_review']['revision'])
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_runtime_change_invalidates_cached_native_risk_cut(self):
         await self.monitor.refresh_recovery()
@@ -1703,18 +2032,18 @@ class MockNativeRiskProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.make_loss()
         self.assertIsNone(self.monitor.latest_automation_risk_cut)
         await self.monitor.refresh_recovery()
-        self.assertTrue(self.runner._protection_pending())
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_corrupt_saved_risk_trigger_cannot_be_silently_dropped(self):
         self.make_loss()
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         await self.runner.close()
         rows = self.store.load_documents('execution_mock_automation_runner_current', ACCOUNT_REF, 1)
         rows[0]['document']['protection_review']['risk_trigger']['binding_revision'] += 1
         self.store.upsert_documents('execution_mock_automation_runner_current', rows)
         with self.assertRaisesRegex(ValueError, 'invalid_mock_native_risk_trigger'):
-            MockAutomationRunner(self.store, self.bundle, self.spec)
+            _prepared_runner(self.store, self.bundle, self.spec)
 
 
 class MockUnfilledOffIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -1752,7 +2081,7 @@ class MockUnfilledOffIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_status_and_real_observation_polling_never_repeat_native_preflight(self):
         await self.approved_buy()
-        self.runner._apply_new_fills()
+        _apply_runner_fills(self.runner)
         # The bootstrap fixture is RAM history, but polling uses the actual
         # SQLite observation reader here, rather than its fixture lambda.
         def native_observations(*args):
@@ -1761,18 +2090,18 @@ class MockUnfilledOffIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, 'load_observation_revisions_after', side_effect=native_observations):
             for _ in range(5):
                 with self.count_native() as counts:
-                    await self.runner.run_once()
+                    await self.runner.episode.advance_once()
                 before.append(counts)
             plan = await self.preview()
             self.assertEqual('VALIDATED_FOR_OFFLINE_REPLACEMENT', plan['replacement_gate']['status'])
-            with patch.object(self.runner, 'preview_unfilled_execution', side_effect=AssertionError('poll repeated full preflight')):
+            with patch.object(self.runner.episode, 'preview_unfilled_execution', side_effect=AssertionError('poll repeated full preflight')):
                 for _ in range(5):
                     with self.count_native() as counts:
-                        await self.runner.run_once()
+                        await self.runner.episode.advance_once()
                     after.append(counts)
                 with self.count_native() as display:
                     for _ in range(100):
-                        self.runner.status
+                        self.runner.episode.status
         self.assertEqual(before, after)
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, display)
         self.assertEqual(1, len(self.transport.calls))
@@ -1785,22 +2114,22 @@ class MockUnfilledOffIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.clock = datetime.fromisoformat(plan['next_check_at'])
         calls = len(self.transport.calls)
         with self.count_native() as cue:
-            self.assertTrue(self.runner.status['unfilled_management_clock']['unfilled_management_due'])
+            self.assertTrue(self.runner.episode.status['unfilled_management_clock']['unfilled_management_due'])
             for _ in range(100):
-                notice = self.runner.request_protection_review(reason='protection_deadline_due',
+                notice = self.runner.episode.request_protection_review(reason='protection_deadline_due',
                     input_ref='deadline:' + plan['receipt_id'], requested_at=self.clock)
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, cue)
         self.assertEqual(1, notice['revision'])
-        with patch.object(self.runner, 'preview_unfilled_execution', side_effect=AssertionError('cue ran full gate')), patch.object(
-                self.runner._repository, 'load_latest_mock_automation_risk', side_effect=AssertionError('cue queried full Risk')):
+        with patch.object(self.runner.episode, 'preview_unfilled_execution', side_effect=AssertionError('cue ran full gate')), patch.object(
+                self.runner.episode._repository, 'load_latest_mock_automation_risk', side_effect=AssertionError('cue queried full Risk')):
             with self.count_native() as changed:
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
             with self.count_native() as repeated:
                 for _ in range(10):
-                    await self.runner.run_once()
+                    await self.runner.episode.advance_once()
         self.assertEqual(1, changed['commits'])
         self.assertEqual(0, repeated['commits'])
-        self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.status['state'])
+        self.assertEqual('PROTECTION_REVIEW_REQUIRED', self.runner.episode.status['state'])
         self.assertEqual(calls, len(self.transport.calls))
         self.protection_counts = {'due_hint_and_100_cues': cue, 'first_processing': changed,
                                   'ten_repeated_polls': repeated, 'automatic_gate_calls': 0}
@@ -1812,15 +2141,15 @@ class MockUnfilledOffIntegrationTests(unittest.IsolatedAsyncioTestCase):
         arguments = await self.inputs()
         self.runner._poll_seconds = 60
         idle = asyncio.Event()
-        native = self.runner.run_once
+        native = self.runner.episode.advance_once
         async def iteration():
             result = await native(); idle.set(); return result
-        with patch.object(self.runner, 'run_once', side_effect=iteration):
+        with patch.object(self.runner.episode, 'advance_once', side_effect=iteration):
             await self.runner.start()
             await asyncio.wait_for(idle.wait(), 3)
             with self.count_native() as rejected:
                 with self.assertRaisesRegex(RuntimeError, 'requires_idle_ready_runner|already_in_progress'):
-                    self.runner.preview_unfilled_execution(**arguments)
+                    self.runner.episode.preview_unfilled_execution(**arguments)
             await self.runner.close()
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, rejected)
         self.assertEqual(1, len(self.transport.calls))
@@ -1838,8 +2167,8 @@ class MockUnfilledOffIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, 'upsert_documents', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK loss'):
                 await self.preview()
-        reserved = deepcopy(self.runner._unfilled_attempt_plan['children'])
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        reserved = deepcopy(self.runner.episode._unfilled_attempt_plan['children'])
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         second = await self.preview()
         self.assertEqual(reserved, second['children'])
         self.assertEqual(5, second['replacement_gate']['child_payload']['quantity'])
@@ -1847,21 +2176,21 @@ class MockUnfilledOffIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.transport, 'submit', side_effect=SubmissionUnknown('fixture lost submit response')):
             self.record = MockUnfilledNativeAttemptTests.submit_child_fixture(self, second)
         self.snapshot = None
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         unknown = await self.preview()
         self.assertEqual('WAIT', unknown['result']['action'])
         self.assertEqual('BLOCKED', unknown['replacement_gate']['status'])
         self.assertEqual(reserved, unknown['children'])
         self.assertEqual((2, 2), (unknown['native_reprices_used'], unknown['native_submission_attempts']))
-        self.runner.request_protection_review(reason='unknown_exposure', input_ref='native-unknown:2', requested_at=self.clock)
-        await self.runner.run_once()
+        self.runner.episode.request_protection_review(reason='unknown_exposure', input_ref='native-unknown:2', requested_at=self.clock)
+        await self.runner.episode.advance_once()
         emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF,
             spec_id=self.spec.spec_id, stopped_at=self.clock, reason='OFF integration stop')
-        await self.runner.run_once()
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        await self.runner.run_once()
-        self.assertEqual('STOPPED', self.runner.status['state'])
-        self.assertTrue(self.runner.status['protection_review_required'])
+        await self.runner.episode.advance_once()
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        await self.runner.episode.advance_once()
+        self.assertEqual('STOPPED', self.runner.episode.status['state'])
+        self.assertTrue(self.runner.episode.status['protection_review_required'])
         self.assertFalse(unknown['order_authorized'])
         self.assertEqual(2, len(self.transport.calls))  # Root + first child, fixture only.
 
@@ -1934,9 +2263,9 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
 
     async def preview(self, **changes):
         arguments = await self.inputs(); arguments.update(changes)
-        if self.runner._unfilled_preflight is None:
-            self.runner.preview_unfilled_management(**{k: v for k, v in arguments.items() if k not in {'recovery', 'risk'}})
-        return self.runner.preview_unfilled_execution(**arguments)
+        if self.runner.episode._unfilled_preflight is None:
+            self.runner.episode.preview_unfilled_management(**{k: v for k, v in arguments.items() if k not in {'recovery', 'risk'}})
+        return self.runner.episode.preview_unfilled_execution(**arguments)
 
     def setup_sell(self, protective):
         from dataclasses import replace
@@ -1993,6 +2322,165 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.execution.load(plan['children'][0]['intent']['intent_id']))
         self.assertEqual((), self.repository.load_mock_automation_decision_gates(ACCOUNT_REF))
 
+    async def test_native_gate_active_read_failure_closes_reader_before_checkpoint_or_claim(self):
+        import sqlite3
+
+        inputs = await self.inputs()
+        episode = self.runner.episode
+        episode.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
+        checkpoint = 'execution_mock_automation_runner_current'
+        saved = self.store.load_document(checkpoint, ACCOUNT_REF, 'current')
+        transport_calls = list(self.transport.calls)
+        validated_readers = []
+        failed_readers = []
+        operations = []
+        revalidate = episode._repository.revalidate_stored_mock_automation_spec
+        server_now = self.runtime.server_now
+
+        def record_validation(spec, profile, *, _reader=None):
+            revalidate(spec, profile, _reader=_reader)
+            validated_readers.append(_reader)
+            operations.append('spec')
+
+        def record_clock():
+            operations.append('clock')
+            return server_now()
+
+        def fail_active_read(environment, account_ref, run_id, *, _reader=None):
+            self.assertEqual(('mock', ACCOUNT_REF, self.run_id), (environment, account_ref, run_id))
+            self.assertEqual(['spec', 'clock'], operations[-2:])
+            self.assertIsNotNone(_reader)
+            self.assertIs(validated_readers[-1], _reader)
+            failed_readers.append(_reader)
+            _reader.execute('SELECT * FROM c24_missing_gate_active_order_test_table')
+
+        with patch.object(episode._repository, 'revalidate_stored_mock_automation_spec', side_effect=record_validation), \
+                patch.object(self.runtime, 'server_now', side_effect=record_clock), \
+                patch.object(self.store, 'load_active_execution_intents', side_effect=fail_active_read), \
+                patch('kiwoom_monitor.application.mock_automation_execution.assess_mock_automation_decision') as gate, \
+                patch.object(episode, '_save_checkpoint') as save, \
+                patch.object(self.runtime, 'submit_automation_intent') as claim, \
+                patch.object(self.transport, 'cancel') as cancel:
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'c24_missing_gate_active_order_test_table'):
+                episode.execute_unfilled_replacement(**inputs)
+            gate.assert_not_called()
+            save.assert_not_called()
+            claim.assert_not_called()
+            cancel.assert_not_called()
+
+        self.assertEqual(1, len(failed_readers))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            failed_readers[0].execute('SELECT 1')
+        self.assertEqual(saved, self.store.load_document(checkpoint, ACCOUNT_REF, 'current'))
+        self.assertEqual(transport_calls, self.transport.calls)
+        self.assertIsNone(episode._unfilled_attempt_plan)
+
+    async def test_late_plan_history_read_error_preserves_durable_fill_and_blocks_gate(self):
+        import sqlite3
+
+        inputs = await self.inputs()
+        episode = self.runner.episode
+        episode.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
+        checkpoint = 'execution_mock_automation_runner_current'
+        saved = self.store.load_document(checkpoint, ACCOUNT_REF, 'current')
+        transport_calls = list(self.transport.calls)
+        position = episode._episode_position
+        fill_id = 'fill-' + self.intent.intent_id
+        fills = [event for event in self.execution.account_events('mock', ACCOUNT_REF).events
+                 if event.broker_execution_id == fill_id]
+        self.assertEqual(1, len(fills))
+        self.assertLess(position.fill_cursor, fills[0].accepted_sequence)
+
+        read_fills = self.store.load_account_execution_events
+        fill_readers = []
+        failed_readers = []
+
+        def capture_fill_reader(environment, account_ref, after_sequence, limit, *, _reader=None):
+            fill_readers.append(_reader)
+            return read_fills(environment, account_ref, after_sequence, limit, _reader=_reader)
+
+        def fail_history(intent_id, *, _reader=None):
+            self.assertEqual(self.intent.intent_id, intent_id)
+            self.assertIsNotNone(_reader)
+            self.assertEqual([_reader], fill_readers)
+            self.assertEqual(3, position.state.position_quantity)
+            self.assertGreaterEqual(position.fill_cursor, fills[0].accepted_sequence)
+            failed_readers.append(_reader)
+            _reader.execute('SELECT * FROM c24_missing_history_test_table')
+
+        with patch.object(self.store, 'load_account_execution_events', side_effect=capture_fill_reader), \
+                patch.object(self.store, 'load_execution_events', side_effect=fail_history), \
+                patch('kiwoom_monitor.central_server.mock_automation_episode.assess_mock_unfilled_gate_bundle_from_risk') as gate, \
+                patch.object(episode, '_save_checkpoint', wraps=episode._save_checkpoint) as save, \
+                patch.object(self.store, 'append_execution_event', wraps=self.store.append_execution_event) as append, \
+                patch.object(self.transport, 'cancel', wraps=self.transport.cancel) as cancel:
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'c24_missing_history_test_table'):
+                episode.preview_unfilled_execution(**inputs)
+            gate.assert_not_called()
+            save.assert_not_called()
+            append.assert_not_called()
+            cancel.assert_not_called()
+
+        self.assertEqual(1, len(failed_readers))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            failed_readers[0].execute('SELECT 1')
+        self.assertEqual(saved, self.store.load_document(checkpoint, ACCOUNT_REF, 'current'))
+        self.assertEqual(fills, [event for event in self.execution.account_events('mock', ACCOUNT_REF).events
+                                 if event.broker_execution_id == fill_id])
+        self.assertIsNone(episode._unfilled_attempt_plan)
+        self.assertEqual(transport_calls, self.transport.calls)
+
+        plan = episode.preview_unfilled_execution(**inputs)
+        self.assertEqual('REPRICE', plan['result']['action'])
+        self.assertEqual(3, position.state.position_quantity)
+        self.assertEqual(transport_calls, self.transport.calls)
+
+    async def test_native_gate_reader_exit_failure_blocks_checkpoint_or_claim(self):
+        import sqlite3
+
+        inputs = await self.inputs()
+        episode = self.runner.episode
+        episode.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
+        checkpoint = 'execution_mock_automation_runner_current'
+        saved = self.store.load_document(checkpoint, ACCOUNT_REF, 'current')
+        transport_calls = list(self.transport.calls)
+        finished_readers = []
+        open_scope = episode._repository.mock_automation_read_scope
+        load_active = self.store.load_active_execution_intents
+
+        @contextmanager
+        def fail_gate_scope_exit():
+            with open_scope() as reader:
+                yield reader
+            if finished_readers and finished_readers[-1] is reader:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    reader.execute('SELECT 1')
+                raise RuntimeError('gate reader exit failed')
+
+        def record_active(environment, account_ref, run_id, *, _reader=None):
+            self.assertIsNotNone(_reader)
+            rows = load_active(environment, account_ref, run_id, _reader=_reader)
+            finished_readers.append(_reader)
+            return rows
+
+        with patch.object(episode._repository, 'mock_automation_read_scope', side_effect=fail_gate_scope_exit), \
+                patch.object(self.store, 'load_active_execution_intents', side_effect=record_active), \
+                patch('kiwoom_monitor.application.mock_automation_execution.assess_mock_automation_decision') as gate, \
+                patch.object(episode, '_save_checkpoint') as save, \
+                patch.object(self.runtime, 'submit_automation_intent') as claim, \
+                patch.object(self.transport, 'cancel') as cancel:
+            with self.assertRaisesRegex(RuntimeError, 'gate reader exit failed'):
+                episode.execute_unfilled_replacement(**inputs)
+            gate.assert_not_called()
+            save.assert_not_called()
+            claim.assert_not_called()
+            cancel.assert_not_called()
+
+        self.assertEqual(1, len(finished_readers))
+        self.assertEqual(saved, self.store.load_document(checkpoint, ACCOUNT_REF, 'current'))
+        self.assertEqual(transport_calls, self.transport.calls)
+        self.assertIsNone(episode._unfilled_attempt_plan)
+
     async def test_two_native_attempts_partial_fill_restart_and_anchored_budget(self):
         first = await self.preview()
         self.confirm_cancel(self.submit_child_fixture(first), filled=2)
@@ -2000,11 +2488,11 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((1, 1, 2), (second['native_reprices_used'], second['native_submission_attempts'], len(second['children'])))
         self.assertEqual(5, second['children'][-1]['intent']['quantity'])
         self.confirm_cancel(self.submit_child_fixture(second), filled=1)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         third = await self.preview()
         self.assertEqual((2, 2, 3), (third['native_reprices_used'], third['native_submission_attempts'], len(third['children'])))
         self.assertEqual(4, third['children'][-1]['intent']['quantity'])
-        self.assertEqual(6, self.runner._state.position_quantity)
+        self.assertEqual(6, self.runner.episode._episode_position._state.position_quantity)
         self.confirm_cancel(self.submit_child_fixture(third))
         exhausted = await self.preview()
         self.assertEqual(3, exhausted['native_reprices_used'])
@@ -2025,7 +2513,7 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
         from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
         with patch.object(self.transport, 'submit', side_effect=SubmissionUnknown('controlled unknown')):
             self.record = self.submit_child_fixture(queued)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         unknown = await self.preview()
         self.assertEqual((1, 1, 1), (unknown['native_reprices_used'], unknown['native_submission_attempts'], len(unknown['children'])))
         self.assertEqual('WAIT', unknown['result']['action'])
@@ -2051,8 +2539,8 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, 'upsert_documents', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK loss'):
                 await self.preview()
-        saved = self.runner._unfilled_attempt_plan
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        saved = self.runner.episode._unfilled_attempt_plan
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         retry = await self.preview()
         self.assertEqual(saved['children'], retry['children'])
         self.assertEqual((1, 1), (retry['native_reprices_used'], retry['native_submission_attempts']))
@@ -2070,14 +2558,14 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
         row['document']['unfilled_execution_preflight']['native_claimed_intent_ids'] = []
         self.store.upsert_documents('execution_mock_automation_runner_current', [row])
         with self.assertRaisesRegex(ValueError, 'integrity_mismatch'):
-            MockAutomationRunner(self.store, self.bundle, self.spec)
+            _prepared_runner(self.store, self.bundle, self.spec)
 
     async def test_reserved_payload_price_and_deadline_are_not_renewed_with_new_cut(self):
         from dataclasses import replace
         first = await self.preview()
         arguments = await self.inputs()
         evidence = replace(arguments['assessment'].reprice_evidence, candidate_limit_price_won=1009)
-        changed = self.runner.preview_unfilled_execution(**{**arguments, 'assessment': replace(
+        changed = self.runner.episode.preview_unfilled_execution(**{**arguments, 'assessment': replace(
             arguments['assessment'], candidate_limit_price_won=1009, reprice_evidence=evidence)})
         self.assertEqual(first['children'], changed['children'])
         self.assertFalse(changed['pending_child_matches_current_cut'])
@@ -2095,18 +2583,18 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
                 emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF,
                                                spec_id=self.spec.spec_id, stopped_at=self.clock, reason='during ACK')
         arguments = await self.inputs()
-        self.runner.preview_unfilled_management(**{k: v for k, v in arguments.items() if k not in {'recovery', 'risk'}})
+        self.runner.episode.preview_unfilled_management(**{k: v for k, v in arguments.items() if k not in {'recovery', 'risk'}})
         with patch.object(self.store, 'upsert_documents', side_effect=stopped):
             with self.assertRaisesRegex(ValueError, 'changed_during_checkpoint'):
-                self.runner.preview_unfilled_execution(**arguments)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+                self.runner.episode.preview_unfilled_execution(**arguments)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
         with self.assertRaisesRegex(ValueError, 'control_changed'):
             await self.preview()
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_slow_checkpoint_cannot_return_a_stale_native_cut(self):
         arguments = await self.inputs()
-        self.runner.preview_unfilled_management(**{k: v for k, v in arguments.items() if k not in {'recovery', 'risk'}})
+        self.runner.episode.preview_unfilled_management(**{k: v for k, v in arguments.items() if k not in {'recovery', 'risk'}})
         native = self.store.upsert_documents
         def slow_ack(collection, rows):
             native(collection, rows)
@@ -2114,13 +2602,120 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
                 self.clock += timedelta(seconds=6)
         with patch.object(self.store, 'upsert_documents', side_effect=slow_ack):
             with self.assertRaisesRegex(ValueError, 'cut_expired_during_ack'):
-                self.runner.preview_unfilled_execution(**arguments)
+                self.runner.episode.preview_unfilled_execution(**arguments)
         self.assertEqual(1, len(self.transport.calls))
+
+    async def test_post_ack_reader_sees_peer_history_commit_and_skips_heartbeat(self):
+        arguments = await self.inputs()
+        episode = self.runner.episode
+        episode.preview_unfilled_management(**{k: v for k, v in arguments.items() if k not in {'recovery', 'risk'}})
+        intent_id = self.record.intent.intent_id
+        event = self.execution.events(intent_id)[0]
+        native_save = self.store.upsert_documents
+        native_intent = self.store.load_execution_intent
+        native_events = self.store.load_execution_events
+        heartbeat = self.runtime.heartbeat
+        acked = False
+        reads = []
+
+        def save(collection, rows):
+            nonlocal acked
+            native_save(collection, rows)
+            if collection == 'execution_mock_automation_runner_current':
+                acked = True
+
+        def load(intent, **options):
+            result = native_intent(intent, **options)
+            if acked:
+                reads.append(('intent', intent, options.get('_reader')))
+                if intent == intent_id:
+                    # Commit through a separate connection after the exact-key SELECT.
+                    with self.store._connection() as peer:
+                        changed = {**event, 'reason': 'peer committed after root lookup'}
+                        peer.execute('UPDATE central_execution_events SET document_json=? WHERE event_id=?',
+                                     (json.dumps(changed), event['event_id']))
+            return result
+
+        def events(intent, **options):
+            if acked:
+                reads.append(('events', intent, options.get('_reader')))
+            return native_events(intent, **options)
+
+        def renew():
+            self.assertFalse(acked, 'changed history must stop before the post-ACK heartbeat')
+            return heartbeat()
+
+        with (patch.object(self.store, 'upsert_documents', side_effect=save),
+              patch.object(self.store, 'load_execution_intent', side_effect=load),
+              patch.object(self.store, 'load_execution_events', side_effect=events),
+              patch.object(self.runtime, 'heartbeat', side_effect=renew)):
+            with self.assertRaisesRegex(ValueError, 'changed_during_checkpoint'):
+                episode.preview_unfilled_execution(**arguments)
+        self.assertEqual([('intent', intent_id), ('events', intent_id)], [read[:2] for read in reads])
+        self.assertIsNotNone(reads[0][2])
+        self.assertIs(reads[0][2], reads[1][2])
+        self.assertEqual(1, len(self.transport.calls))
+
+    async def test_advance_shares_fill_reader_with_fresh_control_and_drains_scope_failure(self):
+        import sqlite3
+
+        episode = self.runner.episode
+        position = episode._episode_position
+        before_cursor = position.fill_cursor
+        current = self.repository.load_mock_automation_control(ACCOUNT_REF)
+        stopped = replace(current, desired_state=type(current.desired_state).STOPPED,
+                          control_revision=current.control_revision + 1,
+                          changed_at=self.clock, reason='peer_stop_during_fill_read')
+        scope = episode._repository.mock_automation_read_scope
+        native_fills = self.store.load_account_execution_events
+        native_control = self.store.load_mock_automation_control
+        readers = []
+
+        def read_fills(environment, account_ref, after_sequence, limit, *, _reader=None):
+            rows = native_fills(environment, account_ref, after_sequence, limit, _reader=_reader)
+            self.assertIsNotNone(_reader)
+            readers.append(_reader)
+            self.assertTrue(self.repository.save_mock_automation_control(
+                stopped, expected_revision=current.control_revision))
+            return rows
+
+        def read_control(account_ref, *, _reader=None):
+            self.assertEqual([_reader], readers)
+            self.assertGreater(position.fill_cursor, before_cursor)
+            self.assertEqual(3, position.state.position_quantity)
+            document = native_control(account_ref, _reader=_reader)
+            self.assertEqual(stopped.to_dict(), document)
+            return document
+
+        @contextmanager
+        def failing_exit():
+            with scope() as reader:
+                yield reader
+            with self.assertRaises(sqlite3.ProgrammingError):
+                reader.execute('SELECT 1')
+            raise OSError('advance reader exit failed')
+
+        with (patch.object(episode._repository, 'mock_automation_read_scope', failing_exit),
+              patch.object(self.store, 'load_account_execution_events', side_effect=read_fills),
+              patch.object(self.store, 'load_mock_automation_control', side_effect=read_control),
+              patch.object(episode, '_produce_native_unfilled_inputs') as produce,
+              patch.object(episode, '_save_checkpoint') as save):
+            with self.assertRaisesRegex(OSError, 'advance reader exit failed'):
+                await episode.advance_once()
+            produce.assert_not_called()
+            save.assert_not_called()
+
+        self.assertEqual(1, len(readers))
+        after_cursor = position.fill_cursor
+        self.assertEqual(0, await episode.advance_once())
+        self.assertEqual('STOPPED', episode.status['state'])
+        self.assertEqual(after_cursor, position.fill_cursor)
+        self.assertEqual(3, position.state.position_quantity)
 
     async def test_missing_manifest_cannot_create_fresh_id_for_existing_native_attempt(self):
         first = await self.preview()
         self.confirm_cancel(self.submit_child_fixture(first), filled=2)
-        self.runner._unfilled_attempt_plan = None
+        self.runner.episode._unfilled_attempt_plan = None
         with self.assertRaisesRegex(ValueError, 'without_preserved_manifest'):
             await self.preview()
         self.assertEqual(2, len(self.transport.calls))
@@ -2139,7 +2734,7 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
         arguments = await self.inputs()
         await self._refresh_recovery()
         with self.assertRaisesRegex(RuntimeError, 'risk snapshot changed'):
-            self.runner.preview_unfilled_execution(**arguments)
+            self.runner.episode.preview_unfilled_execution(**arguments)
         emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF,
                                        spec_id=self.spec.spec_id, stopped_at=self.clock, reason='test stop')
         with self.assertRaisesRegex(ValueError, 'control_changed'):
@@ -2147,7 +2742,7 @@ class MockUnfilledNativeAttemptTests(unittest.IsolatedAsyncioTestCase):
         arguments = await self.inputs()
         self.runtime.stop()
         with self.assertRaisesRegex(RuntimeError, 'acquired ownership'):
-            self.runner.preview_unfilled_execution(**arguments)
+            self.runner.episode.preview_unfilled_execution(**arguments)
         self.assertEqual(1, len(self.transport.calls))
 
 
@@ -2177,22 +2772,22 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.setup_sell(sell)
         self.policy = replace(self.policy, max_snapshot_age_seconds=5)
         inputs = await self.inputs()
-        self.runner.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
+        self.runner.episode.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
         return inputs
 
     async def test_native_approved_buy_submits_fixed_add_once_after_partial_cancel(self):
         inputs = await self.prepare()
-        gate, record, receipt = self.runner.execute_unfilled_replacement(**inputs)
+        gate, record, receipt = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual('APPROVED_FOR_SINGLE_SUBMISSION', gate.status.value, gate.reasons)
         self.assertEqual('ADD', gate.action)
         self.assertEqual('BUY_OPPORTUNITY', gate.replacement_binding['purpose'])
         self.assertEqual((7, 'ACCEPTED', 2), (record.intent.quantity, record.state.value, len(self.transport.calls)))
         self.assertEqual(record.intent.intent_id, receipt.intent_id)
-        self.assertFalse(self.runner._unfilled_attempt_plan['order_authorized'])
+        self.assertFalse(self.runner.episode._unfilled_attempt_plan['order_authorized'])
 
     async def test_native_take_profit_submits_reduce_without_relabelling_exit(self):
         inputs = await self.prepare(sell=False)
-        gate, record, _ = self.runner.execute_unfilled_replacement(**inputs)
+        gate, record, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual('APPROVED_FOR_SINGLE_SUBMISSION', gate.status.value, gate.reasons)
         self.assertEqual(('REDUCE', 1, 'SELL'), (gate.action, record.intent.quantity, record.intent.side.value))
 
@@ -2200,8 +2795,8 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         inputs = await self.prepare(sell=True)
         self.costs = []
         inputs = await self.inputs()
-        self.runner.request_protection_review(reason='hard_risk', input_ref='native-protection', requested_at=self.clock)
-        gate, record, _ = self.runner.execute_unfilled_replacement(**inputs)
+        self.runner.episode.request_protection_review(reason='hard_risk', input_ref='native-protection', requested_at=self.clock)
+        gate, record, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual('APPROVED_FOR_SINGLE_SUBMISSION', gate.status.value, gate.reasons)
         self.assertEqual(('EXIT', 'PROTECTIVE_EXIT', 2), (gate.action, gate.replacement_binding['purpose'], record.intent.quantity))
 
@@ -2210,7 +2805,7 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         # Rebuild the native publication/admission; do not alter an admitted spec.
         self.rebuild_native_policy()
         inputs = await self.prepare()
-        gate, record, receipt = self.runner.execute_unfilled_replacement(**inputs)
+        gate, record, receipt = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertIn('UNFILLED_EXECUTION_POLICY_OFF', gate.reasons)
         self.assertIsNone(record); self.assertIsNone(receipt)
         self.assertEqual(1, len(self.transport.calls))
@@ -2219,17 +2814,17 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.unfilled_execution_policy = replace(self.unfilled_execution_policy, allow_supplied_paired_mock_evidence=False)
         self.rebuild_native_policy()
         inputs = await self.prepare()
-        gate, record, _ = self.runner.execute_unfilled_replacement(**inputs)
+        gate, record, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertIn('UNFILLED_PAIRED_EVIDENCE_NOT_ADMITTED_FOR_MOCK', gate.reasons)
         self.assertIsNone(record)
 
     async def test_policy_cannot_weaken_frozen_limits(self):
         inputs = await self.prepare()
-        self.runner._unfilled_preflight = None
+        self.runner.episode._unfilled_preflight = None
         self.policy = replace(self.policy, maximum_adverse_slippage_bps=101)
         inputs = await self.inputs()
-        self.runner.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
-        gate, record, _ = self.runner.execute_unfilled_replacement(**inputs)
+        self.runner.episode.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
+        gate, record, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertIn('UNFILLED_EXECUTION_FROZEN_LIMIT_EXCEEDED', gate.reasons)
         self.assertIsNone(record)
 
@@ -2239,14 +2834,14 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         def unknown(intent):
             submit(intent); raise SubmissionUnknown('lost response')
         with patch.object(self.transport, 'submit', side_effect=unknown):
-            gate, record, _ = self.runner.execute_unfilled_replacement(**inputs)
+            gate, record, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual('SUBMISSION_UNKNOWN', record.state.value)
         for _ in range(3):
-            self.assertEqual(record, self.runner.execute_unfilled_replacement(**inputs)[1])
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertEqual(record, self.runner.execute_unfilled_replacement(**inputs)[1])
+            self.assertEqual(record, self.runner.episode.execute_unfilled_replacement(**inputs)[1])
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertEqual(record, self.runner.episode.execute_unfilled_replacement(**inputs)[1])
         self.assertEqual(2, len(self.transport.calls))
-        self.assertEqual(1, len(self.runner._unfilled_attempt_plan['children']))
+        self.assertEqual(1, len(self.runner.episode._unfilled_attempt_plan['children']))
 
     async def test_queued_claim_ack_loss_is_consumed_without_network_retry(self):
         inputs = await self.prepare(); create = self.store.create_execution_intent
@@ -2257,9 +2852,9 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             return result
         with patch.object(self.store, 'create_execution_intent', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK lost'):
-                self.runner.execute_unfilled_replacement(**inputs)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        result = self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        result = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual('QUEUED', result[1].state.value)
         self.assertEqual(1, len(self.transport.calls))
 
@@ -2270,10 +2865,10 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             if gate.version == 'mock_automation_replacement_gate/v3':
                 raise OSError('approval ACK lost')
             return result
-        with patch.object(self.runner._repository, 'save_mock_automation_decision_gate', side_effect=lost_ack):
+        with patch.object(self.runner.episode._repository, 'save_mock_automation_decision_gate', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK lost'):
-                self.runner.execute_unfilled_replacement(**inputs)
-        gate, record, _ = self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
+        gate, record, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual('ACCEPTED', record.state.value)
         self.assertEqual(2, len(self.transport.calls))
 
@@ -2281,18 +2876,18 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         inputs = await self.prepare(); save = self.repository.save_mock_automation_decision_gate
         def lost_ack(gate):
             save(gate); raise OSError('approval ACK lost')
-        with patch.object(self.runner._repository, 'save_mock_automation_decision_gate', side_effect=lost_ack):
+        with patch.object(self.runner.episode._repository, 'save_mock_automation_decision_gate', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK lost'):
-                self.runner.execute_unfilled_replacement(**inputs)
-        slot = self.runner._unfilled_attempt_plan['children'][-1]['intent']
+                self.runner.episode.execute_unfilled_replacement(**inputs)
+        slot = self.runner.episode._unfilled_attempt_plan['children'][-1]['intent']
         original = self.repository.load_mock_automation_approved_gate(ACCOUNT_REF, slot['intent_id'])
         inputs = await self.inputs()
-        gate, record, receipt = self.runner.execute_unfilled_replacement(**inputs)
+        gate, record, receipt = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertNotEqual(original.gate_id, gate.gate_id)
         self.assertEqual(inputs['risk'].snapshot_id, gate.risk_snapshot_id)
         self.assertEqual(original, self.repository.load_mock_automation_approved_gate(ACCOUNT_REF, slot['intent_id']))
         self.assertEqual(gate.gate_id, receipt.gate_id)
-        again = self.runner.execute_unfilled_replacement(**inputs)
+        again = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(gate, again[0])
         self.assertEqual(record, again[1])
         self.assertEqual(2, len(self.transport.calls))
@@ -2301,10 +2896,10 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         inputs = await self.prepare(); save = self.repository.save_mock_automation_decision_gate
         def lost_approval(gate):
             save(gate); raise OSError('approval ACK lost')
-        with patch.object(self.runner._repository, 'save_mock_automation_decision_gate', side_effect=lost_approval):
+        with patch.object(self.runner.episode._repository, 'save_mock_automation_decision_gate', side_effect=lost_approval):
             with self.assertRaises(OSError):
-                self.runner.execute_unfilled_replacement(**inputs)
-        slot = self.runner._unfilled_attempt_plan['children'][-1]['intent']
+                self.runner.episode.execute_unfilled_replacement(**inputs)
+        slot = self.runner.episode._unfilled_attempt_plan['children'][-1]['intent']
         first = self.repository.load_mock_automation_approved_gate(ACCOUNT_REF, slot['intent_id'])
         inputs = await self.inputs(); create = self.store.create_execution_intent
         def lost_claim(value, **kwargs):
@@ -2314,9 +2909,9 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             return result
         with patch.object(self.store, 'create_execution_intent', side_effect=lost_claim):
             with self.assertRaises(OSError):
-                self.runner.execute_unfilled_replacement(**inputs)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        gate, record, receipt = self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        gate, record, receipt = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertNotEqual(first.gate_id, gate.gate_id)
         self.assertEqual((inputs['risk'].snapshot_id, 'QUEUED', gate.gate_id),
                          (gate.risk_snapshot_id, record.state.value, receipt.gate_id))
@@ -2324,7 +2919,7 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_claim_reference_survives_submit_fill_cancel_and_newer_reconciliation(self):
-        inputs = await self.prepare(); gate, child, _ = self.runner.execute_unfilled_replacement(**inputs)
+        inputs = await self.prepare(); gate, child, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         expected = {'gate_id': gate.gate_id, 'risk_snapshot_id': gate.risk_snapshot_id,
                     'risk_reconciliation_revision': gate.risk_reconciliation_revision}
         self.assertEqual(expected, self.execution.claim_approval(child.intent.intent_id))
@@ -2337,25 +2932,25 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_managed_child_cannot_become_new_root_to_reset_retry_budget(self):
         inputs = await self.prepare(sell=True)
-        _, child, _ = self.runner.execute_unfilled_replacement(**inputs)
+        _, child, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.confirm_cancel(child)
         self.policy = replace(self.policy, anchor_intent_id=child.intent.intent_id,
                               anchor_price_won=child.intent.limit_price, anchor_available_at=child.intent.created_at)
-        self.runner._unfilled_preflight = None; self.runner._unfilled_attempt_plan = None
+        self.runner.episode._unfilled_preflight = None; self.runner.episode._unfilled_attempt_plan = None
         inputs = await self.inputs()
-        self.runner.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
+        self.runner.episode.preview_unfilled_management(**{k: v for k, v in inputs.items() if k not in {'recovery', 'risk'}})
         with self.assertRaisesRegex(ValueError, 'cannot_reset_original_anchor'):
-            self.runner.execute_unfilled_replacement(**inputs)
+            self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(3, len(self.transport.calls))
 
     async def test_parent_cancel_race_partial_fills_recompute_next_fixed_child(self):
         inputs = await self.prepare()
-        _, first, _ = self.runner.execute_unfilled_replacement(**inputs)
+        _, first, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.confirm_cancel(first, filled=2)
         self.costs = [replace(self.costs[0], gross_amount=sum(row.gross_amount for row in self.costs),
                              settlement_amount=sum(row.settlement_amount for row in self.costs))]
         inputs = await self.inputs()
-        gate, second, _ = self.runner.execute_unfilled_replacement(**inputs)
+        gate, second, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertIsNotNone(second, gate.reasons)
         self.assertEqual(5, second.intent.quantity)
         self.assertEqual(first.intent.intent_id, gate.replacement_binding['parent_intent_id'])
@@ -2372,7 +2967,7 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             return create(value, **kwargs)
         with patch.object(self.store, 'create_execution_intent', side_effect=changed):
             with self.assertRaisesRegex(RuntimeError, 'MOCK_REPLACEMENT_RISK_CHANGED'):
-                self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_native_queued_transaction_rejects_foreign_run_open_order(self):
@@ -2384,15 +2979,15 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             return create(value, **kwargs)
         with patch.object(self.store, 'create_execution_intent', side_effect=changed):
             with self.assertRaisesRegex(RuntimeError, 'MOCK_REPLACEMENT_ACCOUNT_ORDER_IN_FLIGHT'):
-                self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_newer_terminal_rest_confirmation_does_not_invalidate_existing_child(self):
         inputs = await self.prepare()
-        _, child, _ = self.runner.execute_unfilled_replacement(**inputs)
+        _, child, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.clock += timedelta(seconds=1)
         self.runtime.reconcile(self.record.intent.intent_id, replace(self.snapshot, as_of=self.clock))
-        self.assertEqual(child, self.runner.execute_unfilled_replacement(**inputs)[1])
+        self.assertEqual(child, self.runner.episode.execute_unfilled_replacement(**inputs)[1])
         self.assertEqual(2, len(self.transport.calls))
 
     async def test_native_queued_transaction_rejects_changed_fixed_payload(self):
@@ -2403,7 +2998,7 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             return create(value, **kwargs)
         with patch.object(self.store, 'create_execution_intent', side_effect=changed):
             with self.assertRaisesRegex(RuntimeError, 'MOCK_REPLACEMENT_FIXED_CHILD_CHANGED'):
-                self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_native_queued_transaction_rejects_parent_no_longer_cancelled(self):
@@ -2417,7 +3012,7 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             return create(value, **kwargs)
         with patch.object(self.store, 'create_execution_intent', side_effect=changed):
             with self.assertRaisesRegex(RuntimeError, 'MOCK_REPLACEMENT_PARENT_CANCEL_OR_FILLS_CHANGED'):
-                self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_stop_during_native_queued_claim_blocks_submission(self):
@@ -2429,45 +3024,45 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
             return create(value, **kwargs)
         with patch.object(self.store, 'create_execution_intent', side_effect=stopped):
             with self.assertRaisesRegex(RuntimeError, 'MOCK_AUTOMATION_CONTROL_CHANGED'):
-                self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_protection_cue_during_approval_blocks_opportunity_but_keeps_child(self):
         inputs = await self.prepare(); save = self.repository.save_mock_automation_decision_gate
         def armed(gate):
             result = save(gate)
-            self.runner.request_protection_review(reason='new_risk', input_ref='native-risk-next', requested_at=self.clock)
+            self.runner.episode.request_protection_review(reason='new_risk', input_ref='native-risk-next', requested_at=self.clock)
             return result
-        with patch.object(self.runner._repository, 'save_mock_automation_decision_gate', side_effect=armed):
+        with patch.object(self.runner.episode._repository, 'save_mock_automation_decision_gate', side_effect=armed):
             with self.assertRaisesRegex(ValueError, 'changed_or_expired'):
-                self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(1, len(self.transport.calls))
-        self.assertTrue(self.runner.status['protection_review_required'])
+        self.assertTrue(self.runner.episode.status['protection_review_required'])
 
     async def test_approval_ack_delay_cannot_renew_fixed_child_expiry(self):
         inputs = await self.prepare(); save = self.repository.save_mock_automation_decision_gate
         def delayed(gate):
             result = save(gate); self.clock += timedelta(seconds=6); return result
-        with patch.object(self.runner._repository, 'save_mock_automation_decision_gate', side_effect=delayed):
+        with patch.object(self.runner.episode._repository, 'save_mock_automation_decision_gate', side_effect=delayed):
             with self.assertRaisesRegex(ValueError, 'changed_or_expired'):
-                self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_dispatch_receipt_ack_loss_never_repeats_native_submit(self):
         inputs = await self.prepare(); save = self.repository.save_mock_automation_dispatch_receipt
         def lost_ack(receipt):
             save(receipt); raise OSError('dispatch ACK lost')
-        with patch.object(self.runner._repository, 'save_mock_automation_dispatch_receipt', side_effect=lost_ack):
+        with patch.object(self.runner.episode._repository, 'save_mock_automation_dispatch_receipt', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK lost'):
-                self.runner.execute_unfilled_replacement(**inputs)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        result = self.runner.execute_unfilled_replacement(**inputs)
+                self.runner.episode.execute_unfilled_replacement(**inputs)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec)
+        result = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.assertEqual('ACCEPTED', result[1].state.value)
         self.assertEqual(2, len(self.transport.calls))
 
     async def test_gate_cannot_relabel_add_as_legacy_enter_or_mutate_fixed_price(self):
         from kiwoom_monitor.application.mock_automation_execution import mock_automation_decision_gate_from_dict
-        inputs = await self.prepare(); gate, _, _ = self.runner.execute_unfilled_replacement(**inputs)
+        inputs = await self.prepare(); gate, _, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         for field, value in (('action', 'ENTER'), ('limit_price', gate.limit_price + 1), ('replacement_binding', None)):
             with self.subTest(field=field), self.assertRaises((ValueError, TypeError)):
                 mock_automation_decision_gate_from_dict({**gate.to_dict(), field: value})
@@ -2484,17 +3079,17 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_existing_parent_history_is_required_when_confirmation_has_advanced(self):
         from kiwoom_monitor.application.order_lifecycle import project_unfilled_native_attempts
-        inputs = await self.prepare(); _, child, _ = self.runner.execute_unfilled_replacement(**inputs)
+        inputs = await self.prepare(); _, child, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         self.clock += timedelta(seconds=1)
         root = self.runtime.reconcile(self.record.intent.intent_id, replace(self.snapshot, as_of=self.clock))
         with self.assertRaisesRegex(ValueError, 'parent_not_safely_cancelled'):
-            project_unfilled_native_attempts(self.runner._unfilled_attempt_plan, root, [child],
+            project_unfilled_native_attempts(self.runner.episode._unfilled_attempt_plan, root, [child],
                                             [self.execution.events(child.intent.intent_id)])
 
     async def test_postgres_claim_placeholder_and_row_locks_use_same_native_proofs(self):
         from kiwoom_monitor.central_server.database_execution import _require_execution_ownership
         from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_document
-        inputs = await self.prepare(); gate, child, _ = self.runner.execute_unfilled_replacement(**inputs)
+        inputs = await self.prepare(); gate, child, _ = self.runner.episode.execute_unfilled_replacement(**inputs)
         ownership = {**self.execution._ownership, 'active_spec_id': self.spec.spec_id, 'control_revision': 1,
                      'replacement_claim': {'gate_id': gate.gate_id, 'risk_snapshot_id': inputs['risk'].snapshot_id,
                                           'risk_reconciliation_revision': inputs['risk'].reconciliation_revision}}
@@ -2517,14 +3112,14 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         def held(intent):
             entered.set(); release.wait(5); return submit(intent)
         with patch.object(self.transport, 'submit', side_effect=held):
-            command = asyncio.create_task(asyncio.to_thread(self.runner.execute_unfilled_replacement, **inputs))
+            command = asyncio.create_task(asyncio.to_thread(self.runner.episode.execute_unfilled_replacement, **inputs))
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))
             closing = asyncio.create_task(self.runner.close()); await asyncio.sleep(0.02)
             self.assertFalse(closing.done())
             release.set(); result = await command; await closing
         self.assertEqual('ACCEPTED', result[1].state.value)
         self.assertFalse(self.runtime._new_orders_enabled)
-        self.assertEqual(result[1].intent.intent_id, self.runner.status['pending_intent_id'])
+        self.assertEqual(result[1].intent.intent_id, self.runner.episode.status['pending_intent_id'])
 
     async def test_close_during_approval_drains_without_creating_claim(self):
         import asyncio, threading
@@ -2532,8 +3127,8 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
         save = self.repository.save_mock_automation_decision_gate
         def held(gate):
             result = save(gate); entered.set(); release.wait(5); return result
-        with patch.object(self.runner._repository, 'save_mock_automation_decision_gate', side_effect=held):
-            command = asyncio.create_task(asyncio.to_thread(self.runner.execute_unfilled_replacement, **inputs))
+        with patch.object(self.runner.episode._repository, 'save_mock_automation_decision_gate', side_effect=held):
+            command = asyncio.create_task(asyncio.to_thread(self.runner.episode.execute_unfilled_replacement, **inputs))
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))
             closing = asyncio.create_task(self.runner.close()); await asyncio.sleep(0.02)
             self.assertFalse(closing.done())
@@ -2567,20 +3162,20 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         inputs = await self.prepare()
         self.runner._poll_seconds = 60
         idle, submitted = asyncio.Event(), asyncio.Event()
-        native = self.runner.run_once
+        native = self.runner.episode.advance_once
         async def iteration():
             value = await native()
             (submitted if len(self.transport.calls) == 2 else idle).set()
             return value
-        with patch.object(self.runner, 'run_once', side_effect=iteration):
+        with patch.object(self.runner.episode, 'advance_once', side_effect=iteration):
             await self.runner.start()
             try:
                 await asyncio.wait_for(idle.wait(), 3)
                 with self.assertRaisesRegex(RuntimeError, 'idle_acknowledged'):
-                    self.runner.execute_unfilled_replacement(**inputs)
-                self.assertTrue(self.runner.offer_unfilled_execution_inputs(**inputs))
+                    self.runner.episode.execute_unfilled_replacement(**inputs)
+                self.assertTrue(self.runner.episode.offer_unfilled_execution_inputs(**inputs))
                 await asyncio.wait_for(submitted.wait(), 5)
-                self.assertEqual('PROCESSED', self.runner.status['unfilled_input_delivery']['state'])
+                self.assertEqual('PROCESSED', self.runner.episode.status['unfilled_input_delivery']['state'])
                 self.assertEqual(7, self.transport.calls[-1][-1])
             finally:
                 await self.runner.close()
@@ -2588,32 +3183,32 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_one_cut_creates_anchor_and_submits_without_idle_preview_api(self):
         inputs = await self.prepare()
-        self.runner._unfilled_preflight = None
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        with patch.object(self.runner, 'preview_unfilled_management', side_effect=AssertionError('public idle preview')), patch.object(
-                self.runner, 'execute_unfilled_replacement', side_effect=AssertionError('public idle dispatcher')):
-            await self.runner.run_once()
+        self.runner.episode._unfilled_preflight = None
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        with patch.object(self.runner.episode, 'preview_unfilled_management', side_effect=AssertionError('public idle preview')), patch.object(
+                self.runner.episode, 'execute_unfilled_replacement', side_effect=AssertionError('public idle dispatcher')):
+            await self.runner.episode.advance_once()
         self.assertEqual(2, len(self.transport.calls))
         self.assertEqual('ADD', next(gate.action for gate in self.repository.load_mock_automation_decision_gates(ACCOUNT_REF) if gate.replacement_binding is not None))
 
     async def test_take_profit_running_owner_submits_reduce(self):
         inputs = await self.prepare(sell=False)
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        await self.runner.run_once()
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        await self.runner.episode.advance_once()
         self.assertEqual('REDUCE', next(gate.action for gate in self.repository.load_mock_automation_decision_gates(ACCOUNT_REF) if gate.replacement_binding is not None))
-        self.assertEqual('PROCESSED', self.runner.status['unfilled_input_delivery']['state'])
+        self.assertEqual('PROCESSED', self.runner.episode.status['unfilled_input_delivery']['state'])
 
     async def test_protective_cut_precedes_pending_review_without_ev(self):
         inputs = await self.prepare(sell=True)
         self.costs = []
         inputs = await self.inputs()
-        self.runner.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         with patch.object(self.store, 'load_observation_revisions_after', side_effect=AssertionError('waited for minute')):
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
         self.assertEqual('EXIT', next(gate.action for gate in self.repository.load_mock_automation_decision_gates(ACCOUNT_REF) if gate.replacement_binding is not None))
-        self.assertEqual('PROCESSED', self.runner.status['unfilled_input_delivery']['state'])
-        self.assertTrue(self.runner._protection_pending())  # Submission is not actual liquidation.
+        self.assertEqual('PROCESSED', self.runner.episode.status['unfilled_input_delivery']['state'])
+        self.assertTrue(self.runner.episode._protection_pending())  # Submission is not actual liquidation.
 
     async def test_duplicate_notifications_and_idle_polls_do_not_repeat_full_gate(self):
         from dataclasses import asdict
@@ -2637,54 +3232,54 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
             return value
         with self.count_native() as offer, patch.object(type(risk), 'to_dict',
                 autospec=True, side_effect=native_risk_to_dict) as convert, patch(
-                'kiwoom_monitor.central_server.mock_automation_runner.json.dumps', side_effect=encode):
-            self.assertTrue(self.runner.offer_unfilled_execution_inputs(**inputs))
+                'kiwoom_monitor.central_server.mock_automation_episode.json.dumps', side_effect=encode):
+            self.assertTrue(self.runner.episode.offer_unfilled_execution_inputs(**inputs))
             for _ in range(100):
-                self.assertFalse(self.runner.offer_unfilled_execution_inputs(**inputs))
-        self.assertEqual(expected_identity, self.runner._unfilled_input_identity[2])
+                self.assertFalse(self.runner.episode.offer_unfilled_execution_inputs(**inputs))
+        self.assertEqual(expected_identity, self.runner.episode._unfilled_input_identity[2])
         self.assertEqual([expected_payload] * 101, payloads)
         self.assertEqual(101, convert.call_count)
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, offer)
-        await self.runner.run_once()
-        with patch.object(self.runner, '_execute_unfilled_replacement_locked', side_effect=AssertionError('repeat gate')):
+        await self.runner.episode.advance_once()
+        with patch.object(self.runner.episode, '_execute_unfilled_replacement_locked', side_effect=AssertionError('repeat gate')):
             with self.count_native() as idle:
                 for _ in range(10):
-                    await self.runner.run_once()
+                    await self.runner.episode.advance_once()
         self.assertEqual(0, idle['commits'])
         self.assertEqual(2, len(self.transport.calls))
         self.load_counts = {'offer_101': offer, 'idle_10': idle}
 
     async def test_newer_cut_coalesces_and_late_same_cut_cannot_rearm(self):
         old = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**old)
+        self.runner.episode.offer_unfilled_execution_inputs(**old)
         new = await self.inputs()
-        self.runner.offer_unfilled_execution_inputs(**new)
+        self.runner.episode.offer_unfilled_execution_inputs(**new)
         with self.assertRaisesRegex(ValueError, 'out_of_order'):
-            self.runner.offer_unfilled_execution_inputs(**old)
-        await self.runner.run_once()
-        self.assertEqual(new['risk'].reconciliation_revision, self.runner.status['unfilled_input_delivery']['risk_revision'])
-        self.assertFalse(self.runner.offer_unfilled_execution_inputs(**new))
+            self.runner.episode.offer_unfilled_execution_inputs(**old)
+        await self.runner.episode.advance_once()
+        self.assertEqual(new['risk'].reconciliation_revision, self.runner.episode.status['unfilled_input_delivery']['risk_revision'])
+        self.assertFalse(self.runner.episode.offer_unfilled_execution_inputs(**new))
         self.assertEqual(2, len(self.transport.calls))
 
     async def test_mutated_cut_with_same_time_revision_is_rejected_and_payload_is_copied(self):
         inputs = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         altered = {**inputs, 'assessment': replace(inputs['assessment'], candidate_limit_price_won=1002)}
         with self.assertRaisesRegex(ValueError, 'conflicting_cut'):
-            self.runner.offer_unfilled_execution_inputs(**altered)
+            self.runner.episode.offer_unfilled_execution_inputs(**altered)
         inputs['observation'].account.positions['005930'] = 0
-        await self.runner.run_once()
-        self.assertEqual('PROCESSED', self.runner.status['unfilled_input_delivery']['state'])
+        await self.runner.episode.advance_once()
+        self.assertEqual('PROCESSED', self.runner.episode.status['unfilled_input_delivery']['state'])
 
     async def test_input_expiry_blocks_once_without_gate_or_order(self):
         inputs = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         self.clock += timedelta(seconds=6)
-        with patch.object(self.runner, '_execute_unfilled_replacement_locked', side_effect=AssertionError('expired gate')):
-            await self.runner.run_once()
-            await self.runner.run_once()
-        self.assertEqual('BLOCKED', self.runner.status['unfilled_input_delivery']['state'])
-        self.assertIn('expired', self.runner.status['unfilled_input_delivery']['reason'])
+        with patch.object(self.runner.episode, '_execute_unfilled_replacement_locked', side_effect=AssertionError('expired gate')):
+            await self.runner.episode.advance_once()
+            await self.runner.episode.advance_once()
+        self.assertEqual('BLOCKED', self.runner.episode.status['unfilled_input_delivery']['state'])
+        self.assertIn('expired', self.runner.episode.status['unfilled_input_delivery']['reason'])
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_due_without_cut_has_zero_additional_io_and_keeps_session_clock(self):
@@ -2692,36 +3287,36 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.clock = self.policy.wait_until
         with self.count_native() as due:
             for _ in range(100):
-                self.assertFalse(await self.runner._unfilled_call())
+                self.assertFalse(await self.runner.episode._unfilled_call())
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, due)
-        self.assertEqual('CURRENT_INPUT_REQUIRED', self.runner.status['unfilled_input_delivery']['state'])
+        self.assertEqual('CURRENT_INPUT_REQUIRED', self.runner.episode.status['unfilled_input_delivery']['state'])
         clock = AsyncMock(return_value=False)
-        with patch.object(self.runner, '_clock_call', clock):
-            await self.runner.run_once()
+        with patch.object(self.runner.episode, '_clock_call', clock):
+            await self.runner.episode.advance_once()
         clock.assert_awaited_once()
         self.due_counts = due
 
     async def test_protection_abandons_confirmed_buy_before_replacement_gate(self):
         inputs = await self.prepare()
-        self.runner.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        with patch.object(self.runner, '_execute_unfilled_replacement_locked', side_effect=AssertionError('opportunity gate')):
-            await self.runner.run_once()
-        self.assertEqual('ABANDONED', self.runner.status['unfilled_input_delivery']['state'])
+        self.runner.episode.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        with patch.object(self.runner.episode, '_execute_unfilled_replacement_locked', side_effect=AssertionError('opportunity gate')):
+            await self.runner.episode.advance_once()
+        self.assertEqual('ABANDONED', self.runner.episode.status['unfilled_input_delivery']['state'])
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_stop_and_restart_do_not_replay_ram_cut(self):
         inputs = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF,
             spec_id=self.spec.spec_id, stopped_at=self.clock, reason='test stop')
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(1, len(self.transport.calls))
         await self.runner.close()
         with self.assertRaisesRegex(RuntimeError, 'CLOSED'):
-            self.runner.offer_unfilled_execution_inputs(**inputs)
-        restored = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertIsNone(restored._unfilled_input)
+            self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        restored = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertIsNone(restored.episode._unfilled_input)
         await restored.close()
 
     async def test_legacy_spec_cannot_offer_executable_inputs(self):
@@ -2729,7 +3324,7 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.rebuild_native_policy()
         inputs = await self.prepare()
         with self.assertRaisesRegex(ValueError, 'policy_off'):
-            self.runner.offer_unfilled_execution_inputs(**inputs)
+            self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_unknown_on_new_cut_does_not_submit_again(self):
@@ -2737,46 +3332,46 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         submit = self.transport.submit
         def unknown(intent):
             submit(intent); raise SubmissionUnknown('lost response')
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         with patch.object(self.transport, 'submit', side_effect=unknown):
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
         inputs = await self.inputs()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        await self.runner.run_once()
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        await self.runner.episode.advance_once()
         self.assertEqual(2, len(self.transport.calls))
-        self.assertEqual(1, len(self.runner._unfilled_attempt_plan['children']))
+        self.assertEqual(1, len(self.runner.episode._unfilled_attempt_plan['children']))
 
     async def test_stale_native_risk_is_not_authorized_by_current_ram_offer(self):
         inputs = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         await self._refresh_recovery()
         with self.assertRaisesRegex(RuntimeError, 'risk snapshot changed'):
-            await self.runner.run_once()
-        self.assertEqual('ERROR', self.runner.status['unfilled_input_delivery']['state'])
+            await self.runner.episode.advance_once()
+        self.assertEqual('ERROR', self.runner.episode.status['unfilled_input_delivery']['state'])
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_failed_checkpoint_keeps_one_pending_cut_until_ack(self):
         inputs = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        self.runner._checkpoint_pending = True
-        with patch.object(self.runner, '_save_checkpoint', side_effect=OSError('lost ACK')):
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode._checkpoint._pending = True
+        with patch.object(self.runner.episode, '_save_checkpoint', side_effect=OSError('lost ACK')):
             with self.assertRaises(OSError):
-                await self.runner.run_once()
-        self.assertTrue(self.runner.status['unfilled_input_delivery']['pending'])
+                await self.runner.episode.advance_once()
+        self.assertTrue(self.runner.episode.status['unfilled_input_delivery']['pending'])
         self.assertEqual(1, len(self.transport.calls))
-        await self.runner.run_once()
-        self.assertFalse(self.runner.status['unfilled_input_delivery']['pending'])
+        await self.runner.episode.advance_once()
+        self.assertFalse(self.runner.episode.status['unfilled_input_delivery']['pending'])
         self.assertEqual(2, len(self.transport.calls))
 
     async def test_wrong_scope_and_missing_confirmation_are_rejected_in_ram(self):
         inputs = await self.prepare()
         with self.count_native() as invalid:
             with self.assertRaisesRegex(ValueError, 'confirmation_missing'):
-                self.runner.offer_unfilled_execution_inputs(**{**inputs, 'broker_snapshot': None})
+                self.runner.episode.offer_unfilled_execution_inputs(**{**inputs, 'broker_snapshot': None})
             with self.assertRaisesRegex(ValueError, 'scope_or_time'):
-                self.runner.offer_unfilled_execution_inputs(**{**inputs, 'target': replace(inputs['target'], account_ref='wrong')})
+                self.runner.episode.offer_unfilled_execution_inputs(**{**inputs, 'target': replace(inputs['target'], account_ref='wrong')})
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, invalid)
-        self.assertIsNone(self.runner._unfilled_input)
+        self.assertIsNone(self.runner.episode._unfilled_input)
 
     async def test_close_joins_running_submission_after_native_claim(self):
         import asyncio, threading
@@ -2786,7 +3381,7 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         def held(intent):
             entered.set(); release.wait(5)
             return submit(intent)
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         with patch.object(self.transport, 'submit', side_effect=held):
             await self.runner.start()
             try:
@@ -2798,7 +3393,7 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
             await asyncio.wait_for(closing, 5)
         self.assertEqual(2, len(self.transport.calls))
-        child = self.runner._unfilled_attempt_plan['children'][0]['intent']['intent_id']
+        child = self.runner.episode._unfilled_attempt_plan['children'][0]['intent']['intent_id']
         self.assertIsNotNone(self.repository.load_mock_automation_dispatch_receipt(ACCOUNT_REF, child))
 
     async def test_close_during_preview_ack_never_claims_native_child(self):
@@ -2807,10 +3402,10 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         entered, release = threading.Event(), threading.Event()
         save = self.store.upsert_documents
         def held(collection, rows):
-            if collection == 'execution_mock_automation_runner_current' and not self.runner._closing:
+            if collection == 'execution_mock_automation_runner_current' and not self.runner.episode._closing:
                 entered.set(); release.wait(5)
             return save(collection, rows)
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         with patch.object(self.store, 'upsert_documents', side_effect=held):
             await self.runner.start()
             try:
@@ -2822,40 +3417,40 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
             await asyncio.wait_for(closing, 5)
         self.assertEqual(1, len(self.transport.calls))
-        child = self.runner._unfilled_attempt_plan['children'][0]['intent']['intent_id']
+        child = self.runner.episode._unfilled_attempt_plan['children'][0]['intent']['intent_id']
         self.assertIsNone(self.execution.load(child))
 
     async def test_healthy_rest_revision_and_quote_refresh_only_renew_ram_until_event(self):
         inputs = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        await self.runner.run_once()
-        with patch.object(self.runner, '_execute_unfilled_replacement_locked', side_effect=AssertionError('refresh repeated full gate')):
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        await self.runner.episode.advance_once()
+        with patch.object(self.runner.episode, '_execute_unfilled_replacement_locked', side_effect=AssertionError('refresh repeated full gate')):
             for _ in range(6):
                 self.clock += timedelta(milliseconds=100)
                 inputs = await self.inputs()
                 with self.count_native() as renewed:
-                    self.runner.offer_unfilled_execution_inputs(**inputs)
-                    self.assertFalse(await self.runner._unfilled_call())
+                    self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+                    self.assertFalse(await self.runner.episode._unfilled_call())
                 self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, renewed)
         self.assertEqual(2, len(self.transport.calls))
-        self.assertTrue(self.runner.status['unfilled_input_delivery']['pending'])
+        self.assertTrue(self.runner.episode.status['unfilled_input_delivery']['pending'])
 
     async def test_due_with_fresh_cut_is_consumed_once_not_every_rest_refresh(self):
         inputs = await self.prepare()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        await self.runner.run_once()
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        await self.runner.episode.advance_once()
         self.clock = self.policy.wait_until
         inputs = await self.inputs()
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        native = self.runner._execute_unfilled_replacement_locked
-        with patch.object(self.runner, '_execute_unfilled_replacement_locked', wraps=native) as dispatch:
-            await self.runner.run_once()
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        native = self.runner.episode._execute_unfilled_replacement_locked
+        with patch.object(self.runner.episode, '_execute_unfilled_replacement_locked', wraps=native) as dispatch:
+            await self.runner.episode.advance_once()
             self.assertEqual(1, dispatch.call_count)
             inputs = await self.inputs()
-            self.runner.offer_unfilled_execution_inputs(**inputs)
-            self.assertFalse(await self.runner._unfilled_call())
+            self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+            self.assertFalse(await self.runner.episode._unfilled_call())
             self.assertEqual(1, dispatch.call_count)
-        self.assertEqual(self.policy.wait_until.isoformat(), self.runner._unfilled_processed_deadline)
+        self.assertEqual(self.policy.wait_until.isoformat(), self.runner.episode._unfilled_processed_deadline)
         self.assertEqual(2, len(self.transport.calls))
 
     async def test_protective_deadline_without_input_arms_one_review_without_full_gate(self):
@@ -2863,15 +3458,15 @@ class MockUnfilledRunningDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.clock = self.policy.protection_deadline
         with self.count_native() as due:
             for _ in range(100):
-                self.assertFalse(await self.runner._unfilled_call())
+                self.assertFalse(await self.runner.episode._unfilled_call())
         self.assertEqual({'connections': 0, 'selects': 0, 'commits': 0}, due)
-        self.assertEqual(1, self.runner.status['protection_review']['revision'])
-        with patch.object(self.runner, '_execute_unfilled_replacement_locked', side_effect=AssertionError('missing-input gate')):
+        self.assertEqual(1, self.runner.episode.status['protection_review']['revision'])
+        with patch.object(self.runner.episode, '_execute_unfilled_replacement_locked', side_effect=AssertionError('missing-input gate')):
             with self.count_native() as first:
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
             with self.count_native() as repeated:
                 for _ in range(10):
-                    await self.runner.run_once()
+                    await self.runner.episode.advance_once()
         self.assertEqual(1, first['commits'])
         self.assertEqual(0, repeated['commits'])
         self.protection_deadline_counts = {'ram_due_100': due, 'first_poll': first, 'ten_polls': repeated}
@@ -2938,16 +3533,16 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
         return inputs
 
     async def consume(self, inputs):
-        self.runner.offer_unfilled_execution_inputs(**inputs)
-        await self.runner.run_once()
-        return self.runner.status['unfilled_input_delivery']
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
+        await self.runner.episode.advance_once()
+        return self.runner.episode.status['unfilled_input_delivery']
 
     async def test_buy_reprice_cancels_once_waits_confirmation_then_submits_residual(self):
         inputs = await self.prepare_active()
         self.assertEqual('CANCEL_REQUESTED', (await self.consume(inputs))['state'])
         self.assertEqual((1, 1, 1), (self.cancel_calls, self.refreshes, len(self.transport.calls)))
         self.assertEqual(OrderState.CANCEL_PENDING, self.execution.load(self.intent.intent_id).state)
-        self.assertEqual('REPRICE', self.runner.status['after_cancel'])
+        self.assertEqual('REPRICE', self.runner.episode.status['after_cancel'])
         self.snapshot = replace(self.snapshot, state=OrderState.CANCEL_PENDING)
         self.record = self.execution.load(self.intent.intent_id)
         inputs = await self.inputs()
@@ -2963,12 +3558,12 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
         inputs = await self.prepare_active(False)
         delivery = await self.consume(inputs)
         self.assertEqual('CANCEL_REQUESTED', delivery['state'], delivery)
-        self.assertEqual('TAKE_PROFIT', self.runner._unfilled_attempt_plan['result']['purpose'])
+        self.assertEqual('TAKE_PROFIT', self.runner.episode._unfilled_attempt_plan['result']['purpose'])
         self.assertEqual((1, 2), (self.cancel_calls, len(self.transport.calls)))
 
     async def test_protective_cancel_without_ev_then_exit_after_confirmed_cancel(self):
         inputs = await self.prepare_active(True)
-        self.runner.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
+        self.runner.episode.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
         delivery = await self.consume(inputs)
         self.assertEqual('CANCEL_REQUESTED', delivery['state'], delivery)
         self.assertEqual(1, self.cancel_calls)
@@ -2976,14 +3571,14 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
         self.confirm_cancel(self.record, filled=1)
         self.assertEqual('PROCESSED', (await self.consume(await self.inputs()))['state'])
         self.assertEqual(('SELL', 2), (self.transport.calls[-1][1], self.transport.calls[-1][-1]))
-        self.assertTrue(self.runner._protection_pending())
+        self.assertTrue(self.runner.episode._protection_pending())
 
     async def test_buy_wait_without_ev_creates_no_fixed_child_or_cancel(self):
         inputs = await self.prepare_active()
         inputs['assessment'] = replace(inputs['assessment'], reprice_evidence=None)
         delivery = await self.consume(inputs)
         self.assertEqual('WAITING', delivery['state'], delivery)
-        self.assertEqual([], self.runner._unfilled_attempt_plan['children'])
+        self.assertEqual([], self.runner.episode._unfilled_attempt_plan['children'])
         self.assertEqual((0, 0), (self.cancel_calls, self.refreshes))
 
     async def test_profit_without_ev_and_trend_waits_without_forced_exit(self):
@@ -2997,14 +3592,14 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
         inputs['assessment'] = replace(inputs['assessment'], thesis_valid=False, reprice_evidence=None,
                                        candidate_limit_price_won=None, price_input_ref="", price_available_at=None)
         self.assertEqual('CANCEL_REQUESTED', (await self.consume(inputs))['state'])
-        self.assertEqual('ABANDON', self.runner.status['after_cancel'])
+        self.assertEqual('ABANDON', self.runner.episode.status['after_cancel'])
         self.assertEqual(1, self.cancel_calls)
 
     async def test_pending_protection_allows_buy_cancel_but_no_replacement(self):
         inputs = await self.prepare_active()
-        self.runner.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
+        self.runner.episode.request_protection_review(reason='hard_risk', input_ref='risk', requested_at=self.clock)
         self.assertEqual('CANCEL_REQUESTED', (await self.consume(inputs))['state'])
-        self.assertEqual('ABANDON', self.runner.status['after_cancel'])
+        self.assertEqual('ABANDON', self.runner.episode.status['after_cancel'])
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_expired_buy_opportunity_cancels_and_abandons_after_confirmation(self):
@@ -3013,7 +3608,7 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
         await self.bundle.gateway._account_refresh()
         inputs = await self.inputs()
         self.assertEqual('CANCEL_REQUESTED', (await self.consume(inputs))['state'])
-        self.assertEqual('ABANDON', self.runner.status['after_cancel'])
+        self.assertEqual('ABANDON', self.runner.episode.status['after_cancel'])
         self.confirm_cancel(self.execution.load(self.intent.intent_id))
         self.assertEqual('ABANDONED', (await self.consume(await self.inputs()))['state'])
         self.assertEqual(1, len(self.transport.calls))
@@ -3091,7 +3686,7 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
         self.transport.cancel = reject
         delivery = await self.consume(inputs)
         self.assertEqual('CANCEL_UNCONFIRMED', delivery['state'], delivery)
-        self.assertTrue(self.runner._protection_pending())
+        self.assertTrue(self.runner.episode._protection_pending())
         self.clock += timedelta(milliseconds=100)
         await self.consume(await self.inputs())
         self.assertEqual((1, 1), (self.cancel_calls, self.refreshes))
@@ -3123,7 +3718,7 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
         delivery = await self.consume(inputs)
         self.assertEqual('CANCEL_REQUESTED', delivery['state'], delivery)
         self.assertEqual((1, 1), (reader.calls, self.cancel_calls))
-        self.assertTrue(self.runner.status['cancel_risk_snapshot_id'])
+        self.assertTrue(self.runner.episode.status['cancel_risk_snapshot_id'])
         self.assertIsNone(monitor.latest_automation_risk_cut)  # Actual native cancel invalidates the cut.
 
     async def test_unadmitted_mock_ev_cannot_cancel_for_reprice(self):
@@ -3151,7 +3746,7 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
             self.cancel_calls += 1
             entered.set(); release.wait(5)
         self.transport.cancel = held
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         await self.runner.start()
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))
@@ -3173,7 +3768,7 @@ class MockUnfilledRunningCancelTests(unittest.IsolatedAsyncioTestCase):
             entered.set(); await release.wait()
             return await refresh()
         self.bundle.gateway._account_refresh = held
-        self.runner.offer_unfilled_execution_inputs(**inputs)
+        self.runner.episode.offer_unfilled_execution_inputs(**inputs)
         await self.runner.start()
         try:
             await asyncio.wait_for(entered.wait(), 3)
@@ -3230,7 +3825,7 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
         self.collector._approved_trade_sources = {('005930','KRX')}
         self.collector._continuous_from = {('005930','KRX'):self.clock}
         self.quote(1001 if sell is None else 990)
-        self.runner = MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        self.runner = _prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
         self.addAsyncCleanup(self.runner.close)
         if sell is not None:
             from kiwoom_monitor.application.mock_automation_execution import MockAutomationDecisionGate
@@ -3245,7 +3840,7 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
             body.update(quantity=3,signal_reference_price=1000,required_capital_won=0,
                         reasons=('stop_loss_reached',) if sell else ('target_reached',))
             decision = StrategyDecision(decision_id='decision_'+_hash(body),**body)
-            gate,record,_ = self.runner._dispatch_original_and_register(decision,recovery,risk)
+            gate,record,_ = self.runner.episode._dispatch_original_and_register(decision,recovery,risk)
             self.assertIsNotNone(record,gate.reasons)
             self.intent = record.intent;self.record=record
             self.snapshot = BrokerOrderSnapshot(record.broker_order_id,ACCOUNT_REF,'005930',OrderState.ACCEPTED,0,3,self.clock,())
@@ -3266,55 +3861,55 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_approved_unfilled_buy_is_discovered_and_cancelled_without_risk_upgrade(self):
         await self.native_setup()
-        with patch.object(self.runner,'offer_unfilled_execution_inputs',wraps=self.runner.offer_unfilled_execution_inputs) as offer:
-            await self.runner.run_once()
+        with patch.object(self.runner.episode,'offer_unfilled_execution_inputs',wraps=self.runner.episode.offer_unfilled_execution_inputs) as offer:
+            await self.runner.episode.advance_once()
         self.assertEqual(1,offer.call_count)
-        self.assertEqual('BUY_OPPORTUNITY',self.runner._unfilled_registration['purpose'])
-        self.assertEqual('CANCEL_REQUESTED',self.runner.status['unfilled_input_delivery']['state'])
+        self.assertEqual('BUY_OPPORTUNITY',self.runner.episode._unfilled_registration['purpose'])
+        self.assertEqual('CANCEL_REQUESTED',self.runner.episode.status['unfilled_input_delivery']['state'])
         self.assertFalse(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).reconciliation_complete)
-        self.assertEqual('ABANDON',self.runner.status['after_cancel'])
-        self.assertEqual('UNAVAILABLE',self.runner.status['unfilled_native_source']['paired_ev'])
+        self.assertEqual('ABANDON',self.runner.episode.status['after_cancel'])
+        self.assertEqual('UNAVAILABLE',self.runner.episode.status['unfilled_native_source']['paired_ev'])
         self.assertEqual(1,self.cancel_calls)
 
     async def test_original_buy_deadline_cancels_without_price_or_ev_and_no_duplicate(self):
         await self.native_setup(partial=True)
-        await self.runner.run_once()
-        self.assertEqual('WAITING',self.runner.status['unfilled_input_delivery']['state'])
-        policy = self.runner._validate_unfilled_registration(self.runner._unfilled_registration)
+        await self.runner.episode.advance_once()
+        self.assertEqual('WAITING',self.runner.episode.status['unfilled_input_delivery']['state'])
+        policy = self.runner.episode._validate_unfilled_registration(self.runner.episode._unfilled_registration)
         self.clock = policy.wait_until
         self.collector._latest_snapshots.clear()
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
-        self.assertEqual('ABANDON',self.runner.status['after_cancel'])
+        self.assertEqual('ABANDON',self.runner.episode.status['after_cancel'])
         self.assertEqual(OrderState.CANCEL_PENDING,self.execution.load(self.intent.intent_id).state)
-        with patch.object(self.runner,'_manage_unfilled_inputs',side_effect=AssertionError('idle repeated management')):
+        with patch.object(self.runner.episode,'_manage_unfilled_inputs',side_effect=AssertionError('idle repeated management')):
             with self.count_native() as idle:
-                for _ in range(10):await self.runner.run_once()
+                for _ in range(10):await self.runner.episode.advance_once()
         self.assertEqual(0,idle['commits'])
         self.assertEqual(1,self.cancel_calls)
         self.native_idle_counts = idle
 
     async def test_protective_root_registers_from_real_exit_and_cancels_without_minute_or_ev(self):
         await self.native_setup(True)
-        self.runner._bootstrap_pending=True
-        self.assertEqual('PROTECTIVE_EXIT',self.runner._unfilled_registration['purpose'])
+        self.runner.episode._input_progress._bootstrap_pending=True
+        self.assertEqual('PROTECTIVE_EXIT',self.runner.episode._unfilled_registration['purpose'])
         with patch.object(self.store,'load_observation_revisions_after',side_effect=AssertionError('minute needed')):
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
-        self.assertEqual('CANCEL_REQUESTED',self.runner.status['unfilled_input_delivery']['state'])
+        self.assertEqual('CANCEL_REQUESTED',self.runner.episode.status['unfilled_input_delivery']['state'])
 
     async def test_profit_root_registers_independently_and_blocks_missing_paired_ev(self):
         await self.native_setup(False)
-        await self.runner.run_once()
-        self.assertEqual('TAKE_PROFIT',self.runner._unfilled_registration['purpose'])
-        self.assertEqual('BLOCKED',self.runner.status['unfilled_input_delivery']['state'])
+        await self.runner.episode.advance_once()
+        self.assertEqual('TAKE_PROFIT',self.runner.episode._unfilled_registration['purpose'])
+        self.assertEqual('BLOCKED',self.runner.episode.status['unfilled_input_delivery']['state'])
         self.assertEqual(0,self.cancel_calls)
 
     async def test_protective_native_source_waits_for_cancel_confirmation_then_replaces_only_remaining(self):
         await self.native_setup(True)
         before=len(self.transport.calls)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(before,len(self.transport.calls))
         self.assertEqual(OrderState.CANCEL_PENDING,self.execution.load(self.intent.intent_id).state)
         self.snapshot=replace(self.snapshot,state=OrderState.CANCELLED,filled_quantity=1,remaining_quantity=0,
@@ -3322,77 +3917,77 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
         self.positions={'005930':2};self.cash+=1000
         await self.monitor.refresh_recovery()
         self.quote(990)
-        await self.runner.run_once()
-        self.assertEqual(before+1,len(self.transport.calls),self.runner.status)
-        child=self.execution.load(self.runner._unfilled_attempt_plan['children'][-1]['intent']['intent_id'])
+        await self.runner.episode.advance_once()
+        self.assertEqual(before+1,len(self.transport.calls),self.runner.episode.status)
+        child=self.execution.load(self.runner.episode._unfilled_attempt_plan['children'][-1]['intent']['intent_id'])
         self.assertEqual(2,child.intent.quantity)
         self.assertEqual(OrderState.ACCEPTED,child.state)
-        for _ in range(5):await self.runner.run_once()
+        for _ in range(5):await self.runner.episode.advance_once()
         self.assertEqual(before+1,len(self.transport.calls))
 
     async def test_protective_missing_price_becomes_ready_without_repeated_gate_on_ticks(self):
         await self.native_setup(True)
         self.collector._latest_snapshots.clear()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(0,self.cancel_calls)
         self.clock += timedelta(milliseconds=10)
         self.quote(990)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
-        with patch.object(self.runner,'offer_unfilled_execution_inputs',side_effect=AssertionError('tick repeats delivery')):
+        with patch.object(self.runner.episode,'offer_unfilled_execution_inputs',side_effect=AssertionError('tick repeats delivery')):
             for price in (991,992,993):
                 self.quote(price)
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
 
     async def test_healthy_rest_revisions_do_not_repeat_producer_or_full_gate(self):
         await self.native_setup(partial=True)
-        await self.runner.run_once()
-        with patch.object(self.runner,'offer_unfilled_execution_inputs',side_effect=AssertionError('healthy revision delivery')):
+        await self.runner.episode.advance_once()
+        with patch.object(self.runner.episode,'offer_unfilled_execution_inputs',side_effect=AssertionError('healthy revision delivery')):
             for _ in range(5):
                 await self.monitor.refresh_recovery()
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
         self.assertEqual(0,self.cancel_calls)
 
     async def test_flat_first_buy_exception_rejects_unknown_balance_and_aggregate_gaps(self):
         await self.native_setup()
         control = self.repository.load_mock_automation_control(ACCOUNT_REF)
-        await self.runner._produce_native_unfilled_inputs(control)
-        policy=self.runner._validate_unfilled_registration(self.runner._unfilled_registration)
+        await self.runner.episode._produce_native_unfilled_inputs(control)
+        policy=self.runner.episode._validate_unfilled_registration(self.runner.episode._unfilled_registration)
         cut=self.monitor.latest_automation_execution_cut
-        self.assertTrue(self.runner._flat_unfilled_buy_cancel_cut(policy,cut['observation'],cut['risk']))
+        self.assertTrue(self.runner.episode._flat_unfilled_buy_cancel_cut(policy,cut['observation'],cut['risk']))
         for risk in (replace(cut['risk'],submission_unknown_count=1),replace(cut['risk'],balance_mismatch_count=1)):
-            self.assertFalse(self.runner._flat_unfilled_buy_cancel_cut(policy,cut['observation'],risk))
+            self.assertFalse(self.runner.episode._flat_unfilled_buy_cancel_cut(policy,cut['observation'],risk))
         for observation in (replace(cut['observation'],reconciliation_complete=False),
                             replace(cut['observation'],unmapped_broker_order_ids=('unknown',)),
                             replace(cut['observation'],open_orders=(replace(self.record,broker_reported_filled_quantity=1),))):
-            self.assertFalse(self.runner._flat_unfilled_buy_cancel_cut(policy,observation,cut['risk']))
+            self.assertFalse(self.runner.episode._flat_unfilled_buy_cancel_cut(policy,observation,cut['risk']))
 
     async def test_registration_rejects_rehashed_goal_and_extended_deadline(self):
         from kiwoom_monitor.application.mock_automation_session_clock import content_id
         await self.native_setup()
         control=self.repository.load_mock_automation_control(ACCOUNT_REF)
-        await self.runner._produce_native_unfilled_inputs(control)
+        await self.runner.episode._produce_native_unfilled_inputs(control)
         for change in ('goal','deadline'):
-            value=deepcopy(self.runner._unfilled_registration)
+            value=deepcopy(self.runner.episode._unfilled_registration)
             if change=='goal':value['target_quantity']+=1
             else:value['policy']['valid_until']=(self.clock+timedelta(days=1)).isoformat()
             value['registration_id']=content_id('unfilled_registration',{k:v for k,v in value.items() if k!='registration_id'})
             with self.assertRaisesRegex(ValueError,'frozen_policy_mismatch'):
-                self.runner._validate_unfilled_registration(value)
+                self.runner.episode._validate_unfilled_registration(value)
 
     async def test_registration_restore_preserves_root_policy_time_and_detects_tamper(self):
         await self.native_setup()
-        await self.runner.run_once()
-        original = deepcopy(self.runner._unfilled_registration)
+        await self.runner.episode.advance_once()
+        original = deepcopy(self.runner.episode._unfilled_registration)
         await self.runner.close()
-        self.runner = MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
-        self.assertEqual(original,self.runner._unfilled_registration)
+        self.runner = _prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        self.assertEqual(original,self.runner.episode._unfilled_registration)
         await self.runner.close()
         rows = self.store.load_documents('execution_mock_automation_runner_current',ACCOUNT_REF,1)
         rows[0]['document']['unfilled_registration']['target_quantity'] += 1
         self.store.upsert_documents('execution_mock_automation_runner_current',rows)
         with self.assertRaisesRegex(ValueError,'invalid_unfilled_native_registration'):
-            MockAutomationRunner(self.store,self.bundle,self.spec)
+            _prepared_runner(self.store,self.bundle,self.spec)
 
     async def test_collector_borrow_does_no_io_and_refuses_unapproved_nxt_gap_or_missing_price(self):
         await self.native_setup()
@@ -3441,7 +4036,7 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1,self.monitor._queue.qsize())
 
     async def test_new_native_ack_during_producer_work_is_retained_and_old_cut_not_delivered(self):
-        import kiwoom_monitor.central_server.mock_automation_runner as runner_module
+        import kiwoom_monitor.central_server.mock_automation_episode as runner_module
         await self.native_setup(partial=True)
         original=runner_module.drain_thread_call
         changed=False
@@ -3457,12 +4052,12 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
             return result
         control=self.repository.load_mock_automation_control(ACCOUNT_REF)
         with patch.object(runner_module,'drain_thread_call',side_effect=interleaved):
-            with patch.object(self.runner,'offer_unfilled_execution_inputs',side_effect=AssertionError('superseded cut delivered')):
-                await self.runner._produce_native_unfilled_inputs(control)
-        self.assertTrue(self.runner._unfilled_source_pending)
-        self.assertEqual('native_account_cut_superseded',self.runner.status['unfilled_native_source']['reason'])
-        await self.runner.run_once()
-        self.assertEqual('WAITING',self.runner.status['unfilled_input_delivery']['state'])
+            with patch.object(self.runner.episode,'offer_unfilled_execution_inputs',side_effect=AssertionError('superseded cut delivered')):
+                await self.runner.episode._produce_native_unfilled_inputs(control)
+        self.assertTrue(self.runner.episode._unfilled_source_pending)
+        self.assertEqual('native_account_cut_superseded',self.runner.episode.status['unfilled_native_source']['reason'])
+        await self.runner.episode.advance_once()
+        self.assertEqual('WAITING',self.runner.episode.status['unfilled_input_delivery']['state'])
         self.assertEqual(0,self.cancel_calls)
 
 
@@ -3485,7 +4080,7 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
         self.collector=CentralRealtimeCollector(lambda:'unused','real',RealtimeHub(),lambda:self.clock)
         self.collector._approved_trade_sources={('005930','KRX')}
         self.collector._continuous_from={('005930','KRX'):self.clock}
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
         self.bundle.gateway=ManualMockOrderGateway(self.runtime,self.execution,self.monitor.refresh_account,now_provider=lambda:self.clock)
         self.make_loss();self.quote()
         await self.monitor.refresh_recovery()
@@ -3499,16 +4094,16 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_loss_creates_first_protective_exit_without_bars_or_ev_once(self):
         before=len(self.transport.calls)
-        self.runner._bootstrap_pending=True
+        self.runner.episode._input_progress._bootstrap_pending=True
         with patch.object(self.store,'load_observation_revisions_after',side_effect=AssertionError('minute wait')):
-            await self.runner.run_once()
-        self.assertEqual(before+1,len(self.transport.calls),self.runner.status)
-        self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'])
-        self.assertEqual('PROTECTIVE_EXIT',self.runner._unfilled_registration['purpose'])
-        self.assertEqual(1,self.runner._unfilled_registration['root_intent']['quantity'])
-        await self.runner.run_once()  # Consume the actual QUEUED/ACK event cursor once.
+            await self.runner.episode.advance_once()
+        self.assertEqual(before+1,len(self.transport.calls),self.runner.episode.status)
+        self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'])
+        self.assertEqual('PROTECTIVE_EXIT',self.runner.episode._unfilled_registration['purpose'])
+        self.assertEqual(1,self.runner.episode._unfilled_registration['root_intent']['quantity'])
+        await self.runner.episode.advance_once()  # Consume the actual QUEUED/ACK event cursor once.
         with self.count_native() as idle:
-            for _ in range(10):await self.runner.run_once()
+            for _ in range(10):await self.runner.episode.advance_once()
         self.assertEqual(0,idle['commits']);self.assertEqual(before+1,len(self.transport.calls))
 
     async def test_lathed_loss_protection_does_not_wait_for_unavailable_costs(self):
@@ -3516,8 +4111,8 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
         self.reader.read_trade_cost_pages=unavailable
         await self.monitor.refresh_recovery()
         self.assertIsNone(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).daily_net_pnl_won)
-        await self.runner.run_once()
-        self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'],self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'],self.runner.episode.status)
 
     async def test_unknown_or_unmapped_account_order_blocks_new_protective_submit(self):
         original=self.reader.read
@@ -3527,21 +4122,21 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
         self.reader.read=unknown
         await self.monitor.refresh_recovery()
         before=len(self.transport.calls)
-        await self.runner.run_once()
-        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner._protection_exit)
+        await self.runner.episode.advance_once()
+        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner.episode._protection_exit)
 
     async def test_missing_price_and_later_quote_request_one_existing_recovery(self):
         self.collector._latest_snapshots.clear()
-        await self.runner.run_once()
-        self.assertIsNone(self.runner._protection_exit)
+        await self.runner.episode.advance_once()
+        self.assertIsNone(self.runner.episode._protection_exit)
         self.clock+=timedelta(milliseconds=50);self.quote()
         requests=self.monitor.request_automation_execution_recovery
         with patch.object(self.monitor,'request_automation_execution_recovery',wraps=requests) as queued:
-            for _ in range(10):await self.runner.run_once()
+            for _ in range(10):await self.runner.episode.advance_once()
         self.assertEqual(1,queued.call_count)
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
-        self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'],self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'],self.runner.episode.status)
 
     async def test_fixed_checkpoint_ack_failure_never_submits_and_reuses_decision(self):
         save=self.store.upsert_documents;failed=False
@@ -3551,15 +4146,15 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
                 failed=True;raise OSError('prepared ACK failed')
             return save(collection,rows)
         before=len(self.transport.calls)
-        with patch.object(self.store,'upsert_documents',side_effect=fail):await self.runner.run_once()
-        fixed=deepcopy(self.runner._protection_exit)
+        with patch.object(self.store,'upsert_documents',side_effect=fail):await self.runner.episode.advance_once()
+        fixed=deepcopy(self.runner.episode._protection_exit)
         self.assertEqual(before,len(self.transport.calls))
         await self.runner.close()
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
-        self.assertEqual(fixed,self.runner._protection_exit)
-        self.assertEqual(before+1,len(self.transport.calls),self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual(fixed,self.runner.episode._protection_exit)
+        self.assertEqual(before+1,len(self.transport.calls),self.runner.episode.status)
 
     async def test_queued_transaction_rejects_new_risk_after_approval(self):
         create=self.store.create_execution_intent
@@ -3572,32 +4167,32 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
                 self.repository.save_mock_automation_risk_snapshot(mock_automation_risk_snapshot_from_dict(body))
             return create(value,**kwargs)
         before=len(self.transport.calls)
-        with patch.object(self.store,'create_execution_intent',side_effect=changed):await self.runner.run_once()
+        with patch.object(self.store,'create_execution_intent',side_effect=changed):await self.runner.episode.advance_once()
         self.assertEqual(before,len(self.transport.calls))
-        self.assertIn('MOCK_PROTECTION_RISK_OR_FIXED_CUT_CHANGED',self.runner.status['first_protection_exit_reason'])
+        self.assertIn('MOCK_PROTECTION_RISK_OR_FIXED_CUT_CHANGED',self.runner.episode.status['first_protection_exit_reason'])
 
     async def test_native_proof_survives_events_and_restart_without_second_submission(self):
         from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
-        await self.runner.run_once();fixed=deepcopy(self.runner._protection_exit)
+        await self.runner.episode.advance_once();fixed=deepcopy(self.runner.episode._protection_exit)
         intent_id=mock_automation_intent_id(self.spec.spec_id,fixed['decision']['decision_id'])
         with self.store._connection() as connection:
             stored=json.loads(connection.execute('SELECT document_json FROM central_execution_intents WHERE intent_id=?',(intent_id,)).fetchone()[0])
         self.assertEqual(fixed['workflow_id'],stored['mock_protection_claim']['workflow_id'])
         before=len(self.transport.calls)
         await self.runner.close()
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
-        for _ in range(5):await self.runner.run_once()
-        self.assertEqual(fixed,self.runner._protection_exit);self.assertEqual(before,len(self.transport.calls))
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        for _ in range(5):await self.runner.episode.advance_once()
+        self.assertEqual(fixed,self.runner.episode._protection_exit);self.assertEqual(before,len(self.transport.calls))
 
     async def test_unknown_original_response_is_registered_and_never_resubmitted(self):
         from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
         submit=self.transport.submit
         def unknown(intent):submit(intent);raise SubmissionUnknown('unknown protective response')
         before=len(self.transport.calls)
-        with patch.object(self.transport,'submit',side_effect=unknown):await self.runner.run_once()
-        root=self.execution.load(self.runner._unfilled_registration['root_intent']['intent_id'])
+        with patch.object(self.transport,'submit',side_effect=unknown):await self.runner.episode.advance_once()
+        root=self.execution.load(self.runner.episode._unfilled_registration['root_intent']['intent_id'])
         self.assertEqual(OrderState.SUBMISSION_UNKNOWN,root.state)
-        for _ in range(5):await self.runner.run_once()
+        for _ in range(5):await self.runner.episode.advance_once()
         self.assertEqual(before+1,len(self.transport.calls))
 
     async def test_queued_ack_loss_restores_same_native_claim_without_transport(self):
@@ -3607,30 +4202,30 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
             if value.get('policy_version')=='mock-protection-exit/v1':raise OSError('QUEUED ACK lost')
             return result
         before=len(self.transport.calls)
-        with patch.object(self.store,'create_execution_intent',side_effect=lost):await self.runner.run_once()
-        frozen=deepcopy(self.runner._protection_exit)
-        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner._unfilled_registration)
+        with patch.object(self.store,'create_execution_intent',side_effect=lost):await self.runner.episode.advance_once()
+        frozen=deepcopy(self.runner.episode._protection_exit)
+        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner.episode._unfilled_registration)
         await self.runner.close()
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
-        await self.runner.run_once()
-        self.assertEqual(frozen,self.runner._protection_exit)
-        self.assertEqual(OrderState.QUEUED,self.execution.load(self.runner._unfilled_registration['root_intent']['intent_id']).state)
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        await self.runner.episode.advance_once()
+        self.assertEqual(frozen,self.runner.episode._protection_exit)
+        self.assertEqual(OrderState.QUEUED,self.execution.load(self.runner.episode._unfilled_registration['root_intent']['intent_id']).state)
         self.assertEqual(before,len(self.transport.calls))
 
     async def test_receipt_ack_loss_recovers_original_purpose_without_second_order(self):
-        save=self.runner._repository.save_mock_automation_dispatch_receipt
+        save=self.runner.episode._repository.save_mock_automation_dispatch_receipt
         def lost(receipt):save(receipt);raise OSError('receipt ACK lost')
         before=len(self.transport.calls)
-        with patch.object(self.runner._repository,'save_mock_automation_dispatch_receipt',side_effect=lost):await self.runner.run_once()
-        self.assertEqual(before+1,len(self.transport.calls));self.assertIsNone(self.runner._unfilled_registration)
-        await self.runner.run_once()
-        self.assertEqual('PROTECTIVE_EXIT',self.runner._unfilled_registration['purpose'])
+        with patch.object(self.runner.episode._repository,'save_mock_automation_dispatch_receipt',side_effect=lost):await self.runner.episode.advance_once()
+        self.assertEqual(before+1,len(self.transport.calls));self.assertIsNone(self.runner.episode._unfilled_registration)
+        await self.runner.episode.advance_once()
+        self.assertEqual('PROTECTIVE_EXIT',self.runner.episode._unfilled_registration['purpose'])
         self.assertEqual(before+1,len(self.transport.calls))
 
     async def test_actual_fills_and_full_flat_cut_confirm_liquidation_not_submit_ack(self):
-        await self.runner.run_once()
-        self.assertNotEqual('LIQUIDATION_CONFIRMED',self.runner.status['first_protection_exit_state'])
-        root=self.execution.load(self.runner._unfilled_registration['root_intent']['intent_id'])
+        await self.runner.episode.advance_once()
+        self.assertNotEqual('LIQUIDATION_CONFIRMED',self.runner.episode.status['first_protection_exit_state'])
+        root=self.execution.load(self.runner.episode._unfilled_registration['root_intent']['intent_id'])
         self.clock+=timedelta(milliseconds=100)
         snapshot=BrokerOrderSnapshot(root.broker_order_id,ACCOUNT_REF,'005930',OrderState.FILLED,1,0,self.clock,
             (BrokerFill('protect-fill',1,30000,self.clock),))
@@ -3640,12 +4235,12 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
         async def confirmed():return replace(await read(),orders=(snapshot,))
         self.reader.read=confirmed
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
-        self.assertEqual('LIQUIDATION_CONFIRMED',self.runner.status['first_protection_exit_state'],self.runner.status)
-        self.assertTrue(self.runner._protection_pending())  # No automatic BUY reactivation.
+        await self.runner.episode.advance_once()
+        self.assertEqual('LIQUIDATION_CONFIRMED',self.runner.episode.status['first_protection_exit_state'],self.runner.episode.status)
+        self.assertTrue(self.runner.episode._protection_pending())  # No automatic BUY reactivation.
         await self.runner.close()
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
-        self.assertEqual('REVALIDATION_REQUIRED',self.runner.status['first_protection_exit_state'])
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        self.assertEqual('REVALIDATION_REQUIRED',self.runner.episode.status['first_protection_exit_state'])
 
     async def test_control_stop_during_prepared_ack_prevents_native_claim(self):
         save=self.store.upsert_documents;stopped=False
@@ -3658,18 +4253,18 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
                     spec_id=self.spec.spec_id,stopped_at=self.clock,reason='stop before first protective claim')
             return result
         before=len(self.transport.calls)
-        with patch.object(self.store,'upsert_documents',side_effect=stop):await self.runner.run_once()
-        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner._unfilled_registration)
+        with patch.object(self.store,'upsert_documents',side_effect=stop):await self.runner.episode.advance_once()
+        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner.episode._unfilled_registration)
 
     async def test_frozen_first_decision_is_not_renewed_after_expiry(self):
-        with patch.object(self.runner,'_dispatch_original_and_register',side_effect=OSError('before queue')):
-            await self.runner.run_once()
-        fixed=deepcopy(self.runner._protection_exit)
+        with patch.object(self.runner.episode,'_dispatch_original_and_register',side_effect=OSError('before queue')):
+            await self.runner.episode.advance_once()
+        fixed=deepcopy(self.runner.episode._protection_exit)
         self.clock+=timedelta(seconds=self.spec.maximum_data_gap_seconds+1)
         self.quote();await self.monitor.refresh_recovery()
         before=len(self.transport.calls)
-        await self.runner.run_once()
-        self.assertEqual(before,len(self.transport.calls));self.assertEqual(fixed,self.runner._protection_exit)
+        await self.runner.episode.advance_once()
+        self.assertEqual(before,len(self.transport.calls));self.assertEqual(fixed,self.runner.episode._protection_exit)
 
     async def test_postgres_claim_uses_same_proofs_and_row_locks_in_isolated_cursor(self):
         from kiwoom_monitor.central_server.database_execution import _require_mock_protection_claim
@@ -3685,9 +4280,9 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
             if value.get('policy_version')=='mock-protection-exit/v1':
                 _require_mock_protection_claim(Cursor(),kwargs['ownership'],value,'%s',now_provider=lambda:self.clock,new_intent_claim=True)
             return create(value,**kwargs)
-        with patch.object(self.store,'create_execution_intent',side_effect=checked):await self.runner.run_once()
+        with patch.object(self.store,'create_execution_intent',side_effect=checked):await self.runner.episode.advance_once()
         self.assertTrue(statements);self.assertTrue(all('FOR UPDATE' in sql for sql in statements))
-        self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'],self.runner.status)
+        self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'],self.runner.episode.status)
 
     async def test_native_queue_rejects_mutated_fixed_expiry(self):
         create=self.store.create_execution_intent
@@ -3696,9 +4291,9 @@ class MockFirstProtectionExitTests(unittest.IsolatedAsyncioTestCase):
                 value={**value,'expires_at':(self.clock+timedelta(hours=1)).isoformat()}
             return create(value,**kwargs)
         before=len(self.transport.calls)
-        with patch.object(self.store,'create_execution_intent',side_effect=extended):await self.runner.run_once()
+        with patch.object(self.store,'create_execution_intent',side_effect=extended):await self.runner.episode.advance_once()
         self.assertEqual(before,len(self.transport.calls))
-        self.assertIn('MOCK_PROTECTION_FIXED_APPROVAL_CHANGED',self.runner.status['first_protection_exit_reason'])
+        self.assertIn('MOCK_PROTECTION_FIXED_APPROVAL_CHANGED',self.runner.episode.status['first_protection_exit_reason'])
 
     async def test_close_joins_prepared_ack_and_blocks_first_order_before_claim(self):
         import asyncio
@@ -3747,9 +4342,9 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             if self.cancel_calls == 1 or repeat:
                 raise (SubmissionUnknown if unknown else SubmissionRejected)('fixture cancel response')
         self.transport.cancel = cancel
-        await self.runner.run_once()
-        self.assertEqual(1,self.cancel_calls,self.runner.status)
-        return self.runner.status.get('protective_cancel_recovery')
+        await self.runner.episode.advance_once()
+        self.assertEqual(1,self.cancel_calls,self.runner.episode.status)
+        return self.runner.episode.status.get('protective_cancel_recovery')
 
     async def current_cut(self, seconds=1.1):
         self.clock += timedelta(seconds=seconds)
@@ -3761,54 +4356,114 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(('WATCH',0),(cue['state'],cue['retries_used']))
         before = len(self.transport.calls)
         await self.current_cut()
-        await self.runner.run_once()
-        self.assertEqual((2,before),(self.cancel_calls,len(self.transport.calls)),self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual((2,before),(self.cancel_calls,len(self.transport.calls)),self.runner.episode.status)
         events = self.execution.events(self.intent.intent_id)
         starts = [row for row in events if row['event_type']=='CANCEL_STARTED']
         self.assertEqual(2,len(starts))
         self.assertEqual(2,starts[-1]['mock_cancel_retry_claim']['attempt'])
-        self.assertEqual('WAIT_RECONCILIATION',self.runner._cancel_recovery['state'])
+        self.assertEqual('WAIT_RECONCILIATION',self.runner.episode._cancel_recovery['state'])
         self.assertEqual(OrderState.CANCEL_PENDING,self.runtime.load_intent(self.intent.intent_id).state)
+
+    async def test_close_drains_protective_cancel_rejection_and_restores_recovery(self):
+        import asyncio, threading
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionRejected
+        await self.native_setup(True)
+        self.store._execution_wall_now = lambda: self.clock
+        runner = self.runner
+        episode = runner.episode
+        entered, release = threading.Event(), threading.Event()
+        closing_started = asyncio.Event()
+        begin_close = episode.begin_close
+
+        def reject(*_args):
+            self.cancel_calls += 1
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('controlled cancel release was not signalled')
+            raise SubmissionRejected('broker rejected during close')
+
+        def signal_close(**kwargs):
+            begin_close(**kwargs)
+            closing_started.set()
+
+        self.transport.cancel = reject
+        closing = None
+        with patch.object(episode, 'begin_close', side_effect=signal_close):
+            await runner.start()
+            scheduled = runner._task
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3), episode.status)
+                self.assertFalse(episode._protection_pending())
+                read_and_submit_counts = self.reader.calls, len(self.transport.calls)
+                closing = asyncio.create_task(runner.close())
+                await asyncio.wait_for(closing_started.wait(), 5)
+                self.assertFalse(closing.done())
+            finally:
+                release.set()
+                if closing is not None:
+                    await asyncio.wait_for(closing, 5)
+        self.assertTrue(scheduled.done() and runner._task is None)
+        events = [row for row in self.execution.events(self.intent.intent_id)
+                  if row['event_type'].startswith('CANCEL_')]
+        self.assertEqual(['CANCEL_STARTED', 'CANCEL_REJECTED'], [row['event_type'] for row in events])
+        checkpoint = self.store.load_document('execution_mock_automation_runner_current', ACCOUNT_REF, 'current')['document']
+        cue = checkpoint.get('protective_cancel_recovery')
+        self.assertIsNotNone(cue, 'close must checkpoint the acknowledged cancellation rejection')
+        self.assertEqual(('WATCH', 1, 0, events[-1]['event_id']),
+                         (cue['state'], cue['cancel_claims'], cue['retries_used'], cue['reject_event_id']))
+        self.assertEqual('PENDING', checkpoint['protection_review']['state'])
+        with self.assertRaisesRegex(RuntimeError, 'MOCK_AUTOMATION_RUNNER_CLOSED'):
+            await runner.start()
+        with self.assertRaisesRegex(RuntimeError, 'MOCK_AUTOMATION_RUNNER_CLOSED'):
+            episode.request_protection_review(reason='new request', input_ref='closed-runner', requested_at=self.clock)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec,
+                                       price_source=self.collector.automation_price_observation)
+        self.addAsyncCleanup(self.runner.close)
+        self.assertEqual(cue, self.runner.episode.status['protective_cancel_recovery'])
+        self.assertEqual('PENDING', self.runner.episode.status['protection_review']['state'])
+        self.assertEqual(read_and_submit_counts, (self.reader.calls, len(self.transport.calls)))
+        self.assertEqual(1, self.cancel_calls)
 
     async def test_retry_budget_exhaustion_survives_restart_and_cannot_submit_third_cancel(self):
         await self.reject_first(repeat=True)
-        await self.current_cut(); await self.runner.run_once()
-        self.assertEqual((2,'ESCALATE'),(self.cancel_calls,self.runner._cancel_recovery['state']),self.runner.status)
+        await self.current_cut(); await self.runner.episode.advance_once()
+        self.assertEqual((2,'ESCALATE'),(self.cancel_calls,self.runner.episode._cancel_recovery['state']),self.runner.episode.status)
         await self.runner.close()
-        self.runner = MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        self.runner = _prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
         self.addAsyncCleanup(self.runner.close)
         await self.current_cut(.2)
-        for _ in range(5):await self.runner.run_once()
+        for _ in range(5):await self.runner.episode.advance_once()
         self.assertEqual(2,self.cancel_calls)
-        self.assertTrue(self.runner.status['requires_operator_attention'])
+        self.assertTrue(self.runner.episode.status['requires_operator_attention'])
 
     async def test_unknown_cancel_never_retries_even_if_rest_still_reports_accepted(self):
         await self.reject_first(unknown=True)
-        await self.current_cut(); await self.runner.run_once()
-        self.assertEqual((1,'WAIT_RECONCILIATION'),(self.cancel_calls,self.runner._cancel_recovery['state']))
+        await self.current_cut(); await self.runner.episode.advance_once()
+        self.assertEqual((1,'WAIT_RECONCILIATION'),(self.cancel_calls,self.runner.episode._cancel_recovery['state']))
         self.assertEqual(1,sum(row['event_type']=='CANCEL_STARTED' for row in self.execution.events(self.intent.intent_id)))
 
     async def test_accepted_cancel_response_never_retries_before_cancel_confirmation(self):
         await self.reject_first()
-        await self.current_cut(); await self.runner.run_once()
-        await self.current_cut(.2); await self.runner.run_once()
+        await self.current_cut(); await self.runner.episode.advance_once()
+        await self.current_cut(.2); await self.runner.episode.advance_once()
         self.assertEqual(2,self.cancel_calls)
-        self.assertFalse(self.runner._unfilled_attempt_plan['children'])
+        self.assertFalse(self.runner.episode._unfilled_attempt_plan['children'])
 
     async def test_original_deadline_escalates_without_new_order_or_cancel(self):
         cue = await self.reject_first(unknown=True)
         end = datetime.fromisoformat(cue['next_check_at'])
         self.clock = end + timedelta(milliseconds=1)
         await self.monitor.refresh_recovery(); self.quote(990)
-        await self.runner.run_once()
-        self.assertEqual((1,'ESCALATE'),(self.cancel_calls,self.runner._cancel_recovery['state']))
-        self.assertTrue(self.runner.status['requires_operator_attention'])
+        await self.runner.episode.advance_once()
+        self.assertEqual((1,'ESCALATE'),(self.cancel_calls,self.runner.episode._cancel_recovery['state']))
+        self.assertTrue(self.runner.episode.status['requires_operator_attention'])
 
     async def test_idle_polls_do_not_repeat_full_cancel_review_or_commit(self):
         await self.reject_first()
-        await self.runner.run_once()  # Drain the once-only native ACK cursor.
+        await self.runner.episode.advance_once()  # Drain the once-only native ACK cursor.
         with self.count_native() as counts:
-            for _ in range(10):await self.runner.run_once()
+            for _ in range(10):await self.runner.episode.advance_once()
         self.assertEqual((1,0),(self.cancel_calls,counts['commits']),counts)
 
     async def test_sql_fence_rejects_risk_change_after_callback_before_cancel_claim(self):
@@ -3824,7 +4479,7 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             return apply(intent,event,**kw)
         with patch.object(self.store,'append_execution_event',side_effect=changed):
             with self.assertRaisesRegex(RuntimeError,'MOCK_PROTECTIVE_CANCEL_RETRY_NATIVE_CUT_CHANGED'):
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
         self.assertEqual(1,sum(row['event_type']=='CANCEL_STARTED' for row in self.execution.events(self.intent.intent_id)))
 
@@ -3837,9 +4492,9 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.positions={'005930':2};self.cash += 990
             return await refresh()
         self.bundle.gateway._account_refresh=filled
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
-        self.assertEqual('MOCK_AUTOMATION_CANCEL_ASSESSED_ORDER_CHANGED',self.runner.status['unfilled_input_delivery']['reason'])
+        self.assertEqual('MOCK_AUTOMATION_CANCEL_ASSESSED_ORDER_CHANGED',self.runner.episode.status['unfilled_input_delivery']['reason'])
 
     async def test_default_policy_preserves_identity_and_disallows_retry(self):
         from kiwoom_monitor.domain.execution_activation import MockUnfilledExecutionPolicy
@@ -3849,8 +4504,8 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(frozen.policy_id,self.unfilled_execution_policy.policy_id)
         self.unfilled_execution_policy=frozen
         self.rebuild_native_policy()
-        await self.reject_first();await self.current_cut();await self.runner.run_once()
-        self.assertEqual((1,'ESCALATE'),(self.cancel_calls,self.runner._cancel_recovery['state']))
+        await self.reject_first();await self.current_cut();await self.runner.episode.advance_once()
+        self.assertEqual((1,'ESCALATE'),(self.cancel_calls,self.runner.episode._cancel_recovery['state']))
 
     async def test_invalid_retry_policy_is_rejected(self):
         for change in ({'maximum_protective_cancel_retries':4},{'maximum_protective_cancel_retries':True},
@@ -3860,9 +4515,9 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_take_profit_without_ev_is_not_promoted_by_retry_enabled_spec(self):
         await self.native_setup(False)
-        await self.current_cut();await self.runner.run_once()
+        await self.current_cut();await self.runner.episode.advance_once()
         self.assertEqual(0,self.cancel_calls)
-        self.assertIsNone(self.runner._cancel_recovery)
+        self.assertIsNone(self.runner.episode._cancel_recovery)
 
     async def test_sql_fence_rechecks_latest_cancel_response_in_native_transaction(self):
         from kiwoom_monitor.domain.order_contract import order_event
@@ -3877,7 +4532,7 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             return append(intent,event,**kw)
         with patch.object(self.store,'append_execution_event',side_effect=changed):
             with self.assertRaisesRegex(RuntimeError,'MOCK_PROTECTIVE_CANCEL_RETRY_NATIVE_CUT_CHANGED'):
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
 
     async def test_retry_claim_ack_loss_spends_budget_without_repeat_transport(self):
@@ -3889,15 +4544,15 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 raise OSError('lost native retry ACK')
             return result
         with patch.object(self.store,'append_execution_event',side_effect=lost):
-            with self.assertRaisesRegex(OSError,'lost native retry ACK'):await self.runner.run_once()
+            with self.assertRaisesRegex(OSError,'lost native retry ACK'):await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
         await self.runner.close()
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
         self.addAsyncCleanup(self.runner.close)
-        await self.current_cut(.2);await self.runner.run_once()
+        await self.current_cut(.2);await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
         self.assertEqual(2,sum(row['event_type']=='CANCEL_STARTED' for row in self.execution.events(self.intent.intent_id)))
-        self.assertEqual('WAIT_RECONCILIATION',self.runner._cancel_recovery['state'])
+        self.assertEqual('WAIT_RECONCILIATION',self.runner.episode._cancel_recovery['state'])
 
     async def test_corrupt_recovery_checkpoint_cannot_reset_or_redirect_root(self):
         await self.reject_first();await self.runner.close()
@@ -3905,7 +4560,7 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
         rows[0]['document']['protective_cancel_recovery']['managed_intent_id']='foreign-root'
         self.store.upsert_documents('execution_mock_automation_runner_current',rows)
         with self.assertRaisesRegex(ValueError,'invalid_protective_cancel_recovery_checkpoint'):
-            MockAutomationRunner(self.store,self.bundle,self.spec)
+            _prepared_runner(self.store,self.bundle,self.spec)
 
     async def test_cancel_confirmed_during_retry_refresh_returns_terminal_without_another_cancel(self):
         await self.reject_first();await self.current_cut()
@@ -3914,19 +4569,19 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.snapshot=replace(self.snapshot,state=OrderState.CANCELLED,remaining_quantity=0)
             return await refresh()
         self.bundle.gateway._account_refresh=cancelled
-        await self.runner.run_once()
-        self.assertEqual((1,'RESOLVED'),(self.cancel_calls,self.runner._cancel_recovery['state']))
-        self.assertFalse(self.runner._unfilled_attempt_plan['children'])
+        await self.runner.episode.advance_once()
+        self.assertEqual((1,'RESOLVED'),(self.cancel_calls,self.runner.episode._cancel_recovery['state']))
+        self.assertFalse(self.runner.episode._unfilled_attempt_plan['children'])
 
     async def test_parent_retry_budget_is_not_reset_for_a_child(self):
         from kiwoom_monitor.application.order_lifecycle import protective_cancel_recovery
-        await self.reject_first(repeat=True);await self.current_cut();await self.runner.run_once()
+        await self.reject_first(repeat=True);await self.current_cut();await self.runner.episode.advance_once()
         events=self.execution.events(self.intent.intent_id)
         child=replace(self.execution.load(self.intent.intent_id),intent=replace(self.intent,intent_id='child-fixture'))
         child_events=tuple({**row,'intent_id':child.intent.intent_id} for row in events
             if row['event_type'] in {'CANCEL_STARTED','CANCEL_REJECTED'})[:2]
         cue=protective_cancel_recovery(child,(*events,*child_events),
-            self.runner._validate_unfilled_registration(self.runner._unfilled_registration),self.unfilled_execution_policy,self.clock)
+            self.runner.episode._validate_unfilled_registration(self.runner.episode._unfilled_registration),self.unfilled_execution_policy,self.clock)
         self.assertEqual((1,'ESCALATE'),(cue['retries_used'],cue['state']))
 
     async def test_close_during_retry_refresh_prevents_second_native_claim(self):
@@ -3950,7 +4605,7 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
         from kiwoom_monitor.central_server.database_execution import _require_mock_cancel_retry
         from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_document
         await self.reject_first();await self.current_cut()
-        policy=self.runner._validate_unfilled_registration(self.runner._unfilled_registration)
+        policy=self.runner.episode._validate_unfilled_registration(self.runner.episode._unfilled_registration)
         record=self.execution.load(self.intent.intent_id);events=self.execution.events(self.intent.intent_id)
         risk=self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
         claim={'root_intent_id':policy.anchor_intent_id,'policy_id':self.unfilled_execution_policy.policy_id,
@@ -3979,18 +4634,18 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_due_clock_requests_one_existing_owner_recovery_and_consumes_its_ack(self):
         import asyncio
-        await self.reject_first();await self.runner.run_once()
+        await self.reject_first();await self.runner.episode.advance_once()
         self.clock+=timedelta(seconds=1.1);self.quote(990)
         with patch.object(self.monitor,'request_automation_execution_recovery',wraps=self.monitor.request_automation_execution_recovery) as request:
-            for _ in range(3):await self.runner.run_once()
+            for _ in range(3):await self.runner.episode.advance_once()
         self.assertEqual(1,request.call_count)
         self.assertEqual(1,self.cancel_calls)
         # Run the actual existing coalesced queue consumer, without its network
         # collector or heartbeat; recovery itself uses the fixture REST reader.
         self.monitor._task=asyncio.create_task(self.monitor._run())
         await asyncio.wait_for(self.monitor._queue.join(),3)
-        await self.runner.run_once()
-        self.assertEqual(2,self.cancel_calls,self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual(2,self.cancel_calls,self.runner.episode.status)
 
     async def test_sql_fence_rejects_resealed_protection_deadline_extension(self):
         from kiwoom_monitor.application.order_lifecycle import seal_unfilled_attempt_plan
@@ -4007,7 +4662,7 @@ class MockProtectiveCancelRecoveryTests(unittest.IsolatedAsyncioTestCase):
             return append(intent,event,**kw)
         with patch.object(self.store,'append_execution_event',side_effect=extended):
             with self.assertRaisesRegex(RuntimeError,'MOCK_PROTECTIVE_CANCEL_RETRY_POLICY_CHANGED'):
-                await self.runner.run_once()
+                await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
 
 class MockUnfilledPairedInputTests(unittest.IsolatedAsyncioTestCase):
@@ -4041,68 +4696,68 @@ class MockUnfilledPairedInputTests(unittest.IsolatedAsyncioTestCase):
     def population_args(self,**changes):
         from tests.unit.test_order_lifecycle import UnfilledPairedEvidenceTests
         record=self.execution.load(self.intent.intent_id)
-        policy=self.runner._validate_unfilled_registration(self.runner._unfilled_registration)
+        policy=self.runner.episode._validate_unfilled_registration(self.runner.episode._unfilled_registration)
         held=self.positions.get('005930',0)
         quantity=record.intent.quantity-record.filled_quantity
-        target=self.runner._unfilled_registration['target_quantity']
+        target=self.runner.episode._unfilled_registration['target_quantity']
         price=990 if record.intent.side.value=='SELL' else 1001
-        rows=UnfilledPairedEvidenceTests.outcomes_for(record,policy,self.runner._unfilled_cost_model,self.clock,quantity,held,target,price)
+        rows=UnfilledPairedEvidenceTests.outcomes_for(record,policy,self.runner.episode._unfilled_cost_model,self.clock,quantity,held,target,price)
         args=dict(root_intent_id=self.intent.intent_id,managed_intent_id=self.intent.intent_id,
                   population_ref='cohort:unfilled',available_at=self.clock,outcomes=rows)
         args.update(changes)
         return args
 
     def publish(self,**changes):
-        return self.runner.offer_unfilled_reprice_outcomes(**self.population_args(**changes))
+        return self.runner.episode.offer_unfilled_reprice_outcomes(**self.population_args(**changes))
 
     async def test_tp_population_drives_cancel_and_confirmed_state_needs_new_pair_before_child(self):
         await self.ready();self.assertTrue(self.publish())
-        await self.runner.run_once()
-        self.assertEqual(1,self.cancel_calls,self.runner.status)
-        self.assertEqual('REPRICE',self.runner.status['after_cancel'])
+        await self.runner.episode.advance_once()
+        self.assertEqual(1,self.cancel_calls,self.runner.episode.status)
+        self.assertEqual('REPRICE',self.runner.episode.status['after_cancel'])
         before=len(self.transport.calls)
         self.snapshot=replace(self.snapshot,state=OrderState.CANCELLED,remaining_quantity=0)
         await self.monitor.refresh_recovery();self.quote(990)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(before,len(self.transport.calls))
-        self.assertFalse(self.runner._unfilled_attempt_plan['children'])
+        self.assertFalse(self.runner.episode._unfilled_attempt_plan['children'])
         self.clock+=timedelta(milliseconds=1)
         self.assertTrue(self.publish())
         await self.monitor.refresh_recovery()
-        await self.runner.run_once()
-        self.assertEqual(before+1,len(self.transport.calls),self.runner.status)
-        child=self.execution.load(self.runner._unfilled_attempt_plan['children'][-1]['intent']['intent_id'])
+        await self.runner.episode.advance_once()
+        self.assertEqual(before+1,len(self.transport.calls),self.runner.episode.status)
+        child=self.execution.load(self.runner.episode._unfilled_attempt_plan['children'][-1]['intent']['intent_id'])
         self.assertEqual((3,990,'SELL'),(child.intent.quantity,child.intent.limit_price,child.intent.side.value))
 
     async def test_missing_population_keeps_ev_unknown_despite_current_cost_model(self):
-        await self.ready();await self.runner.run_once()
+        await self.ready();await self.runner.episode.advance_once()
         self.assertEqual(0,self.cancel_calls)
-        status=self.runner.status['unfilled_native_source']
+        status=self.runner.episode.status['unfilled_native_source']
         self.assertTrue(status['cost_model_available'])
         self.assertEqual('UNAVAILABLE',status['paired_ev'])
 
     async def test_native_actual_bar_hold_supplies_bounded_wait_without_orders_or_state_mutation(self):
         await self.ready()
-        self.runner._apply_new_fills()
-        prior=self.runner._state
+        _apply_runner_fills(self.runner)
+        prior=self.runner.episode._episode_position._state
         self._bar(self.clock-timedelta(seconds=62),1005,1010)
         observation=self.observations[-1]
-        await self.runner._consume(observation)
-        self.assertEqual('HOLD',self.runner._unfilled_judgment['final_action'])
-        self.assertEqual(prior,self.runner._state)
-        with patch.object(self.runner, '_current_unfilled_judgment',
-                          wraps=self.runner._current_unfilled_judgment) as judgment:
-            await self.runner.run_once()
-        self.assertEqual(('WAIT',0),(self.runner._unfilled_attempt_plan['result']['action'],self.cancel_calls))
-        self.assertTrue(self.runner._unfilled_attempt_plan['result']['inputs']['assessment']['trend_allows_wait'])
+        await self.runner.episode._consume(observation)
+        self.assertEqual('HOLD',self.runner.episode._unfilled_judgment['final_action'])
+        self.assertEqual(prior,self.runner.episode._episode_position._state)
+        with patch.object(self.runner.episode, '_current_unfilled_judgment',
+                          wraps=self.runner.episode._current_unfilled_judgment) as judgment:
+            await self.runner.episode.advance_once()
+        self.assertEqual(('WAIT',0),(self.runner.episode._unfilled_attempt_plan['result']['action'],self.cancel_calls))
+        self.assertTrue(self.runner.episode._unfilled_attempt_plan['result']['inputs']['assessment']['trend_allows_wait'])
         self.assertEqual(2, judgment.call_count)
 
     async def test_model_expiry_cannot_support_native_paired_reprice(self):
         await self.ready();self.publish()
-        self.runner._unfilled_cost_model=replace(self.runner._unfilled_cost_model,valid_to=self.clock.isoformat())
-        await self.runner.run_once()
+        self.runner.episode._unfilled_cost_model=replace(self.runner.episode._unfilled_cost_model,valid_to=self.clock.isoformat())
+        await self.runner.episode.advance_once()
         self.assertEqual(0,self.cancel_calls)
-        self.assertFalse(self.runner.status['unfilled_native_source']['cost_model_available'])
+        self.assertFalse(self.runner.episode.status['unfilled_native_source']['cost_model_available'])
 
     async def test_fresh_account_cannot_renew_population_publication_or_recompute_same_pair(self):
         await self.ready();self.publish()
@@ -4110,34 +4765,34 @@ class MockUnfilledPairedInputTests(unittest.IsolatedAsyncioTestCase):
         async def missing(*_args):raise OSError('fixture actual cost absent')
         self.reader.read_trade_cost_pages=missing
         await self.monitor.refresh_recovery()
-        with patch('kiwoom_monitor.central_server.mock_automation_runner.prepare_unfilled_reprice_evidence',
+        with patch('kiwoom_monitor.central_server.mock_automation_episode.prepare_unfilled_reprice_evidence',
                    wraps=__import__('kiwoom_monitor.application.order_lifecycle',fromlist=['prepare_unfilled_reprice_evidence']).prepare_unfilled_reprice_evidence) as prepare:
-            await self.runner.run_once()
-            published=self.runner._unfilled_population['available_at']
+            await self.runner.episode.advance_once()
+            published=self.runner.episode._unfilled_population['available_at']
             for _ in range(5):
-                await self.monitor.refresh_recovery();self.quote(990);await self.runner.run_once()
+                await self.monitor.refresh_recovery();self.quote(990);await self.runner.episode.advance_once()
         self.assertEqual(1,prepare.call_count)
-        self.assertEqual(published,self.runner._unfilled_population['available_at'])
+        self.assertEqual(published,self.runner.episode._unfilled_population['available_at'])
         self.assertEqual(0,self.cancel_calls)
 
     async def test_duplicate_population_notifications_do_no_db_io_and_keep_one_slot(self):
         await self.ready()
         args=self.population_args()
         with self.count_native() as counts:
-            self.assertTrue(self.runner.offer_unfilled_reprice_outcomes(**args))
-            for _ in range(100):self.assertFalse(self.runner.offer_unfilled_reprice_outcomes(**args))
+            self.assertTrue(self.runner.episode.offer_unfilled_reprice_outcomes(**args))
+            for _ in range(100):self.assertFalse(self.runner.episode.offer_unfilled_reprice_outcomes(**args))
         self.assertEqual((0,0),(counts['selects'],counts['commits']))
-        self.assertIsNotNone(self.runner._unfilled_population)
+        self.assertIsNotNone(self.runner.episode._unfilled_population)
 
     async def test_scope_order_and_duplicate_sample_are_rejected_before_publication(self):
         await self.ready()
         from tests.unit.test_order_lifecycle import UnfilledPairedEvidenceTests
-        record=self.execution.load(self.intent.intent_id);policy=self.runner._validate_unfilled_registration(self.runner._unfilled_registration)
-        rows=UnfilledPairedEvidenceTests.outcomes_for(record,policy,self.runner._unfilled_cost_model,self.clock,3,3,0,990)
+        record=self.execution.load(self.intent.intent_id);policy=self.runner.episode._validate_unfilled_registration(self.runner.episode._unfilled_registration)
+        rows=UnfilledPairedEvidenceTests.outcomes_for(record,policy,self.runner.episode._unfilled_cost_model,self.clock,3,3,0,990)
         for changes in ({'root_intent_id':'foreign'},{'managed_intent_id':'foreign'},
                         {'available_at':self.clock+timedelta(microseconds=1)},{'outcomes':(*rows,rows[0])}):
             with self.subTest(changes=changes),self.assertRaises(ValueError):self.publish(**changes)
-        self.assertIsNone(self.runner._unfilled_population)
+        self.assertIsNone(self.runner.episode._unfilled_population)
 
     async def test_unselected_supplied_evidence_and_protection_episode_cannot_accept_population(self):
         self.unfilled_execution_policy=replace(self.unfilled_execution_policy,allow_supplied_paired_mock_evidence=False)
@@ -4145,90 +4800,90 @@ class MockUnfilledPairedInputTests(unittest.IsolatedAsyncioTestCase):
         arguments = self.population_args()
         self.assertTrue(arguments['outcomes'])
         with self.assertRaisesRegex(ValueError, 'unfilled_population_not_admitted_or_out_of_scope'):
-            self.runner.offer_unfilled_reprice_outcomes(**arguments)
-        self.assertIsNone(self.runner._unfilled_population)
+            self.runner.episode.offer_unfilled_reprice_outcomes(**arguments)
+        self.assertIsNone(self.runner.episode._unfilled_population)
 
     async def test_restart_does_not_replay_empirical_population_or_cached_current_judgment(self):
-        await self.ready();self.publish();await self.runner.run_once();await self.runner.close()
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        await self.ready();self.publish();await self.runner.episode.advance_once();await self.runner.close()
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
         self.addAsyncCleanup(self.runner.close)
-        self.assertIsNone(self.runner._unfilled_population)
-        self.assertIsNone(self.runner._unfilled_judgment)
-        self.assertIsNone(self.runner._unfilled_evidence_cache)
+        self.assertIsNone(self.runner.episode._unfilled_population)
+        self.assertIsNone(self.runner.episode._unfilled_judgment)
+        self.assertIsNone(self.runner.episode._unfilled_evidence_cache)
 
     async def test_protection_bypasses_population_cost_and_family_calculation(self):
         await self.ready(True)
-        self.runner._unfilled_cost_model=None
-        with patch.object(self.runner,'_prepare_native_unfilled_evidence',side_effect=AssertionError('protective EV delay')):
-            await self.runner.run_once()
+        self.runner.episode._unfilled_cost_model=None
+        with patch.object(self.runner.episode,'_prepare_native_unfilled_evidence',side_effect=AssertionError('protective EV delay')):
+            await self.runner.episode.advance_once()
         self.assertEqual(1,self.cancel_calls)
-        self.assertEqual('PROTECTIVE_EXIT',self.runner._unfilled_attempt_plan['result']['purpose'])
+        self.assertEqual('PROTECTIVE_EXIT',self.runner.episode._unfilled_attempt_plan['result']['purpose'])
         with self.assertRaises(ValueError):
-            self.runner.offer_unfilled_reprice_outcomes(root_intent_id=self.intent.intent_id,
+            self.runner.episode.offer_unfilled_reprice_outcomes(root_intent_id=self.intent.intent_id,
                 managed_intent_id=self.intent.intent_id,population_ref='forbidden-protective',available_at=self.clock,outcomes=())
 
     async def test_current_actual_cost_failure_still_blocks_ordinary_cancel_with_positive_pair(self):
         await self.native_setup(False);self.publish()
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual(0,self.cancel_calls)
-        self.assertIn('unfilled_cancel_current_cost_evidence_unavailable',self.runner.status['unfilled_input_delivery']['reason'])
+        self.assertIn('unfilled_cancel_current_cost_evidence_unavailable',self.runner.episode.status['unfilled_input_delivery']['reason'])
 
     async def test_current_pair_price_binding_changes_once_without_tick_recompute(self):
         await self.ready();self.publish()
         self.quote(980)
-        with patch('kiwoom_monitor.central_server.mock_automation_runner.prepare_unfilled_reprice_evidence',
+        with patch('kiwoom_monitor.central_server.mock_automation_episode.prepare_unfilled_reprice_evidence',
                    wraps=__import__('kiwoom_monitor.application.order_lifecycle',fromlist=['prepare_unfilled_reprice_evidence']).prepare_unfilled_reprice_evidence) as prepare:
-            await self.runner.run_once()
-            for _ in range(10):self.quote(980);await self.runner.run_once()
+            await self.runner.episode.advance_once()
+            for _ in range(10):self.quote(980);await self.runner.episode.advance_once()
         self.assertEqual(1,prepare.call_count)
         self.assertEqual(0,self.cancel_calls)
-        self.assertEqual('UNAVAILABLE',self.runner.status['unfilled_native_source']['paired_ev'])
+        self.assertEqual('UNAVAILABLE',self.runner.episode.status['unfilled_native_source']['paired_ev'])
 
     async def test_population_arriving_in_same_cut_requests_one_actual_ack_without_invented_time(self):
         import asyncio
-        await self.ready();await self.runner.run_once()
-        previous=self.runner._unfilled_input_identity
+        await self.ready();await self.runner.episode.advance_once()
+        previous=self.runner.episode._unfilled_input_identity
         self.publish()
         with patch.object(self.monitor,'request_automation_execution_recovery',wraps=self.monitor.request_automation_execution_recovery) as request:
-            for _ in range(3):await self.runner.run_once()
+            for _ in range(3):await self.runner.episode.advance_once()
         self.assertEqual(1,request.call_count)
-        self.assertEqual(previous,self.runner._unfilled_input_identity)
+        self.assertEqual(previous,self.runner.episode._unfilled_input_identity)
         self.assertEqual(0,self.cancel_calls)
         self.monitor._task=asyncio.create_task(self.monitor._run())
         await __import__('asyncio').wait_for(self.monitor._queue.join(),3)
-        await self.runner.run_once()
-        self.assertEqual(1,self.cancel_calls,self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual(1,self.cancel_calls,self.runner.episode.status)
 
     async def test_expired_population_cannot_be_renewed_by_healthy_account_cut(self):
         await self.ready();self.publish()
-        original=self.runner._unfilled_population['available_at']
+        original=self.runner.episode._unfilled_population['available_at']
         self.clock+=timedelta(seconds=6);await self.monitor.refresh_recovery();self.quote(990)
-        await self.runner.run_once()
-        self.assertEqual(original,self.runner._unfilled_population['available_at'])
+        await self.runner.episode.advance_once()
+        self.assertEqual(original,self.runner.episode._unfilled_population['available_at'])
         self.assertEqual(0,self.cancel_calls)
-        self.assertEqual('UNAVAILABLE',self.runner.status['unfilled_native_source']['paired_ev'])
+        self.assertEqual('UNAVAILABLE',self.runner.episode.status['unfilled_native_source']['paired_ev'])
 
     async def test_registered_strategy_stop_loss_uses_protection_before_positive_ev(self):
-        await self.ready();self.publish();self.runner._apply_new_fills()
+        await self.ready();self.publish();_apply_runner_fills(self.runner)
         self._bar(self.clock-timedelta(seconds=62),960,1010)
-        await self.runner._consume(self.observations[-1]);self.quote(980)
-        self.assertTrue(self.runner._protection_pending())
-        with patch.object(self.runner,'_prepare_native_unfilled_evidence',side_effect=AssertionError('protection waited on EV')):
-            await self.runner.run_once()
-        self.assertEqual(1,self.cancel_calls,self.runner.status)
-        self.assertEqual('PROTECTIVE_EXIT',self.runner._unfilled_attempt_plan['result']['purpose'])
+        await self.runner.episode._consume(self.observations[-1]);self.quote(980)
+        self.assertTrue(self.runner.episode._protection_pending())
+        with patch.object(self.runner.episode,'_prepare_native_unfilled_evidence',side_effect=AssertionError('protection waited on EV')):
+            await self.runner.episode.advance_once()
+        self.assertEqual(1,self.cancel_calls,self.runner.episode.status)
+        self.assertEqual('PROTECTIVE_EXIT',self.runner.episode._unfilled_attempt_plan['result']['purpose'])
 
 
 
     async def test_healthy_alignment_ack_wakes_pending_runner_even_without_business_fact_change(self):
         import asyncio
-        await self.ready();await self.runner.run_once();self.publish()
-        await self.runner.run_once()
-        self.assertEqual('awaiting_aligned_native_decision_cut',self.runner._unfilled_source_status['reason'])
+        await self.ready();await self.runner.episode.advance_once();self.publish()
+        await self.runner.episode.advance_once()
+        self.assertEqual('awaiting_aligned_native_decision_cut',self.runner.episode._unfilled_source_status['reason'])
         self.runner._wake_loop=asyncio.get_running_loop();self.runner._wake_event=asyncio.Event()
         await self.monitor.refresh_recovery()
         await asyncio.wait_for(self.runner._wake_event.wait(),.2)
-        self.assertTrue(self.runner._unfilled_source_pending)
+        self.assertTrue(self.runner.episode._unfilled_source_pending)
 
 
 class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
@@ -4272,7 +4927,7 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
         self.collector.set_automation_price_listener(self.supervisor.observe_automation_price)
 
     def stop_price(self):
-        return 70000*(10000-self.runner._config.stop_loss_bps)//10000
+        return 70000*(10000-self.runner.episode._config.stop_loss_bps)//10000
 
     async def test_native_fill_basis_and_old_snapshot_hash_compatibility(self):
         from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
@@ -4292,7 +4947,7 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
             self.tick(self.stop_price())
         await asyncio.wait_for(self.runner._wake_event.wait(),.2)
         self.assertEqual({'connections':0,'selects':0,'commits':0},counts)
-        notice=self.runner._protection_snapshot()
+        notice=self.runner.episode._protection_snapshot()
         self.assertEqual(['SYMBOL_STOP_LOSS_REACHED'],notice['risk_trigger']['reasons'])
         self.assertEqual('EXIT_REQUIRED',notice['risk_trigger']['disposition'])
         self.assertEqual(before,len(self.transport.calls));self.assertFalse(notice['order_authorized'])
@@ -4325,20 +4980,20 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
                 with self.count_native() as counts:self.tick(self.stop_price())
                 await asyncio.wait_for(self.runner._wake_event.wait(),.2)
                 self.assertEqual({'connections':0,'selects':0,'commits':0},counts)
-                first=deepcopy(self.runner._protection_snapshot())
+                first=deepcopy(self.runner.episode._protection_snapshot())
                 self.assertFalse(pending.done())
                 with (patch.object(self.store,'load_observation_revisions_after',side_effect=AssertionError('minute wait')),
-                      patch.object(self.runner,'_prepare_native_unfilled_evidence',side_effect=AssertionError('EV wait'))):
-                    await self.runner.run_once()
+                      patch.object(self.runner.episode,'_prepare_native_unfilled_evidence',side_effect=AssertionError('EV wait'))):
+                    await self.runner.episode.advance_once()
                     await self.monitor.refresh_recovery()
-                    await self.runner.run_once()
+                    await self.runner.episode.advance_once()
                 self.assertFalse(pending.done(),'native protection waited for R4 to finish')
-                self.assertEqual(before+1,len(self.transport.calls),self.runner.status)
-                self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'])
-                self.assertEqual('PROTECTIVE_EXIT',self.runner._unfilled_registration['purpose'])
-                self.assertEqual(10,self.runner._unfilled_registration['root_intent']['quantity'])
-                self.assertEqual(first,self.runner._protection_snapshot())
-                self.assertEqual(10,self.runner._state.position_quantity,'submission is not liquidation')
+                self.assertEqual(before+1,len(self.transport.calls),self.runner.episode.status)
+                self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'])
+                self.assertEqual('PROTECTIVE_EXIT',self.runner.episode._unfilled_registration['purpose'])
+                self.assertEqual(10,self.runner.episode._unfilled_registration['root_intent']['quantity'])
+                self.assertEqual(first,self.runner.episode._protection_snapshot())
+                self.assertEqual(10,self.runner.episode._episode_position._state.position_quantity,'submission is not liquidation')
                 release.set();await asyncio.wait_for(pending,5)
             receipt=shadow.latest_results['position_allocation']
             self.assertEqual('EV_UNAVAILABLE',receipt['r4_action_comparison']['status'])
@@ -4350,59 +5005,59 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_exit_uses_original_stop_quote_after_rebound_without_bars_or_ev(self):
         self.connect();self.clock+=timedelta(milliseconds=20);self.tick(self.stop_price())
-        original=deepcopy(self.runner._protection_snapshot());before=len(self.transport.calls)
+        original=deepcopy(self.runner.episode._protection_snapshot());before=len(self.transport.calls)
         with patch.object(self.store,'load_observation_revisions_after',side_effect=AssertionError('bar wait')):
             with patch.object(self.monitor,'request_automation_execution_recovery',wraps=self.monitor.request_automation_execution_recovery) as queued:
-                for _ in range(10):await self.runner.run_once()
+                for _ in range(10):await self.runner.episode.advance_once()
             self.assertEqual(1,queued.call_count)
             self.clock+=timedelta(milliseconds=20);self.tick(80000)
-            await self.monitor.refresh_recovery();await self.runner.run_once()
-        self.assertEqual(before+1,len(self.transport.calls),self.runner.status)
-        self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'])
-        self.assertEqual(original,self.runner._protection_snapshot())
-        self.assertEqual(self.stop_price(),self.runner._protection_exit['snapshot']['price_won'])
-        self.assertEqual('PROTECTIVE_EXIT',self.runner._unfilled_registration['purpose'])
-        self.assertEqual(10,self.runner._unfilled_registration['root_intent']['quantity'])
+            await self.monitor.refresh_recovery();await self.runner.episode.advance_once()
+        self.assertEqual(before+1,len(self.transport.calls),self.runner.episode.status)
+        self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'])
+        self.assertEqual(original,self.runner.episode._protection_snapshot())
+        self.assertEqual(self.stop_price(),self.runner.episode._protection_exit['snapshot']['price_won'])
+        self.assertEqual('PROTECTIVE_EXIT',self.runner.episode._unfilled_registration['purpose'])
+        self.assertEqual(10,self.runner.episode._unfilled_registration['root_intent']['quantity'])
 
     async def test_thousand_healthy_and_duplicate_ticks_do_not_query_commit_or_rearm(self):
         self.connect()
         with self.count_native() as counts:
             for _ in range(500):self.tick(70000)
-            self.assertIsNone(self.runner._protection_snapshot())
-            self.tick(self.stop_price());original=deepcopy(self.runner._protection_snapshot())
+            self.assertIsNone(self.runner.episode._protection_snapshot())
+            self.tick(self.stop_price());original=deepcopy(self.runner.episode._protection_snapshot())
             for _ in range(500):self.tick(self.stop_price()-1)
         self.assertEqual({'connections':0,'selects':0,'commits':0},counts)
-        self.assertEqual(original,self.runner._protection_snapshot())
+        self.assertEqual(original,self.runner.episode._protection_snapshot())
 
     async def test_unapproved_nxt_paused_and_nonpositive_quotes_do_not_arm(self):
         self.connect();self.collector._subscription_filter_active=True
         self.tick(self.stop_price(),'000660');self.tick(self.stop_price(),'005930_NX');self.tick(0)
         self.collector._credential_paused=True;self.tick(self.stop_price())
-        self.assertIsNone(self.runner._protection_snapshot())
+        self.assertIsNone(self.runner.episode._protection_snapshot())
 
     async def test_missing_basis_and_prefill_quote_do_not_invent_stop(self):
-        self.connect();risk,positions=self.runner._stop_loss_cut
-        self.runner._stop_loss_cut=(replace(risk,owned_entry_prices=()),positions)
-        self.tick(self.stop_price());self.assertIsNone(self.runner._protection_snapshot())
-        self.runner._stop_loss_cut=(risk,positions)
+        self.connect();risk,positions=self.runner.episode._stop_loss_cut
+        self.runner.episode._stop_loss_cut=(replace(risk,owned_entry_prices=()),positions)
+        self.tick(self.stop_price());self.assertIsNone(self.runner.episode._protection_snapshot())
+        self.runner.episode._stop_loss_cut=(risk,positions)
         price=self.collector.automation_price_observation('005930')
-        self.runner.observe_automation_price('005930',{**price,'available_at':risk.observed_at-timedelta(milliseconds=1)})
-        self.assertIsNone(self.runner._protection_snapshot())
+        self.runner.episode.observe_automation_price('005930',{**price,'available_at':risk.observed_at-timedelta(milliseconds=1)})
+        self.assertIsNone(self.runner.episode._protection_snapshot())
 
     async def test_missing_costs_cannot_delay_native_stop(self):
         async def unavailable(*_args):raise OSError('cost unavailable')
         self.reader.read_trade_cost_pages=unavailable
         await self.monitor.refresh_recovery();self.connect();self.tick(self.stop_price())
-        await self.runner.run_once()
-        self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'],self.runner.status)
+        await self.runner.episode.advance_once()
+        self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'],self.runner.episode.status)
 
     async def test_expired_first_quote_never_refreshes_on_later_ticks_or_ack(self):
-        self.connect();self.tick(self.stop_price());original=deepcopy(self.runner._protection_snapshot())
+        self.connect();self.tick(self.stop_price());original=deepcopy(self.runner.episode._protection_snapshot())
         self.clock+=timedelta(seconds=6);self.tick(self.stop_price()-100)
-        await self.monitor.refresh_recovery();before=len(self.transport.calls);await self.runner.run_once()
-        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner._protection_exit)
-        self.assertEqual(original,self.runner._protection_snapshot())
-        self.assertEqual('protection_exit_price_unavailable',self.runner.status['first_protection_exit_reason'])
+        await self.monitor.refresh_recovery();before=len(self.transport.calls);await self.runner.episode.advance_once()
+        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner.episode._protection_exit)
+        self.assertEqual(original,self.runner.episode._protection_snapshot())
+        self.assertEqual('protection_exit_price_unavailable',self.runner.episode.status['first_protection_exit_reason'])
 
     async def test_native_unknown_blocks_stop_submission_until_reconciled(self):
         self.connect();self.tick(self.stop_price())
@@ -4411,8 +5066,8 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
             value=await original()
             return replace(value,orders=(BrokerOrderSnapshot('unmapped',ACCOUNT_REF,'005930',OrderState.ACCEPTED,0,1,self.clock,()),))
         self.reader.read=unknown;await self.monitor.refresh_recovery()
-        before=len(self.transport.calls);await self.runner.run_once()
-        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner._protection_exit)
+        before=len(self.transport.calls);await self.runner.episode.advance_once()
+        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner.episode._protection_exit)
 
     async def test_queue_transaction_rejects_changed_basis_even_with_rehashed_risk(self):
         from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
@@ -4425,64 +5080,64 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
                 self.repository.save_mock_automation_risk_snapshot(mock_automation_risk_snapshot_from_dict(body))
             return create(value,**kwargs)
         before=len(self.transport.calls)
-        with patch.object(self.store,'create_execution_intent',side_effect=changed):await self.runner.run_once()
+        with patch.object(self.store,'create_execution_intent',side_effect=changed):await self.runner.episode.advance_once()
         self.assertEqual(before,len(self.transport.calls))
-        self.assertIn('mock_stop_loss_native_basis_changed',self.runner.status['first_protection_exit_reason'])
+        self.assertIn('mock_stop_loss_native_basis_changed',self.runner.episode.status['first_protection_exit_reason'])
 
     async def test_restart_and_unknown_response_do_not_submit_second_stop(self):
         from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
         self.connect();self.tick(self.stop_price());submit=self.transport.submit
         def unknown(intent):submit(intent);raise SubmissionUnknown('unknown stop ACK')
         before=len(self.transport.calls)
-        with patch.object(self.transport,'submit',side_effect=unknown):await self.runner.run_once()
-        frozen=deepcopy(self.runner._protection_exit);await self.runner.close()
-        self.runner=MockAutomationRunner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
+        with patch.object(self.transport,'submit',side_effect=unknown):await self.runner.episode.advance_once()
+        frozen=deepcopy(self.runner.episode._protection_exit);await self.runner.close()
+        self.runner=_prepared_runner(self.store,self.bundle,self.spec,price_source=self.collector.automation_price_observation)
         self.supervisor._runners[ACCOUNT_REF]=self.runner
-        for _ in range(5):self.tick(self.stop_price()-100);await self.runner.run_once()
-        self.assertEqual(frozen,self.runner._protection_exit);self.assertEqual(before+1,len(self.transport.calls))
+        for _ in range(5):self.tick(self.stop_price()-100);await self.runner.episode.advance_once()
+        self.assertEqual(frozen,self.runner.episode._protection_exit);self.assertEqual(before+1,len(self.transport.calls))
 
     async def test_closed_supervisor_and_runner_do_not_accept_price(self):
         self.connect();self.supervisor._closing=True;self.tick(self.stop_price())
-        self.assertIsNone(self.runner._protection_snapshot())
+        self.assertIsNone(self.runner.episode._protection_snapshot())
         self.supervisor._closing=False;await self.runner.close();self.tick(self.stop_price())
-        self.assertIsNone(self.runner._protection_snapshot())
+        self.assertIsNone(self.runner.episode._protection_snapshot())
 
 
     async def test_stale_native_cut_queues_once_and_fresh_ack_upgrades_original_stop(self):
         self.connect();self.clock+=timedelta(seconds=6)
         with patch.object(self.monitor,'request_automation_execution_recovery',wraps=self.monitor.request_automation_execution_recovery) as queued:
             with self.count_native() as counts:
-                self.tick(self.stop_price());first=deepcopy(self.runner._protection_snapshot())
+                self.tick(self.stop_price());first=deepcopy(self.runner.episode._protection_snapshot())
                 for _ in range(100):self.tick(self.stop_price()-100)
         self.assertEqual(1,queued.call_count);self.assertEqual(0,counts['selects']);self.assertEqual(0,counts['commits'])
         self.assertEqual('RECONCILE_REQUIRED',first['risk_trigger']['disposition'])
         await self.monitor.refresh_recovery()
-        upgraded=self.runner._protection_snapshot()
+        upgraded=self.runner.episode._protection_snapshot()
         self.assertEqual('EXIT_REQUIRED',upgraded['risk_trigger']['disposition'])
         self.assertEqual(first['risk_trigger']['stop_loss'],upgraded['risk_trigger']['stop_loss'])
-        await self.runner.run_once();self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'],self.runner.status)
+        await self.runner.episode.advance_once();self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'],self.runner.episode.status)
 
     async def test_unmapped_order_recovery_keeps_first_stop_after_rebound(self):
-        self.connect();self.tick(self.stop_price());first=deepcopy(self.runner._protection_snapshot())
+        self.connect();self.tick(self.stop_price());first=deepcopy(self.runner.episode._protection_snapshot())
         original=self.reader.read
         async def unknown():
             value=await original()
             return replace(value,orders=(BrokerOrderSnapshot('unmapped',ACCOUNT_REF,'005930',OrderState.ACCEPTED,0,1,self.clock,()),))
         self.reader.read=unknown;await self.monitor.refresh_recovery()
-        self.assertEqual(first,self.runner._protection_snapshot())
-        before=len(self.transport.calls);await self.runner.run_once()
-        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner._protection_exit)
+        self.assertEqual(first,self.runner.episode._protection_snapshot())
+        before=len(self.transport.calls);await self.runner.episode.advance_once()
+        self.assertEqual(before,len(self.transport.calls));self.assertIsNone(self.runner.episode._protection_exit)
         self.clock+=timedelta(milliseconds=10);self.tick(80000);self.reader.read=original
-        await self.monitor.refresh_recovery();await self.runner.run_once()
-        self.assertEqual('ORDER_SUBMITTED',self.runner.status['first_protection_exit_state'],self.runner.status)
-        self.assertEqual(first['risk_trigger']['stop_loss']['price_won'],self.runner._protection_exit['snapshot']['price_won'])
+        await self.monitor.refresh_recovery();await self.runner.episode.advance_once()
+        self.assertEqual('ORDER_SUBMITTED',self.runner.episode.status['first_protection_exit_state'],self.runner.episode.status)
+        self.assertEqual(first['risk_trigger']['stop_loss']['price_won'],self.runner.episode._protection_exit['snapshot']['price_won'])
 
     async def test_policy_and_basis_validation_never_accept_caller_threshold(self):
         from kiwoom_monitor.application.mock_automation_risk import validate_mock_stop_loss_proof
-        self.connect();self.tick(self.stop_price());proof=deepcopy(self.runner._protection_snapshot()['risk_trigger']['stop_loss'])
+        self.connect();self.tick(self.stop_price());proof=deepcopy(self.runner.episode._protection_snapshot()['risk_trigger']['stop_loss'])
         proof['stop_loss_bps']-=1
         with self.assertRaisesRegex(ValueError,'mock_stop_loss_proof_invalid'):
-            validate_mock_stop_loss_proof(proof,self.spec,self.runner._stop_loss_cut[0],stop_loss_bps=self.runner._config.stop_loss_bps)
+            validate_mock_stop_loss_proof(proof,self.spec,self.runner.episode._stop_loss_cut[0],stop_loss_bps=self.runner.episode._config.stop_loss_bps)
         self.assertEqual(1,len(self.transport.calls))
 
 
@@ -4500,8 +5155,8 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
                 self.store.upsert_documents(collection,[{'owner':self.spec.strategy_ref,'key':self.spec.candidate_package_hash,'document':document}])
             return create(value,**kwargs)
         before=len(self.transport.calls)
-        with patch.object(self.store,'create_execution_intent',side_effect=changed):await self.runner.run_once()
-        self.assertEqual(before,len(self.transport.calls));self.assertEqual('BLOCKED',self.runner.status['first_protection_exit_state'])
+        with patch.object(self.store,'create_execution_intent',side_effect=changed):await self.runner.episode.advance_once()
+        self.assertEqual(before,len(self.transport.calls));self.assertEqual('BLOCKED',self.runner.episode.status['first_protection_exit_state'])
 
     async def test_partial_sell_and_additional_buy_keep_runner_and_native_basis_identical(self):
         from tests.unit.test_order_lifecycle import _intent
@@ -4515,8 +5170,8 @@ class MockImmediateStopLossTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.reconcile(intent.intent_id,BrokerOrderSnapshot(record.broker_order_id,ACCOUNT_REF,'005930',OrderState.FILLED,
                 quantity,0,self.clock,(BrokerFill(key+'-fill',quantity,price,self.clock),)))
             self.positions['005930']+=quantity if side is OrderSide.BUY else -quantity
-        await self.monitor.refresh_recovery();self.runner._apply_new_fills()
+        await self.monitor.refresh_recovery();_apply_runner_fills(self.runner)
         risk=self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
         self.assertEqual((('005930',70003),),risk.owned_entry_prices)
-        self.assertEqual(70003,self.runner._state.entry_price);self.assertEqual(9,self.runner._state.position_quantity)
+        self.assertEqual(70003,self.runner.episode._episode_position._state.entry_price);self.assertEqual(9,self.runner.episode._episode_position._state.position_quantity)
         self.assertEqual((('005930',9),),risk.owned_position_quantities)

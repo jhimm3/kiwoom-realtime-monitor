@@ -1,5 +1,7 @@
 # 키움 저장 경로 감사 — 첫 계측 범위
 
+> **저장 감사의 기준.** 아래 경로·비용은 당시 소스와 계측 범위다. 로컬 원본과 NAS 보관은 책임을 구분하며 내구성 ACK·실패 후 재조회는 해당 저장 계약에서 확인한다. [관련 계약](architecture/app-target-20261023.md#portable-execution-target).
+
 ## R3-004 Shadow minute reader 범위 축소 (2026-10-18 로컬)
 
 기존 Runtime/Collector/native reader·query authority/op dedup/단일 snapshot과 owned read/close를 유지하며 선택적인 분 범위를 DB/RAM 양쪽에 전달했다. 새 저장소/writer/queue/task/registry kind/index·commit은 없다. 기존 명시 reader capture 목록/codec/서명 경로에서 bound와 과거 무범위 인자를 검증했다. 고정20종목 native9000→200행/최종200행 값·metadata 동일, 연결20/SELECT22 유지이며 기존 index의 minute 범위 탐색을 확인했다. 실제 PG/wait/운영 I/O는 미측정, 기능58건과 전체 정적 감사의 병행 뉴스-only1실패는 [R3-004](../REFACTOR_BACKLOG.md#r3-004--ram-shadow-분봉의-하루-전체-범위직렬-read)에 구분했다.
@@ -14,7 +16,7 @@
 
 ## 직접 검색 아침 시황 (2026-10-15 후보)
 
-기존 `central_documents` writer의 `morning_market_brief_settings`, `morning_market_brief_runs` collection을 등록했다. 독립 `morning_market_brief` 자식 pause는 신규 시작을 제어하며 소유한 요청/최종 쓰기는 보존한다. 연결·transaction·commit·주문 원장은 변경하지 않는다. claim 저장 이후만 외부 POST를 허용하고 재시작의 미확인 claim은 자동 재요청하지 않는다. 공통 PostgreSQL 문서 writer의 단계/오류 측정을 사용하고 실제 affected rows를 얻지 못하면 미계측으로 남긴다. 중복·동시·claim 실패·취소/종료·revision/TTL·출처/시각 계약을 격리 검사했다. 현재 운영 활성화 전이다. [상세](workstreams/morning-market-brief.md#저장수명진단).
+기존 `central_documents` writer의 `morning_market_brief_settings`, `morning_market_brief_runs` collection을 등록했다. 독립 `morning_market_brief` 자식 pause는 신규 시작을 제어하며 소유한 요청/최종 쓰기는 보존한다. 연결·transaction·commit·주문 원장은 변경하지 않는다. claim 저장 이후만 외부 POST를 허용하고 재시작의 미확인 claim은 자동 재요청하지 않는다. 공통 PostgreSQL 문서 writer의 단계/오류 측정을 사용하고 실제 affected rows를 얻지 못하면 미계측으로 남긴다. 중복·동시·claim 실패·취소/종료·revision/TTL·출처/시각 계약을 격리 검사했다. 현재 운영 활성화 전이다. [상세](archive/2026-11-05/morning-market-brief.md#저장수명진단).
 
 ## 고정 대체 주문 native 승인·제출 (2026-10-14 로컬)
 
@@ -22,29 +24,29 @@
 
 현재 owner/control·latest Risk와 그 내용 hash, 승인 body/고정 payload, 원래 root/직전 parent CANCELLED·상세 체결/잔량과 account-wide 미체결 부재를 QUEUED create/event transaction에서 검사한다. 같은 native writer/connection의 borrowed cursor를 사용하며 PG 구문에는 FOR UPDATE를 유지한다. actual PG는 실행하지 않고 SQLite/native 경합·PG placeholder/lock 구조만 격리 검사했다. 관리 child의 재-root로 예산을 초기화하지 않는다. 새 collection/table/column/migration/writer·독립 task는 없으며 master/TTL/보호 writer/drain을 그대로 쓴다.
 
-같은 입력으로 3목적의 explicit OFF preview는 SELECT 26–27/COMMIT 3, explicit 실행은 SELECT 106–108/COMMIT 14다. 실행은 preview 재검증·approval/index·account snapshot·QUEUE/event·SUBMISSION_STARTED/응답·receipt/index·checkpoint 및 owner lease를 포함한다. 동일 명시 요청 5회는 각 SELECT 10/lease COMMIT 1이고 추가 제출은 0이다. 실제 REST/Risk 생산 비용은 제외하며 SQLite fixture 시간 14.672–16.466ms를 장중/PG 지연이나 개선으로 보고하지 않는다. running 자동 polling에 이 전체 경로를 연결하지 않았다. 다음 사건/기한 dispatcher에서 coalescing·필요 native 검사/저장을 실측해야 한다. [64단계](AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출)·근거 `data/diagnostics/20261014-unfilled-native-dispatch/verification.json`.
+같은 입력으로 3목적의 explicit OFF preview는 SELECT 26–27/COMMIT 3, explicit 실행은 SELECT 106–108/COMMIT 14다. 실행은 preview 재검증·approval/index·account snapshot·QUEUE/event·SUBMISSION_STARTED/응답·receipt/index·checkpoint 및 owner lease를 포함한다. 동일 명시 요청 5회는 각 SELECT 10/lease COMMIT 1이고 추가 제출은 0이다. 실제 REST/Risk 생산 비용은 제외하며 SQLite fixture 시간 14.672–16.466ms를 장중/PG 지연이나 개선으로 보고하지 않는다. running 자동 polling에 이 전체 경로를 연결하지 않았다. 다음 사건/기한 dispatcher에서 coalescing·필요 native 검사/저장을 실측해야 한다. [64단계](archive/2026-11-05/AI_TRADING_SYSTEM_REDESIGN.md#64-목적별-고정-대체-주문의-native-승인과-제출)·근거 `data/diagnostics/20261014-unfilled-native-dispatch/verification.json`.
 
 ## native 자동 취소 실행 경계 (2026-10-14 로컬)
 
 기존 ExecutionRepository의 CANCEL_STARTED/event+intent projection와 lease/control transaction을 그대로 사용한다. 새 writer/collection/task·DDL은 없다. control 바인딩은 CANCEL_STARTED의 owner/control 검사와 ACK까지만 유지하고 이후 응답/체결 대사는 원래 owner만 검사한다. ACK 유실·거절·재시작의 자동 중복 취소는 기존 native CANCEL_STARTED를 읽어 막는다. 수동 경로의 명시 재시도는 유지한다. `execution.event`/`execution.runtime_lease` 진단/보호·common 측정 및 gateway owned command/credential drain을 재사용한다.
 
-격리 SQLite/가짜 broker에서 기존 수동 취소 경계 SELECT 11/COMMIT 3에 비해 신규 자동 경계 SELECT 14/COMMIT 3이었다. 차이 SELECT 3은 gateway/runtime의 시작 이력 검사 2회와 claim transaction의 control 검사 1회다. 첫 취소는 계좌 갱신/전송 각 1회, 이후 명시 중복 5회는 각각 SELECT 4/owner lease COMMIT 1이고 추가 계좌 갱신/취소/Risk 무효화는 0이다. 실제 REST/Risk 생산 비용을 포함하지 않으며 지연 개선을 주장하지 않는다. production caller/idle polling 연결은 아직 없고 목적별 자동 사건/기한·child 승인/제출은 후속이다. [63단계](AI_TRADING_SYSTEM_REDESIGN.md#63-모의계좌-자동-취소의-native-실행-경계)·근거 `data/diagnostics/20261014-automation-cancel/verification.json`.
+격리 SQLite/가짜 broker에서 기존 수동 취소 경계 SELECT 11/COMMIT 3에 비해 신규 자동 경계 SELECT 14/COMMIT 3이었다. 차이 SELECT 3은 gateway/runtime의 시작 이력 검사 2회와 claim transaction의 control 검사 1회다. 첫 취소는 계좌 갱신/전송 각 1회, 이후 명시 중복 5회는 각각 SELECT 4/owner lease COMMIT 1이고 추가 계좌 갱신/취소/Risk 무효화는 0이다. 실제 REST/Risk 생산 비용을 포함하지 않으며 지연 개선을 주장하지 않는다. production caller/idle polling 연결은 아직 없고 목적별 자동 사건/기한·child 승인/제출은 후속이다. [63단계](archive/2026-11-05/AI_TRADING_SYSTEM_REDESIGN.md#63-모의계좌-자동-취소의-native-실행-경계)·근거 `data/diagnostics/20261014-automation-cancel/verification.json`.
 
 ## 운영 Risk 자동 전달 (2026-10-14 로컬)
 
-기존 native 계좌/Risk writer ACK → RAM Risk/계좌 cut·순수 trigger → 기존 runner checkpoint/v1 `protection_review.risk_trigger` → 동일 status/restore reader다. Risk 계산/REST/페이지·전체 주문/체결 내용을 별도 수집/복제하지 않으며 같은 위험의 새 recovery revision/누적 mismatch는 합친다. 실제 노출 변화에만 새 요청을 기록한다. 전달 callback의 추가 native 연결/SELECT/COMMIT와 추가 TR은 0이고 checkpoint는 기존 document.collection/common observed kind·ACK/pending/no-op/drain을 따른다. 새 writer/collection/task·transaction 경계 이동은 없다. 실제 청산 전송·PG/WAL/wait/장중 지연과 기존 recorder checkpoint 미지원은 수락하지 않았다. [62단계](AI_TRADING_SYSTEM_REDESIGN.md#62-운영-risk의-자동-보호-요청-연결과-개발-순서-개정).
+기존 native 계좌/Risk writer ACK → RAM Risk/계좌 cut·순수 trigger → 기존 runner checkpoint/v1 `protection_review.risk_trigger` → 동일 status/restore reader다. Risk 계산/REST/페이지·전체 주문/체결 내용을 별도 수집/복제하지 않으며 같은 위험의 새 recovery revision/누적 mismatch는 합친다. 실제 노출 변화에만 새 요청을 기록한다. 전달 callback의 추가 native 연결/SELECT/COMMIT와 추가 TR은 0이고 checkpoint는 기존 document.collection/common observed kind·ACK/pending/no-op/drain을 따른다. 새 writer/collection/task·transaction 경계 이동은 없다. 실제 청산 전송·PG/WAL/wait/장중 지연과 기존 recorder checkpoint 미지원은 수락하지 않았다. [62단계](archive/2026-11-05/AI_TRADING_SYSTEM_REDESIGN.md#62-운영-risk의-자동-보호-요청-연결과-개발-순서-개정).
 
 ## 목적별 gate·보호 요청 (2026-10-14 로컬)
 
-동일 runner checkpoint/v1 optional gate/보호 요청 → 기존 `document.collection`/`document:execution_mock_automation_runner_current` writer → 동일 복구/status reader를 유지한다. 요청 자체의 DB/COMMIT는 0이며 기존 loop가 ACK/pending/no-op·중단 drain을 소유한다. BUY 원래 승인 확인으로 격리 SQLite changed/repeat SELECT 24→25/26→27·연결 27→28/28→29이며 COMMIT 3/2(checkpoint 자체 1/0)는 유지했다. native intent/event·approved-gate/dispatch receipt 추가 쓰기/전송은 0이다. 새 writer/path/collection/task·transaction 변경이 없어 진단 child를 추가하지 않는다. 기존 master/TTL·owner lease 계측·recorder checkpoint 미지원과 실제 PG/WAL/wait/장중 표본 부족은 유지한다. [60단계](AI_TRADING_SYSTEM_REDESIGN.md#60-목적별-고정-대체-주문-검토와-보호-요청의-우선-처리).
+동일 runner checkpoint/v1 optional gate/보호 요청 → 기존 `document.collection`/`document:execution_mock_automation_runner_current` writer → 동일 복구/status reader를 유지한다. 요청 자체의 DB/COMMIT는 0이며 기존 loop가 ACK/pending/no-op·중단 drain을 소유한다. BUY 원래 승인 확인으로 격리 SQLite changed/repeat SELECT 24→25/26→27·연결 27→28/28→29이며 COMMIT 3/2(checkpoint 자체 1/0)는 유지했다. native intent/event·approved-gate/dispatch receipt 추가 쓰기/전송은 0이다. 새 writer/path/collection/task·transaction 변경이 없어 진단 child를 추가하지 않는다. 기존 master/TTL·owner lease 계측·recorder checkpoint 미지원과 실제 PG/WAL/wait/장중 표본 부족은 유지한다. [60단계](archive/2026-11-05/AI_TRADING_SYSTEM_REDESIGN.md#60-목적별-고정-대체-주문-검토와-보호-요청의-우선-처리).
 
 ## Native 미체결 시도 검토 (2026-10-14 로컬)
 
-같은 `execution_mock_automation_runner_current`의 optional native plan과 기존 `document.collection` 측정/등록을 재사용한다. 명시 idle 검토만 기존 runtime guard의 진입/ACK 후 lease 갱신을 수행한다. 격리 SQLite 첫 검토 SELECT 24/COMMIT 3, 동일 cut 반복 SELECT 26/COMMIT 2, 두 native 시도 이후 SELECT 32/COMMIT 3이다. checkpoint 자체의 changed/repeat는 1/0이며 나머지 2회는 실제 owner lease 갱신이다. fixture의 Risk/복구 생산·native 주문/취소·대사는 이 검토 계측 밖이다. adapter의 실행 원장 쓰기/추가 전송은 0이다. 새 writer/path/task·일반 Shadow polling 호출·DB schema/transaction 소유권 이동은 없다. 운영 PG/WAL/wait/장중 성능과 recorder capture/Replay 수락은 미검증이다. [59단계](AI_TRADING_SYSTEM_REDESIGN.md#59-native-parent-child-시도-투영과-닫힌-owner-gate-검토).
+같은 `execution_mock_automation_runner_current`의 optional native plan과 기존 `document.collection` 측정/등록을 재사용한다. 명시 idle 검토만 기존 runtime guard의 진입/ACK 후 lease 갱신을 수행한다. 격리 SQLite 첫 검토 SELECT 24/COMMIT 3, 동일 cut 반복 SELECT 26/COMMIT 2, 두 native 시도 이후 SELECT 32/COMMIT 3이다. checkpoint 자체의 changed/repeat는 1/0이며 나머지 2회는 실제 owner lease 갱신이다. fixture의 Risk/복구 생산·native 주문/취소·대사는 이 검토 계측 밖이다. adapter의 실행 원장 쓰기/추가 전송은 0이다. 새 writer/path/task·일반 Shadow polling 호출·DB schema/transaction 소유권 이동은 없다. 운영 PG/WAL/wait/장중 성능과 recorder capture/Replay 수락은 미검증이다. [59단계](archive/2026-11-05/AI_TRADING_SYSTEM_REDESIGN.md#59-native-parent-child-시도-투영과-닫힌-owner-gate-검토).
 
 ## 미체결 영속 검토 계획 (2026-10-14 로컬)
 
-idle runner의 명시 실행 전 검토는 기존 `central_documents`, collection=`execution_mock_automation_runner_current`, owner=계좌 UUID/key=current의 optional 필드를 사용한다. writer·연결/transaction·checkpoint pending/ACK/retry 소유자는 그대로이며 새 collection/schema/task/독립 writer는 없다. `document.collection`의 등록된 `document:execution_mock_automation_runner_current` common 측정을 재사용한다. 일반 polling·Collector/Shadow에 추가 DB 호출을 넣지 않았다. 격리 SQLite에서 변경 검토 COMMIT 1회/같은 owner의 동일 입력 반복 0회·추가 실행 원장 쓰기/submit/cancel 0회를 확인했다. 공급 control fixture를 사용한 표본이며 native control/lease/Risk 승인·PG/WAL/wait/운영 지연 표본은 아니다. recorder의 runner checkpoint collection은 현재 지원되지 않으므로 녹화/Replay 수락은 별도 미검증이다. [58단계](AI_TRADING_SYSTEM_REDESIGN.md#58-미체결-검토-계획의-기존-checkpoint-복구와-실행-전-검증).
+idle runner의 명시 실행 전 검토는 기존 `central_documents`, collection=`execution_mock_automation_runner_current`, owner=계좌 UUID/key=current의 optional 필드를 사용한다. writer·연결/transaction·checkpoint pending/ACK/retry 소유자는 그대로이며 새 collection/schema/task/독립 writer는 없다. `document.collection`의 등록된 `document:execution_mock_automation_runner_current` common 측정을 재사용한다. 일반 polling·Collector/Shadow에 추가 DB 호출을 넣지 않았다. 격리 SQLite에서 변경 검토 COMMIT 1회/같은 owner의 동일 입력 반복 0회·추가 실행 원장 쓰기/submit/cancel 0회를 확인했다. 공급 control fixture를 사용한 표본이며 native control/lease/Risk 승인·PG/WAL/wait/운영 지연 표본은 아니다. recorder의 runner checkpoint collection은 현재 지원되지 않으므로 녹화/Replay 수락은 별도 미검증이다. [58단계](archive/2026-11-05/AI_TRADING_SYSTEM_REDESIGN.md#58-미체결-검토-계획의-기존-checkpoint-복구와-실행-전-검증).
 
 ## TOP20 장후 표시 계산본 (2026-10-12 로컬 구현)
 

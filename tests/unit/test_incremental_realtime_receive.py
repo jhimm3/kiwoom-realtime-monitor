@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server.diagnostic_replay_contract import validate_collector_message
+
 import asyncio
 import copy
 import json
 import time
 import tempfile
 import unittest
+from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from pathlib import Path
 from contextlib import ExitStack
 from datetime import datetime
@@ -77,6 +80,92 @@ class Socket:
 
 
 class IncrementalReceiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_subscription_receipt_state_is_owned_per_recorder_and_resets_for_new_batch(self):
+        from kiwoom_monitor.central_server.diagnostic_top20_subscription_v2 import SubscriptionRecorder
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_registration import plan_registration
+
+        hub_observer = hub_capture.HubInputRecorder()
+        hub = RealtimeHub(now_provider=lambda: NOW, observer=hub_observer)
+        other_hub_observer = hub_capture.HubInputRecorder()
+        other_hub = RealtimeHub(now_provider=lambda: NOW, observer=other_hub_observer)
+        recorder = SubscriptionRecorder(hub_observer=hub_observer)
+        other = SubscriptionRecorder(hub_observer=other_hub_observer)
+        collector = CentralRealtimeCollector(lambda: 'unused', 'real', hub, lambda: NOW,
+                                              subscription_observer=recorder)
+        groups = {'100': [{'item': [A], 'type': ['0B']}]}
+        plan = plan_registration(groups, {})
+        request = {'session': 'KRX', 'codes': [A], 'nxt_codes': [],
+                   'program_codes': [A], 'priority_codes': [A]}
+        with patch.object(trace, 'input_token', return_value='recorder-owner-fixture'), \
+                patch.object(trace, 'emit_payload', return_value=False) as emit, \
+                patch.object(trace, 'reject_input'):
+            receipt = recorder.begin_batch(collector, request, plan, 1)
+            self.assertIsNotNone(receipt)
+            self.assertFalse(receipt.complete)
+            self.assertFalse(recorder.complete)
+            self.assertTrue(other.complete)
+            self.assertNotIn('_recorded_v2_complete', vars(collector))
+            self.assertEqual(set(), collector._approved_trade_sources)
+            emit.return_value = True
+            receipt = recorder.begin_batch(collector, request, plan, 2)
+            self.assertTrue(receipt.complete)
+            self.assertTrue(recorder.complete)
+            # A tool callback failure marks its own receipt state and returns;
+            # it cannot approve a native command or modify another recorder.
+            self.assertIsNone(recorder.command_event(collector, 'command_start', receipt, object(), 1))
+            self.assertFalse(recorder.complete)
+            self.assertTrue(other.complete)
+            self.assertNotIn('_recorded_v2_complete', vars(collector))
+            self.assertEqual(set(), collector._approved_trade_sources)
+            self.assertIs(hub._observer, recorder.hub_observer)
+            self.assertEqual('recorder-owner-fixture', hub._observer.lifecycle_epoch)
+            self.assertIsNone(other_hub._observer.lifecycle_epoch)
+            hub.connect()
+            self.assertEqual(1, sum(call.args[2].get('input_kind') == 'hub_initial'
+                                    for call in emit.call_args_list))
+
+    async def test_actual_receive_works_when_subscription_recorder_source_is_physically_absent(self):
+        import hashlib
+        import shutil
+        import subprocess
+        import sys
+        import textwrap
+
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / 'src' / 'kiwoom_monitor'
+            shutil.copytree(root / 'src' / 'kiwoom_monitor', copied,
+                            ignore=shutil.ignore_patterns('__pycache__', 'diagnostic_top20_subscription_v2.py'))
+            self.assertFalse((copied / 'central_server' / 'diagnostic_top20_subscription_v2.py').exists())
+            expected = hashlib.sha256((root / 'src/kiwoom_monitor/central_server/realtime_collector.py').read_bytes()).hexdigest()
+            program = r'''
+import asyncio, hashlib, json, os, runpy, sys
+from pathlib import Path
+runpy.run_path(os.environ['KIWOOM_REGRESSION_REGISTRY_HELPER'])['join_from_environment']()
+copied, root, expected = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+sys.path[:0] = [str(copied.parent), str(root), str(root / 'tests' / 'unit')]
+from tests.unit.test_incremental_realtime_receive import IncrementalReceiveTests
+from kiwoom_monitor.central_server import realtime_collector
+actual = Path(realtime_collector.__file__).resolve()
+assert actual == (copied / 'central_server' / 'realtime_collector.py').resolve()
+assert hashlib.sha256(actual.read_bytes()).hexdigest() == expected
+assert not (copied / 'central_server' / 'diagnostic_top20_subscription_v2.py').exists()
+assert 'kiwoom_monitor.central_server.diagnostic_top20_subscription_v2' not in sys.modules
+# Reuse the original native REG/REMOVE, early ACK, retained trade delivery,
+# removed/new-code filtering, no false readiness and owned-task cleanup oracle.
+asyncio.run(IncrementalReceiveTests().exercise(True, remove_only=True))
+assert 'kiwoom_monitor.central_server.diagnostic_top20_subscription_v2' not in sys.modules
+print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent': True,
+                  'original_native_receive_oracle': 'passed'}))
+'''
+            result = await asyncio.to_thread(subprocess.run,
+                [sys.executable, '-I', '-B', '-X', 'utf8', '-c', textwrap.dedent(program),
+                 str(copied), str(root), expected], capture_output=True, text=True, encoding='utf-8', timeout=15)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            proof = json.loads(result.stdout.strip())
+            self.assertTrue(proof['subscription_tool_source_absent'])
+            self.assertEqual('passed', proof['original_native_receive_oracle'])
+
     async def exercise(self, central, *, record=False, incomplete_receipt=False, remove_only=False, coalesce=False):
         socket, received, controls, events, received_times = Socket(), [], [], [], []
         activations = []
@@ -94,8 +183,15 @@ class IncrementalReceiveTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(trace, 'reject_input', side_effect=lambda token, fields:
                 events.append({'seq':len(events)+1,'event_type':'input_rejected',**fields})))
             if central:
-                hub = RealtimeHub()
-                owner = CentralRealtimeCollector(lambda:'fixture', 'real', hub, lambda:NOW)
+                hub_observer = hub_capture.HubInputRecorder()
+                hub = RealtimeHub(now_provider=lambda: NOW, observer=hub_observer)
+                if record:
+                    from kiwoom_monitor.central_server.diagnostic_top20_subscription_v2 import SubscriptionRecorder
+                    observer = SubscriptionRecorder(hub_observer=hub_observer)
+                else:
+                    observer = None
+                owner = CentralRealtimeCollector(lambda:'fixture', 'real', hub, lambda:NOW,
+                                                  subscription_observer=observer)
                 subscriber = hub.connect(capture_component='source:top20')
                 def update(codes):
                     hub.update_subscription(subscriber, list(codes), [], program_codes=list(codes), priority_codes=list(codes))
@@ -254,10 +350,10 @@ class IncrementalReceiveTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(trace,'input_token',return_value=None):
             store = SQLiteQueryStore(Path(directory)/'replay.sqlite3')
             store.initialize()
-            hub = RealtimeHub()
+            hub = RealtimeHub(now_provider=lambda: NOW, observer=hub_capture.HubInputRecorder())
             collector = CentralRealtimeCollector(lambda:self.fail('token requested by offline replay'),
                 'real',hub,lambda:NOW,store=store)
-            await collector.start_input_replay()
+            await collector.start_input_replay(message_validator=validate_collector_message)
             subscriber = hub.connect(capture_component='live:top20')
             def update(codes):
                 hub.update_subscription(subscriber,list(codes),[],program_codes=list(codes),priority_codes=list(codes))
@@ -284,7 +380,7 @@ class IncrementalReceiveTests(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
     async def test_client_subscription_update_does_not_repeat_connection_opened(self):
-        hub, app = RealtimeHub(), FastAPI()
+        hub, app = RealtimeHub(now_provider=lambda: NOW, observer=hub_capture.HubInputRecorder()), FastAPI()
         hub.set_upstream_ready((A,B,C),True)
         app.include_router(create_realtime_router(hub,
             SimpleNamespace(load_realtime_snapshots=lambda codes:[]),lambda token:token=='fixture',None))

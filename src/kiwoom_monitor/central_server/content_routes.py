@@ -11,6 +11,12 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from kiwoom_monitor.domain.research_contract import ThemeGenerationConflict
+from kiwoom_monitor.application.journal_enrichment import (
+    JOURNAL_ANALYSIS_REVISION_COLLECTION,
+    JournalAnalysisRevisionConflict,
+    journal_analysis_revision_content,
+)
 
 
 class ContentStore(Protocol):
@@ -21,6 +27,8 @@ class ContentStore(Protocol):
 
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
 
+    def accept_journal_analysis_revisions(self, values: list[dict[str, Any]]) -> dict[str, Any]: ...
+
     def replace_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
 
     def resolve_account_scope(self, broker: str, environment: str, account_ref: str) -> dict[str, Any]: ...
@@ -28,6 +36,23 @@ class ContentStore(Protocol):
     def load_theme_snapshots(
         self, *, available_at: float | None = None, limit: int = 100,
     ) -> list[dict[str, Any]]: ...
+
+    def load_current_theme_snapshot(self) -> dict[str, Any]: ...
+
+    def publish_theme_snapshot(self, document: dict[str, Any], *, publication_id: str,
+                               expected_snapshot_id: str | None, effective_at: str | None,
+                               origin_device: str, require_current_projection: bool) -> dict[str, Any]: ...
+
+    def load_accepted_theme_snapshot(self, *, snapshot_id: str | None = None,
+                                     require_current_projection: bool = False) -> dict[str, Any] | None: ...
+
+
+class ThemePublication(BaseModel):
+    document: dict[str, Any]
+    publication_id: str
+    expected_snapshot_id: str | None = Field(...)
+    effective_at: str | None = None
+    origin_device: str = "unknown"
 
 
 class DocumentInput(BaseModel):
@@ -48,7 +73,8 @@ class DocumentSnapshot(BaseModel):
     documents: list[DocumentInput] = Field(default_factory=list, max_length=10000)
 
 
-def create_content_router(store: ContentStore, authorize: Callable[..., None], *, on_theme_changed=None,
+def create_content_router(store: ContentStore, authorize: Callable[..., None], *, read_authorize=None,
+                          theme_history_authorize=None, on_theme_changed=None,
                           theme_notifications_enabled=lambda: True) -> APIRouter:
     """Keep collection policy, journal identity checks, and request models together."""
     router = APIRouter()
@@ -147,6 +173,13 @@ def create_content_router(store: ContentStore, authorize: Callable[..., None], *
                     != str(document["canonical_account_ref"])
                 ):
                     raise HTTPException(status_code=422, detail="검증된 계좌 alias가 필요합니다.")
+            if collection == JOURNAL_ANALYSIS_REVISION_COLLECTION:
+                try:
+                    journal_analysis_revision_content(document)
+                    if str(value.get("key", "")) != str(document["revision_id"]):
+                        raise ValueError("journal analysis revision key does not match revision_id")
+                except (TypeError, ValueError) as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
             if collection == "journal_v2_news_links":
                 identity = {
                     "origin_scope": {
@@ -170,7 +203,14 @@ def create_content_router(store: ContentStore, authorize: Callable[..., None], *
             if str(value.get("owner", "")) != str(document.get("group_id", "")) or str(value.get("key", "")) != expected:
                 raise HTTPException(status_code=422, detail="legacy 뉴스 연결 owner/key가 올바르지 않습니다.")
 
-    @router.get("/api/v1/content/{collection}", dependencies=[Depends(authorize)])
+    def authorize_content_read(collection: str, access_scope: str | None = Depends(read_authorize or authorize)) -> None:
+        if access_scope == "query" and collection not in {
+            "theme_profile", "theme_stock", "theme_metadata", "stock_fundamentals",
+            "stock_nxt_eligibility", "stock_price_references", "historical_highs",
+        }:
+            raise HTTPException(status_code=403, detail="공통 시장 자료 조회 권한이 필요합니다.")
+
+    @router.get("/api/v1/content/{collection}", dependencies=[Depends(authorize_content_read)])
     async def content_documents(
         collection: str, owner: str = Query(default="", max_length=200),
         limit: int = Query(default=1000, ge=1, le=10000),
@@ -191,6 +231,14 @@ def create_content_router(store: ContentStore, authorize: Callable[..., None], *
         values = [value.model_dump() for value in batch.documents]
         for value in values:
             validate_journal_document(collection, value)
+        if collection == JOURNAL_ANALYSIS_REVISION_COLLECTION:
+            try:
+                receipt = await asyncio.to_thread(store.accept_journal_analysis_revisions, values)
+            except JournalAnalysisRevisionConflict as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+            return {"collection": collection, "saved": receipt["saved"]}
         await persist_content(collection, store.upsert_documents, collection, values)
         return {"collection": collection, "saved": len(values)}
 
@@ -204,7 +252,7 @@ def create_content_router(store: ContentStore, authorize: Callable[..., None], *
         return {"collection": collection, "saved": len(values)}
 
     async def persist_content(collection, write, *args):
-        if collection != "theme_metadata" or on_theme_changed is None or not theme_notifications_enabled():
+        if collection != "theme_metadata":
             await asyncio.to_thread(write, *args)
             return
         from .observation_frame_recovery import drain_thread_call
@@ -223,11 +271,47 @@ def create_content_router(store: ContentStore, authorize: Callable[..., None], *
             # The original write error/cancellation still reaches the caller.
             if settled:
                 try:
-                    on_theme_changed()
+                    if on_theme_changed is not None and theme_notifications_enabled():
+                        on_theme_changed()
                 except Exception:
                     logging.getLogger(__name__).exception("settled theme snapshot notification failed")
 
-    @router.get("/api/v1/themes/history", dependencies=[Depends(authorize)])
+    @router.put("/api/v1/themes/snapshot", dependencies=[Depends(authorize)])
+    async def publish_theme_snapshot(publication: ThemePublication) -> dict[str, Any]:
+        receipt = None
+        def publish():
+            nonlocal receipt
+            receipt = store.publish_theme_snapshot(
+                **publication.model_dump(), require_current_projection=True,
+            )
+        try:
+            await persist_content("theme_metadata", publish)
+        except ThemeGenerationConflict as error:
+            raise HTTPException(status_code=409, detail=f"{error.code}: {error}") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return receipt
+
+    @router.get("/api/v1/themes/snapshot", dependencies=[Depends(authorize)])
+    async def accepted_theme_snapshot(
+        snapshot_id: str | None = None,
+    ) -> dict[str, Any]:
+        from .observation_frame_recovery import drain_thread_call
+        try:
+            snapshot = await drain_thread_call(
+                store.load_accepted_theme_snapshot, snapshot_id=snapshot_id,
+                require_current_projection=snapshot_id is None,
+            )
+        except ThemeGenerationConflict as error:
+            raise HTTPException(status_code=409, detail=f"{error.code}: {error}") from error
+        return {"known": snapshot is not None, "snapshot": snapshot}
+
+    @router.get("/api/v1/themes/current-snapshot", dependencies=[Depends(read_authorize or authorize)])
+    async def current_theme_snapshot() -> dict[str, Any]:
+        from .observation_frame_recovery import drain_thread_call
+        return await drain_thread_call(store.load_current_theme_snapshot)
+
+    @router.get("/api/v1/themes/history", dependencies=[Depends(theme_history_authorize or read_authorize or authorize)])
     async def theme_history(
         as_of: float | None = Query(default=None, ge=0.0),
         limit: int = Query(default=100, ge=1, le=1000),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -81,13 +82,14 @@ class UpdateDownloadWorker(QThread):
     failed = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, steps: tuple[UpdateStep, ...], parent: QWidget | None = None) -> None:
+    def __init__(self, steps: tuple[UpdateStep, ...], parent: QWidget | None = None, *, download_dir: Path | None = None) -> None:
         super().__init__(parent)
         self._steps = steps
+        self._download_dir = download_dir
 
     def run(self) -> None:
         try:
-            folder = AppPaths.for_current_user().data_dir.parent / "updates"
+            folder = self._download_dir if self._download_dir is not None else AppPaths.for_current_user().data_dir.parent / "updates"
             folder.mkdir(parents=True, exist_ok=True)
             planned_size = sum(max(1, step.size) for step in self._steps)
             completed_size = 0

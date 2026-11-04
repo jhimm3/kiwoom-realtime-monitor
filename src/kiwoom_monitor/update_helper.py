@@ -296,7 +296,27 @@ def apply_archives(archive_paths: tuple[Path, ...], target_root: Path, progress:
             shutil.rmtree(workspace, ignore_errors=True)
 
 
-def apply_update(wait_pid: int, archive_paths: tuple[Path, ...], target_root: Path, executable: Path, log_path: Path) -> None:
+def apply_update(wait_pid: int, archive_paths: tuple[Path, ...], target_root: Path, executable: Path, log_path: Path,
+                 *, query_only: bool = False, query_data_dir: Path | None = None,
+                 query_settings_role: str | None = None, full_data_dir: Path | None = None,
+                 full_settings_role: str | None = None) -> None:
+    if query_data_dir is not None or query_settings_role is not None:
+        if not query_only or query_data_dir is None or query_settings_role is None:
+            raise ValueError("명시 조회 경로와 설정 역할은 --query-only와 함께 지정해야 합니다.")
+    if full_data_dir is not None or full_settings_role is not None:
+        if (query_only or query_data_dir is not None or query_settings_role is not None
+                or full_data_dir is None or not str(full_data_dir).strip()
+                or full_settings_role is None or not full_settings_role.strip()):
+            raise ValueError("명시 전체 실행 경로와 설정 역할은 조회 옵션 없이 함께 지정해야 합니다.")
+    restart_arguments = [str(executable)]
+    if query_only:
+        restart_arguments.append("--query-only")
+        if query_data_dir is not None:
+            restart_arguments.extend(("--query-data-dir", str(query_data_dir),
+                                      "--query-settings-role", query_settings_role))
+    elif full_data_dir is not None:
+        restart_arguments.extend(("--full-data-dir", str(full_data_dir),
+                                  "--full-settings-role", full_settings_role))
     progress = UpdateProgress()
     try:
         _write_log(log_path, f"업데이트 도우미 시작 ({len(archive_paths)}개)")
@@ -307,7 +327,7 @@ def apply_update(wait_pid: int, archive_paths: tuple[Path, ...], target_root: Pa
         apply_archives(archive_paths, target_root, progress, log_path)
         progress.show("업데이트를 마무리하고 있습니다…", 100)
         _write_log(log_path, "업데이트 완료, 앱 재실행")
-        subprocess.Popen([str(executable)], cwd=str(target_root))
+        subprocess.Popen(restart_arguments, cwd=str(target_root))
         time.sleep(0.4)
         progress.close()
     except Exception as error:
@@ -324,9 +344,28 @@ def main() -> int:
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--exe", required=True, type=Path)
     parser.add_argument("--log", required=True, type=Path)
+    parser.add_argument("--query-only", action="store_true")
+    parser.add_argument("--query-data-dir", type=Path)
+    parser.add_argument("--query-settings-role")
+    parser.add_argument("--full-data-dir")
+    parser.add_argument("--full-settings-role")
     args = parser.parse_args()
+    if args.query_data_dir is not None or args.query_settings_role is not None:
+        if not args.query_only or args.query_data_dir is None or args.query_settings_role is None:
+            parser.error("--query-data-dir and --query-settings-role require --query-only and each other")
+    if args.full_data_dir is not None or args.full_settings_role is not None:
+        if (args.query_only or args.query_data_dir is not None or args.query_settings_role is not None
+                or args.full_data_dir is None or not args.full_data_dir.strip()
+                or args.full_settings_role is None or not args.full_settings_role.strip()):
+            parser.error("--full-data-dir and --full-settings-role require each other and exclude query options")
     try:
-        apply_update(args.wait_pid, tuple(args.archive), args.target, args.exe, args.log)
+        if args.full_data_dir is not None:
+            apply_update(args.wait_pid, tuple(args.archive), args.target, args.exe, args.log,
+                         full_data_dir=Path(args.full_data_dir), full_settings_role=args.full_settings_role)
+        else:
+            apply_update(args.wait_pid, tuple(args.archive), args.target, args.exe, args.log,
+                         query_only=args.query_only, query_data_dir=args.query_data_dir,
+                         query_settings_role=args.query_settings_role)
     except Exception:
         return 1
     return 0

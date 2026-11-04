@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Event
@@ -535,6 +535,7 @@ class AppControllerTests(unittest.TestCase):
         self.assertEqual(old, controller.pending_minutes[("000660", now)])
 
     def test_main_window_realtime_signals_feed_app_buffers_and_saved_signal_keeps_repair_receiver(self):
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import ProgramTradeTick
         now = datetime(2026, 10, 6, 10, 0)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
@@ -546,10 +547,11 @@ class AppControllerTests(unittest.TestCase):
                 window = MainWindow(database.settings, monitor_database_path=path,
                                     minute_bar_repository=MinuteBarRepository(path),
                                     ranking_loader=SimpleNamespace(server_now=lambda: now))
+                window.activate_startup()
                 self.windows.append(window)
                 controller = window._app_controller
                 window._row_by_code["005930"] = 0
-                window._minute_bar_storage_date = now.date()
+                window._pc_market_session.ensure_minute_day(now, flush=lambda: None, retain=None)
                 controller.realtime.trade_received.emit(TradeTick(
                     "005930", 71000, 100, 7100000, 2, 71200, "100000", market_cap_eok=200,
                 ))
@@ -558,7 +560,13 @@ class AppControllerTests(unittest.TestCase):
                 ))
                 self.assertEqual(71000, window._current_prices["005930"])
                 self.assertEqual(200., window._realtime_market_caps["005930"])
-                self.assertEqual(2500., window._latest_market_state["KOSPI"]["index"])
+                self.assertEqual(2500., window._pc_market_session.market_state_at_entry()["KOSPI"]["index"])
+                self.assertEqual("2026-10-06T10:00:00",
+                    window._pc_market_session.market_state_at_entry()["observed_at"])
+                controller.realtime.program_trade_received.emit(ProgramTradeTick(
+                    "005930", "100000", 10, -2, 1200, -3,
+                ))
+                self.assertEqual(10, window._pc_market_session.investor_flow_at_entry("005930")["program_trade"]["net_buy_quantity"])
                 self.assertEqual({"005930": 71000}, controller.pending_prices)
                 self.assertEqual({(now.date(), "005930"): 71200}, controller.pending_highs)
                 self.assertEqual(71000, controller.pending_minutes[("005930", now)].close_price)
@@ -626,6 +634,7 @@ class AppControllerTests(unittest.TestCase):
                     window = MainWindow(database.settings,
                         minute_history_worker_factory=minute_factory,
                         daily_high_worker_factory=daily_factory)
+                    window.activate_startup()
                     self.windows.append(window)
                     controller = window._app_controller
                     controller.ranking_loader = SimpleNamespace(server_now=lambda: now)
@@ -694,6 +703,7 @@ class AppControllerTests(unittest.TestCase):
                         patch.object(MainWindow, "_start_nxt_eligibility_loading", side_effect=start_nxt), \
                         patch.object(MainWindow, "_start_daily_krx_catalog_sync", side_effect=lambda: phases.append("catalog")):
                     window = MainWindow(database.settings)
+                    window.activate_startup()
                     self.windows.append(window)
                     controller = window._app_controller
                     controller.ranking_loader = SimpleNamespace(server_now=lambda: now)
@@ -904,6 +914,7 @@ class AppControllerTests(unittest.TestCase):
                 patch.object(MainWindow, "_start_nxt_eligibility_loading", return_value=False), \
                 patch.object(MainWindow, "_start_daily_krx_catalog_sync"):
             window = MainWindow(database.settings, realtime_worker_factory=Mock())
+            window.activate_startup()
             self.windows.append(window)
             controller = window._app_controller
             controller.ranking_loader = SimpleNamespace(server_now=lambda: datetime(2026, 10, 6, 10, 0))
@@ -1008,6 +1019,143 @@ class AppControllerTests(unittest.TestCase):
         self.assertNotIn("ready", events)  # Entry writer still alive.
         entry.running = False
         self.wait_until(lambda: "ready" in events)
+
+    def test_entry_enriched_commit_ack_loss_blocks_close_while_selective_seed_stays_unbound_until_same_writer_retry(self):
+        from dataclasses import replace
+        from scripts import preserve_current_settings as operator
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
+            TradeEntrySnapshot, scoped_snapshot_execution_key,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, journal = root / "monitor.sqlite3", root / "journal.sqlite3"
+            at = as_kst(datetime(2026, 10, 19, 10, 30))
+            database = Database(source, now_provider=lambda: at)
+            database.initialize()
+            database.settings.set_many({"theme_active_profile": "기본 테마", "rank_query_type": "5"})
+            repository = JournalRepository(journal)
+            scope = AccountScope("kiwoom", AccountEnvironment.MOCK, "00000000-0000-4000-8000-000000000041")
+            snapshot = TradeEntrySnapshot(
+                scoped_snapshot_execution_key("entry-closure-041", scope), "order-041", "005930",
+                "삼성전자", "매수", at, 70000, 1, "KRX", origin_scope=scope,
+                market_state={"source": "original-041"}, orderbook={"bid": 69900},
+                capture_state="realtime_core",
+                investor_flow={"program_trade": {"available": True, "source": "original-0w-041"}},
+            )
+            news = ({"title": "original news-041", "published_at": "2026-10-19T10:29:00+09:00"},)
+            investor = {"available": True, "source": "original-investor-041"}
+            expected = replace(snapshot, news=news, capture_state="realtime_enriched",
+                               investor_flow={**investor, "program_trade": snapshot.investor_flow["program_trade"]})
+            loads, saves, failures, events = [], [], [], []
+            committed, release = Event(), Event()
+            lost_ack = []
+            def load(code, observed):
+                loads.append((code, observed))
+                return dict(investor)
+            native_save = JournalRepository.save_entry_snapshot
+            def save(owner, value, now=None, *, account_scope=None):
+                result = native_save(owner, value, now, account_scope=account_scope)
+                saves.append((value, account_scope))
+                if value.capture_state == "realtime_enriched" and not lost_ack:
+                    lost_ack.append(value)
+                    committed.set()
+                    if not release.wait(3):
+                        raise AssertionError("entry ACK-loss barrier was not released")
+                    raise RuntimeError("041 enriched native COMMIT ACK loss")
+                return result
+            controller = self.controller(events, journal_database_path=journal, entry_investor_loader=load)
+            writer = controller.entry_snapshot_writer
+            writer.failed.connect(failures.append)
+            try:
+                with patch.object(JournalRepository, "save_entry_snapshot", autospec=True, side_effect=save), \
+                        patch("kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer.news_at_execution",
+                              return_value=news) as news_lookup:
+                    writer.enqueue(snapshot)
+                    controller.start_entry_snapshot_writer()
+                    self.assertTrue(committed.wait(2))
+                    self.assertTrue(writer.isRunning())
+                    self.assertFalse(controller.request_close())
+                    self.assertNotIn("ready", events)
+                    # The row exists, but its caller has not received a native ACK.
+                    stored = repository.load_entry_snapshots("005930", at, at + timedelta(seconds=1), scope)[0]
+                    self.assertEqual(news, stored.news)
+                    self.assertEqual(expected.investor_flow, stored.investor_flow)
+                    release.set()
+                    self.wait_until(lambda: not writer.isRunning())
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    self.assertTrue(any("041 enriched native COMMIT ACK loss" in error for error in failures))
+                    self.assertTrue(writer.has_pending_work())
+                    self.assertEqual(expected, writer._pending_job)
+                    self.assertTrue(writer._pending_enriched)
+                    self.assertNotIn("auxiliaries", events)
+                    self.assertNotIn("ready", events)
+
+                    # Only the settings DB is frozen here; the separate source
+                    # journal owner explicitly still has an unacknowledged job.
+                    artifact, target = root / "settings-cut", root / "query-role.sqlite3"
+                    operator.capture_current_state(database=source, source_instance="fixture-source",
+                        source_owner="fixture-settings-owner", operation_id="fixture-entry-cut",
+                        output=artifact, sqlite_frozen=True, artifact_now=at)
+                    manifest, records, digest = operator.verified_current_state_rows(artifact)
+                    keys = {"theme_active_profile", "rank_query_type"}
+                    theme_relations = set(operator.CURRENT_STATE_TABLES) - set(operator.TABLES)
+                    entries = []
+                    for record_id, item in records.items():
+                        relation = item["relation"]
+                        row = tuple(operator.decode_value(value) for value in item["row"])
+                        chosen = (relation in theme_relations or
+                                  relation in {"settings", "central_setting_versions"} and row[0] in keys)
+                        entries.append(dict(record_id=record_id,
+                            placement="TRANSFER" if chosen else "RETAIN_SOURCE",
+                            **({"target_role": "query-local"} if chosen else {})))
+                    selection = dict(format="current-state-selection/v1",
+                        source_instance=manifest["source_instance"], source_owner=manifest["source_owner"],
+                        operation_id=manifest["operation_id"], manifest_sha256=digest,
+                        target_role="query-local", records=entries)
+                    selected = operator.select_current_state_rows(artifact, selection)
+                    self.assertEqual("CLOSED", selected["closure"]["state"])
+                    seeded = operator.install_current_state(artifact=artifact, selection=selection, target=target,
+                        operation_id="fixture-entry-install", target_id="fixture-entry-target", receipt_now=at)
+                    self.assertEqual("OFFLINE_UNBOUND", seeded["runtime_state"])
+                    self.assertFalse(seeded["role_ready"])
+                    self.assertFalse(seeded["applied"])
+                    self.assertFalse(seeded["order_authority"])
+                    self.assertEqual("NOT_EVALUATED", seeded["consumer_status"])
+                    with closing(sqlite3.connect(target)) as connection:
+                        self.assertEqual([], connection.execute(
+                            "SELECT name FROM sqlite_master WHERE name='trade_entry_snapshots'").fetchall())
+                    self.assertTrue(writer.has_pending_work())
+                    self.assertNotIn("ready", events)
+
+                    # Preserve the already observed cut even if its providers are
+                    # detached before an explicit retry by this same owner.
+                    with writer.replace_sources(investor_loader=None, program_loader=None):
+                        self.assertFalse(controller.request_close())
+                    self.wait_until(lambda: "ready" in events)
+                    self.assertFalse(writer.isRunning())
+                    self.assertFalse(writer.has_pending_work())
+                    self.assertEqual([(snapshot, scope), (expected, scope), (expected, scope)], saves)
+                    self.assertEqual([("005930", at)], loads)
+                    self.assertEqual(1, news_lookup.call_count)
+                    stored = repository.load_entry_snapshots("005930", at, at + timedelta(seconds=1), scope)[0]
+                    self.assertEqual(snapshot.execution_key, stored.execution_key)
+                    self.assertEqual(scope, stored.origin_scope)
+                    self.assertEqual(snapshot.market_state, stored.market_state)
+                    self.assertEqual(snapshot.orderbook, stored.orderbook)
+                    self.assertEqual(news, stored.news)
+                    self.assertEqual(expected.investor_flow, stored.investor_flow)
+                    with closing(sqlite3.connect(journal)) as connection:
+                        self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM trade_entry_snapshots").fetchone()[0])
+                    reopened = Database(target).initialize_query_role(role="query-local")
+                    self.assertEqual(seeded["receipt"], reopened["receipt"])
+                    self.assertFalse(reopened["role_ready"])
+                    self.assertFalse(reopened["order_authority"])
+            finally:
+                release.set()
+                writer.requestInterruption()
+                self.assertTrue(writer.wait(4000))
 
     def test_entry_backfill_native_failure_blocks_close_and_retries_retained_jobs(self):
         from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
@@ -1148,6 +1296,7 @@ class AppControllerTests(unittest.TestCase):
                 connection.commit()
             window = MainWindow(database.settings, monitor_database_path=path,
                                 minute_bar_repository=MinuteBarRepository(path))
+            window.activate_startup()
             self.windows.append(window)
             window._app_controller.pending_prices = {"005930": 71200}
             writer = window._market_cache_writer
@@ -1191,6 +1340,7 @@ class AppControllerTests(unittest.TestCase):
             repository.record_history_sync("KEEP", now.date(), now, 1)
             window = MainWindow(database.settings, minute_bar_repository=repository,
                                 ranking_loader=SimpleNamespace(server_now=clock, load_top_stocks=lambda: ()))
+            window.activate_startup()
             controller = window._app_controller
             controller._initial_ranking_timer.stop()
             self.assertIsNone(window._monitor_database_path)
@@ -1401,10 +1551,11 @@ class AppControllerTests(unittest.TestCase):
                     patch.object(MainWindow, "_start_top20_market_repair"):
                 window = MainWindow(database.settings, minute_bar_repository=repository,
                     ranking_loader=SimpleNamespace(server_now=lambda: now, load_top_stocks=lambda: ()))
+                window.activate_startup()
             controller = window._app_controller
             self.assertIsNone(window._monitor_database_path)
             self.assertIsNone(controller.market_cache_writer)
-            window._ensure_today_minute_bar_storage(now)
+            window._pc_market_session.ensure_minute_day(now, flush=window._app_controller.flush_minute_cache, retain=window._app_controller.queue_minute_retention if window._minute_bar_repository is not None else None)
 
             def state():
                 with closing(original_connect(path)) as connection:
@@ -1426,9 +1577,9 @@ class AppControllerTests(unittest.TestCase):
 
             if kind == "empty":
                 gap = RealtimeGap(1, (GapRange("trade", "EMPTY", "KRX", minute, minute),), False)
-                window._minute_aggregator.mark_gap(gap, ("EMPTY",), now)
-                generation = window._minute_aggregator.gap_generation("EMPTY")
-                window._minute_recovery_requests["EMPTY"] = generation
+                window._pc_market_session.minute_aggregator.mark_gap(gap, ("EMPTY",), now)
+                generation = window._pc_market_session.minute_aggregator.gap_generation("EMPTY")
+                window._pc_market_session.prepare_history(("EMPTY",), now, force=True)
                 controller.minute_history.history_received.emit("EMPTY", ())
             initial = state()
             self.assertEqual(([], [], [], []), initial["expired"])
@@ -1520,8 +1671,8 @@ class AppControllerTests(unittest.TestCase):
                         "commits": commits.copy(), "pending_cutoff": controller.pending_minute_retention,
                         "timer_active": controller.minute_cache_timer.isActive(),
                         "pending_data": bool(controller.pending_minutes or controller.pending_market_minutes or controller.pending_minute_gaps),
-                        "history_loaded": "TARGET" in window._minute_history_codes,
-                        "empty_quality": window._minute_aggregator.quality_for_range("EMPTY", minute, minute + timedelta(minutes=1)).value,
+                        "history_loaded": "TARGET" in window._pc_market_session.history_codes,
+                        "empty_quality": window._pc_market_session.minute_aggregator.quality_for_range("EMPTY", minute, minute + timedelta(minutes=1)).value,
                     }
                     if cleanup is not None:
                         controller.request_close()
@@ -2053,6 +2204,7 @@ class AppControllerTests(unittest.TestCase):
                 connection.commit()
             window = MainWindow(database.settings, monitor_database_path=path,
                 minute_bar_repository=MinuteBarRepository(path))
+            window.activate_startup()
             self.windows.append(window)
             controller = window._app_controller
             writer = controller.market_cache_writer
@@ -2159,10 +2311,11 @@ class AppControllerTests(unittest.TestCase):
             window = MainWindow(database.settings, monitor_database_path=path,
                                 minute_bar_repository=MinuteBarRepository(path),
                                 ranking_loader=SimpleNamespace(server_now=lambda: now))
+            window.activate_startup()
             self.windows.append(window)
             controller = window._app_controller
             window._row_by_code["005930"] = 0
-            window._minute_bar_storage_date = now.date()
+            window._pc_market_session.ensure_minute_day(now, flush=lambda: None, retain=None)
             producer = DelayedTradeProducer(controller.realtime)
             self.threads.append(producer)
             producer.trade.connect(controller.realtime.trade_received.emit)
@@ -2197,6 +2350,7 @@ class AppControllerTests(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             self.windows.append(window)
             self.assertTrue(window.close())
             with patch("kiwoom_monitor.presentation.main_window.Top20NasDataWorker") as nas, \
@@ -2217,6 +2371,7 @@ class AppControllerTests(unittest.TestCase):
             database.initialize()
             window = MainWindow(database.settings, monitor_database_path=path,
                                 minute_bar_repository=MinuteBarRepository(path))
+            window.activate_startup()
             self.windows.append(window)
             producer = DelayedHistoryProducer(window._app_controller.minute_history)
             self.threads.append(producer)
@@ -2230,7 +2385,7 @@ class AppControllerTests(unittest.TestCase):
             self.assertFalse(window._market_cache_writer.isInterruptionRequested())
             producer.release.set()
             self.wait_until(lambda: window._app_controller.request_close())
-            self.assertIn("005930", window._minute_history_codes)
+            self.assertIn("005930", window._pc_market_session.history_codes)
             self.assertFalse(window._app_controller.price_cache_timer.isActive())
             with closing(sqlite3.connect(path)) as connection:
                 row = connection.execute("SELECT close_price,volume FROM minute_bars WHERE stock_code='005930'").fetchone()
@@ -2246,6 +2401,7 @@ class AppControllerTests(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             self.windows.append(window)
             started = Event()
             release = Event()
@@ -2372,6 +2528,7 @@ class AppControllerTests(unittest.TestCase):
         application = Mock()
         application.exec.side_effect = loop
         server = Mock()
+        server.process = None
         server.stop.side_effect = lambda: fixture.events.append("server.stop")
         fixture.server = server
         service = Mock() if content_service is None else content_service
@@ -2471,6 +2628,10 @@ class AppControllerTests(unittest.TestCase):
 
         def http(request, **_kwargs):
             state.calls += 1
+            if request.full_url.endswith("/api/v1/themes/snapshot"):
+                from urllib.error import HTTPError
+                from io import BytesIO
+                raise HTTPError(request.full_url, 404, "legacy content fixture", {}, BytesIO(b'{}'))
             if "/news_article?" in request.full_url:
                 if stage == "http":
                     barrier()
@@ -3275,14 +3436,13 @@ class AppControllerTests(unittest.TestCase):
                 writer.start()
                 try:
                     self.assertTrue(entered.wait(2))
-                    with patch.object(writer, "set_investor_loader", wraps=writer.set_investor_loader) as setter:
+                    with patch.object(writer, "replace_sources", wraps=writer.replace_sources) as source_change:
                         if rollback:
                             with self.assertRaisesRegex(RuntimeError, "controlled view rollback"):
                                 controller._apply_api_runtime(runtime, actions)
-                            self.assertEqual([new, old], [call.args[0] for call in setter.call_args_list])
                         else:
                             controller._apply_api_runtime(runtime, actions)
-                            setter.assert_called_once_with(new)
+                        source_change.assert_called_once_with(investor_loader=new, program_loader=None)
                     self.assertFalse(release.is_set())
                     release.set()
                     writer.enqueue(replace(snapshot, execution_key=scoped_snapshot_execution_key("apply-new-030", scope),
@@ -3304,6 +3464,753 @@ class AppControllerTests(unittest.TestCase):
                     release.set()
                     writer.requestInterruption()
                     self.assertTrue(writer.wait(5000))
+
+    def test_runtime_retirement_records_committed_old_client_even_if_later_reset_fails(self):
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        for reset_fails in (False, True):
+            with self.subTest(reset_fails=reset_fails):
+                old, candidate = SimpleNamespace(close=Mock()), SimpleNamespace(close=Mock())
+                controller = self.controller([], market_data_client=old, owned_observers=(old,))
+                writer = EntrySnapshotWriter(Path("unused-retirement.sqlite3"))
+                writer.setParent(controller)
+                controller.entry_snapshot_writer = writer
+                runtime = {"market_data_client": candidate, "owned_observers": (candidate,)}
+                sentinel = OSError("fixture post-commit reset")
+                actions = AppRuntimeActions(apply_runtime=lambda _runtime: None)
+                with patch.object(controller.realtime_subscription, "reset", side_effect=sentinel if reset_fails else None):
+                    if reset_fails:
+                        with self.assertRaises(OSError) as caught:
+                            controller._apply_api_runtime(runtime, actions)
+                        self.assertIs(sentinel, caught.exception)
+                    else:
+                        controller._apply_api_runtime(runtime, actions)
+                self.assertIs(candidate, controller.market_data_client)
+                retained = getattr(controller, "_api_client_retirements", ())
+                self.assertEqual(1, len(retained), "the detached old observer must have an owner")
+                self.assertIs(old, retained[0].client)
+                self.assertTrue(retained[0].runtime_detached)
+                self.assertIsNotNone(retained[0].source_release)
+                self.assertTrue(retained[0].source_release.released)
+                self.assertIs(sentinel if reset_fails else None, retained[0].error)
+                old.close.assert_not_called()
+                candidate.close.assert_not_called()
+
+    def test_runtime_retirement_records_only_unpublished_or_completely_restored_candidate(self):
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        for failure in ("capture", "factory", "view"):
+            with self.subTest(failure=failure):
+                old, candidate = SimpleNamespace(close=Mock()), SimpleNamespace(close=Mock())
+                controller = self.controller([], market_data_client=old, owned_observers=(old,))
+                writer = EntrySnapshotWriter(Path("unused-retirement.sqlite3"))
+                writer.setParent(controller)
+                controller.entry_snapshot_writer = writer
+                sentinel = ValueError("fixture " + failure)
+                new_factory = Mock()
+                old_factory = controller.fundamentals._worker_factory
+                original_set = controller.fundamentals.set_factory
+                runtime = {"market_data_client": candidate, "owned_observers": (candidate,), "fundamentals_worker_factory": new_factory}
+                def capture():
+                    if failure == "capture":
+                        raise sentinel
+                    return lambda: None
+                def apply(_runtime):
+                    if failure == "view":
+                        raise sentinel
+                def set_factory(value):
+                    if failure == "factory" and value is new_factory:
+                        raise sentinel
+                    original_set(value)
+                actions = AppRuntimeActions(apply_runtime=apply, capture_state=capture)
+                with patch.object(writer, "replace_sources", wraps=writer.replace_sources) as source_change, \
+                        patch.object(controller.fundamentals, "set_factory", side_effect=set_factory):
+                    with self.assertRaises(ValueError) as caught:
+                        controller._apply_api_runtime(runtime, actions)
+                self.assertIs(sentinel, caught.exception)
+                self.assertIs(old, controller.market_data_client)
+                self.assertIs(old_factory, controller.fundamentals._worker_factory)
+                self.assertEqual(1 if failure == "view" else 0, source_change.call_count)
+                retained = getattr(controller, "_api_client_retirements", ())
+                self.assertEqual(1, len(retained), "the failed candidate must remain owned after rollback")
+                self.assertIs(candidate, retained[0].client)
+                self.assertTrue(retained[0].runtime_detached)
+                self.assertIs(sentinel, retained[0].error)
+                if failure == "view":
+                    self.assertIsNotNone(retained[0].source_release)
+                    self.assertTrue(retained[0].source_release.released)
+                else:
+                    self.assertIsNone(retained[0].source_release)
+                old.close.assert_not_called()
+                candidate.close.assert_not_called()
+
+    def test_runtime_retirement_keeps_restore_failure_unknown_despite_released_source(self):
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        for failure in ("source_enter", "factory_restore", "view_restore"):
+            with self.subTest(failure=failure):
+                old, candidate = SimpleNamespace(close=Mock()), SimpleNamespace(close=Mock())
+                controller = self.controller([], market_data_client=old, owned_observers=(old,))
+                writer = EntrySnapshotWriter(Path("unused-retirement.sqlite3"))
+                writer.setParent(controller)
+                controller.entry_snapshot_writer = writer
+                original = ValueError("fixture apply")
+                restore = OSError("fixture " + failure)
+                old_factory = controller.realtime._worker_factory
+                new_factory = Mock()
+                original_set = controller.realtime.set_factory
+                def apply(_runtime):
+                    raise original
+                def restore_view():
+                    if failure == "view_restore":
+                        raise restore
+                def set_factory(value):
+                    if failure == "factory_restore" and value is old_factory:
+                        raise restore
+                    original_set(value)
+                actions = AppRuntimeActions(apply_runtime=apply, capture_state=lambda: restore_view)
+                with patch.object(controller.realtime, "set_factory", side_effect=set_factory), \
+                        (patch.object(writer, "replace_sources", side_effect=original)
+                         if failure == "source_enter" else nullcontext()):
+                    with self.assertRaises(ValueError if failure == "source_enter" else RuntimeError) as caught:
+                        controller._apply_api_runtime({"market_data_client": candidate, "owned_observers": (candidate,),
+                                                       "realtime_worker_factory": new_factory}, actions)
+                retained = getattr(controller, "_api_client_retirements", ())
+                self.assertEqual(1, len(retained))
+                self.assertIs(candidate, retained[0].client)
+                self.assertFalse(retained[0].runtime_detached, "source release cannot prove runtime references restored")
+                self.assertIs(caught.exception, retained[0].error)
+                if failure == "source_enter":
+                    self.assertIs(original, retained[0].error)
+                    self.assertIsNone(retained[0].source_release)
+                else:
+                    self.assertIs(original, retained[0].error.__cause__)
+                    self.assertIn(str(restore), str(caught.exception))
+                    self.assertIsNotNone(retained[0].source_release)
+                    self.assertTrue(retained[0].source_release.released)
+                self.assertIs(old, controller.market_data_client)
+                self.assertIs(new_factory if failure == "factory_restore" else old_factory,
+                              controller.realtime._worker_factory)
+                old.close.assert_not_called()
+                candidate.close.assert_not_called()
+
+    def test_runtime_retirement_never_targets_the_same_installed_client_identity(self):
+        for failure in (None, "capture", "view"):
+            with self.subTest(failure=failure):
+                client = SimpleNamespace(close=Mock())
+                controller = self.controller([], market_data_client=client, owned_observers=(client,))
+                sentinel = ValueError("fixture same client")
+                def capture():
+                    if failure == "capture":
+                        raise sentinel
+                    return lambda: None
+                def apply(_runtime):
+                    if failure == "view":
+                        raise sentinel
+                actions = AppRuntimeActions(apply_runtime=apply, capture_state=capture)
+                if failure:
+                    with self.assertRaises(ValueError) as caught:
+                        controller._apply_api_runtime({"market_data_client": client, "owned_observers": (client,)}, actions)
+                    self.assertIs(sentinel, caught.exception)
+                else:
+                    controller._apply_api_runtime({"market_data_client": client, "owned_observers": (client,)}, actions)
+                self.assertIs(client, controller.market_data_client)
+                self.assertEqual([], list(getattr(controller, "_api_client_retirements", ())))
+                client.close.assert_not_called()
+
+    def _api_retirement_probe(self, *, fact_mode="normal", close_error=None, fact_error=None):
+        calls, closed = [], Event()
+        def close():
+            calls.append(QThread.currentThread())
+            closed.set()
+            if close_error is not None:
+                raise close_error
+        def fact():
+            if fact_mode == "read_error":
+                raise fact_error
+            return SimpleNamespace(
+                admission_closed=closed.is_set(), active_requests=1 if fact_mode == "active" else 0,
+                worker_stopped=closed.is_set() and fact_mode != "alive",
+                failure_stage="unexpected" if fact_mode == "unknown_stage" else ("report" if close_error else None),
+            )
+        client = SimpleNamespace(close=close)
+        if fact_mode != "missing":
+            client.comparison_lifecycle_state = fact
+        return client, calls, closed
+
+    def _drain_api_retirement_fixture(self, controller):
+        if controller is None:
+            return
+        controller._shutdown_timer.stop()
+        for item in tuple(getattr(controller, "_api_client_retirements", ())):
+            if item.worker is not None:
+                self.assertTrue(item.worker.wait(4000))
+                self.assertTrue(item.worker.release_after_join())
+        self.app.processEvents()
+
+    def test_actual_api_reload_ends_old_comparison_daemon_after_whole_source_release(self):
+        import threading
+        from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import ParallelValidationClient
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        local_entered, local_resume = Event(), Event()
+        source_entered, source_resume = Event(), Event()
+        completed, close_entered = Event(), Event()
+        observed_threads, close_threads, old_values = [], [], []
+        original_thread = threading.Thread
+        def thread_factory(*args, **kwargs):
+            thread = original_thread(*args, **kwargs)
+            if kwargs.get("name") == "central-local-validation":
+                observed_threads.append(thread)
+            return thread
+        def primary(api_id, path, body, **kwargs):
+            return ({"revision_id": api_id, "value": 7}, False, "")
+        def local(api_id, path, body, **kwargs):
+            if api_id == "ka10001":
+                local_entered.set()
+                if not local_resume.wait(3):
+                    raise TimeoutError("fixture comparison release")
+            return primary(api_id, path, body, **kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("kiwoom_monitor.infrastructure.kiwoom_rest.validation_client.threading.Thread", side_effect=thread_factory):
+                old = ParallelValidationClient(SimpleNamespace(request_with_continuation=primary),
+                    SimpleNamespace(request_with_continuation=local), Path(directory) / "report.jsonl")
+            self.assertEqual(1, len(observed_threads))
+            daemon = observed_threads[0]
+            original_close = old.close
+            def close():
+                close_threads.append(QThread.currentThread())
+                close_entered.set()
+                return original_close()
+            old.close = close
+            def old_source(code, observed):
+                source_entered.set()
+                if not source_resume.wait(3):
+                    raise TimeoutError("fixture whole source release")
+                return {"available": True, "source": "old", "value": old.request("ka10045", "/fixture", {})["value"]}
+            writer = EntrySnapshotWriter(Path(directory) / "unused.sqlite3", investor_loader=old_source)
+            current = object()
+            runtime = {"market_data_client": current,
+                       "entry_investor_loader": lambda *args: {"available": True, "source": "new"}}
+            controller = self.controller([], market_data_client=old, api_runtime_factory=lambda: runtime)
+            controller._owned_observers = (old,)
+            writer.setParent(controller)
+            controller.entry_snapshot_writer = writer
+            controller.configure_runtime(AppRuntimeActions(apply_runtime=lambda _: None))
+            controller.api_reload_completed.connect(completed.set)
+            snapshot = SimpleNamespace(stock_code="005930", executed_at=datetime(2026, 10, 20, 20, 5))
+            caller = original_thread(target=lambda: old_values.append(writer._investor_at_execution(snapshot)))
+            caller.start()
+            try:
+                self.assertEqual(7, old.request("ka10001", "/fixture", {})["value"])
+                self.assertTrue(local_entered.wait(2))
+                self.assertTrue(source_entered.wait(2))
+                with patch.object(controller, "start_initial_ranking"):
+                    controller.restart_for_api_settings()
+                    self.wait_until(completed.is_set)
+                self.assertIs(current, controller.market_data_client)
+                self.assertFalse(close_entered.is_set(), "close cut an admitted whole source call")
+                self.assertEqual({"available": True, "source": "new"}, writer._investor_at_execution(snapshot))
+                source_resume.set()
+                caller.join(3)
+                self.assertFalse(caller.is_alive())
+                self.assertEqual([{"available": True, "source": "old", "value": 7}], old_values)
+                local_resume.set()
+                daemon.join(3)
+                # This behavior assertion precedes all new owner/fact reads. The
+                # current baseline leaves the real compared client idle/alive.
+                self.assertFalse(daemon.is_alive(), "API replacement left the old comparison daemon alive")
+                self.assertTrue(close_entered.is_set())
+                self.assertTrue(all(thread is not controller.thread() for thread in close_threads))
+                controller.request_close()
+                self.wait_until(lambda: controller._shutdown_stage == "ready")
+                self.assertEqual([], controller._api_client_retirements)
+            finally:
+                source_resume.set()
+                local_resume.set()
+                caller.join(3)
+                original_close()
+                daemon.join(3)
+                self._drain_api_retirement_fixture(controller)
+
+    def test_retained_cleanup_native_tail_cannot_auto_delete_or_block_writer_drain(self):
+        from shiboken6 import isValid
+        from kiwoom_monitor.presentation import app_controller as module
+        tail_entered, tail_resume = Event(), Event()
+        created = []
+        class TailRequest(SettingsRequestWorker):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+            def run(self):
+                super().run()
+                # Controlled early finished notification while a real native
+                # QThread tail remains live; not a claim of observed Qt TLS cause.
+                self.finished.emit()
+                tail_entered.set()
+                if not tail_resume.wait(3):
+                    raise TimeoutError("fixture native tail release")
+        old, calls, closed = self._api_retirement_probe()
+        events = []
+        controller = self.controller(events, market_data_client=old, owned_observers=(old,),
+                                     api_runtime_factory=lambda: {"market_data_client": object()})
+        controller.configure_runtime(AppRuntimeActions(apply_runtime=lambda _: None))
+        controller._api_reloading = True
+        controller._api_reload_stage = "signals"
+        try:
+            with patch.object(module, "SettingsRequestWorker", TailRequest), patch.object(controller, "start_initial_ranking"):
+                controller._advance_api_reload()
+                self.wait_until(tail_entered.is_set)
+                self.wait_until(lambda: bool(controller._api_client_retirements) and
+                                controller._api_client_retirements[0].result is not None)
+                retirement = controller._api_client_retirements[0]
+                worker = created[0]
+                self.assertTrue(closed.is_set())
+                self.assertIs(worker, retirement.worker)
+                self.assertFalse(worker.wait(0))
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+                self.assertTrue(isValid(worker), "finished must not auto-delete an explicitly retained native tail")
+                cache = FakeWriter(events, completes=False)
+                controller.market_cache_writer = cache
+                self.assertFalse(controller.request_close())
+                self.assertIn("cache_drain", events, "cleanup was treated as a producer ahead of writer drain")
+                self.assertNotIn("ready", events)
+                cache.running = False
+                self.wait_until(lambda: controller._shutdown_stage == "api_retirements")
+                self.assertNotIn("ready", events)
+                self.assertFalse(worker.wait(0))
+                tail_resume.set()
+                self.wait_until(lambda: controller._shutdown_stage == "ready")
+                self.assertEqual([], controller._api_client_retirements)
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+                self.assertFalse(isValid(worker))
+                self.assertEqual(1, len(calls))
+        finally:
+            tail_resume.set()
+            for worker in created:
+                if isValid(worker):
+                    worker.wait(4000)
+                    worker.release_after_join()
+
+    def test_current_comparison_report_error_joins_after_writer_drain_without_permanent_gate(self):
+        import threading
+        from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import ParallelValidationClient
+        with self.subTest(writer="fake_cache"):
+            observed, writes, close_threads = [], [], []
+            original_thread = threading.Thread
+            def thread_factory(*args, **kwargs):
+                thread = original_thread(*args, **kwargs)
+                if kwargs.get("name") == "central-local-validation":
+                    observed.append(thread)
+                return thread
+            def request(*args, **kwargs):
+                return ({"revision_id": "r1", "value": 7}, False, "")
+            sentinel = PermissionError("fixture report denied")
+            original_open = Path.open
+            with tempfile.TemporaryDirectory() as directory:
+                report = Path(directory) / "report.jsonl"
+                def denied(path, *args, **kwargs):
+                    if path == report:
+                        writes.append(path)
+                        raise sentinel
+                    return original_open(path, *args, **kwargs)
+                with patch("kiwoom_monitor.infrastructure.kiwoom_rest.validation_client.threading.Thread", side_effect=thread_factory):
+                    client = ParallelValidationClient(SimpleNamespace(request_with_continuation=request),
+                        SimpleNamespace(request_with_continuation=request), report)
+                original_close = client.close
+                def close():
+                    close_threads.append(QThread.currentThread())
+                    return original_close()
+                client.close = close
+                events = []
+                controller = self.controller(events, market_data_client=client)
+                controller._owned_observers = (client,)
+                cache = FakeWriter(events, completes=False)
+                controller.market_cache_writer = cache
+                with patch.object(Path, "open", denied):
+                    try:
+                        self.assertEqual(7, client.request("ka10001", "/fixture", {})["value"])
+                        observed[0].join(3)
+                        self.assertFalse(observed[0].is_alive())
+                        self.assertFalse(controller.request_close())
+                        self.assertIn("cache_drain", events)
+                        self.assertEqual([], close_threads, "current observer closed before native writer drain")
+                        cache.running = False
+                        self.wait_until(lambda: controller._shutdown_stage == "ready")
+                        self.assertEqual(1, len(close_threads), "current observer must be handed off exactly once")
+                        self.assertIsNot(close_threads[0], controller.thread())
+                        self.assertIsNone(controller.market_data_client)
+                        self.assertEqual(1, len(controller._api_client_retirements))
+                        retirement = controller._api_client_retirements[0]
+                        self.assertIs(client, retirement.client)
+                        self.assertIs(sentinel, retirement.result.error)
+                        self.assertEqual("close", retirement.result.error_stage)
+                        self.assertIsNone(retirement.result.observation_error)
+                        self.assertTrue(retirement.result.lifecycle.worker_stopped)
+                        self.assertTrue(retirement.result.lifecycle.admission_closed)
+                        self.assertEqual(0, retirement.result.lifecycle.active_requests)
+                        self.assertEqual("report", retirement.result.lifecycle.failure_stage)
+                        self.assertIs(True, retirement.native_result)
+                        self.assertEqual([report], writes)
+                        self.assertFalse(report.exists())
+                        self.assertTrue(controller.request_close())
+                        self.assertEqual(1, len(close_threads))
+                    finally:
+                        with self.assertRaises(PermissionError) as caught:
+                            original_close()
+                        self.assertIs(sentinel, caught.exception)
+                        observed[0].join(3)
+                        self._drain_api_retirement_fixture(controller)
+
+        with self.subTest(writer="native_entry_ack_loss"), tempfile.TemporaryDirectory() as native_directory:
+            from dataclasses import replace
+            from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+            from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+            from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
+                TradeEntrySnapshot, scoped_snapshot_execution_key,
+            )
+            native_journal = Path(native_directory) / "journal.sqlite3"
+            native_repository = JournalRepository(native_journal)
+            native_at = as_kst(datetime(2026, 10, 19, 10, 30))
+            native_scope = AccountScope("kiwoom", AccountEnvironment.MOCK,
+                                       "00000000-0000-4000-8000-000000000061")
+            native_snapshot = TradeEntrySnapshot(
+                scoped_snapshot_execution_key("rest-observer-closure-061", native_scope), "order-061",
+                "005930", "삼성전자", "매수", native_at, 70000, 1, "KRX", origin_scope=native_scope,
+                market_state={"source": "native-original-061"}, orderbook={"bid": 69900},
+                capture_state="realtime_core",
+                investor_flow={"program_trade": {"available": True, "source": "native-original-0w-061"}},
+            )
+            native_news = ({"title": "native original news-061", "published_at": "2026-10-19T10:29:00+09:00"},)
+            native_investor = {"available": True, "source": "native-investor-061", "value": 3}
+            native_expected = replace(native_snapshot, news=native_news, capture_state="realtime_enriched",
+                investor_flow={**native_investor, "program_trade": native_snapshot.investor_flow["program_trade"]})
+            native_saves, native_loads, native_failures, native_events = [], [], [], []
+            native_threads, native_report_writes, native_close_observations, native_local_calls = [], [], [], []
+            native_report_error = PermissionError("fixture native-path report denied")
+            native_ack_error = RuntimeError("061 enriched native COMMIT ACK loss")
+            native_committed, native_ack_resume = Event(), Event()
+            native_retry_committed, native_retry_resume = Event(), Event()
+            native_local_entered, native_local_resume = Event(), Event()
+            native_lost_ack = []
+            native_report = Path(native_directory) / "report.jsonl"
+            native_original_thread = threading.Thread
+            native_original_open = Path.open
+            native_save = JournalRepository.save_entry_snapshot
+            def native_thread_factory(*args, **kwargs):
+                thread = native_original_thread(*args, **kwargs)
+                if kwargs.get("name") == "central-local-validation":
+                    native_threads.append(thread)
+                return thread
+            def native_request(api_id, path, body, **kwargs):
+                return ({"revision_id": api_id, "value": body["n"]}, False, "")
+            def native_local(api_id, path, body, **kwargs):
+                native_local_calls.append((api_id, dict(body)))
+                if api_id == "ka10001":
+                    native_local_entered.set()
+                    if not native_local_resume.wait(3):
+                        raise AssertionError("native comparison report gate was not released")
+                return native_request(api_id, path, body, **kwargs)
+            def native_denied(path, *args, **kwargs):
+                if path == native_report:
+                    native_report_writes.append(path)
+                    raise native_report_error
+                return native_original_open(path, *args, **kwargs)
+            def native_load(code, observed_at):
+                native_loads.append((code, observed_at))
+                # The real report worker has failed, but primary enrichment is
+                # still valid; this accepted comparison stays in the owned RAM.
+                value = native_client.request("ka10045", "/fixture", {"n": 3})["value"]
+                return {**native_investor, "value": value}
+            def native_save_with_ack_loss(owner, value, now=None, *, account_scope=None):
+                result = native_save(owner, value, now, account_scope=account_scope)
+                native_saves.append((value, account_scope))
+                if value.capture_state == "realtime_enriched":
+                    if not native_lost_ack:
+                        native_lost_ack.append(value)
+                        native_committed.set()
+                        if not native_ack_resume.wait(3):
+                            raise AssertionError("native entry ACK-loss gate was not released")
+                        raise native_ack_error
+                    native_retry_committed.set()
+                    if not native_retry_resume.wait(3):
+                        raise AssertionError("native entry retry ACK gate was not released")
+                return result
+            native_controller = self.controller(native_events, journal_database_path=native_journal,
+                entry_investor_loader=native_load)
+            native_writer = native_controller.entry_snapshot_writer
+            native_writer.failed.connect(native_failures.append)
+            with patch("kiwoom_monitor.infrastructure.kiwoom_rest.validation_client.threading.Thread", side_effect=native_thread_factory):
+                native_client = ParallelValidationClient(SimpleNamespace(request_with_continuation=native_request),
+                    SimpleNamespace(request_with_continuation=native_local), native_report)
+            native_original_close = native_client.close
+            def native_close():
+                native_close_observations.append((native_writer.wait(0), native_writer.has_pending_work(),
+                    QThread.currentThread(), tuple(native_saves)))
+                return native_original_close()
+            native_client.close = native_close
+            native_controller.market_data_client = native_client
+            native_controller._owned_observers = (native_client,)
+            try:
+                with patch.object(Path, "open", native_denied), \
+                        patch.object(JournalRepository, "save_entry_snapshot", autospec=True, side_effect=native_save_with_ack_loss), \
+                        patch("kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer.news_at_execution",
+                              return_value=native_news) as native_news_lookup:
+                    self.assertEqual(1, native_client.request("ka10001", "/fixture", {"n": 1})["value"])
+                    self.assertTrue(native_local_entered.wait(2))
+                    self.assertEqual(2, native_client.request("ka10080", "/fixture", {"n": 2})["value"])
+                    native_local_resume.set()
+                    self.assertEqual(1, len(native_threads))
+                    native_threads[0].join(3)
+                    self.assertFalse(native_threads[0].is_alive())
+                    self.assertEqual([native_report], native_report_writes)
+                    self.assertFalse(native_report.exists())
+                    native_writer.enqueue(native_snapshot)
+                    native_controller.start_entry_snapshot_writer()
+                    self.assertTrue(native_committed.wait(2))
+                    self.assertTrue(native_writer.isRunning())
+                    self.assertFalse(native_writer.wait(0))
+                    self.assertFalse(native_controller.request_close())
+                    self.assertEqual([], native_close_observations)
+                    self.assertEqual([], native_controller.findChildren(SettingsRequestWorker))
+                    self.assertIs(native_client, native_controller.market_data_client)
+                    self.assertNotIn("ready", native_events)
+                    # The actual row exists despite the caller's missing ACK.
+                    native_stored = native_repository.load_entry_snapshots(
+                        "005930", native_at, native_at + timedelta(seconds=1), native_scope)[0]
+                    self.assertEqual(native_news, native_stored.news)
+                    self.assertEqual(native_expected.investor_flow, native_stored.investor_flow)
+                    native_ack_resume.set()
+                    self.assertTrue(native_writer.wait(4000))
+                    self.wait_until(lambda: native_controller._shutdown_stage == "cache_failed")
+                    self.assertTrue(any(str(native_ack_error) in message for message in native_failures))
+                    self.assertTrue(native_writer.has_pending_work())
+                    self.assertEqual(native_expected, native_writer._pending_job)
+                    self.assertTrue(native_writer._pending_enriched)
+                    self.assertIs(native_client, native_controller.market_data_client)
+                    self.assertEqual([], native_close_observations)
+                    self.assertEqual([], native_controller.findChildren(SettingsRequestWorker))
+                    self.assertNotIn("auxiliaries", native_events)
+                    self.assertNotIn("ready", native_events)
+                    with native_writer.replace_sources(investor_loader=None, program_loader=None) as native_source_release:
+                        pass
+                    self.assertTrue(native_source_release.released)
+                    self.assertFalse(native_controller.request_close())
+                    self.assertTrue(native_retry_committed.wait(2))
+                    self.assertTrue(native_writer.isRunning())
+                    self.assertFalse(native_writer.wait(0))
+                    self.assertTrue(native_writer.has_pending_work())
+                    native_controller._advance_shutdown()
+                    self.assertEqual([], native_close_observations, "observer close preceded the real retry native ACK")
+                    self.assertEqual([], native_controller.findChildren(SettingsRequestWorker))
+                    self.assertIs(native_client, native_controller.market_data_client)
+                    native_retry_resume.set()
+                    self.assertTrue(native_writer.wait(4000))
+                    self.assertFalse(native_writer.has_pending_work())
+                    native_stored = native_repository.load_entry_snapshots(
+                        "005930", native_at, native_at + timedelta(seconds=1), native_scope)[0]
+                    self.assertEqual(native_snapshot.execution_key, native_stored.execution_key)
+                    self.assertEqual(native_scope, native_stored.origin_scope)
+                    self.assertEqual(native_snapshot.market_state, native_stored.market_state)
+                    self.assertEqual(native_snapshot.orderbook, native_stored.orderbook)
+                    self.assertEqual(native_news, native_stored.news)
+                    self.assertEqual(native_expected.investor_flow, native_stored.investor_flow)
+                    with closing(sqlite3.connect(native_journal)) as native_connection:
+                        self.assertEqual(1, native_connection.execute(
+                            "SELECT COUNT(*) FROM trade_entry_snapshots").fetchone()[0])
+                    self.wait_until(lambda: native_controller._shutdown_stage == "ready")
+                    self.assertEqual([(native_snapshot, native_scope), (native_expected, native_scope),
+                                      (native_expected, native_scope)], native_saves)
+                    self.assertEqual([("005930", native_at)], native_loads)
+                    self.assertEqual(1, native_news_lookup.call_count)
+                    self.assertEqual(1, len(native_close_observations), "native current observer must close exactly once")
+                    native_joined, native_pending, native_close_thread, native_saved_at_close = native_close_observations[0]
+                    self.assertIs(True, native_joined)
+                    self.assertIs(False, native_pending)
+                    self.assertIsNot(native_close_thread, native_controller.thread())
+                    self.assertEqual(tuple(native_saves), native_saved_at_close)
+                    self.assertIsNone(native_controller.market_data_client)
+                    self.assertEqual(1, len(native_controller._api_client_retirements))
+                    native_retirement = native_controller._api_client_retirements[0]
+                    self.assertIs(native_client, native_retirement.client)
+                    self.assertIs(native_report_error, native_retirement.result.error)
+                    self.assertIsNot(native_ack_error, native_retirement.result.error)
+                    self.assertEqual("close", native_retirement.result.error_stage)
+                    self.assertIsNone(native_retirement.result.observation_error)
+                    self.assertIs(True, native_retirement.native_result)
+                    self.assertTrue(native_retirement.result.lifecycle.admission_closed)
+                    self.assertEqual(0, native_retirement.result.lifecycle.active_requests)
+                    self.assertTrue(native_retirement.result.lifecycle.worker_stopped)
+                    self.assertEqual("report", native_retirement.result.lifecycle.failure_stage)
+                    native_job, native_result, native_local_error = native_client._failed_job
+                    self.assertEqual(("ka10001", {"n": 1}), (native_job[0], native_job[2]))
+                    self.assertEqual(({"revision_id": "ka10001", "value": 1}, False, ""), native_result)
+                    self.assertEqual("", native_local_error)
+                    with native_client._jobs.mutex:
+                        native_remaining = tuple(native_client._jobs.queue)
+                    self.assertEqual([("ka10080", {"n": 2}), ("ka10045", {"n": 3})],
+                                     [(job[0], job[2]) for job in native_remaining])
+                    self.assertEqual([("ka10001", {"n": 1})], native_local_calls)
+                    self.assertEqual([native_report], native_report_writes)
+                    self.assertFalse(native_report.exists())
+                    self.assertTrue(native_controller.request_close())
+                    self.assertEqual(1, len(native_close_observations))
+            finally:
+                native_local_resume.set()
+                native_ack_resume.set()
+                native_retry_resume.set()
+                native_writer.requestInterruption()
+                self.assertTrue(native_writer.wait(4000))
+                try:
+                    native_original_close()
+                except PermissionError as native_cleanup_error:
+                    self.assertIs(native_report_error, native_cleanup_error)
+                for native_thread in native_threads:
+                    native_thread.join(3)
+                    self.assertFalse(native_thread.is_alive())
+                self._drain_api_retirement_fixture(native_controller)
+
+    def test_retirement_preserves_unknown_fact_wait_and_worker_start_outcomes(self):
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter, SourceRelease
+        for mode in ("missing", "read_error", "unknown_stage", "active", "alive", "wait_error", "start_error", "started_then_error", "native_join_error"):
+            with self.subTest(mode=mode):
+                sentinel = OSError("fixture " + mode)
+                old, calls, closed = self._api_retirement_probe(
+                    fact_mode=mode, fact_error=sentinel,
+                )
+                controller = self.controller([], market_data_client=old, owned_observers=(old,),
+                    api_runtime_factory=lambda: {"market_data_client": object()})
+                writer = EntrySnapshotWriter(Path("unused-retirement.sqlite3"))
+                writer.setParent(controller)
+                controller.entry_snapshot_writer = writer
+                controller.configure_runtime(AppRuntimeActions(apply_runtime=lambda _: None))
+                controller._api_reloading = True
+                controller._api_reload_stage = "signals"
+                original_start = SettingsRequestWorker.start
+                original_release = SettingsRequestWorker.release_after_join
+                def start(worker):
+                    if mode == "start_error":
+                        raise sentinel
+                    original_start(worker)
+                    if mode == "started_then_error":
+                        raise sentinel
+                def release_fixture():
+                    controller._shutdown_timer.stop()
+                    for item in getattr(controller, "_api_client_retirements", ()):
+                        if item.worker is not None:
+                            self.assertTrue(item.worker.wait(4000))
+                            self.assertTrue(original_release(item.worker))
+                with closing(SimpleNamespace(close=release_fixture)), \
+                        patch.object(controller, "start_initial_ranking"), \
+                        patch.object(SettingsRequestWorker, "start", start), \
+                        (patch.object(SettingsRequestWorker, "release_after_join", side_effect=sentinel)
+                         if mode == "native_join_error" else nullcontext()), \
+                        (patch.object(SourceRelease, "wait", side_effect=sentinel) if mode == "wait_error" else nullcontext()):
+                    controller._advance_api_reload()
+                    self.wait_until(lambda: bool(controller._api_client_retirements) and
+                        controller._api_client_retirements[0].result is not None)
+                    controller.request_close()
+                    if mode == "native_join_error":
+                        self.wait_until(lambda: controller._api_client_retirements[0].native_error is sentinel)
+                    else:
+                        self.wait_until(lambda: controller._api_client_retirements[0].worker is None)
+                    retirement = controller._api_client_retirements[0]
+                    result = retirement.result
+                    self.assertIs(old, retirement.client)
+                    if mode == "native_join_error":
+                        self.assertIs(sentinel, retirement.native_error)
+                        self.assertIs(False, retirement.native_result)
+                        self.assertIsNotNone(retirement.worker)
+                    else:
+                        self.assertIs(True, retirement.native_result)
+                    if mode in {"start_error", "started_then_error"}:
+                        self.assertIs(sentinel, retirement.start_error)
+                    if mode == "read_error":
+                        self.assertIs(sentinel, result.observation_error)
+                    elif mode == "missing":
+                        self.assertIsInstance(result.observation_error, AttributeError)
+                    elif mode == "wait_error":
+                        self.assertIs(sentinel, result.error)
+                        self.assertEqual("source_release", result.error_stage)
+                    elif mode == "start_error":
+                        self.assertIs(sentinel, result.error)
+                        self.assertEqual("start", result.error_stage)
+                    self.assertEqual(0 if mode in {"wait_error", "start_error"} else 1, len(calls))
+                    if mode == "started_then_error":
+                        self.wait_until(lambda: controller._shutdown_stage == "ready")
+                        self.assertIs(sentinel, controller._api_client_retirements[0].start_error)
+                    else:
+                        self.wait_until(lambda: controller._shutdown_stage == "api_retirements")
+                        self.assertNotEqual("ready", controller._shutdown_stage)
+                        self.assertIs(old, controller._api_client_retirements[0].client)
+                    controller._shutdown_timer.stop()
+                if mode == "native_join_error":
+                    # Fixture recovery used only its exact public worker APIs;
+                    # it never changed the product's original UNKNOWN outcome.
+                    self.assertIs(sentinel, retirement.native_error)
+
+    def test_actual_retirement_consumer_keeps_old_candidate_reset_and_same_identity_distinct(self):
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        for outcome in ("capture", "factory", "view", "restore", "reset", "same"):
+            controller = None
+            with self.subTest(outcome=outcome), closing(SimpleNamespace(
+                    close=lambda: self._drain_api_retirement_fixture(controller))):
+                old, old_calls, old_closed = self._api_retirement_probe()
+                candidate, new_calls, new_closed = self._api_retirement_probe()
+                if outcome == "same":
+                    candidate, new_calls, new_closed = old, old_calls, old_closed
+                sentinel = ValueError("fixture " + outcome)
+                factory = Mock()
+                runtime = {"market_data_client": candidate, "owned_observers": (candidate,), "fundamentals_worker_factory": factory}
+                controller = self.controller([], market_data_client=old, owned_observers=(old,), api_runtime_factory=lambda: runtime)
+                writer = EntrySnapshotWriter(Path("unused-retirement.sqlite3"))
+                writer.setParent(controller)
+                controller.entry_snapshot_writer = writer
+                def capture():
+                    if outcome == "capture":
+                        raise sentinel
+                    def restore():
+                        if outcome == "restore":
+                            raise OSError("fixture restore")
+                    return restore
+                def apply(_runtime):
+                    if outcome in {"view", "restore"}:
+                        raise sentinel
+                original_set = controller.fundamentals.set_factory
+                def set_factory(value):
+                    if outcome == "factory" and value is factory:
+                        raise sentinel
+                    original_set(value)
+                controller.configure_runtime(AppRuntimeActions(apply_runtime=apply, capture_state=capture))
+                errors = []
+                controller.api_reload_failed.connect(errors.append)
+                controller._api_reloading = True
+                controller._api_reload_stage = "signals"
+                with patch.object(controller, "start_initial_ranking"), \
+                        patch.object(controller.fundamentals, "set_factory", side_effect=set_factory), \
+                        patch.object(controller.realtime_subscription, "reset", side_effect=sentinel if outcome == "reset" else None):
+                    controller._advance_api_reload()
+                    if outcome == "same":
+                        self.assertEqual([], controller._api_client_retirements)
+                    elif outcome == "restore":
+                        self.assertEqual(1, len(controller._api_client_retirements))
+                        self.assertFalse(controller._api_client_retirements[0].runtime_detached)
+                        self.assertFalse(new_closed.is_set())
+                    else:
+                        target_closed = old_closed if outcome == "reset" else new_closed
+                        self.wait_until(target_closed.is_set)
+                self.assertIs(candidate if outcome in {"reset", "same"} else old, controller.market_data_client)
+                self.assertEqual(1 if outcome == "reset" else 0, len(old_calls))
+                self.assertEqual(1 if outcome in {"capture", "factory", "view"} else 0, len(new_calls))
+                if outcome == "restore":
+                    self.assertEqual(1, len(errors))
+                    self.assertIn(str(sentinel), errors[0])
+                    self.assertIn("fixture restore", errors[0])
+                else:
+                    self.assertEqual([] if outcome == "same" else [str(sentinel)], errors)
+                controller.request_close()
+                self.wait_until(lambda: controller._shutdown_stage == "ready")
+                self.assertEqual([], controller._api_client_retirements)
+                self.assertEqual(1, len(old_calls))
+                self.assertEqual(1, len(new_calls))
 
     def test_runtime_reload_waits_for_old_signals_then_replaces_resources_and_resets_view(self):
         from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
@@ -3332,17 +4239,17 @@ class AppControllerTests(unittest.TestCase):
                 patch("kiwoom_monitor.presentation.main_window.QMessageBox.warning") as warning:
             window = MainWindow(database.settings, ranking_loader=old_loader,
                                 market_data_client=old_client, api_runtime_factory=factory)
+            window.activate_startup()
             self.windows.append(window)
             controller = window._app_controller
             writer = EntrySnapshotWriter(Path(directory) / "journal.sqlite3")
             controller.entry_snapshot_writer = writer
-            self.enterContext(patch.object(writer, "set_investor_loader", wraps=writer.set_investor_loader))
-            self.enterContext(patch.object(writer, "set_program_loader", wraps=writer.set_program_loader))
+            self.enterContext(patch.object(writer, "replace_sources", wraps=writer.replace_sources))
             window._market_cap_reference_codes.add("005930")
             window._market_cap_reference_pending.add("005930")
             window._realtime_market_caps["005930"] = 100
-            window._minute_history_codes.add("005930")
-            old_aggregator = window._minute_aggregator
+            window._pc_market_session.history_cache_saved("005930")
+            old_aggregator = window._pc_market_session.minute_aggregator
             initial_rows = window._table.rowCount()
             producer = DelayedRankingProducer(controller.ranking)
             controller.ranking._worker = producer
@@ -3368,14 +4275,14 @@ class AppControllerTests(unittest.TestCase):
             factory.assert_called_once()
             self.assertIs(new_loader, window._ranking_loader)
             self.assertIs(new_client, window._market_data_client)
-            self.assertEqual("local", window._active_api_route)
+            self.assertEqual("local", window._pc_market_session.source_route)
             self.assertEqual(initial_rows, window._table.rowCount())
             self.assertFalse(window._ranking_execution.priority_preparing)
-            self.assertIsNot(old_aggregator, window._minute_aggregator)
+            self.assertIsNot(old_aggregator, window._pc_market_session.minute_aggregator)
             self.assertFalse(window._market_cap_reference_codes)
             self.assertFalse(window._market_cap_reference_pending)
             self.assertFalse(window._realtime_market_caps)
-            self.assertFalse(window._minute_history_codes)
+            self.assertFalse(window._pc_market_session.history_codes)
             for name, feature in (
                 ("realtime_worker_factory", controller.realtime),
                 ("minute_history_worker_factory", controller.minute_history),
@@ -3385,8 +4292,8 @@ class AppControllerTests(unittest.TestCase):
                 ("nxt_eligibility_worker_factory", controller.nxt_eligibility),
             ):
                 self.assertIs(factories[name], feature._worker_factory)
-            controller.entry_snapshot_writer.set_investor_loader.assert_called_once_with(investor_loader)
-            controller.entry_snapshot_writer.set_program_loader.assert_called_once_with(program_loader)
+            controller.entry_snapshot_writer.replace_sources.assert_called_once_with(
+                investor_loader=investor_loader, program_loader=program_loader)
             warning.assert_not_called()
             self.assertNotIn("_api_reloading", window.__dict__)
             self.assertNotIn("_ranking_loader", window.__dict__)
@@ -3407,6 +4314,7 @@ class AppControllerTests(unittest.TestCase):
                 patch("kiwoom_monitor.presentation.main_window.QMessageBox.warning") as warning:
             window = MainWindow(database.settings, ranking_loader=old_loader,
                                 market_data_client=old_client, api_runtime_factory=factory)
+            window.activate_startup()
             self.windows.append(window)
             window._app_controller.restart_for_api_settings()
             self.wait_until(lambda: warning.called)
@@ -3432,12 +4340,13 @@ class AppControllerTests(unittest.TestCase):
                     minute_repository = MinuteBarRepository(database.settings.database_path)
                     window = MainWindow(database.settings, ranking_loader=old_loader, market_data_client=old_client, minute_bar_repository=minute_repository,
                                         api_runtime_factory=lambda: runtime)
+                    window.activate_startup()
                     self.windows.append(window)
                     controller=window._app_controller
                     controller._initial_ranking_timer.stop()
                     controller._api_reloading=True; controller._api_reload_stage='signals'
                     old_factory=controller.realtime._worker_factory
-                    old_aggregator=window._minute_aggregator
+                    old_aggregator=window._pc_market_session.minute_aggregator
                     window._realtime_market_caps['005930']=123.
                     original_apply=controller._runtime_actions.apply_runtime
                     def fail_view(value):
@@ -3458,7 +4367,7 @@ class AppControllerTests(unittest.TestCase):
                     self.assertIs(old_client, controller.market_data_client)
                     self.assertIs(old_factory, controller.realtime._worker_factory)
                     self.assertEqual({'005930':123.},window._realtime_market_caps)
-                    self.assertIs(old_aggregator,window._minute_aggregator)
+                    self.assertIs(old_aggregator,window._pc_market_session.minute_aggregator)
                     self.assertEqual(2035, minute_repository._now().year)
                     self.assertFalse(controller.api_reloading)
                     window.close()
@@ -3496,6 +4405,7 @@ class AppControllerTests(unittest.TestCase):
                 patch.object(AppController, "schedule_realtime_session_refresh"):
             window = MainWindow(database.settings, ranking_loader=object(),
                                 api_runtime_factory=factory)
+            window.activate_startup()
             self.windows.append(window)
             window._app_controller.restart_for_api_settings()
             self.assertTrue(window.close())
@@ -3516,14 +4426,14 @@ class AppControllerTests(unittest.TestCase):
                     patch.object(AppController, "start_realtime_subscription", side_effect=lambda codes: events.append(("subscribe", codes))), \
                     patch.object(AppController, "start_realtime_followups", side_effect=lambda codes: events.append(("followups", codes))):
                 window = MainWindow(database.settings)
+                window.activate_startup()
                 self.windows.append(window)
                 window._row_by_code = {"005930": 0}
                 window._app_controller.ranked_codes = ("005930",)
                 window._app_controller.nxt_eligibility.finished.emit()
                 self.assertEqual(["catalog", ("subscribe", ("005930",)),
                                   ("followups", ("005930",))], events)
-                window._minute_aggregator = SimpleNamespace(
-                    reset_cumulative_baselines=lambda codes: events.append(("reset", codes)))
+                window._pc_market_session.minute_aggregator.reset_cumulative_baselines = lambda codes: events.append(("reset", codes))
                 window._app_controller.realtime.connection_opened.emit(("005930",))
                 window._app_controller.realtime.codes_added.emit(("000660",))
                 self.assertEqual([("reset", ("005930",)), ("reset", ("000660",))], events[-2:])
@@ -3583,6 +4493,3584 @@ class AppControllerTests(unittest.TestCase):
             )
         self.assertEqual(["mock", "real"], environments)
         self.assertEqual([(1, 1, 1), (2, 2, 2)], observed_counts)
+
+    def test_bootstrap_unpublished_parallel_client_is_joined_before_factory_failure_returns(self):
+        import threading
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client_factory import create_query_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import RemoteKiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+
+        for cleanup_fails in (False, True):
+            with self.subTest(cleanup_fails=cleanup_fails):
+                assembly_error = RuntimeError("fixture recorder construction failure")
+                cleanup_error = PermissionError("fixture close error after actual stop")
+                now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+                old_close = Mock()
+                old_client = SimpleNamespace(server_now=lambda: now)
+                clients, closes = [], []
+                remote_transport = Mock(side_effect=AssertionError("unexpected NAS transport"))
+
+                def factory(*args, **kwargs):
+                    if not kwargs["source_settings"].parallel_validation_enabled:
+                        return old_client
+                    previous = set(threading.enumerate())
+                    client = create_query_client(*args, **kwargs)
+                    self.assertIsInstance(client, validation_client.ParallelValidationClient)
+                    # Document reads have a separate guard below. Direct query
+                    # POST also calls this actual instance transport, so guard
+                    # the common opener before the factory can use the client.
+                    client._primary._opener = remote_transport
+                    created = [thread for thread in threading.enumerate()
+                               if thread not in previous and thread.name == "central-local-validation"]
+                    self.assertEqual(1, len(created))
+                    thread = created[0]
+                    self.assertTrue(thread.is_alive())
+                    original_close = client.close
+                    clients.append((client, thread, original_close))
+
+                    def close():
+                        closes.append((client, threading.get_ident(), thread.is_alive()))
+                        original_close()
+                        self.assertFalse(thread.is_alive())
+                        if cleanup_fails:
+                            raise cleanup_error
+
+                    client.close = close
+                    return client
+
+                def during_loop(fixture):
+                    controller = fixture.window._app_controller
+                    self.assertIs(old_client, controller.market_data_client)
+                    bootstrap.DataSourceConfig.load.return_value = DataSourceSettings(
+                        "personal_server", "https://fixture.invalid", "fixture", False, True,
+                    )
+                    old_client.close = old_close
+                    try:
+                        with patch.object(validation_client, "RealtimeValidationRecorder",
+                                          side_effect=assembly_error) as recorder:
+                            with self.assertRaises(RuntimeError) as caught:
+                                # The exact nested bootstrap factory passed to the
+                                # controller is the entry; it never returns a dict.
+                                controller._api_runtime_factory()
+                        self.assertIs(assembly_error, caught.exception)
+                        if cleanup_fails:
+                            self.assertIs(cleanup_error, caught.exception.__cause__)
+                        self.assertEqual(1, recorder.call_count)
+                        self.assertEqual(1, len(clients))
+                        client, thread, _close = clients[0]
+                        self.assertFalse(thread.is_alive(), "unpublished client outlived its failed factory")
+                        self.assertEqual([(client, threading.get_ident(), True)], closes)
+                        self.assertEqual(0, client.validation_summary()["total_observations"])
+                        self.assertIs(old_client, controller.market_data_client)
+                        old_close.assert_not_called()
+                    finally:
+                        # Keep the established non-observer bootstrap fixture
+                        # unchanged for the separate app-exit/C owner contract.
+                        del old_client.close
+
+                try:
+                    with patch.object(bootstrap.LocalApiConfig, "load", return_value=KiwoomSettings(
+                            "fixture-key", "fixture-secret", "mock")), \
+                            patch.object(KiwoomRestClient, "_post", side_effect=AssertionError("unexpected Kiwoom HTTP")) as local_http, \
+                            patch.object(RemoteKiwoomRestClient, "_read_central_document", side_effect=AssertionError("unexpected NAS HTTP")) as remote_http, \
+                            patch.object(MainWindow, "_refresh_rankings"), \
+                            patch.object(MainWindow, "_restore_environment_selector"), \
+                            patch.object(AppController, "schedule_next_ranking_refresh"), \
+                            patch.object(AppController, "schedule_realtime_session_refresh"):
+                        self._bootstrap_settings_desktop(
+                            during_loop, source_mode="local", cleanup_window=True,
+                            query_client_factory=factory,
+                        )
+                        local_http.assert_not_called()
+                        remote_http.assert_not_called()
+                        remote_transport.assert_not_called()
+                finally:
+                    # Baseline has public close but omits this factory call.
+                    # Observe the live-thread failure above, then clean that
+                    # exact idle client before the owned report TEMP is removed.
+                    for _client, thread, original_close in clients:
+                        original_close()
+                        thread.join(3)
+                        self.assertFalse(thread.is_alive())
+
+
+    def _observer_owner_real_pair(self, directory, prefix):
+        import threading
+        from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import (
+            ParallelValidationClient, RealtimeValidationRecorder,
+        )
+        threads = []
+        original_thread = threading.Thread
+        def create_thread(*args, **kwargs):
+            thread = original_thread(*args, **kwargs)
+            if kwargs.get("name") in {"central-local-validation", "realtime-validation-writer"}:
+                threads.append(thread)
+            return thread
+        def request(*args, **kwargs):
+            raise AssertionError("idle observer owner fixture must not query")
+        acquired_closes = []
+        try:
+            with patch("kiwoom_monitor.infrastructure.kiwoom_rest.validation_client.threading.Thread",
+                       side_effect=create_thread):
+                rest = ParallelValidationClient(SimpleNamespace(request_with_continuation=request),
+                    SimpleNamespace(request_with_continuation=request), Path(directory) / (prefix + "-rest.jsonl"))
+                acquired_closes.append(rest.close)
+                recorder = RealtimeValidationRecorder(Path(directory) / (prefix + "-realtime.jsonl"))
+                acquired_closes.append(recorder.close)
+            self.assertEqual(["central-local-validation", "realtime-validation-writer"], [t.name for t in threads])
+            self.assertTrue(all(t.is_alive() for t in threads))
+            return rest, recorder, threads, tuple(acquired_closes)
+        except BaseException:
+            # The helper has not transferred its exact public handles yet.
+            # Attempt every acquired close before joining the observed daemons.
+            for original_close in acquired_closes:
+                try:
+                    original_close()
+                except BaseException:
+                    pass
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(3)
+            raise
+
+    def test_observer_owner_actual_window_receives_initial_inline_error_without_reclose_or_fake_native_join(self):
+        import threading
+        with tempfile.TemporaryDirectory() as directory:
+            rest, recorder, threads, original_closes = self._observer_owner_real_pair(directory, "initial")
+            try:
+                attempts = []
+                close_error = PermissionError("inline wrapper failed after actual public close")
+                assembly_error = ValueError("initial runtime assembly failed")
+                cleanup = []
+                for observer, original_close in zip((rest, recorder), original_closes):
+                    caught_error = None
+                    try:
+                        attempts.append((observer, QThread.currentThread()))
+                        original_close()
+                        if observer is rest:
+                            raise close_error
+                    except PermissionError as error:
+                        caught_error = error
+                    cleanup.append((observer, caught_error, observer.comparison_lifecycle_state(), None))
+                payload = tuple(cleanup)
+                assembly_error.api_runtime_observer_cleanup = payload
+                assembly_error.__cause__ = close_error
+                for thread in threads:
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive())
+                self.assertIsNone(cleanup[0][2].failure_stage,
+                                  "the wrapper error is independent of the actual producer's failure stage")
+                rest.close = Mock(side_effect=AssertionError("already attempted REST close repeated"))
+                recorder.close = Mock(side_effect=AssertionError("already attempted Recorder close repeated"))
+                database = Database(Path(directory) / "window.sqlite3")
+                database.initialize()
+                borrowed = SimpleNamespace(close=Mock())
+                current_rest, rest_calls, _ = self._api_retirement_probe()
+                current_recorder, recorder_calls, _ = self._api_retirement_probe()
+                with patch.object(MainWindow, "_open_api_settings"), \
+                        patch.object(MainWindow, "_refresh_rankings"), \
+                        patch.object(MainWindow, "_restore_environment_selector"), \
+                        patch.object(AppController, "schedule_next_ranking_refresh"), \
+                        patch.object(AppController, "schedule_realtime_session_refresh"):
+                    # Execute the real constructor and its real AppController receiver.
+                    window = MainWindow(database.settings, market_data_client=borrowed,
+                        owned_observers=(current_rest, current_recorder, current_rest),
+                        unpublished_observer_error=assembly_error)
+                    window.activate_startup()
+                    self.windows.append(window)
+                    controller = window._app_controller
+                    self.assertEqual((current_rest, current_recorder), controller._owned_observers)
+                    self.assertIs(borrowed, controller.market_data_client)
+                    self.assertEqual(1, len(controller._api_client_retirements))
+                    retained = controller._api_client_retirements[0]
+                    self.assertIs(rest, retained.client)
+                    self.assertIs(assembly_error, retained.error)
+                    self.assertIs(close_error, retained.result.error)
+                    self.assertIs(cleanup[0][2], retained.result.lifecycle)
+                    self.assertIsNone(retained.result.observation_error)
+                    self.assertTrue(retained.inline_cleanup)
+                    self.assertIsNone(retained.native_result, "there was no Qt worker/native join")
+                    self.assertIsNone(retained.worker)
+                    self.assertTrue(controller._api_client_stop_confirmed(retained))
+                    self.assertEqual([], controller.findChildren(SettingsRequestWorker))
+                    self.assertEqual([(rest, controller.thread()), (recorder, controller.thread())], attempts)
+                    window.close()
+                    self.wait_until(controller.request_close)
+                    self.assertEqual("ready", controller._shutdown_stage)
+                    self.assertEqual((1, 1), (len(rest_calls), len(recorder_calls)))
+                    borrowed.close.assert_not_called()
+                    rest.close.assert_not_called()
+                    recorder.close.assert_not_called()
+                    self.assertEqual(1, len(controller._api_client_retirements))
+                    self.assertIs(retained, controller._api_client_retirements[0])
+                    self.assertIs(payload, assembly_error.api_runtime_observer_cleanup)
+                    self.assertEqual((rest, recorder), tuple(row[0] for row in assembly_error.api_runtime_observer_cleanup))
+                    self.assertIs(close_error, assembly_error.__cause__)
+                    self.assertTrue(window.close())
+            finally:
+                for original_close, thread in zip(original_closes, threads):
+                    original_close()
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive())
+
+    def test_observer_owner_actual_reload_closes_recorder_after_realtime_fence_while_rest_waits_for_source(self):
+        import threading
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        source_entered, source_resume = Event(), Event()
+        closed = (Event(), Event())
+        close_threads, values, delivered, factory_signals = [], [], [], []
+        with tempfile.TemporaryDirectory() as directory:
+            rest, recorder, threads, original_closes = self._observer_owner_real_pair(directory, "reload")
+            controller = producer = caller = None
+            try:
+                def old_source(code, observed):
+                    source_entered.set()
+                    if not source_resume.wait(3):
+                        raise TimeoutError("observer tuple whole-source gate")
+                    return {"available": True, "source": "retired"}
+                def wrap_close(index):
+                    def close():
+                        close_threads.append((index, QThread.currentThread()))
+                        original_closes[index]()
+                        closed[index].set()
+                    return close
+                rest.close, recorder.close = wrap_close(0), wrap_close(1)
+                runtime = {"market_data_client": object(), "owned_observers": (),
+                           "entry_investor_loader": lambda *args: {"available": True, "source": "current"}}
+                def build():
+                    factory_signals.append(tuple(delivered))
+                    return runtime
+                factory = Mock(side_effect=build)
+                # Install via the existing runtime entry so the baseline reaches the
+                # actual reload/daemon behavior before any new API or field access.
+                controller = self.controller([], api_runtime_factory=factory)
+                writer = EntrySnapshotWriter(Path(directory) / "unused.sqlite3", investor_loader=old_source)
+                writer.setParent(controller)
+                controller.entry_snapshot_writer = writer
+                controller.configure_runtime(AppRuntimeActions(apply_runtime=lambda _: None))
+                controller._apply_api_runtime({"market_data_client": rest,
+                    "owned_observers": (rest, recorder, rest), "entry_investor_loader": old_source},
+                    AppRuntimeActions(apply_runtime=lambda _: None))
+                producer = DelayedProducer(controller.realtime)
+                self.threads.append(producer)
+                controller.realtime._worker = producer
+                producer.result.connect(lambda: delivered.append("last"), Qt.ConnectionType.QueuedConnection)
+                producer.start()
+                caller = threading.Thread(target=lambda: values.append(writer._investor_at_execution(
+                    SimpleNamespace(stock_code="005930", executed_at=datetime(2026, 10, 20, 20, 5)))))
+                caller.start()
+                self.assertTrue(producer.started_run.wait(1))
+                self.assertTrue(source_entered.wait(2))
+                with patch.object(controller, "start_initial_ranking"):
+                    controller.restart_for_api_settings()
+                    controller._api_reload_timer.stop()
+                    controller._advance_api_reload()
+                    controller._api_reload_timer.stop()
+                    factory.assert_not_called()
+                    self.assertEqual([], close_threads)
+                    producer.release.set()
+                    self.assertTrue(producer.wait(4000))
+                    controller._advance_api_reload()
+                    self.assertEqual("signals", controller._api_reload_stage)
+                    factory.assert_not_called()
+                    self.assertEqual([], close_threads)
+                    self.wait_until(lambda: factory.call_count == 1)
+                # Behavior comes before any new retirement/public-fact reads.
+                # MAIN150 closes the old REST port but leaves this real Recorder alive.
+                threads[1].join(3)
+                self.assertFalse(threads[1].is_alive(), "API replacement left its old Recorder daemon alive")
+                self.assertTrue(closed[1].is_set())
+                self.assertEqual([("last",)], factory_signals)
+                self.assertTrue(caller.is_alive())
+                self.assertTrue(threads[0].is_alive())
+                self.assertFalse(closed[0].is_set())
+                retained = next(item for item in controller._api_client_retirements if item.client is rest)
+                self.assertIsNotNone(retained.source_release)
+                self.assertFalse(retained.source_release.released)
+                self.assertIs(runtime["market_data_client"], controller.market_data_client)
+                self.assertEqual((), controller._owned_observers)
+                source_resume.set()
+                caller.join(3)
+                self.assertFalse(caller.is_alive())
+                self.assertEqual([{"available": True, "source": "retired"}], values)
+                self.wait_until(closed[0].is_set)
+                threads[0].join(3)
+                self.assertFalse(threads[0].is_alive())
+                self.assertTrue(all(thread is not controller.thread() for _, thread in close_threads))
+                self.assertEqual([0, 1], sorted(index for index, _ in close_threads))
+                controller.request_close()
+                self.wait_until(lambda: controller._shutdown_stage == "ready")
+                self.assertEqual([], controller._api_client_retirements)
+            finally:
+                try:
+                    source_resume.set()
+                    if producer is not None:
+                        producer.release.set()
+                        self.assertTrue(producer.wait(4000))
+                    if caller is not None and caller.ident is not None:
+                        caller.join(3)
+                        self.assertFalse(caller.is_alive())
+                finally:
+                    try:
+                        for close, thread in zip(original_closes, threads):
+                            close()
+                            thread.join(3)
+                            self.assertFalse(thread.is_alive())
+                    finally:
+                        self._drain_api_retirement_fixture(controller)
+
+    def test_observer_owner_tuple_swap_restores_all_identities_and_preserves_unknown_and_postcommit_cases(self):
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        cases = (("success", "disjoint"), ("capture", "disjoint"), ("factory", "disjoint"),
+                 ("view", "disjoint"), ("source_enter", "disjoint"), ("view_restore", "disjoint"),
+                 ("factory_restore", "disjoint"), ("reset", "disjoint"),
+                 ("success", "same_rest"), ("success", "same_recorder"), ("success", "same_both"))
+        for outcome, alias in cases:
+            controller = None
+            with self.subTest(outcome=outcome, alias=alias), closing(SimpleNamespace(
+                    close=lambda: self._drain_api_retirement_fixture(controller))):
+                old_rest, old_rest_calls, _ = self._api_retirement_probe()
+                old_recorder, old_recorder_calls, _ = self._api_retirement_probe()
+                candidate, candidate_calls, _ = self._api_retirement_probe()
+                recorder, recorder_calls, _ = self._api_retirement_probe()
+                if alias in {"same_rest", "same_both"}:
+                    candidate, candidate_calls = old_rest, old_rest_calls
+                if alias in {"same_recorder", "same_both"}:
+                    recorder, recorder_calls = old_recorder, old_recorder_calls
+                old_tuple, candidate_tuple = (old_rest, old_recorder), (candidate, recorder)
+                sentinel = ValueError("tuple " + outcome)
+                runtime_factory = Mock()
+                runtime = {"market_data_client": candidate,
+                    "owned_observers": (candidate, recorder, candidate, recorder),
+                    "fundamentals_worker_factory": runtime_factory}
+                controller = self.controller([], market_data_client=old_rest, owned_observers=old_tuple,
+                    api_runtime_factory=lambda: runtime)
+                writer = EntrySnapshotWriter(Path("unused-observer-tuple.sqlite3"))
+                writer.setParent(controller)
+                controller.entry_snapshot_writer = writer
+                old_factory = controller.fundamentals._worker_factory
+                setter = controller.fundamentals.set_factory
+                def set_factory(value):
+                    if outcome == "factory" and value is runtime_factory:
+                        raise sentinel
+                    if outcome == "factory_restore" and value is old_factory:
+                        raise OSError("tuple factory restore")
+                    setter(value)
+                def capture():
+                    if outcome == "capture":
+                        raise sentinel
+                    def restore():
+                        if outcome == "view_restore":
+                            raise OSError("tuple view restore")
+                    return restore
+                def apply(_runtime):
+                    self.assertIs(candidate, controller.market_data_client)
+                    self.assertEqual(candidate_tuple, controller._owned_observers)
+                    if outcome in {"view", "view_restore", "factory_restore"}:
+                        raise sentinel
+                controller.configure_runtime(AppRuntimeActions(apply_runtime=apply, capture_state=capture))
+                errors = []
+                controller.api_reload_failed.connect(errors.append)
+                controller._api_reloading, controller._api_reload_stage = True, "signals"
+                with patch.object(controller, "start_initial_ranking"), \
+                        patch.object(controller.fundamentals, "set_factory", side_effect=set_factory), \
+                        patch.object(controller.realtime_subscription, "reset", side_effect=sentinel if outcome == "reset" else None), \
+                        (patch.object(writer, "replace_sources", side_effect=sentinel) if outcome == "source_enter" else nullcontext()):
+                    controller._advance_api_reload()
+                committed = outcome in {"success", "reset"}
+                self.assertIs(candidate if committed else old_rest, controller.market_data_client)
+                self.assertEqual(candidate_tuple if committed else old_tuple, controller._owned_observers)
+                unknown = outcome in {"source_enter", "view_restore", "factory_restore"}
+                target_tuple = old_tuple if committed else candidate_tuple
+                protected = candidate_tuple if committed else old_tuple
+                expected = tuple(value for value in target_tuple if all(value is not current for current in protected))
+                records = tuple(controller._api_client_retirements)
+                self.assertEqual(len(expected), len(records))
+                self.assertEqual({id(value) for value in expected}, {id(item.client) for item in records})
+                for item in records:
+                    self.assertIs(not unknown, item.runtime_detached)
+                    if item.client is not (old_rest if committed else candidate):
+                        self.assertIsNone(item.source_release)
+                    if item.client is (old_rest if committed else candidate) and outcome not in {"capture", "factory", "source_enter"}:
+                        self.assertIsNotNone(item.source_release)
+                        self.assertTrue(item.source_release.released)
+                    if outcome == "reset":
+                        self.assertIs(sentinel, item.error)
+                    elif unknown:
+                        self.assertIsNotNone(item.error)
+                if unknown:
+                    self.assertFalse(candidate_calls or recorder_calls or old_rest_calls or old_recorder_calls)
+                    self.assertIs(sentinel, records[0].error if outcome == "source_enter" else records[0].error.__cause__)
+                else:
+                    self.wait_until(lambda: all(len(calls) == (1 if any(value is target for target in expected) else 0)
+                        for value, calls in ((old_rest, old_rest_calls), (old_recorder, old_recorder_calls),
+                                             (candidate, candidate_calls), (recorder, recorder_calls))))
+                self.assertEqual(0 if outcome == "success" else 1, len(errors))
+                controller.request_close()
+                self.wait_until(lambda: controller._shutdown_stage == "ready")
+                for value, calls in ((old_rest, old_rest_calls), (old_recorder, old_recorder_calls),
+                                     (candidate, candidate_calls), (recorder, recorder_calls)):
+                    self.assertEqual(1, len(calls), "each distinct owned observer closes exactly once")
+                self.assertEqual((), controller._owned_observers)
+                self.assertEqual([], controller._api_client_retirements)
+
+    def test_observer_owner_inline_results_keep_unknown_facts_and_do_not_widen_qt_error_stage_none(self):
+        modes = ("postclose_stage_none", "report", "missing", "read_error", "unknown_stage",
+                 "active", "bool_active", "alive", "admission_open", "qt_stage_none")
+        for mode in modes:
+            controller = None
+            with self.subTest(mode=mode), closing(SimpleNamespace(
+                    close=lambda: self._drain_api_retirement_fixture(controller))):
+                error = PermissionError("raw close error " + mode)
+                fact_error = OSError("raw fact error " + mode)
+                assembly = ValueError("raw assembly " + mode)
+                calls = []
+                def close():
+                    calls.append(QThread.currentThread())
+                    raise error
+                state = SimpleNamespace(admission_closed=mode != "admission_open",
+                    active_requests=True if mode == "bool_active" else (1 if mode == "active" else 0),
+                    worker_stopped=mode != "alive",
+                    failure_stage="unexpected" if mode == "unknown_stage" else ("report" if mode == "report" else None))
+                def fact():
+                    if mode == "read_error":
+                        raise fact_error
+                    return state
+                observer = SimpleNamespace(close=close)
+                if mode != "missing":
+                    observer.comparison_lifecycle_state = fact
+                if mode == "qt_stage_none":
+                    controller = self.controller([], market_data_client=observer, owned_observers=(observer,),
+                        api_runtime_factory=lambda: {"market_data_client": object(), "owned_observers": ()})
+                else:
+                    close_caught, observed, fact_caught = None, None, None
+                    try:
+                        observer.close()
+                    except BaseException as caught:
+                        close_caught = caught
+                    try:
+                        observed = observer.comparison_lifecycle_state()
+                    except BaseException as caught:
+                        fact_caught = caught
+                    payload = ((observer, close_caught, observed, fact_caught),)
+                    assembly.api_runtime_observer_cleanup = payload
+                    assembly.__cause__ = error
+                    controller = self.controller([], market_data_client=object(), owned_observers=(),
+                        api_runtime_factory=Mock(side_effect=assembly))
+                controller.configure_runtime(AppRuntimeActions(apply_runtime=lambda _: None))
+                controller._api_reloading, controller._api_reload_stage = True, "signals"
+                with patch.object(controller, "start_initial_ranking"):
+                    controller._advance_api_reload()
+                self.wait_until(lambda: bool(controller._api_client_retirements) and
+                    controller._api_client_retirements[0].result is not None)
+                retained = controller._api_client_retirements[0]
+                if mode == "qt_stage_none":
+                    self.wait_until(lambda: retained.worker is None)
+                    self.assertFalse(retained.inline_cleanup)
+                    self.assertIs(True, retained.native_result)
+                else:
+                    self.assertTrue(retained.inline_cleanup)
+                    self.assertIsNone(retained.native_result)
+                    self.assertIsNone(retained.worker)
+                    self.assertEqual([], controller.findChildren(SettingsRequestWorker))
+                    self.assertIs(assembly, retained.error)
+                    self.assertIs(payload, assembly.api_runtime_observer_cleanup)
+                    self.assertIs(error, assembly.__cause__)
+                self.assertIs(error, retained.result.error)
+                self.assertEqual("close", retained.result.error_stage)
+                if mode == "missing":
+                    self.assertIsInstance(retained.result.observation_error, AttributeError)
+                elif mode == "read_error":
+                    self.assertIs(fact_error, retained.result.observation_error)
+                else:
+                    self.assertIs(state, retained.result.lifecycle)
+                    self.assertIsNone(retained.result.observation_error)
+                self.assertEqual(1, len(calls))
+                known_stopped = mode in {"postclose_stage_none", "report"}
+                self.assertIs(known_stopped, controller._api_client_stop_confirmed(retained))
+                controller.request_close()
+                if known_stopped:
+                    self.wait_until(lambda: controller._shutdown_stage == "ready")
+                else:
+                    self.wait_until(lambda: controller._shutdown_stage == "api_retirements")
+                    self.assertFalse(controller.request_close())
+                    self.assertNotEqual("ready", controller._shutdown_stage)
+                controller._shutdown_timer.stop()
+                self.assertEqual(1, len(calls), "adoption and app close must not repeat an inline attempt")
+                self.assertIs(retained, controller._api_client_retirements[0])
+
+    def test_observer_owner_current_tuple_waits_for_real_entry_ack_retry_and_actual_native_join(self):
+        from dataclasses import replace
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
+            TradeEntrySnapshot, scoped_snapshot_execution_key,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            rest, recorder, threads, original_closes = self._observer_owner_real_pair(directory, "shutdown")
+            controller = writer = None
+            resume, retry_resume = Event(), Event()
+            try:
+                path = Path(directory) / "journal.sqlite3"
+                repository = JournalRepository(path)
+                scope = AccountScope("kiwoom", AccountEnvironment.MOCK, "00000000-0000-4000-8000-000000000070")
+                at = as_kst(datetime(2026, 10, 20, 10, 30))
+                base = TradeEntrySnapshot(scoped_snapshot_execution_key("both-observers-native-070", scope),
+                    "order-070", "005930", "삼성전자", "매수", at, 70000, 1, "KRX", origin_scope=scope, theme_ranks={},
+                    market_state={"source": "native-070"}, orderbook={"bid": 69900}, capture_state="realtime_core")
+                investor = {"available": True, "source": "native-070"}
+                enriched = replace(base, investor_flow=investor, capture_state="realtime_enriched")
+                committed, resume, retried, retry_resume = Event(), Event(), Event(), Event()
+                saves, loads, failures, closes, events = [], [], [], [], []
+                ack_error = RuntimeError("both observers native enriched ACK loss")
+                original_save = JournalRepository.save_entry_snapshot
+                def save(owner, value, now=None, *, account_scope=None):
+                    result = original_save(owner, value, now, account_scope=account_scope)
+                    saves.append((value, account_scope))
+                    if value.capture_state == "realtime_enriched":
+                        if len(saves) == 2:
+                            committed.set()
+                            if not resume.wait(3):
+                                raise AssertionError("both observers first native ACK gate")
+                            raise ack_error
+                        retried.set()
+                        if not retry_resume.wait(3):
+                            raise AssertionError("both observers retry native ACK gate")
+                    return result
+                def load(code, observed):
+                    loads.append((code, observed))
+                    return investor
+                controller = self.controller(events, market_data_client=rest, owned_observers=(rest, recorder, recorder),
+                    journal_database_path=path, entry_investor_loader=load)
+                writer = controller.entry_snapshot_writer
+                writer.failed.connect(failures.append)
+                def wrap(index):
+                    def close():
+                        closes.append((index, writer.wait(0), writer.has_pending_work(), QThread.currentThread(), tuple(saves)))
+                        return original_closes[index]()
+                    return close
+                rest.close, recorder.close = wrap(0), wrap(1)
+                with patch.object(JournalRepository, "save_entry_snapshot", autospec=True, side_effect=save), \
+                        patch("kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer.news_at_execution", return_value=()) as news:
+                    writer.enqueue(base)
+                    controller.start_entry_snapshot_writer()
+                    self.assertTrue(committed.wait(2))
+                    self.assertTrue(writer.isRunning())
+                    self.assertFalse(writer.wait(0))
+                    self.assertFalse(controller.request_close())
+                    self.assertEqual([], closes)
+                    self.assertEqual((rest, recorder), controller._owned_observers)
+                    self.assertEqual(enriched, repository.load_entry_snapshots("005930", at, at + timedelta(seconds=1), scope)[0])
+                    resume.set()
+                    self.assertTrue(writer.wait(4000))
+                    self.wait_until(lambda: controller._shutdown_stage == "cache_failed")
+                    self.assertTrue(writer.has_pending_work())
+                    self.assertIsNotNone(writer._pending_job)
+                    self.assertEqual(enriched, writer._pending_job)
+                    self.assertTrue(any(str(ack_error) in message for message in failures))
+                    self.assertEqual([], closes)
+                    self.assertTrue(all(thread.is_alive() for thread in threads))
+                    self.assertFalse(controller.request_close())
+                    self.assertTrue(retried.wait(2))
+                    self.assertTrue(writer.isRunning())
+                    self.assertFalse(writer.wait(0))
+                    self.assertTrue(writer.has_pending_work())
+                    controller._advance_shutdown()
+                    self.assertEqual([], closes)
+                    self.assertEqual((rest, recorder), controller._owned_observers)
+                    retry_resume.set()
+                    self.assertTrue(writer.wait(4000))
+                    self.assertFalse(writer.has_pending_work())
+                    self.wait_until(lambda: controller._shutdown_stage == "ready")
+                    for thread in threads:
+                        thread.join(3)
+                        self.assertFalse(thread.is_alive(), "current observer survived actual native writer drain")
+                    self.assertEqual([0, 1], sorted(row[0] for row in closes))
+                    for _, joined, pending, qt_thread, saved in closes:
+                        self.assertIs(True, joined)
+                        self.assertIs(False, pending)
+                        self.assertIsNot(qt_thread, controller.thread())
+                        self.assertEqual(tuple(saves), saved)
+                    self.assertEqual([(base, scope), (enriched, scope), (enriched, scope)], saves)
+                    self.assertEqual([("005930", at)], loads)
+                    self.assertEqual(1, news.call_count)
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM trade_entry_snapshots").fetchone()[0])
+                    self.assertEqual(enriched, repository.load_entry_snapshots("005930", at, at + timedelta(seconds=1), scope)[0])
+                    self.assertIsNone(controller.market_data_client)
+                    self.assertEqual((), controller._owned_observers)
+                    self.assertEqual([], controller._api_client_retirements)
+                    self.assertTrue(controller.request_close())
+                    self.assertEqual(2, len(closes))
+            finally:
+                try:
+                    resume.set()
+                    retry_resume.set()
+                    if writer is not None:
+                        writer.requestInterruption()
+                        self.assertTrue(writer.wait(4000))
+                finally:
+                    try:
+                        for close, thread in zip(original_closes, threads):
+                            close()
+                            thread.join(3)
+                            self.assertFalse(thread.is_alive())
+                    finally:
+                        self._drain_api_retirement_fixture(controller)
+
+    def _run_observer_factory_probe(self, check, *, query_only=False):
+        import json
+        import threading
+        from contextlib import ExitStack
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client_factory import create_query_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import RemoteKiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+
+        now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+        old_client = SimpleNamespace(server_now=lambda: now,
+            require_query_access=lambda: {"api_version": 1, "access_scope": "query"})
+        state = SimpleNamespace(active=False, resources=[], clients=[], closes=[], facts=[],
+            close_errors={}, borrowed_closes=[], attach_borrowed_close=False, old_close=Mock(), last=None)
+        recorder_type = validation_client.RealtimeValidationRecorder
+        original_local_init = KiwoomRestClient.__init__
+        original_remote_init = RemoteKiwoomRestClient.__init__
+        original_entry = bootstrap._main_with_restore_gate
+
+        class CapabilityResponse:
+            headers = {"X-Kiwoom-Server-Time": now.isoformat()}
+
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return json.dumps({"api_version": 1, "access_scope": "query"}).encode()
+
+        def remote_transport(request, **_kwargs):
+            if query_only and request.get_method() == "GET" and request.full_url == "https://fixture.invalid/api/v1/capabilities":
+                return CapabilityResponse()
+            raise AssertionError("unexpected factory NAS transport")
+
+        state.remote_transport = Mock(side_effect=remote_transport)
+        state.local_transport = Mock(side_effect=AssertionError("unexpected factory Kiwoom transport"))
+
+        def local_init(client, *args, **kwargs):
+            original_local_init(client, *args, **kwargs)
+            client._opener = state.local_transport
+
+        def remote_init(client, *args, **kwargs):
+            original_remote_init(client, *args, **kwargs)
+            client._opener = state.remote_transport
+
+        def track(observer, previous, name, kind):
+            created = [thread for thread in threading.enumerate()
+                       if thread not in previous and thread.name == name]
+            # Keep the class's exact real handle for failure cleanup before any
+            # oracle assertion, then cross-check independent thread enumeration.
+            thread = observer._thread
+            raw_close = observer.close
+            raw_fact = observer.comparison_lifecycle_state
+            resource = SimpleNamespace(observer=observer, thread=thread, kind=kind,
+                                       raw_close=raw_close, raw_fact=raw_fact)
+            state.resources.append(resource)
+            self.assertEqual(1, len(created))
+            self.assertIs(thread, created[0])
+            self.assertTrue(thread.is_alive())
+
+            def close():
+                state.closes.append((observer, threading.get_ident()))
+                raw_close()
+                self.assertFalse(thread.is_alive())
+                error = state.close_errors.get(kind)
+                if error is not None:
+                    raise error  # Deliberate wrapper fault after real actual stop.
+
+            def fact():
+                state.facts.append(observer)
+                return raw_fact()
+
+            observer.close, observer.comparison_lifecycle_state = close, fact
+            return observer
+
+        def factory(*args, **kwargs):
+            if not state.active:
+                return old_client
+            self.assertEqual(state.fixture.paths.data_dir.resolve(), Path(args[0]).resolve().parent)
+            previous = set(threading.enumerate())
+            client = create_query_client(*args, **kwargs)
+            state.clients.append((client, kwargs["source_settings"]))
+            if isinstance(client, validation_client.ParallelValidationClient):
+                track(client, previous, "central-local-validation", "rest")
+            elif state.attach_borrowed_close:
+                close = Mock()
+                client.close = close  # A borrowed port does not become an owned observer.
+                state.borrowed_closes.append((client, close))
+            return client
+
+        def recorder(*args, **kwargs):
+            previous = set(threading.enumerate())
+            observer = recorder_type(*args, **kwargs)
+            self.assertIsInstance(observer, recorder_type)
+            return track(observer, previous, "realtime-validation-writer", "recorder")
+
+        def during_loop(fixture):
+            state.fixture = fixture
+            state.active = True
+            old_client.close = state.old_close
+
+            def invoke(source, *, late_error=None, attach_borrowed_close=False):
+                bootstrap.DataSourceConfig.load.return_value = source
+                state.attach_borrowed_close = attach_borrowed_close
+                # A real existing settings input is prepared before the scoped
+                # DB guard; no fake database or altered settings value is used.
+                fixture.window._settings.get("rank_query_type")
+                scope = SimpleNamespace(resource_start=len(state.resources), client_start=len(state.clients),
+                    close_start=len(state.closes), fact_start=len(state.facts), db_calls=[],
+                    remote_start=state.remote_transport.call_count, profiles_start=profile_load.call_count)
+                state.last = scope
+                owner_thread = threading.get_ident()
+                real_connect = sqlite3.connect
+
+                def no_factory_db(*args, **kwargs):
+                    if threading.get_ident() == owner_thread:
+                        scope.db_calls.append(args)
+                        raise AssertionError("nested factory unexpectedly opened a database")
+                    return real_connect(*args, **kwargs)
+
+                with ExitStack() as guards:
+                    guards.enter_context(patch.object(sqlite3, "connect", side_effect=no_factory_db))
+                    local_tr = guards.enter_context(patch.object(KiwoomRestClient, "request_with_continuation",
+                        side_effect=AssertionError("unexpected factory Kiwoom TR")))
+                    remote_tr = guards.enter_context(patch.object(RemoteKiwoomRestClient, "request_with_continuation",
+                        side_effect=AssertionError("unexpected factory NAS TR")))
+                    inputs = [guards.enter_context(patch.object(recorder_type, name,
+                        side_effect=AssertionError("factory accepted an observation")))
+                        for name in ("observe_central", "observe_local", "flush_expired")]
+                    if late_error is not None:
+                        guards.enter_context(patch.object(bootstrap, "StockRepository", side_effect=late_error))
+                    try:
+                        return fixture.window._app_controller._api_runtime_factory()
+                    finally:
+                        self.assertEqual([], scope.db_calls)
+                        local_tr.assert_not_called()
+                        remote_tr.assert_not_called()
+                        for input_guard in inputs: input_guard.assert_not_called()
+                        state.local_transport.assert_not_called()
+                        state.old_close.assert_not_called()
+                        scope.remote_calls = state.remote_transport.call_count - scope.remote_start
+                        scope.profile_reads = profile_load.call_count - scope.profiles_start
+
+            try:
+                check(fixture, invoke, state)
+            finally:
+                state.active = False
+                del old_client.close
+
+        try:
+            with ExitStack() as stack:
+                profile_load = stack.enter_context(patch.object(bootstrap.LocalApiConfig, "load",
+                    return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")))
+                stack.enter_context(patch.object(KiwoomRestClient, "__init__", local_init))
+                stack.enter_context(patch.object(RemoteKiwoomRestClient, "__init__", remote_init))
+                stack.enter_context(patch.object(validation_client, "RealtimeValidationRecorder", side_effect=recorder))
+                stack.enter_context(patch.object(MainWindow, "_refresh_rankings"))
+                stack.enter_context(patch.object(MainWindow, "_restore_environment_selector"))
+                stack.enter_context(patch.object(AppController, "schedule_next_ranking_refresh"))
+                stack.enter_context(patch.object(AppController, "schedule_realtime_session_refresh"))
+                if query_only:
+                    stack.enter_context(patch.object(bootstrap, "_main_with_restore_gate",
+                        side_effect=lambda: original_entry(query_only=True)))
+                self._bootstrap_settings_desktop(during_loop, cleanup_window=True,
+                    source_mode="personal_server" if query_only else "local", query_client_factory=factory)
+        finally:
+            # The original MAIN150 failure leaves the actual Recorder daemon
+            # alive. Observe that first; then close exact test-owned resources
+            # before the fixture's owned TEMP is removed. This is not product proof.
+            for resource in state.resources:
+                if resource.thread.is_alive():
+                    resource.raw_close()
+                resource.thread.join(3)
+                self.assertFalse(resource.thread.is_alive())
+
+    def test_bootstrap_factory_owned_tuple_tracks_real_observers_and_borrowed_branches(self):
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+
+        def ordinary_cases(fixture, invoke, state):
+            for name, fallback, parallel, expected_profiles in (
+                    ("parallel", False, True, 1), ("fallback-only", True, False, 1), ("bare", False, False, 0)):
+                with self.subTest(branch=name):
+                    runtime = invoke(DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", fallback, parallel))
+                    created = state.resources[state.last.resource_start:]
+                    client, source = state.clients[-1]
+                    if parallel:
+                        self.assertEqual(["rest", "recorder"], [item.kind for item in created])
+                        owned = runtime.get("owned_observers")
+                        self.assertIsInstance(owned, tuple)
+                        self.assertEqual(2, len(owned))
+                        self.assertIs(created[0].observer, owned[0])
+                        self.assertIs(created[1].observer, owned[1])
+                        self.assertIs(client, owned[0])
+                        for item in created:
+                            fact = item.raw_fact()
+                            self.assertIs(type(fact.active_requests), int)
+                            self.assertIs(fact.admission_closed, False)
+                            self.assertIs(fact.worker_stopped, False)
+                            self.assertEqual((False, 0, False, None), (fact.admission_closed,
+                                fact.active_requests, fact.worker_stopped, fact.failure_stage))
+                            self.assertTrue(item.thread.is_alive())
+                    else:
+                        self.assertEqual([], created)
+                        self.assertEqual((), runtime.get("owned_observers"))
+                    self.assertIs(client, runtime["market_data_client"])
+                    worker = runtime["realtime_worker_factory"](("005930",))
+                    worker.setParent(fixture.window)
+                    try:
+                        self.assertFalse(worker.isRunning())
+                        self.assertIs(created[1].observer if parallel else None, worker._validation_recorder)
+                    finally:
+                        worker.deleteLater()
+                    self.assertEqual(fallback, source.local_fallback_enabled)
+                    self.assertEqual(parallel, source.parallel_validation_enabled)
+                    self.assertEqual(0, state.last.remote_calls)
+                    self.assertEqual(expected_profiles, state.last.profile_reads)
+                    self.assertEqual([], state.closes[state.last.close_start:])
+                    self.assertEqual([], state.facts[state.last.fact_start:])
+                    self.assertFalse((fixture.paths.data_dir / "central_local_validation.jsonl").exists())
+                    self.assertFalse((fixture.paths.data_dir / "central_local_realtime_validation.jsonl").exists())
+
+        def query_case(_fixture, invoke, state):
+            runtime = invoke(DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", True, True))
+            client, projected = state.clients[-1]
+            self.assertFalse(projected.local_fallback_enabled)
+            self.assertFalse(projected.parallel_validation_enabled)
+            self.assertEqual([], state.resources[state.last.resource_start:])
+            self.assertIs(client, runtime["market_data_client"])
+            self.assertEqual((), runtime.get("owned_observers"))
+            self.assertEqual(0, state.last.profile_reads)
+            self.assertEqual(1, state.last.remote_calls)  # Required capability GET, not a query TR or network.
+            self.assertEqual([], state.closes[state.last.close_start:])
+
+        self._run_observer_factory_probe(ordinary_cases)
+        self._run_observer_factory_probe(query_case, query_only=True)
+
+    def test_bootstrap_late_factory_failure_preserves_both_real_observer_outcomes(self):
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+
+        def cases(fixture, invoke, state):
+            for failed_kinds in ((), ("recorder",), ("rest", "recorder")):
+                with self.subTest(cleanup_errors=failed_kinds):
+                    assembly_error = RuntimeError("fixture late StockRepository construction failure")
+                    state.close_errors = {kind: PermissionError("fixture " + kind + " close wrapper failure")
+                                          for kind in failed_kinds}
+                    with self.assertRaises(RuntimeError) as caught:
+                        invoke(DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True),
+                               late_error=assembly_error)
+                    self.assertIs(assembly_error, caught.exception)
+                    created = state.resources[state.last.resource_start:]
+                    self.assertEqual(["rest", "recorder"], [item.kind for item in created])
+                    # Actual producer stop is the independent first baseline
+                    # oracle; missing metadata is not substituted for old leakage.
+                    self.assertFalse(created[0].thread.is_alive())
+                    self.assertFalse(created[1].thread.is_alive())
+                    expected = [item.observer for item in created]
+                    self.assertEqual(expected, [observer for observer, _thread in state.closes[state.last.close_start:]])
+                    self.assertEqual(expected, state.facts[state.last.fact_start:])
+                    cleanup = getattr(caught.exception, "api_runtime_observer_cleanup", None)
+                    self.assertIsInstance(cleanup, tuple)
+                    self.assertEqual(2, len(cleanup))
+                    for item, entry in zip(created, cleanup):
+                        self.assertIsInstance(entry, tuple)
+                        self.assertEqual(4, len(entry))
+                        observer, close_error, fact, read_error = entry
+                        self.assertIs(item.observer, observer)
+                        self.assertIs(state.close_errors.get(item.kind), close_error)
+                        self.assertIsNone(read_error)
+                        self.assertIs(type(fact.active_requests), int)
+                        self.assertIs(fact.admission_closed, True)
+                        self.assertIs(fact.worker_stopped, True)
+                        self.assertEqual((True, 0, True, None), (fact.admission_closed,
+                            fact.active_requests, fact.worker_stopped, fact.failure_stage))
+                    first = next((state.close_errors[item.kind] for item in created if item.kind in state.close_errors), None)
+                    self.assertIs(first, caught.exception.__cause__)
+                    self.assertEqual(0, created[0].observer.validation_summary()["total_observations"])
+                    self.assertEqual(0, created[1].observer.validation_summary()["total_observations"])
+                    self.assertFalse((fixture.paths.data_dir / "central_local_validation.jsonl").exists())
+                    self.assertFalse((fixture.paths.data_dir / "central_local_realtime_validation.jsonl").exists())
+                    self.assertEqual(0, state.last.remote_calls)
+                    self.assertEqual(1, state.last.profile_reads)
+
+        self._run_observer_factory_probe(cases)
+
+    def test_bootstrap_late_borrowed_factory_failure_does_not_close_data_ports(self):
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+
+        def case(_fixture, invoke, state):
+            assembly_error = RuntimeError("fixture borrowed factory construction failure")
+            source = DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", True, True) if query_mode else DataSourceSettings()
+            with self.assertRaises(RuntimeError) as caught:
+                invoke(source, late_error=assembly_error, attach_borrowed_close=True)
+            self.assertIs(assembly_error, caught.exception)
+            self.assertEqual([], state.resources[state.last.resource_start:])
+            self.assertEqual(1, len(state.borrowed_closes))
+            client, close = state.borrowed_closes[0]
+            self.assertIs(client, state.clients[-1][0])
+            close.assert_not_called()  # Presence of close does not grant ownership.
+            self.assertEqual((), getattr(caught.exception, "api_runtime_observer_cleanup", None))
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertEqual([], state.closes[state.last.close_start:])
+            self.assertEqual([], state.facts[state.last.fact_start:])
+            self.assertEqual(int(query_mode), state.last.remote_calls)
+            self.assertEqual(0 if query_mode else 1, state.last.profile_reads)
+
+        for query_mode in (False, True):
+            with self.subTest(query_only=query_mode):
+                self._run_observer_factory_probe(case, query_only=query_mode)
+
+    def test_bootstrap_pre_window_setup_failure_closes_only_fresh_observers_before_source_lease(self):
+        import threading
+        from contextlib import ExitStack
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client_factory import create_query_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import RemoteKiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        # Existing content/settings fixture owns its TEMP with TestCase.enterContext.
+        # Its finalizer may release content; it never closes these observer handles.
+        # The first baseline oracle below is actual liveness BEFORE test cleanup.
+        cases = (
+            ("application", True, (), (), None),
+            ("icon", True, ("rest", "recorder"), ("theme", "content", "server"), None),
+            ("theme", True, (), ("theme", "content", "server"), None),
+            ("theme", True, (), (), "rest"),
+            ("theme", False, (), (), None),
+        )
+        for stage, parallel, failed_closes, failed_sources, failed_fact in cases:
+            with self.subTest(stage=stage, parallel=parallel, failed_closes=failed_closes,
+                              failed_sources=failed_sources, failed_fact=failed_fact):
+                original_error = RuntimeError("fixture pre-window " + stage + " failure")
+                state = SimpleNamespace(resources=[], borrowed_closes=[], events=[], fixture=None,
+                    failed=False, lease_snapshots=[], query_clients=[],
+                    close_errors={kind: PermissionError("fixture " + kind + " after actual close")
+                                  for kind in failed_closes},
+                    source_errors={kind: OSError("fixture " + kind + " after actual cleanup")
+                                   for kind in failed_sources},
+                    fact_error=RuntimeError("fixture lifecycle observation unavailable"))
+                original_recorder = validation_client.RealtimeValidationRecorder
+                original_join = threading.Thread.join
+                original_lease_close = AppDataLease.close
+                original_theme_close = bootstrap.CentralThemeSyncDispatcher.close
+                original_settings_get = bootstrap.SettingsRepository.get
+                owner_thread = threading.get_ident()
+                service = Mock()
+                service.replace_themes.return_value = SimpleNamespace(pending_collections=())
+                service.push.return_value = SimpleNamespace(total=0)
+                transport = Mock(side_effect=AssertionError("pre-window fixture must not query"))
+
+                def track(observer, previous, kind, thread_name):
+                    thread = observer._thread
+                    resource = SimpleNamespace(observer=observer, thread=thread, kind=kind,
+                        raw_close=observer.close, raw_fact=observer.comparison_lifecycle_state)
+                    state.resources.append(resource)  # Own safety cleanup before assertions.
+                    created = [value for value in threading.enumerate()
+                               if value not in previous and value.name == thread_name]
+                    self.assertEqual([thread], created)
+                    self.assertTrue(thread.is_alive())
+
+                    def close():
+                        state.events.append(kind + ".close")
+                        resource.raw_close()
+                        if kind in state.close_errors:
+                            raise state.close_errors[kind]
+
+                    def fact():
+                        state.events.append(kind + ".fact")
+                        if kind == failed_fact:
+                            raise state.fact_error
+                        return resource.raw_fact()
+
+                    observer.close, observer.comparison_lifecycle_state = close, fact
+                    return observer
+
+                def factory(*args, **kwargs):
+                    previous = set(threading.enumerate())
+                    client = create_query_client(*args, **kwargs)
+                    state.query_clients.append(client)
+                    if parallel:
+                        self.assertIsInstance(client, validation_client.ParallelValidationClient)
+                        for borrowed in (client._primary, client._local):
+                            borrowed._opener = transport
+                            close = Mock()
+                            borrowed.close = close
+                            state.borrowed_closes.append(close)
+                        return track(client, previous, "rest", "central-local-validation")
+                    client._opener = transport
+                    close = Mock()
+                    client.close = close
+                    state.borrowed_closes.append(close)
+                    return client
+
+                def recorder(*args, **kwargs):
+                    previous = set(threading.enumerate())
+                    return track(original_recorder(*args, **kwargs), previous,
+                                 "recorder", "realtime-validation-writer")
+
+                def pull(*_args, **_kwargs):
+                    fixture = state.fixture
+                    state.content_thread = threading.current_thread()
+                    fixture.entered.set()
+                    try:
+                        if not fixture.release.wait(4):
+                            raise RuntimeError("content HTTP fixture was not released")
+                        return SimpleNamespace(total=0)
+                    finally:
+                        fixture.completed.set()
+
+                service.pull.side_effect = pull
+
+                def fail_setup(*_args, **_kwargs):
+                    self.assertEqual(2 if parallel else 0, len(state.resources))
+                    self.assertEqual(1, len(state.query_clients))
+                    self.assertTrue(state.fixture.entered.wait(4))
+                    self.assertTrue(state.content_thread.is_alive())
+                    self.assertTrue(all(item.thread.is_alive() for item in state.resources))
+                    self.assertFalse(state.fixture.restore_available())
+                    state.fixture.server.stop.assert_not_called()
+                    state.events.append("setup.failure")
+                    state.failed = True
+                    raise original_error
+
+                def settings_get(repository, key, *args, **kwargs):
+                    if stage == "theme" and key == "theme_active_profile" and threading.get_ident() == owner_thread:
+                        fail_setup()
+                    return original_settings_get(repository, key, *args, **kwargs)
+
+                def theme_close(dispatcher):
+                    if not state.failed:
+                        return original_theme_close(dispatcher)
+                    state.events.append("theme.close")
+                    original_theme_close(dispatcher)
+                    if "theme" in state.source_errors:
+                        raise state.source_errors["theme"]
+
+                def join(thread, *args, **kwargs):
+                    if thread is not getattr(state, "content_thread", None) or not state.failed or args or kwargs:
+                        return original_join(thread, *args, **kwargs)
+                    # This is the product's actual join call. Release only here;
+                    # the fixture safety join(5) above uses the original join.
+                    # An old source missing this call stays live until that cleanup.
+                    if "content.join" not in state.events:
+                        state.events.append("content.join")
+                        state.content_join_snapshot = [item.thread.is_alive() for item in state.resources]
+                        state.fixture.release.set()
+                        result = original_join(thread, *args, **kwargs)
+                        if "content" in state.source_errors:
+                            raise state.source_errors["content"]
+                        return result
+                    return original_join(thread, *args, **kwargs)
+
+                def close_lease(lease):
+                    if state.failed and not lease._exclusive:
+                        state.lease_snapshots.append({
+                            "observer_alive": [item.thread.is_alive() for item in state.resources],
+                            "content_alive": state.content_thread.is_alive(),
+                            "server_stops": state.fixture.server.stop.call_count,
+                        })
+                        state.events.append("lease.close")
+                    return original_lease_close(lease)
+
+                def before_run(fixture):
+                    state.fixture = fixture
+                    configured = bootstrap.DataSourceConfig.load.return_value
+                    bootstrap.DataSourceConfig.load.side_effect = (
+                        configured,
+                        DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, parallel),
+                    )
+                    application = bootstrap.QApplication.return_value
+                    if stage == "application":
+                        bootstrap.QApplication.side_effect = fail_setup
+                    elif stage == "icon":
+                        application.setWindowIcon.side_effect = fail_setup
+
+                    def stop_server():
+                        state.events.append("server.stop")
+                        if "server" in state.source_errors:
+                            raise state.source_errors["server"]
+
+                    fixture.server.stop.side_effect = stop_server
+
+                def check(fixture):
+                    # Baseline must fail on these real threads before metadata,
+                    # helper finalizers, or test-owned cleanup can hide leakage.
+                    self.assertEqual(2 if parallel else 0, len(state.resources))
+                    for resource in state.resources:
+                        self.assertFalse(resource.thread.is_alive(),
+                            "pre-test-cleanup actual " + resource.kind + " thread remains alive; lease="
+                            + repr(state.lease_snapshots))
+                    self.assertFalse(state.content_thread.is_alive())
+                    self.assertEqual([{"observer_alive": [False] * len(state.resources),
+                        "content_alive": False, "server_stops": 1}], state.lease_snapshots)
+                    self.assertEqual([False] * len(state.resources), state.content_join_snapshot)
+                    self.assertIs(original_error, fixture.exit_error)
+                    for close in state.borrowed_closes:
+                        close.assert_not_called()
+                    bootstrap.MainWindow.assert_not_called()
+                    cleanup = getattr(fixture.exit_error, "api_runtime_observer_cleanup", None)
+                    self.assertIsInstance(cleanup, tuple)
+                    self.assertEqual(len(state.resources), len(cleanup))
+                    for resource, entry in zip(state.resources, cleanup):
+                        self.assertIsInstance(entry, tuple)
+                        self.assertEqual(4, len(entry))
+                        observer, close_error, fact, read_error = entry
+                        self.assertIs(resource.observer, observer)
+                        self.assertIs(state.close_errors.get(resource.kind), close_error)
+                        if resource.kind == failed_fact:
+                            self.assertIsNone(fact)  # UNKNOWN is not a fabricated stopped fact.
+                            self.assertIs(state.fact_error, read_error)
+                        else:
+                            self.assertIsNone(read_error)
+                            self.assertIs(type(fact.active_requests), int)
+                            self.assertEqual((True, 0, True, None), (fact.admission_closed,
+                                fact.active_requests, fact.worker_stopped, fact.failure_stage))
+                    outer = getattr(fixture.exit_error, "desktop_setup_cleanup", None)
+                    self.assertIsInstance(outer, tuple)
+                    self.assertEqual(("close", "join", "stop"), tuple(entry[1] for entry in outer))
+                    self.assertIs(state.content_thread, outer[1][0])
+                    self.assertIs(fixture.server, outer[2][0])
+                    for kind, entry in zip(("theme", "content", "server"), outer):
+                        self.assertIs(state.source_errors.get(kind), entry[2])
+                    first = next((state.close_errors[kind] for kind in ("rest", "recorder")
+                                  if kind in state.close_errors), None)
+                    if first is None:
+                        first = next((state.source_errors[kind] for kind in ("theme", "content", "server")
+                                      if kind in state.source_errors), None)
+                    self.assertIs(first, fixture.exit_error.__cause__)
+                    self.assertEqual(["setup.failure"] + [event for item in state.resources
+                        for event in (item.kind + ".close", item.kind + ".fact")]
+                        + ["theme.close", "content.join", "server.stop", "lease.close"], state.events)
+                    self.assertTrue(fixture.restore_available())
+                    transport.assert_not_called()
+
+                try:
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(bootstrap.LocalApiConfig, "load",
+                            return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")))
+                        stack.enter_context(patch.object(validation_client, "RealtimeValidationRecorder", side_effect=recorder))
+                        stack.enter_context(patch.object(bootstrap.SettingsRepository, "get", autospec=True, side_effect=settings_get))
+                        stack.enter_context(patch.object(bootstrap.CentralThemeSyncDispatcher, "close", theme_close))
+                        stack.enter_context(patch.object(threading.Thread, "join", join))
+                        stack.enter_context(patch.object(AppDataLease, "close", close_lease))
+                        local_tr = stack.enter_context(patch.object(KiwoomRestClient, "request_with_continuation",
+                            side_effect=AssertionError("unexpected local query before Window")))
+                        remote_tr = stack.enter_context(patch.object(RemoteKiwoomRestClient, "request_with_continuation",
+                            side_effect=AssertionError("unexpected central query before Window")))
+                        self._bootstrap_settings_desktop(
+                            lambda _fixture: self.fail("pre-window failure reached event loop"),
+                            after_exit=check, content_service=service, expected_error=RuntimeError,
+                            before_run=before_run, query_client_factory=factory,
+                        )
+                        local_tr.assert_not_called()
+                        remote_tr.assert_not_called()
+                finally:
+                    # Baseline liveness was asserted inside check first. Only
+                    # exact handles owned by this test are now safety-cleaned.
+                    # TEMP survives until TestCase cleanup (enterContext owner).
+                    for resource in state.resources:
+                        resource.raw_close()
+                        resource.thread.join(3)
+                        self.assertFalse(resource.thread.is_alive())
+
+    def test_bootstrap_pre_window_close_failure_does_not_release_source_lease_with_live_owned_observer(self):
+        import threading
+        from contextlib import ExitStack
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        # Independent strict oracle for B1: do not turn the current missing
+        # lifetime guarantee into a PASS by expecting early lease release.
+        setup_error = RuntimeError("fixture application setup failure before Window")
+        close_error = PermissionError("fixture REST close failed before real join")
+        observation_error = RuntimeError("fixture REST lifecycle is UNKNOWN")
+        state = SimpleNamespace(fixture=None, pair=None, failed=False, before_lease=[], borrowed=[])
+        original_lease_close = AppDataLease.close
+        original_recorder_class = validation_client.RealtimeValidationRecorder
+        service = Mock()
+        service.replace_themes.return_value = SimpleNamespace(pending_collections=())
+        service.pull.return_value = SimpleNamespace(total=0)
+        service.push.return_value = SimpleNamespace(total=0)
+
+        def factory(*_args, **_kwargs):
+            # The actual two observer classes/threads are acquired here while
+            # the real main lease is held, using the existing real-pair helper.
+            with patch.object(validation_client, "RealtimeValidationRecorder", original_recorder_class):
+                rest, recorder, threads, raw_closes = self._observer_owner_real_pair(
+                    state.fixture.paths.data_dir, "setup-before-join")
+            state.pair = rest, recorder, threads, raw_closes
+            self.assertFalse(state.fixture.restore_available())
+            now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+            for borrowed in (rest._primary, rest._local):
+                borrowed.server_now = lambda: now
+                borrowed.get_access_token = Mock(side_effect=AssertionError("unexpected token read"))
+                close = Mock()
+                borrowed.close = close
+                state.borrowed.append(close)
+
+            def fail_close():
+                raise close_error  # The real REST daemon is still alive.
+
+            def unknown_fact():
+                raise observation_error
+
+            rest.close, rest.comparison_lifecycle_state = fail_close, unknown_fact
+            return rest
+
+        def recorder(*_args, **_kwargs):
+            return state.pair[1]
+
+        def fail_setup(*_args, **_kwargs):
+            self.assertIsNotNone(state.pair)
+            self.assertTrue(all(thread.is_alive() for thread in state.pair[2]))
+            state.failed = True
+            raise setup_error
+
+        def close_lease(lease):
+            if state.failed and not lease._exclusive:
+                state.before_lease.append({
+                    "observer_alive": tuple(thread.is_alive() for thread in state.pair[2]),
+                    "rest_fact": "UNKNOWN",
+                    "server_stops": state.fixture.server.stop.call_count,
+                    "setup_error": setup_error,
+                    "close_error": close_error,
+                    "observation_error": observation_error,
+                })
+            return original_lease_close(lease)
+
+        def before_run(fixture):
+            state.fixture = fixture
+            configured = bootstrap.DataSourceConfig.load.return_value
+            bootstrap.DataSourceConfig.load.side_effect = (
+                configured,
+                DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True),
+            )
+            bootstrap.QApplication.side_effect = fail_setup
+
+        def check(fixture):
+            # Preserve independent identity/UNKNOWN evidence before the strict
+            # native ordering assertion. V1 is expected to expose this gap;
+            # neither expectedFailure nor an inverse assertion is permitted.
+            self.assertIs(setup_error, fixture.exit_error)
+            self.assertIs(close_error, fixture.exit_error.__cause__)
+            cleanup = getattr(fixture.exit_error, "api_runtime_observer_cleanup", None)
+            self.assertIsInstance(cleanup, tuple)
+            self.assertEqual(2, len(cleanup))
+            self.assertIs(state.pair[0], cleanup[0][0])
+            self.assertIs(close_error, cleanup[0][1])
+            self.assertIsNone(cleanup[0][2])
+            self.assertIs(observation_error, cleanup[0][3])
+            self.assertIs(state.pair[1], cleanup[1][0])
+            self.assertTrue(cleanup[1][2].worker_stopped)
+            for close in state.borrowed:
+                close.assert_not_called()
+            bootstrap.MainWindow.assert_not_called()
+            self.assertEqual(1, len(state.before_lease))
+            self.assertEqual((False, False), state.before_lease[0]["observer_alive"],
+                "B1 HOLD: source lease close was entered with an actual live REST observer, "
+                "original setup/close errors and UNKNOWN lifecycle: " + repr(state.before_lease))
+            self.assertTrue(all(not thread.is_alive() for thread in state.pair[2]))
+
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(bootstrap.LocalApiConfig, "load",
+                    return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")))
+                stack.enter_context(patch.object(validation_client, "RealtimeValidationRecorder", side_effect=recorder))
+                stack.enter_context(patch.object(AppDataLease, "close", close_lease))
+                self._bootstrap_settings_desktop(
+                    lambda _fixture: self.fail("pre-window failure reached event loop"),
+                    after_exit=check, content_service=service, expected_error=RuntimeError,
+                    before_run=before_run, query_client_factory=factory,
+                )
+        finally:
+            # The real-live/UNKNOWN failure is collected above first. Only now
+            # may this test's exact captured public handles finish safe cleanup.
+            if state.pair is not None:
+                for raw_close in state.pair[3]:
+                    raw_close()
+                for thread in state.pair[2]:
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive())
+
+
+    def test_bootstrap_native_completion_defers_repeated_wait_errors_until_sources_and_lease_end(self):
+        import subprocess
+        import sys
+        import threading
+        from contextlib import ExitStack
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        setup_error = RuntimeError("fixture QApplication failure with exact native owners")
+        close_error = PermissionError("fixture legacy REST close failed before join")
+        getter_error = RuntimeError("fixture independent REST lifecycle UNKNOWN")
+        rest_interrupts = (KeyboardInterrupt("first native join interruption"),
+                           SystemExit("second native join interruption"))
+        content_interrupts = (KeyboardInterrupt("first content join interruption"),
+                              OSError("second content join interruption"))
+        process_interrupt = KeyboardInterrupt("process wait interruption")
+        stop_error = OSError("fixture stop failed before terminate")
+        state = SimpleNamespace(fixture=None, pair=None, failed=False, events=[], proof_errors=[],
+            lease_snapshots=[], rest_wait_errors=[], content_wait_errors=[], process_wait_errors=[],
+            rest_wait=Event(), rest_tail=Event(), rest_release=Event(), content_wait=Event(),
+            process_wait=Event(), abort=Event(), proof_done=Event(), proof=None, process=None,
+            borrowed=[], no_queue_waits=[])
+        original_recorder_class = validation_client.RealtimeValidationRecorder
+        real_thread, raw_join = threading.Thread, threading.Thread.join
+        raw_lease_close = AppDataLease.close
+        owner_ident = threading.get_ident()
+        service = Mock()
+        service.replace_themes.return_value = SimpleNamespace(pending_collections=())
+        service.push.return_value = SimpleNamespace(total=0)
+
+        def pull(*_args, **_kwargs):
+            state.content_thread = threading.current_thread()
+            state.fixture.entered.set()
+            try:
+                if not state.fixture.release.wait(4):
+                    raise RuntimeError("content fixture was not released")
+                return SimpleNamespace(total=0)
+            finally:
+                state.fixture.completed.set()
+
+        service.pull.side_effect = pull
+
+        def real_thread_factory(*args, **kwargs):
+            target = kwargs.get("target")
+            if kwargs.get("name") == "central-local-validation":
+                def native_target():
+                    try:
+                        target()
+                    finally:
+                        state.rest_tail.set()
+                        if not state.rest_release.wait(4):
+                            raise RuntimeError("native REST tail was not released")
+                kwargs = dict(kwargs, target=native_target)
+            return real_thread(*args, **kwargs)
+
+        def factory(*_args, **_kwargs):
+            # Preserve V2's constructor wiring: the helper must instantiate the
+            # real Recorder before the outer callback reuses that exact object.
+            with patch.object(validation_client, "RealtimeValidationRecorder", original_recorder_class), \
+                    patch.object(validation_client.threading, "Thread", side_effect=real_thread_factory):
+                state.pair = self._observer_owner_real_pair(state.fixture.paths.data_dir, "native-completion")
+            rest, recorder, threads, _raw_closes = state.pair
+            self.assertFalse(state.fixture.restore_available())
+            now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+            for borrowed in (rest._primary, rest._local):
+                borrowed.server_now = lambda: now
+                borrowed.get_access_token = Mock(side_effect=AssertionError("unexpected token query"))
+                close = Mock()
+                borrowed.close = close
+                state.borrowed.append(close)
+
+            def legacy_close():
+                state.events.append("legacy.close.error")
+                raise close_error
+
+            def unknown_fact():
+                raise getter_error
+
+            rest.close, rest.comparison_lifecycle_state = legacy_close, unknown_fact
+            rest_thread = threads[0]
+
+            def rest_join(*args, **kwargs):
+                if threading.get_ident() == owner_ident and not args and not kwargs:
+                    if len(state.rest_wait_errors) < len(rest_interrupts):
+                        error = rest_interrupts[len(state.rest_wait_errors)]
+                        state.rest_wait_errors.append(error)
+                        raise error
+                    state.events.append("rest.join.blocking")
+                    state.rest_wait.set()
+                result = raw_join(rest_thread, *args, **kwargs)
+                if threading.get_ident() == owner_ident and not args and not kwargs:
+                    state.events.append("rest.join.completed")
+                return result
+
+            rest_thread.join = rest_join
+            # These are separate diagnostics, never actual native completion.
+            for queue in (rest._jobs, recorder._report_jobs):
+                guard = Mock(side_effect=AssertionError("Queue.join is not native completion"))
+                queue.join = guard
+                state.no_queue_waits.append(guard)
+            recorder.wait_for_writes = Mock(side_effect=AssertionError("write counter is not native completion"))
+            state.no_queue_waits.append(recorder.wait_for_writes)
+            return rest
+
+        def recorder(*_args, **_kwargs):
+            return state.pair[1]
+
+        def thread_join(thread, *args, **kwargs):
+            if (thread is getattr(state, "content_thread", None) and state.failed
+                    and threading.get_ident() == owner_ident and not args and not kwargs):
+                if len(state.content_wait_errors) < len(content_interrupts):
+                    error = content_interrupts[len(state.content_wait_errors)]
+                    state.content_wait_errors.append(error)
+                    raise error
+                state.events.append("content.join.blocking")
+                state.content_wait.set()
+                result = raw_join(thread)
+                state.events.append("content.join.completed")
+                return result
+            return raw_join(thread, *args, **kwargs)
+
+        def proof():
+            try:
+                for entered in (state.rest_wait, state.rest_tail):
+                    if not entered.wait(4):
+                        raise AssertionError("actual REST native wait was not entered")
+                if state.abort.is_set(): return
+                self.assertTrue(state.pair[2][0].is_alive())
+                self.assertFalse(state.pair[2][1].is_alive())
+                self.assertTrue(state.content_thread.is_alive())
+                self.assertIsNone(state.process.poll())
+                self.assertFalse(state.fixture.restore_available())
+                self.assertEqual([], state.lease_snapshots)
+                state.fixture.server.stop.assert_not_called()
+                state.events.append("proof.rest.held")
+                state.rest_release.set()
+                if not state.content_wait.wait(4):
+                    raise AssertionError("actual content native wait was not entered")
+                if state.abort.is_set(): return
+                self.assertFalse(any(thread.is_alive() for thread in state.pair[2]))
+                self.assertTrue(state.content_thread.is_alive())
+                self.assertFalse(state.fixture.restore_available())
+                state.fixture.server.stop.assert_not_called()
+                self.assertEqual([], state.lease_snapshots)
+                state.events.append("proof.content.held")
+                state.fixture.release.set()
+                if not state.process_wait.wait(4):
+                    raise AssertionError("captured process native wait was not entered")
+                if state.abort.is_set(): return
+                self.assertFalse(any(thread.is_alive() for thread in state.pair[2]))
+                self.assertFalse(state.content_thread.is_alive())
+                self.assertIsNone(state.process.poll())
+                self.assertIsNone(state.fixture.server.process)  # stop removed the public reference.
+                self.assertEqual(1, state.fixture.server.stop.call_count)
+                self.assertFalse(state.fixture.restore_available())
+                self.assertEqual([], state.lease_snapshots)
+                state.events.append("proof.process.held")
+                # This is the external completion of the test-owned child.
+                # Product stop failed before terminate; no new kill policy is asserted.
+                state.process.stdin.close()
+            except BaseException as error:
+                state.proof_errors.append(error)
+            finally:
+                state.rest_release.set()
+                if state.fixture is not None: state.fixture.release.set()
+                if state.process is not None and state.process.stdin is not None and not state.process.stdin.closed:
+                    state.process.stdin.close()
+                state.proof_done.set()
+
+        def fail_setup(*_args, **_kwargs):
+            self.assertIsNotNone(state.pair)
+            self.assertTrue(all(thread.is_alive() for thread in state.pair[2]))
+            self.assertTrue(state.fixture.entered.wait(4))
+            self.assertFalse(state.fixture.restore_available())
+            state.failed = True
+            state.proof = real_thread(target=proof, name="c10-native-proof")
+            state.proof.start()
+            raise setup_error
+
+        def before_run(fixture):
+            state.fixture = fixture
+            fixture.server.process = state.process = subprocess.Popen(
+                [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            raw_wait = state.process.wait
+
+            def wait(*args, **kwargs):
+                if threading.get_ident() == owner_ident and not args and not kwargs:
+                    if not state.process_wait_errors:
+                        state.process_wait_errors.append(process_interrupt)
+                        raise process_interrupt
+                    state.events.append("process.wait.blocking")
+                    state.process_wait.set()
+                    result = raw_wait()
+                    state.events.append("process.wait.completed")
+                    return result
+                return raw_wait(*args, **kwargs)
+
+            state.process.wait = wait
+
+            def stop():
+                state.events.append("server.stop.error")
+                fixture.server.process = None
+                raise stop_error  # Child stays alive until the proof thread ends it externally.
+
+            fixture.server.stop.side_effect = stop
+            configured = bootstrap.DataSourceConfig.load.return_value
+            bootstrap.DataSourceConfig.load.side_effect = (
+                configured, DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True))
+            bootstrap.QApplication.side_effect = fail_setup
+
+        def close_lease(lease):
+            if state.failed and not lease._exclusive:
+                state.lease_snapshots.append({
+                    "observer_alive": tuple(thread.is_alive() for thread in state.pair[2]),
+                    "content_alive": state.content_thread.is_alive(),
+                    "process_returncode": state.process.poll(),
+                    "server_stops": state.fixture.server.stop.call_count})
+                state.events.append("lease.close")
+            return raw_lease_close(lease)
+
+        def check(fixture):
+            # First baseline oracle is actual liveness before fixture/raw cleanup.
+            self.assertFalse(state.pair[2][0].is_alive(), repr(state.lease_snapshots))
+            self.assertFalse(state.pair[2][1].is_alive(), repr(state.lease_snapshots))
+            self.assertTrue(state.proof_done.wait(4))
+            self.assertEqual([], state.proof_errors)
+            self.assertEqual([{"observer_alive": (False, False), "content_alive": False,
+                "process_returncode": 0, "server_stops": 1}], state.lease_snapshots)
+            self.assertIs(setup_error, fixture.exit_error)
+            self.assertIs(close_error, fixture.exit_error.__cause__)
+            cleanup = fixture.exit_error.api_runtime_observer_cleanup
+            self.assertIs(state.pair[0], cleanup[0][0])
+            self.assertIs(close_error, cleanup[0][1])
+            self.assertIsNone(cleanup[0][2])
+            self.assertIs(getter_error, cleanup[0][3])
+            self.assertIs(state.pair[1], cleanup[1][0])
+            self.assertTrue(cleanup[1][2].worker_stopped)
+            completions = fixture.exit_error.api_runtime_observer_completion
+            self.assertEqual(2, len(completions))
+            for observer, completion, completion_error in completions:
+                self.assertIs(observer, completion.owner)
+                self.assertIs(True, completion.native_completed)
+                self.assertIsNone(completion_error)
+            self.assertIs(state.pair[0], completions[0][0])
+            self.assertIs(rest_interrupts[0], completions[0][1].wait_error)
+            self.assertIs(state.pair[1], completions[1][0])
+            self.assertIsNone(completions[1][1].wait_error)
+            self.assertEqual(list(rest_interrupts), state.rest_wait_errors)
+            self.assertEqual(list(content_interrupts), state.content_wait_errors)
+            self.assertEqual([process_interrupt], state.process_wait_errors)
+            source = fixture.exit_error.desktop_setup_cleanup
+            self.assertEqual(("close", "join", "stop"), tuple(item[1] for item in source))
+            self.assertIs(content_interrupts[0], source[1][2])
+            self.assertIs(stop_error, source[2][2])
+            expected_order = ("proof.rest.held", "rest.join.completed", "proof.content.held",
+                "content.join.completed", "server.stop.error", "proof.process.held",
+                "process.wait.completed", "lease.close")
+            positions = [state.events.index(item) for item in expected_order]
+            self.assertEqual(sorted(positions), positions)
+            for close in state.borrowed: close.assert_not_called()
+            for guard in state.no_queue_waits: guard.assert_not_called()
+            self.assertEqual(0, state.pair[0].validation_summary()["total_observations"])
+            self.assertEqual(0, state.pair[1].validation_summary()["total_observations"])
+            self.assertTrue(fixture.restore_available())
+            bootstrap.MainWindow.assert_not_called()
+
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(bootstrap.LocalApiConfig, "load",
+                    return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")))
+                stack.enter_context(patch.object(validation_client, "RealtimeValidationRecorder", side_effect=recorder))
+                stack.enter_context(patch.object(threading.Thread, "join", thread_join))
+                stack.enter_context(patch.object(AppDataLease, "close", close_lease))
+                self._bootstrap_settings_desktop(
+                    lambda _fixture: self.fail("pre-window failure reached event loop"), after_exit=check,
+                    content_service=service, expected_error=RuntimeError, before_run=before_run,
+                    query_client_factory=factory)
+        finally:
+            state.abort.set(); state.rest_release.set()
+            state.rest_wait.set(); state.rest_tail.set(); state.content_wait.set(); state.process_wait.set()
+            if state.fixture is not None: state.fixture.release.set()
+            if state.process is not None and state.process.stdin is not None and not state.process.stdin.closed:
+                state.process.stdin.close()
+            if state.proof is not None:
+                raw_join(state.proof, 3)
+                self.assertFalse(state.proof.is_alive())
+            if state.pair is not None:
+                for raw_close in state.pair[3]:
+                    try:
+                        raw_close()
+                    except BaseException as error:
+                        # A terminal owner consistently re-raises its original
+                        # deferred wait error, after the liveness oracle above.
+                        self.assertIs(rest_interrupts[0], error)
+                for thread in state.pair[2]:
+                    raw_join(thread, 3)
+                    self.assertFalse(thread.is_alive())
+            if state.process is not None:
+                state.process.wait(timeout=3)
+
+    def test_bootstrap_theme_retry_active_run_drains_after_wait_interruptions_before_source_lease(self):
+        import threading
+        from contextlib import ExitStack
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        setup_error = RuntimeError("fixture QApplication failure while theme retry is active")
+        seed_error = OSError("fixture first theme publish schedules existing retry")
+        wait_errors = (KeyboardInterrupt("first active theme drain interruption"),
+                       SystemExit("second active theme drain interruption"))
+        state = SimpleNamespace(fixture=None, dispatcher=None, pair=None, failed=False,
+            theme_entered=Event(), theme_release=Event(), theme_returned=Event(), drain_wait=Event(),
+            proof_done=Event(), abort=Event(), proof=None, proof_errors=[], wait_errors=[],
+            calls=0, events=[], lease_snapshots=[])
+        real_recorder_class = validation_client.RealtimeValidationRecorder
+        real_dispatcher_class = bootstrap.CentralThemeSyncDispatcher
+        real_thread, raw_thread_join = threading.Thread, threading.Thread.join
+        raw_lease_close = AppDataLease.close
+        service = Mock()
+        service.push.return_value = SimpleNamespace(total=0)
+        owner_ident = threading.get_ident()
+
+        def replace_themes(*_args, **_kwargs):
+            state.calls += 1
+            if state.calls == 1:
+                raise seed_error  # Existing default 2-second retry; no new policy/config.
+            state.theme_thread = threading.current_thread()
+            state.theme_entered.set()
+            try:
+                if not state.theme_release.wait(4):
+                    raise RuntimeError("active theme fixture was not released")
+                return SimpleNamespace(pending_collections=())
+            finally:
+                state.theme_returned.set()
+
+        service.replace_themes.side_effect = replace_themes
+
+        def pull(*_args, **_kwargs):
+            state.content_thread = threading.current_thread()
+            state.fixture.completed.set()
+            return SimpleNamespace(total=0)
+
+        service.pull.side_effect = pull
+
+        def dispatcher(*args, **kwargs):
+            value = real_dispatcher_class(*args, **kwargs)
+            state.dispatcher = value
+            state.raw_theme_wait = value._runs_drained.wait
+
+            def wait(*args, **kwargs):
+                if threading.get_ident() == owner_ident and state.failed:
+                    if len(state.wait_errors) < len(wait_errors):
+                        error = wait_errors[len(state.wait_errors)]
+                        state.wait_errors.append(error)
+                        raise error
+                    state.drain_wait.set()
+                return state.raw_theme_wait(*args, **kwargs)
+
+            value._runs_drained.wait = wait
+            return value
+
+        def factory(*_args, **_kwargs):
+            # Keep V2's actual Recorder constructor wiring and exact two owners.
+            with patch.object(validation_client, "RealtimeValidationRecorder", real_recorder_class):
+                state.pair = self._observer_owner_real_pair(state.fixture.paths.data_dir, "theme-drain")
+            now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+            for borrowed in (state.pair[0]._primary, state.pair[0]._local):
+                borrowed.server_now = lambda: now
+                borrowed.get_access_token = Mock(side_effect=AssertionError("unexpected token query"))
+            return state.pair[0]
+
+        def recorder(*_args, **_kwargs):
+            return state.pair[1]
+
+        def proof():
+            try:
+                if not state.drain_wait.wait(4):
+                    raise AssertionError("real active-run drain wait was not entered")
+                if state.abort.is_set(): return
+                self.assertTrue(state.theme_thread.is_alive())
+                self.assertFalse(state.theme_returned.is_set())
+                with state.dispatcher._state_lock:
+                    self.assertEqual(1, state.dispatcher._active_runs)
+                self.assertFalse(any(thread.is_alive() for thread in state.pair[2]))
+                self.assertFalse(state.content_thread.is_alive())
+                self.assertFalse(state.fixture.restore_available())
+                state.fixture.server.stop.assert_not_called()
+                self.assertEqual([], state.lease_snapshots)
+                state.events.append("proof.theme.active.lease.held")
+            except BaseException as error:
+                state.proof_errors.append(error)
+            finally:
+                state.theme_release.set()
+                state.proof_done.set()
+
+        def fail_setup(*_args, **_kwargs):
+            self.assertTrue(state.theme_entered.wait(4))
+            self.assertTrue(state.theme_thread.is_alive())
+            # Isolate the independent retry timer: content is a completed test
+            # precondition here, while the separate native/source oracle keeps
+            # content live through the actual product join.
+            raw_thread_join(state.content_thread, 3)
+            self.assertFalse(state.content_thread.is_alive())
+            self.assertFalse(state.fixture.restore_available())
+            state.failed = True
+            state.proof = real_thread(target=proof, name="c10-theme-proof")
+            state.proof.start()
+            raise setup_error
+
+        def before_run(fixture):
+            state.fixture = fixture
+            configured = bootstrap.DataSourceConfig.load.return_value
+            bootstrap.DataSourceConfig.load.side_effect = (
+                configured, DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True))
+            bootstrap.QApplication.side_effect = fail_setup
+
+        def close_lease(lease):
+            if state.failed and not lease._exclusive:
+                with state.dispatcher._state_lock:
+                    active = state.dispatcher._active_runs
+                state.lease_snapshots.append({"theme_active_runs": active,
+                    "theme_service_returned": state.theme_returned.is_set(),
+                    "observer_alive": tuple(thread.is_alive() for thread in state.pair[2]),
+                    "content_alive": state.content_thread.is_alive(),
+                    "server_stops": state.fixture.server.stop.call_count})
+                state.events.append("lease.close")
+            return raw_lease_close(lease)
+
+        def check(fixture):
+            # First V4 counterexample oracle is real service work, before test
+            # release/cleanup. Do not infer completion from an exception tuple.
+            self.assertTrue(state.theme_returned.is_set(), repr(state.lease_snapshots))
+            with state.dispatcher._state_lock:
+                self.assertEqual(0, state.dispatcher._active_runs)
+            self.assertTrue(state.proof_done.wait(4))
+            self.assertEqual([], state.proof_errors)
+            self.assertEqual([{"theme_active_runs": 0, "theme_service_returned": True,
+                "observer_alive": (False, False), "content_alive": False,
+                "server_stops": 1}], state.lease_snapshots)
+            self.assertIs(setup_error, fixture.exit_error)
+            self.assertIs(wait_errors[0], fixture.exit_error.__cause__)
+            self.assertEqual(list(wait_errors), state.wait_errors)
+            self.assertEqual(2, state.calls)  # Accepted retry is attempted once; no report retry.
+            source = fixture.exit_error.desktop_setup_cleanup
+            self.assertIs(state.dispatcher, source[0][0])
+            self.assertIs(wait_errors[0], source[0][2])
+            self.assertIsNone(source[1][2])
+            self.assertIsNone(source[2][2])
+            self.assertLess(state.events.index("proof.theme.active.lease.held"), state.events.index("lease.close"))
+            for observer, completion, completion_error in fixture.exit_error.api_runtime_observer_completion:
+                self.assertIs(observer, completion.owner)
+                self.assertIs(True, completion.native_completed)
+                self.assertIsNone(completion_error)
+            self.assertTrue(fixture.restore_available())
+            bootstrap.MainWindow.assert_not_called()
+            # No new policy requires joining the Timer's native tail before the
+            # lease. The contract here is the existing real active-run drain.
+
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(bootstrap.LocalApiConfig, "load",
+                    return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")))
+                stack.enter_context(patch.object(bootstrap, "CentralThemeSyncDispatcher", side_effect=dispatcher))
+                stack.enter_context(patch.object(validation_client, "RealtimeValidationRecorder", side_effect=recorder))
+                stack.enter_context(patch.object(AppDataLease, "close", close_lease))
+                self._bootstrap_settings_desktop(
+                    lambda _fixture: self.fail("pre-window failure reached event loop"), after_exit=check,
+                    content_service=service, expected_error=RuntimeError, before_run=before_run,
+                    query_client_factory=factory)
+        finally:
+            state.abort.set(); state.theme_release.set(); state.drain_wait.set()
+            if state.proof is not None:
+                raw_thread_join(state.proof, 3)
+                self.assertFalse(state.proof.is_alive())
+            if state.dispatcher is not None:
+                state.dispatcher._runs_drained.wait = state.raw_theme_wait
+                state.dispatcher.close()
+            if hasattr(state, "theme_thread"):
+                raw_thread_join(state.theme_thread, 3)
+                self.assertFalse(state.theme_thread.is_alive())
+            if state.pair is not None:
+                for raw_close in state.pair[3]: raw_close()
+                for thread in state.pair[2]:
+                    raw_thread_join(thread, 3)
+                    self.assertFalse(thread.is_alive())
+
+    def test_current_observers_reuse_one_terminal_native_result_after_two_finite_wait_faults(self):
+        import threading
+        from kiwoom_monitor.presentation.app_controller import _ApiClientRetirementResult
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        rest, recorder, threads, raw_closes = self._observer_owner_real_pair(root, "terminal-result")
+        controller = None
+        resources = tuple(zip((rest, recorder), threads))
+        waits = {id(observer): [] for observer, _thread in resources}
+        first = {id(observer): KeyboardInterrupt("first " + kind + " native wait")
+                 for (observer, _thread), kind in zip(resources, ("rest", "recorder"))}
+        second = {id(observer): OSError("second " + kind + " native wait")
+                  for (observer, _thread), kind in zip(resources, ("rest", "recorder"))}
+        real_join = threading.Thread.join
+        for observer, thread in resources:
+            def join(*args, observer=observer, thread=thread, **kwargs):
+                if not args and not kwargs:
+                    calls = waits[id(observer)]
+                    calls.append(len(calls) + 1)
+                    if len(calls) == 1:
+                        raise first[id(observer)]
+                    if len(calls) == 3:
+                        # This is finite, valid native-wait failure, not code
+                        # corruption. A second drain must not be started at all.
+                        raise second[id(observer)]
+                return real_join(thread, *args, **kwargs)
+            thread.join = join
+        now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+        for borrowed in (rest._primary, rest._local):
+            borrowed.server_now = lambda: now
+            borrowed.get_access_token = Mock(side_effect=AssertionError("unexpected token query"))
+        events = []
+        try:
+            controller = self.controller(events, market_data_client=rest, owned_observers=(rest, recorder))
+            self.assertFalse(controller.request_close())
+            self.wait_until(lambda: len(controller._api_client_retirements) == 2 and all(
+                item.result is not None and item.native_result is True
+                for item in controller._api_client_retirements))
+            # Actual observer and Qt task completion precede semantic assertions.
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            records = {id(item.client): item for item in controller._api_client_retirements}
+            self.assertEqual({id(rest), id(recorder)}, set(records))
+            for observer, _thread in resources:
+                item = records[id(observer)]
+                self.assertIsInstance(item.result, _ApiClientRetirementResult)
+                self.assertIs(first[id(observer)], item.result.error)
+                self.assertEqual("close", item.result.error_stage)
+                self.assertEqual([1, 2], waits[id(observer)])
+                completion = item.result.completion
+                self.assertIs(observer, completion.owner)
+                self.assertIs(True, completion.native_completed)
+                self.assertIs(first[id(observer)], completion.wait_error)
+                self.assertIsNone(item.result.completion_error)
+                self.assertIs(completion, observer.finish_comparison_shutdown())
+                self.assertTrue(controller._api_client_stop_confirmed(item))
+            self.wait_until(lambda: controller._shutdown_stage == "ready")
+            self.assertEqual(1, events.count("ready"))
+        finally:
+            for raw_close in raw_closes:
+                try:
+                    raw_close()
+                except BaseException as error:
+                    self.assertTrue(any(error is value for value in first.values()))
+            for thread in threads:
+                real_join(thread, 3)
+                self.assertFalse(thread.is_alive())
+            if controller is not None:
+                self._drain_api_retirement_fixture(controller)
+
+    def test_actual_api_reload_adopts_exact_inline_native_completion_without_erasing_getter_unknown(self):
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+
+        def case(fixture, _invoke, state):
+            controller = fixture.window._app_controller
+            previous_client = controller.market_data_client
+            assembly_error = RuntimeError("fixture late actual factory assembly failure")
+            legacy_error = PermissionError("fixture legacy close before actual join")
+            getter_error = RuntimeError("fixture independent getter UNKNOWN")
+            source = DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True)
+            bootstrap.DataSourceConfig.load.return_value = source
+            failures = []
+            controller.api_reload_failed.connect(failures.append)
+
+            def fail_after_acquisition(*_args, **_kwargs):
+                self.assertEqual(["rest", "recorder"], [resource.kind for resource in state.resources])
+                rest = state.resources[0]
+                self.assertTrue(all(resource.thread.is_alive() for resource in state.resources))
+                self.assertFalse(fixture.restore_available())
+                def legacy_close():
+                    raise legacy_error
+                def unknown_fact():
+                    raise getter_error
+                # Only legacy/fallible ports change. The real factory already
+                # owns each exact public native completion capability.
+                rest.observer.close = legacy_close
+                rest.observer.comparison_lifecycle_state = unknown_fact
+                raise assembly_error
+
+            with patch.object(bootstrap, "StockRepository", side_effect=fail_after_acquisition), \
+                    patch("kiwoom_monitor.presentation.main_window.QMessageBox.warning", return_value=None) as warning:
+                controller.restart_for_api_settings()
+                controller._advance_api_reload()  # existing worker -> queued signal fence
+                controller._advance_api_reload()  # actual factory failure -> actual adopt caller
+            warning.assert_called_once_with(
+                fixture.window, "API 설정", "새 API 설정을 적용하지 못했습니다.\n" + str(assembly_error))
+            # First baseline oracle is actual liveness before helper cleanup.
+            self.assertFalse(state.resources[0].thread.is_alive())
+            self.assertFalse(state.resources[1].thread.is_alive())
+            self.assertEqual([str(assembly_error)], failures)
+            self.assertFalse(controller.api_reloading)
+            self.assertIs(previous_client, controller.market_data_client)
+            original = assembly_error.api_runtime_observer_cleanup
+            self.assertIs(legacy_error, original[0][1])
+            self.assertIsNone(original[0][2])
+            self.assertIs(getter_error, original[0][3])
+            completion_rows = assembly_error.api_runtime_observer_completion
+            self.assertEqual(2, len(completion_rows))
+            rest = state.resources[0].observer
+            record = next(item for item in controller._api_client_retirements if item.client is rest)
+            self.assertIs(assembly_error, record.error)
+            self.assertTrue(record.inline_cleanup)
+            self.assertIsNone(record.worker)  # No invented Qt join for inline completion.
+            self.assertIs(legacy_error, record.result.error)
+            self.assertIs(getter_error, record.result.observation_error)
+            self.assertIsNone(record.result.lifecycle)
+            self.assertIs(completion_rows[0][1], record.result.completion)
+            self.assertIs(rest, record.result.completion.owner)
+            self.assertIs(True, record.result.completion.native_completed)
+            self.assertIsNone(record.result.completion_error)
+            self.assertTrue(controller._api_client_stop_confirmed(record))
+            state.old_close.assert_not_called()
+            fixture.window.close()
+            self.wait_until(lambda: controller._shutdown_stage == "ready")
+            self.assertFalse(fixture.restore_available())  # outer bootstrap still owns its lease
+
+        self._run_observer_factory_probe(case)
+
+    def test_current_native_completion_retains_getter_only_unknown_result_after_ready(self):
+        import threading
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        rest, recorder, threads, raw_closes = self._observer_owner_real_pair(root, "getter-only-unknown")
+        getter_error = RuntimeError("fixture getter-only UNKNOWN after actual completion")
+        controller = None
+        now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+        for borrowed in (rest._primary, rest._local):
+            borrowed.server_now = lambda: now
+            borrowed.get_access_token = Mock(side_effect=AssertionError("unexpected token query"))
+        def unknown_fact():
+            raise getter_error
+        rest.comparison_lifecycle_state = unknown_fact
+        events = []
+        try:
+            controller = self.controller(events, market_data_client=rest, owned_observers=(rest, recorder))
+            self.assertFalse(controller.request_close())
+            self.wait_until(lambda: controller._shutdown_stage == "ready")
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            records = [item for item in controller._api_client_retirements if item.client is rest]
+            self.assertEqual(1, len(records), "actual proof must release the gate while retaining getter UNKNOWN")
+            record = records[0]
+            result = record.result
+            self.assertIsNone(result.error)
+            self.assertIsNone(result.lifecycle)
+            self.assertIs(getter_error, result.observation_error)
+            self.assertIsNone(result.completion_error)
+            self.assertIs(rest, result.completion.owner)
+            self.assertIs(True, result.completion.native_completed)
+            self.assertIsNone(result.completion.wait_error)
+            self.assertTrue(controller._api_client_stop_confirmed(record))
+            self.assertIs(True, record.native_result)
+            self.assertIsNone(record.worker)
+            controller._settle_api_client_retirement(record)
+            self.assertIs(record, next(item for item in controller._api_client_retirements if item.client is rest))
+            self.assertIs(result, record.result)
+            self.assertIs(getter_error, record.result.observation_error)
+            self.assertEqual(1, events.count("ready"))
+        finally:
+            for raw_close in raw_closes: raw_close()
+            for thread in threads:
+                threading.Thread.join(thread, 3)
+                self.assertFalse(thread.is_alive())
+            if controller is not None:
+                self._drain_api_retirement_fixture(controller)
+
+
+    def test_constructor_keeps_native_writers_and_persisted_alert_inactive_until_activation(self):
+        from PySide6.QtCore import QSettings
+        candidate_settings = QSettings("KiwoomMonitor", "CandidateMonitor")
+        previous = candidate_settings.value("alert_enabled")
+        candidate_settings.setValue("alert_enabled", "1")
+        entered = Event()
+        calls = []
+        def load_events(**_kwargs):
+            calls.append(QThread.currentThread())
+            entered.set()
+            return {"events": [], "quality": {"status": "READY"}, "high_watermark": 0,
+                    "next_cursor": None, "has_more": False}
+        window = None
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch.object(MainWindow, "_open_api_settings"), \
+                 patch.object(MainWindow, "_start_top20_market_repair"):
+                root = Path(directory)
+                database = Database(root / "monitor.sqlite3")
+                database.initialize()
+                window = MainWindow(database.settings, monitor_database_path=root / "monitor.sqlite3",
+                    journal_database_path=root / "journal.sqlite3", candidate_client=SimpleNamespace(load_candidate_events=load_events),
+                    research_data_dir=root / "research")
+                try:
+                    self.app.processEvents()
+                    self.assertFalse(window._market_cache_writer.isRunning())
+                    self.assertFalse(window._entry_snapshot_writer.isRunning())
+                    self.assertTrue(window._candidate_dialog._alert_enabled.isChecked())
+                    self.assertFalse(window._candidate_dialog._worker.isRunning())
+                    self.assertEqual([], calls)
+                    self.assertIsNotNone(window._app_controller._shutdown_actions)
+                    window.activate_startup()
+                    self.assertTrue(entered.wait(3))
+                    self.assertTrue(window._market_cache_writer.isRunning())
+                    self.assertTrue(window._entry_snapshot_writer.isRunning())
+                    self.assertIsNot(calls[0], self.app.thread())
+                    window.activate_startup()  # Admission is one-time, never a second writer start.
+                    self.assertEqual({"market_cache_writer", "entry_snapshot_writer"}, window._app_controller._started_writers)
+                finally:
+                    window.close()
+                    self.wait_until(window._app_controller.request_close)
+                    self.assertFalse(window._market_cache_writer.isRunning())
+                    self.assertFalse(window._entry_snapshot_writer.isRunning())
+                    self.assertFalse(window._candidate_dialog._worker.isRunning())
+                    window.deleteLater()
+                    self.app.processEvents()
+        finally:
+            if previous is None:
+                candidate_settings.remove("alert_enabled")
+            else:
+                candidate_settings.setValue("alert_enabled", previous)
+
+    def test_partial_constructor_failure_leaves_only_inactive_owned_children(self):
+        from PySide6.QtCore import QSettings
+        candidate_settings = QSettings("KiwoomMonitor", "CandidateMonitor")
+        previous = candidate_settings.value("alert_enabled")
+        candidate_settings.setValue("alert_enabled", "1")
+        failure = RuntimeError("independent late construction failure")
+        partial = []
+        calls = []
+        def fail(window, *args, **kwargs):
+            partial.append(window)
+            raise failure
+        def load_events(**_kwargs):
+            calls.append(True)
+            return {"events": [], "quality": {"status": "READY"}, "high_watermark": 0}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                database = Database(root / "monitor.sqlite3")
+                database.initialize()
+                try:
+                    with patch.object(MainWindow, "_apply_table_visuals", fail):
+                        with self.assertRaises(RuntimeError) as caught:
+                            MainWindow(database.settings, monitor_database_path=root / "monitor.sqlite3",
+                                journal_database_path=root / "journal.sqlite3", candidate_client=SimpleNamespace(load_candidate_events=load_events),
+                                research_data_dir=root / "research")
+                    self.assertIs(failure, caught.exception)
+                    self.assertEqual(1, len(partial))
+                    window = partial[0]
+                    self.assertIsNone(window._app_controller._shutdown_actions)
+                    self.assertFalse(window._market_cache_writer.isRunning())
+                    self.assertFalse(window._entry_snapshot_writer.isRunning())
+                    self.assertFalse(window._candidate_dialog._worker.isRunning())
+                    self.app.processEvents()
+                    self.assertEqual([], calls)
+                    self.assertFalse(window._candidate_dialog._worker.isRunning())
+                finally:
+                    # Before-source safety cleanup is not product ownership evidence.
+                    for window in partial:
+                        for timer in window.findChildren(QTimer):
+                            timer.stop()
+                        for dialog in (window._candidate_dialog, window._research_dialog):
+                            if dialog is not None:
+                                dialog.stop()
+                        window._entry_snapshot_writer.requestInterruption()
+                        window._entry_snapshot_writer.wait()
+                        window._market_cache_writer.stop_and_drain()
+                        window._market_cache_writer.wait()
+                        window.deleteLater()
+                    self.app.processEvents()
+        finally:
+            if previous is None:
+                candidate_settings.remove("alert_enabled")
+            else:
+                candidate_settings.setValue("alert_enabled", previous)
+
+
+
+    def test_bootstrap_constructor_failure_closes_fresh_observers_before_source_lease(self):
+        import threading
+        from contextlib import ExitStack
+        from PySide6.QtCore import QSettings
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        # Reuse the actual bootstrap/content/lease fixture and the existing
+        # real observer-pair helper. Assertions run BEFORE either safety cleanup.
+        settings = QSettings("KiwoomMonitor", "CandidateMonitor")
+        previous_alert = settings.value("alert_enabled")
+        settings.setValue("alert_enabled", "1")
+        original_controller_init = AppController.__init__
+        original_join = threading.Thread.join
+        original_lease_close = AppDataLease.close
+        original_theme_close = bootstrap.CentralThemeSyncDispatcher.close
+        now = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+        try:
+            for stage in ("before_controller", "late_ui"):
+                with self.subTest(stage=stage):
+                    original_error = RuntimeError("fixture actual constructor " + stage)
+                    state = SimpleNamespace(resources=[], borrowed=[], partials=[], controllers=[],
+                        fixture=None, failed=False, stages=[], events=[], leases=[], constructor_kwargs=[],
+                        joins=[], theme_owners=[])
+                    transport = Mock(side_effect=AssertionError("constructor fixture must not query"))
+                    service = Mock()
+                    service.replace_themes.return_value = SimpleNamespace(pending_collections=())
+                    service.push.return_value = SimpleNamespace(total=0)
+
+                    def factory(*_args, **_kwargs):
+                        rest, recorder, threads, raw_closes = self._observer_owner_real_pair(
+                            state.fixture.paths.data_dir, "constructor-" + stage)
+                        for observer, thread, raw_close, kind in zip(
+                                (rest, recorder), threads, raw_closes, ("rest", "recorder")):
+                            resource = SimpleNamespace(observer=observer, thread=thread, kind=kind,
+                                raw_close=raw_close, raw_fact=observer.comparison_lifecycle_state,
+                                raw_finish=observer.finish_comparison_shutdown, receipts=[])
+                            state.resources.append(resource)
+
+                            def close(resource=resource):
+                                state.events.append(resource.kind + ".close")
+                                resource.raw_close()
+
+                            def fact(resource=resource):
+                                state.events.append(resource.kind + ".fact")
+                                return resource.raw_fact()
+
+                            def finish(resource=resource):
+                                state.events.append(resource.kind + ".finish")
+                                receipt = resource.raw_finish()
+                                resource.receipts.append(receipt)
+                                return receipt
+
+                            observer.close = close
+                            observer.comparison_lifecycle_state = fact
+                            observer.finish_comparison_shutdown = finish
+                        for borrowed in (rest._primary, rest._local):
+                            borrowed.server_now = lambda: now
+                            borrowed.get_access_token = transport
+                            borrowed.close = Mock()
+                            state.borrowed.append(borrowed.close)
+                        # The pair helper has already created the real recorder.
+                        # Reuse that exact owner when bootstrap imports its ctor.
+                        stack.enter_context(patch.object(validation_client,
+                            "RealtimeValidationRecorder", return_value=recorder))
+                        return rest
+
+                    def pull(*_args, **_kwargs):
+                        state.content_thread = threading.current_thread()
+                        state.fixture.entered.set()
+                        try:
+                            if not state.fixture.release.wait(4):
+                                raise RuntimeError("content HTTP fixture was not released")
+                            return SimpleNamespace(total=0)
+                        finally:
+                            state.fixture.completed.set()
+                    service.pull.side_effect = pull
+
+                    def fail_constructor():
+                        self.assertEqual(2, len(state.resources))
+                        self.assertTrue(state.fixture.entered.wait(4))
+                        self.assertTrue(state.content_thread.is_alive())
+                        self.assertTrue(all(item.thread.is_alive() for item in state.resources))
+                        self.assertFalse(state.fixture.restore_available())
+                        state.fixture.server.stop.assert_not_called()
+                        state.events.append("constructor.failure")
+                        state.failed = True
+                        raise original_error
+
+                    def controller_init(controller, parent=None, *args, **kwargs):
+                        state.partials.append(parent)  # Exact partial QObject, only for later safety cleanup.
+                        state.stages.append("controller.enter")
+                        if stage == "before_controller":
+                            fail_constructor()
+                        original_controller_init(controller, parent, *args, **kwargs)
+                        state.controllers.append(controller)
+                        state.stages.append("controller.return")
+
+                    def late_ui(window, *_args, **_kwargs):
+                        state.stages.append("ui.enter")
+                        self.assertIs(state.partials[0], window)
+                        fail_constructor()
+
+                    def join(thread, *args, **kwargs):
+                        if (thread is getattr(state, "content_thread", None)
+                                and state.failed and not args and not kwargs):
+                            state.events.append("content.join")
+                            snapshot = dict(owner=thread, observer_alive=[item.thread.is_alive()
+                                for item in state.resources], content_alive_before=thread.is_alive(),
+                                server_stops=state.fixture.server.stop.call_count)
+                            state.joins.append(snapshot)
+                            state.fixture.release.set()  # Only the product's real join releases it.
+                            result = original_join(thread, *args, **kwargs)
+                            snapshot.update(result=result, content_alive_after=thread.is_alive(),
+                                content_completed=state.fixture.completed.is_set())
+                            return result
+                        return original_join(thread, *args, **kwargs)
+
+                    def theme_close(dispatcher):
+                        if state.failed:
+                            state.events.append("theme.close")
+                            state.theme_owners.append(dispatcher)
+                        return original_theme_close(dispatcher)
+
+                    def close_lease(lease):
+                        if state.failed and not lease._exclusive:
+                            state.events.append("lease.close")
+                            state.leases.append(dict(observer_alive=[item.thread.is_alive()
+                                for item in state.resources], content_alive=state.content_thread.is_alive(),
+                                server_stops=state.fixture.server.stop.call_count))
+                        return original_lease_close(lease)
+
+                    def before_run(fixture):
+                        state.fixture = fixture
+                        configured = bootstrap.DataSourceConfig.load.return_value
+                        bootstrap.DataSourceConfig.load.side_effect = (configured,
+                            DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True))
+                        real_constructor_call = bootstrap.MainWindow.side_effect
+                        def construct(*args, **kwargs):
+                            state.constructor_kwargs.append(dict(kwargs))
+                            return real_constructor_call(*args, **kwargs)
+                        bootstrap.MainWindow.side_effect = construct
+                        fixture.server.stop.side_effect = lambda: state.events.append("server.stop")
+
+                    def check(fixture):
+                        # Prove the intended actual constructor boundary first;
+                        # an unrelated early exception is not causal evidence.
+                        self.assertIs(original_error, fixture.exit_error)
+                        expected_stages = (["controller.enter"] if stage == "before_controller"
+                            else ["controller.enter", "controller.return", "ui.enter"])
+                        self.assertEqual(expected_stages, state.stages)
+                        bootstrap.MainWindow.assert_called_once()
+                        self.assertEqual(1, len(state.constructor_kwargs))
+                        # An old source fails first on actual owned threads here;
+                        # fixture release/join/raw_close cannot create a PASS.
+                        self.assertEqual(2, len(state.resources))
+                        for resource in state.resources:
+                            self.assertFalse(resource.thread.is_alive(),
+                                "pre-test-cleanup actual " + resource.kind + " remains alive")
+                        self.assertIsNone(fixture.exit_error.__cause__)
+                        kwargs = state.constructor_kwargs[0]
+                        self.assertNotIn("initial_google_drive_download", kwargs)
+                        self.assertIs(state.resources[0].observer, kwargs["market_data_client"])
+                        self.assertEqual(tuple(item.observer for item in state.resources), kwargs["owned_observers"])
+                        self.assertEqual([], fixture.windows)  # Failed RHS was never published.
+                        self.assertEqual(1, len(state.partials))
+                        if stage == "before_controller":
+                            self.assertFalse(hasattr(state.partials[0], "_app_controller"))
+                            self.assertEqual([], state.controllers)
+                        else:
+                            window = state.partials[0]
+                            self.assertIsNone(window._app_controller._shutdown_actions)
+                            self.assertFalse(window._market_cache_writer.isRunning())
+                            self.assertFalse(window._entry_snapshot_writer.isRunning())
+                            self.assertTrue(window._candidate_dialog._alert_enabled.isChecked())
+                            self.assertFalse(window._candidate_dialog._worker.isRunning())
+                            self.assertFalse(any(getattr(callback, "__self__", None) is window._research_dialog
+                                for _delay, callback in fixture.callbacks))
+                        for borrowed_close in state.borrowed:
+                            borrowed_close.assert_not_called()
+                        cleanup = fixture.exit_error.api_runtime_observer_cleanup
+                        completions = fixture.exit_error.api_runtime_observer_completion
+                        self.assertEqual(2, len(cleanup))
+                        self.assertEqual(2, len(completions))
+                        for resource, row, completion_row in zip(state.resources, cleanup, completions):
+                            observer, close_error, fact, read_error = row
+                            self.assertIs(resource.observer, observer)
+                            self.assertIsNone(close_error)
+                            self.assertIsNone(read_error)
+                            self.assertEqual((True, 0, True, None), (fact.admission_closed,
+                                fact.active_requests, fact.worker_stopped, fact.failure_stage))
+                            owner, completion, completion_error = completion_row
+                            self.assertIs(resource.observer, owner)
+                            self.assertIs(resource.observer, completion.owner)
+                            self.assertIs(True, completion.native_completed)
+                            self.assertIsNone(completion.wait_error)
+                            self.assertIsNone(completion_error)
+                            self.assertEqual(1, state.events.count(resource.kind + ".close"))
+                            self.assertEqual(1, state.events.count(resource.kind + ".fact"))
+                            # Normal public close + retained exact capability share one receipt.
+                            self.assertEqual(2, len(resource.receipts))
+                            self.assertIs(resource.receipts[0], resource.receipts[1])
+                            self.assertIs(completion, resource.receipts[-1])
+                        self.assertFalse(state.content_thread.is_alive())
+                        # Unchanged source cleanup does a generic join and then
+                        # its exact native-completion join. Observe both real calls.
+                        self.assertEqual(2, len(state.joins))
+                        self.assertEqual([True, False], [row["content_alive_before"] for row in state.joins])
+                        for row in state.joins:
+                            self.assertIs(state.content_thread, row["owner"])
+                            self.assertEqual([False, False], row["observer_alive"])
+                            self.assertEqual(0, row["server_stops"])
+                            self.assertIsNone(row["result"])
+                            self.assertFalse(row["content_alive_after"])
+                            self.assertTrue(row["content_completed"])
+                        self.assertEqual([dict(observer_alive=[False, False], content_alive=False,
+                            server_stops=1)], state.leases)
+                        # Constructor errors do not expose the pre-window
+                        # desktop_setup_cleanup tuple. Use exact actual owners.
+                        self.assertEqual(1, len(state.theme_owners))
+                        self.assertIsInstance(state.theme_owners[0], bootstrap.CentralThemeSyncDispatcher)
+                        fixture.server.stop.assert_called_once_with()
+                        self.assertEqual(["constructor.failure", "rest.close", "rest.finish", "rest.fact",
+                            "recorder.close", "recorder.finish", "recorder.fact", "rest.finish",
+                            "recorder.finish", "theme.close", "content.join", "content.join", "server.stop", "lease.close"],
+                            state.events)
+                        self.assertTrue(fixture.restore_available())
+                        transport.assert_not_called()
+
+                    try:
+                        with ExitStack() as stack:
+                            stack.enter_context(patch.object(bootstrap.LocalApiConfig, "load",
+                                return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")))
+                            stack.enter_context(patch.object(AppController, "__init__", controller_init))
+                            if stage == "late_ui":
+                                stack.enter_context(patch.object(MainWindow, "_apply_table_visuals", late_ui))
+                            stack.enter_context(patch.object(threading.Thread, "join", join))
+                            stack.enter_context(patch.object(AppDataLease, "close", close_lease))
+                            stack.enter_context(patch.object(bootstrap.CentralThemeSyncDispatcher, "close", theme_close))
+                            self._bootstrap_settings_desktop(
+                                lambda _fixture: self.fail("constructor failure reached event loop"),
+                                after_exit=check, content_service=service, expected_error=RuntimeError,
+                                before_run=before_run, query_client_factory=factory)
+                    finally:
+                        # Safety only, AFTER check: no broad discovery or product-success inference.
+                        for resource in state.resources:
+                            resource.raw_close()
+                            original_join(resource.thread, 3)
+                            self.assertFalse(resource.thread.is_alive())
+                        for window in state.partials:
+                            for timer in window.findChildren(QTimer):
+                                timer.stop()
+                            for name in ("_candidate_dialog", "_research_dialog"):
+                                dialog = getattr(window, name, None)
+                                if dialog is not None:
+                                    dialog.stop()
+                            for controller in state.controllers:
+                                for writer in (controller.entry_snapshot_writer, controller.market_cache_writer):
+                                    if writer is not None:
+                                        writer.requestInterruption()
+                                        if hasattr(writer, "stop_and_drain"):
+                                            writer.stop_and_drain()
+                                        writer.wait()
+                            window.deleteLater()
+                        self.app.processEvents()
+        finally:
+            if previous_alert is None:
+                settings.remove("alert_enabled")
+            else:
+                settings.setValue("alert_enabled", previous_alert)
+
+    def test_bootstrap_publishes_complete_window_then_forwards_drive_option_to_activation(self):
+        from kiwoom_monitor import bootstrap
+
+        # After-only phase-contract check. It deliberately stops at activation
+        # admission; activation-midflight/full exec drain belongs to C12.
+        for download, upload, local, uploaded, dirty, expected_download in (
+            (False, False, "", "", "0", False),
+            (True, False, "", "", "0", True),
+            (False, True, "2026-10-16T06:00:00Z", "2026-10-16T14:00:00+09:00", "0", True),
+            (False, True, "2026-10-16T14:00:00+09:00", "2026-10-16T06:00:00Z", "0", False),
+            (False, True, "2026-10-16T14:00:00+09:00", "2026-10-16T05:00:00Z", "0", False),
+            (False, True, "", "", "1", True),
+            (False, False, "2026-10-16T06:00:00Z", "2026-10-16T14:00:00+09:00", "0", False),
+        ):
+            with self.subTest(download=download, upload=upload, local=local, uploaded=uploaded, dirty=dirty):
+                failure = RuntimeError("fixture activation admission boundary")
+                drive = Mock(connected=True, configured=True)
+                state = SimpleNamespace(kwargs=[], activations=[], fixture=None)
+
+                def before_run(fixture):
+                    state.fixture = fixture
+                    database = Database(fixture.paths.database_path)
+                    database.initialize()
+                    database.settings.set("google_drive_auto_download", "1" if download else "0")
+                    database.settings.set("google_drive_auto_upload", "1" if upload else "0")
+                    database.settings.set("google_drive_local_changed_at", local)
+                    database.settings.set("google_drive_last_upload_success_at", uploaded)
+                    database.settings.set("google_drive_unsynced_changes", dirty)
+                    real_constructor_call = bootstrap.MainWindow.side_effect
+                    def construct(*args, **kwargs):
+                        state.kwargs.append(dict(kwargs))
+                        return real_constructor_call(*args, **kwargs)
+                    bootstrap.MainWindow.side_effect = construct
+
+                def activate(window, *, initial_google_drive_download=False):
+                    # Actual MainWindow ctor returned and helper published it
+                    # before the real bootstrap caller entered this phase.
+                    self.assertEqual([window], state.fixture.windows)
+                    self.assertIsInstance(window, MainWindow)
+                    self.assertIsNotNone(window._app_controller._shutdown_actions)
+                    self.assertFalse(window._market_cache_writer.isRunning())
+                    self.assertFalse(window._entry_snapshot_writer.isRunning())
+                    state.activations.append((window, initial_google_drive_download))
+                    raise failure
+
+                def check(fixture):
+                    self.assertIs(failure, fixture.exit_error)
+                    bootstrap.MainWindow.assert_called_once()
+                    self.assertEqual(1, len(state.kwargs))
+                    self.assertNotIn("initial_google_drive_download", state.kwargs[0])
+                    self.assertIs(drive, state.kwargs[0]["google_drive_sync"])
+                    bootstrap.GoogleDriveSyncService.assert_called_once_with(
+                        fixture.paths.database_path, fixture.paths.news_database_path,
+                        backup_set="architecture-v1",
+                    )
+                    self.assertEqual(1, len(state.activations))
+                    self.assertIs(fixture.windows[0], state.activations[0][0])
+                    self.assertIs(expected_download, state.activations[0][1])
+
+                with patch.object(bootstrap, "GoogleDriveSyncService", return_value=drive), \
+                     patch.object(MainWindow, "activate_startup", activate):
+                    self._bootstrap_settings_desktop(
+                        lambda _fixture: self.fail("activation boundary reached event loop"),
+                        after_exit=check, expected_error=RuntimeError, source_mode="local",
+                        before_run=before_run, cleanup_window=True)
+
+
+    def _c12_published_owner_native_case(self, mode):
+        """C11 prerequisite; real Qt exec/dispatcher and native owners, no fake ACK."""
+        import threading
+        import sys
+        import traceback
+        import json
+        from contextlib import ExitStack
+        from dataclasses import replace
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+        from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import (
+            TradeEntrySnapshot, scoped_snapshot_execution_key,
+        )
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        native_wait_modes = {"producer_join_interrupt", "writer_join_interrupt"}
+        native_modes = {"quit", "exec_error", "shutdown_effect_error", "dispatch_interrupts"} | native_wait_modes
+        setup_error = (KeyboardInterrupt("C12 finite native wait " + mode) if mode in native_wait_modes
+            else RuntimeError("C12 original " + mode))
+        previous_cause = OSError("C12 original existing cause")
+        source_error = PermissionError("C12 source close after actual stop")
+        ack_error = RuntimeError("C12 actual enriched COMMIT ACK loss")
+        dispatch_errors = (KeyboardInterrupt("C12 real dispatch wait interrupt one"),
+            KeyboardInterrupt("C12 real dispatch wait interrupt two"))
+        if mode == "show_error":
+            setup_error.__cause__ = previous_cause
+        fixed = datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+        scope = AccountScope("kiwoom", AccountEnvironment.MOCK,
+            "00000000-0000-4000-8000-000000000042")
+        snapshot = TradeEntrySnapshot(scoped_snapshot_execution_key("c12-" + mode, scope),
+            "c12-order", "005930", "삼성전자", "매수", fixed, 70000, 1, "KRX",
+            origin_scope=scope, theme_ranks={}, orderbook={}, market_state={}, capture_state="realtime_core")
+        news = ({"title": "C12 original news", "published_at": "2030-01-02T09:59:00+09:00"},)
+        expected = replace(snapshot, news=news, capture_state="realtime_enriched",
+            investor_flow={"available": True, "source": "C12 original investor"})
+        state = SimpleNamespace(fixture=None, pair=None, producer=None, timers=[], errors=[],
+            events=[], snapshots=[], borrowed=[], native_execs=0, native_returns=0,
+            producer_release=Event(), committed=Event(), ack_release=Event(), saves=[],
+            failures=[], retry_count=0, prepared=False, content_thread=None, close_seen=False,
+            dispatch_interrupts=[], real_dispatch_returns=0, in_shutdown_tick=False,
+            wait_injected=False, wait_attempts=[], tick_snapshots=[], slot_errors=[], test_owned_wake=False,
+            qt_hook_records=[], critical_calls=[], critical_modals=[], watcher_error_logged=False,
+            retry_views=[], retry_requests=[], retry_native_starts=[], retry_close_returns=[],
+            close_error_events=[], error_hook_visible=[])
+        service = Mock()
+        service.replace_themes.return_value = SimpleNamespace(pending_collections=())
+        service.pull.return_value = SimpleNamespace(total=0)
+        service.push.return_value = SimpleNamespace(total=0)
+        ranking_start = Mock()
+        original_recorder_class = validation_client.RealtimeValidationRecorder
+        raw_save = JournalRepository.save_entry_snapshot
+        raw_lease_close = AppDataLease.close
+        raw_start = threading.Thread.start
+        raw_exec = QApplication.exec
+        raw_show = MainWindow.show
+        raw_activate = MainWindow.activate_startup
+        raw_start_entry = AppController.start_entry_snapshot_writer
+        raw_request_close = AppController.request_close
+        raw_close_event = MainWindow.closeEvent
+        raw_entry_native_start = EntrySnapshotWriter.start
+        raw_save_view = MainWindow._save_shutdown_view_state
+        raw_process_events = QCoreApplication.processEvents
+        raw_wait = QThread.wait
+        raw_advance = AppController._advance_shutdown
+        slot_notice = Mock()
+        raw_critical = bootstrap.QMessageBox.critical
+
+        def start(thread):
+            if thread.name == "central-content-sync":
+                state.content_thread = thread
+            return raw_start(thread)
+
+        def factory(*_args, **_kwargs):
+            with patch.object(validation_client, "RealtimeValidationRecorder", original_recorder_class):
+                state.pair = self._observer_owner_real_pair(state.fixture.paths.data_dir, "c12-" + mode)
+            for borrowed in (state.pair[0]._primary, state.pair[0]._local):
+                borrowed.server_now = lambda: fixed
+                borrowed.close = Mock()
+                state.borrowed.append(borrowed.close)
+            self.assertFalse(state.fixture.restore_available())
+            return state.pair[0]
+
+        def save(owner, value, now=None, *, account_scope=None):
+            result = raw_save(owner, value, now, account_scope=account_scope)
+            state.saves.append((value, account_scope))
+            if value.capture_state == "realtime_enriched" and not state.committed.is_set():
+                state.events.append("entry.commit.before_ack")
+                state.committed.set()
+                if not state.ack_release.wait(3):
+                    raise AssertionError("C12 native ACK barrier was not released")
+                raise ack_error
+            return result
+
+        def sample(label):
+            fixture = state.fixture
+            controller = fixture.windows[0]._app_controller
+            writer = controller.entry_snapshot_writer
+            value = dict(label=label, stage=controller._shutdown_stage,
+                producer_running=state.producer.isRunning(),
+                producer_join=state.producer.wait(0), writer_running=writer.isRunning(),
+                writer_join=writer.wait(0), pending=writer.has_pending_work(),
+                observer_alive=tuple(thread.is_alive() for thread in state.pair[2]),
+                content_alive=state.content_thread.is_alive(),
+                server_stops=fixture.server.stop.call_count,
+                restore_available=fixture.restore_available())
+            state.snapshots.append(value)
+            state.events.append(label)
+            return value
+
+        def timer(interval, callback, *, single=False):
+            value = QTimer(self.app)
+            value.setSingleShot(single)
+            value.timeout.connect(callback)
+            state.timers.append(value)
+            value.start(interval)
+            return value
+
+        def prepare(window):
+            if state.prepared:
+                return
+            state.prepared = True
+            fixture = state.fixture
+            fixture.window = window
+            controller = window._app_controller
+            writer = controller.entry_snapshot_writer
+            state.sources = writer.replace_sources(
+                investor_loader=lambda *_: {"available": True, "source": "C12 original investor"},
+                program_loader=None)
+            state.sources.__enter__()
+            writer.failed.connect(state.failures.append)
+            def retry_visible():
+                # The product's existing Window slot runs before this observer.
+                # No fixture show/request_close/save retry is performed here.
+                state.retry_views.append((window.isVisible(), controller.closing,
+                    controller._shutdown_stage,
+                    tuple(value.isActive() for value in controller._shutdown_actions.timers)))
+            retry_signal = getattr(controller, "shutdown_save_retry_needed", None)
+            if retry_signal is not None:
+                retry_signal.connect(retry_visible)
+            # This actual QThread belongs to Window, outside Controller's tree.
+            producer = DelayedProducer(window)
+            producer.release = state.producer_release
+            state.producer = producer
+            def delivered():
+                state.events.append("producer.queued_result")
+                writer.enqueue(snapshot)
+            producer.result.connect(delivered, Qt.ConnectionType.QueuedConnection)
+            producer.start()
+            self.assertTrue(producer.started_run.wait(2))
+
+            def release_producer():
+                try:
+                    if mode in native_modes:
+                        self.assertEqual(1, state.native_returns)
+                    held = sample("after.exec.owner.held")
+                    self.assertEqual(0, held["server_stops"])
+                    self.assertFalse(held["restore_available"])
+                    self.assertTrue(all(held["observer_alive"]))
+                except BaseException as error:
+                    state.errors.append(error)
+                finally:
+                    state.producer_release.set()
+            timer(50, release_producer, single=True)
+            started = time.monotonic()
+            def observe_ack_and_retry():
+                try:
+                    if (mode in native_wait_modes and state.tick_snapshots
+                            and not state.tick_snapshots[0]["timer_active"] and not state.test_owned_wake):
+                        # Before cleanup, preserve the actual missing wake and
+                        # still-owned native/source/lease facts. Recovery here
+                        # is test-owned and must make the first oracle FAIL.
+                        state.test_owned_wake = True
+                        controller._shutdown_timer.start(0)
+                    if state.committed.is_set() and not state.ack_release.is_set():
+                        held = sample("entry.commit.ack.held")
+                        self.assertTrue(held["writer_running"])
+                        self.assertFalse(held["writer_join"])
+                        self.assertEqual(0, held["server_stops"])
+                        self.assertFalse(held["restore_available"])
+                        state.ack_release.set()
+                    if controller._shutdown_stage == "cache_failed" and not state.retry_count:
+                        held = sample("entry.failed.before.explicit.retry")
+                        self.assertTrue(held["pending"])
+                        self.assertTrue(held["writer_join"])
+                        self.assertEqual(0, held["server_stops"])
+                        self.assertTrue(all(held["observer_alive"]))
+                        self.assertFalse(held["restore_available"])
+                        state.retry_count += 1
+                        state.events.append("explicit.window.close.retry")
+                        self.assertTrue(window.isVisible(), "manual save retry needs the actual existing visible Window")
+                        state.retry_close_returns.append(window.close())
+                        self.assertEqual([controller], state.retry_requests)
+                        self.assertEqual([writer], state.retry_native_starts)
+                    if controller._shutdown_stage == "ready":
+                        watcher.stop()
+                    elif time.monotonic() - started >= 4:
+                        raise AssertionError("C12 same-owner shutdown did not reach ready within existing 4-second wait")
+                except BaseException as error:
+                    if not state.watcher_error_logged:
+                        state.watcher_error_logged = True
+                        traceback.print_exception(error)
+                        def read(action):
+                            try:
+                                return action()
+                            except BaseException as observation_error:
+                                return {"UNKNOWN": type(observation_error).__name__ + ": " + str(observation_error)}
+                        market, entry = controller.market_cache_writer, controller.entry_snapshot_writer
+                        snapshot = {
+                            "mode": mode, "stage": controller._shutdown_stage, "closing": controller.closing,
+                            "started_writers": sorted(controller._started_writers),
+                            "shutdown_timer_active": read(controller._shutdown_timer.isActive),
+                            "shutdown_timer_remaining_ms": read(controller._shutdown_timer.remainingTime),
+                            "watcher_active": read(watcher.isActive),
+                            "market_running": read(market.isRunning) if market is not None else None,
+                            "market_queue_size_observation_only": read(market._queue.qsize) if market is not None else None,
+                            "entry_running": read(entry.isRunning) if entry is not None else None,
+                            "entry_pending": read(entry.has_pending_work) if entry is not None else None,
+                            "pending_prices": len(controller.pending_prices),
+                            "pending_minutes": len(controller.pending_minutes),
+                            "pending_market_minutes": len(controller.pending_market_minutes),
+                            "pending_minute_gaps": len(controller.pending_minute_gaps),
+                            "price_retry_batches": len(controller._price_cache_retries),
+                            "pending_minute_retention": repr(controller.pending_minute_retention),
+                            "shutdown_cache_failed": controller._shutdown_cache_failed,
+                            "producer_release": state.producer_release.is_set(),
+                            "committed": state.committed.is_set(), "ack_release": state.ack_release.is_set(),
+                            "retry_count": state.retry_count, "server_stops": fixture.server.stop.call_count,
+                            "events": list(state.events),
+                        }
+                        print("C12_WATCHER_FIRST_FAILURE=" + json.dumps(snapshot, ensure_ascii=False), file=sys.stderr, flush=True)
+                    watcher.stop()
+                    state.errors.append(error)
+                    state.producer_release.set()
+                    state.ack_release.set()
+            watcher = timer(10, observe_ack_and_retry)
+
+        def show(window):
+            result = raw_show(window)
+            if mode == "show_error":
+                prepare(window)
+                raise setup_error
+            return result
+
+        def activate(window, *args, **kwargs):
+            return raw_activate(window, *args, **kwargs)
+
+        def start_entry(controller):
+            result = raw_start_entry(controller)
+            if mode == "activation_error":
+                window = controller.parent()
+                self.assertIsInstance(window, MainWindow)
+                prepare(window)
+                raise setup_error
+            return result
+
+        def request_close(controller):
+            if state.prepared and controller is state.fixture.windows[0]._app_controller and controller._shutdown_stage == "cache_failed":
+                state.retry_requests.append(controller)
+            return raw_request_close(controller)
+
+        def close_event(window, event):
+            try:
+                return raw_close_event(window, event)
+            except BaseException as error:
+                if mode == "shutdown_effect_error":
+                    state.close_error_events.append((window, event.isAccepted(), error))
+                raise
+
+        def native_entry_start(writer, *args, **kwargs):
+            if state.prepared and state.retry_count and writer is state.fixture.windows[0]._app_controller.entry_snapshot_writer:
+                state.retry_native_starts.append(writer)
+            return raw_entry_native_start(writer, *args, **kwargs)
+
+        def real_exec(*_args):
+            state.native_execs += 1
+            result = raw_exec()
+            state.native_returns += 1
+            state.events.append("real.app.exec.returned")
+            if mode == "exec_error":
+                raise setup_error
+            return result
+
+        def save_view(window):
+            result = raw_save_view(window)
+            if mode == "shutdown_effect_error":
+                raise setup_error
+            return result
+
+        def dispatch(*args):
+            result = raw_process_events(*args)
+            if mode == "dispatch_interrupts" and state.native_returns and state.prepared:
+                state.real_dispatch_returns += 1
+                if len(state.dispatch_interrupts) < 2 and state.fixture.windows[0]._app_controller._shutdown_stage != "ready":
+                    error = dispatch_errors[len(state.dispatch_interrupts)]
+                    state.dispatch_interrupts.append(error)
+                    raise error
+            return result
+
+        def install_qt_hook_observation():
+            original_hook = sys.excepthook
+            def observed(error_type, error, tb):
+                state.qt_hook_records.append((error_type, error, tb, str(error)))
+                if mode == "shutdown_effect_error":
+                    state.error_hook_visible.append(state.fixture.windows[0].isVisible())
+                result = original_hook(error_type, error, tb)
+                if mode == "shutdown_effect_error":
+                    # PySide may deliver this hook after enter_native returns.
+                    # Let the original hook and actual modal OK finish first.
+                    self.app.exit(0)
+                return result
+            sys.excepthook = observed
+
+        def critical_modal(*args, **kwargs):
+            state.critical_calls.append((args, kwargs))
+            response = QTimer(self.app)
+            response.setSingleShot(True)
+            state.timers.append(response)
+            def answer():
+                modal = self.app.activeModalWidget()
+                try:
+                    self.assertIsInstance(modal, bootstrap.QMessageBox)
+                    state.critical_modals.append((modal.windowTitle(), modal.text()))
+                    self.assertEqual(args[1:3], (modal.windowTitle(), modal.text()))
+                except BaseException as error:
+                    state.errors.append(error)
+                finally:
+                    if isinstance(modal, bootstrap.QMessageBox):
+                        button = modal.button(bootstrap.QMessageBox.StandardButton.Ok)
+                        if button is not None:
+                            button.click()
+                        else:
+                            modal.accept()
+            response.timeout.connect(answer)
+            response.start(0)
+            # Delegate to the actual native modal. The timer reproduces only
+            # a person's OK response; this call is not silently discarded.
+            return raw_critical(*args, **kwargs)
+
+        def wait(worker, *args, **kwargs):
+            result = raw_wait(worker, *args, **kwargs)
+            if mode in native_wait_modes and state.prepared and state.in_shutdown_tick and args == (0,) and not kwargs:
+                target = (state.producer if mode == "producer_join_interrupt"
+                    else state.fixture.windows[0]._app_controller.entry_snapshot_writer)
+                if worker is target:
+                    state.wait_attempts.append((worker, result))
+                    if not state.wait_injected:
+                        state.wait_injected = True
+                        raise setup_error
+            return result
+
+        def advance(controller):
+            if mode not in native_wait_modes:
+                return raw_advance(controller)
+            state.in_shutdown_tick = True
+            try:
+                return raw_advance(controller)
+            except BaseException as error:
+                state.slot_errors.append(error)
+                raise
+            finally:
+                state.in_shutdown_tick = False
+                if state.wait_injected and not state.tick_snapshots:
+                    observed = sample("native.wait.timer.turn")
+                    observed["timer_active"] = controller._shutdown_timer.isActive()
+                    state.tick_snapshots.append(observed)
+
+        def before_run(fixture):
+            state.fixture = fixture
+            configured = bootstrap.DataSourceConfig.load.return_value
+            bootstrap.DataSourceConfig.load.side_effect = (
+                configured,
+                DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True),
+            )
+            # Retain the existing helper's real repositories/lease and use the
+            # existing real QApplication, replacing only its Mock exec input.
+            bootstrap.QApplication.return_value = self.app
+            original_stop = fixture.server.stop.side_effect
+            def stop():
+                state.close_seen = True
+                state.events.append("server.stop")
+                original_stop()
+                if mode != "quit":
+                    raise source_error
+            fixture.server.stop.side_effect = stop
+            if mode in native_modes:
+                def enter_native():
+                    try:
+                        if mode == 'shutdown_effect_error':
+                            install_qt_hook_observation()
+                        prepare(fixture.windows[0])
+                    except BaseException as error:
+                        state.errors.append(error)
+                    finally:
+                        if mode == "shutdown_effect_error":
+                            # Retain the actual Qt closeEvent/error/modal path.
+                            # The observed original hook exits after real OK.
+                            self.app.quit()
+                        else:
+                            # Direct exec-return inputs must not wait for normal
+                            # close to become ready before exercising outer drain.
+                            self.app.exit(0)
+                timer(0, enter_native, single=True)
+
+        def close_lease(lease):
+            if state.prepared and not lease._exclusive and not lease._stream.closed:
+                sample("outer.lease.before.close")
+            return raw_lease_close(lease)
+
+        def fixture_cleanup():
+            # Only after the lease/native snapshot and assertions. Baseline
+            # leaks are never converted to production completion evidence.
+            for value in state.timers:
+                value.stop()
+            state.producer_release.set()
+            state.ack_release.set()
+            if state.producer is not None:
+                self.assertTrue(state.producer.wait(3000))
+            if state.prepared:
+                window = state.fixture.windows[0]
+                controller = window._app_controller
+                window.close()
+                self.wait_until(lambda: controller._shutdown_stage in {"cache_failed", "ready"})
+                if controller._shutdown_stage == "cache_failed":
+                    window.close()
+                self.wait_until(lambda: controller._shutdown_stage == "ready")
+                state.sources.__exit__(None, None, None)
+            if state.pair is not None:
+                for raw_close in state.pair[3]:
+                    raw_close()
+                for thread in state.pair[2]:
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive())
+
+        def check(fixture):
+            try:
+                if mode in native_wait_modes:
+                    self.assertFalse(state.test_owned_wake, repr(state.tick_snapshots))
+                    self.assertEqual([], state.slot_errors)
+                    self.assertEqual(1, len(state.tick_snapshots))
+                    tick = state.tick_snapshots[0]
+                    self.assertTrue(tick["timer_active"])
+                    self.assertEqual("producers" if mode == "producer_join_interrupt" else "writers", tick["stage"])
+                    self.assertEqual((True, True), tick["observer_alive"])
+                    self.assertEqual(0, tick["server_stops"])
+                    self.assertFalse(tick["restore_available"])
+                    self.assertGreaterEqual(len(state.wait_attempts), 2)
+                    self.assertIs(True, state.wait_attempts[-1][1])
+                    target = state.producer if mode == "producer_join_interrupt" else fixture.window._app_controller.entry_snapshot_writer
+                    phase = "producer" if mode == "producer_join_interrupt" else "writer"
+                    self.assertEqual((target, phase, setup_error), setup_error.app_shutdown_native_wait_error)
+                    self.assertEqual((("native_join", setup_error),), setup_error.app_shutdown_cleanup)
+                    slot_notice.assert_not_called()
+                final = next(item for item in state.snapshots if item["label"] == "outer.lease.before.close")
+                # First assertion checks actual lifetime at source release,
+                # before any fallback test-owned cleanup can alter the facts.
+                self.assertEqual("ready", final["stage"], repr(state.snapshots))
+                self.assertTrue(final["producer_join"])
+                self.assertTrue(final["writer_join"])
+                self.assertFalse(final["pending"])
+                self.assertEqual((False, False), final["observer_alive"])
+                self.assertFalse(final["content_alive"])
+                self.assertEqual(1, final["server_stops"])
+                self.assertFalse(final["restore_available"])
+                if mode == "shutdown_effect_error":
+                    self.assertEqual(1, len(state.close_error_events))
+                    error_window, accepted, close_error = state.close_error_events[0]
+                    self.assertIs(fixture.window, error_window)
+                    self.assertFalse(accepted)
+                    self.assertIs(setup_error, close_error)
+                    self.assertEqual([True], state.error_hook_visible)
+                    self.assertEqual(1, len(state.qt_hook_records))
+                    error_type, error, tb, text = state.qt_hook_records[0]
+                    self.assertIsInstance(error, BaseException)
+                    self.assertIs(setup_error, error)
+                    message = f"처리 중 오류가 발생했습니다.\n{text}\n\n로그 열기에서 자세한 내용을 확인할 수 있습니다."
+                    self.assertEqual([((None, "프로그램 오류", message), {})], state.critical_calls)
+                    self.assertEqual([("프로그램 오류", message)], state.critical_modals)
+                self.assertEqual([], state.errors, "\n".join("".join(
+                    traceback.format_exception(type(error), error, error.__traceback__)) for error in state.errors))
+                self.assertEqual(0 if mode == "activation_error" else 1, ranking_start.call_count)
+                self.assertEqual(1, state.retry_count)
+                self.assertEqual(1, len(state.retry_views))
+                visible, closing, stage, timers = state.retry_views[0]
+                self.assertTrue(visible)
+                self.assertTrue(closing)
+                self.assertEqual("cache_failed", stage)
+                self.assertFalse(any(timers), "retry visibility must not rearm stopped work/storage timers")
+                self.assertEqual([False], state.retry_close_returns)
+                self.assertEqual([fixture.window._app_controller], state.retry_requests)
+                self.assertEqual([fixture.window._app_controller.entry_snapshot_writer], state.retry_native_starts)
+                self.assertEqual([snapshot, expected, expected], [value for value, _scope in state.saves])
+                self.assertEqual([scope, scope, scope], [value for _snapshot, value in state.saves])
+                self.assertTrue(any(str(ack_error) in error for error in state.failures))
+                if mode in native_modes:
+                    self.assertEqual((1, 1), (state.native_execs, state.native_returns))
+                else:
+                    self.assertEqual((0, 0), (state.native_execs, state.native_returns))
+                for close in state.borrowed:
+                    close.assert_not_called()
+                if mode != "quit":
+                    expected_error = dispatch_errors[0] if mode == "dispatch_interrupts" else setup_error
+                    self.assertIs(expected_error, fixture.exit_error)
+                    if mode in {"shutdown_effect_error", "dispatch_interrupts"} | native_wait_modes:
+                        self.assertIsNone(fixture.exit_error.__cause__)
+                        self.assertIs(expected_error, fixture.exit_error.desktop_shutdown_cleanup[0][2])
+                    else:
+                        self.assertIs(previous_cause if mode == "show_error" else source_error,
+                            fixture.exit_error.__cause__)
+                    cleanup = fixture.exit_error.desktop_shutdown_cleanup
+                    self.assertIs(source_error, cleanup[-1][2])
+                if mode == "shutdown_effect_error":
+                    self.assertEqual("save_view_state", setup_error.app_shutdown_start_cleanup[0][0])
+                    self.assertIs(setup_error, setup_error.app_shutdown_start_cleanup[0][1])
+                    self.assertEqual((("request_close", setup_error),), setup_error.app_shutdown_cleanup)
+                if mode == "dispatch_interrupts":
+                    self.assertEqual(list(dispatch_errors), state.dispatch_interrupts)
+                    self.assertGreaterEqual(state.real_dispatch_returns, 2)
+                    self.assertEqual((("event_dispatch", dispatch_errors[0]),),
+                        dispatch_errors[0].app_shutdown_cleanup)
+                order = ("producer.queued_result", "entry.commit.before_ack",
+                    "entry.failed.before.explicit.retry", "explicit.window.close.retry",
+                    "server.stop", "outer.lease.before.close")
+                self.assertEqual(sorted(state.events.index(item) for item in order),
+                    [state.events.index(item) for item in order])
+                stored = JournalRepository(fixture.paths.journal_database_path).load_entry_snapshots(
+                    "005930", fixed, fixed + timedelta(seconds=1), scope)
+                self.assertEqual(1, len(stored))
+                self.assertEqual(expected, stored[0])
+                self.assertTrue(fixture.restore_available())
+            finally:
+                fixture_cleanup()
+
+        try:
+            with ExitStack() as stack:
+                if mode in native_wait_modes:
+                    # Only the baseline timer-slot failure reaches this UI.
+                    # Record it without a modal; the missing-wake snapshot and
+                    # any test-owned recovery remain independent FAIL evidence.
+                    stack.enter_context(patch.object(bootstrap.QMessageBox, "critical", slot_notice))
+                elif mode == "shutdown_effect_error":
+                    stack.enter_context(patch.object(bootstrap.QMessageBox, "critical", side_effect=critical_modal))
+                for active in (
+                    patch.object(bootstrap.LocalApiConfig, "load",
+                        return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")),
+                    patch.object(validation_client, "RealtimeValidationRecorder",
+                        side_effect=lambda *_args, **_kwargs: state.pair[1]),
+                    patch.object(JournalRepository, "save_entry_snapshot", autospec=True, side_effect=save),
+                    patch("kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer.news_at_execution", return_value=news),
+                    patch.object(threading.Thread, "start", start),
+                    patch.object(AppDataLease, "close", close_lease),
+                    patch.object(QApplication, "exec", real_exec),
+                    patch.object(QThread, "wait", wait),
+                    patch.object(AppController, "_advance_shutdown", advance),
+                    patch.object(QCoreApplication, "processEvents", staticmethod(dispatch)),
+                    patch.object(MainWindow, "show", show),
+                    patch.object(MainWindow, "activate_startup", activate),
+                    patch.object(AppController, "start_entry_snapshot_writer", start_entry),
+                    patch.object(AppController, "request_close", request_close),
+                    patch.object(MainWindow, "closeEvent", close_event),
+                    patch.object(EntrySnapshotWriter, "start", native_entry_start),
+                    patch.object(MainWindow, "_save_shutdown_view_state", save_view),
+                    patch.object(AppController, "start_initial_ranking", ranking_start),
+                ):
+                    stack.enter_context(active)
+                self._bootstrap_settings_desktop(
+                    lambda _fixture: self.fail("C12 must use the real Qt exec"), after_exit=check,
+                    expected_error=SystemExit if mode == "quit" else BaseException,
+                    cleanup_window=True, before_run=before_run, query_client_factory=factory,
+                    content_service=service)
+        finally:
+            if state.pair is not None and any(thread.is_alive() for thread in state.pair[2]):
+                fixture_cleanup()
+
+    def test_c12_direct_real_exec_return_keeps_same_writer_ack_retry_and_outer_lease(self):
+        for mode in ("quit", "shutdown_effect_error", "dispatch_interrupts",
+                "producer_join_interrupt", "writer_join_interrupt"):
+            with self.subTest(mode=mode):
+                self._c12_published_owner_native_case(mode)
+
+    def test_c12_real_exec_error_keeps_original_error_and_cleanup_after_actual_shutdown(self):
+        self._c12_published_owner_native_case("exec_error")
+
+    def test_c12_activation_error_keeps_published_owner_until_pending_ack_retry(self):
+        self._c12_published_owner_native_case("activation_error")
+
+    def test_c12_postsetup_error_keeps_existing_cause_and_ordered_source_cleanup(self):
+        self._c12_published_owner_native_case("show_error")
+        for closing in (False, True):
+            with self.subTest(restore_notice_closing=closing):
+                self._c12_restore_notice_queued_case(closing)
+
+    def test_c12_constructor_error_is_not_replaced_by_simultaneous_source_close_error(self):
+        import threading
+        from contextlib import ExitStack
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import validation_client
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        original_error = RuntimeError("C12 actual constructor before Controller")
+        source_error = OSError("C12 actual constructor simultaneous source close")
+        state = SimpleNamespace(fixture=None, pair=None, partial=None, borrowed=[], leases=[], entered=0)
+        original_recorder_class = validation_client.RealtimeValidationRecorder
+        raw_close = AppDataLease.close
+        service = Mock()
+        service.replace_themes.return_value = SimpleNamespace(pending_collections=())
+        service.push.return_value = SimpleNamespace(total=0)
+        def pull(*_args, **_kwargs):
+            state.content_thread = threading.current_thread()
+            return SimpleNamespace(total=0)
+        service.pull.side_effect = pull
+        def factory(*_args, **_kwargs):
+            with patch.object(validation_client, "RealtimeValidationRecorder", original_recorder_class):
+                state.pair = self._observer_owner_real_pair(state.fixture.paths.data_dir, "c12-constructor-source")
+            for borrowed in (state.pair[0]._primary, state.pair[0]._local):
+                borrowed.server_now = lambda: datetime.fromisoformat("2030-01-02T10:00:00+09:00")
+                borrowed.close = Mock()
+                state.borrowed.append(borrowed.close)
+            return state.pair[0]
+        def before_run(fixture):
+            state.fixture = fixture
+            configured = bootstrap.DataSourceConfig.load.return_value
+            bootstrap.DataSourceConfig.load.side_effect = (configured,
+                DataSourceSettings("personal_server", "https://fixture.invalid", "fixture", False, True))
+            def stop():
+                fixture.events.append("server.stop")
+                raise source_error
+            fixture.server.stop.side_effect = stop
+        def fail_controller(_controller, parent=None, *_args, **_kwargs):
+            state.partial = parent
+            state.entered += 1
+            raise original_error
+        def close_lease(lease):
+            if state.entered and not lease._exclusive and not lease._stream.closed:
+                state.leases.append((tuple(thread.is_alive() for thread in state.pair[2]),
+                    state.content_thread.is_alive(), state.fixture.server.stop.call_count))
+            return raw_close(lease)
+        def check(fixture):
+            self.assertEqual(1, state.entered)
+            self.assertIs(original_error, fixture.exit_error)
+            self.assertIs(source_error, original_error.__cause__)
+            self.assertEqual([((False, False), False, 1)], state.leases)
+            self.assertIs(source_error, original_error.desktop_shutdown_cleanup[-1][2])
+            self.assertEqual(2, len(original_error.api_runtime_observer_cleanup))
+            self.assertTrue(all(item[1].native_completed for item in original_error.api_runtime_observer_completion))
+            self.assertEqual([], fixture.windows)
+            for close in state.borrowed:
+                close.assert_not_called()
+            self.assertTrue(fixture.restore_available())
+        try:
+            with ExitStack() as stack:
+                for active in (
+                    patch.object(bootstrap.LocalApiConfig, "load",
+                        return_value=KiwoomSettings("fixture-key", "fixture-secret", "mock")),
+                    patch.object(validation_client, "RealtimeValidationRecorder",
+                        side_effect=lambda *_args, **_kwargs: state.pair[1]),
+                    patch.object(AppController, "__init__", fail_controller),
+                    patch.object(AppDataLease, "close", close_lease),
+                ):
+                    stack.enter_context(active)
+                self._bootstrap_settings_desktop(
+                    lambda _fixture: self.fail("failed constructor entered app.exec"), after_exit=check,
+                    expected_error=BaseException, before_run=before_run,
+                    query_client_factory=factory, content_service=service)
+        finally:
+            if state.pair is not None:
+                # Only after intended-error/native-at-lease assertions.
+                for close in state.pair[3]:
+                    close()
+                for thread in state.pair[2]:
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive())
+            if state.partial is not None:
+                state.partial.deleteLater()
+
+
+    def _c12_restore_notice_queued_case(self, closing):
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import RestoreOutcome, StrictRestoreCoordinator
+
+        message = "C12 원 복원 결과 안내"
+        outcome = RestoreOutcome("ROLLED_BACK", message)
+        state = SimpleNamespace(fixture=None, errors=[], invoked=0, execs=0, timers=[], producer=None)
+        raw_enter = StrictRestoreCoordinator.enter_main
+        warning = Mock()
+        def enter(owner, *args, **kwargs):
+            lease, _original_outcome = raw_enter(owner, *args, **kwargs)
+            return lease, outcome
+        def before_run(fixture):
+            state.fixture = fixture
+            bootstrap.QApplication.return_value = self.app
+            # Requeue the exact captured production lambda on a real native
+            # QTimer. Capturing it without delivery cannot satisfy this oracle.
+            driver = QTimer(self.app)
+            driver.setSingleShot(True)
+            state.timers.append(driver)
+            def deliver():
+                try:
+                    window = fixture.windows[0]
+                    fixture.window = window
+                    callbacks = [callback for _delay, callback in fixture.callbacks
+                        if "restore_outcome" in getattr(getattr(callback, "__code__", None), "co_freevars", ())]
+                    self.assertEqual(1, len(callbacks))
+                    self.assertFalse(window._app_controller.closing)
+                    if closing:
+                        # Keep one real accepted producer active so the ready
+                        # signal cannot quit exec before the queued notice turn.
+                        state.producer = DelayedProducer(window._app_controller)
+                        state.producer.start()
+                        self.assertTrue(state.producer.started_run.wait(2))
+                        window._app_controller.request_close()
+                        self.assertTrue(window._app_controller.closing)
+                    notice = QTimer(self.app)
+                    notice.setSingleShot(True)
+                    state.timers.append(notice)
+                    def invoke():
+                        try:
+                            state.invoked += 1
+                            callbacks[0]()
+                        except BaseException as error:
+                            state.errors.append(error)
+                        finally:
+                            if state.producer is not None:
+                                state.producer.release.set()
+                            self.app.quit()
+                    notice.timeout.connect(invoke)
+                    notice.start(0)
+                except BaseException as error:
+                    state.errors.append(error)
+                    self.app.quit()
+            driver.timeout.connect(deliver)
+            driver.start(0)
+        def after_exit(fixture):
+            self.assertEqual([], state.errors)
+            self.assertEqual(1, state.invoked)
+            if closing:
+                warning.assert_not_called()
+            else:
+                warning.assert_called_once_with(fixture.window, "Google Drive 복원", message)
+            self.assertEqual("ready", fixture.window._app_controller._shutdown_stage)
+            self.assertTrue(fixture.restore_available())
+        try:
+            with patch.object(StrictRestoreCoordinator, "enter_main", enter), \
+                    patch.object(bootstrap.QMessageBox, "warning", warning), \
+                    patch.object(AppController, "start_initial_ranking"):
+                self._bootstrap_settings_desktop(
+                    lambda _fixture: self.fail("restore notice must use actual QApplication.exec"),
+                    after_exit=after_exit, before_run=before_run, cleanup_window=True)
+        finally:
+            for timer in state.timers:
+                timer.stop()
+            if state.producer is not None:
+                state.producer.release.set()
+                self.assertTrue(state.producer.wait(3000))
+
+
+    def _c12_settings_geometry_native_case(self, mode):
+        import threading
+        from contextlib import ExitStack
+        from shiboken6 import isValid
+        from PySide6.QtWidgets import QDialog
+        from kiwoom_monitor import bootstrap
+        from kiwoom_monitor.presentation import main_window as window_module
+        from kiwoom_monitor.presentation import settings_request_worker as request_module
+        from kiwoom_monitor.presentation.settings_dialog import SettingsDialog
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        expected = {"settings_dialog_width": "741", "settings_dialog_height": "683"}
+        normal_modes = {"normal_callback_complete", "normal_callback_join_interrupt"}
+        join_error = KeyboardInterrupt("C12 geometry normal callback native wait interrupted")
+        state = SimpleNamespace(fixture=None, window=None, dialog=None, worker=None,
+            inside_size_submit=False, entered=Event(), release=Event(), committed=Event(),
+            connection_closed=Event(), owner_cut=False, lease_started=False,
+            test_owned_lease_release=False, cleanup=False, errors=[], events=[], waits=[],
+            wait_errors=[], lease_facts=[], timers=[], payloads=[], parents=[], retains=[],
+            transaction_at_gate=None, target_connection=None, content_thread=None,
+            submissions=0, finished_results=[], admission_error=None, close_requested=False,
+            in_owner_callback=False, callback_observations=[], release_attempts=[], wait_injected=False, destroyed=False)
+        raw_connect = sqlite3.connect
+        raw_start = SettingsRequestWorker.start
+        raw_submit = SettingsDialog._save_dialog_size
+        raw_wait = QThread.wait
+        raw_interrupt = QThread.requestInterruption
+        raw_lease_close = AppDataLease.close
+        raw_thread_start = threading.Thread.start
+        raw_release = SettingsRequestWorker.release_after_join
+        raw_complete = getattr(AppController, 'finish_settings_size_request', None)
+        admission = Mock(side_effect=AssertionError("closing must not construct a new SettingsDialog"))
+
+        class GateConnection(sqlite3.Connection):
+            def executemany(connection, sql, rows):
+                rows = tuple(rows)
+                keys = {row[0] for row in rows} if rows else set()
+                if ("INSERT INTO central_setting_versions" in sql and keys == set(expected)
+                        and QThread.currentThread() is state.worker and state.target_connection is None):
+                    state.target_connection = connection
+                    state.payloads.append({row[0]: row[2] for row in rows})
+                    state.transaction_at_gate = connection.in_transaction
+                    state.events.append("geometry.sql.before.first.write")
+                    state.entered.set()
+                    if not state.release.wait(4):
+                        state.errors.append(AssertionError("geometry exact SQL gate was not released"))
+                return super().executemany(sql, rows)
+
+            def commit(connection):
+                result = super().commit()
+                if connection is state.target_connection:
+                    state.events.append("geometry.native.commit")
+                    state.committed.set()
+                return result
+
+            def close(connection):
+                result = super().close()
+                if connection is state.target_connection:
+                    state.events.append("geometry.native.connection.closed")
+                    state.connection_closed.set()
+                return result
+
+        def connect(*args, **kwargs):
+            if state.fixture is not None and args and Path(args[0]).resolve() == state.fixture.paths.database_path.resolve():
+                kwargs = {**kwargs, "factory": GateConnection}
+            return raw_connect(*args, **kwargs)
+
+        def submit(dialog):
+            state.inside_size_submit = True
+            state.submissions += 1
+            state.events.append("dialog.size.submit")
+            try:
+                return raw_submit(dialog)
+            finally:
+                state.inside_size_submit = False
+
+        def start(worker):
+            if state.inside_size_submit and state.worker is None:
+                state.worker = worker
+                state.parents.append(worker.parent())
+                # Observation only: no fixture retain flag or release override.
+                state.retains.append(worker._retain_until_joined)
+                def destroyed(*_args):
+                    state.destroyed = True
+                    state.events.append("geometry.qobject.destroyed")
+                    if mode in normal_modes and not state.close_requested:
+                        schedule_close()
+                worker.destroyed.connect(destroyed)
+            return raw_start(worker)
+
+        def wait(worker, *args, **kwargs):
+            try:
+                result = raw_wait(worker, *args, **kwargs)
+                if (worker is state.worker and mode == "normal_callback_join_interrupt"
+                        and state.in_owner_callback and args == () and not kwargs and not state.wait_injected):
+                    state.wait_injected = True
+                    raise join_error
+            except BaseException as error:
+                if worker is state.worker:
+                    state.wait_errors.append(error)
+                raise
+            if worker is state.worker:
+                before_lease = not state.lease_started and not state.cleanup
+                state.waits.append((result, before_lease, args))
+                if result is True and before_lease:
+                    state.events.append("geometry.actual.native.join")
+            return result
+
+        def interrupt(worker):
+            result = raw_interrupt(worker)
+            if worker is state.worker and not state.cleanup and state.window._app_controller.closing:
+                state.owner_cut = True
+                state.events.append("geometry.product.owner.cut")
+                # Release SQL only when the actual producer owner reached this
+                # exact worker. This is not a native-completion receipt.
+                state.release.set()
+            return result
+
+        def thread_start(thread):
+            if thread.name == "central-content-sync":
+                state.content_thread = thread
+            return raw_thread_start(thread)
+
+        def close_lease(lease):
+            if state.window is not None and not lease._exclusive and not lease._stream.closed:
+                state.lease_started = True
+                state.entered.wait(2)
+                running, observation_error = None, None
+                if state.worker is not None:
+                    try:
+                        running = state.worker.isRunning()
+                    except RuntimeError as error:
+                        observation_error = error
+                facts = {"gate_entered": state.entered.is_set(), "owner_cut": state.owner_cut,
+                    "worker_running": running, "observation_error": observation_error,
+                    "native_join_before_lease": any(result is True and before for result, before, _args in state.waits),
+                    "committed": state.committed.is_set(), "connection_closed": state.connection_closed.is_set(),
+                    "content_alive": state.content_thread.is_alive(),
+                    "server_stops": state.fixture.server.stop.call_count,
+                    "stage": state.window._app_controller._shutdown_stage,
+                    "global_owned": any(item is state.worker for item in tuple(request_module._running_requests))}
+                state.lease_facts.append(facts)
+                state.events.append("outer.lease.before.close")
+                if not state.owner_cut and mode not in normal_modes:
+                    # Preserve the actual live-worker/early-lease facts first.
+                    # This fallback is test-owned and must make the test FAIL.
+                    state.test_owned_lease_release = True
+                    state.release.set()
+            return raw_lease_close(lease)
+
+        def request_close():
+            if state.close_requested:
+                return
+            state.close_requested = True
+            state.window.close()
+            with patch.object(window_module, "SettingsDialog", admission):
+                try:
+                    state.window._open_settings()
+                except AssertionError as error:
+                    state.admission_error = error
+            self.app.quit()
+
+        def schedule_close():
+            close_timer = QTimer(self.app)
+            close_timer.setSingleShot(True)
+            state.timers.append(close_timer)
+            close_timer.timeout.connect(request_close)
+            close_timer.start(0)
+
+        def release(worker, *args, **kwargs):
+            observation = None
+            if worker is state.worker:
+                observation = {"kwargs": dict(kwargs), "before_lease": not state.lease_started,
+                    "result": None, "error": None}
+                state.release_attempts.append(observation)
+            try:
+                result = raw_release(worker, *args, **kwargs)
+            except BaseException as error:
+                if observation is not None:
+                    observation["error"] = error
+                raise
+            if observation is not None:
+                observation["result"] = result
+            return result
+
+        def complete(controller, worker):
+            if worker is not state.worker:
+                return raw_complete(controller, worker)
+            state.in_owner_callback = True
+            try:
+                return raw_complete(controller, worker)
+            finally:
+                state.in_owner_callback = False
+                if mode in normal_modes:
+                    failure = controller._shutdown_native_wait_error
+                    state.callback_observations.append({
+                        "closing": controller.closing,
+                        "gui_receiver": QThread.currentThread() is controller.thread(),
+                        "outside_worker": QThread.currentThread() is not worker,
+                        "global_owned": any(item is worker for item in tuple(request_module._running_requests)),
+                        "valid": isValid(worker), "failure": failure})
+                    if failure is not None:
+                        schedule_close()
+
+        def before_run(fixture):
+            state.fixture = fixture
+            bootstrap.QApplication.return_value = self.app
+            original_stop = fixture.server.stop.side_effect
+            def stop():
+                state.events.append("server.stop")
+                return original_stop()
+            fixture.server.stop.side_effect = stop
+            driver = QTimer(self.app)
+            driver.setSingleShot(True)
+            state.timers.append(driver)
+            def enter():
+                try:
+                    state.window = fixture.windows[0]
+                    fixture.window = state.window
+                    state.window._open_settings()
+                    state.dialog = state.window._settings_dialog
+                    self.assertIsInstance(state.dialog, SettingsDialog)
+                    self.assertIs(state.window, state.dialog.parent())
+                    state.dialog.finished.connect(state.finished_results.append)
+                    state.dialog.resize(741, 683)
+                    self.assertEqual((741, 683), (state.dialog.width(), state.dialog.height()))
+                    self.assertEqual(350, state.dialog._dialog_size_save_timer.interval())
+                    if mode == "reject_before_close" or mode in normal_modes:
+                        state.dialog.reject()
+                        self.assertTrue(state.entered.wait(2))
+                        self.assertTrue(state.worker.isRunning())
+                        self.assertFalse(state.committed.is_set())
+                    if mode in normal_modes:
+                        # Normal completion is a distinct input: make this
+                        # native SQL available before asking the main to close.
+                        state.release.set()
+                        return
+                    state.close_requested = True
+                    state.window.close()
+                    if mode == "close_current_dialog":
+                        self.assertTrue(state.entered.wait(2))
+                    # Probe only the forbidden new admission; never create a
+                    # second fake dialog or a second geometry write in fixture.
+                    with patch.object(window_module, "SettingsDialog", admission):
+                        try:
+                            state.window._open_settings()
+                        except AssertionError as error:
+                            state.admission_error = error
+                except BaseException as error:
+                    state.errors.append(error)
+                finally:
+                    # Use the real Qt quit/closeEvent link, without replacing
+                    # the published owner's close path or native release slot.
+                    if mode not in normal_modes or state.errors:
+                        self.app.quit()
+            driver.timeout.connect(enter)
+            driver.start(0)
+
+        def cleanup():
+            state.cleanup = True
+            state.release.set()
+            for timer in state.timers:
+                timer.stop()
+            if state.worker is not None and isValid(state.worker):
+                self.assertTrue(raw_wait(state.worker, 3000))
+            if state.window is not None:
+                state.window.close()
+                self.wait_until(lambda: state.window._app_controller._shutdown_stage == "ready")
+
+        def check(fixture):
+            try:
+                # Actual body/store/source/lease evidence precedes any cleanup.
+                self.assertEqual(1, len(state.lease_facts), repr(state.events))
+                facts = state.lease_facts[0]
+                self.assertTrue(facts["gate_entered"], repr(facts))
+                self.assertFalse(state.test_owned_lease_release, repr(facts))
+                self.assertTrue(facts["native_join_before_lease"], repr(facts))
+                self.assertTrue(facts["committed"])
+                self.assertTrue(facts["connection_closed"])
+                self.assertFalse(facts["content_alive"])
+                self.assertEqual(1, facts["server_stops"])
+                self.assertEqual("ready", facts["stage"])
+                self.assertEqual([], state.errors)
+                self.assertFalse(facts["global_owned"])
+                if mode == "normal_callback_join_interrupt":
+                    self.assertEqual([join_error], state.wait_errors)
+                    self.assertIs(join_error, fixture.exit_error)
+                    self.assertEqual((state.worker, "settings_size", join_error),
+                        fixture.exit_error.app_shutdown_native_wait_error)
+                    self.assertEqual(2, len(state.release_attempts))
+                    self.assertIs(join_error, state.release_attempts[0]["error"])
+                    self.assertEqual({"wait": True}, state.release_attempts[0]["kwargs"])
+                    self.assertEqual({}, state.release_attempts[1]["kwargs"])
+                    self.assertIs(True, state.release_attempts[1]["result"])
+                else:
+                    self.assertEqual([], state.wait_errors)
+                if mode in normal_modes:
+                    self.assertEqual(1, len(state.callback_observations))
+                    observed = state.callback_observations[0]
+                    self.assertFalse(observed["closing"])
+                    self.assertTrue(observed["gui_receiver"])
+                    self.assertTrue(observed["outside_worker"])
+                    self.assertEqual([True], state.retains)
+                    if mode == "normal_callback_complete":
+                        self.assertFalse(observed["global_owned"])
+                        self.assertIsNone(observed["failure"])
+                        self.assertEqual(1, len(state.release_attempts))
+                        self.assertEqual({"wait": True}, state.release_attempts[0]["kwargs"])
+                        self.assertIs(True, state.release_attempts[0]["result"])
+                        self.assertTrue(state.destroyed)
+                    else:
+                        self.assertTrue(observed["global_owned"])
+                        self.assertTrue(observed["valid"])
+                        self.assertEqual((state.worker, "settings_size", join_error), observed["failure"])
+                self.assertIsNone(state.admission_error)
+                admission.assert_not_called()
+                self.assertEqual([state.window], state.parents)
+                self.assertEqual([expected], state.payloads)
+                self.assertFalse(state.transaction_at_gate,
+                    "gate must not hold a SQLite write transaction that also blocks MainWindow geometry")
+                self.assertEqual(1, state.submissions)
+                self.assertEqual([QDialog.DialogCode.Rejected], state.finished_results)
+                self.assertIsNone(state.window._settings_dialog)
+                with closing(raw_connect(fixture.paths.database_path)) as native:
+                    stored = dict(native.execute("SELECT key,value FROM settings WHERE key IN (?,?)",
+                        tuple(expected)).fetchall())
+                self.assertEqual(expected, stored)
+                order = ("geometry.sql.before.first.write", "geometry.native.commit",
+                    "geometry.native.connection.closed", "geometry.actual.native.join",
+                    "server.stop", "outer.lease.before.close")
+                self.assertEqual(sorted(state.events.index(item) for item in order),
+                    [state.events.index(item) for item in order])
+                self.assertTrue(fixture.restore_available())
+            finally:
+                cleanup()
+
+        try:
+            with ExitStack() as stack:
+                if raw_complete is not None:
+                    stack.enter_context(patch.object(AppController, 'finish_settings_size_request', complete))
+                for active in (
+                    patch.object(sqlite3, "connect", connect),
+                    patch.object(SettingsDialog, "_save_dialog_size", submit),
+                    patch.object(SettingsRequestWorker, "start", start),
+                    patch.object(SettingsRequestWorker, "release_after_join", release),
+                    patch.object(QThread, "wait", wait),
+                    patch.object(QThread, "requestInterruption", interrupt),
+                    patch.object(threading.Thread, "start", thread_start),
+                    patch.object(AppDataLease, "close", close_lease),
+                    patch.object(AppController, "start_initial_ranking"),
+                ):
+                    stack.enter_context(active)
+                self._bootstrap_settings_desktop(
+                    lambda _fixture: self.fail("geometry oracle must use the real QApplication.exec"),
+                    after_exit=check, before_run=before_run, cleanup_window=True,
+                    expected_error=BaseException if mode == 'normal_callback_join_interrupt' else SystemExit)
+        finally:
+            state.release.set()
+            for timer in state.timers:
+                timer.stop()
+            if state.worker is not None and isValid(state.worker):
+                self.assertTrue(raw_wait(state.worker, 3000))
+
+    def test_c12_settings_reject_geometry_native_commit_and_join_precede_outer_lease(self):
+        for mode in ("reject_before_close", "close_current_dialog",
+                "normal_callback_complete", "normal_callback_join_interrupt"):
+            with self.subTest(mode=mode):
+                self._c12_settings_geometry_native_case(mode)
+
 
 
 if __name__ == "__main__":

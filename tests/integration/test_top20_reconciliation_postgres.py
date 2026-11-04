@@ -11,6 +11,9 @@ from unittest.mock import patch
 
 from kiwoom_monitor.central_server.database import PostgresQueryStore
 from kiwoom_monitor.central_server import database_top20_reconciliation as reads
+from kiwoom_monitor.central_server import diagnostic_workloads
+from kiwoom_monitor.central_server.diagnostic_metrics import install_postgres_observation
+from kiwoom_monitor.central_server.diagnostic_replay_contract import install_store_capture
 from kiwoom_monitor.domain.top20_reconciliation import RECONCILED_KIND, build_top20_reconciliation
 from tests.unit import test_top20_reconciliation as fixtures
 from tests.integration.postgres_test_support import isolated_observation_schema
@@ -20,11 +23,60 @@ DAY, NOW, inputs = fixtures.DAY, fixtures.NOW, fixtures.inputs
 
 class PostgresTop20ReconciliationTests(fixtures.NativeStoreTests):
     def setUp(self):
+        install_postgres_observation()
         url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
         if not url:
             raise unittest.SkipTest("dedicated PostgreSQL test database not configured")
         self.store = PostgresQueryStore(self.enterContext(isolated_observation_schema(url)))
+        install_store_capture(self.store)
         self.store.initialize()
+
+    def test_coverage_read_failure_closes_transaction_and_preserves_published_day(self):
+        import psycopg
+        from psycopg.pq import TransactionStatus
+        from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
+        from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+
+        self.seed()
+        service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW)
+        published = asyncio.run(service.after_close.reconcile(DAY))
+        self.assertIsNotNone(published)
+        with self.store._connect() as connection:
+            connection.execute("UPDATE central_documents SET document_json='[]' "
+                               "WHERE collection='market_data_coverage' AND owner=%s AND document_key='complete'",
+                               (DAY + ":A:KRX",))
+        connections, rollbacks, commits, transaction_states = [], [], [], []
+        original_connect = self.store._connect
+
+        def connect():
+            connection = original_connect()
+            native_rollback = connection.rollback
+
+            def rollback():
+                before = connection.info.transaction_status
+                native_rollback()
+                transaction_states.append((before, connection.info.transaction_status))
+
+            connections.append(connection)
+            rollbacks.append(self.enterContext(patch.object(connection, "rollback", side_effect=rollback)))
+            commits.append(self.enterContext(patch.object(connection, "commit", wraps=connection.commit)))
+            return connection
+
+        with patch.object(self.store, "_connect", side_effect=connect), \
+                self.assertRaisesRegex(ValueError, "TOP20 stored document is not an object"):
+            asyncio.run(service.after_close.reconcile(DAY))
+        self.assertEqual(1, len(connections))
+        rollbacks[0].assert_called_once_with()
+        commits[0].assert_not_called()
+        self.assertEqual([(TransactionStatus.INTRANS, TransactionStatus.IDLE)], transaction_states)
+        self.assertTrue(connections[0].closed)
+        with self.assertRaises(psycopg.OperationalError):
+            connections[0].execute("SELECT 1")
+        self.assertEqual(published, self.store.load_dataset_snapshots(RECONCILED_KIND, DAY)[0]["payload"])
+        self.store.upsert_documents("market_data_coverage", [{
+            "owner": DAY + ":A:KRX", "key": "complete", "document": fixtures.pair()["coverage"],
+        }])
+        self.assertEqual(published, asyncio.run(service.after_close.reconcile(DAY)))
 
     def test_recorded_display_native_replay_twice_preserves_cache_receipt_and_values(self):
         from tests.unit.test_diagnostic_display_capture import captured_rows
@@ -32,7 +84,7 @@ class PostgresTop20ReconciliationTests(fixtures.NativeStoreTests):
         self.seed()
         with captured_rows() as (rows, rejected), \
              patch.object(reads, '_top20_today', return_value=datetime(2026, 10, 12).date()), \
-             patch.object(reads, 'is_paused', return_value=False):
+             patch.object(diagnostic_workloads, 'is_paused', return_value=False):
             self.store.load_top20_reconciliation_inputs(DAY)
             self.store.load_top20_display_statistics(DAY, DAY)
             self.store.load_top20_display_statistics(DAY, DAY)
@@ -41,11 +93,12 @@ class PostgresTop20ReconciliationTests(fixtures.NativeStoreTests):
         url = os.environ['KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL']
         for _ in range(2):
             target = PostgresQueryStore(self.enterContext(isolated_observation_schema(url)))
+            install_store_capture(target)
             target.initialize()
             self.addCleanup(target.close)
             fixtures.NativeStoreTests.seed(SimpleNamespace(store=target))
             with patch.object(reads, '_top20_today', side_effect=AssertionError('host day')), \
-                 patch.object(reads, 'is_paused', side_effect=AssertionError('operating control')):
+                 patch.object(diagnostic_workloads, 'is_paused', side_effect=AssertionError('operating control')):
                 result = asyncio.run(execute(target, rows))
             self.assertEqual('complete', result['state'])
             self.assertTrue(result['source_outcomes_match'])

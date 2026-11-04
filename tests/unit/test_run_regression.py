@@ -68,6 +68,28 @@ class RunRegressionTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.fixture_count = 0
 
+    def test_native_qsettings_children_join_user_scope_including_isolated_python(self):
+        result = self._run_fixture("registry-native", timeout=60)
+        self.assertEqual("passed", result["status"], result)
+        self.assertTrue(result["worker_exit_confirmed"])
+        self.assertTrue(result["process_tree_exit_confirmed"])
+        # A nested fixture must never delete the external worker's registry scope.
+        self.assertEqual("borrowed", result["registry_isolation"]["state"])
+        values = json.loads((self.directory / "1" / "registry-native.json").read_text(encoding="utf-8"))
+        self.assertEqual([[], ["-I"], ["-S"]], [value["flags"] for value in values])
+        self.assertTrue(all(value["native_format"] and value["user_scope"] and value["qt_application"]
+                            and value["HKLM_fallback"] == "outside_scope" for value in values))
+
+    def test_registry_ownership_rejects_product_or_unvalidated_cleanup_paths(self):
+        from scripts.regression_registry import _validate
+        valid = dict(getattr(sys, "_kiwoom_regression_registry_override").description)
+        _validate(valid)
+        for key in (r"Software\KiwoomMonitor", valid["key"] + r"\child", r"Software\KiwoomMonitorRegression-guess"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                _validate(dict(valid, key=key))
+        with self.assertRaises(ValueError):
+            _validate(dict(valid, temporary_directory=str(self.directory)))
+
     def _run_fixture(
         self, mode: str, *, timeout: int = 5, module: str | None = None,
         modules: list[str] | None = None,
@@ -405,21 +427,31 @@ class RunRegressionTests(unittest.TestCase):
         shell.write_bytes(b"#!/bin/sh\nexit 0\n")
         example.write_bytes(b"FIXTURE=1\n")
         readme.write_bytes(b"deployment fixture\n")
+        spec = self.directory / "KiwoomMonitor.spec"
+        spec.write_bytes(b"raise RuntimeError('must never execute')\n")
+        unrelated_spec = self.directory / "Unrelated.spec"
+        unrelated_spec.write_bytes(b"unrelated = 1\n")
         with patch.object(run_regression, "ROOT", self.directory):
             before = run_regression._code_tree_identity()
+            unrelated_spec.write_bytes(b"unrelated = 2\n")
+            unrelated_changed = run_regression._code_tree_identity()
             source.write_bytes(b"value = 1\r\n")
             dockerfile.write_bytes(b"FROM python:3.13-slim\r\n")
             gitkeep.write_bytes(b"\r\n")
-            for path in (shell, example, readme):
+            for path in (shell, example, readme, spec):
                 path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
             newline_only = run_regression._code_tree_identity()
             shell.write_bytes(b"#!/bin/sh\r\nexit 1\r\n")
             deployment_changed = run_regression._code_tree_identity()
+            spec.write_bytes(b"raise RuntimeError('changed packaging input')\r\n")
+            spec_changed = run_regression._code_tree_identity()
             source.write_bytes(b"value = 2\r\n")
             changed = run_regression._code_tree_identity()
+        self.assertEqual(before, unrelated_changed)
         self.assertEqual(before["lf_sha256"], newline_only["lf_sha256"])
         self.assertNotEqual(before["raw_sha256"], newline_only["raw_sha256"])
         self.assertNotEqual(newline_only["lf_sha256"], deployment_changed["lf_sha256"])
+        self.assertNotEqual(deployment_changed["lf_sha256"], spec_changed["lf_sha256"])
         self.assertNotEqual(before["lf_sha256"], changed["lf_sha256"])
 
     def test_source_change_during_run_cannot_report_success(self) -> None:
@@ -730,15 +762,43 @@ class RunRegressionTests(unittest.TestCase):
         required = {step.get('name'): step for step in jobs['required-regression']['steps']}
         self.assertIn('--report tmp/regression/ci-sealed/v1-execution.json',
                       sealed['Check v1 recorded execution on sealed DB']['run'])
+        self.assertIn('--report tmp/regression/ci-sealed/v2-execution.json',
+                      sealed['Run empty-cluster v2 cache and TOP20 gates']['run'])
         artifact = sealed['Preserve replay outcomes without secret files']['with']
         download = required['Download selected sealed execution result']
         self.assertEqual(artifact['name'], download['with']['name'])
         self.assertIn('tmp/regression/ci-sealed/v1-execution.json', artifact['path'].splitlines())
+        self.assertIn('tmp/regression/ci-sealed/v2-execution.json', artifact['path'].splitlines())
+        self.assertFalse(any('secrets' in path for path in artifact['path'].splitlines()))
         self.assertEqual("${{ env.SEALED_SELECTED == 'true' }}", download['if'])
         self.assertEqual('tmp/ci-required/sealed', download['with']['path'])
         declaration = required['Confirm declared related tests actually ran']['run']
+        self.assertIn('python -m scripts.check_test_changes --hosted-ci --base-ref', declaration)
         self.assertIn('if [ "$SEALED_SELECTED" = true ]; then', declaration)
         self.assertIn('reports+=(--execution tmp/ci-required/sealed/v1-execution.json)', declaration)
+        self.assertIn('reports+=(--execution tmp/ci-required/sealed/v2-execution.json)', declaration)
+        extensions = (
+            ('postgres-extended', 'PG_SELECTED', 'Download selected extended PostgreSQL result',
+             'tmp/ci-required/postgres-extended', 'run.json'),
+            ('linux-operator', 'OPERATOR_SELECTED', 'Download selected Linux operator result',
+             'tmp/ci-required/operator', 'execution.json'),
+        )
+        for job, selector, step_name, directory, filename in extensions:
+            with self.subTest(job=job):
+                upload = next(step['with'] for step in jobs[job]['steps']
+                              if step.get('uses', '').startswith('actions/upload-artifact'))
+                download = required[step_name]
+                self.assertEqual(upload['name'], download['with']['name'])
+                self.assertEqual(directory, download['with']['path'])
+                self.assertEqual(f"${{{{ env.{selector} == 'true' }}}}", download['if'])
+                condition = f'if [ "${selector}" = true ]; then'
+                self.assertIn(f'{condition}\n  reports+=(--execution {directory}/{filename})\nfi',
+                              declaration)
+        linux = {step.get('name'): step for step in jobs['linux-operator']['steps']}
+        self.assertIn('python3 -B -m scripts.run_linux_operator_ci',
+                      linux['Verify image source and run offline filesystem gate']['run'])
+        self.assertIn('tmp/regression/ci-operator/execution.json',
+                      linux['Preserve operator result']['with']['path'].splitlines())
         self.assertIn('"${reports[@]}"', declaration)
 
     def test_new_test_modules_must_be_registered_but_existing_exclusions_are_unchanged(self) -> None:

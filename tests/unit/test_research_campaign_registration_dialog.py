@@ -49,6 +49,7 @@ class CampaignRegistrationDialogTests(unittest.TestCase):
 
     def dialog(self):
         dialog = ResearchDialog(self.root / 'state')
+        dialog.activate_startup()
         self.dialogs.append(dialog)
         dialog._request_path.setText(str(self.path))
         return dialog

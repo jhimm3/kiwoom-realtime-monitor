@@ -69,30 +69,36 @@ class QueryOperationsBoundaryTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(running, return_exceptions=True)
 
     async def test_shorter_interval_uses_last_success_without_erasing_cursor(self):
-        with patch("kiwoom_monitor.central_server.news_sources.time", return_value=1000):
+        with patch.object(self.collector, "_now", return_value=datetime.fromtimestamp(1000, ZoneInfo("Asia/Seoul"))), \
+                patch.object(self.store, "_now_provider", return_value=datetime.fromtimestamp(1000, ZoneInfo("Asia/Seoul"))):
             await self.collector.run_once()
         cursor = self.store.load_news_source_cursor(_source_id("증권"))
         self.assertEqual(1300, cursor["next_schedule_at"])
         self.collector.update(enabled=True, queries=("증권",), poll_seconds=60)
-        with patch("kiwoom_monitor.central_server.news_sources.time", return_value=1061):
+        with patch.object(self.collector, "_now", return_value=datetime.fromtimestamp(1061, ZoneInfo("Asia/Seoul"))), \
+                patch.object(self.store, "_now_provider", return_value=datetime.fromtimestamp(1061, ZoneInfo("Asia/Seoul"))):
             completed = await self.collector.run_once()
         self.assertEqual(1, completed)
         self.assertEqual(cursor["cursor_identity"], self.store.load_news_source_cursor(_source_id("증권"))["cursor_identity"])
 
     async def test_longer_interval_delays_next_query_without_new_requests(self):
-        with patch("kiwoom_monitor.central_server.news_sources.time", return_value=1000):
+        with patch.object(self.collector, "_now", return_value=datetime.fromtimestamp(1000, ZoneInfo("Asia/Seoul"))), \
+                patch.object(self.store, "_now_provider", return_value=datetime.fromtimestamp(1000, ZoneInfo("Asia/Seoul"))):
             await self.collector.run_once()
         self.collector.update(enabled=True, queries=("증권",), poll_seconds=600)
-        with patch("kiwoom_monitor.central_server.news_sources.time", return_value=1301):
+        with patch.object(self.collector, "_now", return_value=datetime.fromtimestamp(1301, ZoneInfo("Asia/Seoul"))), \
+                patch.object(self.store, "_now_provider", return_value=datetime.fromtimestamp(1301, ZoneInfo("Asia/Seoul"))):
             self.assertEqual(0, await self.collector.run_once())
         self.assertEqual(2, len(self.collector._client.calls))
 
     async def test_failed_query_backoff_is_not_shortened_by_success_schedule(self):
         self.collector._client = _PageClient({("증권", 1): RuntimeError("fake failure")})
-        with patch("kiwoom_monitor.central_server.news_sources.time", return_value=1000):
+        with patch.object(self.collector, "_now", return_value=datetime.fromtimestamp(1000, ZoneInfo("Asia/Seoul"))), \
+                patch.object(self.store, "_now_provider", return_value=datetime.fromtimestamp(1000, ZoneInfo("Asia/Seoul"))):
             await self.collector.run_once()
         self.collector.update(enabled=True, queries=("증권",), poll_seconds=60)
-        with patch("kiwoom_monitor.central_server.news_sources.time", return_value=1061):
+        with patch.object(self.collector, "_now", return_value=datetime.fromtimestamp(1061, ZoneInfo("Asia/Seoul"))), \
+                patch.object(self.store, "_now_provider", return_value=datetime.fromtimestamp(1061, ZoneInfo("Asia/Seoul"))):
             self.assertEqual(0, await self.collector.run_once())
 
     async def test_changed_queries_stop_old_batch_and_resume_old_cursor_when_readded(self):

@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now, kst_now
+from kiwoom_monitor.domain.research_contract import ThemeSnapshotSource
 
 import json
 import hashlib
 import sqlite3
+import uuid
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .backup_file import write_json_backup
+from .settings_repository import SettingsNativeWriteError, SettingsRepository
 
 
-class ThemeBackupError(ValueError):
+class ThemeBackupError(SettingsNativeWriteError):
     pass
 
 
@@ -25,6 +30,145 @@ class ThemeBackupService:
     FORMAT = "kiwoom-realtime-monitor-theme-db"
     VERSION = 1
 
+    SYNC_STATE_KEY = "central_theme_sync_v1"
+
+    @staticmethod
+    def validate_accepted_snapshot(snapshot: object) -> dict:
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("snapshot_id"), str) or not snapshot["snapshot_id"]:
+            raise ThemeBackupError("accepted theme receipt is required")
+        document = snapshot.get("document")
+        if not isinstance(document, dict):
+            raise ThemeBackupError("accepted theme document is required")
+        source = ThemeSnapshotSource.from_document(
+            document, effective_at=snapshot.get("effective_at"), origin_device=snapshot.get("origin_device"),
+        )
+        if (snapshot.get("content_hash") != source.content_hash
+                or snapshot.get("profile_id") != source.profile_id
+                or snapshot.get("origin_device") != source.origin_device
+                or snapshot.get("effective_at") != source.effective_at
+                or any(type(snapshot.get(key)) not in (int, float) for key in ("received_at", "available_at"))
+                or "revision_of" not in snapshot
+                or snapshot["revision_of"] is not None and not isinstance(snapshot["revision_of"], str)):
+            raise ThemeBackupError("accepted theme receipt does not match its source")
+        return json.loads(json.dumps(snapshot, ensure_ascii=False, allow_nan=False))
+
+    @contextmanager
+    def _sync_transaction(self):
+        with closing(sqlite3.connect(self._database_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+
+    @classmethod
+    def _read_sync_state(cls, connection, server_scope: str) -> dict:
+        row = connection.execute("SELECT value FROM settings WHERE key=?", (cls.SYNC_STATE_KEY,)).fetchone()
+        if row is None:
+            return {"schema": 1, "server_scope": server_scope, "ack": None, "prepared": None}
+        try:
+            state = json.loads(row[0])
+        except (TypeError, ValueError) as error:
+            raise ThemeBackupError("theme sync recovery state is unreadable") from error
+        if (not isinstance(state, dict) or state.get("schema") != 1
+                or state.get("server_scope") != server_scope
+                or "ack" not in state or "prepared" not in state
+                or any(state[key] is not None and not isinstance(state[key], dict) for key in ("ack", "prepared"))):
+            raise ThemeBackupError("theme sync recovery source is unknown")
+        try:
+            ack, prepared = state["ack"], state["prepared"]
+            if ack is not None:
+                cls.validate_accepted_snapshot(ack["snapshot"])
+                if not all(isinstance(ack[key], str) and ack[key] for key in ("local_revision", "local_content_hash")):
+                    raise ValueError("missing accepted local identity")
+            if prepared is not None:
+                source = ThemeSnapshotSource.from_document(
+                    prepared["document"], effective_at=prepared["effective_at"], origin_device=prepared["origin_device"],
+                )
+                expected = ack["snapshot"]["snapshot_id"] if ack is not None else None
+                if (prepared["expected_snapshot_id"] != expected or prepared["content_hash"] != source.content_hash
+                        or not all(isinstance(prepared[key], str) and prepared[key]
+                                   for key in ("publication_id", "local_revision"))):
+                    raise ValueError("prepared identity mismatch")
+        except (KeyError, TypeError, ValueError) as error:
+            raise ThemeBackupError("theme sync recovery identity is invalid") from error
+        return state
+
+    @classmethod
+    def _write_sync_state(cls, connection, state: dict) -> None:
+        connection.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (cls.SYNC_STATE_KEY, json.dumps(state, ensure_ascii=False, allow_nan=False)),
+        )
+
+    def prepare_theme_publication(self, *, server_scope: str, origin_device: str) -> dict:
+        """Pin the editable snapshot once, durably, before any remote operation."""
+        with self._sync_transaction() as connection:
+            state = self._read_sync_state(connection, server_scope)
+            if state["prepared"] is not None:
+                return state
+            revision = self._revision(connection)
+            document = self.export_document(connection)
+            source = ThemeSnapshotSource.from_document(document, origin_device=origin_device)
+            ack = state["ack"]
+            if ack is None or source.content_hash != ack["local_content_hash"]:
+                state["prepared"] = {
+                    "publication_id": uuid.uuid4().hex,
+                    "expected_snapshot_id": ack["snapshot"]["snapshot_id"] if ack is not None else None,
+                    "document": document, "content_hash": source.content_hash,
+                    "local_revision": revision, "effective_at": source.effective_at,
+                    "origin_device": source.origin_device,
+                }
+                self._write_sync_state(connection, state)
+            return {**state, "receive_revision": revision}
+
+    def acknowledge_theme_publication(self, receipt: dict, *, publication_id: str, server_scope: str) -> dict:
+        accepted = self.validate_accepted_snapshot(receipt.get("snapshot"))
+        changed, replayed = receipt.get("changed"), receipt.get("replayed")
+        if type(changed) is not bool or type(replayed) is not bool or changed and replayed:
+            raise ThemeBackupError("theme publication receipt kind is invalid")
+        with self._sync_transaction() as connection:
+            state = self._read_sync_state(connection, server_scope)
+            prepared = state["prepared"]
+            if not isinstance(prepared, dict) or prepared.get("publication_id") != publication_id:
+                raise ThemeRevisionConflict("theme prepared publication changed")
+            if accepted["content_hash"] != prepared["content_hash"]:
+                raise ThemeBackupError("theme publication receipt content mismatch")
+            if changed or replayed:
+                if (accepted["snapshot_id"] != publication_id
+                        or accepted["revision_of"] != prepared["expected_snapshot_id"]
+                        or accepted["effective_at"] != prepared["effective_at"]
+                        or accepted["origin_device"] != prepared["origin_device"]):
+                    raise ThemeBackupError("theme publication receipt identity mismatch")
+            elif accepted["snapshot_id"] != prepared["expected_snapshot_id"]:
+                raise ThemeBackupError("theme no-op receipt is not the expected predecessor")
+            state["ack"] = {"snapshot": accepted, "local_revision": prepared["local_revision"],
+                            "local_content_hash": prepared["content_hash"]}
+            state["prepared"] = None
+            self._write_sync_state(connection, state)
+            pending = self._revision(connection) != prepared["local_revision"]
+            if pending:
+                # A full backup restore may recreate row IDs without changing the
+                # editable material; only actual unsent content remains pending.
+                document = self.export_document(connection)
+                pending = ThemeSnapshotSource.from_document(document).content_hash != prepared["content_hash"]
+            return {**state, "pending": pending}
+
+    def confirm_accepted_theme_snapshot(self, snapshot: dict, *, server_scope: str,
+                                      expected_snapshot_id: str, expected_revision: str) -> dict:
+        accepted = self.validate_accepted_snapshot(snapshot)
+        with self._sync_transaction() as connection:
+            state = self._read_sync_state(connection, server_scope)
+            ack = state["ack"]
+            if (state["prepared"] is not None or ack is None
+                    or self._revision(connection) != expected_revision
+                    or ack["snapshot"]["snapshot_id"] != expected_snapshot_id):
+                raise ThemeRevisionConflict("local theme edit or baseline changed during receive")
+            if accepted["snapshot_id"] == expected_snapshot_id:
+                if accepted != ack["snapshot"]:
+                    raise ThemeBackupError("accepted generation changed its original receipt")
+                return state
+            raise ThemeBackupError("remote theme lineage requires explicit reconciliation")
+
     @classmethod
     def validate_document(cls, document: object) -> None:
         if not isinstance(document, dict) or document.get("format") != cls.FORMAT or document.get("version") != cls.VERSION:
@@ -32,9 +176,36 @@ class ThemeBackupService:
         if not isinstance(document.get("profiles"), list):
             raise ThemeBackupError("테마 프로필 백업 형식이 올바르지 않습니다.")
 
-    def __init__(self, database_path: Path, profile_name: str | None = None) -> None:
+    def __init__(self, database_path: Path, profile_name: str | None = None, *,
+                 now_provider: Callable[[], datetime] | None = None,
+                 settings: SettingsRepository | None = None) -> None:
         self._database_path = database_path
+        self._settings = settings
+        if settings is not None and settings.database_path.resolve() != database_path.resolve():
+            raise ThemeBackupError("테마와 설정은 같은 조회 역할 DB를 사용해야 합니다.")
         self._profile_name = profile_name
+        self._now = (lambda: as_kst(now_provider())) if now_provider is not None else (lambda: kst_now())
+
+    def _require_settings_connection(self, connection: sqlite3.Connection) -> None:
+        """The injected UI port may write only this actual native database."""
+        if self._settings is not None:
+            try:
+                self._settings.require_native_connection(connection, self._database_path)
+            except SettingsNativeWriteError as error:
+                raise ThemeBackupError("테마 복원의 실제 연결과 설정 DB가 일치하지 않습니다.") from error
+
+    def read_sync_snapshot(self) -> dict[str, object]:
+        """Read the editable document and its CAS revision from one SQLite snapshot."""
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute("BEGIN")
+            revision = self._revision(connection)
+            document = self.export_document(connection)
+            source = ThemeSnapshotSource.from_document(document)
+            return {"document": document, "revision": revision,
+                    "content_hash": source.content_hash}
+        finally:
+            connection.close()
 
     def revision(self) -> str:
         connection = sqlite3.connect(self._database_path)
@@ -77,13 +248,19 @@ class ThemeBackupService:
         if connection is None:
             connection = sqlite3.connect(self._database_path)
         try:
+            if owns_connection:
+                connection.execute("BEGIN")
+            self._require_settings_connection(connection)
             active_row = connection.execute(
                 "SELECT value FROM settings WHERE key='theme_active_profile'"
             ).fetchone()
+            if self._settings is not None and (
+                    active_row is None or type(active_row[0]) is not str or not active_row[0]):
+                raise ThemeBackupError("테마 원자료 미준비: 저장된 선택을 보존하며 빈 자료를 백업하지 않습니다.")
             common = {
                 "format": self.FORMAT,
                 "version": self.VERSION,
-                "created_at": kst_now().isoformat(timespec="seconds"),
+                "created_at": self._now().isoformat(timespec="seconds"),
                 "active_profile": str(active_row[0]) if active_row is not None else "",
                 "aliases": [{"alias": alias, "code": code} for alias, code in connection.execute("SELECT alias, stock_code FROM stock_aliases ORDER BY alias")],
                 "stock_catalog": [{"code": code, "name": name, "market": market} for code, name, market in connection.execute("SELECT code, name, market FROM stocks ORDER BY code")],
@@ -91,9 +268,22 @@ class ThemeBackupService:
             has_profiles = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='theme_profiles'"
             ).fetchone() is not None
+            if self._settings is not None and not has_profiles:
+                raise ThemeBackupError("테마 원자료 미준비: 현재 프로필 자료를 백업할 수 없습니다.")
             if has_profiles:
                 profiles = []
-                for profile_id, name in connection.execute("SELECT profile_id, profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE"):
+                active_found = self._settings is None
+                if self._settings is None:
+                    profile_sql = "SELECT profile_id, profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE"
+                    profile_values = ()
+                else:
+                    # Reuse the required snapshot list; SQLite owns NOCASE.
+                    profile_sql = "SELECT profile_id,profile_name,profile_name=? COLLATE NOCASE FROM theme_profiles ORDER BY profile_name COLLATE NOCASE"
+                    profile_values = (active_row[0],)
+                for profile_row in connection.execute(profile_sql, profile_values):
+                    profile_id, name = profile_row[:2]
+                    if self._settings is not None:
+                        active_found = active_found or bool(profile_row[2])
                     profiles.append({
                         "name": name,
                         "themes": [{"name": theme, "color": color} for theme, color in connection.execute("SELECT theme_name, default_color FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,))],
@@ -101,6 +291,8 @@ class ThemeBackupService:
                         "theme_name_decisions": self._decision_documents(connection, profile_id),
                         "theme_suggestions": self._suggestion_documents(connection, profile_id),
                     })
+                if not active_found:
+                    raise ThemeBackupError("테마 원자료 미준비: 저장된 선택을 보존하며 빈 자료를 백업하지 않습니다.")
                 return {**common, "profiles": profiles}
             return {
                 **common,
@@ -173,6 +365,8 @@ class ThemeBackupService:
         if isinstance(preview, dict) and isinstance(preview.get("profiles"), list):
             self._import_all_profiles(preview)
             return
+        if self._settings is not None:
+            raise ThemeBackupError("조회 역할은 현재 프로필 백업 형식만 복원할 수 있습니다. 원본 파일은 보존됩니다.")
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -229,6 +423,9 @@ class ThemeBackupService:
     def _import_all_profiles(self, document: dict[object, object], *,
                              expected_revision: str | None = None) -> None:
         self.validate_document(document)
+        if self._settings is not None:
+            self._import_all_profiles_with_settings(document, expected_revision=expected_revision)
+            return
         connection = sqlite3.connect(self._database_path)
         try:
             connection.execute("PRAGMA foreign_keys = ON")
@@ -243,6 +440,33 @@ class ThemeBackupService:
             raise ThemeBackupError("테마 프로필 백업 파일을 적용할 수 없습니다.") from error
         finally:
             connection.close()
+
+    def _import_all_profiles_with_settings(self, document: dict[object, object], *,
+                                           expected_revision: str | None) -> None:
+        def write(connection):
+            if expected_revision is not None and self._revision(connection) != expected_revision:
+                raise ThemeRevisionConflict("원격 조회 중 로컬 테마가 변경되었습니다.")
+            self._apply_all_profiles(connection, document, settings_connection_checked=True)
+
+        try:
+            self._settings.commit_native_write(self._database_path, write)
+        except SettingsNativeWriteError as error:
+            failure = error.__cause__
+            if (error.native_committed is False and isinstance(failure, ThemeRevisionConflict)
+                    and error.close_error is None):
+                raise failure
+            if error.native_committed is False:
+                message = "테마 프로필 복원을 적용하지 못했습니다. COMMIT 전 변경은 되돌렸습니다."
+            elif error.native_committed is None:
+                message = "테마 복원 COMMIT 결과를 확인할 수 없습니다. 현재 테마는 미적용 상태입니다. 재시작 후 DB를 확인하세요."
+            else:
+                message = "테마 복원은 DB에 저장됐지만 정리 또는 현재 화면 적용에 실패했습니다. 다시 열어 확인하세요."
+            if error.cache_invalidated is False:
+                message += " 현재 설정 캐시도 다시 읽을 준비를 마치지 못했습니다."
+            raise ThemeBackupError(message, native_committed=error.native_committed,
+                cache_invalidated=error.cache_invalidated,
+                cache_invalidation_error=error.cache_invalidation_error,
+                close_error=error.close_error) from failure
 
     def _export_profile(self, path: Path) -> None:
         connection = sqlite3.connect(self._database_path)
@@ -304,8 +528,12 @@ class ThemeBackupService:
             connection.close()
 
     def _apply_all_profiles(self, connection: sqlite3.Connection,
-                            document: dict[object, object]) -> None:
+                            document: dict[object, object], *,
+                            settings_connection_checked: bool = False) -> None:
         """Apply profiles using the caller's transaction and SQLite connection."""
+        if not settings_connection_checked:
+            self._require_settings_connection(connection)
+        updated_at = self._now().isoformat() if self._settings is not None else None
         profiles = document["profiles"]
         connection.execute("DELETE FROM profile_stock_themes")
         connection.execute("DELETE FROM profile_themes")
@@ -319,7 +547,10 @@ class ThemeBackupService:
                 name = str(item.get("name", "")).strip()
                 market = str(item.get("market", "")).strip()
                 if len(code) == 6 and code.isalnum() and name:
-                    connection.execute("INSERT INTO stocks(code, name, market) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP", (code, name, market))
+                    if updated_at is None:
+                        connection.execute("INSERT INTO stocks(code, name, market) VALUES (?, ?, ?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, updated_at=CURRENT_TIMESTAMP", (code, name, market))
+                    else:
+                        connection.execute("INSERT INTO stocks(code,name,market,updated_at) VALUES (?,?,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,updated_at=excluded.updated_at", (code,name,market,updated_at))
         for profile in profiles:
             if not isinstance(profile, dict) or not str(profile.get("name", "")).strip():
                 continue
@@ -338,22 +569,29 @@ class ThemeBackupService:
                         connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) VALUES (?, ?, ?, ?)", (profile_id, str(item["code"]), str(item["theme"]).strip(), item.get("color") or None))
             decisions = profile.get("theme_name_decisions", [])
             if isinstance(decisions, list):
-                self._import_name_decisions(connection, profile_id, decisions)
+                self._import_name_decisions(connection, profile_id, decisions, fallback_now=updated_at)
             suggestions = profile.get("theme_suggestions", [])
             if isinstance(suggestions, list):
                 self._import_suggestions(connection, profile_id, suggestions)
-        if not connection.execute("SELECT 1 FROM theme_profiles").fetchone():
-            connection.execute("INSERT INTO theme_profiles(profile_name) VALUES ('기본 테마')")
-        active_profile = str(document.get("active_profile", "")).strip()
-        if active_profile and connection.execute(
-            "SELECT 1 FROM theme_profiles WHERE profile_name=? COLLATE NOCASE",
-            (active_profile,),
-        ).fetchone():
-            connection.execute(
-                "INSERT INTO settings(key,value) VALUES('theme_active_profile',?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        if self._settings is not None:
+            active_profile = document.get("active_profile")
+            if (type(active_profile) is not str or not active_profile
+                    or connection.execute("SELECT 1 FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (active_profile,)).fetchone() is None):
+                raise ThemeBackupError("복원할 테마의 현재 선택과 실제 프로필이 일치하지 않습니다. 기존 자료를 보존합니다.")
+            self._settings.write_many_in_transaction(connection, {"theme_active_profile": active_profile}, updated_at=updated_at)
+        else:
+            if not connection.execute("SELECT 1 FROM theme_profiles").fetchone():
+                connection.execute("INSERT INTO theme_profiles(profile_name) VALUES ('기본 테마')")
+            active_profile = str(document.get("active_profile", "")).strip()
+            if active_profile and connection.execute(
+                "SELECT 1 FROM theme_profiles WHERE profile_name=? COLLATE NOCASE",
                 (active_profile,),
-            )
+            ).fetchone():
+                connection.execute(
+                    "INSERT INTO settings(key,value) VALUES('theme_active_profile',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (active_profile,),
+                )
         codes = {str(row[0]) for row in connection.execute("SELECT code FROM stocks")}
         connection.execute("DELETE FROM stock_aliases")
         aliases = document.get("aliases", [])
@@ -390,7 +628,7 @@ class ThemeBackupService:
 
     @staticmethod
     def _import_name_decisions(
-        connection: sqlite3.Connection, profile_id: int, decisions: list[object],
+        connection: sqlite3.Connection, profile_id: int, decisions: list[object], *, fallback_now: str | None = None,
     ) -> None:
         allowed = {"alias", "split_to", "keep_separate"}
         for item in decisions:
@@ -407,7 +645,7 @@ class ThemeBackupService:
                 "VALUES(?,?,?,?,?,?)",
                 (profile_id, kind, source, target,
                  str(item.get("decision_source") or "user"),
-                 str(item.get("updated_at") or kst_now().isoformat(timespec="seconds"))),
+                 str(item.get("updated_at") or fallback_now or kst_now().isoformat(timespec="seconds"))),
             )
 
     @staticmethod

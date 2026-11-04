@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -17,16 +18,23 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from zipfile import ZipFile
 
 
 FORMAT = 1
+CONTRACT_VERSION = 2
 DEFAULT_IMAGE = "kiwoom-monitor-server:2026.10.01-db-writer-candidate-fixes-v1"
-CONTRACT_FILES = (
+LEGACY_CONTRACT_FILES = (
     "pyproject.toml", "deploy/synology/server.Dockerfile",
     "src/kiwoom_monitor/central_server/central_schema.py",
     "src/kiwoom_monitor/central_server/schema_migrations.py",
 )
+DEPENDENCY_FILES = ("pyproject.toml", "requirements.lock.txt")
+CONTRACT_FILES = (*LEGACY_CONTRACT_FILES, "requirements.lock.txt")
 BUILD_FILE = "src/kiwoom_monitor/central_server/app.py"
+# The local/CI audit history is not an execution input and can exceed the
+# operator's per-file source-admission bound. Keep other tests/fixtures intact.
+DEVELOPMENT_ONLY_SOURCE_PATHS = frozenset({"tests/test_review_changes.jsonl"})
 RELEASE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z")
 
 
@@ -56,6 +64,41 @@ def atomic_json(path: Path, value: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def emit_research_artifact(artifact: Path, *, artifact_kind: str, source_ref: str,
+                           profiles: tuple[str, ...], output: Path) -> dict:
+    """Bind one actual immutable producer archive; this does not select or deploy it."""
+    from kiwoom_monitor.domain.research_contract import (
+        RESEARCH_IMPLEMENTATION_PATHS, RESEARCH_IMPLEMENTATION_RECIPE, SelectedResearchArtifact,
+        research_artifact_metadata_hash, research_implementation_digest,
+    )
+    if artifact_kind not in ("wheel", "source-zip"):
+        raise ValueError("unsupported research artifact kind")
+    raw = artifact.read_bytes()
+    with ZipFile(BytesIO(raw)) as archive:
+        names = archive.namelist()
+        if len(names) != len(set(names)):
+            raise ValueError("research artifact contains duplicate archive entries")
+        corpus = {}
+        for path in RESEARCH_IMPLEMENTATION_PATHS:
+            member = path.removeprefix("src/") if artifact_kind == "wheel" else path
+            corpus[path] = archive.read(member)
+    document = {
+        "version": 1, "kind": "research-producer-artifact", "artifact_kind": artifact_kind,
+        "artifact_ref": artifact.name, "artifact_sha256": hashlib.sha256(raw).hexdigest(),
+        "source_ref": source_ref, "profiles": list(profiles), "recipe": RESEARCH_IMPLEMENTATION_RECIPE,
+        "files": [{"path": path, "sha256": hashlib.sha256(corpus[path]).hexdigest()}
+                  for path in RESEARCH_IMPLEMENTATION_PATHS],
+        "implementation_hash": research_implementation_digest(corpus.__getitem__),
+    }
+    document["metadata_hash"] = research_artifact_metadata_hash(document)
+    SelectedResearchArtifact.from_document(document)
+    # Do not silently replace an already reviewed producer metadata document.
+    with output.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(document, stream, ensure_ascii=False, sort_keys=True, indent=2)
+        stream.write("\n")
+    return document
+
+
 def build_marker(root: Path) -> str:
     match = re.search(r'^SERVER_BUILD = "([A-Za-z0-9._-]+)"$',
                       (root / BUILD_FILE).read_text(encoding="utf-8"), re.MULTILINE)
@@ -76,7 +119,7 @@ def checked_path(root: Path, relative: str) -> Path:
         path.resolve().relative_to(root.resolve())
     except ValueError as error:
         raise RuntimeError("source path escapes release") from error
-    if not relative.startswith(("src/", "tests/", "scripts/")) and relative != "pyproject.toml":
+    if not relative.startswith(("src/", "tests/", "scripts/")) and relative not in DEPENDENCY_FILES:
         raise RuntimeError("source path is outside the code allowlist")
     return path
 
@@ -93,11 +136,21 @@ def release(root: Path, release_id: str | None = None) -> tuple[Path, dict]:
     if manifest.get("release_id") != release_id:
         raise RuntimeError("release ID does not match manifest")
     runtime = read_json(root / "runtime.json")
+    contract_version = manifest.get("contract_version", 1)
+    if type(contract_version) is not int or contract_version not in (1, CONTRACT_VERSION):
+        raise RuntimeError("unsupported dependency contract version")
+    if runtime.get("contract_version", 1) != contract_version:
+        raise RuntimeError("dependency contract version changed; use a reviewed runtime update")
+    if ("requirements.lock.txt" in manifest["files"]) != (contract_version == CONTRACT_VERSION):
+        raise RuntimeError("dependency lock does not match contract version")
+    if contract_version == CONTRACT_VERSION and manifest["files"]["requirements.lock.txt"] != manifest.get("contract", {}).get("requirements.lock.txt"):
+        raise RuntimeError("dependency lock hash does not match release contract")
     accepted = [runtime.get("contract"), *runtime.get("accepted_contracts", [])]
     # Source/build/driver bytes already have per-release integrity checks below.
     # Only installed dependencies and the actual DDL definition constrain this
     # runtime; a log/clock change in the migration runner is ordinary app code.
-    required = ("pyproject.toml", "src/kiwoom_monitor/central_server/central_schema.py")
+    dependencies = DEPENDENCY_FILES if contract_version == CONTRACT_VERSION else ("pyproject.toml",)
+    required = (*dependencies, "src/kiwoom_monitor/central_server/central_schema.py")
     if not any(all(manifest.get("contract", {}).get(name) == item.get(name)
                    and item.get(name) is not None for name in required)
                for item in accepted if isinstance(item, dict)):
@@ -125,21 +178,25 @@ def stage(source: Path, root: Path, image: str) -> dict:
     runner_bytes = Path(__file__).read_bytes()
     if runtime_path.exists():
         runtime = read_json(runtime_path)
+        if runtime.get("contract_version", 1) != CONTRACT_VERSION:
+            raise RuntimeError("dependency contract version changed; prepare a new runtime before source deployment")
         if runtime["image"] != image or any(
             runtime["contract"].get(name) != contract[name]
-            for name in ("pyproject.toml", "src/kiwoom_monitor/central_server/central_schema.py")
+            for name in (*DEPENDENCY_FILES, "src/kiwoom_monitor/central_server/central_schema.py")
         ):
             raise RuntimeError("dependency/schema changed; prepare a new runtime before source deployment")
         if (root / "runner.py").read_bytes() != runner_bytes:
             raise RuntimeError("runtime launcher changed; a new runtime store must be prepared")
     else:
         (root / "runner.py").write_bytes(runner_bytes)
-        atomic_json(runtime_path, {"format": FORMAT, "image": image, "contract": contract})
+        atomic_json(runtime_path, {"format": FORMAT, "contract_version": CONTRACT_VERSION,
+                                   "image": image, "contract": contract})
     names = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--",
-         "src", "tests", "scripts", "pyproject.toml"], cwd=source,
+         "src", "tests", "scripts", *DEPENDENCY_FILES], cwd=source,
     ).decode("utf-8").split("\0")
-    files = {name: digest(checked_path(source, name)) for name in sorted(set(names)) if name}
+    files = {name: digest(checked_path(source, name)) for name in sorted(set(names))
+             if name and name not in DEVELOPMENT_ONLY_SOURCE_PATHS}
     src_hash = hashlib.sha256(json.dumps(
         {name: value for name, value in files.items() if name.startswith("src/")},
         sort_keys=True,
@@ -152,13 +209,14 @@ def stage(source: Path, root: Path, image: str) -> dict:
     content_hash = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
     release_id = f"{marker}-{content_hash[:16]}"
     destination = root / "releases" / release_id
-    manifest = {"format": FORMAT, "release_id": release_id, "server_build": marker,
+    manifest = {"format": FORMAT, "contract_version": CONTRACT_VERSION,
+                "release_id": release_id, "server_build": marker,
                 "src_hash": src_hash, "files": files, "contract": contract,
                 "git_commit": subprocess.check_output(
                     ["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
                 "working_tree_dirty": bool(subprocess.check_output(
                     ["git", "status", "--porcelain", "--untracked-files=normal", "--",
-                     "src", "tests", "scripts", "pyproject.toml"], cwd=source, text=True).strip())}
+                     "src", "tests", "scripts", *DEPENDENCY_FILES], cwd=source, text=True).strip())}
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
         temporary = Path(tempfile.mkdtemp(prefix=".staging-", dir=destination.parent))
@@ -207,7 +265,9 @@ def review_schema_update(source: Path, root: Path) -> dict:
         previous, manifest = release(root)
         runtime = read_json(root / "runtime.json")
         contract = source_contract(source)
-        if contract["pyproject.toml"] != runtime["contract"]["pyproject.toml"]:
+        if runtime.get("contract_version", 1) != CONTRACT_VERSION or any(
+            contract[name] != runtime["contract"].get(name) for name in DEPENDENCY_FILES
+        ):
             raise RuntimeError("dependency changed; schema-only review refused")
         old_plan, new_plan = schema_plan(previous), schema_plan(source)
         if not old_plan or len(new_plan) <= len(old_plan) or new_plan[:len(old_plan)] != old_plan:
@@ -250,8 +310,14 @@ def review_schema_update(source: Path, root: Path) -> dict:
 
 def runtime_environment(root: Path, release_id: str | None) -> tuple[Path, dict, dict]:
     path, manifest = release(root, release_id)
-    if digest(Path("/app/pyproject.toml")) != manifest["contract"]["pyproject.toml"]:
-        raise RuntimeError("image dependency specification does not match source release")
+    dependencies = DEPENDENCY_FILES if manifest.get("contract_version", 1) == CONTRACT_VERSION else ("pyproject.toml",)
+    for name in dependencies:
+        try:
+            installed = digest(Path("/app") / name)
+        except OSError as error:
+            raise RuntimeError("image dependency specification is missing") from error
+        if installed != manifest["contract"][name]:
+            raise RuntimeError("image dependency specification does not match source release")
     environment = dict(os.environ, PYTHONPATH=str(path / "src"), PYTHONDONTWRITEBYTECODE="1")
     return path, manifest, environment
 
@@ -260,6 +326,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("/app/source-runtime"))
     subparsers = parser.add_subparsers(dest="command", required=True)
+    research_artifact = subparsers.add_parser("emit-research-artifact",
+        help="emit producer metadata from actual wheel/source ZIP bytes; does not select it")
+    research_artifact.add_argument("--artifact", required=True, type=Path)
+    research_artifact.add_argument("--artifact-kind", required=True, choices=("wheel", "source-zip"))
+    research_artifact.add_argument("--source-ref", required=True)
+    research_artifact.add_argument("--profile", action="append", required=True)
+    research_artifact.add_argument("--output", required=True, type=Path)
     staging = subparsers.add_parser("stage")
     staging.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[1])
     staging.add_argument("--image", default=DEFAULT_IMAGE)
@@ -271,6 +344,12 @@ def main() -> int:
         if name == "test":
             command.add_argument("--test", action="append", default=[])
     args = parser.parse_args()
+    if args.command == "emit-research-artifact":
+        metadata = emit_research_artifact(args.artifact, artifact_kind=args.artifact_kind,
+            source_ref=args.source_ref, profiles=tuple(args.profile), output=args.output)
+        print(json.dumps({"metadata_hash": metadata["metadata_hash"],
+                          "artifact_sha256": metadata["artifact_sha256"], "selected": False}))
+        return 0
     root = args.root.resolve()
     if args.command == "stage":
         print(json.dumps(stage(args.source, root, args.image), ensure_ascii=False))

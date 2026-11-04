@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import sys
+import json
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -73,6 +78,127 @@ class ObservationSchemaFixtureTests(unittest.TestCase):
 
 
 class DedicatedPostgresUrlTests(unittest.TestCase):
+    def test_url_policy_is_shared_by_cli_and_replay_and_preserves_exact_errors(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_replay import dedicated_database_url
+        from kiwoom_monitor.infrastructure.persistence import postgres_test_target as target
+
+        self.assertIs(target.dedicated_url, _dedicated_url)
+        self.assertIs(target.explicit_dedicated_url, _explicit_dedicated_url)
+        self.assertIs(target.resolve_target_url, _resolve_target_url)
+        source = "postgres://user:secret@host/live?sslmode=require#fragment"
+        expected = "postgres://user:secret@host/kiwoom_monitor_diagnostic_test?sslmode=require#fragment"
+        self.assertEqual(expected, dedicated_database_url(source))
+        self.assertEqual(expected, _resolve_target_url(source, ""))
+        cases = [
+            ("", "", "KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL or KIWOOM_SERVER_DATABASE_URL is required"),
+            ("sqlite:///db", "", "KIWOOM_SERVER_DATABASE_URL is not a PostgreSQL URL"),
+            (expected, "", "KIWOOM_SERVER_DATABASE_URL points at the diagnostic test DB"),
+            (source, "postgres://host/live", "diagnostic DB URL must target kiwoom_monitor_diagnostic_test"),
+            (source, "postgres:///kiwoom_monitor_diagnostic_test", "KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL is not a PostgreSQL URL"),
+        ]
+        for live, explicit, message in cases:
+            for resolve in (_resolve_target_url, dedicated_database_url):
+                with self.subTest(live=live, explicit=explicit, resolve=resolve.__name__):
+                    with self.assertRaises(RuntimeError) as caught:
+                        resolve(live, explicit)
+                    self.assertEqual(message, str(caught.exception))
+
+    def test_copied_src_without_scripts_keeps_tool_cancel_report_and_native_reader(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "candidate"
+            shutil.copytree(root / "src", candidate / "src",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            self.assertFalse((candidate / "scripts").exists())
+            code = textwrap.dedent('''
+                import importlib.util
+                import json
+                import os
+                import sys
+                from pathlib import Path
+                from threading import Event
+                from types import SimpleNamespace
+
+                candidate = Path(sys.argv[1]).resolve()
+                original = Path(sys.argv[2]).resolve()
+                sys.path[:] = [str(candidate / 'src')] + [entry for entry in sys.path
+                    if entry and ('site-packages' in Path(entry).parts
+                        or not Path(entry).resolve().is_relative_to(original))]
+                assert importlib.util.find_spec('scripts') is None
+                from kiwoom_monitor.central_server import diagnostic_sampling as sampling
+                from kiwoom_monitor.central_server.database import SQLiteQueryStore
+                from kiwoom_monitor.central_server.diagnostic_replay import dedicated_database_url
+                from kiwoom_monitor.central_server.diagnostic_runs import DiagnosticRuns
+                from kiwoom_monitor.central_server.diagnostic_workloads import (
+                    _set_tool, capture_status, diagnostic_run_lock, diagnostic_tool_status)
+
+                target = dedicated_database_url('postgres://user:secret@host/live?sslmode=require')
+                assert target == 'postgres://user:secret@host/kiwoom_monitor_diagnostic_test?sslmode=require'
+                data = candidate / 'data'
+                data.mkdir()
+                path = data / 'controls.json'
+                os.environ['KIWOOM_DIAGNOSTIC_WORKLOAD_PATH'] = str(path)
+                session = _set_tool(path, True, 600)['diagnostic_tool']['session_id']
+                stop = Event()
+                stop.set()
+                # An enabled real session cancels before DB admission. This is
+                # the actual shared implementation, without import or DB doubles.
+                result = sampling.run_measurement(
+                    SimpleNamespace(command='measure', label='cancel', workload=''),
+                    path, 5, 'copied-cancel', session, api=lambda *_: {}, stop=stop)
+                assert result == {'kind': 'measure', 'test_id': 'copied-cancel',
+                    'state': 'aborted', 'phase': {'label': 'cancel', 'state': 'aborted',
+                    'reason': 'diagnostic_session_ended', 'samples': 0, 'elapsed_seconds': 0}}
+                runs = DiagnosticRuns(path, lambda *_: {})
+                runs._stop.set()
+                run = {'run_id': 'copied-cancel', 'session_id': session,
+                    'requested_seconds': 5, 'kind': 'measure', 'label': 'cancel', 'workload': ''}
+                lock = diagnostic_run_lock(path)
+                lock.__enter__()
+                runs._run(run, lock, False)
+                runs.close(timeout=None)
+                report = runs.report('copied-cancel')
+                assert report['state'] == 'aborted'
+                assert report['result'] == result
+                assert not capture_status(path)['enabled']
+                assert diagnostic_tool_status(path)['session_id'] == session
+                assert diagnostic_tool_status(path)['enabled']
+                with diagnostic_run_lock(path):
+                    pass
+
+                store_path = data / 'native.sqlite3'
+                store = SQLiteQueryStore(store_path)
+                store.initialize()
+                document = {'value': 17, 'source': 'retained-fixture',
+                            'available_at': '2026-10-23T09:00:00+09:00'}
+                store.upsert_documents('app_settings', [
+                    {'owner': 'copied', 'key': 'accepted', 'document': document}])
+                store.close()
+                reopened = SQLiteQueryStore(store_path)
+                reopened.initialize()
+                assert reopened.load_documents('app_settings', 'copied')[0]['document'] == document
+                reopened.close()
+                modules = {name: str(Path(module.__file__).resolve())
+                    for name, module in sys.modules.items()
+                    if name.startswith('kiwoom_monitor') and getattr(module, '__file__', None)}
+                assert all(Path(value).is_relative_to(candidate / 'src') for value in modules.values())
+                assert not any(name == 'scripts' or name.startswith('scripts.') for name in sys.modules)
+                print(json.dumps({'scripts_absent': True, 'tool_enabled': True,
+                    'cancel_report': report['state'], 'native_reopen': True,
+                    'source_modules': modules}, sort_keys=True))
+            ''')
+            process = subprocess.run(
+                [sys.executable, "-I", "-c", code, str(candidate), str(root)],
+                cwd=candidate, text=True, capture_output=True, timeout=30,
+            )
+            self.assertEqual(0, process.returncode, process.stdout + process.stderr)
+            evidence = json.loads(process.stdout)
+            self.assertTrue(evidence["scripts_absent"])
+            self.assertTrue(evidence["tool_enabled"])
+            self.assertEqual("aborted", evidence["cancel_report"])
+            self.assertTrue(evidence["native_reopen"])
+            self.assertIn("kiwoom_monitor.central_server.diagnostic_sampling", evidence["source_modules"])
+
     def test_candidate_src_precedes_installed_packages_and_test_root(self) -> None:
         root = Path("candidate.zip")
         with patch.object(sys, "path", ["existing"]):

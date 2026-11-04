@@ -17,8 +17,7 @@ class RestClient(Protocol):
     def request(self, api_id: str, path: str, body: dict[str, Any]) -> dict[str, Any]: ...
 
 class StockWriter(Protocol):
-    def upsert(self, code: str, name: str, market: str = "") -> None: ...
-    def upsert_many(self, stocks: tuple[tuple[str, str, str], ...]) -> None: ...
+    def cache_ranking_stocks(self, stocks: tuple[tuple[str, str, str], ...]) -> None: ...
 
 
 class RankingService:
@@ -36,9 +35,13 @@ class RankingService:
         self._missing_current_price_logged: set[str] = set()
         self._last_response_from_local_fallback = False
 
-    def set_query_type(self, query_type: str) -> None:
+    @staticmethod
+    def validate_query_type(query_type: str) -> None:
         if query_type not in {"1", "2", "3", "4", "5"}:
             raise ValueError("순위 조회 기준이 올바르지 않습니다.")
+
+    def set_query_type(self, query_type: str) -> None:
+        self.validate_query_type(query_type)
         self._query_type = query_type
 
     def server_now(self) -> object | None:
@@ -179,12 +182,7 @@ class RankingService:
                 )
             )
         if self._stocks is not None:
-            batch = getattr(self._stocks, "upsert_many", None)
-            if callable(batch):
-                batch(tuple(stock_rows))
-            else:
-                for code, name, market in stock_rows:
-                    self._stocks.upsert(code, name, market)
+            self._stocks.cache_ranking_stocks(tuple(stock_rows))
         self._last_response_from_local_fallback = bool(
             getattr(self._client, "using_fallback", False)
         )

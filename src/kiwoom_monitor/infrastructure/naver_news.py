@@ -15,7 +15,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from kiwoom_monitor.application.news_analysis import NewsAssessment, assess_stock_news
+from kiwoom_monitor.application.news_analysis import assess_stock_news
+from kiwoom_monitor.domain.news_ai_contract import NewsAssessment, StockNewsItem
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _protect, _unprotect
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
@@ -78,16 +79,6 @@ class LocalNewsSources:
     stock_site_url: str = "https://stock.naver.com/api/domestic/detail/news"
     flash_url: str = "https://stock.naver.com/api/domestic/news/list"
     world_url: str = "https://stock.naver.com/api/foreign/news/worldNews"
-
-
-@dataclass(frozen=True)
-class StockNewsItem:
-    title: str
-    description: str
-    link: str
-    original_link: str
-    published_at: datetime | None
-    assessment: NewsAssessment
 
 
 @dataclass(frozen=True)

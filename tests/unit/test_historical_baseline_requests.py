@@ -13,7 +13,8 @@ from kiwoom_monitor.infrastructure.historical_research_readiness import (
     HistoricalDevelopmentReadiness,
 )
 from scripts.prepare_historical_baseline_requests import prepare_requests
-from scripts import summarize_historical_baseline_results as baseline_review
+from scripts import summarize_historical_baseline_results as baseline_cli
+from kiwoom_monitor import research_candidate as baseline_review
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.application.market_session_schedule import research_session_profile_document
 from tests.unit.test_research_independent_comparisons import record
@@ -222,7 +223,7 @@ class HistoricalBaselineRequestTests(unittest.TestCase):
             before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
             stream = StringIO()
             with patch("sys.argv", ["summary", "--root", str(root), "--inspect-development"]), patch("sys.stdout", stream):
-                self.assertEqual(0, baseline_review.main())
+                self.assertEqual(0, baseline_cli.main())
             self.assertEqual("historical_baseline_review/v1", json.loads(stream.getvalue())["version"])
             after = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
             self.assertEqual(before, after)

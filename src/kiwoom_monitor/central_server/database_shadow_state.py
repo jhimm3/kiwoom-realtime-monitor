@@ -166,7 +166,8 @@ class PostgresShadowStateStoreMixin:
 
     def save_shadow_monitor_state(self, monitor_id: str, document: dict[str, Any]) -> None:
         from .postgres_access import DBWriterContext, open_observed_connection
-        from .diagnostic_metrics import record_writer_transaction
+        from .postgres_access import database_observer
+        observer = database_observer()
         from .shadow_checkpoint import clear_frames, save_frames, split_checkpoint
 
         started_at = monotonic()
@@ -194,19 +195,20 @@ class PostgresShadowStateStoreMixin:
                     (monitor_id, updated_at, encoded),
                 )
                 clear_frames(cursor, monitor_id)
-        record_writer_transaction(
-            "shadow_monitor_state", 1, round((monotonic() - started_at) * 1000),
-            encode_ms=encode_ms, bytes_payload_estimate=payload_bytes,
-            domain_counts={
-                **counts,
-                "checkpoint_bar_frames": len(document.get("bars", ())),
-                "checkpoint_universe_frames": len(document.get("universes", ())),
-                "checkpoint_emitted_candidate_keys": len(
-                    document.get("strategy_state", {}).get("emitted_candidate_keys", ()),
-                ),
-            },
-            db_call_id=writer.call_id,
-        )
+        if observer is not None:
+            observer.record_writer_transaction(
+                "shadow_monitor_state", 1, round((monotonic() - started_at) * 1000),
+                encode_ms=encode_ms, bytes_payload_estimate=payload_bytes,
+                domain_counts={
+                    **counts,
+                    "checkpoint_bar_frames": len(document.get("bars", ())),
+                    "checkpoint_universe_frames": len(document.get("universes", ())),
+                    "checkpoint_emitted_candidate_keys": len(
+                        document.get("strategy_state", {}).get("emitted_candidate_keys", ()),
+                    ),
+                },
+                db_call_id=writer.call_id,
+            )
 
     def save_shadow_evaluation(
         self, monitor_id: str, decision: dict[str, Any],

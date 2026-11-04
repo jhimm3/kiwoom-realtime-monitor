@@ -1,3 +1,5 @@
+
+from tests.unit.test_mock_automation_runner import _prepared_runner
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -10,7 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from kiwoom_monitor.application.leader_breakout import (
-    LeaderBreakoutContext, LeaderBreakoutPolicy, evaluate_leader_breakout,
+    LeaderBreakoutContext, LeaderBreakoutPolicy, LeaderTradeInputs, evaluate_leader_breakout,
     evaluate_leader_breakout_trade, evaluate_leader_breakout_minutes,
 )
 from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
@@ -83,6 +85,81 @@ def write_leader_dataset(root, prices=(990, 1010, 1020, 940, 930)):
         "revision_ids_hash": hashlib.sha256("\n".join(row["revision_id"] for row in rows).encode()).hexdigest(),
         "observations_file": "observations.jsonl", "observations_file_hash": hashlib.sha256(encoded).hexdigest()}), encoding="utf-8")
     return dataset
+
+
+class LeaderTradeInputsTests(unittest.TestCase):
+    def test_offer_detaches_payload_and_source_generation_discards_cross_state(self):
+        inputs = LeaderTradeInputs()
+        payload = trade(990)
+        inputs.offer(payload, AT, source="source:1", approved=True)
+        payload["current_price"] = 1010
+        self.assertEqual("0B_source_generation_changed", inputs.take_discontinuity())
+        queued, received, source = inputs.take()
+        self.assertEqual(990, queued["current_price"])
+        inputs.evaluate_trade(execution_config(), queued, received_at=received, source=source,
+            decision_time=AT, position_open=False, position_context=None)
+        inputs.offer(trade(1010), AT, source="source:2", approved=True)
+        self.assertEqual("0B_source_generation_changed", inputs.take_discontinuity())
+        queued, received, source = inputs.take()
+        raw, _ = inputs.evaluate_trade(execution_config(), queued, received_at=received, source=source,
+            decision_time=AT, position_open=False, position_context=None)
+        expected, _ = evaluate_leader_breakout_trade(policy(), queued, received_at=received,
+            source=source, decision_time=AT, state=None, position_open=False, position_context=None)
+        self.assertEqual(expected, raw)
+
+    def test_overflow_unapproved_and_kst_receive_day_discard_pending_queue(self):
+        inputs = LeaderTradeInputs()
+        for _ in range(1000):
+            self.assertIsNotNone(inputs.offer(trade(990), AT, source="source:1", approved=True))
+        self.assertIsNone(inputs.offer(trade(1010), AT, source="source:1", approved=True))
+        self.assertEqual("0B_input_overflow_no_cross_bridge", inputs.take_discontinuity())
+        self.assertIsNone(inputs.take())
+        inputs.offer(trade(990), AT, source="source:1", approved=True)
+        inputs.offer(trade(1010), AT, source="source:1", approved=False)
+        self.assertEqual("0B_source_unapproved", inputs.take_discontinuity())
+        self.assertIsNone(inputs.take())
+        inputs.offer(trade(990), AT, source="source:1", approved=True)
+        tomorrow = AT + timedelta(days=1)
+        inputs.offer(trade(1010, at=tomorrow), tomorrow, source="source:1", approved=True)
+        self.assertEqual("0B_source_generation_changed", inputs.take_discontinuity())
+        self.assertEqual(tomorrow, inputs.take()[1])
+        self.assertIsNone(inputs.take())
+
+    def test_current_entry_rules_mismatch_rejected_and_open_position_uses_admitted_rules(self):
+        admitted = execution_config()
+        self.assertIs(admitted, LeaderTradeInputs.resolve_config(admitted, None, position_open=True))
+        with self.assertRaisesRegex(ValueError, "current_leader_context_unavailable"):
+            LeaderTradeInputs.resolve_config(admitted, None, position_open=False)
+        current = {"revision": 1, "policy": replace(policy(), breakout_buffer_bps=1).to_dict()}
+        with self.assertRaisesRegex(ValueError, "current_leader_rules_require_new_approval"):
+            LeaderTradeInputs.resolve_config(admitted, current, position_open=False)
+
+    def test_latest_stop_quote_uses_actual_available_time_and_reset_clears_it(self):
+        inputs = LeaderTradeInputs()
+        config = execution_config()
+        context = config.contexts[0]
+        quote = inputs.capture_stop_quote(config, trade(940), received_at=AT, source="source:1",
+            decision_time=AT, position_context=context)
+        self.assertEqual("HARD_EXIT", quote["status"])
+        self.assertIs(quote, inputs.latest_stop_quote)
+        self.assertIsNone(inputs.capture_stop_quote(config, trade(930), received_at=AT, source="source:1",
+            decision_time=AT, position_context=context))
+        self.assertIs(quote, inputs.latest_stop_quote)
+        inputs.reset("withdrawn")
+        self.assertIsNone(inputs.latest_stop_quote)
+        self.assertEqual("withdrawn", inputs.take_discontinuity())
+
+    def test_symbol_budget_is_bounded_without_native_or_clock_dependencies(self):
+        inputs = LeaderTradeInputs()
+        with patch("kiwoom_monitor.application.leader_breakout.evaluate_leader_breakout_trade",
+                   return_value=({"context_ref": "test-explicit-structure"}, object())) as kernel:
+            for index in range(200):
+                inputs.evaluate_trade(execution_config(), {"code": f"{index:06d}"}, received_at=AT,
+                    source="source:1", decision_time=AT, position_open=False, position_context=None)
+            with self.assertRaisesRegex(ValueError, "leader_symbol_input_budget_exceeded"):
+                inputs.evaluate_trade(execution_config(), {"code": "999999"}, received_at=AT,
+                    source="source:1", decision_time=AT, position_open=False, position_context=None)
+            self.assertEqual(200, kernel.call_count)
 
 
 class LeaderBreakoutExecutionContractTests(unittest.TestCase):
@@ -385,6 +462,7 @@ class LeaderBreakoutCampaignUiTests(unittest.TestCase):
             with patch("kiwoom_monitor.presentation.research_dialog.QSettings", return_value=preferences), \
                     patch("kiwoom_monitor.presentation.research_dialog.QTimer.singleShot"):
                 dialog = ResearchDialog(root/"state")
+                dialog.activate_startup()
                 process = Mock(); process.poll.return_value = None
                 try:
                     dialog._request_path.setText(str(request_path))
@@ -435,7 +513,7 @@ class LeaderBreakoutAutomationTests(unittest.IsolatedAsyncioTestCase):
         self.live = {"revision": 1, "policy": config.policy.to_dict()}
         self.store.upsert_documents("server_operational_settings", [{"owner": "global", "key": "current",
             "document": {"revision": 1, "shadow_candidate_config": self.live["policy"]}}])
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
             leader_context_source=lambda: self.live)
         self.addAsyncCleanup(self.runner.close)
 
@@ -445,8 +523,8 @@ class LeaderBreakoutAutomationTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.heartbeat()
         payload = {"code": "005930", "market": "KRX", "current_price": price,
                    "trade_time": self.clock.astimezone(KST).strftime("%H%M%S"), "cumulative_trade_value": 100}
-        self.runner.observe_leader_trade(payload, self.clock, source=source, approved=approved)
-        return await self.runner.run_once()
+        self.runner.episode.observe_leader_trade(payload, self.clock, source=source, approved=approved)
+        return await self.runner.episode.advance_once()
 
     async def test_actual_0b_runs_existing_approval_and_claim_then_fill_exit_restart(self):
         from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
@@ -454,22 +532,22 @@ class LeaderBreakoutAutomationTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(self.store, "load_observation_revisions_after", side_effect=AssertionError("no minute/second polling")):
             await self.deliver(990)
             await self.deliver(1001)
-            self.assertEqual(["BUY"], [c[1] for c in self.transport.calls], self.runner.status)
-            self.assertEqual("candidate", self.runner.status["strategy_state"])
+            self.assertEqual(["BUY"], [c[1] for c in self.transport.calls], self.runner.episode.status)
+            self.assertEqual("candidate", self.runner.episode.status["strategy_state"])
             self._fill_pending("BUY", 1001)
             await self.runner.close()
-            self.runner = MockAutomationRunner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+            self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
                 leader_context_source=lambda: self.live)
             self.addAsyncCleanup(self.runner.close)
             self.live = None  # Entry evidence loss cannot erase pinned position protection.
             await self.deliver(990)
-            self.assertEqual("open", self.runner.status["strategy_state"])
+            self.assertEqual("open", self.runner.episode.status["strategy_state"])
             await self.deliver(940)
-            self.assertEqual(["BUY", "SELL"], [c[1] for c in self.transport.calls], self.runner.status)
+            self.assertEqual(["BUY", "SELL"], [c[1] for c in self.transport.calls], self.runner.episode.status)
             self._fill_pending("SELL", 940)
-            await self.runner.run_once()
-            self.assertEqual("flat", self.runner.status["strategy_state"])
-            await self.runner.run_once()
+            await self.runner.episode.advance_once()
+            self.assertEqual("flat", self.runner.episode.status["strategy_state"])
+            await self.runner.episode.advance_once()
             self.assertEqual(2, len(self.transport.calls))
 
     async def test_generation_or_unapproved_gap_cannot_bridge_entry(self):
@@ -481,25 +559,25 @@ class LeaderBreakoutAutomationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], self.transport.calls)
         await self.deliver(990, source="two")
         await self.deliver(1001, source="two")
-        self.assertEqual(1, len(self.transport.calls), self.runner.status)
+        self.assertEqual(1, len(self.transport.calls), self.runner.episode.status)
 
     async def test_pending_order_does_not_create_position_or_duplicate_entry(self):
         await self.deliver(990); await self.deliver(1001)
         await self.deliver(1002)
-        self.assertNotEqual("open", self.runner.status["strategy_state"])
+        self.assertNotEqual("open", self.runner.episode.status["strategy_state"])
         self.assertEqual(1, len(self.transport.calls))
 
     async def test_overflow_and_dequeue_staleness_do_not_bridge_a_cross(self):
         await self.deliver(990)
         payload = trade(1001, at=self.clock)
         for _ in range(1001):
-            self.runner.observe_leader_trade(payload, self.clock, source="overflow", approved=True)
-        await self.runner.run_once()
+            self.runner.episode.observe_leader_trade(payload, self.clock, source="overflow", approved=True)
+        await self.runner.episode.advance_once()
         self.assertEqual([], self.transport.calls)
         await self.deliver(990, source="overflow")
-        self.runner.observe_leader_trade(trade(1001, at=self.clock), self.clock, source="overflow", approved=True)
+        self.runner.episode.observe_leader_trade(trade(1001, at=self.clock), self.clock, source="overflow", approved=True)
         self.clock += timedelta(seconds=4)
-        await self.runner.run_once()
+        await self.runner.episode.advance_once()
         self.assertEqual([], self.transport.calls)
         await self.deliver(1001, source="overflow")
         self.assertEqual([], self.transport.calls)
@@ -508,20 +586,20 @@ class LeaderBreakoutAutomationTests(unittest.IsolatedAsyncioTestCase):
         from kiwoom_monitor.application.mock_automation_risk import validate_mock_stop_loss_proof
         await self.deliver(990); await self.deliver(1001)
         self._fill_pending("BUY", 1001)
-        await self.runner.run_once(); await self._refresh_recovery()
+        await self.runner.episode.advance_once(); await self._refresh_recovery()
         risk = self.repository.load_latest_mock_automation_risk(self.bundle.account_ref)
-        pin = self.runner._leader_position_proof
+        pin = self.runner.episode._leader_position_proof
         proof = {"version":"leader_absolute_stop/v1", "symbol":"005930", "quantity":1,
             "entry_price_won":1001, "price_won":940, "available_at":self.clock.isoformat(),
             "input_ref":"0B:fixture", "hard_stop_price":950, "position_proof":pin,
-            "rules_hash":self.runner._config.rules_hash, "package_hash":self.spec.candidate_package_hash}
-        validate_mock_stop_loss_proof(proof, self.spec, risk, leader_config=self.runner._config, position_proof=pin)
+            "rules_hash":self.runner.episode._config.rules_hash, "package_hash":self.spec.candidate_package_hash}
+        validate_mock_stop_loss_proof(proof, self.spec, risk, leader_config=self.runner.episode._config, position_proof=pin)
         with self.assertRaises(ValueError):
             validate_mock_stop_loss_proof({**proof, "hard_stop_price":980}, self.spec, risk,
-                leader_config=self.runner._config, position_proof=pin)
+                leader_config=self.runner.episode._config, position_proof=pin)
         with self.assertRaises(ValueError):
             validate_mock_stop_loss_proof({**proof, "quantity":2}, self.spec, risk,
-                leader_config=self.runner._config, position_proof=pin)
+                leader_config=self.runner.episode._config, position_proof=pin)
 
     async def test_transaction_recomputes_0b_evidence_and_rejects_tampering(self):
         native = self.store.upsert_documents
@@ -570,9 +648,9 @@ class LeaderBreakoutNativeProtectionTests(unittest.IsolatedAsyncioTestCase):
         await self.runner.close()
         self.collector = CentralRealtimeCollector(lambda:"unused", "real", RealtimeHub(), lambda:self.clock)
         self.collector._approved_trade_sources = {("005930","KRX")}
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec, now_provider=lambda:self.clock,
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda:self.clock,
             leader_context_source=lambda:self.live, price_source=self.collector.automation_price_observation)
-        self.collector.set_breakout_trade_listener(lambda payload, at, **source:self.runner.observe_leader_trade(payload, at, **source))
+        self.collector.set_breakout_trade_listener(lambda payload, at, **source:self.runner.episode.observe_leader_trade(payload, at, **source))
         self.bundle.gateway = ManualMockOrderGateway(self.runtime, self.execution, self.monitor.refresh_account, now_provider=lambda:self.clock)
 
     async def asyncTearDown(self):
@@ -589,9 +667,9 @@ class LeaderBreakoutNativeProtectionTests(unittest.IsolatedAsyncioTestCase):
         from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
         await self.deliver(990); await self.deliver(1001)
         self._fill_pending("BUY", 1001)
-        await self.runner.run_once(); await self.monitor.refresh_recovery()
+        await self.runner.episode.advance_once(); await self.monitor.refresh_recovery()
         self.hard_tick()
-        notice = self.runner._protection_snapshot()
+        notice = self.runner.episode._protection_snapshot()
         self.assertEqual("leader_absolute_stop/v1", notice["risk_trigger"]["stop_loss"]["version"])
         await self.monitor.refresh_recovery()
         submit = self.transport.submit
@@ -599,15 +677,15 @@ class LeaderBreakoutNativeProtectionTests(unittest.IsolatedAsyncioTestCase):
             submit(intent)
             raise SubmissionUnknown("fixture lost ACK")
         with patch.object(self.transport, "submit", side_effect=unknown), \
-                patch.object(self.runner, "_prepare_native_unfilled_evidence", side_effect=AssertionError("no EV wait")):
-            await self.runner.run_once()
-        self.assertEqual(["BUY","SELL"], [c[1] for c in self.transport.calls], self.runner.status)
-        self.assertEqual("PROTECTIVE_EXIT", self.runner._unfilled_registration["purpose"])
+                patch.object(self.runner.episode, "_prepare_native_unfilled_evidence", side_effect=AssertionError("no EV wait")):
+            await self.runner.episode.advance_once()
+        self.assertEqual(["BUY","SELL"], [c[1] for c in self.transport.calls], self.runner.episode.status)
+        self.assertEqual("PROTECTIVE_EXIT", self.runner.episode._unfilled_registration["purpose"])
         await self.runner.close()
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec, now_provider=lambda:self.clock,
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda:self.clock,
             leader_context_source=lambda:None, price_source=self.collector.automation_price_observation)
         for _ in range(3):
-            self.hard_tick(); await self.runner.run_once()
+            self.hard_tick(); await self.runner.episode.advance_once()
         self.assertEqual(2, len(self.transport.calls))
 
 
@@ -1042,6 +1120,7 @@ class LeaderBreakoutTests(unittest.TestCase):
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start"), \
                 patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=Preferences()):
             dialog = CandidateMonitorDialog(Mock())
+            dialog.activate_startup()
             dialog._apply_operational_settings({"revision": 7, "shadow_candidate_config": LeaderBreakoutPolicy().to_dict()})
             with patch.object(dialog, "_start_settings_request") as save:
                 dialog._save_operational_settings()
@@ -1056,6 +1135,7 @@ class LeaderBreakoutTests(unittest.TestCase):
             request.write_text(json.dumps({"mode": "leader_breakout", "dataset": "dataset",
                 "session_profile": "krx-regular/v1", "policy": LeaderBreakoutPolicy().to_dict()}), encoding="utf-8")
             dialog = ResearchDialog(root)
+            dialog.activate_startup()
             dialog._request_path.setText(str(request))
             self.assertTrue(dialog._preview_request())
             self.assertEqual("분봉 돌파 판단 실행", dialog._run.text())
@@ -1134,6 +1214,7 @@ class LeaderBreakoutSelectionTests(unittest.TestCase):
             patcher = patch("kiwoom_monitor.presentation.candidate_monitor_dialog." + name, **kwargs)
             patcher.start(); self.addCleanup(patcher.stop)
         self.dialog = CandidateMonitorDialog(Mock())
+        self.dialog.activate_startup()
         self.addCleanup(self.close_dialog)
 
     def close_dialog(self):
@@ -1332,6 +1413,7 @@ class LeaderBreakoutLiveApiTests(unittest.IsolatedAsyncioTestCase):
                     with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start"), \
                             patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=preferences):
                         dialog = CandidateMonitorDialog(Mock())
+                        dialog.activate_startup()
                         saved = (await client.get("/api/v1/settings/operations", headers=headers)).json()
                         dialog._apply_operational_settings(saved)
                         dialog._leader_policy_editor.setPlainText(json.dumps(policy().to_dict()))

@@ -87,6 +87,37 @@ class SettingsRepositoryTest(unittest.TestCase):
             database.settings.set("refresh_interval_seconds", "60")
             self.assertEqual(database.settings.get("refresh_interval_seconds"), "60")
 
+    def test_explicit_missing_default_is_read_only_and_does_not_mask_raw_or_store_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "settings.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value BLOB)")
+                connection.executemany("INSERT INTO settings VALUES(?,?)", (
+                    ("present", "saved"), ("empty", ""), ("null", None), ("integer", 1),
+                ))
+            clock = Mock(side_effect=AssertionError("a read must not sample a clock"))
+            repository = SettingsRepository(path, now_provider=clock, strict_text=True)
+            before = path.read_bytes()
+            self.assertEqual("0", repository.get("missing-basis", "0"))
+            self.assertEqual("", repository.get("missing-date", ""))
+            self.assertEqual("saved", repository.get("present", "fallback"))
+            self.assertEqual("", repository.get("empty", "fallback"))
+            with self.assertRaises(KeyError):
+                repository.get("missing-basis")
+            for key in ("null", "integer"):
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    repository.get(key, "fallback")
+            self.assertEqual(before, path.read_bytes())
+            clock.assert_not_called()
+            # A default is not a negative cache entry or an inferred source row.
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("INSERT INTO settings VALUES('missing-basis','native-success')")
+            self.assertEqual("native-success", repository.get("missing-basis", "0"))
+            with patch("kiwoom_monitor.infrastructure.persistence.settings_repository.sqlite3.connect",
+                       side_effect=sqlite3.OperationalError("controlled unavailable store")):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "controlled unavailable store"):
+                    repository.get("another-missing", "fallback")
+
     def test_set_many_persists_values_and_one_version_for_form(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "monitor.sqlite3"

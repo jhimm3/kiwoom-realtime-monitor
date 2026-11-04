@@ -15,7 +15,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -30,7 +30,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -99,7 +99,7 @@
           "applied_revision": 0,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -127,7 +127,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -155,7 +155,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -180,7 +180,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -205,7 +205,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -220,7 +220,7 @@
         "body": {
           "detail": "news_naver_stock_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -235,7 +235,7 @@
         "body": {
           "detail": "news_naver_flash_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -250,7 +250,7 @@
         "body": {
           "detail": "news_naver_world_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -265,7 +265,7 @@
         "body": {
           "detail": "news_naver_stock_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -334,7 +334,7 @@
           "applied_revision": 0,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -398,7 +398,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "f5c51fa5e51ca5a4af6a21a39343a09a1e06ba32bbe0e3f6347d052e3e51c018",
+        "storage_hash": "9fc893317d351c23af96d8d88c42bac523f0622e3641668b62296dc95681136f",
         "stored": [
           {
             "owner": "global",
@@ -533,7 +533,7 @@
         "body": {
           "detail": "OPERATIONAL_SETTINGS_REVISION_CONFLICT"
         },
-        "storage_hash": "f5c51fa5e51ca5a4af6a21a39343a09a1e06ba32bbe0e3f6347d052e3e51c018",
+        "storage_hash": "9fc893317d351c23af96d8d88c42bac523f0622e3641668b62296dc95681136f",
         "stored": [
           {
             "owner": "global",
@@ -653,7 +653,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "f5c51fa5e51ca5a4af6a21a39343a09a1e06ba32bbe0e3f6347d052e3e51c018",
+        "storage_hash": "9fc893317d351c23af96d8d88c42bac523f0622e3641668b62296dc95681136f",
         "stored": [
           {
             "owner": "global",
@@ -724,7 +724,7 @@
         "body": {
           "detail": "OPERATIONAL_SETTINGS_SAVE_FAILED"
         },
-        "storage_hash": "f5c51fa5e51ca5a4af6a21a39343a09a1e06ba32bbe0e3f6347d052e3e51c018",
+        "storage_hash": "9fc893317d351c23af96d8d88c42bac523f0622e3641668b62296dc95681136f",
         "stored": [
           {
             "owner": "global",
@@ -908,7 +908,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "f5c51fa5e51ca5a4af6a21a39343a09a1e06ba32bbe0e3f6347d052e3e51c018",
+        "storage_hash": "9fc893317d351c23af96d8d88c42bac523f0622e3641668b62296dc95681136f",
         "stored": [
           {
             "owner": "global",
@@ -1028,7 +1028,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "f5c51fa5e51ca5a4af6a21a39343a09a1e06ba32bbe0e3f6347d052e3e51c018",
+        "storage_hash": "9fc893317d351c23af96d8d88c42bac523f0622e3641668b62296dc95681136f",
         "stored": [
           {
             "owner": "global",
@@ -1099,7 +1099,7 @@
         "body": {
           "detail": "EXTERNAL_MARKET_SYMBOLS_REQUIRED"
         },
-        "storage_hash": "f5c51fa5e51ca5a4af6a21a39343a09a1e06ba32bbe0e3f6347d052e3e51c018",
+        "storage_hash": "9fc893317d351c23af96d8d88c42bac523f0622e3641668b62296dc95681136f",
         "stored": [
           {
             "owner": "global",
@@ -1219,7 +1219,7 @@
           "applied_revision": 2,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "01f81bf090dd727e378317cafcea9e5279a159d76f5da60f76eaefb1392aed60",
+        "storage_hash": "9db95395bab8981c2fe125ff17ea7b3f651e49edbc31e18faaffc9cbda67f155",
         "stored": [
           {
             "owner": "global",
@@ -1407,7 +1407,7 @@
           "applied_revision": 3,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "f296acf2c55388b1517ce06429154d6bdf398f7ebbc10a49764b3fde873e0e2e",
+        "storage_hash": "9be1b1401c0a5c0b0ac4bf87966d443caa1ba71e6d471e85e50ade77cfb70365",
         "stored": [
           {
             "owner": "global",
@@ -1542,7 +1542,7 @@
         "body": {
           "detail": "invalid shadow candidate strategy config: BreakoutStrategyConfig.__init__() missing 17 required positional arguments: 'rolling_factor_version', 'rank_factor_version', 'lookback_bars', 'buffer_bps', 'rank_persistence_enabled', 'rank_persistence_required', 'rank_top_k', 'rank_window_seconds', 'rank_max_gap_seconds', 'rank_min_residency_seconds', 'stop_loss_bps', 'target_bps', 'max_hold_minutes', 'quantity', 'capital_won', 'signal_valid_seconds', and 'cooldown_seconds'"
         },
-        "storage_hash": "f296acf2c55388b1517ce06429154d6bdf398f7ebbc10a49764b3fde873e0e2e",
+        "storage_hash": "9be1b1401c0a5c0b0ac4bf87966d443caa1ba71e6d471e85e50ade77cfb70365",
         "stored": [
           {
             "owner": "global",
@@ -1662,7 +1662,7 @@
           "applied_revision": 4,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "a6672908ce3b1b78b5f176042f29c64d4e1f65e1412ab55f03463da6a0af7e0f",
+        "storage_hash": "09161d4f1835643c34767226df0f9f35fe7e975f8fbe0f5875c85c4795a483d5",
         "stored": [
           {
             "owner": "global",
@@ -1854,7 +1854,7 @@
           "applied_revision": 5,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "e75b3fef31e9817054a883491c2da946a45476e0d7d7312f7e86fd37599897e5",
+        "storage_hash": "1adadeffd9843a7a60852e1e375d4176642245d269c44156c3f50ab07feb6e91",
         "stored": [
           {
             "owner": "global",
@@ -2042,7 +2042,7 @@
           "applied_revision": 5,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "e75b3fef31e9817054a883491c2da946a45476e0d7d7312f7e86fd37599897e5",
+        "storage_hash": "1adadeffd9843a7a60852e1e375d4176642245d269c44156c3f50ab07feb6e91",
         "stored": [
           {
             "owner": "global",
@@ -2115,7 +2115,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2130,7 +2130,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2199,7 +2199,7 @@
           "applied_revision": 0,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2227,7 +2227,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2255,7 +2255,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2280,7 +2280,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2305,7 +2305,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2320,7 +2320,7 @@
         "body": {
           "detail": "news_naver_stock_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2335,7 +2335,7 @@
         "body": {
           "detail": "news_naver_flash_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2350,7 +2350,7 @@
         "body": {
           "detail": "news_naver_world_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2365,7 +2365,7 @@
         "body": {
           "detail": "news_naver_stock_url: HTTPS API 주소를 입력하세요."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2434,7 +2434,7 @@
           "applied_revision": 0,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297",
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e",
         "stored": [],
         "events": [],
         "candidate_index": null
@@ -2498,7 +2498,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "8825f935160518571cd1ab4b5a7f9abd9384cdf880669e61cb89ef32f26bae52",
+        "storage_hash": "fe0886f4a8eba4ec3986c1c28551394482a07d382c76dcc9c5a2dcdbb104a970",
         "stored": [
           {
             "owner": "global",
@@ -2665,7 +2665,7 @@
         "body": {
           "detail": "OPERATIONAL_SETTINGS_REVISION_CONFLICT"
         },
-        "storage_hash": "8825f935160518571cd1ab4b5a7f9abd9384cdf880669e61cb89ef32f26bae52",
+        "storage_hash": "fe0886f4a8eba4ec3986c1c28551394482a07d382c76dcc9c5a2dcdbb104a970",
         "stored": [
           {
             "owner": "global",
@@ -2785,7 +2785,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "8825f935160518571cd1ab4b5a7f9abd9384cdf880669e61cb89ef32f26bae52",
+        "storage_hash": "fe0886f4a8eba4ec3986c1c28551394482a07d382c76dcc9c5a2dcdbb104a970",
         "stored": [
           {
             "owner": "global",
@@ -2856,7 +2856,7 @@
         "body": {
           "detail": "OPERATIONAL_SETTINGS_SAVE_FAILED"
         },
-        "storage_hash": "8825f935160518571cd1ab4b5a7f9abd9384cdf880669e61cb89ef32f26bae52",
+        "storage_hash": "fe0886f4a8eba4ec3986c1c28551394482a07d382c76dcc9c5a2dcdbb104a970",
         "stored": [
           {
             "owner": "global",
@@ -3040,7 +3040,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "8825f935160518571cd1ab4b5a7f9abd9384cdf880669e61cb89ef32f26bae52",
+        "storage_hash": "fe0886f4a8eba4ec3986c1c28551394482a07d382c76dcc9c5a2dcdbb104a970",
         "stored": [
           {
             "owner": "global",
@@ -3160,7 +3160,7 @@
           "applied_revision": 1,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "8825f935160518571cd1ab4b5a7f9abd9384cdf880669e61cb89ef32f26bae52",
+        "storage_hash": "fe0886f4a8eba4ec3986c1c28551394482a07d382c76dcc9c5a2dcdbb104a970",
         "stored": [
           {
             "owner": "global",
@@ -3280,7 +3280,7 @@
           "applied_revision": 2,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "1716757b81b3d57b8c31572eee09156c7671ec9458deaf6b91851407f3c11603",
+        "storage_hash": "916b1b2cdbe7e46f6a14a21ee5c24d971203b378de60185c1773134a3fe02544",
         "stored": [
           {
             "owner": "global",
@@ -3457,7 +3457,7 @@
         "body": {
           "detail": "OPERATIONAL_SETTINGS_APPLY_PENDING"
         },
-        "storage_hash": "94ec952ff34ba6d0f75c6aa9cf185f3d06f6091e2fc1602b3cb2e34ef49db457",
+        "storage_hash": "236d32e71efcac36020f92cca80765c6d2c07be6794329b0314f474493a16396",
         "stored": [
           {
             "owner": "global",
@@ -3673,7 +3673,7 @@
           "applied_revision": 2,
           "apply_status": "RECOVERY_REQUIRED"
         },
-        "storage_hash": "94ec952ff34ba6d0f75c6aa9cf185f3d06f6091e2fc1602b3cb2e34ef49db457",
+        "storage_hash": "236d32e71efcac36020f92cca80765c6d2c07be6794329b0314f474493a16396",
         "stored": [
           {
             "owner": "global",
@@ -3793,7 +3793,7 @@
           "applied_revision": 3,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "94ec952ff34ba6d0f75c6aa9cf185f3d06f6091e2fc1602b3cb2e34ef49db457",
+        "storage_hash": "236d32e71efcac36020f92cca80765c6d2c07be6794329b0314f474493a16396",
         "stored": [
           {
             "owner": "global",
@@ -4019,7 +4019,7 @@
           "applied_revision": 4,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "d0952a37f3ba3404a2d6d4d6cad950b425dd98c8ce109247163e6cc4462420e9",
+        "storage_hash": "ec5d6561fefc6035b260903fe78649857953e0ba2034929c9f070ecef37f8ef3",
         "stored": [
           {
             "owner": "global",
@@ -4239,7 +4239,7 @@
           "applied_revision": 5,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "f3241eee5c626fec9ecc8c612e964a587a5a4d685a9aee74ff3b2d12b7a1194d",
+        "storage_hash": "2bdad2720c79e0698f4dad577b038a483623f130100f21cdd3770bdedbb95efa",
         "stored": [
           {
             "owner": "global",
@@ -4406,7 +4406,7 @@
         "body": {
           "detail": "invalid shadow candidate strategy config: BreakoutStrategyConfig.__init__() missing 17 required positional arguments: 'rolling_factor_version', 'rank_factor_version', 'lookback_bars', 'buffer_bps', 'rank_persistence_enabled', 'rank_persistence_required', 'rank_top_k', 'rank_window_seconds', 'rank_max_gap_seconds', 'rank_min_residency_seconds', 'stop_loss_bps', 'target_bps', 'max_hold_minutes', 'quantity', 'capital_won', 'signal_valid_seconds', and 'cooldown_seconds'"
         },
-        "storage_hash": "f3241eee5c626fec9ecc8c612e964a587a5a4d685a9aee74ff3b2d12b7a1194d",
+        "storage_hash": "2bdad2720c79e0698f4dad577b038a483623f130100f21cdd3770bdedbb95efa",
         "stored": [
           {
             "owner": "global",
@@ -4526,7 +4526,7 @@
           "applied_revision": 6,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "ca3cdacea9f515cc2aa2ff275b1669c91d9c0e2f1f7499b4b4cb31ace5702860",
+        "storage_hash": "9b16a12e9ece9da22ffe280a170142cc80c6a777984da97ab9020d379c76451a",
         "stored": [
           {
             "owner": "global",
@@ -4750,7 +4750,7 @@
           "applied_revision": 7,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "a69993c4abe3efe4ae7de3e6830854bbf40161d2160d3a72779c34ecb0397269",
+        "storage_hash": "261d33113ee724bb739b0889949a6ffc3faf77b2e53c70c88bfc3272cfb6f013",
         "stored": [
           {
             "owner": "global",
@@ -4970,7 +4970,7 @@
           "applied_revision": 7,
           "apply_status": "ACTIVE"
         },
-        "storage_hash": "a69993c4abe3efe4ae7de3e6830854bbf40161d2160d3a72779c34ecb0397269",
+        "storage_hash": "261d33113ee724bb739b0889949a6ffc3faf77b2e53c70c88bfc3272cfb6f013",
         "stored": [
           {
             "owner": "global",

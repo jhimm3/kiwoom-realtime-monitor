@@ -226,3 +226,49 @@ class CredentialsClientTests(unittest.TestCase):
         self.assertNotIn("ephemeral", repr(self.client.__dict__))
         self.client.prepare_account("nas-real-default", 3, "ephemeral-real", "ephemeral-secret")
         self.assertEqual(*[json.loads(r.data)["request_id"] for r in self.requests])
+
+
+class CredentialsOperationContextTests(unittest.TestCase):
+    setUp = CredentialsClientTests.setUp
+    open = CredentialsClientTests.open
+    def test_observation_header_is_distinct_from_retry_business_uuid_and_ephemeral_secrets(self):
+        from kiwoom_monitor.domain import operation_context as c
+        self.responses = [TimeoutError("ephemeral-key ephemeral-secret access"), self.operation]
+        parent = c.OperationContextSnapshot("pc.credentials", "settings-observation")
+        observed = []
+        original_open = self.opener.open.side_effect
+        def opened(request, timeout):
+            observed.append(c.snapshot_operation_context())
+            return original_open(request, timeout)
+        self.opener.open.side_effect = opened
+        with c.operation_context_scope(parent):
+            with self.assertRaises(RuntimeError):
+                self.client.prepare_mock("nas-mock-default", 3, "ephemeral-key", "ephemeral-secret")
+            self.assertEqual(parent, c.snapshot_operation_context())
+            self.client.prepare_mock("nas-mock-default", 3, "ephemeral-key", "ephemeral-secret")
+            self.assertEqual(parent, c.snapshot_operation_context())
+        self.assertEqual([parent, parent], observed)
+        self.assertEqual(["settings-observation"] * 2, [request.get_header("X-request-id") for request in self.requests])
+        business = [json.loads(request.data)["request_id"] for request in self.requests]
+        self.assertEqual(business[0], business[1])
+        self.assertNotEqual("settings-observation", business[0])
+        self.assertNotIn("ephemeral", repr(self.client.__dict__))
+        self.assertEqual(c.OperationContextSnapshot(), c.snapshot_operation_context())
+
+    def test_bearer_overlap_and_cancel_use_safe_wire_id_and_reset(self):
+        import asyncio
+        from kiwoom_monitor.domain import operation_context as c
+        parent = c.OperationContextSnapshot("pc.credentials", "prefix-access-suffix")
+        seen = []
+        def cancelled(request, timeout):
+            seen.append((request.get_header("X-request-id"), c.snapshot_operation_context()))
+            raise asyncio.CancelledError()
+        self.opener.open.side_effect = cancelled
+        with c.operation_context_scope(parent):
+            with self.assertRaises(asyncio.CancelledError):
+                self.client._request("GET", "/api/v1/capabilities")
+            self.assertEqual(parent, c.snapshot_operation_context())
+        wire, actual = seen[0]
+        self.assertEqual(uuid.UUID(wire).hex, wire)
+        self.assertEqual(c.OperationContextSnapshot("pc.credentials", wire), actual)
+        self.assertNotIn("access", wire)

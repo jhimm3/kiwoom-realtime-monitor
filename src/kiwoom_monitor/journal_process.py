@@ -18,7 +18,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QDate, QPoint, QRectF, QSettings, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QDate, QPoint, QRectF, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QCloseEvent, QIcon, QImage, QPainter, QPen, QPolygon, QTextDocument
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox,
@@ -241,345 +241,354 @@ class JournalWindow(QMainWindow):
             self._api_ready = bool(settings.app_key and settings.secret_key)
         client = create_query_client(config, config.with_name("data_source.json"))
         self._query_client = client
-        self._available_account_contexts = ()
-        self._account_list_worker = None
-        self._minute_service = MinuteChartService(client, include_nxt=True)
-        self._market_index_service = MarketIndexChartService(client)
-        self._market_index_worker: MarketIndexBackfillWorker | None = None
-        self._market_index_requested_days: set[date] = set()
-        self._market_index_active_day: date | None = None
-        self._pending_market_index_day: date | None = None
-        self._compare_stock_requested: set[tuple[str, date]] = set()
-        self._previous_chart_requested: set[tuple[str, date]] = set()
-        self._daily_chart_service = DailyTradeChartService(client)
-        self._history_service = TradeHistoryService(client)
-        self._cost_service = TradeCostService(client)
-        self._live_code = ""
-        self._live_name = ""
-        self._worker: ConfirmWorker | None = None
-        self._history_worker: HistoryWorker | None = None
-        self._analysis_enrichment_worker: AnalysisEnrichmentWorker | None = None
-        self._analysis_enrichment_task_ids: dict[str, dict[str, str]] = {}
-        self._shutting_down = False
-        self._quit_after_history_sync = False
-        self._backfill_worker: BackfillWorker | None = None
-        self._daily_chart_worker: DailyChartWorker | None = None
-        self._pending_daily_chart: tuple[str, date, str] | None = None
-        self._automatic_backfill_running = False
-        self._automatic_backfill_attempted_for: tuple[date, bool] | None = None
-        self._selected_history_day: date | None = None
-        self._selected_history_code = ""
-        self._selected_history_focus: datetime | None = None
-        self._selected_history_range: tuple[date, date] | None = None
-        self._visible_fills: tuple[TradeFill, ...] = ()
-        self._visible_costs: tuple[DailyTradeCost, ...] = ()
-        self._episodes: tuple[TradeEpisode, ...] = ()
-        self._all_episodes: tuple[TradeEpisode, ...] = ()
-        self._active_episode: TradeEpisode | None = None
-        self._loaded_history_scope: AccountScope | None = None
-        self._loading_review = False
-        self._review_dirty = False
-        self._loading_setup = False
-        self._last_confirmed_minute = ""
-        self.setWindowTitle("키움 매매일지")
-        self.resize(1040, 720)
-        saved_geometry = QSettings("KiwoomMonitor", "TradingJournalWindow").value("geometry")
-        if saved_geometry is not None:
-            self.restoreGeometry(saved_geometry)
-        root = QWidget(); layout = QVBoxLayout(root)
-        self._status = QLabel("대기")
-        self._tabs = QTabWidget(); layout.addWidget(self._tabs)
+        try:
+            self._available_account_contexts = ()
+            self._account_list_worker = None
+            self._minute_service = MinuteChartService(client, include_nxt=True)
+            self._market_index_service = MarketIndexChartService(client)
+            self._market_index_worker: MarketIndexBackfillWorker | None = None
+            self._market_index_requested_days: set[date] = set()
+            self._market_index_active_day: date | None = None
+            self._pending_market_index_day: date | None = None
+            self._compare_stock_requested: set[tuple[str, date]] = set()
+            self._previous_chart_requested: set[tuple[str, date]] = set()
+            self._daily_chart_service = DailyTradeChartService(client)
+            self._history_service = TradeHistoryService(client)
+            self._cost_service = TradeCostService(client)
+            self._live_code = ""
+            self._live_name = ""
+            self._worker: ConfirmWorker | None = None
+            self._history_worker: HistoryWorker | None = None
+            self._analysis_enrichment_worker: AnalysisEnrichmentWorker | None = None
+            self._analysis_enrichment_task_ids: dict[str, dict[str, str]] = {}
+            self._shutting_down = False
+            self._quit_after_history_sync = False
+            self._backfill_worker: BackfillWorker | None = None
+            self._daily_chart_worker: DailyChartWorker | None = None
+            self._pending_daily_chart: tuple[str, date, str] | None = None
+            self._automatic_backfill_running = False
+            self._automatic_backfill_attempted_for: tuple[date, bool] | None = None
+            self._selected_history_day: date | None = None
+            self._selected_history_code = ""
+            self._selected_history_focus: datetime | None = None
+            self._selected_history_range: tuple[date, date] | None = None
+            self._visible_fills: tuple[TradeFill, ...] = ()
+            self._visible_costs: tuple[DailyTradeCost, ...] = ()
+            self._episodes: tuple[TradeEpisode, ...] = ()
+            self._all_episodes: tuple[TradeEpisode, ...] = ()
+            self._active_episode: TradeEpisode | None = None
+            self._loaded_history_scope: AccountScope | None = None
+            self._loading_review = False
+            self._review_dirty = False
+            self._loading_setup = False
+            self._last_confirmed_minute = ""
+            self.setWindowTitle("키움 매매일지")
+            self.resize(1040, 720)
+            saved_geometry = QSettings("KiwoomMonitor", "TradingJournalWindow").value("geometry")
+            if saved_geometry is not None:
+                self.restoreGeometry(saved_geometry)
+            root = QWidget(); layout = QVBoxLayout(root)
+            self._status = QLabel("대기")
+            self._tabs = QTabWidget(); layout.addWidget(self._tabs)
 
-        history_page = QWidget(); history_layout = QVBoxLayout(history_page)
-        filters = QHBoxLayout()
-        today = as_kst(self._query_client.server_now()).date()
-        current_date = QDate(today.year, today.month, today.day)
-        self._from_date = QDateEdit(current_date.addDays(-7)); self._from_date.setCalendarPopup(True)
-        self._to_date = QDateEdit(current_date); self._to_date.setCalendarPopup(True)
-        self._from_date.dateChanged.connect(self.reload_history); self._to_date.dateChanged.connect(self.reload_history)
-        self._stock_filter = QLineEdit(); self._stock_filter.setPlaceholderText("종목명·코드 검색")
-        self._stock_filter.setMaximumWidth(150); self._stock_filter.textChanged.connect(self._apply_history_filters)
-        self._result_filter = QComboBox(); self._result_filter.addItems(("전체 손익", "수익", "손실", "보합"))
-        self._result_filter.currentTextChanged.connect(self._apply_history_filters)
-        self._review_filter = QComboBox(); self._review_filter.addItems(("전체 복기", "미작성", "작성 중", "복기 완료"))
-        self._review_filter.currentTextChanged.connect(self._apply_history_filters)
-        self._account_filter = QComboBox()
-        self._account_filter.setMinimumWidth(175)
-        self._refresh_account_choices()
-        self._account_filter.currentIndexChanged.connect(self._account_filter_changed)
-        sync = QPushButton("키움에서 체결내역 가져오기"); sync.clicked.connect(self.sync_history)
-        journal_settings = QPushButton("⚙"); journal_settings.setToolTip("매매일지 설정"); journal_settings.setFixedWidth(34)
-        journal_settings.clicked.connect(self._open_journal_settings)
-        filters.addWidget(QLabel("계좌")); filters.addWidget(self._account_filter)
-        account_reload = QPushButton("↻"); account_reload.setFixedWidth(28)
-        account_reload.setToolTip("API 계좌 목록 갱신"); account_reload.clicked.connect(self._load_api_account_choices)
-        filters.addWidget(account_reload)
-        filters.addWidget(QLabel("기간")); filters.addWidget(self._from_date); filters.addWidget(QLabel("~")); filters.addWidget(self._to_date)
-        filters.addWidget(self._stock_filter); filters.addWidget(self._result_filter); filters.addWidget(self._review_filter)
-        filters.addWidget(sync); filters.addStretch(); filters.addWidget(self._status); filters.addWidget(journal_settings)
-        history_layout.addLayout(filters)
-        self._period_summary = QLabel("체결내역을 가져오면 날짜·종목별 매매 결과가 표시됩니다.")
-        self._period_summary.setStyleSheet("font-size: 14px; font-weight: 600; padding: 8px; background: #f4f7fb; border-radius: 4px;")
-        export_review = QPushButton("복기 이미지 저장"); export_review.clicked.connect(self._export_review_image)
-        summary_row = QHBoxLayout(); summary_row.setContentsMargins(0, 0, 0, 0)
-        summary_row.addWidget(self._period_summary, 1); summary_row.addWidget(export_review)
-        history_layout.addLayout(summary_row)
-        group_actions = QHBoxLayout()
-        split_group = QPushButton("선택 체결을 새 묶음으로 분리"); split_group.clicked.connect(self._split_selected_fills)
-        merge_groups = QPushButton("선택한 매매 묶음 합치기"); merge_groups.clicked.connect(self._merge_selected_groups)
-        reset_group = QPushButton("선택 묶음 자동분류로 복원"); reset_group.clicked.connect(self._reset_selected_groups)
-        backfill = QPushButton("누락 분봉 일괄 보완"); backfill.clicked.connect(self._start_missing_backfill)
-        retry_backfill = QPushButton("실패만 재시도"); retry_backfill.clicked.connect(lambda: self._start_missing_backfill(failed_only=True))
-        stop_backfill = QPushButton("보완 중지"); stop_backfill.clicked.connect(self._stop_backfill)
-        self._auto_backfill = QCheckBox("장 종료 후 자동 보완")
-        self._auto_backfill.setChecked(QSettings("KiwoomMonitor", "TradingJournalWindow").value("auto_backfill", True, type=bool))
-        self._auto_backfill.toggled.connect(self._save_auto_backfill_setting)
-        group_actions.addWidget(split_group); group_actions.addWidget(merge_groups); group_actions.addWidget(reset_group); group_actions.addStretch()
-        group_actions.addWidget(self._auto_backfill); group_actions.addWidget(backfill); group_actions.addWidget(retry_backfill); group_actions.addWidget(stop_backfill)
-        history_layout.addLayout(group_actions)
-        splitter = QSplitter(Qt.Orientation.Vertical); self._history_splitter = splitter
-        self._summary_table = QTableWidget(0, 15)
-        self._summary_table.setHorizontalHeaderLabels((
-            "매매 기간", "종목", "매수", "매도", "매수금액", "매도금액",
-            "추정 실현손익", "수익률", "실제 비용", "비용후 손익", "상태", "체결", "분봉", "복기", "매매유형",
-        ))
-        self._summary_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._summary_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self._summary_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._summary_table.itemSelectionChanged.connect(self._show_selected_summary)
-        self._configure_journal_table(self._summary_table)
-        splitter.addWidget(self._summary_table)
-        self._fills_table = QTableWidget(0, 9)
-        self._fills_table.setHorizontalHeaderLabels(("일시", "종목", "구분", "수량", "체결가", "체결금액", "주문유형", "시장", "주문번호"))
-        self._fills_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._fills_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self._fills_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._fills_table.itemSelectionChanged.connect(self._show_selected_fill)
-        self._fills_table.cellClicked.connect(lambda row, _column: self._show_fill_at_row(row))
-        self._configure_journal_table(self._fills_table)
-        splitter.addWidget(self._fills_table)
-        chart_box = QWidget(); chart_layout = QVBoxLayout(chart_box); chart_layout.setContentsMargins(0, 0, 0, 0); chart_layout.setSpacing(0)
-        chart_actions = QHBoxLayout()
-        self._history_interval = QComboBox(); self._history_interval.addItems(("1분", "3분", "5분", "10분", "30분", "60분", "일봉"))
-        saved_history_interval = self._journal_settings.value("history_chart_interval", "1분", type=str)
-        self._history_interval.setCurrentText(saved_history_interval if saved_history_interval in {"1분", "3분", "5분", "10분", "30분", "60분", "일봉"} else "1분")
-        self._history_interval.currentTextChanged.connect(self._history_interval_changed)
-        self._history_view_count = QSpinBox(); self._history_view_count.setRange(0, 2_000); self._history_view_count.setSingleStep(1)
-        self._history_view_count.setSpecialValueText("전체"); self._history_view_count.setSuffix("개")
-        self._history_view_count.setValue(self._journal_settings.value(f"history_chart_view_count_{self._history_interval.currentText()}", 120, type=int))
-        self._history_view_count.valueChanged.connect(lambda value: self._history_chart.set_view_count(value))
-        chart_larger = QPushButton("확대"); chart_larger.clicked.connect(lambda: self._history_chart.zoom(0.5))
-        chart_smaller = QPushButton("축소"); chart_smaller.clicked.connect(lambda: self._history_chart.zoom(2.0))
-        chart_all = QPushButton("전체"); chart_all.clicked.connect(lambda: self._history_view_count.setValue(0))
-        history_drawing = QComboBox(); history_drawing.addItems(("그리기 끄기", "선", "가로선", "세로선", "사각형", "텍스트"))
-        history_drawing.currentTextChanged.connect(lambda value: self._history_chart.set_drawing_mode(value.replace("그리기 ", "")))
-        clear_history_drawing = QPushButton("그림 초기화"); clear_history_drawing.clicked.connect(lambda: self._history_chart.clear_annotations())
-        chart_settings = QPushButton("⚙"); chart_settings.setToolTip("차트 설정"); chart_settings.setFixedWidth(34)
-        chart_settings.clicked.connect(self._open_chart_settings)
-        self._history_trade_details = QCheckBox("체결정보")
-        self._history_trade_details.setToolTip("기본 차트와 차트 따로보기의 현재 종목 차트에서 체결시간·가격·수량을 표시합니다.")
-        self._history_trade_details.setChecked(self._show_trade_details)
-        self._history_trade_details.toggled.connect(self._set_trade_details_visible)
-        self._dual_history_chart = QCheckBox("분봉+일봉 같이 보기")
-        self._dual_history_chart.setChecked(self._show_dual_history_chart)
-        self._dual_history_chart.toggled.connect(self._toggle_dual_history_chart)
-        detached_charts = QPushButton("차트 따로 보기"); detached_charts.clicked.connect(self._open_detached_charts)
-        chart_actions.addWidget(QLabel("봉 주기")); chart_actions.addWidget(self._history_interval); chart_actions.addWidget(QLabel("화면 봉 수")); chart_actions.addWidget(self._history_view_count)
-        chart_actions.addWidget(chart_larger); chart_actions.addWidget(chart_smaller); chart_actions.addWidget(chart_all)
-        chart_actions.addWidget(history_drawing); chart_actions.addWidget(clear_history_drawing); chart_actions.addWidget(chart_settings); chart_actions.addStretch()
-        chart_actions.addWidget(self._dual_history_chart); chart_actions.addWidget(self._history_trade_details)
-        chart_actions.addWidget(detached_charts)
-        chart_layout.addLayout(chart_actions)
-        self._history_chart = MinuteChart(); self._history_chart.set_background(self._chart_background); self._history_chart.set_ctrl_wheel_zoom_enabled(self._ctrl_wheel_zoom_enabled); self._history_chart.set_trade_value_threshold(self._trade_value_threshold); self._history_chart.set_daily_trade_value_threshold(self._daily_trade_value_threshold); self._history_chart.set_trade_details_visible(self._show_trade_details); self._history_chart.set_drawing_style(self._drawing_line_width, self._rectangle_color, self._line_color, self._horizontal_line_color, self._vertical_line_color); self._history_chart.set_moving_average_styles(self._moving_average_styles); self._history_chart.set_interval(self._history_interval.currentText()); self._history_chart.set_view_count(self._history_view_count.value()); chart_layout.addWidget(self._history_chart)
-        self._history_scroll = QScrollBar(Qt.Orientation.Horizontal)
-        self._history_scroll.setFixedHeight(12)
-        self._history_scroll.valueChanged.connect(self._history_chart.set_view_start)
-        self._history_chart.view_changed.connect(lambda maximum, current, page: self._sync_chart_scrollbar(self._history_scroll, maximum, current, page))
-        self._history_chart.view_count_changed.connect(self._history_view_count_changed)
-        self._history_chart.annotations_changed.connect(lambda values: self._history_annotations_changed(self._history_interval.currentText(), values))
-        chart_layout.addWidget(self._history_scroll)
-        self._history_daily_title = QLabel("일봉 차트")
-        self._history_daily_title.setFixedHeight(18)
-        self._history_daily_title.setStyleSheet("font-weight:600;color:#555555;background:#EEF1F4;border-top:1px solid #BFC6CF;padding-left:5px;")
-        self._history_daily_chart = MinuteChart(); self._history_daily_chart.set_interval("일봉")
-        self._history_daily_chart.set_top_margin(30)
-        self._history_daily_chart.set_background(self._chart_background)
-        self._history_daily_chart.set_ctrl_wheel_zoom_enabled(self._ctrl_wheel_zoom_enabled)
-        self._history_daily_chart.set_daily_trade_value_threshold(self._daily_trade_value_threshold)
-        self._history_daily_chart.set_trade_details_visible(self._show_trade_details)
-        self._history_daily_chart.set_drawing_style(self._drawing_line_width, self._rectangle_color, self._line_color, self._horizontal_line_color, self._vertical_line_color)
-        self._history_daily_chart.set_moving_average_styles(self._moving_average_styles)
-        self._history_daily_chart.set_view_count(self._journal_settings.value("history_chart_view_count_일봉", 120, type=int))
-        self._history_daily_chart.view_count_changed.connect(lambda count: self._daily_history_view_count_changed(count))
-        self._history_daily_chart.annotations_changed.connect(lambda values: self._history_annotations_changed("일봉", values))
-        self._history_daily_title.setVisible(self._show_dual_history_chart)
-        self._history_daily_chart.setVisible(self._show_dual_history_chart)
-        chart_layout.addWidget(self._history_daily_title); chart_layout.addWidget(self._history_daily_chart)
-        splitter.addWidget(chart_box)
-        review_box = QGroupBox("선택한 매매 복기")
-        review_form = QFormLayout(review_box)
-        self._analysis_label = QTextEdit()
-        self._analysis_label.setReadOnly(True)
-        self._analysis_label.setPlainText("매매 묶음을 선택하면 분봉 기준 자동 분석이 표시됩니다.")
-        self._analysis_label.setMinimumHeight(120)
-        self._analysis_label.setMaximumHeight(220)
-        self._analysis_label.setStyleSheet("padding: 7px; background: #f7f7f7; color: #333333;")
-        self._analysis_data_status = QLabel("분석 자료: 매매 묶음을 선택하세요.")
-        self._analysis_data_status.setWordWrap(True)
-        self._analysis_data_status.setStyleSheet("padding: 4px 7px; color: #666666; background: #eef3f7;")
-        setup_row = QVBoxLayout()
-        self._setup_label = QTextEdit()
-        self._setup_label.setReadOnly(True)
-        self._setup_label.setPlainText("매매 묶음을 선택하면 진입 유형을 추정합니다.")
-        self._setup_label.setMinimumHeight(58)
-        self._setup_label.setMaximumHeight(100)
-        self._setup_cycles = QTableWidget(0, 5)
-        self._setup_cycles.setHorizontalHeaderLabels(("회차", "자동 유형", "세부 유형", "신뢰도", "직접 수정"))
-        self._setup_cycles.verticalHeader().setVisible(False)
-        self._setup_cycles.horizontalHeader().setStretchLastSection(True)
-        self._setup_cycles.setMinimumHeight(68)
-        self._setup_cycles.setMaximumHeight(260)
-        setup_row.addWidget(self._setup_label)
-        setup_row.addWidget(self._setup_cycles)
-        self._review_reason = QTextEdit(); self._review_reason.setPlaceholderText("왜 진입했고 어떤 근거로 매도했는지 적어보세요."); self._review_reason.setMaximumHeight(70)
-        self._review_note = QTextEdit(); self._review_note.setPlaceholderText("잘한 점, 놓친 점, 다음 매매에서 바꿀 점을 적어보세요."); self._review_note.setMaximumHeight(85)
-        self._review_tags = QLineEdit(); self._review_tags.setPlaceholderText("예: 주도주 돌파, 테마주 돌파, 신규주 (쉼표로 구분)")
-        review_options = QHBoxLayout()
-        self._review_rating = QComboBox(); self._review_rating.addItems(("잘함", "보통", "아쉬움"))
-        self._review_status = QComboBox(); self._review_status.addItems(("미작성", "작성 중", "복기 완료"))
-        self._review_saved = QLabel("매매 묶음을 선택하세요.")
-        save_review = QPushButton("지금 저장"); save_review.clicked.connect(self._save_active_review)
-        self._journal_news_button = QPushButton("관련 뉴스 보기")
-        self._journal_news_button.setEnabled(False)
-        self._journal_news_button.clicked.connect(self._open_active_news)
-        review_options.addWidget(QLabel("평가")); review_options.addWidget(self._review_rating)
-        review_options.addWidget(QLabel("상태")); review_options.addWidget(self._review_status)
-        review_options.addWidget(save_review); review_options.addWidget(self._journal_news_button); review_options.addWidget(self._review_saved); review_options.addStretch()
-        review_form.addRow("예상 매매유형", setup_row)
-        review_form.addRow("자동 분석", self._analysis_label)
-        review_form.addRow("분석 자료", self._analysis_data_status)
-        review_form.addRow("매매 이유", self._review_reason); review_form.addRow("복기 메모", self._review_note)
-        review_form.addRow("태그", self._review_tags); review_form.addRow(review_options)
-        review_scroll = QScrollArea()
-        review_scroll.setWidgetResizable(True)
-        review_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        review_scroll.setWidget(review_box)
-        splitter.addWidget(review_scroll)
-        splitter.setSizes((210, 170, 250, 210))
-        saved_splitter = QSettings("KiwoomMonitor", "TradingJournalWindow").value("history_splitter")
-        if saved_splitter is not None:
-            splitter.restoreState(saved_splitter)
-        history_layout.addWidget(splitter)
-        help_text = QLabel("위 요약에서 날짜·종목을 선택하면 해당 체결만 아래에 표시되고, 분봉을 자동으로 보완해 매수·매도 위치를 차트에 표시합니다. 실현손익은 수수료·세금을 제외한 FIFO 추정값입니다.")
-        help_text.setWordWrap(True); help_text.setStyleSheet("color: #666666;"); history_layout.addWidget(help_text)
-        self._tabs.addTab(history_page, "과거 매매목록")
+            history_page = QWidget(); history_layout = QVBoxLayout(history_page)
+            filters = QHBoxLayout()
+            today = as_kst(self._query_client.server_now()).date()
+            current_date = QDate(today.year, today.month, today.day)
+            self._from_date = QDateEdit(current_date.addDays(-7)); self._from_date.setCalendarPopup(True)
+            self._to_date = QDateEdit(current_date); self._to_date.setCalendarPopup(True)
+            self._from_date.dateChanged.connect(self.reload_history); self._to_date.dateChanged.connect(self.reload_history)
+            self._stock_filter = QLineEdit(); self._stock_filter.setPlaceholderText("종목명·코드 검색")
+            self._stock_filter.setMaximumWidth(150); self._stock_filter.textChanged.connect(self._apply_history_filters)
+            self._result_filter = QComboBox(); self._result_filter.addItems(("전체 손익", "수익", "손실", "보합"))
+            self._result_filter.currentTextChanged.connect(self._apply_history_filters)
+            self._review_filter = QComboBox(); self._review_filter.addItems(("전체 복기", "미작성", "작성 중", "복기 완료"))
+            self._review_filter.currentTextChanged.connect(self._apply_history_filters)
+            self._account_filter = QComboBox()
+            self._account_filter.setMinimumWidth(175)
+            self._refresh_account_choices()
+            self._account_filter.currentIndexChanged.connect(self._account_filter_changed)
+            sync = QPushButton("키움에서 체결내역 가져오기"); sync.clicked.connect(self.sync_history)
+            journal_settings = QPushButton("⚙"); journal_settings.setToolTip("매매일지 설정"); journal_settings.setFixedWidth(34)
+            journal_settings.clicked.connect(self._open_journal_settings)
+            filters.addWidget(QLabel("계좌")); filters.addWidget(self._account_filter)
+            account_reload = QPushButton("↻"); account_reload.setFixedWidth(28)
+            account_reload.setToolTip("API 계좌 목록 갱신"); account_reload.clicked.connect(self._load_api_account_choices)
+            filters.addWidget(account_reload)
+            filters.addWidget(QLabel("기간")); filters.addWidget(self._from_date); filters.addWidget(QLabel("~")); filters.addWidget(self._to_date)
+            filters.addWidget(self._stock_filter); filters.addWidget(self._result_filter); filters.addWidget(self._review_filter)
+            filters.addWidget(sync); filters.addStretch(); filters.addWidget(self._status); filters.addWidget(journal_settings)
+            history_layout.addLayout(filters)
+            self._period_summary = QLabel("체결내역을 가져오면 날짜·종목별 매매 결과가 표시됩니다.")
+            self._period_summary.setStyleSheet("font-size: 14px; font-weight: 600; padding: 8px; background: #f4f7fb; border-radius: 4px;")
+            export_review = QPushButton("복기 이미지 저장"); export_review.clicked.connect(self._export_review_image)
+            summary_row = QHBoxLayout(); summary_row.setContentsMargins(0, 0, 0, 0)
+            summary_row.addWidget(self._period_summary, 1); summary_row.addWidget(export_review)
+            history_layout.addLayout(summary_row)
+            group_actions = QHBoxLayout()
+            split_group = QPushButton("선택 체결을 새 묶음으로 분리"); split_group.clicked.connect(self._split_selected_fills)
+            merge_groups = QPushButton("선택한 매매 묶음 합치기"); merge_groups.clicked.connect(self._merge_selected_groups)
+            reset_group = QPushButton("선택 묶음 자동분류로 복원"); reset_group.clicked.connect(self._reset_selected_groups)
+            backfill = QPushButton("누락 분봉 일괄 보완"); backfill.clicked.connect(self._start_missing_backfill)
+            retry_backfill = QPushButton("실패만 재시도"); retry_backfill.clicked.connect(lambda: self._start_missing_backfill(failed_only=True))
+            stop_backfill = QPushButton("보완 중지"); stop_backfill.clicked.connect(self._stop_backfill)
+            self._auto_backfill = QCheckBox("장 종료 후 자동 보완")
+            self._auto_backfill.setChecked(QSettings("KiwoomMonitor", "TradingJournalWindow").value("auto_backfill", True, type=bool))
+            self._auto_backfill.toggled.connect(self._save_auto_backfill_setting)
+            group_actions.addWidget(split_group); group_actions.addWidget(merge_groups); group_actions.addWidget(reset_group); group_actions.addStretch()
+            group_actions.addWidget(self._auto_backfill); group_actions.addWidget(backfill); group_actions.addWidget(retry_backfill); group_actions.addWidget(stop_backfill)
+            history_layout.addLayout(group_actions)
+            splitter = QSplitter(Qt.Orientation.Vertical); self._history_splitter = splitter
+            self._summary_table = QTableWidget(0, 15)
+            self._summary_table.setHorizontalHeaderLabels((
+                "매매 기간", "종목", "매수", "매도", "매수금액", "매도금액",
+                "추정 실현손익", "수익률", "실제 비용", "비용후 손익", "상태", "체결", "분봉", "복기", "매매유형",
+            ))
+            self._summary_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self._summary_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+            self._summary_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self._summary_table.itemSelectionChanged.connect(self._show_selected_summary)
+            self._configure_journal_table(self._summary_table)
+            splitter.addWidget(self._summary_table)
+            self._fills_table = QTableWidget(0, 9)
+            self._fills_table.setHorizontalHeaderLabels(("일시", "종목", "구분", "수량", "체결가", "체결금액", "주문유형", "시장", "주문번호"))
+            self._fills_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self._fills_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+            self._fills_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self._fills_table.itemSelectionChanged.connect(self._show_selected_fill)
+            self._fills_table.cellClicked.connect(lambda row, _column: self._show_fill_at_row(row))
+            self._configure_journal_table(self._fills_table)
+            splitter.addWidget(self._fills_table)
+            chart_box = QWidget(); chart_layout = QVBoxLayout(chart_box); chart_layout.setContentsMargins(0, 0, 0, 0); chart_layout.setSpacing(0)
+            chart_actions = QHBoxLayout()
+            self._history_interval = QComboBox(); self._history_interval.addItems(("1분", "3분", "5분", "10분", "30분", "60분", "일봉"))
+            saved_history_interval = self._journal_settings.value("history_chart_interval", "1분", type=str)
+            self._history_interval.setCurrentText(saved_history_interval if saved_history_interval in {"1분", "3분", "5분", "10분", "30분", "60분", "일봉"} else "1분")
+            self._history_interval.currentTextChanged.connect(self._history_interval_changed)
+            self._history_view_count = QSpinBox(); self._history_view_count.setRange(0, 2_000); self._history_view_count.setSingleStep(1)
+            self._history_view_count.setSpecialValueText("전체"); self._history_view_count.setSuffix("개")
+            self._history_view_count.setValue(self._journal_settings.value(f"history_chart_view_count_{self._history_interval.currentText()}", 120, type=int))
+            self._history_view_count.valueChanged.connect(lambda value: self._history_chart.set_view_count(value))
+            chart_larger = QPushButton("확대"); chart_larger.clicked.connect(lambda: self._history_chart.zoom(0.5))
+            chart_smaller = QPushButton("축소"); chart_smaller.clicked.connect(lambda: self._history_chart.zoom(2.0))
+            chart_all = QPushButton("전체"); chart_all.clicked.connect(lambda: self._history_view_count.setValue(0))
+            history_drawing = QComboBox(); history_drawing.addItems(("그리기 끄기", "선", "가로선", "세로선", "사각형", "텍스트"))
+            history_drawing.currentTextChanged.connect(lambda value: self._history_chart.set_drawing_mode(value.replace("그리기 ", "")))
+            clear_history_drawing = QPushButton("그림 초기화"); clear_history_drawing.clicked.connect(lambda: self._history_chart.clear_annotations())
+            chart_settings = QPushButton("⚙"); chart_settings.setToolTip("차트 설정"); chart_settings.setFixedWidth(34)
+            chart_settings.clicked.connect(self._open_chart_settings)
+            self._history_trade_details = QCheckBox("체결정보")
+            self._history_trade_details.setToolTip("기본 차트와 차트 따로보기의 현재 종목 차트에서 체결시간·가격·수량을 표시합니다.")
+            self._history_trade_details.setChecked(self._show_trade_details)
+            self._history_trade_details.toggled.connect(self._set_trade_details_visible)
+            self._dual_history_chart = QCheckBox("분봉+일봉 같이 보기")
+            self._dual_history_chart.setChecked(self._show_dual_history_chart)
+            self._dual_history_chart.toggled.connect(self._toggle_dual_history_chart)
+            detached_charts = QPushButton("차트 따로 보기"); detached_charts.clicked.connect(self._open_detached_charts)
+            chart_actions.addWidget(QLabel("봉 주기")); chart_actions.addWidget(self._history_interval); chart_actions.addWidget(QLabel("화면 봉 수")); chart_actions.addWidget(self._history_view_count)
+            chart_actions.addWidget(chart_larger); chart_actions.addWidget(chart_smaller); chart_actions.addWidget(chart_all)
+            chart_actions.addWidget(history_drawing); chart_actions.addWidget(clear_history_drawing); chart_actions.addWidget(chart_settings); chart_actions.addStretch()
+            chart_actions.addWidget(self._dual_history_chart); chart_actions.addWidget(self._history_trade_details)
+            chart_actions.addWidget(detached_charts)
+            chart_layout.addLayout(chart_actions)
+            self._history_chart = MinuteChart(); self._history_chart.set_background(self._chart_background); self._history_chart.set_ctrl_wheel_zoom_enabled(self._ctrl_wheel_zoom_enabled); self._history_chart.set_trade_value_threshold(self._trade_value_threshold); self._history_chart.set_daily_trade_value_threshold(self._daily_trade_value_threshold); self._history_chart.set_trade_details_visible(self._show_trade_details); self._history_chart.set_drawing_style(self._drawing_line_width, self._rectangle_color, self._line_color, self._horizontal_line_color, self._vertical_line_color); self._history_chart.set_moving_average_styles(self._moving_average_styles); self._history_chart.set_interval(self._history_interval.currentText()); self._history_chart.set_view_count(self._history_view_count.value()); chart_layout.addWidget(self._history_chart)
+            self._history_scroll = QScrollBar(Qt.Orientation.Horizontal)
+            self._history_scroll.setFixedHeight(12)
+            self._history_scroll.valueChanged.connect(self._history_chart.set_view_start)
+            self._history_chart.view_changed.connect(lambda maximum, current, page: self._sync_chart_scrollbar(self._history_scroll, maximum, current, page))
+            self._history_chart.view_count_changed.connect(self._history_view_count_changed)
+            self._history_chart.annotations_changed.connect(lambda values: self._history_annotations_changed(self._history_interval.currentText(), values))
+            chart_layout.addWidget(self._history_scroll)
+            self._history_daily_title = QLabel("일봉 차트")
+            self._history_daily_title.setFixedHeight(18)
+            self._history_daily_title.setStyleSheet("font-weight:600;color:#555555;background:#EEF1F4;border-top:1px solid #BFC6CF;padding-left:5px;")
+            self._history_daily_chart = MinuteChart(); self._history_daily_chart.set_interval("일봉")
+            self._history_daily_chart.set_top_margin(30)
+            self._history_daily_chart.set_background(self._chart_background)
+            self._history_daily_chart.set_ctrl_wheel_zoom_enabled(self._ctrl_wheel_zoom_enabled)
+            self._history_daily_chart.set_daily_trade_value_threshold(self._daily_trade_value_threshold)
+            self._history_daily_chart.set_trade_details_visible(self._show_trade_details)
+            self._history_daily_chart.set_drawing_style(self._drawing_line_width, self._rectangle_color, self._line_color, self._horizontal_line_color, self._vertical_line_color)
+            self._history_daily_chart.set_moving_average_styles(self._moving_average_styles)
+            self._history_daily_chart.set_view_count(self._journal_settings.value("history_chart_view_count_일봉", 120, type=int))
+            self._history_daily_chart.view_count_changed.connect(lambda count: self._daily_history_view_count_changed(count))
+            self._history_daily_chart.annotations_changed.connect(lambda values: self._history_annotations_changed("일봉", values))
+            self._history_daily_title.setVisible(self._show_dual_history_chart)
+            self._history_daily_chart.setVisible(self._show_dual_history_chart)
+            chart_layout.addWidget(self._history_daily_title); chart_layout.addWidget(self._history_daily_chart)
+            splitter.addWidget(chart_box)
+            review_box = QGroupBox("선택한 매매 복기")
+            review_form = QFormLayout(review_box)
+            self._analysis_label = QTextEdit()
+            self._analysis_label.setReadOnly(True)
+            self._analysis_label.setPlainText("매매 묶음을 선택하면 분봉 기준 자동 분석이 표시됩니다.")
+            self._analysis_label.setMinimumHeight(120)
+            self._analysis_label.setMaximumHeight(220)
+            self._analysis_label.setStyleSheet("padding: 7px; background: #f7f7f7; color: #333333;")
+            self._analysis_data_status = QLabel("분석 자료: 매매 묶음을 선택하세요.")
+            self._analysis_data_status.setWordWrap(True)
+            self._analysis_data_status.setStyleSheet("padding: 4px 7px; color: #666666; background: #eef3f7;")
+            setup_row = QVBoxLayout()
+            self._setup_label = QTextEdit()
+            self._setup_label.setReadOnly(True)
+            self._setup_label.setPlainText("매매 묶음을 선택하면 진입 유형을 추정합니다.")
+            self._setup_label.setMinimumHeight(58)
+            self._setup_label.setMaximumHeight(100)
+            self._setup_cycles = QTableWidget(0, 5)
+            self._setup_cycles.setHorizontalHeaderLabels(("회차", "자동 유형", "세부 유형", "신뢰도", "직접 수정"))
+            self._setup_cycles.verticalHeader().setVisible(False)
+            self._setup_cycles.horizontalHeader().setStretchLastSection(True)
+            self._setup_cycles.setMinimumHeight(68)
+            self._setup_cycles.setMaximumHeight(260)
+            setup_row.addWidget(self._setup_label)
+            setup_row.addWidget(self._setup_cycles)
+            self._review_reason = QTextEdit(); self._review_reason.setPlaceholderText("왜 진입했고 어떤 근거로 매도했는지 적어보세요."); self._review_reason.setMaximumHeight(70)
+            self._review_note = QTextEdit(); self._review_note.setPlaceholderText("잘한 점, 놓친 점, 다음 매매에서 바꿀 점을 적어보세요."); self._review_note.setMaximumHeight(85)
+            self._review_tags = QLineEdit(); self._review_tags.setPlaceholderText("예: 주도주 돌파, 테마주 돌파, 신규주 (쉼표로 구분)")
+            review_options = QHBoxLayout()
+            self._review_rating = QComboBox(); self._review_rating.addItems(("잘함", "보통", "아쉬움"))
+            self._review_status = QComboBox(); self._review_status.addItems(("미작성", "작성 중", "복기 완료"))
+            self._review_saved = QLabel("매매 묶음을 선택하세요.")
+            save_review = QPushButton("지금 저장"); save_review.clicked.connect(self._save_active_review)
+            self._journal_news_button = QPushButton("관련 뉴스 보기")
+            self._journal_news_button.setEnabled(False)
+            self._journal_news_button.clicked.connect(self._open_active_news)
+            review_options.addWidget(QLabel("평가")); review_options.addWidget(self._review_rating)
+            review_options.addWidget(QLabel("상태")); review_options.addWidget(self._review_status)
+            review_options.addWidget(save_review); review_options.addWidget(self._journal_news_button); review_options.addWidget(self._review_saved); review_options.addStretch()
+            review_form.addRow("예상 매매유형", setup_row)
+            review_form.addRow("자동 분석", self._analysis_label)
+            review_form.addRow("분석 자료", self._analysis_data_status)
+            review_form.addRow("매매 이유", self._review_reason); review_form.addRow("복기 메모", self._review_note)
+            review_form.addRow("태그", self._review_tags); review_form.addRow(review_options)
+            review_scroll = QScrollArea()
+            review_scroll.setWidgetResizable(True)
+            review_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            review_scroll.setWidget(review_box)
+            splitter.addWidget(review_scroll)
+            splitter.setSizes((210, 170, 250, 210))
+            saved_splitter = QSettings("KiwoomMonitor", "TradingJournalWindow").value("history_splitter")
+            if saved_splitter is not None:
+                splitter.restoreState(saved_splitter)
+            history_layout.addWidget(splitter)
+            help_text = QLabel("위 요약에서 날짜·종목을 선택하면 해당 체결만 아래에 표시되고, 분봉을 자동으로 보완해 매수·매도 위치를 차트에 표시합니다. 실현손익은 수수료·세금을 제외한 FIFO 추정값입니다.")
+            help_text.setWordWrap(True); help_text.setStyleSheet("color: #666666;"); history_layout.addWidget(help_text)
+            self._tabs.addTab(history_page, "과거 매매목록")
 
-        # '오늘 진행 중' 탭은 화면에는 추가하지 않지만 set_stock(), 분봉 확인,
-        # 차트 설정에서 내부 위젯을 계속 사용한다. 지역 변수로만 두면 __init__
-        # 종료 후 QWidget과 자식 MinuteChart가 함께 삭제되므로 창 수명 동안
-        # 명시적으로 보관한다.
-        self._live_page = QWidget()
-        live_page = self._live_page
-        live_layout = QVBoxLayout(live_page)
-        top = QHBoxLayout(); self._title = QLabel("메인 표에서 종목을 선택하면 오늘 분봉을 볼 수 있습니다.")
-        self._live_interval = QComboBox(); self._live_interval.addItems(("1분", "3분", "5분", "10분", "30분", "60분", "일봉"))
-        self._live_view_count = QSpinBox(); self._live_view_count.setRange(0, 2_000); self._live_view_count.setSingleStep(1)
-        self._live_view_count.setSpecialValueText("전체"); self._live_view_count.setSuffix("개"); self._live_view_count.setValue(120)
-        self._live_view_count.valueChanged.connect(lambda value: self._chart.set_view_count(value))
-        live_zoom_in = QPushButton("확대"); live_zoom_in.clicked.connect(lambda: self._chart.zoom(0.5))
-        live_zoom_out = QPushButton("축소"); live_zoom_out.clicked.connect(lambda: self._chart.zoom(2.0))
-        live_all = QPushButton("전체"); live_all.clicked.connect(lambda: self._live_view_count.setValue(0))
-        live_drawing = QComboBox(); live_drawing.addItems(("그리기 끄기", "선", "가로선", "세로선", "사각형", "텍스트"))
-        live_drawing.currentTextChanged.connect(lambda value: self._chart.set_drawing_mode(value.replace("그리기 ", "")))
-        clear_live_drawing = QPushButton("그림 초기화"); clear_live_drawing.clicked.connect(lambda: self._chart.clear_annotations())
-        self._live_trade_details = QCheckBox("체결정보"); self._live_trade_details.setChecked(self._show_trade_details)
-        self._live_trade_details.toggled.connect(self._set_trade_details_visible)
-        confirm = QPushButton("완료 분봉 지금 확인"); confirm.clicked.connect(self.confirm_completed_bars)
-        top.addWidget(self._title); top.addStretch(); top.addWidget(QLabel("봉 주기")); top.addWidget(self._live_interval)
-        top.addWidget(QLabel("화면 봉 수")); top.addWidget(self._live_view_count)
-        top.addWidget(live_zoom_in); top.addWidget(live_zoom_out); top.addWidget(live_all)
-        top.addWidget(live_drawing); top.addWidget(clear_live_drawing); top.addWidget(self._live_trade_details); top.addWidget(confirm); live_layout.addLayout(top)
-        self._chart = MinuteChart(); self._chart.set_background(self._chart_background); self._chart.set_ctrl_wheel_zoom_enabled(self._ctrl_wheel_zoom_enabled); self._chart.set_trade_value_threshold(self._trade_value_threshold); self._chart.set_daily_trade_value_threshold(self._daily_trade_value_threshold); self._chart.set_trade_details_visible(self._show_trade_details); self._chart.set_drawing_style(self._drawing_line_width, self._rectangle_color, self._line_color, self._horizontal_line_color, self._vertical_line_color); self._chart.set_moving_average_styles(self._moving_average_styles); live_layout.addWidget(self._chart)
-        self._live_scroll = QScrollBar(Qt.Orientation.Horizontal)
-        self._live_scroll.valueChanged.connect(self._chart.set_view_start)
-        self._chart.view_changed.connect(lambda maximum, current, page: self._sync_chart_scrollbar(self._live_scroll, maximum, current, page))
-        self._chart.view_count_changed.connect(lambda count: self._sync_view_count_input(self._live_view_count, count))
-        live_layout.addWidget(self._live_scroll)
-        self._live_interval.currentTextChanged.connect(self._live_interval_changed)
-        saved_interval = QSettings("KiwoomMonitor", "TradingJournalWindow").value("chart_interval", "1분", type=str)
-        if saved_interval in ("1분", "3분", "5분", "10분", "30분", "60분", "일봉"):
-            self._history_interval.setCurrentText(saved_interval); self._live_interval.setCurrentText(saved_interval)
-        self._table = QTableWidget(0, 8)
-        self._table.setHorizontalHeaderLabels(("시간", "시가", "고가", "저가", "종가", "거래량", "거래대금(억)", "상태"))
-        self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._configure_journal_table(self._table)
-        live_layout.addWidget(self._table)
-        note = QLabel("현재 진행 중인 봉은 ‘임시’, 키움에서 다시 받은 완료 봉은 ‘확인’으로 표시됩니다. 장 종료 후 다시 확인하면 같은 자리에 확정값이 덮어써집니다.")
-        note.setWordWrap(True); live_layout.addWidget(note)
-        # 실시간 순위표가 주 화면이므로 중복되는 '오늘 진행 중' 탭은 표시하지 않는다.
+            # '오늘 진행 중' 탭은 화면에는 추가하지 않지만 set_stock(), 분봉 확인,
+            # 차트 설정에서 내부 위젯을 계속 사용한다. 지역 변수로만 두면 __init__
+            # 종료 후 QWidget과 자식 MinuteChart가 함께 삭제되므로 창 수명 동안
+            # 명시적으로 보관한다.
+            self._live_page = QWidget()
+            live_page = self._live_page
+            live_layout = QVBoxLayout(live_page)
+            top = QHBoxLayout(); self._title = QLabel("메인 표에서 종목을 선택하면 오늘 분봉을 볼 수 있습니다.")
+            self._live_interval = QComboBox(); self._live_interval.addItems(("1분", "3분", "5분", "10분", "30분", "60분", "일봉"))
+            self._live_view_count = QSpinBox(); self._live_view_count.setRange(0, 2_000); self._live_view_count.setSingleStep(1)
+            self._live_view_count.setSpecialValueText("전체"); self._live_view_count.setSuffix("개"); self._live_view_count.setValue(120)
+            self._live_view_count.valueChanged.connect(lambda value: self._chart.set_view_count(value))
+            live_zoom_in = QPushButton("확대"); live_zoom_in.clicked.connect(lambda: self._chart.zoom(0.5))
+            live_zoom_out = QPushButton("축소"); live_zoom_out.clicked.connect(lambda: self._chart.zoom(2.0))
+            live_all = QPushButton("전체"); live_all.clicked.connect(lambda: self._live_view_count.setValue(0))
+            live_drawing = QComboBox(); live_drawing.addItems(("그리기 끄기", "선", "가로선", "세로선", "사각형", "텍스트"))
+            live_drawing.currentTextChanged.connect(lambda value: self._chart.set_drawing_mode(value.replace("그리기 ", "")))
+            clear_live_drawing = QPushButton("그림 초기화"); clear_live_drawing.clicked.connect(lambda: self._chart.clear_annotations())
+            self._live_trade_details = QCheckBox("체결정보"); self._live_trade_details.setChecked(self._show_trade_details)
+            self._live_trade_details.toggled.connect(self._set_trade_details_visible)
+            confirm = QPushButton("완료 분봉 지금 확인"); confirm.clicked.connect(self.confirm_completed_bars)
+            top.addWidget(self._title); top.addStretch(); top.addWidget(QLabel("봉 주기")); top.addWidget(self._live_interval)
+            top.addWidget(QLabel("화면 봉 수")); top.addWidget(self._live_view_count)
+            top.addWidget(live_zoom_in); top.addWidget(live_zoom_out); top.addWidget(live_all)
+            top.addWidget(live_drawing); top.addWidget(clear_live_drawing); top.addWidget(self._live_trade_details); top.addWidget(confirm); live_layout.addLayout(top)
+            self._chart = MinuteChart(); self._chart.set_background(self._chart_background); self._chart.set_ctrl_wheel_zoom_enabled(self._ctrl_wheel_zoom_enabled); self._chart.set_trade_value_threshold(self._trade_value_threshold); self._chart.set_daily_trade_value_threshold(self._daily_trade_value_threshold); self._chart.set_trade_details_visible(self._show_trade_details); self._chart.set_drawing_style(self._drawing_line_width, self._rectangle_color, self._line_color, self._horizontal_line_color, self._vertical_line_color); self._chart.set_moving_average_styles(self._moving_average_styles); live_layout.addWidget(self._chart)
+            self._live_scroll = QScrollBar(Qt.Orientation.Horizontal)
+            self._live_scroll.valueChanged.connect(self._chart.set_view_start)
+            self._chart.view_changed.connect(lambda maximum, current, page: self._sync_chart_scrollbar(self._live_scroll, maximum, current, page))
+            self._chart.view_count_changed.connect(lambda count: self._sync_view_count_input(self._live_view_count, count))
+            live_layout.addWidget(self._live_scroll)
+            self._live_interval.currentTextChanged.connect(self._live_interval_changed)
+            saved_interval = QSettings("KiwoomMonitor", "TradingJournalWindow").value("chart_interval", "1분", type=str)
+            if saved_interval in ("1분", "3분", "5분", "10분", "30분", "60분", "일봉"):
+                self._history_interval.setCurrentText(saved_interval); self._live_interval.setCurrentText(saved_interval)
+            self._table = QTableWidget(0, 8)
+            self._table.setHorizontalHeaderLabels(("시간", "시가", "고가", "저가", "종가", "거래량", "거래대금(억)", "상태"))
+            self._table.horizontalHeader().setStretchLastSection(True)
+            self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self._configure_journal_table(self._table)
+            live_layout.addWidget(self._table)
+            note = QLabel("현재 진행 중인 봉은 ‘임시’, 키움에서 다시 받은 완료 봉은 ‘확인’으로 표시됩니다. 장 종료 후 다시 확인하면 같은 자리에 확정값이 덮어써집니다.")
+            note.setWordWrap(True); live_layout.addWidget(note)
+            # 실시간 순위표가 주 화면이므로 중복되는 '오늘 진행 중' 탭은 표시하지 않는다.
 
-        backfill_page = QWidget(); backfill_layout = QVBoxLayout(backfill_page)
-        backfill_actions = QHBoxLayout()
-        self._backfill_filter = QComboBox(); self._backfill_filter.addItems(("전체", "미조회", "일부", "실패", "확정"))
-        self._backfill_filter.currentTextChanged.connect(self._refresh_backfill_table)
-        refresh_backfills = QPushButton("목록 새로고침"); refresh_backfills.clicked.connect(self._refresh_backfill_table)
-        retry_selected = QPushButton("선택 항목 재조회"); retry_selected.clicked.connect(self._retry_selected_backfills)
-        backfill_actions.addWidget(QLabel("상태")); backfill_actions.addWidget(self._backfill_filter)
-        backfill_actions.addWidget(refresh_backfills); backfill_actions.addWidget(retry_selected); backfill_actions.addStretch()
-        backfill_layout.addLayout(backfill_actions)
-        self._backfill_table = QTableWidget(0, 5)
-        self._backfill_table.setHorizontalHeaderLabels(("거래일", "종목코드", "상태", "분봉 수", "실패 사유"))
-        self._backfill_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._backfill_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self._backfill_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._backfill_table.horizontalHeader().setStretchLastSection(True)
-        self._configure_journal_table(self._backfill_table)
-        backfill_layout.addWidget(self._backfill_table)
-        self._tabs.addTab(backfill_page, "분봉 보완 관리")
+            backfill_page = QWidget(); backfill_layout = QVBoxLayout(backfill_page)
+            backfill_actions = QHBoxLayout()
+            self._backfill_filter = QComboBox(); self._backfill_filter.addItems(("전체", "미조회", "일부", "실패", "확정"))
+            self._backfill_filter.currentTextChanged.connect(self._refresh_backfill_table)
+            refresh_backfills = QPushButton("목록 새로고침"); refresh_backfills.clicked.connect(self._refresh_backfill_table)
+            retry_selected = QPushButton("선택 항목 재조회"); retry_selected.clicked.connect(self._retry_selected_backfills)
+            backfill_actions.addWidget(QLabel("상태")); backfill_actions.addWidget(self._backfill_filter)
+            backfill_actions.addWidget(refresh_backfills); backfill_actions.addWidget(retry_selected); backfill_actions.addStretch()
+            backfill_layout.addLayout(backfill_actions)
+            self._backfill_table = QTableWidget(0, 5)
+            self._backfill_table.setHorizontalHeaderLabels(("거래일", "종목코드", "상태", "분봉 수", "실패 사유"))
+            self._backfill_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self._backfill_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+            self._backfill_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self._backfill_table.horizontalHeader().setStretchLastSection(True)
+            self._configure_journal_table(self._backfill_table)
+            backfill_layout.addWidget(self._backfill_table)
+            self._tabs.addTab(backfill_page, "분봉 보완 관리")
 
-        stats_page = QWidget(); stats_layout = QVBoxLayout(stats_page)
-        stats_actions = QHBoxLayout(); self._stats_unit = QComboBox(); self._stats_unit.addItems(("일간", "주간", "월간"))
-        self._stats_unit.currentTextChanged.connect(self._refresh_statistics)
-        self._stats_summary = QLabel(); self._stats_summary.setStyleSheet("font-size: 14px; font-weight: 600; padding: 8px; background: #f4f7fb;")
-        stats_actions.addWidget(QLabel("집계")); stats_actions.addWidget(self._stats_unit); stats_actions.addStretch(); stats_layout.addLayout(stats_actions)
-        stats_layout.addWidget(self._stats_summary)
-        self._stats_table = QTableWidget(0, 7)
-        self._stats_table.setHorizontalHeaderLabels(("기간", "매매", "수익", "손실", "승률", "실현손익", "수익률"))
-        self._stats_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._configure_journal_table(self._stats_table)
-        self._stats_table.horizontalHeader().setStretchLastSection(True); stats_layout.addWidget(self._stats_table)
-        self._tabs.addTab(stats_page, "매매 통계")
-        self.setCentralWidget(root)
-        self._review_save_timer = QTimer(self); self._review_save_timer.setSingleShot(True)
-        self._review_save_timer.timeout.connect(self._save_active_review)
-        self._account_reload_timer = QTimer(self); self._account_reload_timer.setSingleShot(True)
-        self._account_reload_timer.timeout.connect(self._reload_selected_account)
-        self._history_followup_timer = QTimer(self); self._history_followup_timer.setSingleShot(True)
-        self._history_followup_timer.timeout.connect(self._run_history_followups)
-        self._review_reason.textChanged.connect(self._review_changed); self._review_note.textChanged.connect(self._review_changed)
-        self._review_tags.textChanged.connect(self._review_changed); self._review_rating.currentTextChanged.connect(self._review_changed)
-        self._review_status.currentTextChanged.connect(self._review_changed)
-        self._refresh_timer = QTimer(self); self._refresh_timer.timeout.connect(self.refresh); self._refresh_timer.start(1_000)
-        self._confirm_timer = QTimer(self); self._confirm_timer.timeout.connect(self._confirm_on_new_minute); self._confirm_timer.start(1_000)
-        self._auto_backfill_timer = QTimer(self); self._auto_backfill_timer.timeout.connect(self._check_automatic_backfill)
-        self._auto_backfill_timer.start(60_000)
-        self._history_sync_timer = QTimer(self); self._history_sync_timer.timeout.connect(self._auto_sync_history_once)
-        self._history_sync_timer.start(600_000)
-        self._enrichment_timer = QTimer(self); self._enrichment_timer.timeout.connect(self._schedule_analysis_enrichment)
-        self._enrichment_timer.start(300_000)
-        self._central_sync_timer = QTimer(self); self._central_sync_timer.timeout.connect(self._schedule_central_journal_sync)
-        self._central_sync_timer.start(60_000)
-        self.reload_history()
-        QTimer.singleShot(1_200, self._auto_sync_history_once)
-        QTimer.singleShot(2_000, self._check_automatic_backfill)
-        QTimer.singleShot(500, self._schedule_central_journal_sync)
-        QTimer.singleShot(0, self._load_api_account_choices)
+            stats_page = QWidget(); stats_layout = QVBoxLayout(stats_page)
+            stats_actions = QHBoxLayout(); self._stats_unit = QComboBox(); self._stats_unit.addItems(("일간", "주간", "월간"))
+            self._stats_unit.currentTextChanged.connect(self._refresh_statistics)
+            self._stats_summary = QLabel(); self._stats_summary.setStyleSheet("font-size: 14px; font-weight: 600; padding: 8px; background: #f4f7fb;")
+            stats_actions.addWidget(QLabel("집계")); stats_actions.addWidget(self._stats_unit); stats_actions.addStretch(); stats_layout.addLayout(stats_actions)
+            stats_layout.addWidget(self._stats_summary)
+            self._stats_table = QTableWidget(0, 7)
+            self._stats_table.setHorizontalHeaderLabels(("기간", "매매", "수익", "손실", "승률", "실현손익", "수익률"))
+            self._stats_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self._configure_journal_table(self._stats_table)
+            self._stats_table.horizontalHeader().setStretchLastSection(True); stats_layout.addWidget(self._stats_table)
+            self._tabs.addTab(stats_page, "매매 통계")
+            self.setCentralWidget(root)
+            self._review_save_timer = QTimer(self); self._review_save_timer.setSingleShot(True)
+            self._review_save_timer.timeout.connect(self._save_active_review)
+            self._account_reload_timer = QTimer(self); self._account_reload_timer.setSingleShot(True)
+            self._account_reload_timer.timeout.connect(self._reload_selected_account)
+            self._history_followup_timer = QTimer(self); self._history_followup_timer.setSingleShot(True)
+            self._history_followup_timer.timeout.connect(self._run_history_followups)
+            self._review_reason.textChanged.connect(self._review_changed); self._review_note.textChanged.connect(self._review_changed)
+            self._review_tags.textChanged.connect(self._review_changed); self._review_rating.currentTextChanged.connect(self._review_changed)
+            self._review_status.currentTextChanged.connect(self._review_changed)
+            self._refresh_timer = QTimer(self); self._refresh_timer.timeout.connect(self.refresh); self._refresh_timer.start(1_000)
+            self._confirm_timer = QTimer(self); self._confirm_timer.timeout.connect(self._confirm_on_new_minute); self._confirm_timer.start(1_000)
+            self._auto_backfill_timer = QTimer(self); self._auto_backfill_timer.timeout.connect(self._check_automatic_backfill)
+            self._auto_backfill_timer.start(60_000)
+            self._history_sync_timer = QTimer(self); self._history_sync_timer.timeout.connect(self._auto_sync_history_once)
+            self._history_sync_timer.start(600_000)
+            self._enrichment_timer = QTimer(self); self._enrichment_timer.timeout.connect(self._schedule_analysis_enrichment)
+            self._enrichment_timer.start(300_000)
+            self._central_sync_timer = QTimer(self); self._central_sync_timer.timeout.connect(self._schedule_central_journal_sync)
+            self._central_sync_timer.start(60_000)
+            self.reload_history()
+            QTimer.singleShot(1_200, self._auto_sync_history_once)
+            QTimer.singleShot(2_000, self._check_automatic_backfill)
+            QTimer.singleShot(500, self._schedule_central_journal_sync)
+            QTimer.singleShot(0, self._load_api_account_choices)
+        except BaseException as error:
+            # The query client starts its own thread before UI construction.
+            # Keep the original construction failure if either close also fails.
+            try:
+                self.finish_shutdown()
+            except BaseException as close_error:
+                raise error from close_error
+            raise
 
     def _load_api_account_choices(self):
         loader = getattr(self._query_client, "load_account_contexts", None)
         if not callable(loader) or self._account_list_worker is not None or self._shutting_down: return
-        worker = SettingsRequestWorker(loader); self._account_list_worker = worker
+        worker = SettingsRequestWorker(loader, self); self._account_list_worker = worker
         worker.succeeded.connect(self._api_accounts_loaded); worker.failed.connect(self._api_accounts_failed)
         worker.start()
 
@@ -1198,6 +1207,8 @@ class JournalWindow(QMainWindow):
         now = as_kst(self._query_client.server_now())
         common_result = {
             "analysis_revision_id": str(getattr(prepared, "analysis_revision_id", "")),
+            "current_published": bool(getattr(prepared, "current_published", True)),
+            "manual_revision": str(getattr(prepared, "manual_revision", "")),
             "snapshot_count": len(tuple(getattr(prepared, "entry_snapshots", ()))),
             "research_link_count": len(tuple(getattr(prepared, "research_links", ()))),
         }
@@ -1301,8 +1312,8 @@ class JournalWindow(QMainWindow):
         if isinstance(delegate, JournalCellMarkerDelegate):
             delegate.set_selected_cell(None)
         group_ids = tuple(episode.group_id for episode in self._episodes)
-        setups = self._repo.load_trade_setups(group_ids)
-        cycle_overrides = self._repo.load_trade_setup_cycle_overrides_many(group_ids)
+        setups = self._repo.load_trade_setups(group_ids, self._loaded_history_scope)
+        cycle_overrides = self._repo.load_trade_setup_cycle_overrides_many(group_ids, self._loaded_history_scope)
         reviews = self._repo.load_reviews(group_ids)
         backfill_candidates = tuple(dict.fromkeys(
             (fill.stock_code, fill.filled_at.date())
@@ -1845,9 +1856,14 @@ class JournalWindow(QMainWindow):
                 self._pending_market_index_day = day
             return
         self._market_index_active_day = day
-        worker = MarketIndexBackfillWorker(self._market_index_service, day)
+        monitor_db, now_provider = self._monitor_db, self._query_client.server_now
+        def save_history(minute_rows, daily_rows):
+            MinuteBarRepository(monitor_db, now_provider=now_provider).replace_market_index_history(minute_rows, daily_rows)
+        worker = MarketIndexBackfillWorker(self._market_index_service, day,
+            save_history=save_history)
         worker.completed.connect(self._market_index_backfill_completed)
         worker.failed.connect(self._market_index_backfill_failed)
+        worker.storage_failed.connect(self._market_index_backfill_storage_failed)
         worker.finished.connect(self._market_index_backfill_finished)
         worker.setParent(self if isinstance(self, QObject) else None)
         self._market_index_worker = worker
@@ -1855,9 +1871,6 @@ class JournalWindow(QMainWindow):
 
     def _market_index_backfill_completed(self, rows: object) -> None:
         if isinstance(rows, tuple) and len(rows) == 2 and isinstance(rows[0], dict) and isinstance(rows[1], dict):
-            try:
-                MinuteBarRepository(self._monitor_db).replace_market_index_history(rows[0], rows[1])
-            except Exception as error: self._status.setText(f"시장지수 저장 실패 · {error}"); return
             if self._market_index_active_day is not None:
                 self._market_index_requested_days.add(self._market_index_active_day)
             self._status.setText(f"코스피·코스닥 분봉·일봉 보완 · {len(rows[0])}개")
@@ -1865,6 +1878,10 @@ class JournalWindow(QMainWindow):
 
     def _market_index_backfill_failed(self, message: str) -> None:
         self._status.setText(f"시장지수 보완 실패 · {message}")
+
+    @Slot(str)
+    def _market_index_backfill_storage_failed(self, message: str) -> None:
+        self._status.setText(f"시장지수 저장 실패 · {message}")
 
     def _market_index_backfill_finished(self) -> None:
         worker = self._market_index_worker
@@ -1991,6 +2008,16 @@ class JournalWindow(QMainWindow):
             result_mode=self._strategy_result_mode,
             on_snapshot_backfill_error=lambda _key, error: backfill_errors.append(str(error)),
         )
+        if not prepared.current_published:
+            message = "수동 유형이 변경되어 분석은 과거 입력으로 보존했습니다. 다시 선택해 최신 분석을 표시하세요."
+            self._status.setText(message)
+            self._setup_label.setPlainText(message)
+            self._analysis_data_status.setText("최신 수동 입력의 분석은 아직 게시하지 않았습니다.")
+            self._analysis_label.clear()
+            self._setup_cycles.setRowCount(0)
+            self._history_chart.set_setup_types(())
+            self._history_daily_chart.set_setup_types(())
+            return
         self._journal_news_button.setText(f"관련 뉴스 보기 · 고정 {len(prepared.linked_news)}건")
         analyses = analyze_trade_cycles(
             prepared.cycles, rows,
@@ -2085,9 +2112,15 @@ class JournalWindow(QMainWindow):
         if self._loading_setup or self._active_episode is None:
             return
         manual_type = "" if value == "자동 판정 사용" else value
-        self._repo.save_trade_setup_cycle_override(self._active_episode.group_id, cycle_index, manual_type)
+        episode = self._active_episode
+        origin = episode.fills[0].origin_scope
+        canonical = episode.summary.account_scope if episode.summary.account_scope != origin else None
+        self._repo.save_trade_setup_cycle_override(
+            episode.group_id, cycle_index, manual_type,
+            now=as_kst(self._query_client.server_now()), account_scope=origin, canonical_scope=canonical,
+        )
         rows = self._load_selected_chart_rows()
-        self._show_trade_analysis(self._active_episode, rows)
+        self._show_trade_analysis(episode, rows)
 
     def _load_active_review(self) -> None:
         if self._active_episode is None:
@@ -2286,7 +2319,8 @@ class JournalWindow(QMainWindow):
         self._start_bar_confirmation(self._live_code)
 
     def _start_bar_confirmation(self, code: str, target_day: date | None = None, include_previous: bool = False) -> None:
-        worker = ConfirmWorker(self._minute_service, code, target_day, include_previous)
+        worker = ConfirmWorker(self._minute_service, code, target_day, include_previous,
+            save_bars=self._repo.upsert_bars, now_provider=self._query_client.server_now)
         worker.completed.connect(self._confirmed)
         worker.failed.connect(lambda message: self._status.setText(f"확인 실패 · {message}"))
         worker.finished.connect(self._worker_finished)
@@ -2302,7 +2336,6 @@ class JournalWindow(QMainWindow):
 
     def _confirmed(self, code: str, bars: object, checked_at: object, source: str) -> None:
         if isinstance(bars, tuple) and isinstance(checked_at, datetime):
-            self._repo.upsert_bars(code, bars, source, checked_at)
             self._status.setText(f"{checked_at:%H:%M:%S} 확인 · {len(bars)}개")
             if self._selected_history_day is not None and code == self._selected_history_code:
                 self._refresh_selected_history_after_bars(code)
@@ -2337,6 +2370,38 @@ class JournalWindow(QMainWindow):
                 # deleteLater로 이미 정리된 QThread 래퍼는 다시 조회하지 않는다.
                 pass
             setattr(self, attribute, None)
+
+    def finish_shutdown(self) -> None:
+        # UI shutdown keeps its existing bounded wait. Its cleared references
+        # do not end native work still owned by the window's QObject tree.
+        # After exec ends, retain and join those exact workers before source
+        # sync/PID/lease teardown; queued workflow results are not drained here.
+        self._shutting_down = True
+        workers = tuple(self.findChildren(QThread))
+        for worker in workers:
+            worker.requestInterruption()
+        for worker in workers:
+            if isinstance(worker, SettingsRequestWorker):
+                joined = worker.release_after_join(wait=True)
+            else:
+                joined = worker.wait()
+            if not joined:
+                raise RuntimeError("journal worker did not finish before dependency close")
+        sync_error = None
+        try:
+            self._central_journal_sync_runner.close()
+        except BaseException as error:
+            sync_error = error
+        try:
+            close_client = getattr(self._query_client, "close", None)
+            if callable(close_client):
+                close_client()
+        except BaseException as error:
+            if sync_error is not None:
+                raise sync_error from error
+            raise
+        if sync_error is not None:
+            raise sync_error
 
     def closeEvent(self, event: QCloseEvent) -> None:
         event.ignore()
@@ -2402,68 +2467,68 @@ def _run_journal_process(arguments: list[str]) -> int:
     # 프로세스를 명시적으로 끝낸다.
     app = QApplication(sys.argv[:1]); app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(str(_application_icon_path())))
-    window = JournalWindow(Path(options.monitor_database), Path(options.journal_database), Path(options.config))
-    window.setWindowIcon(app.windowIcon())
     command_path = Path(options.command_file); last_id = -1
     state_path = command_path.with_name("journal_process.pid")
-    state_path.write_text(
-        json.dumps(process_identity_document(), ensure_ascii=True), encoding="ascii"
-    )
-    parent_pid = options.parent_pid
-    parent_missing_since: float | None = None
-
-    def poll() -> None:
-        nonlocal last_id, parent_pid, parent_missing_since
-        if bool(app.property("journal_terminating")):
-            return
-        try:
-            command = json.loads(command_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            command = {}
-        try:
-            requested_parent = int(command.get("parent_pid", 0))
-        except (TypeError, ValueError):
-            requested_parent = 0
-        if requested_parent > 0 and _parent_is_alive(requested_parent):
-            parent_pid = requested_parent
-            parent_missing_since = None
-        if not _parent_is_alive(parent_pid):
-            now = monotonic_time.monotonic()
-            if parent_missing_since is None:
-                parent_missing_since = now
-            elif now - parent_missing_since >= 5.0:
-                timer.stop()
-                window.shutdown()
-                app.setProperty("journal_terminating", True)
-                app.exit(0)
-            return
-        parent_missing_since = None
-        request_id = int(command.get("request_id", -1))
-        if request_id <= last_id:
-            return
-        last_id = request_id
-        if command.get("action") == "shutdown":
-            window.shutdown()
-            app.setProperty("journal_terminating", True)
-            timer.stop(); app.exit(0); return
-        if command.get("action") == "parent":
-            return
-        if command.get("action") == "sync":
-            window._quit_after_history_sync = True
-            if not window._auto_sync_history_once():
-                window._quit_after_history_sync = False
-                window.shutdown()
-                app.setProperty("journal_terminating", True)
-                timer.stop(); app.exit(0)
-            return
-        window.set_stock(str(command.get("code", "")), str(command.get("name", "")))
-        window.showNormal(); window.raise_(); window.activateWindow()
-
-    timer = QTimer(); timer.timeout.connect(poll); timer.start(100)
+    window = JournalWindow(Path(options.monitor_database), Path(options.journal_database), Path(options.config))
     try:
+        window.setWindowIcon(app.windowIcon())
+        state_path.write_text(
+            json.dumps(process_identity_document(), ensure_ascii=True), encoding="ascii"
+        )
+        parent_pid = options.parent_pid
+        parent_missing_since: float | None = None
+
+        def poll() -> None:
+            nonlocal last_id, parent_pid, parent_missing_since
+            if bool(app.property("journal_terminating")):
+                return
+            try:
+                command = json.loads(command_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                command = {}
+            try:
+                requested_parent = int(command.get("parent_pid", 0))
+            except (TypeError, ValueError):
+                requested_parent = 0
+            if requested_parent > 0 and _parent_is_alive(requested_parent):
+                parent_pid = requested_parent
+                parent_missing_since = None
+            if not _parent_is_alive(parent_pid):
+                now = monotonic_time.monotonic()
+                if parent_missing_since is None:
+                    parent_missing_since = now
+                elif now - parent_missing_since >= 5.0:
+                    timer.stop()
+                    window.shutdown()
+                    app.setProperty("journal_terminating", True)
+                    app.exit(0)
+                return
+            parent_missing_since = None
+            request_id = int(command.get("request_id", -1))
+            if request_id <= last_id:
+                return
+            last_id = request_id
+            if command.get("action") == "shutdown":
+                window.shutdown()
+                app.setProperty("journal_terminating", True)
+                timer.stop(); app.exit(0); return
+            if command.get("action") == "parent":
+                return
+            if command.get("action") == "sync":
+                window._quit_after_history_sync = True
+                if not window._auto_sync_history_once():
+                    window._quit_after_history_sync = False
+                    window.shutdown()
+                    app.setProperty("journal_terminating", True)
+                    timer.stop(); app.exit(0)
+                return
+            window.set_stock(str(command.get("code", "")), str(command.get("name", "")))
+            window.showNormal(); window.raise_(); window.activateWindow()
+
+        timer = QTimer(); timer.timeout.connect(poll); timer.start(100)
         return app.exec()
     finally:
-        window._central_journal_sync_runner.close()
+        window.finish_shutdown()
         try:
             state_pid, state_token = read_process_identity(state_path)
             own_identity = process_identity_document()

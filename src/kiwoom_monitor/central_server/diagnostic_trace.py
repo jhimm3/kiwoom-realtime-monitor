@@ -330,6 +330,28 @@ def _close_admission(session, reason):
         _WAKE.set()
 
 
+def maintenance_status() -> dict[str, object]:
+    """Detach scalar native lifetime facts; no payload/manifest/report IO."""
+    with _LOCK:
+        if _SESSION is None:
+            if _THREAD is None and not _QUEUE and not _PACKED and not _ACTIVE_OPERATIONS:
+                return {"state": "not_created"}
+            return {"state": "unknown"}
+        fields = ("pending_events", "copy_reserved_bytes", "charged_bytes", "packing_events",
+                  "packed_events", "accepted", "written")
+        values = {key: _SESSION.get(key) for key in fields}
+        if any(type(value) is not int or value < 0 for value in values.values()):
+            return {"state": "unknown"}
+        state = _SESSION.get("state")
+        if state not in {"running", "stopping", "awaiting_persistence", "persisting",
+                         "interrupted", "failed", "complete", "incomplete"}:
+            return {"state": "unknown"}
+        worker = "unknown" if _THREAD is None else "running" if _THREAD.is_alive() else "exited"
+        if worker == "exited" and _ACTIVE_OPERATIONS:
+            return {"state": "unknown"}
+        return {"state": state, "worker": worker, "queued": _retained_events(_SESSION), **values}
+
+
 def status(trace_id: str | None = None) -> dict:
     with _LOCK:
         if _SESSION is not None and (trace_id is None or trace_id == _SESSION["trace_id"]):

@@ -61,7 +61,7 @@ class RealtimeGapQualityTests(unittest.TestCase):
         ))
 
     def test_native_overflow_partial_commit_query_recovery_and_late_retry(self):
-        hub = RealtimeHub()
+        hub = RealtimeHub(now_provider=lambda: self.now)
         subscriber = hub.connect()
         subscriber.queue = asyncio.Queue(maxsize=1)
         aggregator, control = MinuteTradeValueAggregator(), MinuteTradeValueAggregator()

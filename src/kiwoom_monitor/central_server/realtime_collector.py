@@ -5,17 +5,17 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_registration import (
 )
 
 import asyncio
-from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
+from .async_lifetime import owned_create_task, owned_to_thread
 import json
 import logging
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections import deque
 from itertools import chain
 from uuid import uuid4
 from dataclasses import asdict
 from datetime import datetime, time as clock_time, timedelta, timezone
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, ContextManager, Protocol
 
 from websockets.asyncio.client import connect
 
@@ -36,10 +36,6 @@ from kiwoom_monitor.domain.order_contract import AccountScope
 from .realtime_hub import (
     RealtimeHub, CapturedMessageReceipt, CapturedParserReceipt, CapturedHubEvent,
 )
-from .diagnostic_replay_contract import (
-    COLLECTOR_EVENT_FIELDS, COLLECTOR_INPUT_VERSION, captured_workload, validate_collector_message,
-)
-from .diagnostic_top20_lifecycle_input import captured_subscription
 from .minute_bars import MinuteBarAccumulator
 from .market_observations import (
     KST,
@@ -63,6 +59,28 @@ REALTIME_REG_INTERVAL_SECONDS = 0.25
 SUBSCRIPTION_ACK_TIMEOUT_SECONDS = 15.0
 LATEST_CHECKPOINT_SECONDS = 300
 LATEST_CHECKPOINT_OFFSET_SECONDS = 10
+
+
+class RealtimeSubscriptionObserver(Protocol):
+    """Optional command evidence, without owning native registration progress."""
+
+    def begin_batch(self, collector: CentralRealtimeCollector, request: dict, plan: Any, revision: int) -> Any: ...
+    def command_event(self, collector: CentralRealtimeCollector, kind: str, batch: Any, command: Any, ordinal: int, **kwargs: Any) -> Any: ...
+    def end_batch(self, collector: CentralRealtimeCollector, batch: Any, groups: dict, **kwargs: Any) -> Any: ...
+    def projection(self, collector: CentralRealtimeCollector, batch: Any, groups: dict, codes: tuple, **kwargs: Any) -> Any: ...
+
+
+class RealtimeCollectorInputObserver(Protocol):
+    """Optional evidence; native input, flush and transport stay with Collector."""
+
+    def record_input(self, collector: CentralRealtimeCollector, kind: str, payload: dict, *, excluded_types: dict | None = None) -> str | None: ...
+    def record_message(self, collector: CentralRealtimeCollector, message: dict) -> CapturedMessageReceipt | None: ...
+    def ram_capture_anchor(self, collector: CentralRealtimeCollector) -> dict | None: ...
+    def record_gap(self, collector: CentralRealtimeCollector, clear_continuous: bool) -> None: ...
+    def market_operation(self, collector: CentralRealtimeCollector, tick: Any) -> Any: ...
+    def workload_scope(self, collector: CentralRealtimeCollector) -> ContextManager: ...
+    def flush_scope(self) -> ContextManager: ...
+    def subscription_scope(self, collector: CentralRealtimeCollector, session: str, codes: tuple, nxt_codes: tuple, program_codes: tuple | None, priority_codes: tuple | None) -> ContextManager: ...
 
 
 class RealtimeCollectorStore(Protocol):
@@ -128,7 +146,6 @@ def _registered_trade_sources(
     return result
 
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -152,7 +169,12 @@ class CentralRealtimeCollector:
         account_scope_resolver: Callable[[str], AccountScope | None] | None = None,
         account_event_handler: Callable[[str, object], None] | None = None,
         *, snapshot_sleep: Callable[[float], Awaitable[None]] | None = None,
+        subscription_observer: RealtimeSubscriptionObserver | None = None,
+        input_observer: RealtimeCollectorInputObserver | None = None,
     ) -> None:
+        self._subscription_observer = subscription_observer
+        self._input_observer = input_observer
+        self._replay_message_validator: Callable[[dict[str, Any]], None] | None = None
         self._token_provider = token_provider
         self._environment = environment
         self._hub = hub
@@ -249,6 +271,18 @@ class CentralRealtimeCollector:
         return {"records": count,
                 "oldest_record_at": datetime.fromtimestamp(oldest, KST).isoformat() if oldest is not None else None,
                 "timed_records": known}
+
+    def minute_read_status(self) -> dict[str, bool | str | None]:
+        """Detach the existing process-local read capability and successful-save markers.
+
+        These observations are cache invalidation hints, not native commit receipts
+        or trading authority. Reading them never drains or scans pending input.
+        """
+        return {
+            "configured": self._store is not None,
+            "minute_bars_committed_at": self._save_success_at.get("minute_bars"),
+            "minute_finalizations_committed_at": self._save_success_at.get("minute_finalizations"),
+        }
 
     def operational_status(self) -> dict[str, object]:
         """Read in-memory owner state without polling the DB or draining buffers."""
@@ -480,12 +514,15 @@ class CentralRealtimeCollector:
         if self._store is not None and self._snapshot_task is None:
             self._snapshot_task = owned_create_task(self._save_snapshots(), name="kiwoom-realtime-snapshots")
 
-    async def start_input_replay(self) -> None:
+    async def start_input_replay(self, *, message_validator: Callable[[dict[str, Any]], None]) -> None:
         """Start the real persistence loop on a fresh, isolated market collector."""
         if (self._task is not None or self._snapshot_task is not None or self._close_task is not None
                 or self._input_replay_only or self._store is None or self._market_events is not None
                 or self._account_scope_resolver is not None or self._account_event_handler is not None):
             raise RuntimeError("INPUT_REPLAY_REQUIRES_FRESH_MARKET_COLLECTOR")
+        if not callable(message_validator):
+            raise TypeError("INPUT_REPLAY_MESSAGE_VALIDATOR_REQUIRED")
+        self._replay_message_validator = message_validator
         self._input_replay_only = True
         self._snapshot_task = owned_create_task(self._save_snapshots(), name="kiwoom-replay-snapshots")
 
@@ -493,7 +530,7 @@ class CentralRealtimeCollector:
         """Replay only allowlisted market input; account events cannot enter here."""
         if not self._input_replay_only or self._credential_shutdown:
             raise RuntimeError("INPUT_REPLAY_NOT_RUNNING")
-        validate_collector_message(message)
+        self._replay_message_validator(message)
         self._publish_parsed(message)
 
     def restore_replay_source_state(
@@ -537,9 +574,10 @@ class CentralRealtimeCollector:
     def _apply_trade_source_approval(
         self, sources: set[tuple[str, str]], subscribed_at: datetime, *, reset_all: bool,
     ) -> None:
-        self._record_upstream("source_approval", {
-            "sources": tuple(sorted(sources)), "subscribed_at": subscribed_at, "reset_all": reset_all,
-        })
+        if self._input_observer is not None:
+            self._input_observer.record_input(self, "source_approval", {
+                "sources": tuple(sorted(sources)), "subscribed_at": subscribed_at, "reset_all": reset_all,
+            })
         added_sources = sources - self._approved_trade_sources
         removed_sources = self._approved_trade_sources - sources
         reset_sources = sources if reset_all else added_sources
@@ -647,7 +685,7 @@ class CentralRealtimeCollector:
             if self._credential_paused or generation != self._connection_generation:
                 return
             self._credential_phase = "REGISTERING"
-            from . import diagnostic_top20_subscription_v2 as recording
+            recording = self._subscription_observer
             groups, approved, subscribed = {}, set(), ()
             self._subscription_filter_active = True
             self._apply_trade_source_approval(set(), self._now_provider(), reset_all=False)
@@ -692,7 +730,7 @@ class CentralRealtimeCollector:
                             batch_request = {"session":session, "codes":list(target.active_codes),
                                 "nxt_codes":list(target.nxt_codes), "program_codes":list(program),
                                 "priority_codes":list(priority)}
-                            batch = recording.begin_batch(self, batch_request, plan, revision)
+                            batch = recording.begin_batch(self, batch_request, plan, revision) if recording is not None else None
                             batch_closed = False
                             progress = RegistrationProgress(plan)
                             approved.intersection_update(plan.retained)
@@ -702,7 +740,7 @@ class CentralRealtimeCollector:
                             if connection_approved:
                                 covered = ready_codes(desired, approved, target.active_codes)
                                 projected = recording.projection(self, batch, retained_groups, covered,
-                                    desired=desired,previous=approval)
+                                    desired=desired,previous=approval) if recording is not None else None
                                 self._hub.set_upstream_ready(covered, True, approval=projected)
                                 published_codes = covered
                     if approved - wanted:
@@ -717,7 +755,7 @@ class CentralRealtimeCollector:
                             retained_groups = encode_groups({group:atoms & allowed
                                 for group,atoms in group_atoms_for_live(groups).items()})
                             projected = recording.projection(self,batch,retained_groups,covered,
-                                desired=desired,previous=approval)
+                                desired=desired,previous=approval) if recording is not None else None
                             self._hub.set_upstream_ready(covered,True,approval=projected)
                             published_codes = covered
                     # Keep the market/account parsers on their native path, but gate unapproved market rows.
@@ -728,7 +766,7 @@ class CentralRealtimeCollector:
                         if now >= last_sent + REALTIME_REG_INTERVAL_SECONDS:
                             command = progress.start()
                             command_receipt = recording.command_event(
-                                self, 'command_start', batch, command, progress.index+1)
+                                self, 'command_start', batch, command, progress.index+1) if recording is not None else None
                             deadline = now + SUBSCRIPTION_ACK_TIMEOUT_SECONDS
                             send_task = owned_create_task(websocket.send(json.dumps(command.packet())),
                                                           name="realtime-subscription-send")
@@ -745,9 +783,10 @@ class CentralRealtimeCollector:
                         send_task.result()
                         send_task = None
                         last_sent = time.monotonic()
-                        recording.command_event(self, 'command_sent', batch, progress.command,
-                                                progress.index+1, parent=command_receipt,
-                                                sent_mono_ns=int(last_sent*1e9))
+                        if recording is not None:
+                            recording.command_event(self, 'command_sent', batch, progress.command,
+                                                    progress.index+1, parent=command_receipt,
+                                                    sent_mono_ns=int(last_sent*1e9))
                         committed = progress.mark_sent()
                     if recv_task in done:
                         message = json.loads(recv_task.result())
@@ -758,8 +797,9 @@ class CentralRealtimeCollector:
                         elif kind in {"REG", "REMOVE"}:
                             if progress is None:
                                 raise RuntimeError('realtime_ack_without_command')
-                            recording.command_event(self, 'command_ack', batch, progress.command,
-                                                    progress.index+1, parent=command_receipt, message=message)
+                            if recording is not None:
+                                recording.command_event(self, 'command_ack', batch, progress.command,
+                                                        progress.index+1, parent=command_receipt, message=message)
                             committed = progress.accept_ack(message) or committed
                         else:
                             admitted = filter_message(message, allowed)
@@ -776,7 +816,7 @@ class CentralRealtimeCollector:
                             latest_target.nxt_codes,self._hub.requested_program_codes(),self._hub.requested_priority_codes())
                         superseded = all_atoms(groups) != all_atoms(latest_groups)
                         completed = recording.end_batch(self, batch, groups,
-                            outcome='superseded' if superseded else 'returned')
+                            outcome='superseded' if superseded else 'returned') if recording is not None else None
                         batch_closed = True
                         progress = None
                         if superseded:
@@ -791,14 +831,16 @@ class CentralRealtimeCollector:
                         published_codes = subscribed
             except BaseException as error:
                 if progress is not None:
-                    recording.end_batch(self, batch, encode_groups(progress.groups),
-                                        outcome='failed', error_type=type(error).__name__)
+                    if recording is not None:
+                        recording.end_batch(self, batch, encode_groups(progress.groups),
+                                            outcome='failed', error_type=type(error).__name__)
                     batch_closed = True
                 raise
             finally:
                 if progress is not None and not batch_closed:
-                    recording.end_batch(self,batch,encode_groups(progress.groups),
-                                        outcome='failed',error_type='SubscriptionInterrupted')
+                    if recording is not None:
+                        recording.end_batch(self,batch,encode_groups(progress.groups),
+                                            outcome='failed',error_type='SubscriptionInterrupted')
                 tasks = [task for task in (recv_task, send_task) if task is not None]
                 for task in tasks:
                     task.cancel()
@@ -847,9 +889,8 @@ class CentralRealtimeCollector:
         return remaining
 
     def _mark_capture_gap(self, *, clear_continuous: bool = False) -> None:
-        from .diagnostic_top20_lifecycle_input import record_gap
-        record_gap(self, clear_continuous)
-        self._record_upstream("capture_gap", {"clear_continuous": clear_continuous})
+        if self._input_observer is not None:
+            self._input_observer.record_gap(self, clear_continuous)
         self._minute_bars.mark_capture_gap()
         self._ram_observation_generation += 1
         self._ram_observation_gap_at = self._now_provider()
@@ -947,7 +988,8 @@ class CentralRealtimeCollector:
         at = self._now_provider()
         if at.tzinfo is None:
             raise ValueError("RAM observation clock must be timezone-aware")
-        capture_anchor = self._ram_capture_anchor()
+        capture_anchor = (self._input_observer.ram_capture_anchor(self)
+                          if self._input_observer is not None else None)
         if codes is None:
             codes = tuple(sorted({code for code, _ in self._approved_trade_sources}))
         if type(seconds) is not int or not 1 <= seconds <= 60 or len(set(codes)) > 200:
@@ -982,130 +1024,13 @@ class CentralRealtimeCollector:
             "capture_anchor": capture_anchor,
         }
 
-    def _ram_capture_anchor(self) -> dict[str, Any] | None:
-        """Reuse the recorder's accepted-input high water as an unverified hint.
-
-        This never starts recording, reads the manifest, or promises that the
-        current RAM values, excluded fields or earlier prefix were captured.
-        """
-        if self._input_replay_only:
-            return None
-        from .diagnostic_trace import input_token
-        trace_id = input_token("collector_inputs")
-        high_water = getattr(self, "_recorded_input_high_water", None)
-        if (not trace_id or getattr(self, "_recorded_capture_epoch", None) != trace_id
-                or type(high_water) is not tuple or len(high_water) != 2
-                or high_water[0] != trace_id or type(high_water[1]) is not str
-                or not 1 <= len(high_water[1]) <= 160):
-            return None
-        return {"trace_id": trace_id, "producer_component": f"realtime_collector:{id(self):x}",
-                "input_id": high_water[1], "collector_input_version": COLLECTOR_INPUT_VERSION,
-                "role": "last_accepted_collector_input", "verified": False}
-
-    def _record_upstream(self, kind: str, payload: dict, *, excluded_types: dict | None = None) -> str | None:
-        from . import diagnostic_trace as trace
-        trace_id = trace.input_token("collector_inputs")
-        if trace_id is None or self._input_replay_only:
-            return
-        fields = {"workload_id": "realtime", "producer_component": f"realtime_collector:{id(self):x}",
-                  "input_kind": kind, "input_id": uuid4().hex, "excluded_types": excluded_types or {},
-                  "collector_input_version": COLLECTOR_INPUT_VERSION,
-                  "entered_mono_ns": time.monotonic_ns(), "entered_wall_ns": time.time_ns()}
-        try:
-            if getattr(self, "_recorded_capture_epoch", None) != trace_id:
-                initial = {"source_time": self._now_provider(),
-                           "approved_sources": tuple(sorted(self._approved_trade_sources)),
-                           "continuous_from": tuple((code, market, at) for (code, market), at in
-                                                    sorted(self._continuous_from.items())),
-                           "initial_state": "cold_with_prefix",
-                           "warm_accumulators": bool(self._pending_snapshots or self._minute_bars._dirty)}
-                trace.emit_payload(trace_id, "collector_input", {
-                    **fields, "input_kind": "initial_state", "input_id": uuid4().hex,
-                }, initial)
-                self._recorded_capture_epoch = trace_id
-            if trace.emit_payload(trace_id, "collector_input", fields,
-                                  {"source_time": self._now_provider(), **payload}):
-                self._recorded_input_high_water = (trace_id, fields["input_id"])
-                return fields["input_id"]
-        except Exception:
-            try:
-                trace.reject_input(trace_id, {**fields, "reason": "collector_capture_error"})
-            except Exception:
-                pass
-
-    def _record_upstream_message(self, message: dict[str, Any]) -> CapturedMessageReceipt | None:
-        from . import diagnostic_trace as trace
-        trace_id = trace.input_token("collector_inputs")
-        if trace_id is None or self._input_replay_only or str(message.get("trnm", "")).upper() != "REAL":
-            return
-        receipt_enabled = trace.input_token("top20_inputs") == trace_id
-        parents = []
-        complete = True
-        message_id = uuid4().hex
-        try:
-            rows = message.get("data")
-            if type(rows) is not list or len(rows) > 10000:
-                raise ValueError("collector_message_bounds")
-            selected, excluded = [], {}
-            offset = 0
-            def flush_group():
-                nonlocal offset, selected, excluded, complete
-                identifier = self._record_upstream("message", {"message_id": message_id, "row_offset": offset,
-                    "message": {"trnm": "REAL", "data": selected}}, excluded_types=excluded)
-                if receipt_enabled:
-                    if identifier:
-                        parents.append(identifier)
-                    else:
-                        complete = False
-                offset += len(selected)
-                selected, excluded = [], {}
-            for row in rows:
-                if type(row) is not dict:
-                    raise ValueError("collector_row_type")
-                kind = row.get("type")
-                if type(kind) is not str or len(kind) > 8:
-                    raise ValueError("collector_event_type")
-                fields = COLLECTOR_EVENT_FIELDS.get(kind)
-                if fields is None:
-                    label = kind if kind in {"0w", "0J", "0U", "00", "04"} else "other"
-                    excluded[label] = excluded.get(label, 0) + 1
-                    continue  # Never copy account fields or credentials.
-                values = row.get("values")
-                if type(values) is not dict:
-                    raise ValueError("collector_values_type")
-                selected.append({**{key: row[key] for key in ("item", "stk_cd", "code") if key in row},
-                                 "type": kind, "values": {key: values[key] for key in fields
-                                    if key in values}})
-                if len(selected) == 100:
-                    flush_group()
-            if selected or excluded:
-                flush_group()
-        except Exception:
-            complete = False
-            try:
-                trace.reject_input(trace_id, {"workload_id": "realtime",
-                    "producer_component": f"realtime_collector:{id(self):x}",
-                    "reason": "collector_message_not_captureable"})
-            except Exception:
-                pass
-        if receipt_enabled:
-            receipt = CapturedMessageReceipt(trace_id, f"realtime_collector:{id(self):x}",
-                                             message_id, tuple(parents), complete)
-            try:
-                trace.emit(trace_id, "collector_message_receipt", {
-                    "producer_component": receipt.producer_component, "message_id": message_id,
-                    "parent_input_ids": receipt.input_ids, "complete": complete,
-                })
-            except Exception:
-                return CapturedMessageReceipt(trace_id, receipt.producer_component, message_id,
-                                              receipt.input_ids, False)
-            return receipt
 
     def _publish_parsed(self, message: dict[str, Any]) -> None:
-        message_receipt = self._record_upstream_message(message)
+        message_receipt = (self._input_observer.record_message(self, message)
+                           if self._input_observer is not None else None)
         for tick in parse_market_operation_ticks(message):
-            from .diagnostic_top20_lifecycle_input import record_market_operation
-            receipt = record_market_operation(self, tick)
+            receipt = (self._input_observer.market_operation(self, tick)
+                       if self._input_observer is not None else None)
             event = {
                 "type": "market_operation",
                 "payload": asdict(tick),
@@ -1343,24 +1268,22 @@ class CentralRealtimeCollector:
                         if float(value["received_at"]) > cutoff
                     }
 
-    @captured_workload("realtime", "realtime_collector")
     async def _flush_snapshots(
         self, *, flush_latest: bool = True, periodic: bool = False, flush_seconds: bool = True,
     ) -> None:
-        task = owned_create_task(self._flush_serialized(flush_latest, periodic, flush_seconds), name="realtime-owned-save")
-        self._flush_tasks.add(task)
-        task.add_done_callback(self._flush_tasks.discard)
-        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-        await asyncio.shield(task)
+        with (self._input_observer.workload_scope(self)
+              if self._input_observer is not None else nullcontext()):
+            task = owned_create_task(self._flush_serialized(flush_latest, periodic, flush_seconds), name="realtime-owned-save")
+            self._flush_tasks.add(task)
+            task.add_done_callback(self._flush_tasks.discard)
+            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            await asyncio.shield(task)
 
     async def _flush_serialized(self, flush_latest: bool, periodic: bool, flush_seconds: bool) -> None:
         async with self._flush_lock:
-            from .diagnostic_metrics import CURRENT_FLUSH_ID
-            token = CURRENT_FLUSH_ID.set(uuid4().hex)
-            try:
+            with (self._input_observer.flush_scope()
+                  if self._input_observer is not None else nullcontext()):
                 await self._flush_snapshot_cycle(flush_latest, periodic, flush_seconds)
-            finally:
-                CURRENT_FLUSH_ID.reset(token)
 
     async def _flush_snapshot_cycle(
         self, flush_latest: bool = True, periodic: bool = False, flush_seconds: bool = True,
@@ -1569,26 +1492,29 @@ class CentralRealtimeCollector:
         ]
         return groups
 
-    @captured_subscription
     async def _send_subscription(
         self, websocket: Any, session: str, codes: tuple[str, ...], nxt_codes: tuple[str, ...],
         program_codes: tuple[str, ...] | None = None,
         priority_codes: tuple[str, ...] | None = None,
         *, previous_groups: dict[str, list[dict[str, object]]] | None = None,
     ) -> dict[str, list[dict[str, object]]]:
-        # Explicit v1 historical policy; live _receive uses the incremental planner.
-        groups = self._subscription_groups(session, codes, nxt_codes, program_codes, priority_codes)
-        previous_groups = previous_groups or {}
-        for group_no in sorted(set(previous_groups) - set(groups)):
-            await self._send_registration(websocket, json.dumps({
-                "trnm": "REMOVE", "grp_no": group_no,
-                "data": previous_groups[group_no],
-            }))
-        for group_no, data in groups.items():
-            await self._send_registration(websocket, json.dumps({
-                "trnm": "REG", "grp_no": group_no, "refresh": "0", "data": data,
-            }))
-        return groups
+        with (self._input_observer.subscription_scope(self, session, codes, nxt_codes,
+                program_codes, priority_codes) if self._input_observer is not None else nullcontext()) as observed:
+            # Explicit v1 historical policy; live _receive uses the incremental planner.
+            groups = self._subscription_groups(session, codes, nxt_codes, program_codes, priority_codes)
+            previous_groups = previous_groups or {}
+            for group_no in sorted(set(previous_groups) - set(groups)):
+                await self._send_registration(websocket, json.dumps({
+                    "trnm": "REMOVE", "grp_no": group_no,
+                    "data": previous_groups[group_no],
+                }))
+            for group_no, data in groups.items():
+                await self._send_registration(websocket, json.dumps({
+                    "trnm": "REG", "grp_no": group_no, "refresh": "0", "data": data,
+                }))
+            if observed is not None:
+                observed(groups)
+            return groups
 
     async def _send_registration(self, websocket: Any, raw: str) -> None:
         wait_seconds = (

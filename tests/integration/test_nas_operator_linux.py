@@ -119,7 +119,8 @@ class NasOperatorLinuxTests(unittest.TestCase):
             contract = {name: files[name] if name in files else 'a' * 64 for name in op.CONTRACT}
             digest = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
             release = 'build-' + digest[:16]
-            value = {'format': 1, 'release_id': release, 'server_build': 'build', 'files': files,
+            value = {'format': 1, 'contract_version': op.CONTRACT_VERSION,
+                     'release_id': release, 'server_build': 'build', 'files': files,
                      'contract': contract, 'src_hash': hashlib.sha256(json.dumps(
                          {k: v for k, v in files.items() if k.startswith('src/')}, sort_keys=True).encode()).hexdigest()}
             for name, data in content.items():
@@ -148,7 +149,8 @@ class NasOperatorLinuxTests(unittest.TestCase):
                 contract = {name: files.get(name, 'a' * 64) for name in op.CONTRACT}
                 digest = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
                 release = 'build-' + digest[:16]
-                value = dict(format=1, release_id=release, server_build='build', files=files,
+                value = dict(format=1, contract_version=op.CONTRACT_VERSION,
+                    release_id=release, server_build='build', files=files,
                     contract=contract, src_hash=hashlib.sha256(json.dumps(
                         {k: v for k, v in files.items() if k.startswith('src/')}, sort_keys=True).encode()).hexdigest())
                 for name, data in content.items():
@@ -307,9 +309,12 @@ class NasOperatorLinuxTests(unittest.TestCase):
     def test_helper_update_preserves_revoke_backups_and_rolls_back_failed_probe(self):
         from scripts import nas_operator_install as installer
         workspace = Path(__file__).resolve().parents[2]
-        for include_launcher, failed in ((launcher, failure) for launcher in (False, True)
-                                         for failure in (False, True, 'fence')):
-            with self.subTest(launcher=include_launcher, failed=failed), contextlib.ExitStack() as stack:
+        cases = [(launcher, None, failure) for launcher in (False, True)
+                 for failure in (False, True, 'fence')]
+        cases += [(False, policy, failure) for policy in ('set', 'clear')
+                  for failure in (False, True, 'fence', 'partial')]
+        for include_launcher, policy_mode, failed in cases:
+            with self.subTest(launcher=include_launcher, policy=policy_mode, failed=failed), contextlib.ExitStack() as stack:
                 root = Path(tempfile.mkdtemp(prefix='refresh-', dir=self.directory))
                 source = root / 'bundle'
                 (source / 'scripts').mkdir(parents=True)
@@ -355,23 +360,67 @@ class NasOperatorLinuxTests(unittest.TestCase):
                     private.put_json('install-backup-index.json', original_index)
                     config = {'helper_dir': str(helper), 'private': str(private_path),
                               'store': str(root / 'source-runtime'), 'allowed_uid': 0}
+                    options = {}
+                    policy = {'format': 1, 'contract': {name: hashlib.sha256(name.encode()).hexdigest()
+                               for name in op.CONTRACT}, 'runtime_image_id': 'sha256:' + 'e' * 64}
+                    if policy_mode:
+                        config.update(contract={name: 'a' * 64 for name in op.LEGACY_CONTRACT},
+                                      runtime_image_id='sha256:' + 'd' * 64,
+                                      runner_sha256='b' * 64, runtime_sha256='c' * 64)
+                        if policy_mode == 'clear':
+                            config['isolated_test_runtime'] = policy
+                            options['clear_isolated_test_runtime'] = True
+                        else:
+                            options['isolated_test_runtime_policy'] = policy
+                        raw_config = (json.dumps(config, indent=3) + '\n').encode()
+                        Path(op.CONFIG).write_bytes(raw_config)
+                        Path(op.CONFIG).chmod(0o600)
+                        originals[op.CONFIG] = raw_config
+                        for item in entries:
+                            if item['path'] == op.CONFIG:
+                                item.update(installed_sha256=hashlib.sha256(raw_config).hexdigest(),
+                                            installed_mode=0o600)
+                        private.put_json('install-backup-index.json', original_index)
+                    original_config = json.loads(json.dumps(config))
+                    if policy_mode and not failed:
+                        stale = dict(config, runtime_image_id='sha256:' + 'f' * 64)
+                        with self.assertRaisesRegex(op.Rejected, 'isolated_test_policy_config_changed'):
+                            installer.update_helpers(source, stale, '/acl', **options)
+                        self.assertFalse(Path(private_path / 'helper-update.json').exists())
+                        self.assertEqual(original_index, private.json('install-backup-index.json'))
+                        for path, raw in originals.items():
+                            self.assertEqual(raw, Path(path).read_bytes())
                     if include_launcher:
                         runner = root / 'source-runtime' / 'runner.py'
                         runner.parent.mkdir()
                         runner.write_bytes(b'previous launcher')
                         runner.chmod(0o777)  # Actual NAS shared-source mode.
                         originals[str(runner)] = runner.read_bytes()
+                    if failed == 'partial':
+                        original_write = op.Tree.write
+                        injected = []
+
+                        def write(tree, name, data, mode=0o600):
+                            if tree.path == str(Path(op.CONFIG).parent) and name == Path(op.CONFIG).name and not injected:
+                                injected.append(True)
+                                raise OSError('injected_partial_failure')
+                            return original_write(tree, name, data, mode)
+
+                        stack.enter_context(patch.object(op.Tree, 'write', new=write))
                     if failed:
-                        with self.assertRaisesRegex(op.Rejected, 'injected_(probe|fence)_failure'):
-                            installer.update_helpers(source, config, '/acl')
+                        with self.assertRaisesRegex(OSError if failed == 'partial' else op.Rejected,
+                                                    'injected_(probe|fence|partial)_failure'):
+                            installer.update_helpers(source, config, '/acl', **options)
                         self.assertEqual(original_index, private.json('install-backup-index.json'))
                         self.assertEqual('rolled_back', private.json('helper-update.json')['state'])
                         for path, data in originals.items():
                             self.assertEqual(data, Path(path).read_bytes())
+                        if policy_mode:
+                            self.assertEqual(0o600, stat.S_IMODE(Path(op.CONFIG).stat().st_mode))
                         if include_launcher:
                             self.assertEqual(0o777, stat.S_IMODE(runner.stat().st_mode))
                     else:
-                        result = installer.update_helpers(source, config, '/acl')
+                        result = installer.update_helpers(source, config, '/acl', **options)
                         self.assertTrue(result['sudoers_unchanged'])
                         self.assertFalse(result['server_restarted'])
                         current = private.json('install-backup-index.json')
@@ -382,6 +431,15 @@ class NasOperatorLinuxTests(unittest.TestCase):
                                              new['installed_sha256'])
                         for name in ('nas_operator.py', 'nas_operator_worker.py'):
                             self.assertEqual((source / 'scripts' / name).read_bytes(), (helper / name).read_bytes())
+                        if policy_mode:
+                            actual_config = json.loads(Path(op.CONFIG).read_bytes())
+                            self.assertEqual({k: v for k, v in original_config.items() if k != 'isolated_test_runtime'},
+                                             {k: v for k, v in actual_config.items() if k != 'isolated_test_runtime'})
+                            self.assertEqual(policy if policy_mode == 'set' else None,
+                                             actual_config.get('isolated_test_runtime'))
+                            self.assertEqual(0o600, stat.S_IMODE(Path(op.CONFIG).stat().st_mode))
+                            self.assertEqual({str(helper / name) for name in ('nas_operator.py', 'nas_operator_worker.py')} |
+                                             {op.CONFIG}, {item['path'] for item in private.json('helper-update.json')['entries']})
                         if include_launcher:
                             self.assertEqual((source / 'scripts/nas_source_runtime.py').read_bytes(), runner.read_bytes())
                             self.assertEqual(0o777, stat.S_IMODE(runner.stat().st_mode))
@@ -389,39 +447,112 @@ class NasOperatorLinuxTests(unittest.TestCase):
                                              json.loads(Path(op.CONFIG).read_bytes())['runner_sha256'])
                         for path, data in originals.items():
                             if Path(path).parent != helper and not (include_launcher and
-                                    path in (op.CONFIG, str(runner))):
+                                    path in (op.CONFIG, str(runner))) and not (policy_mode and path == op.CONFIG):
                                 self.assertEqual(data, Path(path).read_bytes())
+                    self.assertEqual(original_config, config)
                     for number in range(len(entries)):
                         self.assertEqual(b'original-before-install', private.read('install-backups/' + str(number)))
 
     def test_interrupted_helper_update_validates_all_backups_before_restore(self):
         from scripts import nas_operator_install as installer
-        with self.tree('private', protected=True) as private:
-            helper = self.directory / 'helper'
+        for with_policy in (False, True):
+            self._check_interrupted_update_targets(installer, with_policy)
+
+    def _check_interrupted_update_targets(self, installer, with_policy):
+        with self.tree('private-policy' if with_policy else 'private', protected=True) as private:
+            helper = self.directory / ('helper-policy' if with_policy else 'helper')
             helper.mkdir()
-            with patch.object(installer, 'HELPER', str(helper)), patch.object(op, 'HELPER', str(helper)):
+            config_path = self.directory / 'operator.json'
+            with patch.object(installer, 'HELPER', str(helper)), patch.object(op, 'HELPER', str(helper)), \
+                    patch.object(op, 'CONFIG', str(config_path)):
                 entries = []
-                for number, name in enumerate(('nas_operator.py', 'nas_operator_worker.py')):
+                targets = [(helper / name, 0o644) for name in ('nas_operator.py', 'nas_operator_worker.py')]
+                if with_policy:
+                    targets.append((config_path, 0o600))
+                for number, (path, mode) in enumerate(targets):
+                    name = path.name
                     old, new = ('old:' + name).encode(), ('new:' + name).encode()
-                    (helper / name).write_bytes(new)
+                    path.write_bytes(new)
+                    path.chmod(mode)
                     private.write('helper-update-backups/' + 'a' * 32 + '/' + str(number), old)
-                    entries.append({'path': str(helper / name), 'mode': 0o644,
+                    entries.append({'path': str(path), 'mode': mode,
                                     'previous_sha256': hashlib.sha256(old).hexdigest(),
                                     'new_sha256': hashlib.sha256(new).hexdigest()})
                 index = {'state': 'complete', 'entries': [{'path': path} for path in op.installed_paths()]}
                 private.put_json('helper-update.json', {'state': 'prepared', 'update_id': 'a' * 32,
                                                        'entries': entries, 'previous_index': index})
-                saved = private.read('helper-update-backups/' + 'a' * 32 + '/1')
-                private.write('helper-update-backups/' + 'a' * 32 + '/1', b'corrupt')
+                backup = 'helper-update-backups/' + 'a' * 32 + '/' + str(len(targets) - 1)
+                saved = private.read(backup)
+                private.write(backup, b'corrupt')
                 with self.assertRaisesRegex(op.Rejected, 'helper_update_backup_changed'):
                     installer.recover_helper_update(private)
-                self.assertEqual(b'new:nas_operator.py', (helper / 'nas_operator.py').read_bytes())
-                private.write('helper-update-backups/' + 'a' * 32 + '/1', saved)
+                for path, unused in targets:
+                    self.assertEqual(('new:' + path.name).encode(), path.read_bytes())
+                private.write(backup, saved)
+                if with_policy:
+                    config_path.write_bytes(b'changed outside update')
+                    with self.assertRaisesRegex(op.Rejected, 'helper_changed_during_update'):
+                        installer.recover_helper_update(private)
+                    self.assertEqual(b'new:nas_operator.py', (helper / 'nas_operator.py').read_bytes())
+                    config_path.write_bytes(b'new:operator.json')
                 installer.recover_helper_update(private)
                 self.assertEqual(index, private.json('install-backup-index.json'))
                 self.assertEqual('rolled_back', private.json('helper-update.json')['state'])
-                for name in ('nas_operator.py', 'nas_operator_worker.py'):
-                    self.assertEqual(('old:' + name).encode(), (helper / name).read_bytes())
+                for path, mode in targets:
+                    self.assertEqual(('old:' + path.name).encode(), path.read_bytes())
+                    self.assertEqual(mode, stat.S_IMODE(path.stat().st_mode))
+
+    def test_policy_update_rejects_null_conflicts_and_launcher_before_writes(self):
+        from scripts import nas_operator_install as installer
+        root = self.directory / 'bundle'
+        (root / 'scripts').mkdir(parents=True)
+        config = {'helper_dir': installer.HELPER, 'private': installer.PRIVATE}
+        valid = {'format': 1, 'contract': {name: 'a' * 64 for name in op.CONTRACT},
+                 'runtime_image_id': 'sha256:' + 'b' * 64}
+        for options, reason in (({'isolated_test_runtime_policy': None}, 'invalid_isolated_test_runtime'),
+                                ({'isolated_test_runtime_policy': valid, 'clear_isolated_test_runtime': True},
+                                 'conflicting_isolated_test_policy_update')):
+            with self.subTest(options=options), patch.object(installer, 'protected_directory') as protect:
+                with self.assertRaisesRegex(op.Rejected, reason):
+                    installer.update_helpers(root, config, '/acl', **options)
+                protect.assert_not_called()
+        (root / 'scripts/nas_source_runtime.py').write_bytes(b'not an authorized launcher update')
+        for options in ({'isolated_test_runtime_policy': valid}, {'clear_isolated_test_runtime': True}):
+            with self.subTest(options=options), patch.object(installer, 'protected_directory') as protect:
+                with self.assertRaisesRegex(op.Rejected, 'isolated_test_policy_launcher_bundle_forbidden'):
+                    installer.update_helpers(root, config, '/acl', **options)
+                protect.assert_not_called()
+
+    def test_admin_policy_cli_reads_protected_json_and_null_is_not_clear(self):
+        from scripts import nas_operator_install as installer
+        root = self.directory / 'cli-bundle'
+        (root / 'scripts').mkdir(parents=True)
+        policy_path = self.directory / 'reviewed-policy.json'
+        policy = {'format': 1, 'contract': {name: 'a' * 64 for name in op.CONTRACT},
+                  'runtime_image_id': 'sha256:' + 'b' * 64}
+        policy_path.write_text(json.dumps(policy))
+        config = {'allowed_user': 'k379', 'helper_dir': installer.HELPER, 'private': installer.PRIVATE}
+        command = ['installer', '--user', 'k379', '--update',
+                   '--isolated-test-runtime-policy', str(policy_path)]
+        with patch.object(installer.sys, 'argv', command), patch.object(op, 'load_config', return_value=config), \
+                patch.object(installer, 'executable', return_value='/acl'), \
+                patch.object(installer, 'check_acl') as acl, \
+                patch.object(installer, 'update_helpers', return_value={}) as update, \
+                contextlib.redirect_stdout(__import__('io').StringIO()):
+            self.assertEqual(0, installer.main())
+        self.assertEqual(policy, update.call_args.kwargs['isolated_test_runtime_policy'])
+        self.assertIn(unittest.mock.call(policy_path, '/acl'), acl.call_args_list)
+        policy_path.write_text('null')
+        with patch.object(installer.sys, 'argv', command), patch.object(op, 'load_config', return_value=config), \
+                patch.object(installer, '__file__', str(root / 'scripts/nas_operator_install.py')), \
+                patch.object(installer, 'executable', return_value='/acl'), patch.object(installer, 'check_acl'), \
+                patch.object(installer, 'protected_directory') as protect, \
+                contextlib.redirect_stdout(__import__('io').StringIO()):
+            self.assertEqual(1, installer.main())
+        protect.assert_not_called()
+        with patch.object(installer.sys, 'argv', command + ['--clear-isolated-test-runtime']), \
+                contextlib.redirect_stderr(__import__('io').StringIO()), self.assertRaises(SystemExit):
+            installer.main()
 
     def test_native_install_validates_before_grant_and_rolls_back_rule_first_on_failure(self):
         from scripts import nas_operator_install as installer

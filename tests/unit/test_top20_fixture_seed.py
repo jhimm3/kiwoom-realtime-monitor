@@ -1,19 +1,33 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+
+import asyncio
 import copy
 import hashlib
 import json
 import unittest
+from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
 from kiwoom_monitor.central_server.diagnostic_replay_baseline import DEFAULT_CONFIG, TABLES, TABLES_V2, ReplayDatabaseLease
 from kiwoom_monitor.central_server.diagnostic_top20_seed import (
-    Top20ColdFixtureSeed, Top20FixtureClock, preflight_top20_cold_fixture, seal_top20_cold_fixture,
+    Top20ColdFixtureSeed, Top20FixtureClock, preflight_top20_cold_fixture,
+    recorded_top20_cold_fixture_preflight, seal_top20_cold_fixture,
 )
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
+
+
+# Frozen from 0d7da46's v1 seal for the controlled fixture below.
+LEGACY_V1_SEED_ID = "9aac28167f7a44c95b370f5a4559f02eedd2c8517354a3ed251b780ea0aff337"
 
 
 def digest(value):
@@ -45,8 +59,10 @@ class Top20FixtureSeedTests(unittest.TestCase):
         clock = Top20FixtureClock(self.origin)
         store = ForbiddenIO()
         broker = CentralRestBroker(ForbiddenIO(), store, ranking_reservation=True)
-        service = AutonomousTop20Service(broker, RealtimeHub(), store, now_provider=clock.now,
-                                         catalog_loader=ForbiddenIO())
+        service = AutonomousTop20Service(broker, RealtimeHub(now_provider=clock.now, observer=hub_capture.HubInputRecorder()), store, now_provider=clock.now,
+                                         catalog_loader=ForbiddenIO(),
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         return service, clock
 
     def seal(self, service, clock):
@@ -67,6 +83,8 @@ class Top20FixtureSeedTests(unittest.TestCase):
             self.assertEqual([], service._tasks)
             self.assertEqual(0, service._hub.client_count)
             self.assertIsNone(service._broker._worker)
+            self.assertFalse(hasattr(service._broker, "_flow_inflight"))
+            self.assertEqual("empty_dict", json.loads(seed.document)["ram_state"]["broker"]["_flow_inflight"])
         self.assertEqual([seeds[0]] * 3, seeds)
         self.assertEqual([reports[0]] * 3, reports)
         self.assertTrue(reports[0]["seed_identity_verified"])
@@ -76,6 +94,19 @@ class Top20FixtureSeedTests(unittest.TestCase):
         self.assertFalse(reports[0]["top20_session_execution_ready"])
         self.assertIn("persistent_query_cache_outside_baseline_v1", reports[0]["blockers"])
         self.assertEqual("cold_controlled_fixture", json.loads(seeds[0].document)["fixture"])
+        self.assertEqual(LEGACY_V1_SEED_ID, seeds[0].ram_seed_id)
+        # A previously sealed document is reusable with a fresh native owner;
+        # newly checked owner fields must not rewrite the canonical v1 state.
+        legacy_seed = Top20ColdFixtureSeed(LEGACY_V1_SEED_ID, seeds[0].document)
+        service, clock = self.fixture()
+        self.assertTrue(self.preflight(legacy_seed, service, clock)["seed_identity_verified"])
+        with patch("kiwoom_monitor.central_server.diagnostic_trace.status", return_value=self.manifest), \
+                patch("kiwoom_monitor.central_server.diagnostic_trace.recorded_top20_window_frontier",
+                      return_value=self.frontier):
+            result = recorded_top20_cold_fixture_preflight("fixture", legacy_seed, service, clock,
+                baseline=self.baseline)
+        self.assertEqual(LEGACY_V1_SEED_ID, result["fixture_preflight"]["ram_seed_id"])
+        self.assertFalse(result["fixture_preflight"]["execution_authorized"])
 
     def test_v2_seed_requires_one_shared_broker_store_clock_and_restored_generation(self):
         from tests.unit.test_replay_cache_clock import URL, TOKEN
@@ -93,6 +124,7 @@ class Top20FixtureSeedTests(unittest.TestCase):
         lease._baseline_id = proof['baseline_id']
         store = lease.store()
         service._store = store
+        service.after_close._store = store
         from kiwoom_monitor.central_server.program_snapshot_writer import ProgramSnapshotWriter
         service._program_snapshots = ProgramSnapshotWriter(store)
         service._broker._store = store
@@ -117,12 +149,17 @@ class Top20FixtureSeedTests(unittest.TestCase):
     def test_warm_markers_cohort_aggregation_or_pending_writes_cannot_be_cold_seeded(self):
         changes = (
             lambda s: s._entry_stage_ready.update({("005930", "daily"): "2026-10-06"}),
-            lambda s: s._daily_input_versions.update({("005930", "KRX"): 1}),
+            lambda s: s.daily_reference.invalidate("005930", "KRX"),
             lambda s: setattr(s._collector, "active_codes", ("005930",)),
             lambda s: s._trade_values._last_cumulative_volume.update({("005930", "SOR"): 100}),
             lambda s: s._program_snapshots._pending.update({"p": {"value": 1}}),
+            lambda s: s._pending_index_records.update({"previous-minute": {"total": 1}}),
             lambda s: setattr(s, "_last_ranking_slot", "2026-10-06T08:55:00"),
             lambda s: s._fundamentals_pending.add("005930"),
+            lambda s: setattr(s.after_close, "_backfill_progress_day", "2026-10-06"),
+            lambda s: s.after_close._backfill_completed_steps.update({"005930": {"daily"}}),
+            lambda s: setattr(s.after_close, "_backfill_retry_at", 1.0),
+            lambda s: setattr(s.after_close, "_backfill_entrant_first_seen", {}),
         )
         for change in changes:
             with self.subTest(change=change):
@@ -135,8 +172,9 @@ class Top20FixtureSeedTests(unittest.TestCase):
     def test_completed_task_close_lock_or_shared_subscription_is_not_a_safe_cold_start(self):
         changes = (
             lambda s: setattr(s, "_close_task", object()),
+            lambda s: setattr(s.after_close, "_backfill_task", object()),
             lambda s: setattr(s._program_snapshots, "_save_task", object()),
-            lambda s: s._daily_input_lock.acquire(),
+            lambda s: s.daily_reference._daily_input_lock.acquire(),
             lambda s: s._hub.connect(),
             lambda s: setattr(s._hub, "_upstream_ready", True),
             lambda s: setattr(s._broker, "_worker", object()),
@@ -149,6 +187,91 @@ class Top20FixtureSeedTests(unittest.TestCase):
                 change(service)
                 with self.assertRaises(ValueError):
                     self.seal(service, clock)
+
+    def test_broker_canonical_flow_projection_requires_all_actual_native_owners_cold(self):
+        fields = {
+            "_inflight": {"pending": object()}, "_lookup_tasks": {object()}, "_cache": {"key": object()},
+            "_worker": object(), "_persist_worker": object(), "_credential_paused": True,
+            "_credential_generation": 1, "_drain_task": object(), "_activation_task": object(),
+            "_activating_credentials": object(), "_resume_task": object(), "_close_task": object(),
+        }
+        for field, value in fields.items():
+            with self.subTest(field=field):
+                service, clock = self.fixture()
+                setattr(service._broker, field, value)
+                with self.assertRaisesRegex(ValueError, "non_cold"):
+                    self.seal(service, clock)
+        for field in ("_inflight", "_lookup_tasks", "_cache"):
+            with self.subTest(missing=field):
+                service, clock = self.fixture()
+                delattr(service._broker, field)
+                with self.assertRaisesRegex(ValueError, "non_cold_or_missing"):
+                    self.seal(service, clock)
+        for field in ("_queue", "_persist_queue"):
+            service, clock = self.fixture()
+            queue = getattr(service._broker, field)
+            queue.put_nowait(object())
+            with self.subTest(queue=field, dequeued=False), self.assertRaisesRegex(ValueError, "queue_not_drained"):
+                self.seal(service, clock)
+            queue.get_nowait()
+            self.assertTrue(queue.empty())
+            self.assertEqual(1, queue._unfinished_tasks)
+            with self.subTest(queue=field, dequeued=True), self.assertRaisesRegex(ValueError, "queue_not_drained"):
+                self.seal(service, clock)
+            queue.task_done()
+            self.assertEqual(LEGACY_V1_SEED_ID, self.seal(service, clock).ram_seed_id)
+
+    def test_broker_guard_and_finished_native_tasks_cannot_be_projected_cold(self):
+        async def exercise():
+            service, clock = self.fixture()
+            async with service._broker._guard:
+                with self.assertRaisesRegex(ValueError, "lock_in_use"):
+                    self.seal(service, clock)
+            task = asyncio.create_task(asyncio.sleep(0))
+            try:
+                for finished in (False, True):
+                    if finished:
+                        await task
+                    for field in ("_worker", "_persist_worker", "_drain_task", "_activation_task", "_resume_task", "_close_task"):
+                        with self.subTest(field=field, finished=finished):
+                            setattr(service._broker, field, task)
+                            try:
+                                with self.assertRaisesRegex(ValueError, "non_cold"):
+                                    self.seal(service, clock)
+                            finally:
+                                setattr(service._broker, field, None)
+            finally:
+                await task
+            self.assertEqual(LEGACY_V1_SEED_ID, self.seal(service, clock).ram_seed_id)
+        asyncio.run(exercise())
+
+    def test_index_save_owner_and_flush_cut_are_non_cold_even_with_empty_pending(self):
+        async def check():
+            service, clock = self.fixture()
+            seed = self.seal(service, clock)
+            async with service._index_flush_lock:
+                with self.assertRaisesRegex(ValueError, "lock_in_use"):
+                    self.seal(service, clock)
+                with self.assertRaisesRegex(ValueError, "lock_in_use"):
+                    self.preflight(seed, service, clock)
+            task = asyncio.create_task(asyncio.sleep(0))
+            service._index_save_task = task
+            try:
+                for finished in (False, True):
+                    if finished:
+                        await task
+                    with self.subTest(finished=finished):
+                        self.assertEqual({}, service._pending_index_records)
+                        with self.assertRaisesRegex(ValueError, "_index_save_task"):
+                            self.seal(service, clock)
+                        with self.assertRaisesRegex(ValueError, "_index_save_task"):
+                            self.preflight(seed, service, clock)
+            finally:
+                await task
+            service._index_save_task = None
+            self.assertEqual(seed, self.seal(service, clock))
+            self.assertTrue(self.preflight(seed, service, clock)["seed_identity_verified"])
+        asyncio.run(check())
 
     def test_persistent_cache_or_outbox_cannot_be_silently_disabled_or_ignored(self):
         service, clock = self.fixture()
@@ -181,6 +304,7 @@ class Top20FixtureSeedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity_mismatch"):
             self.preflight(seed, service, clock, source_manifest=changed_input)
         service._minute_backfill_enabled = False
+        service.after_close._minute_backfill_enabled = False
         with self.assertRaisesRegex(ValueError, "identity_mismatch"):
             self.preflight(seed, service, clock)
 
@@ -238,12 +362,34 @@ class Top20FixtureSeedTests(unittest.TestCase):
         service, clock = self.fixture()
         clock = Top20FixtureClock(self.origin + timedelta(seconds=30))
         service._now = clock.now
+        service.after_close._now = clock.now
+        service._hub._now_provider = clock.now
         with self.assertRaisesRegex(ValueError, "source_clock_mismatch"):
             self.seal(service, clock)
         service, clock = self.fixture()
         service._now = lambda: self.origin
         with self.assertRaisesRegex(ValueError, "not_frozen_or_bound"):
             self.seal(service, clock)
+
+
+    def test_hub_clock_and_installed_observer_are_required_without_changing_seed_identity(self):
+        service, clock = self.fixture()
+        self.assertEqual(clock.now, service._hub._now_provider)
+        self.assertIs(hub_capture.HubInputRecorder, type(service._hub._observer))
+        observer = service._hub._observer
+        original = self.seal(service, clock)
+        service._hub._now_provider = lambda: self.origin
+        with self.assertRaisesRegex(ValueError, "hub_clock_or_observer_not_bound"):
+            self.seal(service, clock)
+        service._hub._now_provider = clock.now
+        service._hub._observer = None
+        with self.assertRaisesRegex(ValueError, "hub_clock_or_observer_not_bound"):
+            self.seal(service, clock)
+        service._hub._observer = object()
+        with self.assertRaisesRegex(ValueError, "hub_clock_or_observer_not_bound"):
+            self.seal(service, clock)
+        service._hub._observer = observer
+        self.assertEqual(original, self.seal(service, clock))
 
 
 if __name__ == "__main__":

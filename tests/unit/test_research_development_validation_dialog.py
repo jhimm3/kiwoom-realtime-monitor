@@ -280,6 +280,7 @@ class DevelopmentValidationDialogTests(unittest.TestCase):
         with patch('kiwoom_monitor.presentation.research_dialog.QSettings') as settings:
             settings.return_value.value.side_effect = lambda key, default=None, **kw: default
             parent = ResearchDialog(self.root / 'parent'); self.dialogs.append(parent)
+            parent.activate_startup()
         parent._worker_retry_timer.stop()
         parent._show_development_validation(); first = parent._validation_dialog
         parent._show_development_validation(); self.assertIs(first, parent._validation_dialog)

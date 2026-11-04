@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
+from kiwoom_monitor.infrastructure.central_content_client import _http_operation_context
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.domain.time_basis import aware_iso_kst
 
@@ -93,6 +94,15 @@ class RemoteKiwoomRestClient:
         self._command_lock = RLock()
         self._pending_submit = None
         self._server_clock: tuple[datetime, float] | None = None
+
+    def require_query_access(self) -> dict[str, Any]:
+        """Confirm this explicit connection is the server's dedicated query bearer."""
+        request = Request(f"{self._server_url}/api/v1/capabilities",
+            headers={"Authorization": f"Bearer {self._access_token}"}, method="GET")
+        document = self._read_central_document(request, "조회 권한", timeout_seconds=10)
+        if "api_version" not in document or document.get("access_scope") != "query":
+            raise ValueError("조회 전용 접속 토큰을 확인하세요. 서버가 조회 권한을 확인하지 않았습니다.")
+        return document
 
     def load_account_contexts(self) -> tuple[AccountQueryContext, ...]:
         request = Request(f"{self._server_url}/api/v3/kiwoom/accounts",
@@ -221,34 +231,36 @@ class RemoteKiwoomRestClient:
     def request_with_continuation(
         self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str = "N", next_key: str = ""
     ) -> tuple[dict[str, Any], bool, str]:
-        request = Request(
-            f"{self._server_url}/api/v1/kiwoom/query",
-            data=json.dumps({
-                "api_id": api_id, "path": path, "body": body,
-                "cont_yn": cont_yn, "next_key": next_key,
-            }, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._access_token}",
-                "Content-Type": "application/json;charset=UTF-8",
-            },
-            method="POST",
-        )
-        try:
-            request.add_header("X-Kiwoom-Clock", "1")
-            with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
-                document = json.loads(response.read().decode("utf-8"))
-                self._capture_server_clock(response)
-        except HTTPError as error:
-            detail = _http_error_detail(error)
-            if (error.code == 503 and isinstance(detail, dict) and detail.get("code") == "REALTIME_RECONNECTING"
-                    and planned_reconnect_remaining(detail.get("connection_status")) is not None):
-                raise CentralPlannedReconnect(detail["connection_status"]) from None
-            _raise_central_http_error(error, detail)
-        except (URLError, TimeoutError, ConnectionError, OSError) as error:
-            raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
-        if not isinstance(document, dict) or not isinstance(document.get("payload"), dict):
-            raise KiwoomApiError("개인 중앙 서버 응답 형식이 올바르지 않습니다.")
-        return document["payload"], bool(document.get("has_next")), str(document.get("next_key", ""))
+        with _http_operation_context(self._access_token) as request_id:
+            request = Request(
+                f"{self._server_url}/api/v1/kiwoom/query",
+                data=json.dumps({
+                    "api_id": api_id, "path": path, "body": body,
+                    "cont_yn": cont_yn, "next_key": next_key,
+                }, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {self._access_token}",
+                    "Content-Type": "application/json;charset=UTF-8",
+                },
+                method="POST",
+            )
+            try:
+                request.add_header("X-Kiwoom-Clock", "1")
+                request.add_header("X-Request-ID", request_id)
+                with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
+                    document = json.loads(response.read().decode("utf-8"))
+                    self._capture_server_clock(response)
+            except HTTPError as error:
+                detail = _http_error_detail(error)
+                if (error.code == 503 and isinstance(detail, dict) and detail.get("code") == "REALTIME_RECONNECTING"
+                        and planned_reconnect_remaining(detail.get("connection_status")) is not None):
+                    raise CentralPlannedReconnect(detail["connection_status"]) from None
+                _raise_central_http_error(error, detail)
+            except (URLError, TimeoutError, ConnectionError, OSError) as error:
+                raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
+            if not isinstance(document, dict) or not isinstance(document.get("payload"), dict):
+                raise KiwoomApiError("개인 중앙 서버 응답 형식이 올바르지 않습니다.")
+            return document["payload"], bool(document.get("has_next")), str(document.get("next_key", ""))
 
     def load_stored_minute_bars(
         self, code: str, trading_date: str, market: str = "",
@@ -261,31 +273,33 @@ class RemoteKiwoomRestClient:
         self, code: str, trading_date: str, market: str = "",
     ) -> tuple[tuple[dict[str, Any], ...], bool]:
         """중앙 분봉과 장후 전체 조회 완료 근거를 함께 읽는다."""
-        query = urlencode({
-            "code": code,
-            "trading_date": trading_date,
-            "market": market.upper(),
-        })
-        request = Request(
-            f"{self._server_url}/api/v1/market/minute-bars?{query}",
-            headers={"Authorization": f"Bearer {self._access_token}"},
-            method="GET",
-        )
-        try:
-            request.add_header("X-Kiwoom-Clock", "1")
-            with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
-                document = json.loads(response.read().decode("utf-8"))
-                self._capture_server_clock(response)
-        except HTTPError as error:
-            _raise_central_http_error(error, _http_error_detail(error))
-        except (URLError, TimeoutError, ConnectionError, OSError) as error:
-            raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
-        bars = document.get("bars") if isinstance(document, dict) else None
-        if not isinstance(bars, list) or any(not isinstance(value, dict) for value in bars):
-            raise KiwoomApiError("개인 중앙 서버 분봉 응답 형식이 올바르지 않습니다.")
-        coverage = document.get("coverage") if isinstance(document, dict) else None
-        complete = bool(isinstance(coverage, dict) and coverage.get("complete") is True)
-        return tuple(bars), complete
+        with _http_operation_context(self._access_token) as request_id:
+            query = urlencode({
+                "code": code,
+                "trading_date": trading_date,
+                "market": market.upper(),
+            })
+            request = Request(
+                f"{self._server_url}/api/v1/market/minute-bars?{query}",
+                headers={"Authorization": f"Bearer {self._access_token}"},
+                method="GET",
+            )
+            try:
+                request.add_header("X-Kiwoom-Clock", "1")
+                request.add_header("X-Request-ID", request_id)
+                with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
+                    document = json.loads(response.read().decode("utf-8"))
+                    self._capture_server_clock(response)
+            except HTTPError as error:
+                _raise_central_http_error(error, _http_error_detail(error))
+            except (URLError, TimeoutError, ConnectionError, OSError) as error:
+                raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
+            bars = document.get("bars") if isinstance(document, dict) else None
+            if not isinstance(bars, list) or any(not isinstance(value, dict) for value in bars):
+                raise KiwoomApiError("개인 중앙 서버 분봉 응답 형식이 올바르지 않습니다.")
+            coverage = document.get("coverage") if isinstance(document, dict) else None
+            complete = bool(isinstance(coverage, dict) and coverage.get("complete") is True)
+            return tuple(bars), complete
 
     def load_stored_recent_minute_bars(
         self, code: str, end_date: str, market: str = "", trading_days: int = 2,
@@ -539,93 +553,97 @@ class RemoteKiwoomRestClient:
         return snapshots
 
     def _read_central_document(self, request: Request, label: str, *, timeout_seconds=None) -> dict[str, Any]:
-        try:
-            request.add_header("X-Kiwoom-Clock", "1")
-            with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds, context=system_ssl_context()) as response:
-                document = json.loads(response.read().decode("utf-8"))
-                self._capture_server_clock(response)
-        except HTTPError as error:
-            if error.code in {404, 405, 501} and "/api/v1/market/top20-series?" in request.full_url:
-                raise CentralFeatureUnavailable("중앙 서버가 TOP20 series를 지원하지 않습니다.") from error
-            _raise_central_http_error(error, _http_error_detail(error))
-        except (URLError, TimeoutError, ConnectionError, OSError) as error:
-            raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
-        if not isinstance(document, dict):
-            raise KiwoomApiError(f"개인 중앙 서버 {label} 응답 형식이 올바르지 않습니다.")
-        return document
+        with _http_operation_context(self._access_token) as request_id:
+            try:
+                request.add_header("X-Kiwoom-Clock", "1")
+                request.add_header("X-Request-ID", request_id)
+                with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds, context=system_ssl_context()) as response:
+                    document = json.loads(response.read().decode("utf-8"))
+                    self._capture_server_clock(response)
+            except HTTPError as error:
+                if error.code in {404, 405, 501} and "/api/v1/market/top20-series?" in request.full_url:
+                    raise CentralFeatureUnavailable("중앙 서버가 TOP20 series를 지원하지 않습니다.") from error
+                _raise_central_http_error(error, _http_error_detail(error))
+            except (URLError, TimeoutError, ConnectionError, OSError) as error:
+                raise CentralServerUnavailable("개인 중앙 서버에 연결할 수 없습니다.") from error
+            if not isinstance(document, dict):
+                raise KiwoomApiError(f"개인 중앙 서버 {label} 응답 형식이 올바르지 않습니다.")
+            return document
 
     def query_account_pages(
         self, api_id: str, path: str, body: dict[str, Any], *, max_pages: int = 20,
     ) -> AccountQueryBatch:
         if max_pages < 1:
             raise ValueError("max_pages must be positive")
-        pages: list[dict[str, Any]] = []
-        context: AccountQueryContext | None = None
-        batch_id, next_key = "", ""
-        for page_index in range(max_pages):
-            request = Request(
-                f"{self._server_url}/api/{'v3' if self._selected_context else 'v2'}/kiwoom/account-query",
-                data=json.dumps({
-                    "api_id": api_id, "path": path, "body": body,
-                    "batch_id": batch_id, "page_index": page_index,
-                    "next_key": next_key,
-                    **(self._selected_fields() if self._selected_context else {}),
-                }, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {self._access_token}",
-                    "Content-Type": "application/json;charset=UTF-8",
-                },
-                method="POST",
-            )
-            try:
-                request.add_header("X-Kiwoom-Clock", "1")
-                with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
-                    document = json.loads(response.read().decode("utf-8"))
-                    self._capture_server_clock(response)
-            except HTTPError as error:
-                detail = _http_error_detail(error)
-                if error.code in {404, 405, 501}:
-                    raise AccountQueryCapabilityError(
-                        "중앙 서버가 검증 계좌 조회 v2를 지원하지 않습니다."
-                    ) from error
-                if error.code in _CENTRAL_GATEWAY_UNAVAILABLE_STATUS:
+        with _http_operation_context(self._access_token) as request_id:
+            pages: list[dict[str, Any]] = []
+            context: AccountQueryContext | None = None
+            batch_id, next_key = "", ""
+            for page_index in range(max_pages):
+                request = Request(
+                    f"{self._server_url}/api/{'v3' if self._selected_context else 'v2'}/kiwoom/account-query",
+                    data=json.dumps({
+                        "api_id": api_id, "path": path, "body": body,
+                        "batch_id": batch_id, "page_index": page_index,
+                        "next_key": next_key,
+                        **(self._selected_fields() if self._selected_context else {}),
+                    }, ensure_ascii=False).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {self._access_token}",
+                        "Content-Type": "application/json;charset=UTF-8",
+                    },
+                    method="POST",
+                )
+                try:
+                    request.add_header("X-Kiwoom-Clock", "1")
+                    request.add_header("X-Request-ID", request_id)
+                    with self._opener(request, timeout=self._timeout, context=system_ssl_context()) as response:
+                        document = json.loads(response.read().decode("utf-8"))
+                        self._capture_server_clock(response)
+                except HTTPError as error:
+                    detail = _http_error_detail(error)
+                    if error.code in {404, 405, 501}:
+                        raise AccountQueryCapabilityError(
+                            "중앙 서버가 검증 계좌 조회 v2를 지원하지 않습니다."
+                        ) from error
+                    if error.code in _CENTRAL_GATEWAY_UNAVAILABLE_STATUS:
+                        raise InterruptedAccountQueryError(
+                            "개인 중앙 서버 계좌 조회가 중단되었습니다.", context,
+                        ) from error
+                    raise KiwoomApiError(f"개인 중앙 서버 오류: HTTP {error.code} {detail}".strip()) from error
+                except (URLError, TimeoutError, ConnectionError, OSError) as error:
                     raise InterruptedAccountQueryError(
                         "개인 중앙 서버 계좌 조회가 중단되었습니다.", context,
                     ) from error
-                raise KiwoomApiError(f"개인 중앙 서버 오류: HTTP {error.code} {detail}".strip()) from error
-            except (URLError, TimeoutError, ConnectionError, OSError) as error:
-                raise InterruptedAccountQueryError(
-                    "개인 중앙 서버 계좌 조회가 중단되었습니다.", context,
-                ) from error
-            page_context = self._account_context(document, verified=self._selected_context is not None)
-            if self._selected_context is not None and page_context != self._selected_context:
-                raise AccountScopeMismatchError("선택한 계좌와 NAS 응답의 연결 버전이 다릅니다.")
-            if self._selected_context is not None and (type(document.get("complete")) is not bool
-                    or type(document.get("page_index")) is not int):
-                raise IncompleteAccountQueryError("NAS 계좌 페이지 완료 상태가 올바르지 않습니다.")
-            if context is None:
-                context = page_context
-            elif page_context != context:
-                raise KiwoomApiError("계좌 조회 도중 중앙 서버 context가 변경되었습니다.")
-            payload = document.get("payload") if isinstance(document, dict) else None
-            response_batch_id = str(document.get("batch_id", "")) if isinstance(document, dict) else ""
-            if not isinstance(payload, dict) or not response_batch_id:
-                raise KiwoomApiError("개인 중앙 서버 계좌 응답 형식이 올바르지 않습니다.")
-            if batch_id and response_batch_id != batch_id:
-                raise KiwoomApiError("계좌 조회 batch ID가 변경되었습니다.")
-            if int(document.get("page_index", -1)) != page_index:
-                raise KiwoomApiError("계좌 조회 페이지 순서가 올바르지 않습니다.")
-            pages.append(payload)
-            batch_id = response_batch_id
-            if bool(document.get("complete")):
-                assert context is not None
-                return AccountQueryBatch(tuple(pages), context, len(pages), True)
-            next_key = str(document.get("next_key", ""))
-            if not next_key:
-                raise KiwoomApiError("미완료 계좌 조회에 다음 cursor가 없습니다.")
-        raise IncompleteAccountQueryError(
-            f"account query exceeded the {max_pages}-page safety limit"
-        )
+                page_context = self._account_context(document, verified=self._selected_context is not None)
+                if self._selected_context is not None and page_context != self._selected_context:
+                    raise AccountScopeMismatchError("선택한 계좌와 NAS 응답의 연결 버전이 다릅니다.")
+                if self._selected_context is not None and (type(document.get("complete")) is not bool
+                        or type(document.get("page_index")) is not int):
+                    raise IncompleteAccountQueryError("NAS 계좌 페이지 완료 상태가 올바르지 않습니다.")
+                if context is None:
+                    context = page_context
+                elif page_context != context:
+                    raise KiwoomApiError("계좌 조회 도중 중앙 서버 context가 변경되었습니다.")
+                payload = document.get("payload") if isinstance(document, dict) else None
+                response_batch_id = str(document.get("batch_id", "")) if isinstance(document, dict) else ""
+                if not isinstance(payload, dict) or not response_batch_id:
+                    raise KiwoomApiError("개인 중앙 서버 계좌 응답 형식이 올바르지 않습니다.")
+                if batch_id and response_batch_id != batch_id:
+                    raise KiwoomApiError("계좌 조회 batch ID가 변경되었습니다.")
+                if int(document.get("page_index", -1)) != page_index:
+                    raise KiwoomApiError("계좌 조회 페이지 순서가 올바르지 않습니다.")
+                pages.append(payload)
+                batch_id = response_batch_id
+                if bool(document.get("complete")):
+                    assert context is not None
+                    return AccountQueryBatch(tuple(pages), context, len(pages), True)
+                next_key = str(document.get("next_key", ""))
+                if not next_key:
+                    raise KiwoomApiError("미완료 계좌 조회에 다음 cursor가 없습니다.")
+            raise IncompleteAccountQueryError(
+                f"account query exceeded the {max_pages}-page safety limit"
+            )
 
     @staticmethod
     def _account_context(document: object, *, verified=False) -> AccountQueryContext:

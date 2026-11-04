@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
@@ -802,8 +802,11 @@ class OrderLifecycle:
             return self._apply(record, "CANCEL_REJECTED", fallback, reason=str(error))
         return self._apply(record, "CANCEL_ACCEPTED", OrderState.CANCEL_PENDING)
 
-    def reconcile(self, intent_id: str, snapshot: BrokerOrderSnapshot) -> ExecutionRecord:
-        record = self._required(intent_id)
+    def reconcile(
+        self, intent_id: str, snapshot: BrokerOrderSnapshot, *, _connection: Any = None,
+    ) -> ExecutionRecord:
+        connection_args = {} if _connection is None else {"_connection": _connection}
+        record = self._required(intent_id, **connection_args)
         intent = record.intent
         if snapshot.account_ref != intent.account_ref or snapshot.symbol != intent.symbol:
             raise ValueError("broker snapshot does not match the order account and symbol")
@@ -833,7 +836,7 @@ class OrderLifecycle:
                 filled_quantity=filled_quantity, fill_ids=tuple(fill_ids),
                 detailed_filled_quantity=detailed_filled_quantity,
                 broker_reported_filled_quantity=broker_reported_filled_quantity,
-                last_broker_as_of=snapshot.as_of,
+                last_broker_as_of=snapshot.as_of, **connection_args,
             )
 
         if snapshot.filled_quantity > intent.quantity:
@@ -853,7 +856,7 @@ class OrderLifecycle:
                     filled_quantity=filled_quantity, fill_ids=tuple(fill_ids),
                     detailed_filled_quantity=detailed_filled_quantity,
                     broker_reported_filled_quantity=broker_reported_filled_quantity,
-                    last_broker_as_of=snapshot.as_of,
+                    last_broker_as_of=snapshot.as_of, **connection_args,
                 )
 
         final_state = self._snapshot_state(snapshot, filled_quantity, intent.quantity)
@@ -868,7 +871,7 @@ class OrderLifecycle:
                 filled_quantity=filled_quantity, fill_ids=tuple(fill_ids),
                 detailed_filled_quantity=detailed_filled_quantity,
                 broker_reported_filled_quantity=broker_reported_filled_quantity,
-                last_broker_as_of=snapshot.as_of,
+                last_broker_as_of=snapshot.as_of, **connection_args,
             )
         return record
 
@@ -914,8 +917,9 @@ class OrderLifecycle:
             return "insufficient available cash after open-order reservation"
         return ""
 
-    def _required(self, intent_id: str) -> ExecutionRecord:
-        record = self._repository.load(intent_id)
+    def _required(self, intent_id: str, *, _connection: Any = None) -> ExecutionRecord:
+        connection_args = {} if _connection is None else {"_connection": _connection}
+        record = self._repository.load(intent_id, **connection_args)
         if record is None:
             raise KeyError(f"unknown order intent: {intent_id}")
         return record
@@ -925,7 +929,10 @@ class OrderLifecycle:
             raise RuntimeError("order transport is not configured")
         return self._transport
 
-    def _apply(self, record: ExecutionRecord, event_type: str, state: OrderState, **values: object) -> ExecutionRecord:
+    def _apply(
+        self, record: ExecutionRecord, event_type: str, state: OrderState, *,
+        _connection: Any = None, **values: object,
+    ) -> ExecutionRecord:
         received_at = self._now()
         occurred_at = values.pop("occurred_at", received_at)
         event_fields = {
@@ -936,4 +943,5 @@ class OrderLifecycle:
         event = order_event(
             record.intent.intent_id, event_type, state, occurred_at, received_at, **event_fields,
         )
-        return self._repository.apply(record, event, **values)
+        connection_args = {} if _connection is None else {"_connection": _connection}
+        return self._repository.apply(record, event, **values, **connection_args)

@@ -119,12 +119,14 @@ class PostgresQueryCacheStoreMixin:
             connection.close()
 
         total_ms = round((monotonic() - total_started) * 1000)
-        from .diagnostic_metrics import record_writer_transaction
+        from .postgres_access import database_observer
+        observer = database_observer()
         try:
-            record_writer_transaction("query_cache", 1, total_ms,
-                                      commit_ms=commit_ms, connect_ms=connect_ms,
-                                      execute_ms=upsert_ms + cleanup_ms,
-                                      db_call_id=writer.call_id)
+            if observer is not None:
+                observer.record_writer_transaction("query_cache", 1, total_ms,
+                                          commit_ms=commit_ms, connect_ms=connect_ms,
+                                          execute_ms=upsert_ms + cleanup_ms,
+                                          db_call_id=writer.call_id)
         except Exception:
             # The cache write has already committed; a diagnostic sink failure
             # must not turn that successful write into a caller-visible error.

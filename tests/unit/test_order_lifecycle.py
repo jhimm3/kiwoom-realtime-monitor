@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, replace
 import json
@@ -998,6 +999,61 @@ class AutomationCancelBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime._new_orders_enabled)
         self.assertEqual(self.record.intent, result.intent)
         self.assertEqual(1, self.refreshes)
+
+    async def test_cancel_reads_share_each_scope_and_close_before_refresh_and_claim(self):
+        timeline = []
+        readers = []
+        native_scope = self.store.mock_automation_read_scope
+        load = self.repository.load
+        events = self.repository.events
+
+        @contextmanager
+        def observed_scope():
+            with native_scope() as reader:
+                readers.append(reader)
+                timeline.append('open')
+                yield reader
+            timeline.append('close')
+
+        def observed_read(read, name):
+            def read_order(intent, **options):
+                reader = options.get('_reader')
+                if reader is not None:
+                    self.assertIs(reader, readers[-1])
+                    timeline.append(name)
+                return read(intent, **options)
+            return read_order
+
+        self.refresh_hook = lambda: timeline.append('refresh')
+        with (patch.object(self.store, 'mock_automation_read_scope', observed_scope),
+              patch.object(self.repository, 'load', observed_read(load, 'intent')),
+              patch.object(self.repository, 'events', observed_read(events, 'history'))):
+            result = await self.gateway.cancel_automation_intent(
+                self.record, spec_id='spec-1', control_revision=1,
+                before_cancel_claim=lambda: timeline.append('claim'),
+            )
+        self.assertEqual(['open', 'intent', 'history', 'close', 'refresh',
+                          'open', 'intent', 'history', 'close', 'claim'], timeline)
+        self.assertIsNot(readers[0], readers[1])
+        self.assertEqual((OrderState.CANCEL_PENDING, 1, 1),
+                         (result.state, self.refreshes, self.transport.cancel_calls))
+
+    async def test_explicit_retry_history_error_precedes_refresh_and_runtime(self):
+        failure = OSError('history unavailable')
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                if terminal:
+                    self.reconcile(OrderState.FILLED, 3, 0)
+                with (patch.object(self.repository, 'events', side_effect=failure),
+                      patch.object(self.runtime, 'cancel_automation_intent') as cancel):
+                    with self.assertRaises(OSError) as caught:
+                        await self.gateway.cancel_automation_intent(
+                            self.record, spec_id='spec-1', control_revision=1,
+                            cancel_retry_claim={'attempt': 2},
+                        )
+                self.assertIs(failure, caught.exception)
+                cancel.assert_not_called()
+                self.assertEqual((0, 0), (self.refreshes, self.transport.cancel_calls))
 
     async def test_sell_uses_same_native_cancel_without_creating_new_sell(self):
         intent = replace(_intent(), intent_id="sell-1", side=OrderSide.SELL)

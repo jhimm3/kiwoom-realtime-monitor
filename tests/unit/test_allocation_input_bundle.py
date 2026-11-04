@@ -231,7 +231,7 @@ class AllocationOffFlowTests(unittest.IsolatedAsyncioTestCase):
                 [{k:row[k] for k in ('symbol','ev_receipt','exit_receipt')}],expected_selection_revision=1,
                 position_studies={row['symbol']:row['position_study']})
             runtime=MarketThemeShadowRuntime(parent._hub,collector,parent._bindings,
-                position_account_source=source,position_allocation=inputs.compile_dynamic_allocation_ram_selection(selection))
+                position_account_source=source,position_allocation=inputs.compile_dynamic_allocation_ram_selection(selection), now_provider=collector._now_provider)
             self.addAsyncCleanup(runtime.close)
             runtime.offer_allocation_models(published,inputs.decode_dynamic_allocation_model_publication(published,runtime._allocation,1))
             cases.append((action,budget,runtime))

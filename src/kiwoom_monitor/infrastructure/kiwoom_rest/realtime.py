@@ -3,9 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable
 
 from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
+
+
+class RealtimeSourceRoute(str, Enum):
+    LOCAL = "local"
+    LOCAL_FALLBACK = "local_fallback"
+    CENTRAL = "central"
+    CENTRAL_WAITING = "central_waiting"
+    CENTRAL_RETRY = "central_retry"
+
+
+@dataclass(frozen=True)
+class RealtimeSourceTransition:
+    """Transport evidence; generation is scoped to that producer, not a clock."""
+
+    route: RealtimeSourceRoute
+    generation: int | None = None
+    # A received trade is useful legacy readiness evidence, not a full-code ACK.
+    acknowledged: bool = False
 
 
 @dataclass(frozen=True)

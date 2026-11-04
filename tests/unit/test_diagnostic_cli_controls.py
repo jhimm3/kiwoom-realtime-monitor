@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
+from kiwoom_monitor.central_server import diagnostic_sampling as sampling
 from kiwoom_monitor.central_server.diagnostic_workloads import (
     capture_status, control_snapshot, diagnostic_tool_status, paused_workloads,
 )
@@ -101,27 +102,33 @@ class DiagnosticCliControlTests(unittest.TestCase):
               patch.dict(sys.modules, {"psycopg": types.SimpleNamespace(
                   connect=lambda *a, **k: FakeConnection(), Error=Exception)}),
               patch.object(self.cli, "_api", side_effect=api),
-              patch.object(self.cli, "_log_position", return_value=(self.path, 0)),
-              patch.object(self.cli, "_device_stats",
-                           side_effect=[device_before, device_before, device_after]),
+              patch.object(sampling, "_log_position", return_value=(self.path, 0)),
+              patch.object(sampling, "_device_stats",
+                           side_effect=[device_before, device_before, device_after] * 2),
               patch.object(self.cli.time, "time", return_value=100.0),
-              patch.object(self.cli, "_host_usage", return_value={}),
-              patch.object(self.cli, "_uncontrolled_importers", return_value=[]),
-              patch.object(self.cli, "_wal_timing_status", return_value={}),
-              patch.object(self.cli, "_io_timing_status", return_value={}),
-              patch.object(self.cli, "_snapshot", return_value={"wal_bytes": 0}),
-              patch.object(self.cli, "_optional_io_snapshot", return_value={}),
-              patch.object(self.cli, "_wal_timing_report", return_value={}),
-              patch.object(self.cli, "_storage_mapping", return_value={}),
-              patch.object(self.cli, "_log_counts", return_value={})):
+              patch.object(sampling, "_host_usage", return_value={}),
+              patch.object(sampling, "_uncontrolled_importers", return_value=[]),
+              patch.object(sampling, "_wal_timing_status", return_value={}),
+              patch.object(sampling, "_io_timing_status", return_value={}),
+              patch.object(sampling, "_snapshot", return_value={"wal_bytes": 0}),
+              patch.object(sampling, "_optional_io_snapshot", return_value={}),
+              patch.object(sampling, "_wal_timing_report", return_value={}),
+              patch.object(sampling, "_storage_mapping", return_value={}),
+              patch.object(sampling, "_log_counts", return_value={})):
             phase = self.cli._measure(0, "test", session_id)
+            self.assertIsNone(phase["db_calls_raw"])
+            self.assertEqual(2, len(queries))
+            in_process_phase = self.cli._measure(0, "test", session_id, api=api)
         self.assertEqual("complete", phase["state"])
         self.assertEqual(0, phase["elapsed_seconds"])
         self.assertIsNone(phase["wal_bytes_per_second"])
         self.assertIsNone(phase["storage_devices"]["dm-4"]["average_queue"])
         self.assertIsNone(phase["storage_devices"]["dm-4"]["busy_percent"])
         self.assertEqual("complete", phase["db_calls"]["state"])
-        self.assertEqual(2, len(queries))
+        self.assertIs(response, in_process_phase["db_calls_raw"])
+        self.assertEqual(5, len(queries))
+        self.assertEqual({"start": 100.0, "end": 100.0, "mode": "raw", "limit": 50_000},
+                         queries[-1])
         self.assertGreaterEqual(queries[1]["end"], queries[1]["start"])
         self.assertEqual("opt_in_observed_calls_only",
                          phase["db_calls"]["summary"]["coverage"])
@@ -286,12 +293,12 @@ class DiagnosticCliControlTests(unittest.TestCase):
               patch.dict(sys.modules, {"psycopg": types.SimpleNamespace(
                   connect=lambda *a, **k: FakeConnection(), Error=Exception)}),
               patch.object(self.cli, "_api", return_value={}),
-              patch.object(self.cli, "_log_position", return_value=(self.path, 0)),
-              patch.object(self.cli, "_device_stats", return_value={}),
-              patch.object(self.cli, "_host_usage", return_value={}),
-              patch.object(self.cli, "_uncontrolled_importers", return_value=[]),
-              patch.object(self.cli, "_wal_timing_status", return_value={}),
-              patch.object(self.cli, "_snapshot", return_value={"wal_bytes": 0}) as snapshot,
+              patch.object(sampling, "_log_position", return_value=(self.path, 0)),
+              patch.object(sampling, "_device_stats", return_value={}),
+              patch.object(sampling, "_host_usage", return_value={}),
+              patch.object(sampling, "_uncontrolled_importers", return_value=[]),
+              patch.object(sampling, "_wal_timing_status", return_value={}),
+              patch.object(sampling, "_snapshot", return_value={"wal_bytes": 0}) as snapshot,
               patch.object(self.cli.time, "sleep", side_effect=end_session)):
             phase = self.cli._measure(5, "stopped", session_id)
 
@@ -315,10 +322,10 @@ class DiagnosticCliControlTests(unittest.TestCase):
               patch.dict(sys.modules, {"psycopg": types.SimpleNamespace(
                   connect=failed_connect, Error=ProbeError)}),
               patch.object(self.cli, "_api", return_value={}),
-              patch.object(self.cli, "_log_position", return_value=(self.path, 0)),
-              patch.object(self.cli, "_device_stats", return_value={}),
-              patch.object(self.cli, "_host_usage", return_value={}),
-              patch.object(self.cli, "_uncontrolled_importers", return_value=[])):
+              patch.object(sampling, "_log_position", return_value=(self.path, 0)),
+              patch.object(sampling, "_device_stats", return_value={}),
+              patch.object(sampling, "_host_usage", return_value={}),
+              patch.object(sampling, "_uncontrolled_importers", return_value=[])):
             phase = self.cli._measure(5, "timeout", session_id)
 
         self.assertEqual(phase["state"], "aborted")

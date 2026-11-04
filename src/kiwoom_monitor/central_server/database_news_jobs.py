@@ -10,6 +10,7 @@ from kiwoom_monitor.domain.news_observation import news_job_key
 from .database_codec import bounded_limit
 from .database_news_job_writes import (
     _insert_sqlite_news_job, _insert_postgres_news_job, _notify_news_job_wakeup,
+    _news_job_rows, _NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL,
 )
 from .postgres_access import _NEWS_CLAIM_WAIT_PROBE_SLOTS, _execute_with_postgres_wait_probe
 
@@ -18,10 +19,6 @@ _NEWS_JOB_CLAIM_READY_SQL = (
     "SELECT job_key,article_revision_id,stock_code,target_id,stage,input_hash,"
     "processing_version,attempts,payload_json,updated_at FROM central_news_jobs "
     "WHERE state='PENDING' AND next_retry_at<=%s "
-)
-_NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL = (
-    "'historical_backfill','historical_market_backfill',"
-    "'historical_market_pc_backfill','historical_news_pc_backfill'"
 )
 _NEWS_JOB_CLAIM_ORDER_AND_LOCK_SQL = (
     "ORDER BY CASE WHEN %s<>'' AND stage=%s THEN -1 "
@@ -223,10 +220,12 @@ class PostgresNewsJobStoreMixin:
                 return cursor.fetchall()
 
             rows = run_phase("claim_candidates", claim_candidates)
-        from .diagnostic_metrics import record_writer_transaction
-        record_writer_transaction("news_job_claim", len(rows),
-                                  round((monotonic() - started_at) * 1000),
-                                  db_call_id=writer.call_id, domain_phase_ms=phase_ms)
+        from .postgres_access import database_observer
+        observer = database_observer()
+        if observer is not None:
+            observer.record_writer_transaction("news_job_claim", len(rows),
+                                      round((monotonic() - started_at) * 1000),
+                                      db_call_id=writer.call_id, domain_phase_ms=phase_ms)
         return _news_job_rows(rows)
 
     def explain_news_job_claim_plan(self) -> dict[str, Any]:
@@ -360,10 +359,12 @@ class PostgresNewsJobStoreMixin:
                 "UPDATE central_news_jobs SET state='COMPLETED',output_ref=%s,error='',updated_at=%s "
                 "WHERE job_key=%s AND state='RUNNING' AND attempts=%s", (output_ref, time(), job_key, attempts),
             )
-        from .diagnostic_metrics import record_writer_transaction
-        record_writer_transaction("news_job_finish", 1,
-                                  round((monotonic() - started_at) * 1000),
-                                  db_call_id=writer.call_id)
+        from .postgres_access import database_observer
+        observer = database_observer()
+        if observer is not None:
+            observer.record_writer_transaction("news_job_finish", 1,
+                                      round((monotonic() - started_at) * 1000),
+                                      db_call_id=writer.call_id)
 
     def retry_news_job(self, job_key: str, error: str, next_retry_at: float,
                         output_ref: str = "", *, attempts: int) -> None:
@@ -482,7 +483,7 @@ def _enqueue_postgres_news_ai_jobs(cursor: Any, values: list[dict[str, Any]]) ->
         key = news_job_key("AI", str(value.get("target_id") or stock), str(body[0]), str(body[1]),
                            str(value["processing_version"]))
         cursor.execute(
-            "INSERT INTO central_news_jobs VALUES(%s,%s,%s,%s,'AI',%s,%s,0,%s,'PENDING','','',%s,%s) "
+            "INSERT INTO central_news_jobs(job_key,article_revision_id,stock_code,target_id,stage,input_hash,processing_version,attempts,next_retry_at,state,output_ref,error,payload_json,updated_at) VALUES(%s,%s,%s,%s,'AI',%s,%s,0,%s,'PENDING','','',%s,%s) "
             "ON CONFLICT(job_key) DO NOTHING RETURNING job_key",
             (key, str(row[0]), stock, str(value.get("target_id") or stock), str(body[1]),
              str(value["processing_version"]), time(),
@@ -490,11 +491,3 @@ def _enqueue_postgres_news_ai_jobs(cursor: Any, values: list[dict[str, Any]]) ->
         )
         count += int(cursor.fetchone() is not None)
     return count
-
-
-def _news_job_rows(rows: list[tuple[object, ...]]) -> list[dict[str, Any]]:
-    keys = ("job_key", "article_revision_id", "stock_code", "target_id", "stage",
-            "input_hash", "processing_version", "attempts")
-    return [{**dict(zip(keys, row[:8], strict=True)), "attempts": int(row[7]) + 1,
-             "payload": row[8] if isinstance(row[8], dict) else json.loads(str(row[8])),
-             "queued_at": float(row[9])} for row in rows]

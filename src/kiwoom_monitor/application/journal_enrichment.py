@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Mapping, Protocol
 from zoneinfo import ZoneInfo
 
-from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 
 
 ENRICHMENT_STATES = (
@@ -82,6 +82,71 @@ class JournalAnalysisRevision:
     @property
     def effective_scope(self) -> AccountScope:
         return self.canonical_scope or self.origin_scope
+
+
+JOURNAL_ANALYSIS_REVISION_COLLECTION = "journal_v2_analysis_revisions"
+
+
+class JournalAnalysisRevisionConflict(ValueError):
+    """An immutable identity cannot be overwritten by different content."""
+
+
+def journal_analysis_revision_content(document: Mapping[str, object]) -> tuple[object, ...]:
+    """J1 logical content, excluding first receipt and JSON text formatting.
+
+    Keep the existing J1 reader's legacy malformed-content interpretation. This
+    comparison never rewrites incoming content_json, created_at, or identity.
+    """
+    required = (
+        "revision_id", "group_id", "analysis_kind", "input_fingerprint",
+        "analysis_version", "content_json", "created_at", "origin_broker",
+        "origin_environment", "origin_account_ref", "canonical_account_ref",
+    )
+    if any(name not in document for name in required):
+        raise ValueError("일지 분석 revision의 필수 입력이 없습니다.")
+    datetime.fromisoformat(str(document["created_at"]))
+    try:
+        content = dict(json.loads(str(document["content_json"] or "{}")))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        content = {}
+    origin = AccountScope(
+        str(document["origin_broker"]), AccountEnvironment(str(document["origin_environment"])),
+        str(document["origin_account_ref"]),
+    )
+    effective = AccountScope(origin.broker, origin.environment, str(document["canonical_account_ref"]))
+    return (
+        str(document["revision_id"]), str(document["group_id"]), str(document["analysis_kind"]),
+        str(document["input_fingerprint"]), str(document["analysis_version"]),
+        content, origin, effective,
+    )
+
+
+@dataclass(frozen=True)
+class TradeSetupManualInput:
+    """One scoped manual input cut; receipts do not change its content revision."""
+
+    group_id: str
+    legacy_manual_type: str
+    cycle_overrides: tuple[tuple[int, str], ...]
+    origin_scope: AccountScope = LEGACY_ACCOUNT_SCOPE
+    canonical_scope: AccountScope | None = None
+
+    @property
+    def revision(self) -> str:
+        return enrichment_fingerprint({
+            "group_id": self.group_id,
+            "origin_scope": self.origin_scope.to_dict(),
+            "account_scope": (self.canonical_scope or self.origin_scope).to_dict(),
+            "legacy_manual_type": self.legacy_manual_type,
+            "cycle_overrides": self.cycle_overrides,
+        })
+
+
+@dataclass(frozen=True)
+class TradeAnalysisPublication:
+    revision: JournalAnalysisRevision
+    current_published: bool
+    manual_revision: str
 
 
 @dataclass(frozen=True)

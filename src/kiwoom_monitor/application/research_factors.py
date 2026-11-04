@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.strategy_contract import (
+    FACTOR_VERSION, ROLLING_HIGH_BREAKOUT_ID, PULLBACK_REACCELERATION_ID,
+    RANK_PERSISTENCE_ID, RollingHighBreakoutParameters, RankPersistenceParameters,
+    PullbackReaccelerationParameters,
+)
+
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -33,12 +39,8 @@ from kiwoom_monitor.application.theme_leadership import (
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 
 
-ROLLING_HIGH_BREAKOUT_ID = "rolling_high_breakout"
-PULLBACK_REACCELERATION_ID = "pullback_reacceleration"
-RANK_PERSISTENCE_ID = "rank_persistence"
 MARKET_REGIME_ID = "market_regime"
 THEME_LEADERSHIP_ID = LEADERSHIP_FACTOR_ID
-FACTOR_VERSION = "v1"
 _SEOUL = ZoneInfo("Asia/Seoul")
 
 
@@ -72,48 +74,6 @@ class FactorValue:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-@dataclass(frozen=True)
-class RollingHighBreakoutParameters:
-    lookback_bars: int
-    buffer_bps: int
-
-    def __post_init__(self) -> None:
-        if self.lookback_bars <= 0:
-            raise ValueError("lookback_bars must be positive")
-        if self.buffer_bps < 0:
-            raise ValueError("buffer_bps must not be negative")
-
-
-@dataclass(frozen=True)
-class RankPersistenceParameters:
-    top_k: int
-    window_seconds: int
-    max_gap_seconds: int
-
-    def __post_init__(self) -> None:
-        if self.top_k <= 0 or self.top_k > 20:
-            raise ValueError("top_k must be between 1 and 20")
-        if self.window_seconds <= 0:
-            raise ValueError("window_seconds must be positive")
-        if self.max_gap_seconds <= 0:
-            raise ValueError("max_gap_seconds must be positive")
-
-
-@dataclass(frozen=True)
-class PullbackReaccelerationParameters:
-    lookback_bars: int
-    minimum_pullback_bps: int
-    minimum_reacceleration_bps: int
-
-    def __post_init__(self) -> None:
-        if self.lookback_bars < 3:
-            raise ValueError("pullback lookback_bars must be at least 3")
-        if self.minimum_pullback_bps <= 0:
-            raise ValueError("minimum_pullback_bps must be positive")
-        if self.minimum_reacceleration_bps < 0:
-            raise ValueError("minimum_reacceleration_bps must not be negative")
 
 
 FACTOR_REGISTRY: Mapping[tuple[str, str], FactorDefinition] = MappingProxyType({

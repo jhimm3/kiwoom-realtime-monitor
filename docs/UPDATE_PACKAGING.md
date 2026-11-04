@@ -1,5 +1,7 @@
 # Windows 빌드·설치·부분 업데이트 배포
 
+> **전환 설치물의 선택.** 기존 Windows 도구를 재사용한다. 선택한 소스·설치물·자료·OS를 묶어 빈 첫 기동과 실제 자료 이전을 구분해 검증하고, 이전 실행 파일·자료의 복귀 근거를 보존한다. [관련 계약](architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
+
 [현재 구현·검증 상태](CURRENT_STATUS.md) · [남은 확인 사항](OPEN_ITEMS.md)
 
 최초 설치는 전체 설치 파일(`KiwoomMonitor-Setup-<버전>.exe`)로 한다. 이후 버전은
@@ -11,6 +13,25 @@
 `src/kiwoom_monitor/presentation/app_metadata.py`의 `APP_VERSION`,
 `installer/KiwoomMonitor.iss`의 버전과 출력 파일명에 동일하게 반영한다.
 관련 테스트와 `compileall`을 통과한 작업본에서 공식 배포본을 만든다.
+
+소스에서 기존 전체 데스크톱 기능을 설치할 때는 `full` 선택을 명시한다.
+기본 `pip install .`은 공통 core만 설치하고, `.[server]`는 GUI/OCR/Drive를
+포함하지 않는 중앙 서버 선택이다. 기존 전체 검사 환경은 계속 전체 lock을
+설치하며, 전체 앱 빌드 환경의 프로젝트 설치는 다음 명령을 사용한다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
+.\.venv\Scripts\python.exe -m pip install --no-build-isolation --constraint requirements.lock.txt ".[full]"
+```
+
+`query`는 표·차트에 필요한 PySide6/Pillow, `ocr`는 기존 Qt OCR 기능,
+`drive`와 `chatgpt`는 기존 공급자 기능의 의존성 선택이다. headless 연구·실행은
+공통 core와 실제 사용하는 adapter 선택을 사용한다. 설치 extra 자체가 실행
+역할을 선택하거나 권한을 부여하지 않는다. 조회 전용 조립의 통합·검증 전에는
+`.[query]` 설치만으로 기존 전체 데스크톱 진입점이 조회 전용으로 바뀌지 않는다.
+
+아래 `KiwoomMonitor.spec`와 Inno Setup 명령은 기존 전체 앱을 만든다.
+조회 전용 frozen 설치본과 역할 간 부분 업데이트 호환은 아직 수락하지 않았다.
 
 검증된 `resources/UpdateHelper.exe`가 있으면 재사용한다. 도우미가 없거나
 `src/kiwoom_monitor/update_helper.py`, Python, PyInstaller, 도우미 의존성 또는

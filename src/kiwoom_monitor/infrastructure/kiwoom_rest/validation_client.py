@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from collections import OrderedDict, deque
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -25,6 +25,30 @@ VALIDATION_STATUSES = frozenset({
     "OUT_OF_ORDER", "NOT_COMPARABLE",
 })
 _COMPARABLE_STATUSES = frozenset({"MATCH", "VALUE_MISMATCH", "LATE"})
+
+
+@dataclass(frozen=True)
+class ComparisonLifecycleState:
+    """Observer lifecycle facts only; not report/data durability authority."""
+
+    admission_closed: bool
+    active_requests: int
+    worker_stopped: bool
+    failure_stage: str | None
+
+
+@dataclass(frozen=True)
+class ComparisonShutdownCompletion:
+    """Native owner receipt, separate from fallible lifecycle/report facts.
+
+    A true receipt is produced only after the native join. A constructor
+    with unknown native start state gets no true receipt. Wait errors are not
+    producer/report errors and do not turn an unknown lifecycle into a fact.
+    """
+
+    owner: object
+    native_completed: bool
+    wait_error: BaseException | None
 
 
 class _ValidationMetrics:
@@ -94,7 +118,25 @@ class ParallelValidationClient:
         self._now = now_provider
         self._metrics = _ValidationMetrics()
         self._writer_lock = threading.Lock()
-        threading.Thread(target=self._work, name="central-local-validation", daemon=True).start()
+        # Admission must never wait for report I/O held by _writer_lock.
+        self._state = threading.Condition()
+        self._closing = False
+        self._active_requests = 0
+        self._worker_error: BaseException | None = None
+        self._worker_error_stage: str | None = None
+        self._shutdown_completion: ComparisonShutdownCompletion | None = None
+        self._shutdown_wait_error: BaseException | None = None
+        self._failed_job: tuple[tuple[Any, ...], object | None, str] | None = None
+        self._thread = threading.Thread(
+            target=self._work, name="central-local-validation", daemon=True,
+        )
+        try:
+            self._thread.start()
+        except BaseException as error:
+            completion = self.finish_comparison_shutdown()
+            if completion.wait_error is not None:
+                raise error from completion.wait_error
+            raise
 
     def request(self, api_id: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
         payload, _, _ = self.request_with_continuation(api_id, path, body)
@@ -105,28 +147,116 @@ class ParallelValidationClient:
     ) -> tuple[dict[str, Any], bool, str]:
         if api_id in ORDER_API_IDS:
             raise ValueError("order APIs cannot use the parallel validation client")
-        primary_started = self._monotonic()
-        requested_at = self._now().isoformat()
+        with self._state:
+            if self._closing:
+                raise RuntimeError("parallel validation client is closed")
+            self._active_requests += 1
         try:
-            central = self._primary.request_with_continuation(
-                api_id, path, body, cont_yn=cont_yn, next_key=next_key,
+            primary_started = self._monotonic()
+            requested_at = self._now().isoformat()
+            try:
+                central = self._primary.request_with_continuation(
+                    api_id, path, body, cont_yn=cont_yn, next_key=next_key,
+                )
+            except CentralServerUnavailable:
+                if not self._fallback_on_unavailable:
+                    raise
+                return self._local.request_with_continuation(
+                    api_id, path, body, cont_yn=cont_yn, next_key=next_key,
+                )
+            primary_finished = self._monotonic()
+            queue_skipped = False
+            with self._state:
+                try:
+                    self._jobs.put_nowait((
+                        api_id, path, dict(body), cont_yn, next_key, central,
+                        requested_at, primary_started, primary_finished,
+                    ))
+                except queue.Full:
+                    queue_skipped = True
+                self._state.notify_all()
+            if queue_skipped:
+                self._metrics.record("MISSING", queue_skip=True)
+                logger.warning("중앙·로컬 비교 대기열이 가득 차 %s 비교를 건너뜁니다.", api_id)
+            return central
+        finally:
+            with self._state:
+                self._active_requests -= 1
+                self._state.notify_all()
+
+    def close(self) -> None:
+        """Reject new compared requests and join accepted requests/comparisons.
+
+        Borrowed primary/local account, stored-data, token and clock delegates
+        remain usable; closing this observer does not close those dependencies.
+        A failed report is retained with its job/result and is never retried here.
+        """
+        completion = self.finish_comparison_shutdown()
+        if completion.native_completed is not True:
+            raise RuntimeError("comparison native completion is unconfirmed")
+        if self._worker_error is not None:
+            if completion.wait_error is not None:
+                raise self._worker_error from completion.wait_error
+            raise self._worker_error
+        if completion.wait_error is not None:
+            raise completion.wait_error
+
+    def finish_comparison_shutdown(self) -> ComparisonShutdownCompletion:
+        """Keep the caller's lifetime until the exact owned native thread ends.
+
+        Interrupted native waits are deferred, not completion. Retrying only
+        that blocking stage neither retries reports nor admits new inputs.
+        No lifecycle getter, queue join, timeout or polling task is involved.
+        """
+        # Preserve Thread.join's existing invalid self-join behavior. A worker
+        # cannot synchronously join itself; its outer owner must finish it.
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("cannot join current thread")
+        while True:
+            try:
+                pending_start_handle = None
+                with self._state:
+                    if self._shutdown_completion is not None:
+                        return self._shutdown_completion
+                    self._closing = True
+                    self._state.notify_all()
+                    while self._active_requests:
+                        self._state.wait()
+                    if self._thread.ident is None:
+                        # The same CPython 3.13 native handle is ready before the
+                        # Python Thread publishes ident. Keep it inside its owner.
+                        pending_start_handle = getattr(self._thread, "_handle", None)
+                        if (pending_start_handle is None or not getattr(pending_start_handle, "ident", 0)
+                                or not callable(getattr(pending_start_handle, "join", None))):
+                            return ComparisonShutdownCompletion(self, False, self._shutdown_wait_error)
+                if pending_start_handle is None:
+                    self._thread.join()
+                else:
+                    pending_start_handle.join()
+                with self._state:
+                    if self._shutdown_completion is None:
+                        self._shutdown_completion = ComparisonShutdownCompletion(
+                            self, True, self._shutdown_wait_error,
+                        )
+                    return self._shutdown_completion
+            except BaseException as error:
+                with self._state:
+                    if self._shutdown_wait_error is None:
+                        self._shutdown_wait_error = error
+
+    def comparison_lifecycle_state(self) -> ComparisonLifecycleState:
+        """Expose actual owned-thread facts without exposing the queue or jobs.
+
+        A stopped worker can still own a failed report and accepted RAM jobs.
+        Closing admission and observing zero active requests are separate facts.
+        """
+        with self._state:
+            return ComparisonLifecycleState(
+                admission_closed=self._closing,
+                active_requests=self._active_requests,
+                worker_stopped=not self._thread.is_alive(),
+                failure_stage=self._worker_error_stage,
             )
-        except CentralServerUnavailable:
-            if not self._fallback_on_unavailable:
-                raise
-            return self._local.request_with_continuation(
-                api_id, path, body, cont_yn=cont_yn, next_key=next_key,
-            )
-        primary_finished = self._monotonic()
-        try:
-            self._jobs.put_nowait((
-                api_id, path, dict(body), cont_yn, next_key, central,
-                requested_at, primary_started, primary_finished,
-            ))
-        except queue.Full:
-            self._metrics.record("MISSING", queue_skip=True)
-            logger.warning("중앙·로컬 비교 대기열이 가득 차 %s 비교를 건너뜁니다.", api_id)
-        return central
 
     def load_stored_minute_bars(
         self, code: str, trading_date: str, market: str = "",
@@ -264,31 +394,47 @@ class ParallelValidationClient:
 
     def _work(self) -> None:
         while True:
+            with self._state:
+                while self._jobs.empty():
+                    if self._closing and not self._active_requests:
+                        return
+                    self._state.wait()
+                job = self._jobs.get_nowait()
             (
                 api_id, path, body, cont_yn, next_key, central,
                 requested_at, primary_started, primary_finished,
-            ) = self._jobs.get()
-            local_started = self._monotonic()
+            ) = job
+            local = None
+            local_error = ""
+            stage = "local_query"
             try:
-                local = self._local.request_with_continuation(
-                    api_id, path, body, cont_yn=cont_yn, next_key=next_key,
-                )
+                local_started = self._monotonic()
+                try:
+                    local = self._local.request_with_continuation(
+                        api_id, path, body, cont_yn=cont_yn, next_key=next_key,
+                    )
+                except Exception as error:
+                    local_error = str(error)
+                stage = "report"
                 self._record(
-                    api_id, path, body, central, local,
+                    api_id, path, body, central, local, local_error,
                     requested_at=requested_at,
                     primary_latency_ms=(primary_finished - primary_started) * 1_000,
                     queue_wait_ms=(local_started - primary_finished) * 1_000,
                     local_latency_ms=(self._monotonic() - local_started) * 1_000,
                 )
-            except Exception as error:
-                self._record(
-                    api_id, path, body, central, None, str(error),
-                    requested_at=requested_at,
-                    primary_latency_ms=(primary_finished - primary_started) * 1_000,
-                    queue_wait_ms=(local_started - primary_finished) * 1_000,
-                    local_latency_ms=(self._monotonic() - local_started) * 1_000,
+            except BaseException as error:
+                with self._state:
+                    self._failed_job = (job, local, local_error)
+                    self._worker_error = error
+                    self._worker_error_stage = stage
+                    self._state.notify_all()
+                logger.error(
+                    "중앙·로컬 비교 처리 실패: stage=%s api_id=%s error_type=%s",
+                    stage, api_id, type(error).__name__,
                 )
-            finally:
+                return
+            else:
                 self._jobs.task_done()
 
     def _record(
@@ -397,9 +543,28 @@ class RealtimeValidationRecorder:
         self._report_jobs: queue.Queue[dict[str, object]] = queue.Queue(
             maxsize=max(1, report_queue_limit),
         )
-        threading.Thread(
+        # Reuse the matching lock; no state lock is held during report I/O.
+        self._state = threading.Condition(self._lock)
+        self._closing = False
+        self._active_observations = 0
+        self._worker_error: BaseException | None = None
+        self._worker_error_stage: str | None = None
+        self._shutdown_completion: ComparisonShutdownCompletion | None = None
+        self._shutdown_wait_error: BaseException | None = None
+        self._failed_report: dict[str, object] | None = None
+        self._thread = threading.Thread(
             target=self._write_loop, name="realtime-validation-writer", daemon=True,
-        ).start()
+        )
+        try:
+            self._thread.start()
+        except BaseException as error:
+            with self._state:
+                self._worker_error = error
+                self._worker_error_stage = "thread_start"
+            completion = self.finish_comparison_shutdown()
+            if completion.wait_error is not None:
+                raise error from completion.wait_error
+            raise
 
     def observe_central(
         self, event_type: str, event: object, *, metadata: Mapping[str, object] | None = None,
@@ -412,6 +577,21 @@ class RealtimeValidationRecorder:
         self._observe("direct", event_type, event, metadata=metadata)
 
     def _observe(
+        self, side: str, event_type: str, event: object, *,
+        metadata: Mapping[str, object] | None,
+    ) -> None:
+        with self._state:
+            if self._closing:
+                return
+            self._active_observations += 1
+        try:
+            self._observe_accepted(side, event_type, event, metadata=metadata)
+        finally:
+            with self._state:
+                self._active_observations -= 1
+                self._state.notify_all()
+
+    def _observe_accepted(
         self, side: str, event_type: str, event: object, *,
         metadata: Mapping[str, object] | None,
     ) -> None:
@@ -573,11 +753,20 @@ class RealtimeValidationRecorder:
         return rows
 
     def flush_expired(self) -> int:
-        with self._lock:
-            rows = self._expire_locked(self._monotonic())
-        for row in rows:
-            self._write_row(row)
-        return len(rows)
+        with self._state:
+            if self._closing:
+                return 0
+            self._active_observations += 1
+        try:
+            with self._lock:
+                rows = self._expire_locked(self._monotonic())
+            for row in rows:
+                self._write_row(row)
+            return len(rows)
+        finally:
+            with self._state:
+                self._active_observations -= 1
+                self._state.notify_all()
 
     def validation_summary(self) -> dict[str, object]:
         summary = self._metrics.snapshot()
@@ -623,23 +812,119 @@ class RealtimeValidationRecorder:
             "metrics": self._metrics.snapshot(),
         }
 
+    def close(self) -> None:
+        """Stop admission, finish accepted observations/report attempts and join.
+
+        Pending unmatched observations remain in their existing RAM maps. Close
+        does not force expiry, synthesize MISSING rows, retry or clear them.
+        The original OSError continue/count/log policy stays in the writer; its
+        first error is re-raised only after the actual writer thread has ended.
+        """
+        completion = self.finish_comparison_shutdown()
+        if completion.native_completed is not True:
+            raise RuntimeError("comparison native completion is unconfirmed")
+        if self._worker_error is not None:
+            if completion.wait_error is not None:
+                raise self._worker_error from completion.wait_error
+            raise self._worker_error
+        if completion.wait_error is not None:
+            raise completion.wait_error
+
+    def finish_comparison_shutdown(self) -> ComparisonShutdownCompletion:
+        """Keep the caller's lifetime until the exact owned native thread ends.
+
+        Interrupted native waits are deferred, not completion. Retrying only
+        that blocking stage neither retries reports nor admits new inputs.
+        No lifecycle getter, queue join, timeout or polling task is involved.
+        """
+        # Preserve Thread.join's existing invalid self-join behavior. A worker
+        # cannot synchronously join itself; its outer owner must finish it.
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("cannot join current thread")
+        while True:
+            try:
+                pending_start_handle = None
+                with self._state:
+                    if self._shutdown_completion is not None:
+                        return self._shutdown_completion
+                    self._closing = True
+                    self._state.notify_all()
+                    while self._active_observations:
+                        self._state.wait()
+                    if self._thread.ident is None:
+                        # The same CPython 3.13 native handle is ready before the
+                        # Python Thread publishes ident. Keep it inside its owner.
+                        pending_start_handle = getattr(self._thread, "_handle", None)
+                        if (pending_start_handle is None or not getattr(pending_start_handle, "ident", 0)
+                                or not callable(getattr(pending_start_handle, "join", None))):
+                            return ComparisonShutdownCompletion(self, False, self._shutdown_wait_error)
+                if pending_start_handle is None:
+                    self._thread.join()
+                else:
+                    pending_start_handle.join()
+                with self._state:
+                    if self._shutdown_completion is None:
+                        self._shutdown_completion = ComparisonShutdownCompletion(
+                            self, True, self._shutdown_wait_error,
+                        )
+                    return self._shutdown_completion
+            except BaseException as error:
+                with self._state:
+                    if self._shutdown_wait_error is None:
+                        self._shutdown_wait_error = error
+
+    def comparison_lifecycle_state(self) -> ComparisonLifecycleState:
+        """Observer/thread facts only; active_requests counts observe/flush calls.
+
+        These four shared facts are not report durability or matching completion.
+        """
+        with self._state:
+            return ComparisonLifecycleState(
+                admission_closed=self._closing,
+                active_requests=self._active_observations,
+                worker_stopped=not self._thread.is_alive(),
+                failure_stage=self._worker_error_stage,
+            )
+
+    def _remember_report_failure(self, row: dict[str, object], error: BaseException) -> None:
+        with self._state:
+            if self._worker_error is None:
+                self._worker_error = error
+                self._worker_error_stage = "report"
+                self._failed_report = row
+
     def _write_row(self, row: Mapping[str, object]) -> None:
-        try:
-            self._report_jobs.put_nowait(dict(row))
-        except queue.Full:
+        queue_skipped = False
+        with self._state:
+            try:
+                self._report_jobs.put_nowait(dict(row))
+            except queue.Full:
+                queue_skipped = True
+            self._state.notify_all()
+        if queue_skipped:
             self._metrics.record("MISSING", queue_skip=True)
             logger.warning("실시간 대조 기록 대기열이 가득 차 비교 결과를 건너뜁니다.")
 
     def _write_loop(self) -> None:
         while True:
-            row = self._report_jobs.get()
+            with self._state:
+                while self._report_jobs.empty():
+                    if self._closing and not self._active_observations:
+                        return
+                    self._state.wait()
+                row = self._report_jobs.get_nowait()
             try:
-                self._report_path.parent.mkdir(parents=True, exist_ok=True)
-                with self._report_path.open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
-            except OSError:
-                self._metrics.record("MISSING", queue_skip=True)
-                logger.exception("실시간 대조 결과를 기록하지 못했습니다.")
+                try:
+                    self._report_path.parent.mkdir(parents=True, exist_ok=True)
+                    with self._report_path.open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                except OSError as error:
+                    self._remember_report_failure(row, error)
+                    self._metrics.record("MISSING", queue_skip=True)
+                    logger.exception("실시간 대조 결과를 기록하지 못했습니다.")
+            except BaseException as error:
+                self._remember_report_failure(row, error)
+                return
             finally:
                 self._report_jobs.task_done()
 

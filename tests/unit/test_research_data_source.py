@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -152,6 +153,120 @@ class ResearchDataSourceTests(unittest.TestCase):
                 ("ranking",),
             )
         store.close()
+
+    def test_mixed_offset_export_uses_exact_instants_and_preserves_raw_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+            store.initialize()
+            try:
+                # Same-instant IDs oppose sequence order; the later Z row has
+                # the smallest sequence, so time must precede both tie breakers.
+                cases = (
+                    ("end-kst", "2026-09-12T09:00:00.000003+09:00", 50),
+                    ("a-start-utc", "2026-09-12T00:00:00.000001+00:00", 60),
+                    ("outside-nine-hours", "2026-09-12T00:00:00.000002+09:00", 30),
+                    ("inside-z", "2026-09-12T00:00:00.000002Z", 10),
+                    ("before-kst", "2026-09-12T09:00:00.000000+09:00", 20),
+                    ("z-start-kst", "2026-09-12T09:00:00.000001+09:00", 40),
+                    ("end-utc", "2026-09-12T00:00:00.000003+00:00", 70),
+                )
+                rows, original = [], {}
+                for index, (revision_id, timestamp, sequence) in enumerate(cases):
+                    payload = json.dumps({"items": [{"stk_cd": f"{index:06d}"}],
+                                          "original_revision": revision_id}, separators=(", ", ": "))
+                    payload_hash = hashlib.sha256(payload.encode()).hexdigest()
+                    rows.append((
+                        sequence, revision_id, "fixture-" + revision_id, 1, "fixture", "", "",
+                        "ranking", "5", "COMBINED", timestamp, timestamp, timestamp, None,
+                        payload_hash, "count", "actual", "complete", "query", "ranking_top20",
+                        "[]", "source_timezone_confirmed", "{}", payload,
+                    ))
+                    original[revision_id] = dict(
+                        accepted_sequence=sequence, effective_at=timestamp, received_at=timestamp,
+                        available_at=timestamp, payload_hash=payload_hash, payload=json.loads(payload),
+                    )
+                with store._lock, store._connection() as connection:
+                    connection.executemany(
+                        "INSERT INTO central_observation_revisions("
+                        "accepted_sequence,revision_id,observation_key,schema_version,source_id,source_session_id,"
+                        "source_sequence,kind,subject,venue,effective_at,received_at,available_at,"
+                        "revision_of,payload_hash,unit,value_kind,completeness,origin,candidate_universe,"
+                        "quality_flags_json,clock_quality,source_ref_json,payload_json) "
+                        "VALUES(" + ",".join(("?",) * 24) + ")", rows,
+                    )
+                    before = connection.execute(
+                        "SELECT * FROM central_observation_revisions ORDER BY accepted_sequence"
+                    ).fetchall()
+                start = datetime(2026, 9, 12, 0, 0, 0, 1, tzinfo=UTC)
+                end = datetime(2026, 9, 12, 0, 0, 0, 3, tzinfo=UTC)
+                expected_ids = ["z-start-kst", "a-start-utc", "inside-z"]
+                expected_hash = hashlib.sha256(b"z-start-kst\na-start-utc\ninside-z").hexdigest()
+                datasets = []
+                for range_start, range_end in ((start, end), (start.astimezone(KST), end.astimezone(KST))):
+                    with self.subTest(range_offset=range_start.utcoffset()):
+                        dataset = CentralResearchDataSource(_StoreClient(store)).load(
+                            range_start, range_end, ("ranking",), subject="5",
+                        )
+                        datasets.append(dataset)
+                        self.assertEqual(expected_ids, [row["revision_id"] for row in dataset.observations])
+                        self.assertEqual(3, dataset.manifest["revision_count"])
+                        self.assertEqual(expected_hash, dataset.manifest["revision_ids_hash"])
+                        self.assertEqual({"start": start.isoformat(), "end": end.isoformat()},
+                                         dataset.manifest["captured_range"])
+                        self.assertEqual("2026-09-12T09:00:00.000001+09:00", dataset.manifest["recorded_from"])
+                        for observation in dataset.observations:
+                            self.assertEqual(original[observation["revision_id"]],
+                                {key: observation[key] for key in original[observation["revision_id"]]})
+                        page = store.load_observation_export_page(dataset.manifest["fixed_watermark"], 0, 1000)
+                        self.assertEqual(dataset.manifest, page["manifest"])
+                        self.assertEqual(dataset.manifest["fixed_watermark"], page["watermark"])
+                        self.assertEqual(list(dataset.observations), page["observations"])
+                self.assertEqual(datasets[0].observations, datasets[1].observations)
+                self.assertEqual(datasets[0].manifest["revision_ids_hash"], datasets[1].manifest["revision_ids_hash"])
+                with store._lock, store._connection() as connection:
+                    self.assertEqual(before, connection.execute(
+                        "SELECT * FROM central_observation_revisions ORDER BY accepted_sequence"
+                    ).fetchall())
+                for label, invalid_time in (
+                    ("naive", "2026-09-12T09:00:00.000001"),
+                    ("invalid-time", "2026-09-12Tinvalid"),
+                ):
+                    with self.subTest(invalid_available_at=label):
+                        with store._lock, store._connection() as connection:
+                            connection.execute(
+                                "UPDATE central_observation_revisions SET available_at=? WHERE revision_id=?",
+                                (invalid_time, "z-start-kst"),
+                            )
+                            altered = connection.execute(
+                                "SELECT * FROM central_observation_revisions ORDER BY accepted_sequence"
+                            ).fetchall()
+                            export_counts = connection.execute(
+                                "SELECT (SELECT COUNT(*) FROM central_research_exports),"
+                                "(SELECT COUNT(*) FROM central_research_export_members)"
+                            ).fetchone()
+                        try:
+                            with self.assertRaises(sqlite3.OperationalError):
+                                store.create_observation_export(start, end, ("ranking",), "5")
+                            with store._lock, store._connection() as connection:
+                                self.assertEqual(export_counts, connection.execute(
+                                    "SELECT (SELECT COUNT(*) FROM central_research_exports),"
+                                    "(SELECT COUNT(*) FROM central_research_export_members)"
+                                ).fetchone())
+                                self.assertEqual(altered, connection.execute(
+                                    "SELECT * FROM central_observation_revisions ORDER BY accepted_sequence"
+                                ).fetchall())
+                        finally:
+                            with store._lock, store._connection() as connection:
+                                connection.execute(
+                                    "UPDATE central_observation_revisions SET available_at=? WHERE revision_id=?",
+                                    (original["z-start-kst"]["available_at"], "z-start-kst"),
+                                )
+                with store._lock, store._connection() as connection:
+                    self.assertEqual(before, connection.execute(
+                        "SELECT * FROM central_observation_revisions ORDER BY accepted_sequence"
+                    ).fetchall())
+            finally:
+                store.close()
 
     def test_explicit_export_session_profile_is_frozen_without_changing_revision_hash(self) -> None:
         store = SQLiteQueryStore(Path(":memory:"))

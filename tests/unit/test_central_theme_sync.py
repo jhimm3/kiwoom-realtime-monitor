@@ -10,7 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
+from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService, CentralContentSyncResult
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from tests.unit.test_theme_generation_sync import NativeThemeClient, ConfirmedThemeReceiveService
+from tests.unit.test_theme_generation import NOW
+from kiwoom_monitor.infrastructure.central_content_client import CentralContentHttpError
 from kiwoom_monitor.infrastructure.central_theme_sync import CentralThemeSyncDispatcher
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
@@ -37,6 +41,7 @@ class _Service:
         self.calls += 1
         self.upload_thread_id = threading.get_ident()
         self.called.set()
+        return CentralContentSyncResult()
 
 
 class _FailOnceService(_Service):
@@ -45,6 +50,7 @@ class _FailOnceService(_Service):
         if self.calls == 1:
             raise RuntimeError("temporary outage")
         self.called.set()
+        return CentralContentSyncResult()
 
 
 class _FailService(_Service):
@@ -83,20 +89,23 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
                 if not state.release.wait(4):
                     state.timed_out = True
 
-            class Client:
-                def load_all(self, collection, **_kwargs):
+            store = SQLiteQueryStore(root / "central.sqlite3", now_provider=lambda: NOW)
+            store.initialize(); self.addCleanup(store.close)
+            class Client(NativeThemeClient):
+                def load_accepted_theme_snapshot(self, **kwargs):
                     state.calls += 1
-                    if collection == "theme_profile" and stage == "http":
-                        barrier()
-                    if failure == "runtime":
-                        raise RuntimeError("controlled offline theme sync")
-                    return [{"document": document, "updated_at": 2_000_000_000.0}] if collection == "theme_metadata" else []
-
-                def replace(self, *_args, **_kwargs):
-                    raise AssertionError("newer snapshot must use native CAS import")
+                    if stage == "http": barrier()
+                    if failure == "runtime": raise RuntimeError("controlled offline theme sync")
+                    return super().load_accepted_theme_snapshot(**kwargs)
+            client = Client(store)
+            service = CentralContentSyncService(client)
+            service.replace_themes(path)
+            first = store.load_accepted_theme_snapshot()
+            store.publish_theme_snapshot(document, publication_id="remote-fixture", expected_snapshot_id=first["snapshot_id"],
+                                         origin_device="peer", require_current_projection=True)
 
             dispatcher = CentralThemeSyncDispatcher(
-                CentralContentSyncService(Client()), path, debounce_seconds=0.05,
+                ConfirmedThemeReceiveService(client), path, debounce_seconds=0.05,
                 retry_delays=(0.05,), pending_path=marker,
             )
             lease = AppDataLease(root, exclusive=False)
@@ -261,10 +270,11 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
                 })
                 observed = {}
 
-                class Client:
+                store = SQLiteQueryStore(Path(directory) / "central.sqlite3", now_provider=lambda: first)
+                store.initialize(); self.addCleanup(store.close)
+                class Client(NativeThemeClient):
                     mutated = False
-
-                    def load_all(self, collection, **_kwargs):
+                    def load_accepted_theme_snapshot(self, **kwargs):
                         if not self.mutated:
                             self.mutated = True
                             StockRepository(path).update_price_cache(
@@ -285,21 +295,22 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
                             elif edit == "catalog":
                                 StockRepository(path).upsert("000001", "사용자 이름", "KOSDAQ")
                             observed["edited_revision"] = backup.revision()
-                        return [{"document": remote, "updated_at": 101.0}] if collection == "theme_metadata" else []
-
-                    def replace(self, *_args, **_kwargs):
-                        raise AssertionError("newer remote snapshot must use the import path")
+                        return super().load_accepted_theme_snapshot(**kwargs)
+                client = Client(store)
+                service = CentralContentSyncService(client)
+                service.replace_themes(path)
+                first_receipt = store.load_accepted_theme_snapshot()
+                store.publish_theme_snapshot(remote, publication_id="remote-cap", expected_snapshot_id=first_receipt["snapshot_id"],
+                                             origin_device="peer", require_current_projection=True)
 
                 marker = Path(directory) / ".theme-pending"
                 marker.write_text("100.0", encoding="utf-8")
                 dispatcher = CentralThemeSyncDispatcher(
-                    CentralContentSyncService(Client()), path, pending_path=marker,
+                    ConfirmedThemeReceiveService(client), path, pending_path=marker,
                 )  # type: ignore[arg-type]
                 try:
                     # Keep the actual revision fence/import; only suppress asynchronous retries.
-                    with patch.object(dispatcher, "_schedule_locked") as schedule, patch(
-                        "kiwoom_monitor.infrastructure.central_theme_sync.time.time", return_value=101.0,
-                    ):
+                    with patch.object(dispatcher, "_schedule_locked") as schedule:
                         result = dispatcher.flush_pending()
                     self.assertEqual(revision, observed["cap_revision"])
                     self.assertEqual(before_document, observed["cap_document"])
@@ -346,13 +357,13 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
                 service, Path(directory) / "monitor.sqlite3",
                 debounce_seconds=1.0, pending_path=marker,
             )  # type: ignore[arg-type]
-            original = service.load_theme_snapshot
+            original = service.replace_themes
 
-            def load_with_edit():
+            def load_with_edit(path):
                 dispatcher.notify()
-                return original()
+                return original(path)
 
-            service.load_theme_snapshot = load_with_edit  # type: ignore[method-assign]
+            service.replace_themes = load_with_edit  # type: ignore[method-assign]
             self.assertFalse(dispatcher.flush_pending())
             self.assertEqual(0, service.applied)
             self.assertTrue(marker.exists())
@@ -411,23 +422,22 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             second.close()
 
-    def test_newer_nas_theme_is_applied_instead_of_overwritten(self) -> None:
+    def test_remote_divergence_preserves_pending_without_timestamp_winner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            marker = Path(directory) / ".theme-pending"
-            marker.write_text("100.0", encoding="utf-8")
+            marker = Path(directory) / ".theme-pending"; marker.write_text("100.0", encoding="utf-8")
             service = _Service()
-            service.remote_completed_at = 101.0
-            dispatcher = CentralThemeSyncDispatcher(
-                service, Path(directory) / "monitor.sqlite3", pending_path=marker,
-            )  # type: ignore[arg-type]
+            def conflict(_path): raise ValueError("theme snapshot revision conflict")
+            service.replace_themes = conflict
+            dispatcher = CentralThemeSyncDispatcher(service, Path(directory) / "monitor.sqlite3", pending_path=marker)
+            try:
+                with patch.object(dispatcher, "_schedule_locked"):
+                    self.assertFalse(dispatcher.flush_pending())
+                self.assertEqual(0, service.applied)
+                self.assertTrue(marker.exists())
+            finally: dispatcher.close()
 
-            self.assertTrue(dispatcher.flush_pending())
-            self.assertEqual(0, service.calls)
-            self.assertEqual(1, service.applied)
-            self.assertFalse(marker.exists())
-            dispatcher.close()
 
-    def test_newer_local_theme_is_uploaded(self) -> None:
+    def test_pending_upload_uses_owner_result_without_timestamp_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / ".theme-pending"
             marker.write_text("101.0", encoding="utf-8")
@@ -443,8 +453,17 @@ class CentralThemeSyncDispatcherTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             dispatcher.close()
 
-    def test_legacy_nanosecond_pending_marker_is_compared_as_seconds(self) -> None:
-        self.assertEqual(100.0, CentralThemeSyncDispatcher._pending_time("100000000000"))
+    def test_legacy_nanosecond_marker_drains_as_opaque_pending_without_time_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / ".theme-pending"
+            marker.write_text("100000000000", encoding="utf-8")
+            service = _Service()
+            dispatcher = CentralThemeSyncDispatcher(service, Path(directory) / "monitor.sqlite3", pending_path=marker)
+            try:
+                self.assertTrue(dispatcher.flush_pending())
+                self.assertEqual(1, service.calls)
+                self.assertFalse(marker.exists())
+            finally: dispatcher.close()
 
 
 if __name__ == "__main__":

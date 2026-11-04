@@ -20,13 +20,15 @@ from kiwoom_monitor.application.market_theme_shadow import (
 )
 from kiwoom_monitor.application.theme_leadership import ThemeLeadershipParameters, ThemeLeadershipState
 from kiwoom_monitor.domain.ranking import normalize_stock_code
-from .observation_frame_recovery import drain_thread_call
+from .observation_frame_recovery import drain_thread_call, join_owned_close
+from .ram_shadow_selection_config import (
+    SHADOW_RESULT_COLLECTION, SHADOW_RESULT_OWNER, SHADOW_SELECTION_COLLECTION,
+    validate_ram_shadow_selection, position_comparison_requires_theme_context,
+    _validate_position_comparison_input_shapes, selected_position_allocation, _selected_stock_thesis,
+)
 
 logger = logging.getLogger(__name__)
 _RAM_INPUT_EVENTS = frozenset({"trade", "stock_reference", "context", "source_context", "connection_opened", "subscription_ready", "codes_added", "error"})
-SHADOW_RESULT_COLLECTION = "ram_shadow_diagnostics"
-SHADOW_RESULT_OWNER = "market_theme"
-SHADOW_SELECTION_COLLECTION = "ram_shadow_selection"
 
 
 def _copy_shadow_inputs(inputs):
@@ -51,82 +53,6 @@ def _copy_shadow_inputs(inputs):
     return deepcopy(inputs, {id(frames): frames} if immutable else None)
 
 
-def validate_ram_shadow_selection(value):
-    """Explicit bounded observation and optional research snapshot; no order authority."""
-    required = {
-        "version", "revision", "enabled", "theme_ids", "leadership_venue", "recording"
-    }
-    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"stock_thesis", "position_comparison", "position_account_live", "position_allocation"}:
-        raise ValueError("invalid RAM shadow selection fields")
-    if value["version"] != "ram-shadow-selection/v1" or type(value["revision"]) is not int or value["revision"] < 0:
-        raise ValueError("invalid RAM shadow selection version or revision")
-    if type(value["enabled"]) is not bool or type(value["recording"]) is not bool:
-        raise ValueError("RAM shadow enabled/recording must be boolean")
-    themes = value["theme_ids"]
-    if (not isinstance(themes, list) or len(themes) > 32 or
-        any(not isinstance(v, str) or not v.strip() or v != v.strip() or len(v) > 120 for v in themes) or
-        len(set(themes)) != len(themes)):
-        raise ValueError("select at most 32 distinct nonempty theme IDs")
-    if value["leadership_venue"] not in {"KRX", "NXT"}:
-        raise ValueError("RAM shadow requires a KRX/NXT venue")
-    request = _selected_stock_thesis(value)
-    if request is not None and request.entry_thesis.theme_id not in themes:
-        raise ValueError("selected research thesis theme must be an observed theme")
-    document = value.get("position_comparison")
-    live_account = value.get("position_account_live", False)
-    if type(live_account) is not bool or (live_account and document is None):
-        raise ValueError("live position observation requires explicit comparison inputs")
-    if document is not None:
-        from kiwoom_monitor.application.position_target import POSITION_ACTION_COMPARISON_SHADOW_VERSION
-        if not isinstance(document, dict) or document.get("schema") != POSITION_ACTION_COMPARISON_SHADOW_VERSION:
-            raise ValueError("position comparison requires a fixed input document")
-        if len(json.dumps(document, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 256 * 1024:
-            raise ValueError("position comparison input exceeds 256 KiB")
-        if value["leadership_venue"] != "KRX":
-            raise ValueError("position comparison currently supports mock KRX only")
-    result = deepcopy(value)
-    allocation=selected_position_allocation(value)
-    if allocation is not None:
-        if value['leadership_venue']!='KRX':raise ValueError('native allocation supports KRX only')
-        if document is not None and document['requests'][0]['account_ref']!=allocation['policy'].account_ref:
-            raise ValueError('shared position comparison/allocation must use one account')
-    else:
-        result.pop('position_allocation',None)
-    if value["enabled"] and not themes and (not live_account or allocation is not None
-            or position_comparison_requires_theme_context(document)):
-        raise ValueError("RAM shadow requires explicit themes unless a theme-independent native R4 policy is selected")
-    if result.get("stock_thesis") is None:
-        result.pop("stock_thesis", None)
-    if result.get("position_comparison") is None:
-        result.pop("position_comparison", None)
-    if not live_account:
-        result.pop("position_account_live", None)
-    return result
-
-
-def position_comparison_requires_theme_context(document):
-    """Only an explicitly validated v2 policy may omit the theme startup dependency."""
-    if document is None:
-        return True
-    from kiwoom_monitor.application.position_target import (
-        PositionActionCapabilitySelectionPolicy, position_action_comparison_inputs_from_document,
-    )
-    try:
-        parameters = position_action_comparison_inputs_from_document(document)[0]
-    except (KeyError, AttributeError) as error:
-        raise ValueError("position comparison input is incomplete") from error
-    policy = parameters.selection_policy
-    return not (isinstance(policy, PositionActionCapabilitySelectionPolicy)
-                and not {"stock_thesis", "theme_context"}.intersection(policy.required_data_capabilities))
-
-
-def selected_position_allocation(selection):
-    document=selection.get('position_allocation')
-    if document is None:return None
-    from .market_theme_shadow_inputs import compile_dynamic_allocation_ram_selection
-    return compile_dynamic_allocation_ram_selection(document)
-
-
 def selected_position_comparison(selection):
     """Compile supplied fixed inputs once during selection preparation, never on ticks/reads."""
     document = selection.get("position_comparison")
@@ -140,28 +66,6 @@ def selected_position_comparison(selection):
     if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 256 * 1024:
         raise ValueError("position comparison result exceeds 256 KiB")
     return result
-
-
-def _selected_stock_thesis(selection, *, decision_time=None):
-    from .market_theme_shadow_inputs import persisted_stock_thesis_shadow_request_from_evidence
-    value = selection.get("stock_thesis")
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) != {"evidence", "thesis_policy_version"}:
-        raise ValueError("research thesis selection requires evidence and an explicit policy")
-    evidence = value["evidence"]
-    if not isinstance(evidence, dict) or set(evidence) != {"thesis", "leadership", "run_status", "stored_identity"}:
-        raise ValueError("invalid selected research thesis evidence fields")
-    if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 1024 * 1024:
-        raise ValueError("selected research evidence exceeds one MiB")
-    try:
-        thesis = evidence["thesis"]
-        return persisted_stock_thesis_shadow_request_from_evidence(evidence,
-            run_id=thesis["run_id"], thesis_id=thesis["thesis_id"],
-            thesis_policy_version=value["thesis_policy_version"], leadership_venue=selection["leadership_venue"],
-            decision_time=decision_time or thesis["available_at"])
-    except (KeyError, AttributeError) as error:
-        raise ValueError("selected research thesis evidence is incomplete") from error
 
 
 def ram_shadow_bindings_from_snapshot(selection, snapshot, decision_time):
@@ -453,11 +357,12 @@ class MarketThemeShadowRuntime:
     common inputs/calculations, and owns all bound monitors through shutdown.
     Market/theme/reference context updates come from their existing owners.
     """
-    def __init__(self, hub, collector, bindings, *, ranking_source=None, theme_source=None,
+    def __init__(self, hub, collector, bindings, *, now_provider, ranking_source=None, theme_source=None,
                   record_store=None, record_interval_seconds=30.0, position_comparison=None,
                   position_document=None, position_account_source=None, position_allocation=None):
         if not math.isfinite(record_interval_seconds) or record_interval_seconds < 0.5:
             raise ValueError("shadow recording interval must be finite and at least 0.5 seconds")
+        self._now = now_provider
         self._bindings = tuple((monitor, _copy_shadow_inputs(context)) for monitor, context in bindings)
         self._position_comparison = deepcopy(position_comparison)
         self._position_account_source = position_account_source if position_document is not None else None
@@ -465,6 +370,8 @@ class MarketThemeShadowRuntime:
         self._allocation_account_source = position_account_source if position_allocation is not None else None
         if position_allocation is not None and position_account_source is None:raise ValueError('allocation requires native account RAM source')
         self._allocation_receipt = None
+        self._allocation_input_failure = None
+        self._allocation_preparations = set()
         self._allocation_models = self._allocation_model_document = None
         self._allocation_model_generation = 0
         self._allocation_reads = self._allocation_evaluations = 0
@@ -582,7 +489,7 @@ class MarketThemeShadowRuntime:
                 change_ref = observation["revision_id"]
                 # Expire the projection only; the original evidence/lease is retained.
                 expires = observation.get("expires_at")
-                if observation.get("observed_at") and expires and datetime.fromisoformat(expires) <= self._collector._now_provider():
+                if observation.get("observed_at") and expires and datetime.fromisoformat(expires) <= self._now():
                     observation = {**observation, "pattern": "UNKNOWN", "candidates": (), "changes": {},
                         "lookup_change": {**(observation.get("lookup_change") or {}), "state": "UNKNOWN"},
                         "rank_price_trade_relation": {"lookup_first_is_candidate": None,
@@ -594,7 +501,7 @@ class MarketThemeShadowRuntime:
                                                            "market_frame_stale")))}}
                 price = observation.get("price_trade_leadership")
                 if (price and price["quality"]["status"] == "COMPLETE"
-                        and datetime.fromisoformat(price["expires_at"]) <= self._collector._now_provider()):
+                        and datetime.fromisoformat(price["expires_at"]) <= self._now()):
                     observation["price_trade_leadership"] = {**price, "state": "UNKNOWN", "projection": "expired",
                         "current_candidates": (), "previous_candidates": (), "retained_candidates": (),
                         "entered_candidates": (), "left_candidates": (),
@@ -611,7 +518,7 @@ class MarketThemeShadowRuntime:
                         "rank_changed_candidate_retained": False, "candidate_changed_rank_retained": False}
                 auxiliary = observation.get("second_trade_auxiliary")
                 if (auxiliary and auxiliary["quality"]["status"] == "COMPLETE"
-                        and datetime.fromisoformat(auxiliary["expires_at"]) <= self._collector._now_provider()):
+                        and datetime.fromisoformat(auxiliary["expires_at"]) <= self._now()):
                     observation["second_trade_auxiliary"] = {**auxiliary, "state": "UNKNOWN", "projection": "expired",
                         "current_candidates": (), "quality": {**auxiliary["quality"], "status": "STALE"}}
                 changes[change_ref] = observation
@@ -630,7 +537,7 @@ class MarketThemeShadowRuntime:
                 "is_live_account": False, "result": deepcopy(self._position_comparison)}
         if self._allocation is not None:
             receipt=deepcopy(self._allocation_receipt)
-            if receipt and datetime.fromisoformat(receipt['valid_until'])<=self._collector._now_provider():
+            if receipt and datetime.fromisoformat(receipt['valid_until'])<=self._now():
                 receipt['quality']={'status':'BLOCKED','reasons':sorted(set(receipt['quality']['reasons']+['native_allocation_receipt_expired']))}
                 receipt['result']=None
                 receipt.pop('lower_targets',None)
@@ -788,12 +695,36 @@ class MarketThemeShadowRuntime:
             raise ValueError("unknown market context source")
         self._wake("source_context")
 
+    async def prepare_allocation_models(self, document, *, expected_selection_revision):
+        """Replay against this runtime's policy; selection owner fences final admission."""
+        from .market_theme_shadow_inputs import decode_dynamic_allocation_model_publication
+        if self._closing or self._closed or self._allocation is None:
+            raise RuntimeError('ALLOCATION_RUNTIME_NOT_READY')
+        if not isinstance(document, dict):
+            raise ValueError('allocation publication requires an object')
+        if (type(document.get('expected_selection_revision')) is not int
+                or document['expected_selection_revision'] != expected_selection_revision):
+            raise ValueError('ALLOCATION_SELECTION_REVISION_CONFLICT')
+        duplicate = self.allocation_publication_duplicate(document)
+        if duplicate is not None:
+            return None, duplicate
+        task = asyncio.create_task(drain_thread_call(decode_dynamic_allocation_model_publication,
+            document, self._allocation, expected_selection_revision), name='allocation-model-preparation')
+        self._allocation_preparations.add(task)
+        try:
+            decoded = await task
+            if self._closing or self._closed:
+                raise RuntimeError('ALLOCATION_RUNTIME_NOT_READY')
+            return decoded, None
+        finally:
+            self._allocation_preparations.discard(task)
+
     def allocation_publication_duplicate(self, document):
         if self._closing or self._closed or self._allocation is None:raise RuntimeError('ALLOCATION_RUNTIME_NOT_READY')
         encoded=json.dumps(document,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
         if len(encoded.encode())>4*1024*1024:raise ValueError('allocation publication budget exceeded')
         if self._allocation_model_document!=encoded:return None
-        if self._collector._now_provider()>=self._allocation_models['valid_until']:
+        if self._now()>=self._allocation_models['valid_until']:
             raise ValueError('allocation model publication expired')
         return {'publication_ref':self._allocation_models['publication_ref'],'generation':self._allocation_model_generation,
             'duplicate':True,'order_authorized':False,'source_durability':'not_verified'}
@@ -801,11 +732,11 @@ class MarketThemeShadowRuntime:
     def offer_allocation_models(self, document, decoded):
         duplicate=self.allocation_publication_duplicate(document)
         if duplicate is not None:return duplicate
-        cut=self._collector._now_provider()
+        cut=self._now()
         if not decoded['available_at']<=cut<decoded['valid_until']:raise ValueError('allocation model publication not current')
         self._allocation_models=deepcopy(decoded)
         self._allocation_model_document=json.dumps(document,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
-        self._allocation_model_generation+=1;self._allocation_receipt=None
+        self._allocation_model_generation+=1;self._allocation_receipt=None;self._allocation_input_failure=None
         self.context_changed('account')
         return {'publication_ref':decoded['publication_ref'],'generation':self._allocation_model_generation,
             'duplicate':False,'order_authorized':False,'source_durability':'not_verified'}
@@ -939,7 +870,7 @@ class MarketThemeShadowRuntime:
         # Retain the existing sources first; read already collected TOP20 RAM only
         # within the same 200-code budget. This adds no REG or collector owner.
         market_codes = set()
-        cutoff = self._collector._now_provider()
+        cutoff = self._now()
         for _, context in self._bindings:
             eligible = [frame for frame in context.market_frames if frame.venue == context.market_venue
                         and frame.window == context.market_window and datetime.fromisoformat(frame.available_at) <= cutoff]
@@ -965,7 +896,7 @@ class MarketThemeShadowRuntime:
             snapshot['_trade_cut'] = prepare_ram_trade_observations(snapshot)
         return snapshot
 
-    def _market_minute_key(self, snapshot):
+    def _market_minute_key(self, snapshot, read_status=None):
         """Existing native live-minute reader, shared per minute/cohort/commit.
 
         Only closed 10-minute history is cached in this runtime owner, using
@@ -985,11 +916,11 @@ class MarketThemeShadowRuntime:
                         and cutoff < datetime.fromisoformat(frame.available_at) + timedelta(seconds=monitor._market_parameters.max_gap_seconds)):
                     wanted.update((normalize_stock_code(row.code), context.leadership_venue) for row in frame.members)
         wanted = tuple(sorted(wanted))[:200]
-        commits = getattr(self._collector, "_save_success_at", {})
+        commits = self._collector.minute_read_status() if read_status is None else read_status
         # A late native close/commit refreshes the bounded read without a timer,
         # retry loop or changes to any writer's receipt/transaction ownership.
         key = (cutoff.astimezone(timezone(timedelta(hours=9))).date().isoformat(), end, wanted,
-               commits.get("minute_bars"), commits.get("minute_finalizations"))
+               commits.get("minute_bars_committed_at"), commits.get("minute_finalizations_committed_at"))
         return key
 
 
@@ -1053,7 +984,7 @@ class MarketThemeShadowRuntime:
                         raise ValueError("minute_history_unavailable")
                     found = compute_minute_trade_candidates(minute_inputs, as_of=datetime.fromisoformat(inputs.decision_time),
                         top_k=monitor._market_parameters.top_k)
-                    found["published_at"] = self._collector._now_provider().isoformat()
+                    found["published_at"] = self._now().isoformat()
                     calculated.append((scope, found))
             except Exception as error:
                 found = {"policy_version": "minute-price-trade-candidates/v1", "primary_timeframe": "1m", "state": "UNKNOWN",
@@ -1070,8 +1001,9 @@ class MarketThemeShadowRuntime:
         from .market_theme_shadow_inputs import market_theme_shadow_inputs_from_ram, market_price_trade_inputs_from_ram, market_minute_trade_inputs_from_rows
         # Keep existing minute context beside the shared individual 0B cut.
         # The owned read never blocks H1/H2, account or protective evaluation.
-        key = self._market_minute_key(snapshot)
-        if not key[2] or self._collector._store is None:
+        read_status = self._collector.minute_read_status()
+        key = self._market_minute_key(snapshot, read_status)
+        if not key[2] or not read_status["configured"]:
             self._market_minute_cache = (key, (), {})
         elif (not self._closing and (self._market_minute_cache is None or self._market_minute_cache[0] != key)
                 and (self._market_minute_read_task is None or self._market_minute_read_task.done())):
@@ -1163,9 +1095,11 @@ class MarketThemeShadowRuntime:
             if self._allocation is not None:
                 from .market_theme_shadow_inputs import dynamic_allocation_inputs_from_ram
                 generation=self._allocation_model_generation
+                stage='account_observation'
                 try:
                     self._allocation_reads+=int(self._allocation['policy'].account_ref not in self._account_cut_cache)
                     observation=self._borrow_position_account(self._allocation['policy'].account_ref,self._allocation_account_source)
+                    stage='context_inputs'
                     contexts={}
                     for monitor in self._monitors:
                         result=monitor._result
@@ -1178,11 +1112,15 @@ class MarketThemeShadowRuntime:
                     if 0 in self._allocation['policy'].context_weights:
                         kwargs['theme_memberships']=tuple(context.theme_membership for _,context in self._bindings
                             if context.theme_membership is not None)
+                    stage='allocation_evaluation'
                     receipt=await drain_thread_call(dynamic_allocation_inputs_from_ram,self._allocation,snapshot,tuple(contexts.values()),observation,**kwargs)
                     if generation==self._allocation_model_generation and not self._closing:
                         self._allocation_receipt=receipt
+                        self._allocation_input_failure=None
                 except Exception as error:
                     if generation==self._allocation_model_generation and not self._closing:
+                        # Keep the original chain internally; public receipts never copy its text.
+                        self._allocation_input_failure=(stage,error)
                         self._allocation_receipt={'decision_time':snapshot['decision_time'],'valid_until':snapshot['decision_time'],
                             'result':None,'quality':{'status':'ERROR','reasons':['native_allocation_input_error:'+type(error).__name__]},
                             'source_durability':'not_verified','order_authorized':False}
@@ -1325,7 +1263,7 @@ class MarketThemeShadowRuntime:
             self._coalesced_events += len(events) - 1
             report = None
             try:
-                changed = await self._refresh_sources(self._collector._now_provider().timestamp())
+                changed = await self._refresh_sources(self._now().timestamp())
                 if account_changed and not kinds & _RAM_INPUT_EVENTS:
                     await self._refresh_position_inputs(self._snapshot())
                     self._select_record()
@@ -1373,6 +1311,8 @@ class MarketThemeShadowRuntime:
 
     async def _close_owned(self, snapshot, source_error, ranking_snapshots):
         try:
+            if self._allocation_preparations:
+                await asyncio.gather(*tuple(self._allocation_preparations), return_exceptions=True)
             if self._task is not None:
                 self._task.cancel()
                 try:
@@ -1412,18 +1352,5 @@ class MarketThemeShadowRuntime:
                     self._market_minute_cache = None
                     self._market_minute_read_task = None
                     self._market_minute_targets.clear()
+                    self._allocation_input_failure=None
                     self._closed = True
-
-
-async def join_owned_close(task):
-    """Join the existing async owner even if its close caller is repeatedly cancelled."""
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-        task.result()
-        raise

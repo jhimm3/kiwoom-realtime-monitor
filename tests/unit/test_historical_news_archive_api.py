@@ -15,7 +15,7 @@ from tests.unit.historical_news_test_support import historical_news_archive_fixt
 
 def fixed_archive_contract_fixture(directory):
     """Freeze inputs before serving HTTP; never normalize returned IDs or times."""
-    with patch('uuid.uuid4', side_effect=(uuid.UUID(int=i) for i in range(1, 1000))), patch('time.time', return_value=1790300000.0), patch('kiwoom_monitor.central_server.database_news_revisions.time', return_value=1790300000.0), patch('kiwoom_monitor.central_server.database_news_sources.time', return_value=1790300000.0), patch('kiwoom_monitor.central_server.database_news_jobs.time', return_value=1790300000.0):
+    with patch('uuid.uuid4', side_effect=(uuid.UUID(int=i) for i in range(1, 1000))), patch('time.time', return_value=1790300000.0), patch('kiwoom_monitor.central_server.database_news_revisions.time', return_value=1790300000.0), patch('kiwoom_monitor.central_server.database_news_jobs.time', return_value=1790300000.0):
         archive = historical_news_archive_fixture(directory)
         seal_historical_news_archive_fixture(archive)
     return archive

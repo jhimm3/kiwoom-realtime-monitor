@@ -68,7 +68,80 @@ class NewsViewModelTests(unittest.TestCase):
         self.assertEqual("호재 가능성 높음", outlook)
         self.assertEqual("계약 체결", reason)
         self.assertIn("신뢰도 87%", source)
-        self.assertEqual("호재 가능성 높음  ᴬᴵ", row.outlook)
+        self.assertEqual("호재 가능성 높음  ᴬᴵ · 판본 미확인", row.outlook)
+
+    def _versioned_ai(self):
+        from dataclasses import replace
+        from kiwoom_monitor.domain.news_ai_contract import freeze_news_ai_input, news_ai_article_input, news_ai_source_member
+        from kiwoom_monitor.domain.news_observation import stable_document_hash
+        item = replace(_item("판본 기사"), input_source={
+            "version": 1, "article_revision_id": "article-1", "body_revision_id": "body-1",
+            "body_content_hash": stable_document_hash({"body": "original body"}),
+        })
+        member = news_ai_source_member(0, news_ai_article_input(item), "original body", "fulltext",
+            input_text="original body", span=(0, len("original body")))
+        frozen = freeze_news_ai_input(item.link, item.title, "original body", "original-hash", [member], kind="article")
+        stored = StoredAINewsAnalysis(AINewsAnalysis("원판단 요약", "긍정", 87, "원판단 근거"),
+            "gemini", "model", datetime(2026, 10, 29, tzinfo=UTC), "original-hash",
+            {"status": "REPORTED", "input_binding": frozen["input_binding"]})
+        return item, stored
+
+    def test_new_body_labels_previous_judgment_without_changing_original_value_or_refs(self):
+        from copy import deepcopy
+        from dataclasses import replace
+        from kiwoom_monitor.domain.news_ai_contract import news_ai_version_status
+        from kiwoom_monitor.domain.news_observation import stable_document_hash
+        original, stored = self._versioned_ai()
+        snapshot = deepcopy(stored.provenance)
+        current = replace(original, input_source={
+            "version": 1, "article_revision_id": "article-1", "body_revision_id": "body-2",
+            "body_content_hash": stable_document_hash({"body": "corrected body"}),
+        })
+        group = NewsEventGroup(current, (current,))
+        self.assertEqual("CURRENT", news_ai_version_status((original,), stored.provenance))
+        self.assertEqual("PREVIOUS", news_ai_version_status((current,), stored.provenance))
+        self.assertIn("이전 판단", build_display_row(current, group, stored).outlook)
+        self.assertIn("이전 판단", effective_judgment(current, stored, group)[3])
+        self.assertIn("직접 요청할 때만", ai_detail_html(current, stored, group))
+        self.assertIn("원판단 요약", ai_detail_html(current, stored, group))
+        self.assertEqual(snapshot, stored.provenance)
+        self.assertEqual("원판단 근거", stored.analysis.reason)
+        # Reopening onto the original source changes only the derived display.
+        self.assertNotIn("이전 판단", build_display_row(original, NewsEventGroup(original, (original,)), stored).outlook)
+
+    def test_bundle_checks_actual_members_and_never_uses_requester_pin_as_produced_body(self):
+        from copy import deepcopy
+        from dataclasses import replace
+        from kiwoom_monitor.domain.news_ai_contract import news_ai_version_status
+        original, stored = self._versioned_ai()
+        current = replace(original, input_source={**original.input_source, "body_revision_id": "body-2"})
+        metadata = deepcopy(stored.provenance)
+        metadata.update(article_revision_id="article-1", body_revision_id="body-2")
+        self.assertEqual("PREVIOUS", news_ai_version_status((current,), metadata))
+        unrelated = replace(original, link="https://example.com/other", original_link="https://example.com/other")
+        self.assertEqual("UNKNOWN", news_ai_version_status((original, unrelated), stored.provenance))
+        self.assertEqual("UNKNOWN", news_ai_version_status((replace(original, input_source=None),), stored.provenance))
+        self.assertEqual("UNKNOWN", news_ai_version_status((original,), {"status": "UNKNOWN"}))
+
+    def test_nonrepresentative_bundle_body_change_keeps_whole_inference_as_previous(self):
+        from dataclasses import replace
+        from kiwoom_monitor.domain.news_ai_contract import (
+            freeze_news_ai_input, news_ai_article_input, news_ai_source_member, news_ai_version_status,
+        )
+        original, stored = self._versioned_ai()
+        second = replace(original, link="https://example.com/second", original_link="https://example.com/second",
+            input_source={**original.input_source, "article_revision_id": "article-2", "body_revision_id": "body-2"})
+        raw = "original body"
+        members = [news_ai_source_member(index, news_ai_article_input(item), raw, "fulltext",
+            input_text=raw, span=(index * len(raw), (index + 1) * len(raw)))
+            for index, item in enumerate((original, second))]
+        frozen = freeze_news_ai_input(original.link, original.title, raw + raw, "bundle-hash", members, kind="bundle")
+        stored = replace(stored, provenance={"status": "REPORTED", "input_binding": frozen["input_binding"]})
+        changed = replace(second, input_source={**second.input_source, "body_revision_id": "body-3"})
+        group = NewsEventGroup(original, (original, changed))
+        self.assertEqual("PREVIOUS", news_ai_version_status(group.items, stored.provenance))
+        self.assertIn("이전 판단", build_display_row(original, group, stored).outlook)
+        self.assertIn("이전 판단", ai_detail_html(original, stored, group))
 
     def test_detail_and_related_articles_escape_untrusted_text(self) -> None:
         first = _item("대표 기사")

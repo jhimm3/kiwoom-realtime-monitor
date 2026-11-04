@@ -1034,6 +1034,7 @@ def assess_market_for_strategy(
 def market_frames_from_observations(
     observations: Iterable[Mapping[str, Any]],
     theme_snapshots: Iterable[Mapping[str, Any]] = (),
+    *, chronological: bool = True,
 ) -> tuple[MarketResearchFrame, ...]:
     """D2 ranking revision과 D5 테마 revision을 계산용 frame으로 바꾼다."""
     themes = sorted(
@@ -1077,7 +1078,10 @@ def market_frames_from_observations(
             capture_quality=str(observation.get("completeness", "unknown")),
             theme_revision_id=str(snapshot.get("snapshot_id", "")) if snapshot else "",
         ))
-    return tuple(sorted(result, key=lambda frame: (frame.available_at, frame.revision_id)))
+    return tuple(sorted(result, key=lambda frame: (
+        _aware_datetime(frame.available_at).astimezone(timezone.utc) if chronological else frame.available_at,
+        frame.revision_id,
+    )))
 
 
 def _fixed_turnover(

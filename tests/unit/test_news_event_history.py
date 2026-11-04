@@ -44,7 +44,7 @@ class NewsEventHistoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("2026-09-12T00:00:00+00:00", saved["listing_published_at"])
             self.assertEqual("article_html", saved["published_at_source"])
             service = CentralNewsService(
-                None, store, jobs_enabled=False, query_set_enabled=False,
+                None, store, query_set_enabled=False,
                 naver_api_enabled=False, naver_stock_enabled=False, read_only_search=True,
             )
             values = await service.search("005930", "테스트기업", None)
@@ -185,7 +185,7 @@ class NewsEventHistoryTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
             store.initialize()
-            service = CentralNewsService(Client(), store, jobs_enabled=False)  # type: ignore[arg-type]
+            service = CentralNewsService(Client(), store)  # type: ignore[arg-type]
             await service.search("005930", "테스트기업", None)
             runner = NewsJobRunner(store, fetcher=lambda *_args, **_kwargs: "공급계약 체결")
             await runner.run_once()

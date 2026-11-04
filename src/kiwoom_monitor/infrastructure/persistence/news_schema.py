@@ -11,11 +11,14 @@ from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
 )
 
 
-NEWS_SCHEMA_VERSION = 4
+NEWS_SCHEMA_VERSION = 7
 NEWS_SCHEMA_BASELINE_NAME = "current_news_schema_baseline"
 NEWS_ACCOUNT_SCOPE_NAME = "account_scoped_journal_news_links"
 NEWS_LINK_TOMBSTONE_NAME = "journal_news_link_tombstones"
 NEWS_AI_THEME_CANDIDATES_NAME = "news_ai_theme_candidates"
+NEWS_AI_PROVENANCE_NAME = "news_ai_accepted_provenance"
+NEWS_INPUT_SOURCE_NAME = "news_article_input_source"
+NEWS_AI_INFERENCE_NAME = "news_ai_immutable_inferences"
 
 
 def initialize_news_schema(database_path: Path) -> None:
@@ -27,6 +30,9 @@ def initialize_news_schema(database_path: Path) -> None:
             SQLiteMigration(2, NEWS_ACCOUNT_SCOPE_NAME, _apply_v2_account_scope),
             SQLiteMigration(3, NEWS_LINK_TOMBSTONE_NAME, _apply_v3_link_tombstones),
             SQLiteMigration(4, NEWS_AI_THEME_CANDIDATES_NAME, _apply_v4_ai_theme_candidates),
+            SQLiteMigration(5, NEWS_AI_PROVENANCE_NAME, _apply_v5_ai_provenance),
+            SQLiteMigration(6, NEWS_INPUT_SOURCE_NAME, _apply_v6_input_source),
+            SQLiteMigration(7, NEWS_AI_INFERENCE_NAME, _apply_v7_ai_inferences),
         )
         # 완성된 DB는 시작할 때 읽기 전용 버전 확인만 한다. 새 버전이나
         # 불완전한 원장은 아래 실행기가 기존 트랜잭션/호환성 검사를 맡는다.
@@ -156,4 +162,32 @@ def _apply_v4_ai_theme_candidates(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_journal_news_links_active_scope ON journal_news_links("
         "canonical_account_ref,origin_broker,origin_environment,group_id,stock_code,is_deleted)"
+    )
+
+
+def _apply_v5_ai_provenance(connection: sqlite3.Connection) -> None:
+    """Old results remain UNKNOWN; do not reconstruct historical provenance."""
+    for table in ("stock_news_ai", "news_ai_shared"):
+        columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        if "provenance_json" not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN provenance_json TEXT")
+
+
+def _apply_v6_input_source(connection: sqlite3.Connection) -> None:
+    """Old rows retain NULL provenance; no native refs are reconstructed."""
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(stock_news)")}
+    if not columns:
+        # Recorded v1 databases can contain only journal tables. Reuse the
+        # baseline owner within this migration's savepoint for missing tables.
+        _apply_v1_baseline(connection)
+    if "input_source_json" not in columns:
+        connection.execute("ALTER TABLE stock_news ADD COLUMN input_source_json TEXT")
+
+
+def _apply_v7_ai_inferences(connection: sqlite3.Connection) -> None:
+    """Store one immutable provider batch; legacy results gain no invented raw."""
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS news_ai_inferences ("
+        "inference_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, "
+        "computed_at REAL NOT NULL, available_at REAL NOT NULL, document_json TEXT NOT NULL)"
     )

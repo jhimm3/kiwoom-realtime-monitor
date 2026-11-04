@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 import hashlib
 import sqlite3
+from pathlib import Path
 from threading import Barrier
 import unittest
 from unittest.mock import patch
@@ -12,8 +13,9 @@ import test_research_final_preparation as fixtures
 from kiwoom_monitor import research_process as rp
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
-from scripts import run_research as runner
+from kiwoom_monitor import research_run as runner
 from scripts import prepare_mock_automation_candidate as candidate_cli
+from kiwoom_monitor import research_candidate as candidate_artifacts
 from kiwoom_monitor.application.mock_automation_candidate import (
     CandidateEligibilityStatus,
     MockAutomationEligibilityPolicy,
@@ -31,10 +33,77 @@ class CandidateFinalPreparationReviewTests(unittest.TestCase):
         plan = json.loads((self.output / "daily-plan.json").read_text())
         self.development_end = max(datetime.fromisoformat(fold["end"]) for fold in plan["evaluation"]["folds"])
 
+    def test_input_and_preparation_reuse_each_raw_plan_request_once(self):
+        self.prepare()
+        from pathlib import Path
+        paths = [self.output / 'daily-plan.json', *(self.output / 'requests' / f'daily-{family}.json'
+                  for family in ('breakout', 'pullback'))]
+        originals = {path.resolve(): path.read_bytes() for path in paths}
+        original_open, original_loads = Path.open, json.loads
+        for operation in (candidate_artifacts.inspect_daily_development_inputs,
+                          candidate_artifacts.inspect_final_preparation):
+            with self.subTest(operation=operation.__name__):
+                reads = dict.fromkeys(originals, 0)
+                parses = dict.fromkeys(originals, 0)
+                def opened(path, *args, **kwargs):
+                    resolved = Path(path).resolve()
+                    if resolved in reads:
+                        reads[resolved] += 1
+                    return original_open(path, *args, **kwargs)
+                def loads(encoded, *args, **kwargs):
+                    for path, raw in originals.items():
+                        if encoded == raw:
+                            parses[path] += 1
+                    return original_loads(encoded, *args, **kwargs)
+                with patch.object(Path, 'open', new=opened), patch.object(json, 'loads', new=loads):
+                    result = operation(self.output)
+                self.assertEqual([1, 1, 1], list(reads.values()))
+                self.assertEqual([1, 1, 1], list(parses.values()))
+                self.assertEqual('REVIEW_REQUIRED', result['status'])
+                self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        self.assertFalse((self.output / 'research.sqlite3').exists())
+
+    def test_reused_development_document_keeps_raw_size_and_strict_encoding_boundary(self):
+        self.prepare()
+        path = self.output / 'requests/daily-breakout.json'
+        document = json.loads(path.read_bytes())
+        document['request']['note'] = 'raw-surrogate-marker'
+        text = json.dumps(document)
+        encoded = text.encode('utf-8')
+        maximum = 1024 * 1024
+        variants = {
+            'utf8': encoded,
+            'utf8_bom': b'\xef\xbb\xbf' + encoded,
+            'utf16_bom': text.encode('utf-16'),
+            'utf16_le': text.encode('utf-16-le'),
+            'utf32_le': text.encode('utf-32-le'),
+            'raw_surrogate': encoded.replace(b'raw-surrogate-marker', b'\xed\xa0\x80'),
+            'escaped_surrogate': encoded.replace(b'raw-surrogate-marker', b'\\ud800'),
+            'exact_1MiB': encoded + b' ' * (maximum - len(encoded)),
+            'over_1MiB': encoded + b' ' * (maximum + 1 - len(encoded)),
+        }
+        def expected(raw):
+            if len(raw) > maximum:
+                raise ValueError('development validation request exceeds 1 MiB')
+            return json.loads(raw.decode('utf-8-sig'))
+        def outcome(operation):
+            try:
+                operation()
+                return ('value',)
+            except (ValueError, OSError) as error:
+                return ('error', type(error), str(error))
+        for name, raw in variants.items():
+            with self.subTest(case=name):
+                path.write_bytes(raw)
+                self.assertIsInstance(json.loads(raw), dict)
+                self.assertEqual(outcome(lambda: expected(raw)),
+                    outcome(lambda: candidate_artifacts.inspect_daily_development_inputs(self.output)))
+                self.assertEqual(raw, path.read_bytes())
+
     def test_missing_choices_are_not_defaults_and_no_policy_source_or_ledger_is_written(self):
         self.prepare()
         before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
-        with (patch.object(candidate_cli, "ResearchRepository", side_effect=AssertionError("no DB")),
+        with (patch.object(candidate_artifacts, "ResearchRepository", side_effect=AssertionError("no DB")),
               patch.object(rp, "load_research_input", side_effect=AssertionError("no OOS"))):
             report = candidate_cli.inspect_final_preparation(self.output)
         self.assertEqual("REVIEW_REQUIRED", report["status"])
@@ -70,7 +139,7 @@ class CandidateFinalPreparationReviewTests(unittest.TestCase):
                            ("2024-10-06T00:00:00+09:00", "2024-10-05T00:00:00+09:00"),
                            ("2024-10-06T00:00:00", None)):
             with (self.subTest(start=start, end=end),
-                  patch.object(candidate_cli, "inspect_daily_development_inputs", side_effect=AssertionError("no input")),
+                  patch.object(candidate_artifacts, "_inspect_daily_development_inputs", side_effect=AssertionError("no input")),
                   self.assertRaises(ValueError)):
                 candidate_cli.inspect_final_preparation(self.output, final_start=start, final_end=end)
 
@@ -79,7 +148,7 @@ class CandidateFinalPreparationReviewTests(unittest.TestCase):
         for values in ({"minimum_active_days": True}, {"minimum_closed_trades": -1},
                        {"minimum_net_realized_pnl_won": 0.1}, {"maximum_drawdown_ppm": 1000001}):
             with (self.subTest(values=values),
-                  patch.object(candidate_cli, "inspect_daily_development_inputs", side_effect=AssertionError("no input")),
+                  patch.object(candidate_artifacts, "_inspect_daily_development_inputs", side_effect=AssertionError("no input")),
                   self.assertRaises(ValueError)):
                 candidate_cli.inspect_final_preparation(self.output, **values)
 
@@ -143,7 +212,7 @@ class CandidateFinalPreparationReviewTests(unittest.TestCase):
         document["strategy"]["buffer_bps"] += 1
         path = self.root / "different-request.json"
         path.write_text(json.dumps(document))
-        with (patch.object(candidate_cli, "inspect_daily_development_inputs", side_effect=AssertionError("no input")),
+        with (patch.object(candidate_artifacts, "_inspect_daily_development_inputs", side_effect=AssertionError("no input")),
               self.assertRaisesRegex(ValueError, "설정이 다릅니다")):
             candidate_cli.inspect_final_preparation(self.output, request_path=path)
 
@@ -192,39 +261,39 @@ class FinalExecutionTests(unittest.TestCase):
     def test_candidate_cli_freezes_tbd_without_loading_input_or_creating_runs(self):
         request_path, policy_path, _ = self.candidate_cli_paths()
         with (patch.object(rp, 'load_research_input', side_effect=AssertionError('no OOS input read')),
-              patch.object(candidate_cli, 'ResearchRepository', side_effect=AssertionError('no database access'))):
-            policy = candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+              patch.object(candidate_artifacts, 'ResearchRepository', side_effect=AssertionError('no database access'))):
+            policy = candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
         self.assertEqual(4, len(policy.tbd_fields))
         self.assertEqual(rp.final_candidate_spec_hash(self.request, self.prepared.implementation_hash), policy.candidate_spec_hash)
         before = policy_path.read_bytes()
-        with patch.object(candidate_cli, 'datetime') as clock:
-            clock.now.side_effect = AssertionError('must reuse original freeze time')
-            repeated = candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        with patch.object(candidate_artifacts, 'kst_now', side_effect=AssertionError('must reuse original freeze time')) as clock:
+            repeated = candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1', now_provider=clock)
+        clock.assert_not_called()
         self.assertEqual(policy.policy_id, repeated.policy_id)
         self.assertEqual(before, policy_path.read_bytes())
         self.assertFalse(self.request.runs_dir.exists())
 
     def test_candidate_cli_refuses_replacing_frozen_thresholds_or_strategy(self):
         request_path, policy_path, _ = self.candidate_cli_paths()
-        candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
         before = policy_path.read_bytes()
         with self.assertRaisesRegex(ValueError, '기존 동결'):
-            candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1', minimum_closed_trades=1)
+            candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1', minimum_closed_trades=1)
         document = json.loads(request_path.read_text(encoding='utf-8'))
         document['strategy']['buffer_bps'] += 1
         request_path.write_text(json.dumps(document), encoding='utf-8')
         with self.assertRaisesRegex(ValueError, '기존 동결'):
-            candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+            candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
         self.assertEqual(before, policy_path.read_bytes())
 
     def test_candidate_cli_completed_final_exports_blocked_evidence_readonly(self):
         request_path, policy_path, output = self.candidate_cli_paths()
-        policy = candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        policy = candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
         result = self.execute()
         row = result['candidates'][0]
         before = hashlib.sha256(self.request.database.read_bytes()).hexdigest()
         with patch.object(rp, 'load_research_input', side_effect=AssertionError('no OOS reread')):
-            documents = candidate_cli.prepare_publication(
+            documents = candidate_artifacts.prepare_publication(
                 request_path, policy_path, output, account_ref='account-ref-1',
                 final_batch_id=self.prepared.batch.batch_id, final_run_id=row['run_id'],
             )
@@ -237,9 +306,9 @@ class FinalExecutionTests(unittest.TestCase):
 
     def test_candidate_cli_cannot_promote_development_without_final_ledger(self):
         request_path, policy_path, output = self.candidate_cli_paths()
-        candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
         with self.assertRaisesRegex(ValueError, 'final holdout ledger'):
-            candidate_cli.prepare_publication(
+            candidate_artifacts.prepare_publication(
                 request_path, policy_path, output, account_ref='account-ref-1',
                 final_batch_id=self.prepared.batch.batch_id, final_run_id='development-run',
             )
@@ -252,12 +321,12 @@ class FinalExecutionTests(unittest.TestCase):
         run = self.repo.load_run(row['run_id'])
         request_path, policy_path, output = self.candidate_cli_paths()
         later = datetime.fromisoformat(run['started_at']) + timedelta(days=1)
-        policy = candidate_cli.freeze_policy(
+        policy = candidate_artifacts.freeze_policy(
             request_path, policy_path, strategy_ref='strategy-1', now_provider=lambda: later,
             minimum_closed_trades=0, minimum_active_days=0,
             minimum_net_realized_pnl_won=0, maximum_drawdown_ppm=1_000_000,
         )
-        documents = candidate_cli.prepare_publication(
+        documents = candidate_artifacts.prepare_publication(
             request_path, policy_path, output, account_ref='account-ref-1',
             final_batch_id=self.prepared.batch.batch_id, final_run_id=row['run_id'],
         )
@@ -267,11 +336,11 @@ class FinalExecutionTests(unittest.TestCase):
 
     def test_candidate_cli_changed_code_is_rejected_before_reading_final(self):
         request_path, policy_path, output = self.candidate_cli_paths()
-        candidate_cli.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
-        with (patch.object(candidate_cli, 'research_implementation_hash', return_value='a' * 64),
-              patch.object(candidate_cli, 'ResearchRepository', side_effect=AssertionError('must fail before reads'))):
+        candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strategy-1')
+        with (patch.object(candidate_artifacts, 'research_implementation_hash', return_value='a' * 64),
+              patch.object(candidate_artifacts, 'ResearchRepository', side_effect=AssertionError('must fail before reads'))):
             with self.assertRaisesRegex(ValueError, '현재 전략'):
-                candidate_cli.prepare_publication(request_path, policy_path, output,
+                candidate_artifacts.prepare_publication(request_path, policy_path, output,
                     account_ref='account-ref-1', final_batch_id='batch', final_run_id='run')
         self.assertFalse(output.exists())
 
@@ -279,7 +348,7 @@ class FinalExecutionTests(unittest.TestCase):
         request_path, _, _ = self.candidate_cli_paths()
         target = self.request.dataset / 'policy.json'
         with self.assertRaisesRegex(ValueError, '동결 연구 입력'):
-            candidate_cli.freeze_policy(request_path, target, strategy_ref='strategy-1')
+            candidate_artifacts.freeze_policy(request_path, target, strategy_ref='strategy-1')
         self.assertFalse(target.exists())
 
     def test_candidate_cli_atomic_publication_has_one_winner_and_no_partial_file(self):
@@ -288,26 +357,63 @@ class FinalExecutionTests(unittest.TestCase):
         def write(value):
             barrier.wait(timeout=5)
             try:
-                candidate_cli._write_immutable(output, {'value': value})
+                candidate_artifacts._write_immutable(output, {'value': value})
                 return 'written'
             except ValueError:
                 return 'conflict'
         with ThreadPoolExecutor(max_workers=2) as executor:
             self.assertEqual(['conflict', 'written'], sorted(executor.map(write, (1, 2))))
         self.assertIn(json.loads(output.read_text(encoding='utf-8'))['value'], (1, 2))
-        self.assertEqual([], list(output.parent.glob('.candidate-*.tmp')))
+        self.assertEqual([], list(output.parent.glob(f'.{output.name}.*.tmp')))
         before = output.read_bytes()
         with self.assertRaisesRegex(ValueError, '동결 파일'):
-            candidate_cli._write_immutable(output, {'value': 3})
+            candidate_artifacts._write_immutable(output, {'value': 3})
         self.assertEqual(before, output.read_bytes())
 
     def test_candidate_cli_failed_publication_leaves_no_partial_artifact(self):
         output = self.fixture.root / 'publication.json'
-        with patch.object(candidate_cli.os, 'link', side_effect=PermissionError('fixture refusal')):
+        with patch.object(candidate_artifacts.os, 'link', side_effect=PermissionError('fixture refusal')):
             with self.assertRaises(PermissionError):
-                candidate_cli._write_immutable(output, {'value': 1})
+                candidate_artifacts._write_immutable(output, {'value': 1})
         self.assertFalse(output.exists())
-        self.assertEqual([], list(output.parent.glob('.candidate-*.tmp')))
+        self.assertEqual([], list(output.parent.glob(f'.{output.name}.*.tmp')))
+
+    def test_candidate_cli_preserves_nonconflict_filesystem_file_exists_errors(self):
+        parent = self.fixture.root / 'regular-parent'
+        parent.write_bytes(b'original-parent')
+        with self.assertRaises(FileExistsError) as raised:
+            candidate_artifacts._write_immutable(parent / 'output.json', {'value': 1})
+        self.assertIs(type(raised.exception), FileExistsError)
+        self.assertEqual(b'original-parent', parent.read_bytes())
+        output = self.fixture.root / 'publication.json'
+        original = FileExistsError('fixture temporary creation failed')
+        with patch.object(candidate_artifacts.tempfile, 'NamedTemporaryFile', side_effect=original):
+            with self.assertRaises(FileExistsError) as raised:
+                candidate_artifacts._write_immutable(output, {'value': 1})
+        self.assertIs(original, raised.exception)
+        self.assertFalse(output.exists())
+        output.write_bytes(b'original-output')
+        original = FileExistsError('fixture original read failed')
+        with patch.object(Path, 'read_bytes', side_effect=original):
+            with self.assertRaises(FileExistsError) as raised:
+                candidate_artifacts._write_immutable(output, {'value': 2})
+        self.assertIs(original, raised.exception)
+        self.assertEqual(b'original-output', output.read_bytes())
+
+    def test_candidate_cli_cleanup_oracle_detects_actual_retained_temporary(self):
+        output = self.fixture.root / 'publication.json'
+        unlink = Path.unlink
+        def retain(path, *args, **kwargs):
+            if path.name.startswith(f'.{output.name}.') and path.suffix == '.tmp':
+                return None
+            return unlink(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', retain):
+            candidate_artifacts._write_immutable(output, {'value': 1})
+        retained = list(output.parent.glob(f'.{output.name}.*.tmp'))
+        self.assertEqual(1, len(retained))
+        self.assertEqual(output.read_bytes(), retained[0].read_bytes())
+        retained[0].unlink()
+        self.assertEqual([], list(output.parent.glob(f'.{output.name}.*.tmp')))
 
     def test_candidate_cli_main_reports_tbd_and_error_without_promoting_state(self):
         from contextlib import redirect_stdout
@@ -702,6 +808,98 @@ class FinalExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rp.execute_final_holdout_evaluation(changed,owner_token=self.owner)
         self.assertEqual((),self.repo.load_final_holdout_executions(self.prepared.batch.batch_id))
+
+
+    def test_candidate_request_raw_utf8_surrogate_is_rejected_before_conversion_or_policy(self):
+        request_path, policy_path, _ = self.candidate_cli_paths()
+        document = json.loads(request_path.read_bytes())
+        document['note'] = 'raw-surrogate-marker'
+        raw = json.dumps(document).encode('utf-8').replace(b'raw-surrogate-marker', b'\xed\xa0\x80')
+        request_path.write_bytes(raw)
+        self.assertIsInstance(json.loads(raw), dict)
+        with self.assertRaises(UnicodeDecodeError) as expected:
+            raw.decode('utf-8')
+        with patch.object(candidate_artifacts, 'research_process_request_from_document',
+                          wraps=rp.research_process_request_from_document) as converter:
+            with self.assertRaises(UnicodeDecodeError) as actual:
+                candidate_artifacts.freeze_policy(request_path, policy_path, strategy_ref='strict-utf8')
+        self.assertEqual(expected.exception.args, actual.exception.args)
+        converter.assert_not_called()
+        self.assertFalse(policy_path.exists())
+        self.assertEqual(raw, request_path.read_bytes())
+
+    def test_candidate_request_one_read_and_parse_preserve_original_spec_and_raw_bytes(self):
+        from pathlib import Path
+        from contextlib import ExitStack
+        request_path, _, _ = self.candidate_cli_paths()
+        raw = request_path.read_bytes()
+        original_open = Path.open
+        original_loads = json.loads
+        def captured_load(operation):
+            reads = []
+            def opened(path, *args, **kwargs):
+                if Path(path).resolve() == request_path.resolve():
+                    reads.append(args[0] if args else kwargs.get('mode', 'r'))
+                return original_open(path, *args, **kwargs)
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(Path, 'open', new=opened))
+                decoded = stack.enter_context(patch.object(json, 'loads', wraps=original_loads))
+                value = operation()
+            return value, len(reads), decoded.call_count
+        def original_contract():
+            candidate_artifacts._read_object(request_path, maximum_bytes=4 * 1024 * 1024)
+            return rp.load_research_process_request(request_path)
+        before, old_reads, old_parses = captured_load(original_contract)
+        after, new_reads, new_parses = captured_load(lambda: candidate_artifacts._request(request_path))
+        self.assertEqual(before, after)
+        self.assertEqual((2, 2), (old_reads, old_parses))
+        self.assertEqual((1, 1), (new_reads, new_parses))
+        self.assertEqual(raw, request_path.read_bytes())
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), hashlib.sha256(request_path.read_bytes()).hexdigest())
+
+    def test_candidate_request_byte_limits_encodings_and_errors_match_original_contract(self):
+        request_path, _, _ = self.candidate_cli_paths()
+        original = request_path.read_bytes()
+        text = original.decode('utf-8')
+        maximum = 4 * 1024 * 1024
+        cases = {
+            'utf8': original,
+            'utf8_crlf': text.replace('\n', '\r\n').encode('utf-8'),
+            'utf8_bom': b'\xef\xbb\xbf' + original,
+            'utf16_bom': text.encode('utf-16'),
+            'utf16_le': text.encode('utf-16-le'),
+            'utf16_be': text.encode('utf-16-be'),
+            'utf32_bom': text.encode('utf-32'),
+            'utf32_le': text.encode('utf-32-le'),
+            'utf32_be': text.encode('utf-32-be'),
+            'non_object': b'[]',
+            'non_object_bom': b'\xef\xbb\xbf[]',
+            'malformed': b'{',
+            'malformed_bom': b'\xef\xbb\xbf{',
+            'invalid_utf8': b'{"bad":"\xff"}',
+            'empty': b'',
+            'exact_maximum': original + b' ' * (maximum - len(original)),
+            'oversize': original + b' ' * (maximum + 1 - len(original)),
+        }
+        def outcome(operation):
+            try:
+                return ('value', operation())
+            except (OSError, UnicodeError, ValueError) as error:
+                return ('error', type(error), str(error))
+        def original_contract(path):
+            candidate_artifacts._read_object(path, maximum_bytes=maximum)
+            return rp.load_research_process_request(path)
+        for name, raw in cases.items():
+            with self.subTest(case=name):
+                request_path.write_bytes(raw)
+                expected = outcome(lambda: original_contract(request_path))
+                actual = outcome(lambda: candidate_artifacts._request(request_path))
+                self.assertEqual(expected, actual)
+                self.assertEqual(raw, request_path.read_bytes())
+        for path in (request_path.with_name('missing-request.json'), request_path.parent):
+            with self.subTest(path=str(path)):
+                self.assertEqual(outcome(lambda: original_contract(path)),
+                                 outcome(lambda: candidate_artifacts._request(path)))
 
 
 if __name__ == '__main__':

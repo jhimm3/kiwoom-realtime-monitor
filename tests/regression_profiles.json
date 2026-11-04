@@ -44,6 +44,7 @@
         "tests.unit.test_check_postgres_integration",
         "tests.unit.test_research_observation_history",
         "tests.unit.test_research_data_source",
+        "tests.unit.test_research_input_authority",
         "tests.unit.test_research_replay",
         "tests.unit.test_minute_bar_revisions",
         "tests.unit.test_research_factors",
@@ -147,6 +148,7 @@
         "tests.unit.test_news_jobs",
         "tests.unit.test_central_ai_service",
         "tests.unit.test_central_content_sync",
+        "tests.unit.test_theme_generation_sync",
         "tests.unit.test_central_content_client",
         "tests.unit.test_central_journal_sync",
         "tests.unit.test_central_settings_sync",
@@ -168,11 +170,16 @@
       "tests.unit.test_incremental_realtime_receive",
       "tests.unit.test_app_controller",
       "tests.unit.test_main_window",
+      "tests.unit.test_profile_selection_retarget",
       "tests.unit.test_market_cache_writer",
       "tests.unit.test_realtime_gap_quality",
       "tests.unit.test_live_0b_minute_transition",
       "tests.unit.test_live_0b_allocation_dialog",
-      "tests.unit.test_run_test_app_with_data"
+      "tests.unit.test_run_test_app_with_data",
+      "tests.unit.test_app_paths",
+      "tests.unit.test_pc_market_session",
+      "tests.unit.test_query_only_composition",
+      "tests.unit.test_top20_nas_callbacks"
     ],
     "top20-lifecycle": [
       "tests.unit.test_top20_reconciliation",
@@ -195,7 +202,10 @@
       "tests.unit.test_chatgpt_plan",
       "tests.unit.test_chatgpt_plan_settings",
       "tests.unit.test_nas_chatgpt_plan",
-      "tests.unit.test_chatgpt_nas_transfer"
+      "tests.unit.test_chatgpt_nas_transfer",
+      "tests.unit.test_ai_request_authority",
+      "tests.unit.test_query_authority",
+      "tests.unit.test_query_authority_unicode"
     ],
     "dependency-audit-p0-execution-fence": [
       "tests.unit.test_mock_account_drain"
@@ -263,6 +273,7 @@
       "tests.unit.test_mock_account_bundle",
       "tests.unit.test_mock_automation_admission",
       "tests.unit.test_mock_automation_candidate",
+      "tests.unit.test_strategy_data_contract",
       "tests.unit.test_mock_automation_dialog",
       "tests.unit.test_mock_automation_risk",
       "tests.unit.test_mock_automation_runner",
@@ -271,6 +282,15 @@
       "tests.unit.test_mock_automation_supervisor",
       "tests.unit.test_market_role_change",
       "tests.unit.test_planned_reconnect"
+    ],
+    "dependency-audit-p2-core-module-evidence": [
+      "tests.unit.test_candidate_monitor",
+      "tests.unit.test_central_server_app",
+      "tests.unit.test_central_server_database",
+      "tests.unit.test_external_market_collector",
+      "tests.unit.test_market_events",
+      "tests.unit.test_mock_account_monitor",
+      "tests.unit.test_news_jobs"
     ],
     "dependency-audit-p2-functional-discovery": [
       "tests.unit.test_classify_historical_stock_adjustments",
@@ -317,7 +337,9 @@
       "tests.unit.test_diagnostic_top20_input",
       "tests.unit.test_top20_delivery_provenance",
       "tests.unit.test_top20_fixture_seed",
-      "tests.unit.test_top20_lifecycle_inputs"
+      "tests.unit.test_top20_lifecycle_inputs",
+      "tests.unit.test_export_preserved_rank_history",
+      "tests.unit.test_import_preserved_rank_history"
     ],
     "dependency-audit-p2-trace-persistence": [
       "tests.unit.test_diagnostic_trace",
@@ -336,7 +358,12 @@
     "main-observation-delivery-contracts": [
       "tests.unit.test_observation_delivery",
       "tests.unit.test_observation_frame_recovery",
-      "tests.unit.test_replay_content_comparison"
+      "tests.unit.test_replay_content_comparison",
+      "tests.unit.test_ram_shadow_optional_runtime",
+      "tests.unit.test_research_reported_results",
+      "tests.unit.test_research_result_delivery",
+      "tests.unit.test_async_lifetime",
+      "tests.unit.test_news_body_processor"
     ],
     "dependency-audit-batch-01-central-and-data-contracts": [
       "tests.unit.test_api_settings_dialog",
@@ -519,12 +546,17 @@
       "tests.unit.test_settings_api_hub",
       "tests.unit.test_settings_backup",
       "tests.unit.test_settings_repository",
-      "tests.unit.test_shadow_checkpoint"
+      "tests.unit.test_shadow_checkpoint",
+      "tests.unit.test_preserve_current_settings",
+      "tests.unit.test_role_settings_transition",
+      "tests.unit.test_role_settings_transition_qt"
     ],
     "dependency-audit-batch-07-final-unregistered-contracts": [
       "tests.unit.test_stock_fundamentals_service",
       "tests.unit.test_stock_repository",
       "tests.unit.test_theme_backup",
+      "tests.unit.test_theme_generation",
+      "tests.unit.test_theme_current_snapshot",
       "tests.unit.test_theme_import",
       "tests.unit.test_theme_parser",
       "tests.unit.test_theme_suggestions",
@@ -540,8 +572,9 @@
       "tests.unit.test_update_planner",
       "tests.unit.test_snapshot_prepared_historical_news",
       "tests.unit.test_stage_prepared_historical_news_archive",
-      "tests.unit.test_verify_prepared_historical_news_rules"
+      "tests.unit.test_verify_prepared_historical_news_rules",
+      "tests.unit.test_operation_context"
     ]
   },
-  "core_order_sha256": "5E4EA6B03D183B782D2283CCE0A2DBF745509B021F1B4782424ACEBEADE0B982"
+  "core_order_sha256": "66449E0216559944855F18FC8C1B2811B41B97C3139940F76E7C4232CC44833B"
 }

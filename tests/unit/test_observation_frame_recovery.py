@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.unit.test_mock_automation_runner import _prepared_runner, _apply_runner_fills
+
 import asyncio
 import copy
 import threading
@@ -34,16 +36,16 @@ class RecoveryFixture:
         else:
             self.store = FakeStore()
         runner = self.create()
-        runner._cursor = cursor
-        runner._state = StrategyState(status="open", symbol="005930", entry_price=10000,
+        (runner.episode._input_progress if mock else runner)._cursor = cursor
+        (runner.episode._episode_position if mock else runner)._state = StrategyState(status="open", symbol="005930", entry_price=10000,
                                       position_quantity=2, opened_at="2026-09-12T00:00:00+00:00",
                                       emitted_candidate_keys=("already-emitted",))
         if mock:
-            runner._status = {"state": "WAITING_ORDER", "pending_intent_id": "pending-original",
+            runner.episode._status = {"state": "WAITING_ORDER", "pending_intent_id": "pending-original",
                               "orders_enabled": False}
-            runner._fill_cursor = 3
-            runner._seen_fill_ids = {"already-filled"}
-        runner._save_checkpoint()
+            runner.episode._episode_position._fill_cursor = 3
+            runner.episode._episode_position._seen_fill_ids = {"already-filled"}
+        (runner.episode if mock else runner)._save_checkpoint()
         self.original = copy.deepcopy(self.document())
         self.original.pop("delivery_protocol")
         self.write_document(self.original)
@@ -53,10 +55,14 @@ class RecoveryFixture:
     def create(self):
         if not self.mock:
             return CandidateMonitor(self.store, _config(), poll_seconds=1, universe_max_age_seconds=300)
-        runner = MockAutomationRunner(self.store, self.case.bundle, self.case.spec)
-        runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+        runner = _prepared_runner(self.store, self.case.bundle, self.case.spec)
+        runner.episode._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
             active_spec_id=self.case.spec.spec_id, desired_state=SimpleNamespace(value="RUNNING"))
         return runner
+
+    @property
+    def business(self):
+        return self.runner.episode if self.mock else self.runner
 
     def document(self):
         if not self.mock:
@@ -80,7 +86,7 @@ class RecoveryFixture:
                                        exhausted=len(values) <= limit)
 
     async def poll(self, limit=1000):
-        return await self.runner.run_once(limit=limit) if self.mock else self.runner.run_once(limit=limit)
+        return await self.runner.episode.advance_once(limit=limit) if self.mock else self.runner.run_once(limit=limit)
 
 
 class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -94,14 +100,14 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(mock=mock):
                 fixture = RecoveryFixture(self, mock, rows, cursor=6004)
                 fixture.pending = True
-                with patch.object(fixture.runner, "_consume", side_effect=AssertionError("historical decision")):
+                with patch.object(fixture.business, "_consume", side_effect=AssertionError("historical decision")):
                     self.assertEqual(0, await fixture.poll(limit=701))
                     self.assertEqual(fixture.original, fixture.document())
                     fixture.pending = False
                     for _ in range(8):
                         self.assertEqual(0, await fixture.poll(limit=701))
                         self.assertEqual(fixture.original, fixture.document())
-                        fixture.runner._save_checkpoint()
+                        fixture.business._save_checkpoint()
                         self.assertEqual(fixture.original, fixture.document())
                     self.assertEqual(0, await fixture.poll(limit=701))
                 saved = fixture.document()
@@ -117,7 +123,7 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(fixture.original[key], saved[key])
                 # Once saved, restart does not rewind or repair again; >C alone is consumed.
                 fixture.runner = fixture.create()
-                self.assertIsNone(fixture.runner._frame_recovery)
+                self.assertIsNone((fixture.business._input_progress if mock else fixture.runner)._frame_recovery)
                 future = rows[-1]
                 fixture.store.load_observation_revisions_after = lambda *args: [future]
                 if mock:
@@ -126,7 +132,7 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     from unittest.mock import Mock
                     consumer = Mock()
-                fixture.runner._consume = consumer
+                fixture.business._consume = consumer
                 self.assertEqual(1, await fixture.poll())
                 consumer.assert_called_once_with(future)
 
@@ -134,20 +140,20 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
         for mock in (False, True):
             fixture = RecoveryFixture(self, mock)
             await fixture.poll(limit=1)
-            self.assertEqual([], list(fixture.runner._bars))
+            self.assertEqual([], list(fixture.business._strategy_inputs.frames_for_checkpoint()[0] if mock else fixture.runner._bars))
             fixture.runner = fixture.create()  # Scratch is deliberately not a durable partial checkpoint.
-            self.assertEqual(0, fixture.runner._frame_recovery.after_sequence)
+            self.assertEqual(0, (fixture.business._input_progress if mock else fixture.runner)._frame_recovery.after_sequence)
             method = "upsert_documents" if mock else "save_shadow_monitor_state"
             with patch.object(fixture.store, method, side_effect=OSError("native checkpoint failed")):
                 with self.assertRaisesRegex(OSError, "native checkpoint failed"):
                     await fixture.poll()
-                fixture.runner._save_checkpoint()
+                fixture.business._save_checkpoint()
             self.assertEqual(fixture.original, fixture.document())
-            self.assertIsNone(fixture.runner._delivery_protocol)
+            self.assertIsNone((fixture.business._input_progress if mock else fixture.runner)._delivery_protocol)
             reads = len(fixture.reads)
             await fixture.poll()
             self.assertEqual(reads, len(fixture.reads))  # Complete scratch retries its commit only.
-            self.assertIsNone(fixture.runner._frame_recovery)
+            self.assertIsNone((fixture.business._input_progress if mock else fixture.runner)._frame_recovery)
 
     async def test_lost_final_ack_has_only_old_or_fully_repaired_checkpoint(self):
         for mock in (False, True):
@@ -160,12 +166,12 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(fixture.store, method, side_effect=lost_ack):
                 with self.assertRaisesRegex(OSError, "lost COMMIT ack"):
                     await fixture.poll()
-            self.assertIsNone(fixture.runner._delivery_protocol)
+            self.assertIsNone((fixture.business._input_progress if mock else fixture.runner)._delivery_protocol)
             saved = fixture.document()
             self.assertEqual(3, len(saved["bars"]))
             self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL, saved["delivery_protocol"])
             fixture.runner = fixture.create()
-            self.assertIsNone(fixture.runner._frame_recovery)
+            self.assertIsNone((fixture.business._input_progress if mock else fixture.runner)._frame_recovery)
             self.assertEqual(fixture.original["strategy_state"], saved["strategy_state"])
 
     async def test_mock_fills_and_stop_control_continue_without_partial_checkpoint(self):
@@ -173,17 +179,17 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
         fixture.case.events.values.append(fixture.case.event(4, "new-fill", "BUY", 1, 10000))
         fixture.pending = True
         await fixture.poll()
-        self.assertEqual(3, fixture.runner._state.position_quantity)
-        self.assertEqual(4, fixture.runner._fill_cursor)
-        fixture.runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+        self.assertEqual(3, fixture.business._episode_position._state.position_quantity)
+        self.assertEqual(4, fixture.business._episode_position._fill_cursor)
+        fixture.business._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
             active_spec_id=fixture.case.spec.spec_id, desired_state=SimpleNamespace(value="STOPPED"))
         reads = len(fixture.reads)
         await fixture.poll()
         self.assertEqual(reads, len(fixture.reads))
-        self.assertEqual("STOPPED", fixture.runner.status["state"])
-        self.assertEqual("pending-original", fixture.runner.status["pending_intent_id"])
+        self.assertEqual("STOPPED", fixture.business.status["state"])
+        self.assertEqual("pending-original", fixture.business.status["pending_intent_id"])
         self.assertEqual(fixture.original, fixture.document())
-        fixture.runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+        fixture.business._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
             active_spec_id=fixture.case.spec.spec_id, desired_state=SimpleNamespace(value="RUNNING"))
         fixture.pending = False
         await fixture.poll()
@@ -226,19 +232,19 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     release.set()
                 await asyncio.wait_for(closing, 5)
-            self.assertIsNone(fixture.runner._frame_recovery)
+            self.assertIsNone((fixture.business._input_progress if mock else fixture.runner)._frame_recovery)
             self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL, fixture.document()["delivery_protocol"])
 
     async def test_mock_close_drains_fill_work_before_discarding_partial_recovery(self):
         fixture = RecoveryFixture(self, True)
         entered, release = threading.Event(), threading.Event()
-        native = fixture.runner._apply_new_fills
-        def blocked_fill():
+        native = fixture.business._episode_position.apply_new_fills
+        def blocked_fill(*args, **kwargs):
             entered.set()
             if not release.wait(5):
                 raise TimeoutError("test did not release fill reader")
-            native()
-        with patch.object(fixture.runner, "_apply_new_fills", side_effect=blocked_fill):
+            native(*args, **kwargs)
+        with patch.object(fixture.business._episode_position, "apply_new_fills", side_effect=blocked_fill):
             await fixture.runner.start()
             self.assertTrue(await asyncio.to_thread(entered.wait, 5))
             closing = asyncio.create_task(fixture.runner.close())
@@ -249,4 +255,4 @@ class ObservationFrameRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
             await asyncio.wait_for(closing, 5)
         self.assertEqual(fixture.original, fixture.document())
-        self.assertIsNotNone(fixture.runner._frame_recovery)
+        self.assertIsNotNone(fixture.business._input_progress._frame_recovery)

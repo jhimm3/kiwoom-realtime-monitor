@@ -1,4 +1,6 @@
 import asyncio
+import tempfile
+from pathlib import Path
 from copy import deepcopy
 from datetime import datetime, timedelta
 import json
@@ -14,6 +16,7 @@ from kiwoom_monitor.application.morning_market_brief import (
     RESEARCH_SCHEMA, RESEARCH_PROMPT, render_research_prompt, research_feature_rows,
 )
 from kiwoom_monitor.central_server.morning_market_brief import MorningMarketBrief, create_morning_market_brief_router
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.infrastructure.chatgpt_plan import GroundedResponse, search_evidence, validate_reasoning
 
 KST = ZoneInfo("Asia/Seoul")
@@ -792,7 +795,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(context_from_run(run, NOW+timedelta(minutes=240))["available"])
 
     async def test_diagnostic_master_child_pause_prevents_new_work(self):
-        with patch("kiwoom_monitor.central_server.morning_market_brief.is_paused", return_value=True):
+        with patch.object(self.runtime, "_workload_paused", return_value=True):
             with self.assertRaises(ValueError): await self.runtime.request()
         self.assertEqual(self.ai.calls, [])
 
@@ -809,3 +812,71 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         status,_ = await request(app,"PUT",path,values); self.assertEqual(status,409)
         values["expected_revision"] = 1; values["api_key"] = "forbidden"
         status,_ = await request(app,"PUT",path,values); self.assertEqual(status,422)
+
+
+class NativeMorningBriefLifetimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_schedule_claim_completion_restart_and_shutdown(self):
+        with tempfile.TemporaryDirectory(prefix="morning-brief-native-") as directory:
+            path = Path(directory) / "central.sqlite3"
+            store = SQLiteQueryStore(path, now_provider=lambda: NOW)
+            runtime = restarted = reopened = closing = None
+            ai = AI()
+            ai.release = asyncio.Event()
+            try:
+                store.initialize()
+                runtime = MorningMarketBrief(store, ai, clock=lambda: NOW)
+                await runtime.start()
+                self.assertEqual("running", (await runtime.request())["status"])
+                claimed = store.load_documents(RUNS_COLLECTION, NOW.date().isoformat(), 100)
+                self.assertEqual(1, len(claimed))
+                self.assertEqual("scheduled", claimed[0]["key"])
+                self.assertEqual("running", claimed[0]["document"]["status"])
+                self.assertEqual(NOW.isoformat(), claimed[0]["document"]["cutoff_at"])
+
+                closing = asyncio.create_task(runtime.close())
+                await asyncio.sleep(.01)
+                self.assertFalse(closing.done())
+                ai.release.set()
+                await closing
+                self.assertIsNone(runtime._loop_task)
+                self.assertTrue(runtime._run_task.done())
+
+                rows = store.load_documents(RUNS_COLLECTION, NOW.date().isoformat(), 100)
+                self.assertEqual(1, len(rows))
+                saved = rows[0]["document"]
+                self.assertEqual("completed", saved["status"])
+                self.assertEqual(json.dumps(result(NOW)), saved["raw_response"])
+                self.assertEqual(NOW.isoformat(), saved["inputs"]["cutoff_at"])
+                self.assertEqual((NOW.timestamp(), NOW.timestamp()),
+                                 (saved["available_at"], saved["finished_at"]))
+                self.assertEqual(SCHEMA, saved["result"]["schema"])
+                self.assertEqual("unknown", saved["result"]["participation"]["state"])
+                self.assertEqual(["UNCONFIRMED"],
+                                 [item["status"] for item in saved["result"]["hypotheses"]])
+                self.assertFalse(saved["auto_trade_eligible"])
+                self.assertEqual(1, len(ai.calls))
+                latest = await runtime.latest()
+                self.assertEqual(saved, latest["run"])
+                self.assertTrue(latest["context"]["available"])
+                self.assertEqual("not_connected", latest["context"]["consumer_binding"])
+                self.assertFalse(latest["context"]["auto_trade_eligible"])
+
+                store.close()
+                reopened = SQLiteQueryStore(path, now_provider=lambda: NOW)
+                reopened.initialize()
+                restarted = MorningMarketBrief(reopened, ai, clock=lambda: NOW)
+                self.assertEqual("already_attempted", (await restarted.request())["status"])
+                self.assertEqual(saved, (await restarted.latest())["run"])
+                self.assertEqual(1, len(ai.calls))
+            finally:
+                ai.release.set()
+                closers = [closing] if closing is not None else ([runtime.close()] if runtime is not None else [])
+                if restarted is not None:
+                    closers.append(restarted.close())
+                try:
+                    closed = await asyncio.gather(*closers, return_exceptions=True)
+                    self.assertEqual([None] * len(closed), closed)
+                finally:
+                    if reopened is not None:
+                        reopened.close()
+                    store.close()

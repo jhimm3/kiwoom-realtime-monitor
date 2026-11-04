@@ -1,5 +1,7 @@
 # 시놀로지 개인 중앙 서버 설치
 
+> **운영과 검증 범위.** 기존 NAS 실행 모드의 설치·유지 절차다. AR의 목표 배치에서 NAS는 보관을 맡으며, 실제 선택한 설치물·대상 데이터·복귀 지점을 확정한 뒤 승인 범위에서 전환한다. [관련 계약](../../docs/architecture/app-target-20261023.md#portable-execution-target).
+
 [현재 구현·검증 상태](../../docs/CURRENT_STATUS.md) · [남은 확인 사항](../../docs/OPEN_ITEMS.md)
 
 이 구성은 Container Manager에서 서버와 PostgreSQL을 함께 실행한다. PostgreSQL 포트는 외부에 공개하지 않고 앱은 중앙 서버의 8787 포트에만 접속한다.

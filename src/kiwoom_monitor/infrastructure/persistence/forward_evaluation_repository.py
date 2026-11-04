@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
-from typing import Any, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Mapping, Protocol
+
+from kiwoom_monitor.domain.time_basis import same_aware_instant
 
 from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationAdmission,
@@ -71,10 +74,18 @@ from kiwoom_monitor.domain.execution_activation import (
 )
 
 
+if TYPE_CHECKING:
+    from .execution_repository import ExecutionRepository
+
+
 class ForwardEvaluationStore(Protocol):
+    def mock_automation_read_scope(self) -> AbstractContextManager[Any]: ...
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
     def insert_immutable_document(
         self, collection: str, owner: str, key: str, document: dict[str, Any],
+    ) -> bool: ...
+    def publish_mock_automation_current_risk(
+        self, account_ref: str, document: dict[str, Any], *, expected: dict[str, Any] | None,
     ) -> bool: ...
     def insert_strategy_stage_revision(self, document: dict[str, Any]) -> bool: ...
     def load_documents(
@@ -82,16 +93,16 @@ class ForwardEvaluationStore(Protocol):
         offset: int = 0, updated_after: float = 0.0,
     ) -> list[dict[str, Any]]: ...
     def load_document(
-        self, collection: str, owner: str, key: str,
+        self, collection: str, owner: str, key: str, *, _reader: Any = None,
     ) -> dict[str, Any] | None: ...
     def load_account_bindings(self) -> list[dict[str, Any]]: ...
     def load_latest_account_binding(
-        self, credential_profile_id: str, broker: str, environment: str,
+        self, credential_profile_id: str, broker: str, environment: str, *, _reader: Any = None,
     ) -> dict[str, Any] | None: ...
-    def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None: ...
+    def load_mock_automation_control(self, account_ref: str, *, _reader: Any = None) -> dict[str, Any] | None: ...
     def load_mock_automation_lineage(
         self, account_ref: str, *, spec_id: str, admission_id: str,
-        lease_receipt_id: str, recovery_decision_id: str | None = None,
+        lease_receipt_id: str, recovery_decision_id: str | None = None, _reader: Any = None,
     ) -> dict[str, dict[str, Any]]: ...
     def save_mock_automation_control(
         self, value: dict[str, Any], *, expected_revision: int,
@@ -130,18 +141,48 @@ class ForwardEvaluationRepository:
     def __init__(self, store: ForwardEvaluationStore) -> None:
         self._store = store
 
+    def mock_automation_read_scope(self) -> AbstractContextManager[Any]:
+        factory = getattr(self._store, 'mock_automation_read_scope', None)
+        return factory() if callable(factory) else nullcontext()
+
+    def shares_active_intent_reader(self, execution: ExecutionRepository) -> bool:
+        return (execution.uses_store(self._store)
+                and getattr(type(self._store), "_supports_scoped_active_intents", False) is True)
+
     def save_profile(self, value: ForwardEvaluationSpec) -> bool:
         return self._save_immutable(
             self.PROFILE_COLLECTION, value.strategy_ref, value.profile_id, value.to_dict(),
         )
 
-    def load_profile(self, strategy_ref: str, profile_id: str) -> ForwardEvaluationSpec | None:
-        document = self._find(self.PROFILE_COLLECTION, strategy_ref, profile_id)
+    def load_profile(self, strategy_ref: str, profile_id: str, *, _reader: Any = None) -> ForwardEvaluationSpec | None:
+        document = self._find(self.PROFILE_COLLECTION, strategy_ref, profile_id, _reader=_reader)
         return forward_spec_from_dict(document) if document else None
 
     def save_mock_automation_spec(self, value: MockAutomationOperatingSpec) -> bool:
         value = mock_automation_spec_from_dict(value.to_dict())
         profile = self.load_profile(value.strategy_ref, value.forward_profile_id)
+        self._validate_mock_automation_spec_binding(value, profile)
+        return self._save_immutable(
+            self.MOCK_AUTOMATION_SPEC_COLLECTION,
+            value.account_scope.account_ref,
+            value.spec_id,
+            value.to_dict(),
+        )
+
+    def revalidate_stored_mock_automation_spec(
+        self, value: MockAutomationOperatingSpec, profile: ForwardEvaluationSpec | None, *, _reader: Any = None,
+    ) -> None:
+        """Reuse this evaluation's native immutable reads; check binding now.
+
+        The caller already loaded this spec and its exact profile from this
+        repository. Publication and conflict handling stay in save_spec.
+        """
+        value = mock_automation_spec_from_dict(value.to_dict())
+        self._validate_mock_automation_spec_binding(value, profile, _reader=_reader)
+
+    def _validate_mock_automation_spec_binding(
+        self, value: MockAutomationOperatingSpec, profile: ForwardEvaluationSpec | None, *, _reader: Any = None,
+    ) -> None:
         if profile is None:
             raise ValueError("mock automation spec requires a stored forward profile")
         if (
@@ -149,22 +190,18 @@ class ForwardEvaluationRepository:
             or profile.environment != "mock"
         ):
             raise ValueError("mock automation spec does not match its forward profile scope")
+        reader_args = {} if _reader is None else {"_reader": _reader}
         latest = self._store.load_latest_account_binding(
             value.credential_profile_id, value.account_scope.broker, value.account_scope.environment.value,
+            **reader_args,
         )
         if latest is None or (
             str(latest.get("account_ref", "")) != value.account_scope.account_ref
             or int(latest.get("binding_revision", 0)) != value.binding_revision
-            or str(latest.get("verified_at", "")) != value.binding_verified_at.isoformat()
+            or not same_aware_instant(str(latest.get("verified_at", "")), value.binding_verified_at)
             or str(latest.get("verification_method", "")) != "ka00001"
         ):
             raise ValueError("mock automation spec requires the current verified mock binding")
-        return self._save_immutable(
-            self.MOCK_AUTOMATION_SPEC_COLLECTION,
-            value.account_scope.account_ref,
-            value.spec_id,
-            value.to_dict(),
-        )
 
     def load_mock_automation_specs(
         self, account_ref: str,
@@ -176,41 +213,62 @@ class ForwardEvaluationRepository:
         return tuple(sorted(values, key=lambda item: (item.frozen_at, item.spec_id)))
 
     def load_mock_automation_spec(
-        self, account_ref: str, spec_id: str,
+        self, account_ref: str, spec_id: str, *,
+        require_canonical_document: bool = False, _reader: Any = None,
     ) -> MockAutomationOperatingSpec | None:
-        document = self._find(self.MOCK_AUTOMATION_SPEC_COLLECTION, account_ref, spec_id)
-        return mock_automation_spec_from_dict(document) if document else None
+        collection = self.MOCK_AUTOMATION_SPEC_COLLECTION
+        document = self._find(collection, account_ref, spec_id, _reader=_reader)
+        if not document:
+            return None
+        spec = mock_automation_spec_from_dict(document)
+        # A typed decode can discard fields. Preserve the immutable conflict
+        # check when the gate reuses this read in place of save_mock_automation_spec.
+        if require_canonical_document and document != spec.to_dict():
+            raise ValueError(f"immutable document conflict: {collection}/{account_ref}/{spec_id}")
+        return spec
 
     def save_mock_automation_risk_snapshot(self, value: MockAutomationRiskSnapshot) -> bool:
         value = mock_automation_risk_snapshot_from_dict(value.to_dict())
-        current = self.load_latest_mock_automation_risk(value.account_ref)
-        if current is not None and (
-            current.reconciliation_revision > value.reconciliation_revision
-            or (
-                current.reconciliation_revision == value.reconciliation_revision
-                and current.snapshot_id != value.snapshot_id
-            )
-        ):
-            raise ValueError("mock automation risk revision did not advance monotonically")
-        created = self._save_immutable(
-            self.MOCK_AUTOMATION_RISK_COLLECTION,
-            value.account_ref,
-            value.snapshot_id,
-            value.to_dict(),
-        )
-        if current is None or current.snapshot_id != value.snapshot_id:
-            self._store.upsert_documents(self.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION, [{
-                "owner": value.account_ref,
-                "key": value.account_ref,
-                "document": value.to_dict(),
-            }])
-        return created
+        account = value.account_ref
+        document = value.to_dict()
+        created = None
+        scope_name = "_mock_automation_risk_write_scope"
+        write_scope = (getattr(self._store, scope_name)
+                       if callable(getattr(type(self._store), scope_name, None)) else None)
+        while True:
+            expected = self._find(self.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION, account, account)
+            current = mock_automation_risk_snapshot_from_dict(expected) if expected else None
+            if current is not None and (
+                current.reconciliation_revision > value.reconciliation_revision
+                or (
+                    current.reconciliation_revision == value.reconciliation_revision
+                    and current.snapshot_id != value.snapshot_id
+                )
+            ):
+                raise ValueError("mock automation risk revision did not advance monotonically")
+            already_current = current is not None and current.snapshot_id == value.snapshot_id
+            # Close the first write scope before reloading a competing current revision.
+            scope = (write_scope() if created is None and not already_current and callable(write_scope)
+                     else nullcontext((None, None)))
+            with scope as (shared_history, shared_publish):
+                if created is None:
+                    save_history = self._save_immutable if shared_history is None else shared_history
+                    created = save_history(
+                        self.MOCK_AUTOMATION_RISK_COLLECTION, account, value.snapshot_id, document,
+                    )
+                if already_current:
+                    return created
+                # History has already committed. Retry only an acknowledged comparison miss.
+                publish_current = (self._store.publish_mock_automation_current_risk
+                                   if shared_publish is None else shared_publish)
+                if publish_current(account, document, expected=expected):
+                    return created
 
     def load_latest_mock_automation_risk(
-        self, account_ref: str,
+        self, account_ref: str, *, _reader: Any = None,
     ) -> MockAutomationRiskSnapshot | None:
         document = self._find(
-            self.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION, account_ref, account_ref,
+            self.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION, account_ref, account_ref, _reader=_reader,
         )
         return mock_automation_risk_snapshot_from_dict(document) if document else None
 
@@ -266,6 +324,7 @@ class ForwardEvaluationRepository:
         *,
         credential_profile_id: str,
         expected_binding_revision: int,
+        confirm_only: bool = False,
     ) -> bool:
         """Persist a validated publication without enabling execution or order transport."""
         package = candidate_package_from_dict(package.to_dict())
@@ -293,6 +352,21 @@ class ForwardEvaluationRepository:
             raise ValueError("candidate publication requires the current verified mock binding")
         # Anchor the first policy by package before the remaining documents. If the
         # process stops mid-publication, a retry cannot substitute a lower threshold.
+        if confirm_only:
+            # A withdrawn/unselected producer cannot finish a partial prefix or
+            # publish new bytes. A complete identical receipt can still resolve
+            # COMMIT/ACK loss, after the same current binding and policy checks.
+            originals = (
+                self._find(self.MOCK_AUTOMATION_ELIGIBILITY_POLICY_COLLECTION,
+                           policy.strategy_ref, package.package_hash),
+                self._find(self.MOCK_AUTOMATION_CANDIDATE_COLLECTION,
+                           package.strategy_ref, package.package_hash),
+                self._find(self.MOCK_AUTOMATION_ELIGIBILITY_RECEIPT_COLLECTION,
+                           receipt.account_ref, package.package_hash),
+            )
+            if originals != (policy.to_dict(), package.to_dict(), receipt.to_dict()):
+                raise ValueError("candidate scientific implementation hash does not match this server")
+            return False
         changed = self._save_immutable(
             self.MOCK_AUTOMATION_ELIGIBILITY_POLICY_COLLECTION,
             policy.strategy_ref,
@@ -383,10 +457,10 @@ class ForwardEvaluationRepository:
         ))
 
     def load_mock_automation_admission_for_spec(
-        self, account_ref: str, spec_id: str,
+        self, account_ref: str, spec_id: str, *, _reader: Any = None,
     ) -> MockAutomationAdmission | None:
         document = self._find(
-            self.MOCK_AUTOMATION_ADMISSION_BY_SPEC_COLLECTION, account_ref, spec_id,
+            self.MOCK_AUTOMATION_ADMISSION_BY_SPEC_COLLECTION, account_ref, spec_id, _reader=_reader,
         )
         return mock_automation_admission_from_dict(document) if document else None
 
@@ -437,12 +511,12 @@ class ForwardEvaluationRepository:
         return saved
 
     def load_mock_automation_lease_for_admission(
-        self, account_ref: str, admission_id: str,
+        self, account_ref: str, admission_id: str, *, _reader: Any = None,
     ) -> MockAutomationLeaseReceipt | None:
         document = self._find(
             self.MOCK_AUTOMATION_LEASE_BY_ADMISSION_COLLECTION,
             account_ref,
-            admission_id,
+            admission_id, _reader=_reader,
         )
         return mock_automation_lease_receipt_from_dict(document) if document else None
 
@@ -456,9 +530,10 @@ class ForwardEvaluationRepository:
         return tuple(sorted(values, key=lambda item: (item.admitted_at, item.receipt_id)))
 
     def load_mock_automation_control(
-        self, account_ref: str,
+        self, account_ref: str, *, _reader: Any = None,
     ) -> MockAutomationControl | None:
-        document = self._store.load_mock_automation_control(account_ref)
+        reader_args = {} if _reader is None else {"_reader": _reader}
+        document = self._store.load_mock_automation_control(account_ref, **reader_args)
         return mock_automation_control_from_dict(document) if document else None
 
     def save_mock_automation_control(
@@ -475,62 +550,74 @@ class ForwardEvaluationRepository:
         self, value: MockAutomationRecoveryDecision,
     ) -> bool:
         value = mock_automation_recovery_decision_from_dict(value.to_dict())
-        lineage = self._store.load_mock_automation_lineage(
-            value.account_ref, spec_id=value.spec_id, admission_id=value.admission_id,
-            lease_receipt_id=value.lease_receipt_id,
-        )
-        spec_document = lineage.get("spec")
-        spec = mock_automation_spec_from_dict(spec_document) if spec_document else None
-        if spec is None:
-            raise ValueError("mock automation recovery requires a stored operating spec")
-        admission_document = lineage.get("admission")
-        receipt_document = lineage.get("lease")
-        if admission_document is None or receipt_document is None:
-            raise ValueError("mock automation recovery requires stored admission and lease receipt")
-        admission = mock_automation_admission_from_dict(admission_document)
-        receipt = mock_automation_lease_receipt_from_dict(receipt_document)
-        if (
-            admission.spec_id != value.spec_id
-            or admission.execution_run_id != value.execution_run_id
-            or receipt.admission_id != value.admission_id
-            or receipt.execution_run_id != value.execution_run_id
-            or receipt.new_orders_enabled is not False
-        ):
-            raise ValueError("mock automation recovery does not match admission lineage")
-        if value.risk_snapshot_id:
-            risk = self.load_latest_mock_automation_risk(value.account_ref)
-            if risk is None or (
-                risk.snapshot_id != value.risk_snapshot_id
-                or risk.reconciliation_revision != value.risk_reconciliation_revision
-                or risk.execution_run_id != value.execution_run_id
-            ):
-                raise ValueError("mock automation recovery does not match current risk evidence")
-        saved = self._save_immutable(
-            self.MOCK_AUTOMATION_RECOVERY_COLLECTION,
-            value.account_ref,
-            value.decision_id,
-            value.to_dict(),
-        )
-        current = self._find(
-            self.MOCK_AUTOMATION_CURRENT_RECOVERY_COLLECTION,
-            value.account_ref,
-            value.admission_id,
-        )
-        if current is None or datetime.fromisoformat(str(current["observed_at"])) <= value.observed_at:
-            self._store.upsert_documents(
-                self.MOCK_AUTOMATION_CURRENT_RECOVERY_COLLECTION,
-                [{"owner": value.account_ref, "key": value.admission_id,
-                  "document": value.to_dict()}],
+        scope_name = "_mock_automation_recovery_scope"
+        if value.risk_snapshot_id and callable(getattr(type(self._store), scope_name, None)):
+            scope = getattr(self._store, scope_name)()
+        else:
+            scope = nullcontext((
+                self.mock_automation_read_scope if value.risk_snapshot_id else nullcontext,
+                self._save_immutable, self._store.load_document, self._store.upsert_documents,
+            ))
+        with scope as (read_scope, save_immutable, load_current, upsert_current):
+            with read_scope() as reader:
+                reader_args = {} if reader is None else {"_reader": reader}
+                lineage = self._store.load_mock_automation_lineage(
+                    value.account_ref, spec_id=value.spec_id, admission_id=value.admission_id,
+                    lease_receipt_id=value.lease_receipt_id, **reader_args,
+                )
+                spec_document = lineage.get("spec")
+                spec = mock_automation_spec_from_dict(spec_document) if spec_document else None
+                if spec is None:
+                    raise ValueError("mock automation recovery requires a stored operating spec")
+                admission_document = lineage.get("admission")
+                receipt_document = lineage.get("lease")
+                if admission_document is None or receipt_document is None:
+                    raise ValueError("mock automation recovery requires stored admission and lease receipt")
+                admission = mock_automation_admission_from_dict(admission_document)
+                receipt = mock_automation_lease_receipt_from_dict(receipt_document)
+                if (
+                    admission.spec_id != value.spec_id
+                    or admission.execution_run_id != value.execution_run_id
+                    or receipt.admission_id != value.admission_id
+                    or receipt.execution_run_id != value.execution_run_id
+                    or receipt.new_orders_enabled is not False
+                ):
+                    raise ValueError("mock automation recovery does not match admission lineage")
+                if value.risk_snapshot_id:
+                    risk = self.load_latest_mock_automation_risk(value.account_ref, **reader_args)
+                    if risk is None or (
+                        risk.snapshot_id != value.risk_snapshot_id
+                        or risk.reconciliation_revision != value.risk_reconciliation_revision
+                        or risk.execution_run_id != value.execution_run_id
+                    ):
+                        raise ValueError("mock automation recovery does not match current risk evidence")
+            document = value.to_dict()
+            saved = save_immutable(
+                self.MOCK_AUTOMATION_RECOVERY_COLLECTION,
+                value.account_ref,
+                value.decision_id,
+                document,
             )
+            row = load_current(
+                self.MOCK_AUTOMATION_CURRENT_RECOVERY_COLLECTION,
+                value.account_ref,
+                value.admission_id,
+            )
+            current = _document(row) if row is not None else None
+            if current is None or datetime.fromisoformat(str(current["observed_at"])) <= value.observed_at:
+                upsert_current(
+                    self.MOCK_AUTOMATION_CURRENT_RECOVERY_COLLECTION,
+                    [{"owner": value.account_ref, "key": value.admission_id, "document": document}],
+                )
         return saved
 
     def load_latest_mock_automation_recovery(
-        self, account_ref: str, admission_id: str,
+        self, account_ref: str, admission_id: str, *, _reader: Any = None,
     ) -> MockAutomationRecoveryDecision | None:
         document = self._find(
             self.MOCK_AUTOMATION_CURRENT_RECOVERY_COLLECTION,
             account_ref,
-            admission_id,
+            admission_id, _reader=_reader,
         )
         return mock_automation_recovery_decision_from_dict(document) if document else None
 
@@ -603,10 +690,10 @@ class ForwardEvaluationRepository:
         return mock_automation_decision_gate_from_dict(document) if document else None
 
     def load_mock_automation_approved_gate(
-        self, account_ref: str, intent_id: str,
+        self, account_ref: str, intent_id: str, *, _reader: Any = None,
     ) -> MockAutomationDecisionGate | None:
         document = self._find(
-            self.MOCK_AUTOMATION_APPROVED_GATE_COLLECTION, account_ref, intent_id,
+            self.MOCK_AUTOMATION_APPROVED_GATE_COLLECTION, account_ref, intent_id, _reader=_reader,
         )
         return mock_automation_decision_gate_from_dict(document) if document else None
 
@@ -703,12 +790,12 @@ class ForwardEvaluationRepository:
         return saved
 
     def load_latest_mock_automation_stop(
-        self, account_ref: str, admission_id: str,
+        self, account_ref: str, admission_id: str, *, _reader: Any = None,
     ) -> MockAutomationStopRevision | None:
         document = self._find(
             self.MOCK_AUTOMATION_CURRENT_STOP_COLLECTION,
             account_ref,
-            admission_id,
+            admission_id, _reader=_reader,
         )
         return mock_automation_stop_revision_from_dict(document) if document else None
 
@@ -995,8 +1082,9 @@ class ForwardEvaluationRepository:
     ) -> bool:
         return self._store.insert_immutable_document(collection, owner, key, dict(document))
 
-    def _find(self, collection: str, owner: str, key: str) -> dict[str, Any] | None:
-        row = self._store.load_document(collection, owner, key)
+    def _find(self, collection: str, owner: str, key: str, *, _reader: Any = None) -> dict[str, Any] | None:
+        reader_args = {} if _reader is None else {"_reader": _reader}
+        row = self._store.load_document(collection, owner, key, **reader_args)
         return _document(row) if row is not None else None
 
     def _has_passing_forward_report(

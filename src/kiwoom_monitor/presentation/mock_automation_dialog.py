@@ -94,7 +94,9 @@ def operation_availability(context: dict[str, Any]) -> dict[str, bool]:
             and not status.get("restore_error")
         ),
         "stop": automatic and desired == "RUNNING" and active_spec == selected_spec,
-        "resume": account_ready and desired == "STOPPED" and active_spec == selected_spec,
+        "resume": account_ready and active_spec == selected_spec and (
+            desired == "STOPPED" or desired == "RUNNING" and control.get("entry_resume_required", False)
+        ),
     }
 
 
@@ -678,6 +680,8 @@ class MockAutomationDialog(QDialog):
         elif isinstance(status, dict):
             control = status.get("control")
             desired = control.get("desired_state") if isinstance(control, dict) else "미시작"
+            if isinstance(control, dict) and control.get("entry_resume_required", False):
+                desired = str(desired) + " · 신규 진입 재개 대기"
             runner = status.get("runner")
             runner_state = runner.get("state") if isinstance(runner, dict) else "없음"
             error = str(status.get("restore_error", ""))

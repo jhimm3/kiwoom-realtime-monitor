@@ -11,7 +11,10 @@ from typing import Callable, Protocol
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 from kiwoom_monitor.application.journal_enrichment import (
+    JournalAnalysisRevision,
     JournalResearchLink,
+    TradeAnalysisPublication,
+    TradeSetupManualInput,
     journal_analysis_revision,
 )
 from kiwoom_monitor.application.strategy_pack import StrategyPackManifest
@@ -47,32 +50,16 @@ class TradeAnalysisRepository(Protocol):
 
     def load_strategy_pack_draft(self, pack_id: str) -> ExtractedStrategyDraft | None: ...
 
-    def load_trade_setup(
-        self, group_id: str, account_scope: AccountScope | None = None,
-    ) -> tuple[TradeSetupClassification, str] | None: ...
-
-    def save_trade_setup(
-        self, group_id: str, classification: TradeSetupClassification, manual_type: str = "",
-        now: datetime | None = None,
-    ) -> None: ...
-
-    def load_trade_setup_cycle_overrides(
-        self, group_id: str, account_scope: AccountScope | None = None,
-    ) -> dict[int, str]: ...
-
-    def save_trade_setup_cycle_override(
-        self, group_id: str, cycle_index: int, manual_type: str, now: datetime | None = None,
-    ) -> None: ...
-
-    def save_trade_analysis_setup(
-        self,
-        group_id: str,
-        classification: TradeSetupClassification,
-        legacy_override: tuple[int, str] | None = None,
-        now: datetime | None = None,
-        *, account_scope: AccountScope | None = None,
+    def load_trade_setup_manual_input(
+        self, group_id: str, *, account_scope: AccountScope,
         canonical_scope: AccountScope | None = None,
-    ) -> None: ...
+    ) -> TradeSetupManualInput: ...
+
+    def publish_trade_analysis(
+        self, revision: JournalAnalysisRevision, classification: TradeSetupClassification, *,
+        expected_manual_revision: str, legacy_override: tuple[int, str] | None = None,
+        now: datetime,
+    ) -> TradeAnalysisPublication: ...
 
 
 class AnalysisStrategyPack(Protocol):
@@ -119,6 +106,8 @@ class PreparedTradeAnalysis:
     analysis_revision_id: str = ""
     daily_bar_count: int = 0
     cycle_selected_packs: tuple[StrategyPackManifest | None, ...] = ()
+    current_published: bool = True
+    manual_revision: str = ""
 
 
 class TradeAnalysisPreparationService:
@@ -174,12 +163,9 @@ class TradeAnalysisPreparationService:
         account_scope = episode.summary.account_scope
         origin_scope = episode.fills[0].origin_scope
         canonical_scope = account_scope if account_scope != origin_scope else None
-        stored_setup = (
-            self._repository.load_trade_setup(episode.group_id)
-            if account_scope == LEGACY_ACCOUNT_SCOPE
-            else self._repository.load_trade_setup(episode.group_id, account_scope)
+        manual_input = self._repository.load_trade_setup_manual_input(
+            episode.group_id, account_scope=origin_scope, canonical_scope=canonical_scope,
         )
-        legacy_manual_type = stored_setup[1] if stored_setup is not None else ""
 
         base_cycle_setups = active_pack.classify_cycles(episode, minute_rows, daily_rows)
         cycles = split_trade_episode_cycles(episode)
@@ -193,31 +179,12 @@ class TradeAnalysisPreparationService:
             )[0]
             for index, cycle in enumerate(cycles)
         )
-        stored_cycle_overrides = (
-            self._repository.load_trade_setup_cycle_overrides(episode.group_id)
-            if account_scope == LEGACY_ACCOUNT_SCOPE
-            else self._repository.load_trade_setup_cycle_overrides(episode.group_id, account_scope)
-        )
         selection = resolve_cycle_type_selection(
             cycle_setups,
-            stored_cycle_overrides,
-            legacy_manual_type,
+            {index: value for index, value in manual_input.cycle_overrides if value},
+            manual_input.legacy_manual_type,
             strategy_packs,
         )
-        # 분류 계산이 모두 끝난 뒤 자동 판정과 과거 수동 유형 이전을
-        # 한 트랜잭션으로 확정한다. 중간 실패가 사용자 입력을 지우면 안 된다.
-        if account_scope == LEGACY_ACCOUNT_SCOPE:
-            self._repository.save_trade_analysis_setup(
-                episode.group_id, overall_setup, selection.legacy_override,
-                now=observed_at,
-            )
-        else:
-            self._repository.save_trade_analysis_setup(
-                episode.group_id, overall_setup, selection.legacy_override,
-                now=observed_at,
-                account_scope=origin_scope, canonical_scope=canonical_scope,
-            )
-
         snapshot_options = (
             {"on_backfill_error": on_snapshot_backfill_error}
             if on_snapshot_backfill_error is not None else {}
@@ -270,8 +237,10 @@ class TradeAnalysisPreparationService:
                     for pack in (active_manifest, *strategy_packs)
                 ),
                 "result_mode": result_mode,
+                # Legacy single-cycle migration preserves this effective input.
+                "manual_selection": selection.normalized_overrides,
             },
-            "trade-analysis/v2",
+            "trade-analysis/v3",
             {
                 "automatic_type": overall_setup.setup_type,
                 "confidence": overall_setup.confidence,
@@ -281,9 +250,11 @@ class TradeAnalysisPreparationService:
             },
             now=observed_at, account_scope=origin_scope, canonical_scope=canonical_scope,
         )
-        revision_saver = getattr(self._repository, "save_journal_analysis_revision", None)
-        if callable(revision_saver):
-            revision = revision_saver(revision)
+        publication = self._repository.publish_trade_analysis(
+            revision, overall_setup, expected_manual_revision=manual_input.revision,
+            legacy_override=selection.legacy_override, now=observed_at,
+        )
+        revision = publication.revision
 
         return PreparedTradeAnalysis(
             overall_setup,
@@ -298,4 +269,6 @@ class TradeAnalysisPreparationService:
             revision.revision_id,
             len(daily_rows),
             tuple(cycle_selected_packs),
+            publication.current_published,
+            publication.manual_revision,
         )

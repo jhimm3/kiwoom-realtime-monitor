@@ -10,13 +10,14 @@ from kiwoom_monitor.domain.time_basis import kst_now
 
 import json
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 from typing import Any
 
 from kiwoom_monitor.central_server.database_codec import _event_document, _json_document
 
 def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                                  value: dict[str, Any], p: str, *, now_provider=None,
-                                 new_intent_claim=False) -> None:
+                                 new_intent_claim=False, submission_claim=False) -> None:
     if ownership is None:
         return  # Offline ledger/import callers keep the existing unowned contract.
     if new_intent_claim and ownership.get('cancel_retry_claim') is not None:
@@ -33,7 +34,8 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
             kst_now() if now_provider is None else now_provider()):
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
     control_revision = ownership.get("control_revision")
-    if control_revision is not None:
+    entry_claim = (new_intent_claim or submission_claim) and value.get("side") == "BUY"
+    if control_revision is not None or (entry_claim and ownership["run_id"].startswith("mock_auto_run_")):
         cursor.execute(
             "SELECT document_json FROM central_documents WHERE collection=" + p
             + " AND owner=" + p + " AND document_key=" + p
@@ -46,15 +48,19 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         )
         control_row = cursor.fetchone()
         control = _json_document(control_row[0]) if control_row else {}
-        if (
+        if control_revision is not None and (
             control.get("desired_state") != "RUNNING"
             or int(control.get("control_revision", 0)) != int(control_revision)
             or control.get("active_spec_id") != ownership.get("active_spec_id")
             or control.get("execution_run_id") != ownership["run_id"]
         ):
             raise RuntimeError("MOCK_AUTOMATION_CONTROL_CHANGED")
+        if (entry_claim and control.get("execution_run_id") == ownership["run_id"]
+                and control.get("entry_resume_required", False)):
+            raise RuntimeError("CREDENTIAL_CHANGE_REQUIRES_EXPLICIT_ENTRY_RESUME")
     if ownership.get('replacement_claim') is not None and 'intent_id' in value:
-        _require_mock_replacement_claim(cursor, ownership, value, p, new_intent_claim=new_intent_claim)
+        _require_mock_replacement_claim(cursor, ownership, value, p, new_intent_claim=new_intent_claim,
+            now_provider=now_provider)
     if ownership.get('protection_claim') is not None and 'intent_id' in value:
         _require_mock_protection_claim(cursor, ownership, value, p, now_provider=now_provider,new_intent_claim=new_intent_claim)
     if new_intent_claim and value.get('policy_version') == 'leader_execution_adapter/v1':
@@ -145,7 +151,7 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
             raise RuntimeError('LEADER_CURRENT_ENTRY_CONTEXT_CHANGED')
 
 
-def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_claim):
+def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_claim, now_provider=None):
     """Borrow the QUEUED transaction; never create a second order writer."""
     from kiwoom_monitor.application.mock_automation_execution import (
         mock_automation_decision_gate_from_dict, MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION,
@@ -215,6 +221,9 @@ def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_c
             or datetime.fromisoformat(parent['last_broker_as_of']) > datetime.fromisoformat(value['created_at'])
             or value['quantity'] > parent['quantity'] - parent['filled_quantity']):
         raise RuntimeError('MOCK_REPLACEMENT_PARENT_CANCEL_OR_FILLS_CHANGED')
+    if binding['purpose'] in {'PROTECTIVE_EXIT', 'TAKE_PROFIT'}:
+        _require_mock_unfilled_management_origin(cursor, ownership, value, p, now_provider=now_provider, spec=spec,
+            root_value=root, risk_value=risk)
     cursor.execute(f'SELECT intent_id FROM central_execution_intents WHERE environment={p} AND account_ref={p} '
                    f"AND state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED') AND intent_id<>{p} LIMIT 1" + lock,
                    ('mock', value['account_ref'], value['intent_id']))
@@ -332,18 +341,163 @@ def _retain_execution_claim(cursor, intent, p):
     return {**intent, **{key:stored[key] for key in ('mock_replacement_claim','mock_protection_claim') if key in stored}}
 
 
+def _require_mock_unfilled_management_origin(cursor, ownership, value, p, *, now_provider=None,
+                                              spec=None, checkpoint=None, root_value=None, risk_value=None):
+    """Keep original enrollment and current management proof in one native claim."""
+    from kiwoom_monitor.application.mock_automation_execution import (
+        MOCK_AUTOMATION_DECISION_GATE_VERSION, mock_automation_decision_gate_from_dict,
+        validate_unfilled_original_approval, validate_unfilled_original_gate, mock_automation_intent_id,
+        MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION, MockAutomationGateStatus, _fixed_replacement_binding,
+    )
+    from kiwoom_monitor.application.order_lifecycle import (
+        validate_unfilled_attempt_plan, UnfilledOrderManagementPolicy, UNFILLED_ATTEMPT_PLAN_VERSION, unfilled_plan_intent,
+    )
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+    from kiwoom_monitor.application.mock_automation_admission import mock_automation_admission_from_dict
+    from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document
+    if not ownership or ownership.get('control_revision') is None or value.get('side') not in {'BUY', 'SELL'}:
+        return
+    source = root_value if root_value is not None else value
+    child_control_revision = None
+    original_source = (str(source.get('policy_version', '')).startswith(MOCK_AUTOMATION_DECISION_GATE_VERSION + ':')
+        and source.get('intent_id') == mock_automation_intent_id(ownership['active_spec_id'], source.get('decision_id', '')))
+    if (not original_source and source.get('policy_version') != UNFILLED_ATTEMPT_PLAN_VERSION
+            and root_value is None):
+        return False  # Existing unregistered/manual native orders retain their cancel contract.
+    lock = ' FOR UPDATE' if p == '%s' else ''
+    def document(collection, key, *, required=True):
+        cursor.execute(f'SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} '
+            f'AND document_key={p}' + lock, (collection, value['account_ref'], key))
+        row = cursor.fetchone()
+        if not row and required:
+            raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_PROOF_MISSING')
+        return _json_document(row[0]) if row else None
+    def native_value(intent_id):
+        cursor.execute(f'SELECT document_json FROM central_execution_intents WHERE intent_id={p}' + lock, (intent_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_ROOT_MISSING')
+        return _json_document(row[0])
+    if root_value is None and source.get('policy_version') == UNFILLED_ATTEMPT_PLAN_VERSION:
+        child = native_value(value['intent_id'])
+        claim = child.get('mock_replacement_claim')
+        fixed_value = document('execution_mock_automation_approved_gates', value['intent_id'], required=claim is not None)
+        if claim is None:
+            if fixed_value is not None:
+                raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_CHILD_APPROVAL_CHANGED')
+            return False  # Existing manually submitted preview child has no native v3 claim.
+        fixed = mock_automation_decision_gate_from_dict(fixed_value)
+        submitted = mock_automation_decision_gate_from_dict(document('execution_mock_automation_decision_gates', claim['gate_id']))
+        if (fixed.version != MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION or submitted.version != fixed.version
+                or fixed.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+                or submitted.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+                or fixed.spec_id != submitted.spec_id or fixed.admission_id != submitted.admission_id
+                or _fixed_replacement_binding(fixed) != _fixed_replacement_binding(submitted)
+                or (submitted.account_ref, submitted.spec_id, submitted.execution_run_id) !=
+                    (value['account_ref'], ownership['active_spec_id'], ownership['run_id'])
+                or submitted.gate_id != claim['gate_id']
+                or submitted.risk_snapshot_id != claim['risk_snapshot_id']
+                or submitted.risk_reconciliation_revision != claim['risk_reconciliation_revision']
+                or unfilled_plan_intent(submitted.replacement_binding['child_payload']) != _record_from_document(child).intent
+                or _record_from_document(child).intent != _record_from_document(value).intent):
+            raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_CHILD_APPROVAL_CHANGED')
+        if submitted.control_revision == ownership['control_revision']:
+            return True  # The child's immutable native claim is already current.
+        if not 0 < submitted.control_revision < ownership['control_revision']:
+            raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_CURRENT_CONTROL_CHANGED')
+        child_control_revision = submitted.control_revision
+        root_value = native_value(submitted.replacement_binding['root_intent_id'])
+        source = root_value
+        original_source = (str(source.get('policy_version', '')).startswith(MOCK_AUTOMATION_DECISION_GATE_VERSION + ':')
+            and source.get('intent_id') == mock_automation_intent_id(ownership['active_spec_id'], source.get('decision_id', '')))
+        if not original_source:
+            raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_CHILD_APPROVAL_CHANGED')
+    if spec is None:
+        spec = mock_automation_spec_from_dict(document('execution_mock_automation_specs', ownership['active_spec_id']))
+    if spec.unfilled_execution_policy is None:
+        return False
+    if not original_source:
+        if checkpoint is None:
+            checkpoint = document('execution_mock_automation_runner_current', 'current')
+        plan = validate_unfilled_attempt_plan(checkpoint.get('unfilled_execution_preflight'))
+    if root_value is None and not original_source:
+        root_value = native_value(plan['anchor']['root_intent']['intent_id'])
+    root = _record_from_document(root_value if root_value is not None else value)
+    if (not root.intent.policy_version.startswith(MOCK_AUTOMATION_DECISION_GATE_VERSION + ':')
+            or root.intent.intent_id != mock_automation_intent_id(ownership['active_spec_id'], root.intent.decision_id)):
+        if plan['anchor']['scope']['control_revision'] != ownership['control_revision']:
+            raise RuntimeError('MOCK_PROTECTIVE_CANCEL_RETRY_POLICY_CHANGED')
+        return False  # Earlier direct-ledger orders retain only their existing same-revision contract.
+    original = mock_automation_decision_gate_from_dict(document('execution_mock_automation_approved_gates', root.intent.intent_id))
+    validate_unfilled_original_gate(spec, root, original, account_ref=value['account_ref'],
+        execution_run_id=ownership['run_id'], admission_id=original.admission_id,
+        control_revision=original.control_revision)
+    if child_control_revision is not None and original.control_revision > child_control_revision:
+        raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_CHILD_APPROVAL_CHANGED')
+    if child_control_revision is None and original.control_revision == ownership['control_revision']:
+        # Preserve standalone native v2 and no-minute protection. Their original
+        # same-revision contract does not require a registered checkpoint.
+        return True
+    if checkpoint is None:
+        checkpoint = document('execution_mock_automation_runner_current', 'current')
+    plan = validate_unfilled_attempt_plan(checkpoint.get('unfilled_execution_preflight'))
+    if root_value is None:
+        root = _record_from_document(native_value(root.intent.intent_id))
+    scope = plan['anchor']['scope']
+    if unfilled_plan_intent(plan['anchor']['root_intent']) != root.intent:
+        raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_ROOT_CHANGED')
+    policy_value = dict(plan['anchor']['policy'])
+    for name in ('anchor_available_at', 'valid_until', 'wait_until', 'protection_deadline'):
+        policy_value[name] = datetime.fromisoformat(policy_value[name])
+    policy = UnfilledOrderManagementPolicy(**policy_value)
+    preview = mock_automation_decision_gate_from_dict(plan['native_gate'])
+    admission = mock_automation_admission_from_dict(document('execution_mock_automation_admission_by_spec', spec.spec_id))
+    validate_unfilled_original_approval(spec, scope, policy, root, original, checkpoint.get('unfilled_registration'),
+        admission_id=admission.admission_id, current_control_revision=ownership['control_revision'])
+    managed_ids = (root.intent.intent_id, *(child['intent']['intent_id'] for child in plan['children']))
+    if (value['intent_id'] not in managed_ids or checkpoint.get('spec_id') != spec.spec_id
+            or checkpoint.get('execution_run_id') != ownership['run_id']
+            or (preview.account_ref, preview.spec_id, preview.execution_run_id,
+                preview.admission_id, preview.control_revision) !=
+                (value['account_ref'], spec.spec_id, ownership['run_id'], admission.admission_id, ownership['control_revision'])
+            or preview.lease_receipt_id != original.lease_receipt_id):
+        raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_CURRENT_CONTROL_CHANGED')
+    if (admission.account_ref, admission.spec_id, admission.execution_run_id) != (
+            value['account_ref'], spec.spec_id, ownership['run_id']):
+        raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_ADMISSION_CHANGED')
+    if policy.purpose == 'BUY_OPPORTUNITY':
+        # BUY keeps the original mapped-account/Risk callback, including the
+        # known-flat cancellation exception. This proof grants no replacement.
+        return True  # Original approval proved this is the ordinary profit/protection path.
+    if risk_value is None:
+        risk_value = document('execution_mock_automation_current_risk', value['account_ref'])
+    risk = mock_automation_risk_snapshot_from_dict(risk_value)
+    now = kst_now() if now_provider is None else now_provider()
+    if (risk.account_ref != value['account_ref'] or risk.execution_run_id != ownership['run_id']
+            or not risk.reconciliation_complete or risk.submission_unknown_count or risk.balance_mismatch_count
+            or any(not 0 <= (now-at).total_seconds() <= spec.unfilled_execution_policy.max_snapshot_age_seconds
+                for at in (risk.observed_at, risk.account_as_of))):
+        raise RuntimeError('MOCK_UNFILLED_MANAGEMENT_NATIVE_CUT_CHANGED')
+    return True
+
+
 def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provider=None):
     """Fence a protective retry in the same native CANCEL_STARTED transaction."""
     claim = ownership.get('cancel_retry_claim') if ownership else None
     if claim is None:
+        if event.get('event_type') == 'CANCEL_STARTED':
+            _require_mock_unfilled_management_origin(cursor, ownership, value, p, now_provider=now_provider)
         return event
     from kiwoom_monitor.application.order_lifecycle import (
         protective_cancel_recovery, validate_unfilled_attempt_plan, UnfilledOrderManagementPolicy, unfilled_plan_intent,
     )
-    from kiwoom_monitor.application.mock_automation_execution import unfilled_execution_policy_rejections
+    from kiwoom_monitor.application.mock_automation_execution import (
+        unfilled_execution_policy_rejections, MOCK_AUTOMATION_DECISION_GATE_VERSION, mock_automation_intent_id,
+    )
     from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
     from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
-    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, _record_document
     from dataclasses import replace
     if (set(claim) != {'root_intent_id','policy_id','reject_event_id','attempt',
                       'risk_snapshot_id','risk_reconciliation_revision'}
@@ -383,7 +537,7 @@ def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provid
             or replace(_record_from_document(value),state=native.state,updated_at=native.updated_at) != native
             or checkpoint.get('spec_id') != spec.spec_id or checkpoint.get('execution_run_id') != ownership['run_id']
             or scope['account_ref'] != value['account_ref'] or scope['spec_id'] != spec.spec_id
-            or scope['execution_run_id'] != ownership['run_id'] or scope['control_revision'] != ownership['control_revision']
+            or scope['execution_run_id'] != ownership['run_id']
             or unfilled_plan_intent(plan['anchor']['root_intent']) != root.intent
             or policy.protection_deadline > root.intent.created_at + timedelta(seconds=frozen.max_snapshot_age_seconds)
             or unfilled_execution_policy_rejections(spec,policy,root)):
@@ -395,6 +549,12 @@ def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provid
     now = kst_now() if now_provider is None else now_provider()
     cue = protective_cancel_recovery(native,events,policy,frozen,now)
     risk = mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_current_risk',value['account_ref']))
+    if (scope['control_revision'] != ownership['control_revision']
+            or (root.intent.policy_version.startswith(MOCK_AUTOMATION_DECISION_GATE_VERSION + ':')
+                and root.intent.intent_id == mock_automation_intent_id(spec.spec_id, root.intent.decision_id))):
+        if not _require_mock_unfilled_management_origin(cursor, ownership, value, p, now_provider=now_provider,
+                spec=spec, checkpoint=checkpoint, root_value=_record_document(root), risk_value=risk.to_dict()):
+            raise RuntimeError('MOCK_PROTECTIVE_CANCEL_RETRY_POLICY_CHANGED')
     if (cue['state'] != 'RETRY_READY' or cue['attempt'] != claim['attempt']
             or cue['reject_event_id'] != claim['reject_event_id']
             or risk.snapshot_id != claim['risk_snapshot_id'] or risk.reconciliation_revision != claim['risk_reconciliation_revision']
@@ -449,26 +609,91 @@ def _mock_automation_lineage_query(
     return " UNION ALL ".join(statements), tuple(parameters)
 
 
+def _scoped_mock_automation_control(cursor, account_ref, placeholder):
+    cursor.execute(
+        "SELECT document_json FROM central_documents WHERE collection=" + placeholder
+        + " AND owner=" + placeholder + " AND document_key=" + placeholder,
+        ("execution_mock_automation_control", account_ref, account_ref),
+    )
+    rows = cursor.fetchall()  # Exact PK: finish the read before the next typed validation.
+    return _json_document(rows[0][0]) if rows else None
+
+
+def _execution_intent_row(cursor, intent_id, placeholder):
+    cursor.execute(
+        "SELECT document_json FROM central_execution_intents WHERE intent_id=" + placeholder, (intent_id,),
+    )
+    rows = cursor.fetchall()  # The exact-key statement must finish before the next read.
+    return rows[0] if rows else None
+
+
+def _execution_event_rows(cursor, intent_id, placeholder):
+    cursor.execute(
+        "SELECT document_json FROM central_execution_events WHERE intent_id=" + placeholder
+        + " ORDER BY accepted_sequence", (intent_id,),
+    )
+    return cursor.fetchall()
+
+
+def _active_execution_rows(cursor, environment, account_ref, run_id, p):
+    terminal = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED")
+    cursor.execute(
+        f"SELECT document_json FROM central_execution_intents WHERE environment={p} "
+        f"AND account_ref={p} AND run_id={p} AND state NOT IN ({p},{p},{p},{p}) ORDER BY created_at",
+        (environment, account_ref, run_id, *terminal),
+    )
+    return cursor.fetchall()
+
+
+def _account_active_execution_rows(cursor, environment, account_ref, limit, p):
+    cursor.execute(
+        f"SELECT document_json FROM central_execution_intents WHERE environment={p} AND account_ref={p} "
+        f"AND state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED') ORDER BY created_at,intent_id LIMIT {p}",
+        (environment, account_ref, limit),
+    )
+    return cursor.fetchall()
+
+
+def _account_execution_event_rows(cursor, environment, account_ref, after_sequence, limit, p):
+    cursor.execute(
+        "SELECT e.accepted_sequence,i.document_json,e.document_json "
+        "FROM central_execution_events e JOIN central_execution_intents i "
+        f"ON i.intent_id=e.intent_id WHERE i.environment={p} AND i.account_ref={p} "
+        f"AND e.accepted_sequence>{p} ORDER BY e.accepted_sequence LIMIT {p}",
+        (environment, account_ref, after_sequence, limit),
+    )
+    return cursor.fetchall()
+
+
 class SQLiteExecutionStoreMixin:
-    def load_account_active_execution_intents(self, environment: str, account_ref: str, limit: int) -> list[dict[str, Any]]:
+    _supports_scoped_active_intents = True
+
+    def load_account_active_execution_intents(
+        self, environment: str, account_ref: str, limit: int, *, _reader: Any = None,
+    ) -> list[dict[str, Any]]:
         if environment != "mock" or not account_ref.strip() or type(limit) is not int or not 1 <= limit <= 401:
             raise ValueError("bounded mock account ledger scope is required")
-        with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                "SELECT document_json FROM central_execution_intents WHERE environment=? AND account_ref=? "
-                "AND state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED') ORDER BY created_at,intent_id LIMIT ?",
-                (environment, account_ref, limit)).fetchall()
+        with self._lock:
+            if _reader is not None:
+                rows = _account_active_execution_rows(_reader, environment, account_ref, limit, "?")
+            else:
+                with self._connection() as connection:
+                    rows = _account_active_execution_rows(connection.cursor(), environment, account_ref, limit, "?")
         return [_json_document(row[0]) for row in rows]
 
     def load_mock_automation_lineage(
         self, account_ref: str, *, spec_id: str, admission_id: str,
-        lease_receipt_id: str, recovery_decision_id: str | None = None,
+        lease_receipt_id: str, recovery_decision_id: str | None = None, _reader: Any = None,
     ) -> dict[str, dict[str, Any]]:
         sql, parameters = _mock_automation_lineage_query(
             account_ref, spec_id, admission_id, lease_receipt_id, recovery_decision_id, "?",
         )
-        with self._lock, self._connection() as connection:
-            rows = connection.execute(sql, parameters).fetchall()
+        with self._lock:
+            if _reader is not None:
+                rows = _reader.execute(sql, parameters).fetchall()
+            else:
+                with self._connection() as connection:
+                    rows = connection.execute(sql, parameters).fetchall()
         return {str(role): _json_document(document) for role, document in rows}
 
     def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool:
@@ -506,7 +731,8 @@ class SQLiteExecutionStoreMixin:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             _require_execution_ownership(connection.cursor(), ownership, intent, "?",
-                                         now_provider=getattr(self, '_execution_wall_now', None))
+                                         now_provider=getattr(self, '_execution_wall_now', None),
+                                         submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
             event = _require_mock_cancel_retry(connection.cursor(), ownership, intent, event, '?',
                                               now_provider=getattr(self, '_execution_wall_now', None))
             event_document = _event_document(event)
@@ -537,11 +763,13 @@ class SQLiteExecutionStoreMixin:
             )
         return True
 
-    def load_execution_intent(self, intent_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connection() as connection:
-            row = connection.execute(
-                "SELECT document_json FROM central_execution_intents WHERE intent_id=?", (intent_id,),
-            ).fetchone()
+    def load_execution_intent(self, intent_id: str, *, _reader: Any = None) -> dict[str, Any] | None:
+        with self._lock:
+            if _reader is not None:
+                row = _execution_intent_row(_reader, intent_id, "?")
+            else:
+                with self._connection() as connection:
+                    row = _execution_intent_row(connection.cursor(), intent_id, "?")
         return _json_document(row[0]) if row else None
 
     def find_execution_intent_by_broker_order_id(
@@ -557,25 +785,24 @@ class SQLiteExecutionStoreMixin:
             raise ValueError("broker order id matches multiple execution intents")
         return _json_document(rows[0][0]) if rows else None
 
-    def load_execution_events(self, intent_id: str) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                "SELECT document_json FROM central_execution_events WHERE intent_id=? ORDER BY accepted_sequence",
-                (intent_id,),
-            ).fetchall()
+    def load_execution_events(self, intent_id: str, *, _reader: Any = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if _reader is not None:
+                rows = _execution_event_rows(_reader, intent_id, "?")
+            else:
+                with self._connection() as connection:
+                    rows = _execution_event_rows(connection.cursor(), intent_id, "?")
         return [_json_document(row[0]) for row in rows]
 
     def load_account_execution_events(
-        self, environment: str, account_ref: str, after_sequence: int, limit: int,
+        self, environment: str, account_ref: str, after_sequence: int, limit: int, *, _reader: Any = None,
     ) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                "SELECT e.accepted_sequence,i.document_json,e.document_json "
-                "FROM central_execution_events e JOIN central_execution_intents i "
-                "ON i.intent_id=e.intent_id WHERE i.environment=? AND i.account_ref=? "
-                "AND e.accepted_sequence>? ORDER BY e.accepted_sequence LIMIT ?",
-                (environment, account_ref, after_sequence, limit),
-            ).fetchall()
+        with self._lock:
+            if _reader is not None:
+                rows = _account_execution_event_rows(_reader, environment, account_ref, after_sequence, limit, "?")
+            else:
+                with self._connection() as connection:
+                    rows = _account_execution_event_rows(connection.cursor(), environment, account_ref, after_sequence, limit, "?")
         return [
             {"accepted_sequence": int(row[0]), "intent": _json_document(row[1]),
              "event": _json_document(row[2])}
@@ -597,7 +824,10 @@ class SQLiteExecutionStoreMixin:
             )
         return cursor.rowcount == 1
 
-    def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None:
+    def load_mock_automation_control(self, account_ref: str, *, _reader: Any = None) -> dict[str, Any] | None:
+        if _reader is not None:
+            with self._lock:
+                return _scoped_mock_automation_control(_reader, account_ref, '?')
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 "SELECT document_json FROM central_documents WHERE collection=? AND owner=? "
@@ -607,15 +837,14 @@ class SQLiteExecutionStoreMixin:
         return _json_document(row[0]) if row else None
 
     def load_active_execution_intents(
-        self, environment: str, account_ref: str, run_id: str,
+        self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None,
     ) -> list[dict[str, Any]]:
-        terminal = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED")
-        with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                "SELECT document_json FROM central_execution_intents WHERE environment=? "
-                "AND account_ref=? AND run_id=? AND state NOT IN (?,?,?,?) ORDER BY created_at",
-                (environment, account_ref, run_id, *terminal),
-            ).fetchall()
+        with self._lock:
+            if _reader is not None:
+                rows = _active_execution_rows(_reader, environment, account_ref, run_id, "?")
+            else:
+                with self._connection() as connection:
+                    rows = _active_execution_rows(connection.cursor(), environment, account_ref, run_id, "?")
         return [_json_document(row[0]) for row in rows]
 
     def save_mock_automation_control(
@@ -661,36 +890,54 @@ class SQLiteExecutionStoreMixin:
         return cursor.rowcount == 1
 
 class PostgresExecutionStoreMixin:
-    def load_account_active_execution_intents(self, environment: str, account_ref: str, limit: int) -> list[dict[str, Any]]:
+    _supports_scoped_active_intents = True
+
+    @contextmanager
+    def _broker_reconciliation_scope(self):
+        from .postgres_access import DBWriterContext, owned_postgres_session
+
+        owner = DBWriterContext(
+            writer_family="infrastructure.connection", writer_kind="broker_reconciliation",
+            operation="broker_reconciliation_scope", access_mode="connection",
+        )
+        with owned_postgres_session(self._connect, owner) as connection:
+            yield connection
+
+    def load_account_active_execution_intents(
+        self, environment: str, account_ref: str, limit: int, *, _reader: Any = None,
+    ) -> list[dict[str, Any]]:
         if environment != "mock" or not account_ref.strip() or type(limit) is not int or not 1 <= limit <= 401:
             raise ValueError("bounded mock account ledger scope is required")
         from .postgres_access import DBWriterContext, open_observed_connection
-        reader = DBWriterContext(writer_family="read.execution", writer_kind="account_active_intents",
-            operation="load_account_active_execution_intents", access_mode="read")
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT document_json FROM central_execution_intents WHERE environment=%s AND account_ref=%s "
-                "AND state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED') ORDER BY created_at,intent_id LIMIT %s",
-                (environment, account_ref, limit))
-            rows = cursor.fetchall()
+        if _reader is not None:
+            rows = _account_active_execution_rows(_reader, environment, account_ref, limit, "%s")
+        else:
+            reader = DBWriterContext(writer_family="read.execution", writer_kind="account_active_intents",
+                operation="load_account_active_execution_intents", access_mode="read")
+            with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+                rows = _account_active_execution_rows(cursor, environment, account_ref, limit, "%s")
         return [_json_document(row[0]) for row in rows]
 
     def load_mock_automation_lineage(
         self, account_ref: str, *, spec_id: str, admission_id: str,
-        lease_receipt_id: str, recovery_decision_id: str | None = None,
+        lease_receipt_id: str, recovery_decision_id: str | None = None, _reader: Any = None,
     ) -> dict[str, dict[str, Any]]:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         sql, parameters = _mock_automation_lineage_query(
             account_ref, spec_id, admission_id, lease_receipt_id, recovery_decision_id, "%s",
         )
-        reader = DBWriterContext(
-            writer_family="read.mock_automation", writer_kind="immutable_lineage",
-            operation="load_mock_automation_lineage", access_mode="read",
-        )
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
-            cursor.execute(sql, parameters)
-            rows = cursor.fetchall()
+        if _reader is not None:
+            _reader.execute(sql, parameters)
+            rows = _reader.fetchall()
+        else:
+            reader = DBWriterContext(
+                writer_family="read.mock_automation", writer_kind="immutable_lineage",
+                operation="load_mock_automation_lineage", access_mode="read",
+            )
+            with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+                cursor.execute(sql, parameters)
+                rows = cursor.fetchall()
         return {str(role): _json_document(document) for role, document in rows}
 
     def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool:
@@ -730,16 +977,22 @@ class PostgresExecutionStoreMixin:
             )
             return cursor.rowcount == 1
 
-    def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, str] | None = None) -> bool:
-        from .postgres_access import DBWriterContext, open_observed_connection
+    def append_execution_event(
+        self, intent: dict[str, Any], event: dict[str, Any], *,
+        ownership: dict[str, str] | None = None, _connection: Any = None,
+    ) -> bool:
+        from .postgres_access import DBWriterContext, observe_existing_transaction, open_observed_connection
 
         writer = DBWriterContext(
             writer_family="execution.event", writer_kind="execution_event",
             operation="append_execution_event", rows_attempted=1,
         )
-        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+        transaction = (open_observed_connection(self._connect, writer) if _connection is None
+                       else observe_existing_transaction(_connection, writer, require_idle=True))
+        with transaction as connection, connection.cursor() as cursor:
             _require_execution_ownership(cursor, ownership, intent, "%s",
-                                         now_provider=getattr(self, '_execution_wall_now', None))
+                                         now_provider=getattr(self, '_execution_wall_now', None),
+                                         submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
             event = _require_mock_cancel_retry(cursor, ownership, intent, event, '%s',
                                               now_provider=getattr(self, '_execution_wall_now', None))
             cursor.execute(
@@ -764,30 +1017,36 @@ class PostgresExecutionStoreMixin:
                 raise KeyError(f"unknown execution intent: {intent['intent_id']}")
             return True
 
-    def load_execution_intent(self, intent_id: str) -> dict[str, Any] | None:
-        from .postgres_access import DBWriterContext, open_observed_connection
+    def load_execution_intent(
+        self, intent_id: str, *, _reader: Any = None, _connection: Any = None,
+    ) -> dict[str, Any] | None:
+        from .postgres_access import DBWriterContext, observe_existing_transaction, open_observed_connection
 
-        reader = DBWriterContext(
-            writer_family="read.execution", writer_kind="intent_by_id",
-            operation="load_execution_intent", access_mode="read",
-        )
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT document_json FROM central_execution_intents WHERE intent_id=%s", (intent_id,),
+        if _reader is not None:
+            row = _execution_intent_row(_reader, intent_id, "%s")
+        else:
+            reader = DBWriterContext(
+                writer_family="read.execution", writer_kind="intent_by_id",
+                operation="load_execution_intent", access_mode="read",
             )
-            row = cursor.fetchone()
+            transaction = (open_observed_connection(self._connect, reader) if _connection is None
+                           else observe_existing_transaction(_connection, reader, require_idle=True))
+            with transaction as connection, connection.cursor() as cursor:
+                row = _execution_intent_row(cursor, intent_id, "%s")
         return _json_document(row[0]) if row else None
 
     def find_execution_intent_by_broker_order_id(
-        self, environment: str, account_ref: str, run_id: str, broker_order_id: str,
+        self, environment: str, account_ref: str, run_id: str, broker_order_id: str, *, _connection: Any = None,
     ) -> dict[str, Any] | None:
-        from .postgres_access import DBWriterContext, open_observed_connection
+        from .postgres_access import DBWriterContext, observe_existing_transaction, open_observed_connection
 
         reader = DBWriterContext(
             writer_family="read.execution", writer_kind="intent_by_broker_order",
             operation="find_execution_intent_by_broker_order_id", access_mode="read",
         )
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+        transaction = (open_observed_connection(self._connect, reader) if _connection is None
+                       else observe_existing_transaction(_connection, reader, require_idle=True))
+        with transaction as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT document_json FROM central_execution_intents "
                 "WHERE environment=%s AND account_ref=%s AND run_id=%s AND broker_order_id=%s LIMIT 2",
@@ -798,39 +1057,34 @@ class PostgresExecutionStoreMixin:
             raise ValueError("broker order id matches multiple execution intents")
         return _json_document(rows[0][0]) if rows else None
 
-    def load_execution_events(self, intent_id: str) -> list[dict[str, Any]]:
+    def load_execution_events(self, intent_id: str, *, _reader: Any = None) -> list[dict[str, Any]]:
         from .postgres_access import DBWriterContext, open_observed_connection
 
-        reader = DBWriterContext(
-            writer_family="read.execution", writer_kind="intent_events",
-            operation="load_execution_events", access_mode="read",
-        )
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT document_json FROM central_execution_events WHERE intent_id=%s ORDER BY accepted_sequence",
-                (intent_id,),
+        if _reader is not None:
+            rows = _execution_event_rows(_reader, intent_id, "%s")
+        else:
+            reader = DBWriterContext(
+                writer_family="read.execution", writer_kind="intent_events",
+                operation="load_execution_events", access_mode="read",
             )
-            rows = cursor.fetchall()
+            with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+                rows = _execution_event_rows(cursor, intent_id, "%s")
         return [_json_document(row[0]) for row in rows]
 
     def load_account_execution_events(
-        self, environment: str, account_ref: str, after_sequence: int, limit: int,
+        self, environment: str, account_ref: str, after_sequence: int, limit: int, *, _reader: Any = None,
     ) -> list[dict[str, Any]]:
         from .postgres_access import DBWriterContext, open_observed_connection
 
-        reader = DBWriterContext(
-            writer_family="read.execution", writer_kind="account_events",
-            operation="load_account_execution_events", access_mode="read",
-        )
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT e.accepted_sequence,i.document_json,e.document_json "
-                "FROM central_execution_events e JOIN central_execution_intents i "
-                "ON i.intent_id=e.intent_id WHERE i.environment=%s AND i.account_ref=%s "
-                "AND e.accepted_sequence>%s ORDER BY e.accepted_sequence LIMIT %s",
-                (environment, account_ref, after_sequence, limit),
+        if _reader is not None:
+            rows = _account_execution_event_rows(_reader, environment, account_ref, after_sequence, limit, "%s")
+        else:
+            reader = DBWriterContext(
+                writer_family="read.execution", writer_kind="account_events",
+                operation="load_account_execution_events", access_mode="read",
             )
-            rows = cursor.fetchall()
+            with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+                rows = _account_execution_event_rows(cursor, environment, account_ref, after_sequence, limit, "%s")
         return [
             {"accepted_sequence": int(row[0]), "intent": _json_document(row[1]),
              "event": _json_document(row[2])}
@@ -858,7 +1112,9 @@ class PostgresExecutionStoreMixin:
             )
             return cursor.rowcount == 1
 
-    def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None:
+    def load_mock_automation_control(self, account_ref: str, *, _reader: Any = None) -> dict[str, Any] | None:
+        if _reader is not None:
+            return _scoped_mock_automation_control(_reader, account_ref, '%s')
         from .postgres_access import DBWriterContext, open_observed_connection
 
         reader = DBWriterContext(
@@ -875,22 +1131,19 @@ class PostgresExecutionStoreMixin:
         return _json_document(row[0]) if row else None
 
     def load_active_execution_intents(
-        self, environment: str, account_ref: str, run_id: str,
+        self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None,
     ) -> list[dict[str, Any]]:
-        terminal = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED")
         from .postgres_access import DBWriterContext, open_observed_connection
 
-        reader = DBWriterContext(
-            writer_family="read.execution", writer_kind="active_intents",
-            operation="load_active_execution_intents", access_mode="read",
-        )
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT document_json FROM central_execution_intents WHERE environment=%s "
-                "AND account_ref=%s AND run_id=%s AND state NOT IN (%s,%s,%s,%s) ORDER BY created_at",
-                (environment, account_ref, run_id, *terminal),
+        if _reader is not None:
+            rows = _active_execution_rows(_reader, environment, account_ref, run_id, "%s")
+        else:
+            reader = DBWriterContext(
+                writer_family="read.execution", writer_kind="active_intents",
+                operation="load_active_execution_intents", access_mode="read",
             )
-            rows = cursor.fetchall()
+            with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+                rows = _active_execution_rows(cursor, environment, account_ref, run_id, "%s")
         return [_json_document(row[0]) for row in rows]
 
     def save_mock_automation_control(
@@ -933,15 +1186,17 @@ class PostgresExecutionStoreMixin:
         return True
 
     def acquire_execution_runtime(
-        self, owner_key: str, owner_token: str, now: str, lease_expires_at: str,
+        self, owner_key: str, owner_token: str, now: str, lease_expires_at: str, *, _connection: Any = None,
     ) -> bool:
-        from .postgres_access import DBWriterContext, open_observed_connection
+        from .postgres_access import DBWriterContext, observe_existing_transaction, open_observed_connection
 
         writer = DBWriterContext(
             writer_family="execution.runtime_lease", writer_kind="execution_runtime_acquire",
             operation="acquire_execution_runtime", rows_attempted=1,
         )
-        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+        transaction = (open_observed_connection(self._connect, writer) if _connection is None
+                       else observe_existing_transaction(_connection, writer, require_idle=True))
+        with transaction as connection, connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO central_execution_runtime_leases(owner_key,owner_token,lease_expires_at,updated_at) "
                 "VALUES(%s,%s,%s,%s) ON CONFLICT(owner_key) DO UPDATE SET owner_token=EXCLUDED.owner_token,"

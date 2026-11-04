@@ -65,7 +65,7 @@ class DiagnosticRunTests(unittest.TestCase):
                      patch("kiwoom_monitor.central_server.diagnostic_replay.require_after_hours"), \
                      patch("kiwoom_monitor.central_server.diagnostic_replay.compile_trace_replay_profile", return_value=profile), \
                      patch("kiwoom_monitor.central_server.diagnostic_replay.run_replay", side_effect=replay), \
-                     patch("scripts.nas_workload_diagnostic._measure", side_effect=measure), \
+                     patch("kiwoom_monitor.central_server.diagnostic_sampling.measure", side_effect=measure), \
                      patch.object(threading.Thread, "join", join):
                     _set_tool(path, True, 120)
                     runs = DiagnosticRuns(path, lambda *_: {}, "postgresql://user:password@database/kiwoom_monitor")
@@ -88,6 +88,8 @@ class DiagnosticRunTests(unittest.TestCase):
                         self.assertFalse(report_entered.is_set(), "report/run lease finalized before child stopped")
                         self.assertFalse(closed.is_set())
                         self.assertFalse(committed.is_set())
+                        self.assertEqual('owned', runs.maintenance_status()['state'])
+                        self.assertEqual('running', runs.maintenance_status()['worker'])
                         with self.assertRaisesRegex(RuntimeError, "diagnostic_run_busy"):
                             with diagnostic_run_lock(path):
                                 pass
@@ -96,6 +98,7 @@ class DiagnosticRunTests(unittest.TestCase):
                         self.assertFalse(closing.is_alive())
                         self.assertFalse(runs._worker.is_alive())
                         self.assertFalse(child_threads[0].is_alive())
+                        self.assertEqual({'state':'owned', 'worker':'exited', 'phase':'aborted'}, runs.maintenance_status())
                         self.assertEqual([15, 15], bounded_joins)
                         self.assertTrue(committed.is_set())
                         document = store.load_documents("app_settings", "replay")[0]["document"]
@@ -231,7 +234,7 @@ class DiagnosticRunTests(unittest.TestCase):
                         with patch("kiwoom_monitor.central_server.diagnostic_replay.require_after_hours"), \
                                 patch("kiwoom_monitor.central_server.diagnostic_replay.compile_trace_replay_profile", return_value=profile), \
                                 patch("kiwoom_monitor.central_server.diagnostic_replay.run_replay", side_effect=replay), \
-                                patch("scripts.nas_workload_diagnostic._measure", side_effect=measure):
+                                patch("kiwoom_monitor.central_server.diagnostic_sampling.measure", side_effect=measure):
                             run = runs.start(kind="replay", seconds=15, label="shape", workload="trace_synthetic",
                                              profile_trace_id="trace-1", window_end_seconds=10,
                                              include_writer_kinds=("query_minute",), query_minute_scenario="recorded_counts")
@@ -310,7 +313,7 @@ class DiagnosticRunTests(unittest.TestCase):
                     with patch("kiwoom_monitor.central_server.diagnostic_replay.require_after_hours"), \
                             patch("kiwoom_monitor.central_server.diagnostic_replay.run_replay",
                                   side_effect=replay), \
-                            patch("scripts.nas_workload_diagnostic._measure",
+                            patch("kiwoom_monitor.central_server.diagnostic_sampling.measure",
                                   side_effect=measure):
                         started = runs.start(
                             kind="replay", seconds=17, label="selected",
@@ -360,7 +363,7 @@ class DiagnosticRunTests(unittest.TestCase):
                           "phase": {"state": "complete",
                                     "db_calls": {"state": "complete"}}}
                 try:
-                    with patch("scripts.nas_workload_diagnostic._run_measurement",
+                    with patch("kiwoom_monitor.central_server.diagnostic_sampling.run_measurement",
                                return_value=result), patch.object(
                                    runs, "_write_report", side_effect=delayed_report,
                                ):
@@ -369,9 +372,11 @@ class DiagnosticRunTests(unittest.TestCase):
                         status = runs.status(first["run_id"])
                         self.assertEqual("completed", status["state"])
                         self.assertNotIn("report_url", status)
+                        self.assertEqual({'state':'owned', 'worker':'running', 'phase':'completed'}, runs.maintenance_status())
                         release.set()
                         runs._worker.join(3)
                         status = runs.status(first["run_id"])
+                        self.assertEqual({'state':'owned', 'worker':'exited', 'phase':'completed'}, runs.maintenance_status())
                         self.assertEqual(
                             f"/api/v1/diagnostics/reports/{first['run_id']}",
                             status["report_url"],
@@ -395,7 +400,7 @@ class DiagnosticRunTests(unittest.TestCase):
                             "phase": {"state": "aborted", "reason": "cancel_requested"}}
 
                 runs = DiagnosticRuns(path, lambda *_: {})
-                with patch("scripts.nas_workload_diagnostic._run_measurement", side_effect=measure):
+                with patch("kiwoom_monitor.central_server.diagnostic_sampling.run_measurement", side_effect=measure):
                     first = runs.start(kind="measure", seconds=5, label="test", request_id="same",
                                        expected_session=control["diagnostic_tool"]["session_id"],
                                        expected_revision=control["control_revision"])
@@ -466,7 +471,7 @@ class DiagnosticRunTests(unittest.TestCase):
                 self.assertIsNone(runs._current)
                 with diagnostic_run_lock(path):
                     pass
-                with patch("scripts.nas_workload_diagnostic._run_measurement",
+                with patch("kiwoom_monitor.central_server.diagnostic_sampling.run_measurement",
                            return_value={"kind": "measure", "state": "aborted",
                                          "phase": {"state": "aborted"}}):
                     second = runs.start(kind="measure", seconds=5, label="test",

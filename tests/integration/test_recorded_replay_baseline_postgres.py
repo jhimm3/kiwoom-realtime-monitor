@@ -116,5 +116,70 @@ class RecordedReplayBaselinePostgresTests(unittest.TestCase):
                 self.assertIsNotNone(cursor.fetchone())
 
 
+class C07CurrentHeadRestorePostgresTests(unittest.TestCase):
+    setUp = RecordedReplayBaselinePostgresTests.setUp
+
+    def test_ref_rank_seal_restore_and_failed_verification_keep_parent_and_child_facts(self):
+        from datetime import datetime, timezone
+        from kiwoom_monitor.central_server.market_observations import ranking_observation
+        from psycopg import sql
+        suffix = uuid4().hex
+        subject, key = "replay-ref-" + suffix, "2026-10-24T09:00:00+09:00"
+        value = {"items": ["owned-ref-fixture"]}
+        at = datetime(2026, 10, 24, 0, tzinfo=timezone.utc)
+        store = self.lease.store()
+        store.save_dataset_snapshot("ranking", subject, key, value,
+            observation=ranking_observation(subject, key, value, at, source="owned-replay-fixture"))
+        snapshot_schema, metadata_table = "replay_ref_" + suffix, "baseline_ref_" + suffix
+        # The original sealed baseline remains untouched. Clone schema/metadata
+        # exist only in this owned connection's force-rollback transaction.
+        try:
+            with self.lease.connection.transaction(force_rollback=True):
+                with self.lease.connection.cursor() as cursor:
+                    cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(snapshot_schema)))
+                    cursor.execute(sql.SQL("CREATE TABLE {} (singleton boolean PRIMARY KEY CHECK(singleton),baseline_id text NOT NULL,manifest jsonb NOT NULL)").format(
+                        sql.Identifier("replay_meta", metadata_table)))
+                    cursor.execute("SELECT s.payload_json,s.revision_id,m.revision_id,r.payload_json,r.payload_hash,r.received_at,r.available_at "
+                        "FROM central_dataset_snapshots s JOIN central_observation_revisions r ON r.revision_id=s.revision_id "
+                        "JOIN central_market_data_observation_meta m ON m.revision_id=r.revision_id "
+                        "WHERE s.kind='ranking' AND s.subject=%s", (subject,))
+                    original = cursor.fetchone()
+                    self.assertEqual(None, original[0])
+                    self.assertEqual(original[1], original[2])
+                    self.assertEqual(value, original[3])
+                with patch.object(self.lease, "_snapshot_schema", snapshot_schema), patch.object(
+                        self.lease, "_metadata_table", metadata_table):
+                    sealed = self.lease.seal()
+                    self.assertEqual(set(baseline.TABLES), set(sealed["manifest"]["tables"]))
+                    self.assertEqual(baseline.TABLES, self.lease.tables)
+                    with self.lease.connection.cursor() as cursor:
+                        cursor.execute("INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) VALUES('replay_gate',%s,'after-seal',0,'{}')", (subject,))
+                        before_sequence = self.lease._sequences(cursor)
+                    actual_digest = self.lease._tables_digest
+                    def fail_after_insert(cursor, schema, **kwargs):
+                        if schema == "public":
+                            raise RuntimeError("owned ref restore verification failure")
+                        return actual_digest(cursor, schema, **kwargs)
+                    with patch.object(self.lease, "_tables_digest", side_effect=fail_after_insert):
+                        with self.assertRaisesRegex(RuntimeError, "owned ref restore verification failure"):
+                            self.lease.restore(sealed["baseline_id"])
+                    with self.lease.connection.cursor() as cursor:
+                        self.assertEqual(before_sequence, self.lease._sequences(cursor))
+                        cursor.execute("SELECT document_json FROM central_documents WHERE collection='replay_gate' AND owner=%s AND document_key='after-seal'", (subject,))
+                        self.assertEqual({}, cursor.fetchone()[0])
+                    restored = self.lease.restore(sealed["baseline_id"])
+                    self.assertTrue(restored["baseline_managed"])
+                    with self.lease.connection.cursor() as cursor:
+                        cursor.execute("SELECT s.payload_json,s.revision_id,m.revision_id,r.payload_json,r.payload_hash,r.received_at,r.available_at "
+                            "FROM central_dataset_snapshots s JOIN central_observation_revisions r ON r.revision_id=s.revision_id "
+                            "JOIN central_market_data_observation_meta m ON m.revision_id=r.revision_id "
+                            "WHERE s.kind='ranking' AND s.subject=%s", (subject,))
+                        self.assertEqual(original, cursor.fetchone())
+                        cursor.execute("SELECT COUNT(*) FROM central_documents WHERE collection='replay_gate' AND owner=%s AND document_key='after-seal'", (subject,))
+                        self.assertEqual(0, cursor.fetchone()[0])
+        finally:
+            self.lease.restore(self.baseline_id)
+
+
 if __name__ == '__main__':
     unittest.main()

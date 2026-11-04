@@ -22,7 +22,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from kiwoom_monitor.central_server.news_sources import _page_items
+from kiwoom_monitor.infrastructure.news_source_documents import page_items
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.historical_backfill import individual_candidate_catalog
 
@@ -83,7 +83,7 @@ def _item(row: sqlite3.Row, by_name: dict[str, tuple[tuple[str, str], ...]],
     url = str(row["article_url"] or "")
     news = SimpleNamespace(title=title, description=summary, link=url,
                            original_link="", published_at=datetime.fromisoformat(str(row["published_at"])))
-    accepted = _page_items([news], catalog, retain_market_articles=True)
+    accepted = page_items([news], catalog, retain_market_articles=True)
     if not accepted:
         return None
     accepted[0]["document"]["publisher_name"] = str(row["publisher"] or "")

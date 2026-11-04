@@ -82,7 +82,7 @@ def inventory(root: Path) -> dict:
         for path in sorted((root / directory).rglob('*.py')):
             relative = path.relative_to(root).as_posix()
             result['products'][relative] = tree_key(ast.parse(path.read_text(encoding='utf-8-sig'), filename=relative))
-    for relative in ('tests/regression_profiles.json', 'tests/ci_groups.json', 'requirements.lock.txt',
+    for relative in ('tests/regression_profiles.json', 'tests/ci_groups.json', 'requirements.lock.txt', 'KiwoomMonitor.spec',
                      '.github/workflows/dependency-regression.yml'):
         path = root / relative
         if path.exists():
@@ -441,6 +441,68 @@ def execution_ids(root: Path, paths: list[Path], *, validated_reports: list[dict
     return covered
 
 
+def _executed_modules(report: dict, manifest: dict, expected_counts: dict[str, int]) -> set[str]:
+    """Read whole-module evidence only from a validated standard regression report."""
+    from scripts import run_regression
+
+    if ('source_start' in report or report.get('schema_version') != 1 or 'shard' in report
+            or report.get('missing_test_files') != [] or report.get('unrun_batches') != []
+            or report.get('interrupted') is not False or report.get('source_modified_during_run') is not False):
+        return set()
+    profile = report.get('profile')
+    if profile == 'selected':
+        selection = report.get('selection')
+        if (not isinstance(selection, dict) or selection.get('kind') != 'incremental_test_selection'
+                or selection.get('version') != 1):
+            return set()
+        selected = selection.get('selected_modules')
+        selection_source = selection.get('source')
+        if (not isinstance(selection_source, dict)
+                or selection_source.get('lf_sha256') != report['code_tree_start']['lf_sha256']
+                or report.get('selection_verified') is not True or not isinstance(selected, list)
+                or not all(isinstance(name, str) for name in selected)):
+            return set()
+        members = set(selected)
+        batches = [{**batch, 'modules': [name for name in batch['modules'] if name in members]}
+                   for batch in run_regression._planned_batches(manifest, 'all-local')]
+        batches = [batch for batch in batches if batch['modules']]
+        if len(members) != len(selected) or members != {name for batch in batches for name in batch['modules']}:
+            return set()
+    elif profile in run_regression._available_profiles(manifest):
+        batches = run_regression._planned_batches(manifest, profile)
+    else:
+        return set()
+
+    plan = [(batch['name'], batch['modules']) for batch in batches]
+    reported = report.get('planned_batches')
+    if not isinstance(reported, list) or not all(isinstance(batch, dict) for batch in reported):
+        return set()
+    reported_plan = [(batch.get('name'), batch.get('modules')) for batch in reported]
+    workers = report['batch_results']
+    if (not plan or reported_plan != plan
+            or [(worker.get('name'), worker.get('modules')) for worker in workers]
+            != run_regression._profile_workers(batches)):
+        return set()
+    completed = set()
+    for worker in workers:
+        source = worker.get('source')
+        if (worker.get('exit_code') != 0 or not isinstance(source, dict) or source.get('verified') is not True
+                or type(worker['test_count']) is not int
+                or any(worker.get(flag) is not False for flag in ('timeout', 'interrupted', 'leaked_descendants'))
+                or worker.get('passed_test_ids') != worker['executed_test_ids']
+                or run_regression._discovery_evidence_error(worker, worker['modules'], worker['test_count'])):
+            continue
+        offset = 0
+        for row in worker['module_test_counts']:
+            module, count = row['module'], row['test_count']
+            ids = worker['executed_test_ids'][offset:offset + count]
+            offset += count
+            if (count == expected_counts.get(module, count)
+                    and all(isinstance(identity, str) and identity.startswith(module + '.') for identity in ids)):
+                completed.add(module)
+    return completed
+
+
 def validate_history(root: Path, base_ref: str) -> str:
     if not base_ref or set(base_ref) == {'0'}:
         base_ref = 'HEAD'
@@ -456,7 +518,28 @@ def validate_history(root: Path, base_ref: str) -> str:
     return base_ref
 
 
-def check(root: Path, *, executions: list[Path] | None = None, base_ref: str = '') -> dict:
+def _live_test_renames(records: list[dict], current_tests: dict) -> dict[str, str]:
+    """Resolve validated rename chains while their destination is still live."""
+    aliases: dict[str, str] = {}
+    for record in records:
+        renames = record.get('renames', {})
+        removed = {identity for identity, item in record['tests'].items() if item['after'] is None}
+        for identity, item in record['tests'].items():
+            if item['before'] is None:
+                aliases.pop(identity, None)
+        for old, target in list(aliases.items()):
+            if target in removed:
+                if target in renames:
+                    aliases[old] = renames[target]
+                else:
+                    del aliases[old]
+        aliases.update(renames)
+    return {old: target for old, target in aliases.items() if old not in current_tests and target in current_tests}
+
+
+def check(root: Path, *, executions: list[Path] | None = None, base_ref: str = '', hosted_ci: bool = False) -> dict:
+    if hosted_ci and not executions:
+        raise ValueError('Hosted CI requires execution evidence')
     if base_ref:
         base_ref = validate_history(root, base_ref)
     expected, records, findings = load_state(root)
@@ -469,12 +552,17 @@ def check(root: Path, *, executions: list[Path] | None = None, base_ref: str = '
                          json.dumps({kind: list(difference[kind]) for kind in ('tests', 'support', 'products')}))
     # Reuse the existing module/CI routing validator rather than a second catalog.
     from scripts import run_regression
-    errors = run_regression._catalog_errors(run_regression._load_manifest(), run_regression._load_ci_groups(),
-                                           run_regression._test_modules_under('unit'), run_regression._test_modules_under('integration'))
+    manifest = run_regression._load_manifest()
+    unit_modules = run_regression._test_modules_under('unit')
+    integration_modules = run_regression._test_modules_under('integration')
+    groups = run_regression._load_ci_groups()
+    errors = run_regression._catalog_errors(manifest, groups, unit_modules, integration_modules)
     if errors:
         raise ValueError('; '.join(errors))
     code_reviews = {path: item for record in records for path, item in record['products'].items()}
     selected = {}
+    nas_pending = set()
+    nas_pending_modules = set()
     if executions is not None:
         if not base_ref:
             raise ValueError('Execution checks require --base-ref (comparison only; tests are never launched)')
@@ -484,27 +572,53 @@ def check(root: Path, *, executions: list[Path] | None = None, base_ref: str = '
         names += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], cwd=root, text=True).splitlines()
         validated_reports = []
         covered = execution_ids(root, executions, validated_reports=validated_reports)
+        test_reviews = {identity: item for record in records for identity, item in record['tests'].items()}
+        nas_modules = set(groups['nas_operator_owned']) if hosted_ci else set()
+        nas_aliases = {executed for identity, item in test_reviews.items() if identity in current['tests']
+                       for executed in item.get('executed_as', ())} if hosted_ci else set()
+
+        def nas_test_ids(tests):
+            return {test for test in tests if isinstance(test, str) and test.rsplit('.', 2)[0] in nas_modules}
+
+        if covered & nas_modules or nas_test_ids(covered):
+            raise ValueError('NAS operator execution is outside hosted CI scope')
+
+        def in_scope(tests):
+            tests = set(tests)
+            outside = {test for test in nas_test_ids(tests) if test in current['tests'] or test in nas_aliases}
+            nas_pending.update(outside)
+            nas_pending_modules.update(tests & nas_modules)
+            return tests - outside - nas_modules
+
+        expected_counts = {module: count for record in records for module, count in record.get('module_counts', {}).items()}
+        retired = {identity for identity, item in test_reviews.items() if item['after'] is None}
+        registered_modules = unit_modules | integration_modules
+        related_coverage = covered.difference(registered_modules, retired).union(
+            *(_executed_modules(report, manifest, expected_counts) for report in validated_reports))
+        live_renames = {old: new for old, new in _live_test_renames(records, current['tests']).items()
+                        if old not in registered_modules}
         for name in names:
             if name in code_reviews:
-                selected[name] = code_reviews[name]['tests']
-                missing = set(selected[name]) - covered
+                selected[name] = list(dict.fromkeys(live_renames.get(test, test) for test in code_reviews[name]['tests']))
+                missing = in_scope(selected[name]) - related_coverage
                 if missing:
                     raise ValueError(f'Related tests not executed for {name}: {sorted(missing)}')
-        test_reviews = {identity: item for record in records for identity, item in record['tests'].items()}
         support_reviews = {name: item for record in records for name, item in record['support'].items()}
         for identity, item in test_reviews.items():
             if item['after'] and item['after']['file'] in names:
-                missing = set(item.get('executed_as', [identity])) - covered
+                missing = in_scope(item.get('executed_as', [identity])) - covered
                 if missing:
                     raise ValueError(f'Changed tests not executed: {sorted(missing)}')
         for name, item in support_reviews.items():
-            if name in names and item['after'] is not None and (not item.get('tests') or set(item['tests']) - covered):
-                raise ValueError(f'Fixture change has no executed consumers: {name}')
+            if name in names and item['after'] is not None:
+                tests = {live_renames.get(test, test) for test in (item.get('tests') or [])}
+                if not tests or in_scope(tests) - related_coverage:
+                    raise ValueError(f'Fixture change has no executed consumers: {name}')
         previous = subprocess.run(['git', 'show', f'{base_ref}:{LEDGER}'], cwd=root, capture_output=True)
         old_count = len([line for line in previous.stdout.splitlines() if line.strip()]) if previous.returncode == 0 else 0
         for record in records[old_count:]:
             for issue in record.get('findings', []):
-                if issue['status'] == 'resolved' and set(issue['tests']) - covered:
+                if issue['status'] == 'resolved' and in_scope(issue['tests']) - covered:
                     raise ValueError(f'Finding resolution tests not executed: {issue["id"]}')
         observed = {}
         for report in validated_reports:
@@ -514,15 +628,23 @@ def check(root: Path, *, executions: list[Path] | None = None, base_ref: str = '
             for worker in report.get('batch_results', []):
                 for row in worker.get('module_test_counts', []):
                     observed[row['module']] = row['test_count']
-        expected_counts = {module: count for record in records for module, count in record.get('module_counts', {}).items()}
+        if nas_modules & observed.keys():
+            raise ValueError('NAS operator discovery is outside hosted CI scope')
         for module, count in expected_counts.items():
             required = module in observed or (module.replace('.', '/') + '.py' in names and count > 0)
+            if required and module in nas_modules:
+                nas_pending_modules.add(module)
+                continue
             if required and observed.get(module) != count:
                 raise ValueError(f'Unexpected runtime discovery count: {module}: expected {count}, observed {observed.get(module)}')
-    return {'status': 'passed', 'static_case_definitions': len(current['tests']), 'records': len(records),
-            'execution_checked': executions is not None, 'related_product_tests': selected,
-            'audit_decisions_preserved': True, 'original_unresolved': 49,
-            'finding_updates': findings['explicit_updates'], 'scope': 'incremental; no semantic auto-approval'}
+    result = {'status': 'passed', 'static_case_definitions': len(current['tests']), 'records': len(records),
+              'execution_checked': executions is not None, 'related_product_tests': selected,
+              'audit_decisions_preserved': True, 'original_unresolved': 49,
+              'finding_updates': findings['explicit_updates'], 'scope': 'incremental; no semantic auto-approval'}
+    if hosted_ci:
+        result['nas_operator_pending_test_ids'] = sorted(nas_pending)
+        result['nas_operator_pending_modules'] = sorted(nas_pending_modules)
+    return result
 
 
 def main(argv=None) -> int:
@@ -531,6 +653,7 @@ def main(argv=None) -> int:
     parser.add_argument('--report', type=Path)
     parser.add_argument('--findings', action='store_true', help='list existing audit/gap identities before adding an issue')
     parser.add_argument('--execution', action='append', type=Path, default=None)
+    parser.add_argument('--hosted-ci', action='store_true', help='check hosted regressions and report separate NAS operator obligations')
     parser.add_argument('--base-ref', default='')
     parser.add_argument('--query', action='store_true', help='query diff/impact/relevant audit only; never execute')
     parser.add_argument('--path', action='append', default=[], help='explicit changed-file/directory scope; recorded in report')
@@ -540,6 +663,8 @@ def main(argv=None) -> int:
     try:
         if args.limit < 1 or args.offset < 0:
             raise ValueError('Positive limit and nonnegative offset required')
+        if args.hosted_ci and (args.query or args.plan or args.findings):
+            raise ValueError('--hosted-ci requires execution verification')
         if args.query:
             result = query_changes(ROOT, args.base_ref or 'HEAD', args.path)
         elif args.path:
@@ -553,7 +678,7 @@ def main(argv=None) -> int:
             args.plan.parent.mkdir(parents=True, exist_ok=True)
             args.plan.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
         else:
-            result = check(ROOT, executions=args.execution, base_ref=args.base_ref)
+            result = check(ROOT, executions=args.execution, base_ref=args.base_ref, hosted_ci=args.hosted_ci)
     except (ValueError, OSError, KeyError, SyntaxError, sqlite3.Error, subprocess.CalledProcessError) as error:
         result = {'status': 'failed', 'reason': str(error)}
     if args.report:

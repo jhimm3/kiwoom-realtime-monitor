@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-from .diagnostic_replay_contract import captured_workload
-from .diagnostic_rest_input import (
-    captured_broker_request, link_request, recording_scope,
-    request_origin, transport_call,
-)
-
 import asyncio
-from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
+from .async_lifetime import owned_create_task, owned_to_thread
 import copy
 import hashlib
 import json
 import logging
 import time
 from datetime import datetime
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any, Callable, Protocol
+from uuid import uuid4
+
+from kiwoom_monitor.domain.operation_context import (
+    OperationContextSnapshot, operation_context_scope, snapshot_operation_context,
+    validated_request_id,
+)
 
 from .database_query_cache import QueryCacheStore, StoredQuery
 from .market_ingest import fundamentals_refresh_key
@@ -152,8 +153,15 @@ class _Job:
     future: asyncio.Future[BrokerResult]
     record_response: bool = True
     queued_at: float = field(default_factory=time.monotonic)
-    flow_capture: dict | None = field(default=None, repr=False)
-    input_group: Any = field(default=None, repr=False)
+    observation: Any = field(default=None, repr=False)
+    origin: OperationContextSnapshot = field(default_factory=OperationContextSnapshot, repr=False)
+
+
+@dataclass(frozen=True)
+class _InFlightRequest:
+    future: asyncio.Future[BrokerResult] = field(repr=False)
+    origin: OperationContextSnapshot = field(repr=False)
+    observation: Any = field(default=None, repr=False)
 
 
 @dataclass
@@ -161,6 +169,16 @@ class _CredentialJob:
     settings: Any = field(repr=False)
     future: asyncio.Future[Any] = field(repr=False)
     phase: str = "token"
+    origin: OperationContextSnapshot = field(default_factory=OperationContextSnapshot, repr=False)
+
+
+def _operation_origin() -> OperationContextSnapshot:
+    """Keep supplied correlation; fill only missing observability metadata."""
+    origin = snapshot_operation_context()
+    return OperationContextSnapshot(
+        source=origin.source or "central.rest_broker",
+        request_id=origin.request_id or uuid4().hex,
+    )
 
 
 class BrokerCredentialBusyError(RuntimeError):
@@ -176,8 +194,11 @@ class CentralRestBroker:
         *, allowed_endpoints: dict[str, str] | None = None, namespace: str = "market",
         ranking_reservation: bool = False,
         wall_time: Callable[[], float] | None = None,
+        input_observer: Any = None,
     ) -> None:
         self._client = client
+        self._input_observer = input_observer
+        self._input_observer_state = input_observer.new_broker_state() if input_observer is not None else None
         self._store = store
         self._response_handler = response_handler
         self._allowed_endpoints = dict(allowed_endpoints or READ_ONLY_ENDPOINTS)
@@ -190,9 +211,7 @@ class CentralRestBroker:
         self._queue: asyncio.PriorityQueue[tuple[int, int, _Job | _CredentialJob | None]] = asyncio.PriorityQueue()
         self._persist_queue: asyncio.Queue[tuple[_Job, BrokerResult] | None] = asyncio.Queue()
         self._sequence = count()
-        self._inflight: dict[str, asyncio.Future[BrokerResult]] = {}
-        # Opt-in receipts only; future completion removes the small diagnostic link.
-        self._flow_inflight: dict[asyncio.Future[BrokerResult], dict] = {}
+        self._inflight: dict[str, _InFlightRequest] = {}
         self._lookup_tasks: set[asyncio.Task[None]] = set()
         self._cache: dict[str, tuple[float, BrokerResult]] = {}
         self._guard = asyncio.Lock()
@@ -208,11 +227,13 @@ class CentralRestBroker:
 
     async def prepare_credentials(self, settings: Any) -> Any:
         """Explicit management job, lower priority than live ranking."""
-        candidate = await self._prepare_credential_phase(settings, "token")
-        return await self._prepare_credential_phase(candidate, "identity")
+        with operation_context_scope(_operation_origin()):
+            candidate = await self._prepare_credential_phase(settings, "token")
+            return await self._prepare_credential_phase(candidate, "identity")
 
     async def prepare_drained_credentials(self, settings: Any) -> Any:
         """Explicit recovery remains queued; ordinary old-generation reads stay closed."""
+        origin = _operation_origin()
         await self.start()
         async with self._guard:
             if (not self._credential_paused or self._drain_task is None or not self._drain_task.done()
@@ -226,17 +247,18 @@ class CentralRestBroker:
                 self._activating_credentials = None
             future = asyncio.get_running_loop().create_future()
             future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-            await self._queue.put((20, next(self._sequence), _CredentialJob(settings, future, "drained")))
+            await self._queue.put((20, next(self._sequence), _CredentialJob(settings, future, "drained", origin)))
         return await asyncio.shield(future)
 
     async def _prepare_credential_phase(self, settings: Any, phase: str) -> Any:
+        origin = _operation_origin()
         await self.start()
         async with self._guard:
             if self._credential_paused:
                 raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
             future = asyncio.get_running_loop().create_future()
             future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-            await self._queue.put((20, next(self._sequence), _CredentialJob(settings, future, phase)))
+            await self._queue.put((20, next(self._sequence), _CredentialJob(settings, future, phase, origin)))
         return await asyncio.shield(future)
 
     async def begin_credential_change(self) -> None:
@@ -320,10 +342,11 @@ class CentralRestBroker:
                 raise BrokerCredentialBusyError("BROKER_CLOSE_IN_PROGRESS")
             self._close_task.result()
             self._close_task = None
-        if self._persist_worker is None or self._persist_worker.done():
-            self._persist_worker = owned_create_task(self._run_persistence(), name="kiwoom-broker-persistence")
-        if self._worker is None or self._worker.done():
-            self._worker = owned_create_task(self._run(), name="kiwoom-central-rest-broker")
+        with operation_context_scope(OperationContextSnapshot()):
+            if self._persist_worker is None or self._persist_worker.done():
+                self._persist_worker = owned_create_task(self._run_persistence(), name="kiwoom-broker-persistence")
+            if self._worker is None or self._worker.done():
+                self._worker = owned_create_task(self._run(), name="kiwoom-central-rest-broker")
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -366,133 +389,143 @@ class CentralRestBroker:
             record_response=False,
         )
 
-    @captured_broker_request
     async def _request(
         self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str,
         next_key: str, record_response: bool,
     ) -> BrokerResult:
-        flow_link = None
-        if api_id == "ka10045":
-            from .diagnostic_top20_flow_input import broker_flow_link
-            flow_link = broker_flow_link(api_id, path, body)
-        self._validate(api_id, path, cont_yn, next_key)
-        await self.start()
-        key = self._fingerprint(api_id, path, body, cont_yn, next_key)
-        if not record_response:
-            key = f"unrecorded:{key}"
-        async with self._guard:
-            if self._credential_paused:
-                raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
-            self._prune_memory_cache()
-            cached = self._cache.get(key)
-            basic_recording_pending = (
-                api_id == "ka10001" and record_response and self._response_handler is not None
-                and cached is not None and cached[1].recording_succeeded is None
-            )
-            if cached and cached[0] > time.monotonic() and not basic_recording_pending:
-                request_origin("ram_cache")
-                if flow_link is not None:
-                    flow_link["receipt"]["origin"] = "ram_cache"
-                value = cached[1]
-                return BrokerResult(
-                    copy.deepcopy(value.payload), value.has_next, value.next_key,
-                    True, value.recording_succeeded,
+        observer = self._input_observer
+        with (observer.broker_request_scope(self._input_observer_state, self,
+                namespace=self._namespace, api_id=api_id, path=path, body=body,
+                cont_yn=cont_yn, next_key=next_key, record_response=record_response,
+                handler_present=self._response_handler is not None,
+                cache_lookup=bool(record_response and self._store is not None and _persistent_cache_ttl(api_id, cont_yn)))
+                if observer is not None else nullcontext()) as observed:
+            request_handle, returned = observed if observed is not None else (None, None)
+            self._validate(api_id, path, cont_yn, next_key)
+            origin = _operation_origin()
+            await self.start()
+            key = self._fingerprint(api_id, path, body, cont_yn, next_key)
+            if not record_response:
+                key = f"unrecorded:{key}"
+            async with self._guard:
+                if self._credential_paused:
+                    raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
+                self._prune_memory_cache()
+                cached = self._cache.get(key)
+                basic_recording_pending = (
+                    api_id == "ka10001" and record_response and self._response_handler is not None
+                    and cached is not None and cached[1].recording_succeeded is None
                 )
-            existing = self._inflight.get(key)
-            if existing is None:
-                future = asyncio.get_running_loop().create_future()
-                self._inflight[key] = future
-                link_request(future)
-                future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-                if flow_link is not None:
-                    self._flow_inflight[future] = flow_link
-                    future.add_done_callback(lambda done: self._flow_inflight.pop(done, None))
-                generation = self._credential_generation
-                task = owned_create_task(
-                    self._resolve_cache_or_queue(
-                        key, api_id, path, copy.deepcopy(body), cont_yn,
-                        next_key, record_response, generation, future,
-                        flow_link=flow_link,
-                    ),
-                    name=f"broker-cache-lookup-{api_id}",
-                )
-                self._lookup_tasks.add(task)
-                task.add_done_callback(self._lookup_tasks.discard)
-                existing = future
-            else:
-                link_request(existing, shared=True)
-                linked = self._flow_inflight.get(existing)
-                if linked is not None:
-                    linked["receipt"]["shared"] = True
-                if flow_link is not None:
-                    flow_link["receipt"].update(origin="shared_inflight", shared=True)
-        return await asyncio.shield(existing)
+                if cached and cached[0] > time.monotonic() and not basic_recording_pending:
+                    if observer is not None:
+                        observer.broker_request_origin(request_handle, "ram_cache")
+                    value = cached[1]
+                    result = BrokerResult(
+                        copy.deepcopy(value.payload), value.has_next, value.next_key,
+                        True, value.recording_succeeded,
+                    )
+                    if returned is not None:
+                        returned(result)
+                    return result
+                existing = self._inflight.get(key)
+                if existing is None:
+                    future = asyncio.get_running_loop().create_future()
+                    group = observer.join_broker_request(request_handle, None, shared=False) if observer is not None else None
+                    existing = _InFlightRequest(future, origin, group)
+                    self._inflight[key] = existing
+                    future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                    generation = self._credential_generation
+                    task = owned_create_task(
+                        self._resolve_cache_or_queue(
+                            key, api_id, path, copy.deepcopy(body), cont_yn,
+                            next_key, record_response, generation, existing,
+                            request_handle=request_handle,
+                        ),
+                        name=f"broker-cache-lookup-{api_id}",
+                    )
+                    self._lookup_tasks.add(task)
+                    task.add_done_callback(self._lookup_tasks.discard)
+                else:
+                    if observer is not None:
+                        observer.join_broker_request(request_handle, existing.observation, shared=True)
+                    try:
+                        logger.info(
+                            "shared broker request request_id=%s origin_request_id=%s relation=shared_inflight",
+                            validated_request_id(origin.request_id), validated_request_id(existing.origin.request_id),
+                        )
+                    except Exception:
+                        # An unavailable observation sink cannot reject an existing request.
+                        pass
+            result = await asyncio.shield(existing.future)
+            if returned is not None:
+                returned(result)
+            return result
 
     async def _resolve_cache_or_queue(
         self, key: str, api_id: str, path: str, body: dict[str, Any],
         cont_yn: str, next_key: str, record_response: bool, generation: int,
-        future: asyncio.Future[BrokerResult],
-        *, flow_link: dict | None = None,
+        entry: _InFlightRequest,
+        *, request_handle: Any = None,
     ) -> None:
-        try:
-            stored = None
-            input_group = getattr(future, "_market_input_group", None)
-            if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
-                with recording_scope(input_group, "cache_read"):
-                    stored = await owned_to_thread(self._store.load_query, key)
-            if api_id == "ka10001" and key != self._fingerprint(api_id, path, body, cont_yn, next_key):
-                # A slow DB lookup can cross 07:00/midnight. Do not stamp the
-                # previous period's cached payload as a fresh observation.
+        future = entry.future
+        observer = self._input_observer
+        with operation_context_scope(entry.origin):
+            try:
                 stored = None
-            recording_succeeded: bool | None = None
-            if stored is not None:
-                request_origin("persistent_cache")
-            if stored is not None and self._response_handler is not None:
-                if flow_link is not None:
-                    flow_link["receipt"]["origin"] = "persistent_cache"
-                from .diagnostic_metrics import CURRENT_API_ID
-                api_token = CURRENT_API_ID.set(api_id)
-                try:
-                    with recording_scope(input_group, "cache_ingest"):
-                        await owned_to_thread(self._response_handler, api_id, body, stored.payload)
-                    recording_succeeded = True
-                except Exception:
-                    recording_succeeded = False
-                    logger.exception("recording_gap: 중앙 캐시 응답 저장에 실패했습니다: %s", api_id)
-                finally:
-                    CURRENT_API_ID.reset(api_token)
-            async with self._guard:
-                if self._inflight.get(key) is not future:
-                    raise BrokerCredentialBusyError("REQUEST_OWNERSHIP_CHANGED")
-                if self._credential_paused or self._credential_generation != generation:
-                    raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
-                # A separate request may have populated RAM while the DB lookup ran.
-                cached = self._cache.get(key)
-                if cached and cached[0] > time.monotonic():
-                    request_origin("ram_cache_after_lookup")
-                    value = cached[1]
-                    self._inflight.pop(key, None)
-                    future.set_result(BrokerResult(copy.deepcopy(value.payload), value.has_next, value.next_key, True, value.recording_succeeded))
-                elif stored is not None:
-                    result = BrokerResult(stored.payload, stored.has_next, stored.next_key, True, recording_succeeded)
-                    ttl = CACHE_SECONDS.get(api_id, 0.0) if cont_yn == "N" else 0.0
-                    if recording_succeeded is not False:
-                        self._cache[key] = (time.monotonic() + ttl, result)
-                    self._inflight.pop(key, None)
-                    future.set_result(copy.deepcopy(result))
-                else:
-                    job = _Job(key, api_id, path, body, cont_yn, next_key, future, record_response,
-                               flow_capture=flow_link, input_group=input_group)
-                    self._queue.put_nowait((REQUEST_PRIORITIES.get(api_id, 50), next(self._sequence), job))
-        except BaseException as error:
-            async with self._guard:
-                if self._inflight.get(key) is future:
-                    self._inflight.pop(key, None)
-                if not future.done():
-                    if isinstance(error, asyncio.CancelledError):
-                        future.cancel()
+                group = entry.observation
+                if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
+                    with (observer.broker_effect_scope(group, "cache_read") if observer is not None else nullcontext()):
+                        stored = await owned_to_thread(self._store.load_query, key)
+                if api_id == "ka10001" and key != self._fingerprint(api_id, path, body, cont_yn, next_key):
+                    # A slow DB lookup can cross 07:00/midnight. Do not stamp the
+                    # previous period's cached payload as a fresh observation.
+                    stored = None
+                recording_succeeded: bool | None = None
+                if stored is not None:
+                    if observer is not None:
+                        observer.broker_request_origin(request_handle, "persistent_cache")
+                if stored is not None and self._response_handler is not None:
+                    with (observer.broker_persistence_scope(self, api_id=api_id) if observer is not None else nullcontext()):
+                        try:
+                            with (observer.broker_effect_scope(group, "cache_ingest") if observer is not None else nullcontext()):
+                                await owned_to_thread(self._response_handler, api_id, body, stored.payload)
+                            recording_succeeded = True
+                        except Exception:
+                            recording_succeeded = False
+                            logger.exception("recording_gap: 중앙 캐시 응답 저장에 실패했습니다: %s", api_id)
+                async with self._guard:
+                    if self._inflight.get(key) is not entry:
+                        raise BrokerCredentialBusyError("REQUEST_OWNERSHIP_CHANGED")
+                    if self._credential_paused or self._credential_generation != generation:
+                        raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
+                    # A separate request may have populated RAM while the DB lookup ran.
+                    cached = self._cache.get(key)
+                    if cached and cached[0] > time.monotonic():
+                        if observer is not None:
+                            observer.broker_request_origin(request_handle, "ram_cache_after_lookup")
+                        value = cached[1]
+                        self._inflight.pop(key, None)
+                        future.set_result(BrokerResult(copy.deepcopy(value.payload), value.has_next, value.next_key, True, value.recording_succeeded))
+                    elif stored is not None:
+                        result = BrokerResult(stored.payload, stored.has_next, stored.next_key, True, recording_succeeded)
+                        ttl = CACHE_SECONDS.get(api_id, 0.0) if cont_yn == "N" else 0.0
+                        if recording_succeeded is not False:
+                            self._cache[key] = (time.monotonic() + ttl, result)
+                        self._inflight.pop(key, None)
+                        future.set_result(copy.deepcopy(result))
                     else:
-                        future.set_exception(error)
+                        job = _Job(key, api_id, path, body, cont_yn, next_key, future, record_response,
+                                   observation=group, origin=entry.origin)
+                        self._queue.put_nowait((REQUEST_PRIORITIES.get(api_id, 50), next(self._sequence), job))
+            except BaseException as error:
+                async with self._guard:
+                    if self._inflight.get(key) is entry:
+                        self._inflight.pop(key, None)
+                    if not future.done():
+                        if isinstance(error, asyncio.CancelledError):
+                            future.cancel()
+                        else:
+                            future.set_exception(error)
 
     async def _run(self) -> None:
         while True:
@@ -500,130 +533,141 @@ class CentralRestBroker:
             try:
                 if job is None:
                     return
-                if isinstance(job, _CredentialJob):
+                with operation_context_scope(job.origin):
+                    if isinstance(job, _CredentialJob):
+                        try:
+                            function = (self._client.prepare_drained_credentials if job.phase == "drained" else
+                                        self._client.prepare_credential_token if job.phase == "token"
+                                        else self._client.verify_prepared_credentials)
+                            result = await owned_to_thread(function, job.settings)
+                            if not job.future.done():
+                                job.future.set_result(result)
+                        except Exception:
+                            if not job.future.done():
+                                job.future.set_exception(RuntimeError("CANDIDATE_VALIDATION_FAILED"))
+                        continue
+                    if (
+                        self._ranking_reservation
+                        and self._namespace == "market"
+                        and priority > REQUEST_PRIORITIES["ka00198"]
+                        and (delay := ranking_reservation_delay(self._wall_time())) > 0
+                    ):
+                        # Put the low-priority job back before yielding. Sleeping first
+                        # would occupy the only broker worker and make a newly queued
+                        # ka00198 wait for the whole reservation window.
+                        await self._queue.put((priority, next(self._sequence), job))
+                        await asyncio.sleep(min(delay, 0.05))
+                        continue
                     try:
-                        function = (self._client.prepare_drained_credentials if job.phase == "drained" else
-                                    self._client.prepare_credential_token if job.phase == "token"
-                                    else self._client.verify_prepared_credentials)
-                        result = await owned_to_thread(function, job.settings)
-                        if not job.future.done():
+                        delegated = False
+                        started_at = time.monotonic()
+                        queue_wait_ms = round((started_at - job.queued_at) * 1000)
+                        payload, has_next, next_key = await owned_to_thread(self._call_transport, job)
+                        api_audit_logger.info(
+                            "request completed namespace=%s api_id=%s continuation=%s queue_wait_ms=%d duration_ms=%d",
+                            self._namespace, job.api_id, job.cont_yn,
+                            queue_wait_ms,
+                            round((time.monotonic() - started_at) * 1000),
+                        )
+                        result = BrokerResult(payload, has_next, next_key)
+                        ttl = CACHE_SECONDS.get(job.api_id, 0.0) if job.cont_yn == "N" else 0.0
+                        if ttl > 0:
+                            async with self._guard:
+                                self._cache[job.key] = (time.monotonic() + ttl, result)
+                                self._prune_memory_cache()
+                        if job.record_response and (self._response_handler is not None or (_persistent_cache_ttl(job.api_id, job.cont_yn) and self._store is not None)):
+                            await self._persist_queue.put((job, result))
+                            delegated = True
+                        elif not job.future.done():
                             job.future.set_result(result)
-                    except Exception:
+                    except Exception as error:
+                        api_audit_logger.warning(
+                            "request failed namespace=%s api_id=%s continuation=%s error_type=%s",
+                            self._namespace, job.api_id, job.cont_yn, type(error).__name__,
+                        )
                         if not job.future.done():
-                            job.future.set_exception(RuntimeError("CANDIDATE_VALIDATION_FAILED"))
-                    continue
-                if (
-                    self._ranking_reservation
-                    and self._namespace == "market"
-                    and priority > REQUEST_PRIORITIES["ka00198"]
-                    and (delay := ranking_reservation_delay(self._wall_time())) > 0
-                ):
-                    # Put the low-priority job back before yielding. Sleeping first
-                    # would occupy the only broker worker and make a newly queued
-                    # ka00198 wait for the whole reservation window.
-                    await self._queue.put((priority, next(self._sequence), job))
-                    await asyncio.sleep(min(delay, 0.05))
-                    continue
-                try:
-                    delegated = False
-                    started_at = time.monotonic()
-                    queue_wait_ms = round((started_at - job.queued_at) * 1000)
-                    payload, has_next, next_key = await owned_to_thread(transport_call, self._client, job)
-                    api_audit_logger.info(
-                        "request completed namespace=%s api_id=%s continuation=%s queue_wait_ms=%d duration_ms=%d",
-                        self._namespace, job.api_id, job.cont_yn,
-                        queue_wait_ms,
-                        round((time.monotonic() - started_at) * 1000),
-                    )
-                    result = BrokerResult(payload, has_next, next_key)
-                    ttl = CACHE_SECONDS.get(job.api_id, 0.0) if job.cont_yn == "N" else 0.0
-                    if ttl > 0:
-                        async with self._guard:
-                            self._cache[job.key] = (time.monotonic() + ttl, result)
-                            self._prune_memory_cache()
-                    if job.record_response and (self._response_handler is not None or (_persistent_cache_ttl(job.api_id, job.cont_yn) and self._store is not None)):
-                        await self._persist_queue.put((job, result))
-                        delegated = True
-                    elif not job.future.done():
-                        job.future.set_result(result)
-                except Exception as error:
-                    api_audit_logger.warning(
-                        "request failed namespace=%s api_id=%s continuation=%s error_type=%s",
-                        self._namespace, job.api_id, job.cont_yn, type(error).__name__,
-                    )
-                    if not job.future.done():
-                        job.future.set_exception(error)
-                finally:
-                    if not delegated:
-                        async with self._guard:
-                            self._inflight.pop(job.key, None)
+                            job.future.set_exception(error)
+                    finally:
+                        if not delegated:
+                            async with self._guard:
+                                self._inflight.pop(job.key, None)
             finally:
                 self._queue.task_done()
 
-    @captured_workload("rest_market", "rest_broker")
+    def _call_transport(self, job: _Job):
+        """Own the physical call; optional input observation never executes it."""
+        observer = self._input_observer
+        with (observer.broker_transport_scope(job.observation) if observer is not None else nullcontext()) as returned:
+            result = self._client.request_with_continuation(job.api_id, job.path, job.body,
+                cont_yn=job.cont_yn, next_key=job.next_key)
+            if returned is not None:
+                returned(result)
+            return result
+
     async def _run_persistence(self) -> None:
-        from .diagnostic_metrics import CURRENT_API_ID
-        while True:
-            item = await self._persist_queue.get()
-            try:
-                if item is None:
-                    return
-                job, result = item
-                api_token = CURRENT_API_ID.set(job.api_id)
+        observer = self._input_observer
+        with (observer.broker_persistence_scope(self) if observer is not None else nullcontext()):
+            while True:
+                item = await self._persist_queue.get()
                 try:
-                    started_at = time.monotonic()
-                    handler_ms = cache_ms = 0
-                    recording_succeeded: bool | None = None
-                    if self._response_handler is not None:
-                        phase_started = time.monotonic()
+                    if item is None:
+                        return
+                    job, result = item
+                    with operation_context_scope(job.origin):
                         try:
-                            from .diagnostic_top20_flow_input import flow_recording_scope
-                            with recording_scope(job.input_group, "ingest"), flow_recording_scope(job.flow_capture, self._response_handler):
-                                await owned_to_thread(self._response_handler, job.api_id, job.body, result.payload)
-                            recording_succeeded = True
-                        except Exception:
-                            recording_succeeded = False
-                            logger.exception("recording_gap: 중앙 조회 응답 저장에 실패했습니다: %s", job.api_id)
-                        handler_ms = round((time.monotonic() - phase_started) * 1000)
-                    ttl = _persistent_cache_ttl(job.api_id, job.cont_yn)
-                    if ttl > 0 and self._store is not None:
-                        phase_started = time.monotonic()
-                        try:
-                            with recording_scope(job.input_group, "cache_write"):
-                                await owned_to_thread(
-                                    self._store.save_query, job.key, job.api_id, self._wall_time() + ttl,
-                                    StoredQuery(result.payload, result.has_next, result.next_key),
-                                )
-                        except Exception:
-                            logger.exception("recording_gap: 중앙 조회 캐시 저장에 실패했습니다: %s", job.api_id)
-                        cache_ms = round((time.monotonic() - phase_started) * 1000)
-                    total_ms = round((time.monotonic() - started_at) * 1000)
-                    if total_ms >= 1000:
-                        logger.warning(
-                            "slow broker persistence namespace=%s api_id=%s handler_ms=%d cache_ms=%d total_ms=%d",
-                            self._namespace, job.api_id, handler_ms, cache_ms, total_ms,
-                        )
-                    recorded_result = replace(result, recording_succeeded=recording_succeeded)
-                    if recording_succeeded is False:
-                        async with self._guard:
-                            self._cache.pop(job.key, None)
-                    elif recording_succeeded is True and job.key in self._cache:
-                        async with self._guard:
-                            cached = self._cache.get(job.key)
-                            if cached is not None:
-                                self._cache[job.key] = (cached[0], recorded_result)
-                    if not job.future.done():
-                        job.future.set_result(recorded_result)
-                except Exception as error:
-                    logger.exception("broker persistence failed unexpectedly: %s", job.api_id)
-                    if not job.future.done():
-                        job.future.set_exception(error)
+                            with (observer.broker_persistence_scope(self, api_id=job.api_id) if observer is not None else nullcontext()):
+                                try:
+                                    started_at = time.monotonic()
+                                    handler_ms = cache_ms = 0
+                                    recording_succeeded: bool | None = None
+                                    if self._response_handler is not None:
+                                        phase_started = time.monotonic()
+                                        try:
+                                            with (observer.broker_effect_scope(job.observation, "ingest", response_handler=self._response_handler) if observer is not None else nullcontext()):
+                                                await owned_to_thread(self._response_handler, job.api_id, job.body, result.payload)
+                                            recording_succeeded = True
+                                        except Exception:
+                                            recording_succeeded = False
+                                            logger.exception("recording_gap: 중앙 조회 응답 저장에 실패했습니다: %s", job.api_id)
+                                        handler_ms = round((time.monotonic() - phase_started) * 1000)
+                                    ttl = _persistent_cache_ttl(job.api_id, job.cont_yn)
+                                    if ttl > 0 and self._store is not None:
+                                        phase_started = time.monotonic()
+                                        try:
+                                            with (observer.broker_effect_scope(job.observation, "cache_write") if observer is not None else nullcontext()):
+                                                await owned_to_thread(
+                                                    self._store.save_query, job.key, job.api_id, self._wall_time() + ttl,
+                                                    StoredQuery(result.payload, result.has_next, result.next_key),
+                                                )
+                                        except Exception:
+                                            logger.exception("recording_gap: 중앙 조회 캐시 저장에 실패했습니다: %s", job.api_id)
+                                        cache_ms = round((time.monotonic() - phase_started) * 1000)
+                                    total_ms = round((time.monotonic() - started_at) * 1000)
+                                    if total_ms >= 1000:
+                                        logger.warning(
+                                            "slow broker persistence namespace=%s api_id=%s handler_ms=%d cache_ms=%d total_ms=%d",
+                                            self._namespace, job.api_id, handler_ms, cache_ms, total_ms,
+                                        )
+                                    recorded_result = replace(result, recording_succeeded=recording_succeeded)
+                                    if recording_succeeded is False:
+                                        async with self._guard:
+                                            self._cache.pop(job.key, None)
+                                    elif recording_succeeded is True and job.key in self._cache:
+                                        async with self._guard:
+                                            cached = self._cache.get(job.key)
+                                            if cached is not None:
+                                                self._cache[job.key] = (cached[0], recorded_result)
+                                    if not job.future.done():
+                                        job.future.set_result(recorded_result)
+                                except Exception as error:
+                                    logger.exception("broker persistence failed unexpectedly: %s", job.api_id)
+                                    if not job.future.done():
+                                        job.future.set_exception(error)
+                        finally:
+                            async with self._guard:
+                                self._inflight.pop(job.key, None)
                 finally:
-                    CURRENT_API_ID.reset(api_token)
-                    async with self._guard:
-                        self._inflight.pop(job.key, None)
-            finally:
-                self._persist_queue.task_done()
+                    self._persist_queue.task_done()
 
     def _prune_memory_cache(self) -> None:
         """만료 응답과 오래된 응답을 제거해 24시간 실행 시 메모리를 제한한다."""

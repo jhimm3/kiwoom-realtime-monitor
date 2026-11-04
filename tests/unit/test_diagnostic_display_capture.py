@@ -14,9 +14,10 @@ from kiwoom_monitor.central_server import diagnostic_account_context as context
 from kiwoom_monitor.central_server import diagnostic_trace as trace
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.diagnostic_account_input import AccountInputProjection
+from kiwoom_monitor.central_server.diagnostic_metrics import install_postgres_observation
 from kiwoom_monitor.central_server.diagnostic_replay_contract import (
     ACCOUNT_CLOCK_COLLECTION, capture_owner, compile_recorded_plan, freeze_payload,
-    validate_operation,
+    validate_operation, install_store_capture,
 )
 from kiwoom_monitor.central_server.diagnostic_top20_display_input import (
     DisplayReplay, environment_scope, environment_value, prepare_environment,
@@ -63,7 +64,9 @@ def captured_rows(*, account=True):
 
 class DisplayCaptureTests(unittest.TestCase):
     def store(self):
+        install_postgres_observation()
         store = SQLiteQueryStore(Path(':memory:'))
+        install_store_capture(store)
         store.initialize()
         self.addCleanup(store.close)
         return store
@@ -80,7 +83,7 @@ class DisplayCaptureTests(unittest.TestCase):
         self.seed(source)
         with captured_rows() as (rows, rejected), \
              patch('kiwoom_monitor.central_server.database_top20_reconciliation._top20_today', return_value=date(2026, 10, 2)), \
-             patch('kiwoom_monitor.central_server.database_top20_reconciliation.is_paused', return_value=False):
+             patch('kiwoom_monitor.central_server.diagnostic_workloads.is_paused', return_value=False):
             source.load_top20_reconciliation_inputs(DAY)
             source.load_top20_series(DAY)
             source.load_top20_display_statistics(DAY, DAY)  # Cache miss writes.
@@ -93,7 +96,7 @@ class DisplayCaptureTests(unittest.TestCase):
             self.seed(target)
             # Any fallback to host time or operating control fails this test.
             with patch('kiwoom_monitor.central_server.database_top20_reconciliation._top20_today', side_effect=AssertionError('host day')), \
-                 patch('kiwoom_monitor.central_server.database_top20_reconciliation.is_paused', side_effect=AssertionError('operating pause')), \
+                 patch('kiwoom_monitor.central_server.diagnostic_workloads.is_paused', side_effect=AssertionError('operating pause')), \
                  patch('kiwoom_monitor.central_server.database_top20_reconciliation.time', side_effect=AssertionError('host timestamp')):
                 result = asyncio.run(execute(target, rows))
             self.assertEqual('complete', result['state'])
@@ -123,7 +126,7 @@ class DisplayCaptureTests(unittest.TestCase):
         source = self.store()
         with captured_rows() as (rows, rejected), \
              patch('kiwoom_monitor.central_server.database_top20_reconciliation._top20_today', return_value=date(2026, 10, 3)), \
-             patch('kiwoom_monitor.central_server.database_top20_reconciliation.is_paused', side_effect=[False, True]):
+             patch('kiwoom_monitor.central_server.diagnostic_workloads.is_paused', side_effect=[False, True]):
             source.load_top20_display_statistics(DAY, '2026-10-02')
         self.assertEqual([], rejected)
         target = self.store()

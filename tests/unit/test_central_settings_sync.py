@@ -166,7 +166,8 @@ class CentralSettingsSyncTests(unittest.TestCase):
         self.assertFalse(is_shared_setting("near_high_sound_fire"))
         self.assertTrue(is_shared_setting("trade_value_1m_alert_eok"))
         self.assertTrue(is_shared_setting("theme_text_import_exclusions"))
-        self.assertTrue(is_shared_setting("theme_active_profile"))
+        self.assertFalse(is_shared_setting("theme_active_profile"))
+        self.assertFalse(is_shared_setting("central_theme_sync_v1"))
         self.assertTrue(is_shared_setting("theme_profiles_initialized"))
 
     def test_only_versioned_shared_settings_are_uploaded(self) -> None:

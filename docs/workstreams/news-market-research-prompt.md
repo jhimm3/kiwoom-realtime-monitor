@@ -1,5 +1,7 @@
 # 00 종합을 기준으로 한 뉴스·시황 연구 입력 프롬프트
 
+> **뉴스 연구 입력의 적용.** 이 프롬프트 결과는 연구 자료다. 발행·가용·본문 판본·확인 상태를 보존하고, 실행 중 새 분석이나 유료 재요청은 사용자 정책을 따른다. [관련 계약](../architecture/r3-ownership.md#news).
+
 2026-10-17. **프롬프트와 자료 형식 준비 단계**다. 기존 1,720일치의 재분석·수집 재개·운영 프롬프트 교체·자동 연구/매매 연결은 수행하지 않았다.
 
 [프롬프트 원문](news-market-research-prompt.txt) · [출력 JSON Schema](news-market-research-output.schema.json) · [합성 출력 예시](../examples/news-market-research-example.json) · [앱이 읽은 분류·수치 행](../examples/news-market-research-feature-rows.json)

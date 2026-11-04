@@ -11,9 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from kiwoom_monitor.domain.time_basis import as_kst
+from kiwoom_monitor.domain.news_ai_contract import decode_news_ai_provenance, decode_news_input_source, select_news_copy_source
+from kiwoom_monitor.infrastructure.persistence.news_ai_repository import _retain_matching_body_projections
 
 from kiwoom_monitor.infrastructure.central_content_client import (
     CentralContentClient,
+    CentralContentHttpError,
+    CentralThemeConflict,
     is_missing_collection_error,
 )
 from kiwoom_monitor.infrastructure.central_sync_utils import (
@@ -47,7 +51,7 @@ class CentralContentSyncResult:
 class CentralContentSyncService:
     """기존 로컬 콘텐츠를 개인 중앙 서버에 비파괴 방식으로 복사한다.
 
-    중앙 서버의 (collection, owner, key) upsert를 사용하므로 앱을 다시 켜도
+    뉴스는 중앙 서버의 (collection, owner, key) upsert를 사용하므로 앱을 다시 켜도
     같은 자료가 늘어나지 않는다. 이 단계에서는 로컬 DB가 계속 원본이며,
     중앙 서버 장애가 로컬 뉴스·테마 사용을 막지 않는다.
     """
@@ -72,13 +76,12 @@ class CentralContentSyncService:
         self._pending_collections = ()
         self._load_push_manifest(news_database_path)
         news = self._read_news(news_database_path, include_catalog=sync_news_catalog)
-        themes = self._read_themes(main_database_path)
         v2_enabled = self._journal_news_links_v2_enabled()
         counts: dict[str, int] = {}
         pending: list[str] = []
         if news["journal_v2_news_links"] and not v2_enabled:
             pending.append("journal_v2_news_links")
-        for collection, documents in {**news, **themes}.items():
+        for collection, documents in news.items():
             if collection == "journal_v2_news_links" and not v2_enabled:
                 continue
             try:
@@ -107,21 +110,59 @@ class CentralContentSyncService:
         )
 
     def replace_themes(self, main_database_path: Path) -> CentralContentSyncResult:
-        """중앙 테마를 현재 로컬 스냅샷과 같게 만든다.
+        """Synchronize one accepted generation; dirty local material is pinned first.
 
-        추가만 하는 upsert와 달리 삭제·이름 변경도 반영된다. 두 컬렉션은
-        중앙 서버에서 각각 한 트랜잭션으로 교체된다.
+        An unbound PC can publish into an empty native stream. Existing remote or
+        legacy material requires an explicit adoption decision and stays untouched.
         """
-        themes = self._read_themes(main_database_path)
-        profiles = self._client.replace("theme_profile", themes["theme_profile"])
-        stocks = self._client.replace("theme_stock", themes["theme_stock"])
-        metadata = self._client.replace("theme_metadata", themes["theme_metadata"])
+        if not main_database_path.is_file():
+            raise ThemeBackupError("테마 동기화 원본 DB가 없습니다.")
+        owner = ThemeBackupService(main_database_path, now_provider=self._client.server_now)
+        scope = self._client.theme_sync_scope
+        state = owner.prepare_theme_publication(server_scope=scope, origin_device=socket.gethostname())
+        prepared = state["prepared"]
+        if prepared is not None:
+            receipt = self._client.publish_theme_snapshot(
+                prepared["document"], publication_id=prepared["publication_id"],
+                expected_snapshot_id=prepared["expected_snapshot_id"],
+                effective_at=prepared["effective_at"], origin_device=prepared["origin_device"],
+            )
+            settled = owner.acknowledge_theme_publication(
+                receipt, publication_id=prepared["publication_id"], server_scope=scope,
+            )
+            snapshot = settled["ack"]["snapshot"]
+            changed = receipt["changed"] or receipt["replayed"]
+            pending = ("theme_generation",) if settled["pending"] else ()
+        else:
+            snapshot = self._client.load_accepted_theme_snapshot()
+            if snapshot is None:
+                raise CentralThemeConflict(409, "remote_stream_missing: 복구 정책 확인이 필요합니다.")
+            previous_id = state["ack"]["snapshot"]["snapshot_id"]
+            if snapshot["snapshot_id"] != previous_id:
+                # Current history has no native-vs-legacy source-kind proof.
+                # Do not turn a remote head or timestamp into an adoption policy.
+                raise CentralThemeConflict(409, "remote_generation_requires_reconciliation")
+            settled = owner.confirm_accepted_theme_snapshot(
+                snapshot, server_scope=scope, expected_snapshot_id=previous_id,
+                expected_revision=state["receive_revision"],
+            )
+            changed = snapshot["snapshot_id"] != previous_id
+            pending = ()
+        profiles = snapshot["document"]["profiles"] if changed else []
         return CentralContentSyncResult(
-            theme_profiles=profiles, theme_stocks=stocks, theme_metadata=metadata,
+            theme_profiles=sum(len(profile.get("themes", [])) for profile in profiles),
+            theme_stocks=sum(len(profile.get("stock_themes", [])) for profile in profiles),
+            theme_metadata=int(changed), pending_collections=pending,
         )
 
     def load_theme_snapshot(self) -> tuple[dict[str, list[dict[str, Any]]], float | None]:
         """현재 중앙 테마 스냅샷과 완료 표식의 서버 저장 시각을 읽는다."""
+        try:
+            return self._client.load_current_theme_snapshot()
+        except CentralContentHttpError as error:
+            if error.status_code != 404:
+                raise
+        # Older deployed servers retain their actual collection read contract.
         collections = {
             name: self._client.load_all(name, page_size=self._batch_size, updated_after=0.0)
             for name in ("theme_profile", "theme_stock", "theme_metadata")
@@ -152,14 +193,14 @@ class CentralContentSyncService:
         self, main_database_path: Path, news_database_path: Path, *,
         sync_news_catalog: bool = True,
     ) -> CentralContentSyncResult:
-        """중앙 자료를 현재 PC의 캐시에 병합한다. 중앙 자료는 삭제하지 않는다."""
+        """뉴스/연결 자료를 병합한다. 테마는 dispatcher의 generation 경로가 소유한다."""
         self._pending_collections = ()
         self._load_pull_cursors(news_database_path)
         v2_enabled = self._journal_news_links_v2_enabled()
         collections: dict[str, list[dict[str, Any]]] = {}
         next_cursors = dict(self._pull_cursors)
         pending: list[str] = []
-        names = ["journal_news_link", "theme_profile", "theme_stock", "theme_metadata"]
+        names = ["journal_news_link"]
         if sync_news_catalog:
             names[0:0] = ["news_article", "news_ai", "news_ai_shared"]
         if v2_enabled:
@@ -197,7 +238,6 @@ class CentralContentSyncService:
         for collection, document, _key, _fingerprint in manifest_changes:
             changed_collections[collection].append(document)
         news_counts = self._write_news(news_database_path, changed_collections)
-        theme_counts = self._write_themes(main_database_path, changed_collections)
         # 두 DB 반영이 모두 끝난 뒤에만 커서를 전진시킨다. 앱을 다시 켜도
         # 1만 건이 넘는 전체 자료 대신 이후 변경분만 받는다.
         cursors_changed = next_cursors != self._pull_cursors
@@ -217,9 +257,9 @@ class CentralContentSyncService:
                 news_counts.get("journal_news_link", 0)
                 + news_counts.get("journal_v2_news_links", 0)
             ),
-            theme_profiles=theme_counts.get("theme_profile", 0),
-            theme_stocks=theme_counts.get("theme_stock", 0),
-            theme_metadata=theme_counts.get("theme_metadata", 0),
+            theme_profiles=0,
+            theme_stocks=0,
+            theme_metadata=0,
             pending_collections=self._pending_collections,
         )
 
@@ -284,7 +324,6 @@ class CentralContentSyncService:
         self._load_push_manifest(news_database_path)
         for collection, documents in {
             **self._read_news(news_database_path, include_catalog=sync_news_catalog),
-            **self._read_themes(main_database_path),
         }.items():
             for document in documents:
                 self._push_manifest[_manifest_key(collection, document)] = _manifest_hash(document, collection=collection)
@@ -344,6 +383,8 @@ class CentralContentSyncService:
             if include_catalog and "stock_news" in tables:
                 for row in connection.execute("SELECT * FROM stock_news"):
                     values = dict(row)
+                    if "input_source_json" in values:
+                        values["input_source_contract"] = "v1"
                     item = _document(
                         str(values.get("stock_code", "")), str(values.get("identity", "")), values,
                     )
@@ -391,45 +432,6 @@ class CentralContentSyncService:
         return result
 
     @staticmethod
-    def _read_themes(path: Path) -> dict[str, list[dict[str, Any]]]:
-        result = {"theme_profile": [], "theme_stock": [], "theme_metadata": []}
-        if not path.is_file():
-            return result
-        connection = sqlite3.connect(path)
-        connection.row_factory = sqlite3.Row
-        try:
-            tables = _table_names(connection)
-            if not {"theme_profiles", "profile_themes"}.issubset(tables):
-                return result
-            query = (
-                "SELECT p.profile_name,t.theme_name,t.default_color "
-                "FROM profile_themes t JOIN theme_profiles p ON p.profile_id=t.profile_id"
-            )
-            for row in connection.execute(query):
-                values = dict(row)
-                owner, key = str(values["profile_name"]), str(values["theme_name"])
-                result["theme_profile"].append(_document(owner, key, values))
-            if "profile_stock_themes" in tables:
-                query = (
-                    "SELECT p.profile_name,s.stock_code,s.theme_name,s.custom_color "
-                    "FROM profile_stock_themes s JOIN theme_profiles p ON p.profile_id=s.profile_id"
-                )
-                for row in connection.execute(query):
-                    values = dict(row)
-                    owner = str(values["profile_name"])
-                    key = f'{values["stock_code"]}|{values["theme_name"]}'
-                    result["theme_stock"].append(_document(owner, key, values))
-        finally:
-            connection.close()
-        if {"settings", "stocks", "stock_aliases", "theme_profiles", "profile_themes"}.issubset(tables):
-            document = ThemeBackupService(path).export_document()
-            metadata = _document("default", "full", document)
-            metadata["effective_at"] = str(document.get("created_at") or "") or None
-            metadata["origin_device"] = socket.gethostname().strip() or "unknown"
-            result["theme_metadata"].append(metadata)
-        return result
-
-    @staticmethod
     def _write_news(path: Path, collections: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
         counts = {
             "news_article": 0, "news_ai": 0, "news_ai_shared": 0,
@@ -438,6 +440,7 @@ class CentralContentSyncService:
         if not path.is_file():
             return counts
         connection = sqlite3.connect(path)
+        connection.row_factory = sqlite3.Row
         try:
             tables = _table_names(connection)
             mappings = {
@@ -446,13 +449,62 @@ class CentralContentSyncService:
                 "news_ai_shared": ("news_ai_shared", ("identity",)),
             }
             with connection:
+                metadata_ready = all(name in tables for name in ("stock_news", "stock_news_ai", "news_ai_shared")) and all(
+                    required <= {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+                    for table, required in (("stock_news", {"input_source_json"}), ("stock_news_ai", {"provenance_json"}),
+                                             ("news_ai_shared", {"provenance_json", "company_impacts"})))
+                current_articles = {}
+                if metadata_ready:
+                    connection.execute("BEGIN IMMEDIATE")
+                    keys = sorted({(str(value["owner"]), str(value["key"])) for value in collections.get("news_article", ())})
+                    if keys:
+                        sql = ("WITH wanted(owner,identity) AS (VALUES " + ",".join("(?,?)" for _ in keys) + ") "
+                               "SELECT n.* FROM stock_news n JOIN wanted w ON w.owner=n.stock_code AND w.identity=n.identity")
+                        current_articles = {(str(row["stock_code"]), str(row["identity"])): dict(row) for row in
+                                            connection.execute(sql, tuple(part for key in keys for part in key)).fetchall()}
                 for collection, (table, conflict) in mappings.items():
                     if table not in tables:
                         continue
-                    for value in collections.get(collection, []):
+                    incoming = collections.get(collection, [])
+                    retained = set()
+                    if metadata_ready and collection in {"news_ai", "news_ai_shared"}:
+                        groups = {}
+                        for index, value in enumerate(incoming):
+                            reference = decode_news_ai_provenance(value.get("document", {}).get("provenance_json"))
+                            owner = str(value["owner"]) if collection == "news_ai" else str(reference.get("target_id") or "")
+                            groups.setdefault((owner, str(value.get("target_name") or "")), []).append(index)
+                        for (owner, name), indices in groups.items():
+                            own, shared = _retain_matching_body_projections(connection, owner,
+                                tuple(str(incoming[index]["key"]) for index in indices),
+                                tuple(decode_news_ai_provenance(incoming[index].get("document", {}).get("provenance_json")) for index in indices), name)
+                            retained.update(indices[index] for index in (own if collection == "news_ai" else shared))
+                    for index, value in enumerate(incoming):
+                        if index in retained:
+                            continue
                         document = value.get("document")
-                        if isinstance(document, dict) and _upsert_row(connection, table, conflict, document):
-                            counts[collection] += 1
+                        if isinstance(document, dict):
+                            if collection == "news_article":
+                                source = decode_news_input_source(document.get("input_source_json"))
+                                if metadata_ready:
+                                    prior = current_articles.get((str(value["owner"]), str(value["key"])))
+                                    source, replace_article = select_news_copy_source(
+                                        prior.get("input_source_json") if prior else None, source, value.get("native_source_cut"))
+                                    if not replace_article and prior is not None:
+                                        document = prior
+                                document = {**document, "input_source_json": (
+                                    json.dumps(source, ensure_ascii=False, separators=(",", ":"))
+                                    if source is not None else None
+                                )}
+                            if collection in {"news_ai", "news_ai_shared"}:
+                                document = {**document, "provenance_json": json.dumps(
+                                    decode_news_ai_provenance(document.get("provenance_json")),
+                                    ensure_ascii=False, separators=(",", ":"),
+                                )}
+                                for name in ("theme_candidates", "company_impacts", "positive_evidence", "negative_evidence"):
+                                    if isinstance(document.get(name), (list, dict)):
+                                        document[name] = json.dumps(document[name], ensure_ascii=False, separators=(",", ":"))
+                            if _upsert_row(connection, table, conflict, document):
+                                counts[collection] += 1
                 if "journal_news_links" in tables:
                     columns = {
                         str(row[1]) for row in connection.execute(
@@ -484,74 +536,15 @@ class CentralContentSyncService:
     @staticmethod
     def _write_themes(path: Path, collections: dict[str, list[dict[str, Any]]], *,
                       expected_revision: str | None = None) -> dict[str, int]:
-        counts = {"theme_profile": 0, "theme_stock": 0, "theme_metadata": 0}
-        if not path.is_file():
-            return counts
-        if expected_revision is not None:
-            metadata = collections.get("theme_metadata", [])
-            document = metadata[-1].get("document") if metadata else None
-            if not isinstance(document, dict):
-                raise ValueError("원격 테마 전체 스냅샷이 없어 로컬 테마를 교체할 수 없습니다.")
-            ThemeBackupService(path).import_document(
-                document, expected_revision=expected_revision,
-            )
-            return {"theme_profile": len(collections["theme_profile"]),
-                    "theme_stock": len(collections["theme_stock"]), "theme_metadata": 1}
-        connection = sqlite3.connect(path)
-        try:
-            if not {"theme_profiles", "profile_themes", "profile_stock_themes"}.issubset(_table_names(connection)):
-                return counts
-            with connection:
-                for value in collections["theme_profile"]:
-                    document = value.get("document")
-                    if not isinstance(document, dict):
-                        continue
-                    profile = str(document.get("profile_name") or value.get("owner") or "").strip()
-                    theme = str(document.get("theme_name") or value.get("key") or "").strip()
-                    if not profile or not theme:
-                        continue
-                    connection.execute("INSERT OR IGNORE INTO theme_profiles(profile_name) VALUES(?)", (profile,))
-                    profile_id = connection.execute(
-                        "SELECT profile_id FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (profile,),
-                    ).fetchone()[0]
-                    connection.execute(
-                        "INSERT INTO profile_themes(profile_id,theme_name,default_color) VALUES(?,?,?) "
-                        "ON CONFLICT(profile_id,theme_name) DO UPDATE SET default_color=excluded.default_color",
-                        (profile_id, theme, str(document.get("default_color") or "#DCE6F1")),
-                    )
-                    counts["theme_profile"] += 1
-                for value in collections["theme_stock"]:
-                    document = value.get("document")
-                    if not isinstance(document, dict):
-                        continue
-                    profile = str(document.get("profile_name") or value.get("owner") or "").strip()
-                    code, theme = str(document.get("stock_code") or ""), str(document.get("theme_name") or "").strip()
-                    row = connection.execute(
-                        "SELECT profile_id FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (profile,),
-                    ).fetchone()
-                    if row is None or not code or not theme:
-                        continue
-                    connection.execute(
-                        "INSERT OR IGNORE INTO profile_themes(profile_id,theme_name) VALUES(?,?)", (row[0], theme),
-                    )
-                    connection.execute(
-                        "INSERT INTO profile_stock_themes(profile_id,stock_code,theme_name,custom_color) VALUES(?,?,?,?) "
-                        "ON CONFLICT(profile_id,stock_code,theme_name) DO UPDATE SET custom_color=excluded.custom_color",
-                        (row[0], code, theme, document.get("custom_color")),
-                    )
-                    counts["theme_stock"] += 1
-        finally:
-            connection.close()
+        if not path.is_file() or expected_revision is None:
+            raise ThemeBackupError("로컬 revision 없는 테마 교체는 허용하지 않습니다.")
         metadata = collections.get("theme_metadata", [])
-        if metadata:
-            document = metadata[-1].get("document")
-            if isinstance(document, dict):
-                try:
-                    ThemeBackupService(path).import_document(document)
-                    counts["theme_metadata"] = 1
-                except ThemeBackupError:
-                    pass
-        return counts
+        document = metadata[-1].get("document") if metadata else None
+        if not isinstance(document, dict):
+            raise ThemeBackupError("원격 테마 전체 스냅샷이 없습니다.")
+        ThemeBackupService(path).import_document(document, expected_revision=expected_revision)
+        return {"theme_profile": len(collections.get("theme_profile", [])),
+                "theme_stock": len(collections.get("theme_stock", [])), "theme_metadata": 1}
 
 
 def _table_names(connection: sqlite3.Connection) -> set[str]:
@@ -676,6 +669,23 @@ def _manifest_key(collection: str, envelope: dict[str, Any]) -> str:
 
 def _manifest_hash(envelope: dict[str, Any], *, collection: str) -> str:
     document = envelope.get("document")
+    if (collection in {"news_ai", "news_ai_shared"} and isinstance(document, dict)
+            and "provenance_json" in document):
+        provenance = document["provenance_json"]
+        if isinstance(provenance, str):
+            try:
+                provenance = json.loads(provenance)
+            except ValueError:
+                pass
+        if provenance in (
+            None,
+            {"status": "UNKNOWN"},
+            {"status": "UNKNOWN", "origin": "reported_copy", "reported_origin": "UNKNOWN",
+             "reported_status": "UNKNOWN"},
+        ):
+            # The server labels an unlinked AI copy without adding source evidence.
+            # A legacy local table may have no column for that label.
+            document = {key: value for key, value in document.items() if key != "provenance_json"}
     if (collection == "theme_metadata" and isinstance(document, dict)
             and document.get("format") == ThemeBackupService.FORMAT
             and document.get("version") == ThemeBackupService.VERSION

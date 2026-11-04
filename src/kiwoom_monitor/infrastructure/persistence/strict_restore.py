@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .news_ai_backup import NewsAIBackupService
 from .settings_backup import SettingsBackupService
@@ -189,8 +189,12 @@ def _sqlite_backup(source_path: Path, destination_path: Path) -> None:
 class StrictRestoreCoordinator:
     _INPUT_NAMES = {"settings": "settings.json", "themes": "themes.json", "news_ai": "news_ai.json"}
     _ACTIVE_STATES = {"STAGED", "PREPARED", "APPLYING", "ROLLING_BACK"}
+    _PROVENANCE_FORMAT = "google-drive-v2-manifest/v1"
 
-    def __init__(self, monitor_database: Path, news_database: Path) -> None:
+    def __init__(
+        self, monitor_database: Path, news_database: Path, *,
+        expected_backup_set: str | None = None,
+    ) -> None:
         self.monitor_database = monitor_database.resolve()
         self.news_database = news_database.resolve()
         self.data_dir = self.monitor_database.parent
@@ -198,10 +202,12 @@ class StrictRestoreCoordinator:
             raise StrictRestoreError("설정과 뉴스 DB가 같은 앱 데이터 폴더에 있어야 합니다.")
         self.root = self.data_dir / "strict_restore"
         self.pointer = self.root / "current.json"
+        self.expected_backup_set = expected_backup_set
 
     def stage(
         self, *, settings: Path | None, themes: Path | None,
         news_ai: Path | None, excluded_setting_keys: frozenset[str],
+        provenance: dict[str, Any] | None = None,
     ) -> str:
         """Freeze validated downloaded inputs without changing operating data."""
         with AppDataLease(
@@ -210,11 +216,13 @@ class StrictRestoreCoordinator:
             return self._stage_locked(
                 settings=settings, themes=themes, news_ai=news_ai,
                 excluded_setting_keys=excluded_setting_keys,
+                provenance=provenance,
             )
 
     def _stage_locked(
         self, *, settings: Path | None, themes: Path | None,
         news_ai: Path | None, excluded_setting_keys: frozenset[str],
+        provenance: dict[str, Any] | None = None,
     ) -> str:
         existing = self._read_pointer()
         if existing is not None and existing["state"] in self._ACTIVE_STATES:
@@ -246,26 +254,100 @@ class StrictRestoreCoordinator:
                 "excluded_setting_keys": sorted(excluded_setting_keys),
                 "before": None,
             }
+            if provenance is not None:
+                # Freeze the parsed source unchanged. This checksum covers its
+                # canonical JSON representation, not the original remote bytes.
+                frozen = json.loads(json.dumps(provenance, ensure_ascii=False))
+                frozen["manifest_canonical_sha256"] = self._manifest_digest(frozen.get("manifest"))
+                manifest["provenance"] = frozen
+            self._validate_provenance(manifest)
             _atomic_document(self.pointer, manifest)
         except BaseException:
             shutil.rmtree(operation_dir, ignore_errors=True)
             raise
         return operation_id
 
-    def enter_main(self, *, timeout: float = 30.0) -> tuple[AppDataLease, RestoreOutcome | None]:
-        """Finish or undo a pending restore before normal database initialization."""
-        pointer = self._read_pointer()
-        if pointer is None or pointer["state"] not in self._ACTIVE_STATES:
-            lease = AppDataLease(self.data_dir, exclusive=False, timeout=timeout)
-            # A request could have been published while acquiring the shared lock.
-            current = self._read_pointer()
-            if current is None or current["state"] not in self._ACTIVE_STATES:
-                return lease, None
-            lease.close()
-        with AppDataLease(self.data_dir, exclusive=True, timeout=timeout):
+    def enter_main(
+        self, *, timeout: float = 30.0,
+        startup_preparation: Callable[[], Callable[[], None] | None] | None = None,
+        allow_restore: bool = True,
+        restore_target_check: Callable[[], None] | None = None,
+    ) -> tuple[AppDataLease, RestoreOutcome | None]:
+        """Recover first; prepare only a root without any explicit restore ledger.
+
+        The optional probe is read-only and returns a preparation action only
+        while work remains. Probe under shared ownership and recheck under the
+        existing exclusive root lock, so concurrent main entries do not retain
+        a stale copy plan after another entry has finished preparing.
+        Validate an optional target only before a new apply under that lock;
+        interrupted rollback and terminal restarts do not invoke that check.
+        """
+        if startup_preparation is None:
             pointer = self._read_pointer()
-            outcome = self._complete_pending(pointer) if pointer is not None else None
-        return AppDataLease(self.data_dir, exclusive=False, timeout=timeout), outcome
+            if pointer is None or pointer["state"] not in self._ACTIVE_STATES:
+                lease = AppDataLease(self.data_dir, exclusive=False, timeout=timeout)
+                # A request could have been published while acquiring the shared lock.
+                try:
+                    current = self._read_pointer()
+                except BaseException:
+                    lease.close()
+                    raise
+                if current is None or current["state"] not in self._ACTIVE_STATES:
+                    return lease, None
+                lease.close()
+            with AppDataLease(self.data_dir, exclusive=True, timeout=timeout):
+                pointer = self._read_pointer()
+                if not allow_restore and pointer is not None and pointer["state"] in self._ACTIVE_STATES:
+                    raise StrictRestoreError("조회 역할 폴더에 대기 중인 전체 앱 복원 자료가 있습니다. 원자료를 보존합니다.")
+                outcome = self._complete_pending(
+                    pointer, restore_target_check=restore_target_check,
+                ) if pointer is not None else None
+            return AppDataLease(self.data_dir, exclusive=False, timeout=timeout), outcome
+
+        deadline = time.monotonic() + timeout
+        restore_authority_seen = False
+        while True:
+            pointer = self._read_pointer()
+            restore_authority_seen |= pointer is not None
+            lease = AppDataLease(self.data_dir, exclusive=False,
+                                 timeout=max(0.0, deadline - time.monotonic()))
+            try:
+                # A request could have been published while acquiring the lock.
+                current = self._read_pointer()
+                restore_authority_seen |= current is not None
+                pending = current is not None and current["state"] in self._ACTIVE_STATES
+                preparation = (startup_preparation()
+                               if not restore_authority_seen and startup_preparation is not None else None)
+                if not pending and preparation is None:
+                    return lease, None
+            except BaseException:
+                lease.close()
+                raise
+            lease.close()
+            try:
+                exclusive = AppDataLease(self.data_dir, exclusive=True, timeout=0.0)
+            except StrictRestoreError:
+                # Another main can finish its copy then retain a shared lifetime
+                # lease. Retry the read-only probe instead of waiting on a stale
+                # exclusive plan for that other app's entire lifetime.
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+                continue
+            with exclusive:
+                pointer = self._read_pointer()
+                restore_authority_seen |= pointer is not None
+                if not allow_restore and pointer is not None and pointer["state"] in self._ACTIVE_STATES:
+                    raise StrictRestoreError("조회 역할 폴더에 대기 중인 전체 앱 복원 자료가 있습니다. 원자료를 보존합니다.")
+                outcome = self._complete_pending(
+                    pointer, restore_target_check=restore_target_check,
+                ) if pointer is not None else None
+                if not restore_authority_seen and startup_preparation is not None:
+                    preparation = startup_preparation()
+                    if preparation is not None:
+                        preparation()
+            return AppDataLease(self.data_dir, exclusive=False,
+                                timeout=max(0.0, deadline - time.monotonic())), outcome
 
     def enter_child(self, *, timeout: float = 30.0) -> AppDataLease:
         lease = AppDataLease(self.data_dir, exclusive=False, timeout=timeout)
@@ -299,7 +381,52 @@ class StrictRestoreCoordinator:
         excluded = document.get("excluded_setting_keys")
         if not isinstance(excluded, list) or any(not isinstance(key, str) for key in excluded):
             raise StrictRestoreError("복원 설정 제외 목록이 손상됐습니다.")
+        self._validate_provenance(document)
         return document
+
+    @staticmethod
+    def _manifest_digest(manifest: Any) -> str:
+        canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _validate_provenance(self, document: dict[str, Any]) -> None:
+        provenance = document.get("provenance")
+        if provenance is None and self.expected_backup_set is None:
+            return  # Old/default roots retain their existing ledger contract.
+        if not isinstance(provenance, dict) or provenance.get("format") != self._PROVENANCE_FORMAT:
+            raise StrictRestoreError("복원 자료의 Google Drive 출처를 확인할 수 없습니다.")
+        source = provenance.get("manifest")
+        if (
+            not isinstance(source, dict)
+            or source.get("format") != "kiwoom-monitor-drive-bundle"
+            or source.get("version") != 2
+            or not isinstance(source.get("generation"), str)
+            or not isinstance(source.get("components"), dict)
+            or provenance.get("manifest_canonical_sha256") != self._manifest_digest(source)
+        ):
+            raise StrictRestoreError("복원 자료의 Google Drive manifest 출처가 손상됐습니다.")
+        if self.expected_backup_set is not None and source.get("backup_set") != self.expected_backup_set:
+            raise StrictRestoreError("복원 자료의 Google Drive 백업 묶음이 현재 구조와 다릅니다.")
+        components = source["components"]
+        for role, info in components.items():
+            if (
+                role not in self._INPUT_NAMES or not isinstance(info, dict)
+                or not isinstance(info.get("file_id"), str)
+                or not isinstance(info.get("name"), str)
+                or not isinstance(info.get("sha256"), str) or len(info["sha256"]) != 64
+                or type(info.get("size")) is not int or info["size"] < 0
+            ):
+                raise StrictRestoreError("복원 자료의 Google Drive 구성요소 출처가 손상됐습니다.")
+        for role, info in document["inputs"].items():
+            source_info = components.get(role)
+            if (
+                not isinstance(info, dict) or not isinstance(source_info, dict)
+                or type(info.get("size")) is not int
+                or not isinstance(info.get("sha256"), str)
+                or info.get("size") != source_info["size"]
+                or info.get("sha256") != source_info["sha256"]
+            ):
+                raise StrictRestoreError("복원 입력과 Google Drive manifest의 지문이 다릅니다.")
 
     def _input_path(self, manifest: dict[str, Any], role: str) -> Path | None:
         info = manifest["inputs"].get(role)
@@ -312,7 +439,10 @@ class StrictRestoreCoordinator:
             raise StrictRestoreError("복원 입력 파일이 손상됐습니다.")
         return path
 
-    def _complete_pending(self, manifest: dict[str, Any]) -> RestoreOutcome | None:
+    def _complete_pending(
+        self, manifest: dict[str, Any], *,
+        restore_target_check: Callable[[], None] | None = None,
+    ) -> RestoreOutcome | None:
         state = manifest["state"]
         if state in {"COMMITTED", "ROLLED_BACK"}:
             return None
@@ -322,6 +452,8 @@ class StrictRestoreCoordinator:
         settings = self._input_path(manifest, "settings")
         themes = self._input_path(manifest, "themes")
         news_ai = self._input_path(manifest, "news_ai")
+        if restore_target_check is not None:
+            restore_target_check()
         required = self.monitor_database.stat().st_size if self.monitor_database.is_file() else 0
         if news_ai is not None and self.news_database.is_file():
             required += self.news_database.stat().st_size
@@ -405,7 +537,7 @@ class StrictRestoreCoordinator:
         if len(relative.parts) < 2:
             raise StrictRestoreError("복원 자산 경로가 허용 범위를 벗어났습니다.")
         stored = (Path("data") / relative).as_posix()
-        resolved = SettingsBackupService._resolve_asset_path(self.data_dir.parent, stored)
+        resolved = SettingsBackupService._resolve_asset_path(self.data_dir, stored)
         if resolved is None or resolved[0] != path.resolve():
             raise StrictRestoreError("복원 자산 경로가 허용 범위를 벗어났습니다.")
         return relative

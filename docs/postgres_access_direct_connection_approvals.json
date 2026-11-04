@@ -235,12 +235,12 @@
       "reason": "Classification requires review."
     },
     {
-      "file": "scripts/nas_workload_diagnostic.py",
-      "owner": "_measure",
+      "file": "src/kiwoom_monitor/central_server/diagnostic_sampling.py",
+      "owner": "measure",
       "call": "psycopg.connect",
       "count": 1,
       "category": "diagnostic_tool",
-      "reason": "Classification requires review."
+      "reason": "2026-10-29 static relocation review: existing nas_workload_diagnostic._measure delegates to diagnostic_sampling.measure. The sampling body owns one bounded-timeout read-only statistics connection/cursor, checks the same diagnostic session and cancellation, and returns aborted on probe errors; it does not own domain writes or reset statistics."
     },
     {
       "file": "scripts/probe_postgres_access_commit_waits.py",
@@ -441,6 +441,142 @@
       "count": 1,
       "category": "test_integration",
       "reason": "Read-only repeatable-read seed export connection after setUp verifies the explicit diagnostic database and creates a random fixture schema. Uses only that schema, closes through its context manager, and verifies preservation of historical market rows and their live parent without accessing the operating database."
+    },
+    {
+      "file": "scripts/export_preserved_rank_history.py",
+      "owner": "_source",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "offline_maintenance",
+      "reason": "2026-10-29 static review: explicit rank-preservation source; forces read-only repeatable-read and KST, reads only fixed source metadata and ranking/membership relations, rolls back in finally, and closes the fresh handle through owned_connection_scope. Operational source selection/authorization is separate."
+    },
+    {
+      "file": "scripts/import_preserved_rank_history.py",
+      "owner": "_target_connection",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "offline_maintenance",
+      "reason": "2026-10-29 static review: explicit offline rank target uses a normalized UUID schema and immutable descriptor/plan, with new-schema creation or exact owned resume only. Existing native command uses UUID advisory/transaction locks, original IDs/sequences and first receipt; fresh handle closes through owned_connection_scope before ACK-loss readback. No runtime admission is granted."
+    },
+    {
+      "file": "tests/integration/test_ai_request_authority_postgres.py",
+      "owner": "AIRequestAuthorityPostgresTests._make_store",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: AI-request authority fixture validates explicit diagnostic URL and connected current_database before creating only its UUID schema. Setup connection exits natively; paired addCleanup drops that exact schema. No operational fallback or runtime authority is introduced."
+    },
+    {
+      "file": "tests/integration/test_ai_request_authority_postgres.py",
+      "owner": "AIRequestAuthorityPostgresTests._make_store.drop_schema",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: paired AI-request authority cleanup uses the already verified diagnostic target and only its captured UUID schema; native context closes on success/failure and to_regnamespace verifies absence."
+    },
+    {
+      "file": "tests/integration/test_ai_request_authority_postgres.py",
+      "owner": "AIRequestAuthorityPostgresTests.test_pg_overlapping_old_body_writer_waits_for_matching_commit_and_reads_fresh_current",
+      "call": "psycopg.connect",
+      "count": 2,
+      "category": "test_integration",
+      "reason": "2026-11-04 static review: probe and control sessions use the verified diagnostic database and fixture UUID-schema DSN. The probe maps the native BODY advisory lock tag. The independent control transaction holds and releases the gate for overlapping writers. The probe rolls back, the control commits or rolls back, and both handles close by context."
+    },
+    {
+      "file": "tests/integration/test_ai_request_authority_postgres.py",
+      "owner": "AIRequestAuthorityPostgresTests.test_pg_reversed_multi_key_writers_acquire_sorted_advisory_keys_before_projection",
+      "call": "psycopg.connect",
+      "count": 2,
+      "category": "test_integration",
+      "reason": "2026-11-04 static review: probe and control sessions use the verified diagnostic database and fixture UUID-schema DSN. The probe maps the advisory tag and the independent control transaction holds the z key while the two writers acquire keys in sorted order. The probe rolls back, the control commits or rolls back, and both handles close by context."
+    },
+    {
+      "file": "tests/integration/test_postgres_access_postgres.py",
+      "owner": "HistoricalSourceClockPostgresTests._make_store",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: historical-source clock fixture validates explicit diagnostic URL and connected current_database before creating only its UUID schema. Setup connection exits natively; paired addCleanup drops that exact schema. No operational fallback or runtime authority is introduced."
+    },
+    {
+      "file": "tests/integration/test_postgres_access_postgres.py",
+      "owner": "HistoricalSourceClockPostgresTests._make_store.cleanup",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: paired historical-source clock cleanup uses the already verified diagnostic target and only its captured UUID schema; native context closes on success/failure and to_regnamespace verifies absence."
+    },
+    {
+      "file": "tests/integration/test_postgres_access_postgres.py",
+      "owner": "NewsBodyProcessorPostgresTests.make_store",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: news BODY processor fixture validates explicit diagnostic URL and connected current_database before creating only its UUID schema. Setup connection exits natively; paired addCleanup drops that exact schema. No operational fallback or runtime authority is introduced."
+    },
+    {
+      "file": "tests/integration/test_postgres_access_postgres.py",
+      "owner": "NewsBodyProcessorPostgresTests.make_store.cleanup",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: paired news BODY processor cleanup uses the already verified diagnostic target and only its captured UUID schema; native context closes on success/failure and to_regnamespace verifies absence."
+    },
+    {
+      "file": "tests/integration/test_postgres_access_postgres.py",
+      "owner": "NewsJobResultPostgresTests._make_store",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: news-job-result fixture validates explicit diagnostic URL and connected current_database before creating only its UUID schema. Setup connection exits natively; paired addCleanup drops that exact schema. No operational fallback or runtime authority is introduced."
+    },
+    {
+      "file": "tests/integration/test_postgres_access_postgres.py",
+      "owner": "NewsJobResultPostgresTests._make_store.drop_schema",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: paired news-job-result cleanup uses the already verified diagnostic target and only its captured UUID schema; native context closes on success/failure and to_regnamespace verifies absence."
+    },
+    {
+      "file": "tests/integration/test_reported_research_result_postgres.py",
+      "owner": "PostgresReportedResearchResultTests.test_read_committed_parallel_noop_and_conflicting_winner",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: native-concurrency observer reads only pg_stat_activity for this test loser PID on the fixture-verified diagnostic database. Autocommit connection closes in its context; owned schema cleanup remains with isolated_observation_schema."
+    },
+    {
+      "file": "tests/integration/test_reported_research_result_postgres.py",
+      "owner": "PostgresReportedResearchResultTests.test_read_committed_parallel_noop_and_conflicting_winner.loser_connect",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: loser factory uses only the owned diagnostic UUID-schema DSN and returns its fresh handle to the unchanged native accept_research_result transaction/owned_connection_scope. Instrumentation observes actual READ COMMITTED blocking without replacing native lock, commit or receipt semantics."
+    },
+    {
+      "file": "tests/integration/test_theme_generation_postgres.py",
+      "owner": "PostgresThemeGenerationTests._assert_generic_lock_order.connect",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: lock-order fixture factory connects only to its captured diagnostic UUID schema and returns a fresh instrumented handle to existing native theme/generic-write transaction owners. It preserves real lock/commit ordering and paired UUID teardown rather than substituting a fake writer."
+    },
+    {
+      "file": "tests/integration/test_theme_generation_postgres.py",
+      "owner": "PostgresThemeGenerationTests.drop_schema",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: theme addCleanup drops only the captured fixture UUID schema on its verified diagnostic target; native autocommit context owns connection close and errors propagate. No database-wide cleanup or reset is approved."
+    },
+    {
+      "file": "tests/integration/test_theme_generation_postgres.py",
+      "owner": "PostgresThemeGenerationTests.setUp",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "2026-10-29 static review: theme fixture requires explicit diagnostic URL and connected database identity, creates one generated ar05_theme UUID schema, and scopes normal stores to it. Setup administration connection is context-owned and cleanup drops only that schema."
     }
   ]
 }

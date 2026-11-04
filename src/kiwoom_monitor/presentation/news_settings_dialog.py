@@ -443,7 +443,7 @@ class NaverNewsSettingsDialog(QDialog):
         self._plan_run("select", str(self._plan_account.currentData() or ""))
 
     def _plan_run(self, action: str, account_id: str = "") -> None:
-        if self._plan_worker is not None:
+        if self._closed or self._plan_worker is not None:
             return
         self._plan_cancel = Event()
         cancel, auth = self._plan_cancel, self._plan_auth
@@ -487,7 +487,7 @@ class NaverNewsSettingsDialog(QDialog):
             return {"status": status, "models": models, "message": message,
                     "first": first and active.get("permitted", False), "revoked": revoked}
 
-        worker = SettingsRequestWorker(task)
+        worker = SettingsRequestWorker(task, self)
         self._plan_worker = worker
         for widget in (self._plan_account, self._plan_connect, self._plan_add, self._plan_disconnect, self._plan_refresh):
             widget.setEnabled(False)
@@ -606,11 +606,11 @@ class NaverNewsSettingsDialog(QDialog):
         self._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(enabled)
 
     def _load_operational_settings(self) -> None:
-        if self._operations_worker is not None or self._operational_client is None:
+        if self._closed or self._operations_worker is not None or self._operational_client is None:
             return
         self._set_operational_controls_enabled(False)
         self._operations_status.setText("NAS 운영 설정을 불러오는 중…")
-        worker = SettingsRequestWorker(self._operational_client.load)
+        worker = SettingsRequestWorker(self._operational_client.load, self)
         self._operations_worker = worker
         worker.succeeded.connect(self._operational_settings_loaded)
         worker.failed.connect(self._operational_settings_failed)
@@ -664,7 +664,7 @@ class NaverNewsSettingsDialog(QDialog):
             self.accept()
 
     def _save(self) -> None:
-        if self._operations_worker is not None or self._plan_worker is not None:
+        if self._closed or self._operations_worker is not None or self._plan_worker is not None:
             return
         credentials = self._config.load()
         news_filter = self._config.load_filter()
@@ -802,7 +802,7 @@ class NaverNewsSettingsDialog(QDialog):
             self._set_operational_controls_enabled(False)
             self._content.setEnabled(False)
             self._operations_status.setText("NAS 운영 설정을 저장하는 중…")
-            worker = SettingsRequestWorker(save)
+            worker = SettingsRequestWorker(save, self)
             self._operations_worker = worker
             worker.succeeded.connect(self._operational_settings_saved)
             worker.failed.connect(self._operational_settings_failed)
@@ -813,9 +813,27 @@ class NaverNewsSettingsDialog(QDialog):
                                 "PC 설정만 저장했습니다. NAS 설정은 다시 불러온 뒤 저장하세요.")
         self.accept()
 
+    def shutdown(self) -> None:
+        """Keep accepted settings writes/auth work owned until the native job exits."""
+        self._closed = True
+        errors: list[BaseException] = []
+        try:
+            self._plan_cancel.set()
+        except BaseException as error:
+            errors.append(error)
+        for worker in self.findChildren(SettingsRequestWorker, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            try:
+                worker.wait()
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            failure = errors[0]
+            for error in errors[1:]:
+                failure.add_note(f"NEWS_SETTINGS_CLEANUP_FAILED:{type(error).__name__}:{error}")
+            raise failure
+
     def done(self, result: int) -> None:
         """저장·취소·X 버튼 어떤 방식으로 닫더라도 마지막 크기를 기억한다."""
+        self.shutdown()
         self._window_settings.setValue("geometry", self.saveGeometry())
-        self._closed = True
-        self._plan_cancel.set()
         super().done(result)

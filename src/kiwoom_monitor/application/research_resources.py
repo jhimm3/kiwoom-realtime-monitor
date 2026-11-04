@@ -80,6 +80,10 @@ class ResearchResourceGuard:
         if used > self.limits.memory_mb * 1024 * 1024:
             raise ResearchResourceBlocked('memory_rss_limit_exceeded')
 
+    def checkpoint_due(self) -> bool:
+        """Check the existing batch cadence without resource or caller IO."""
+        return self.monotonic() - self._batch_started >= self.limits.batch_seconds
+
     def checkpoint(self):
         self.check()
         now = self.monotonic()

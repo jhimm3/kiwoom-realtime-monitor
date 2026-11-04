@@ -1,6 +1,6 @@
 # 기능 보존 검증의 현재 판정
 
-정리 기준: **2026-10-11**. 현재 소스 SHA·실제 배포 release·검증 결과의 공통 정본은 [CURRENT_STATUS 상단 표](CURRENT_STATUS.md#current-summary)다. 아래 판정은 이 계획의 완료 범위와 다음 검증만 다룬다.
+정리 기준 **2026-10-11**. 아래는 당시 기능 보존 계획과 검증 범위다. 현재 AR 검증·전환은 [정본 0절](architecture/app-target-20261023.md#0-현재-기준과-진행-현황), 당시 제품의 검증은 [상태 찾아보기](CURRENT_STATUS.md)를 참조한다.
 
 | 범위 | 현재 판정과 남은 검증 |
 |---|---|
@@ -84,4 +84,4 @@ Windows에서 timeout과 중단 때 worker가 만든 자식과 손자 프로세�
 
 - [2026-10-11까지의 분리·보존 계약과 실행 기록](archive/2026-10-11/history/DEPENDENCY_REFACTOR_VERIFICATION_PLAN_through_20261011.md).
 - [현재 CI 계약과 최종 감사](TEST_FINAL_QUALITY_AUDIT.md).
-- [현재 완료 판정](CURRENT_STATUS.md#current-summary) · [실제 잔여](OPEN_ITEMS.md).
+- [현재 완료 판정](archive/2026-11-05/product-and-r3-status.md#current-summary) · [실제 잔여](OPEN_ITEMS.md).

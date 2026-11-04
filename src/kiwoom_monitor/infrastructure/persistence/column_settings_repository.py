@@ -12,15 +12,38 @@ class ColumnSetting:
     width: int
 
 class ColumnSettingsRepository:
-    def __init__(self, database_path: Path, *, now_provider=None) -> None:
+    def __init__(
+        self, database_path: Path, *, now_provider=None,
+        column_names: tuple[str, ...] | None = None, strict_values: bool = False,
+    ) -> None:
         self._database_path = database_path
-        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
+        self.set_now_provider(now_provider or kst_now)
+        self._column_names = column_names
+        self._strict_values = strict_values
+
+    def set_now_provider(self, now_provider) -> None:
+        self._now = lambda: as_kst(now_provider())
+
     def list(self) -> tuple[ColumnSetting, ...]:
         con = sqlite3.connect(self._database_path)
         try:
-            rows = con.execute("SELECT column_name, visible, position, width FROM column_settings ORDER BY position").fetchall()
+            statement = "SELECT column_name, visible, position, width FROM column_settings"
+            parameters = ()
+            if self._column_names is not None:
+                statement += " WHERE column_name IN (" + ",".join("?" for _ in self._column_names) + ")"
+                parameters = self._column_names
+            rows = con.execute(statement + " ORDER BY position", parameters).fetchall()
         finally:
             con.close()
+        if self._strict_values:
+            missing = set(self._column_names or ()) - {row[0] for row in rows}
+            if missing:
+                raise ValueError("조회 열 설정 자료가 없습니다: " + ", ".join(sorted(missing)))
+            for name, visible, position, width in rows:
+                if (type(name) is not str or type(visible) is not int or visible not in (0, 1)
+                        or type(position) is not int or type(width) is not int
+                        or position < 0 or width < 0):
+                    raise ValueError(f"조회 열 설정 '{name}'의 원자료를 적용할 수 없습니다.")
         return tuple(ColumnSetting(str(n), bool(v), int(p), int(w)) for n,v,p,w in rows)
     def save(self, settings: tuple[ColumnSetting, ...]) -> None:
         con = sqlite3.connect(self._database_path)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from .diagnostic_workloads import is_paused
 from .market_observations import KST, as_kst
 
 import asyncio
@@ -44,8 +43,10 @@ class YahooDelayedMarketCollector:
         auto_roll_enabled: bool = True, roll_confirmations: int = 2,
         opener: Callable[..., Any] = urlopen,
         now_provider: Callable[[], datetime] | None = None,
+        workload_paused: Callable[[str], bool] | None = None,
     ) -> None:
         self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
+        self._workload_paused = workload_paused or (lambda _workload: False)
         self._store = store
         self._symbols = dict(symbols)
         self._poll_seconds = max(60, int(poll_seconds))
@@ -273,7 +274,7 @@ class YahooDelayedMarketCollector:
 
     async def _run(self) -> None:
         while True:
-            if not is_paused("external_market"):
+            if not self._workload_paused("external_market"):
                 today = self._now().date().isoformat()
                 include_daily = self._last_daily_date != today
                 try:

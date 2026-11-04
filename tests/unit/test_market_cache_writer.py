@@ -312,7 +312,7 @@ class MarketCacheWriterTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute("INSERT INTO stocks(code,name) VALUES (?,?)", ("005930", "삼성전자"))
                 connection.commit()
-            writer = MarketCacheWriter(path)
+            writer = MarketCacheWriter(path, now_provider=lambda: datetime(2031, 1, 1, 15, 5, tzinfo=timezone.utc))
             writer.start()
             with closing(sqlite3.connect(path)) as blocker:
                 blocker.execute("BEGIN IMMEDIATE")
@@ -323,10 +323,10 @@ class MarketCacheWriterTests(unittest.TestCase):
             self.assertTrue(writer.stop_and_drain())
             with closing(sqlite3.connect(path)) as connection:
                 row = connection.execute(
-                    "SELECT market_cap,float_ratio,float_shares,upper_limit_price "
+                    "SELECT market_cap,float_ratio,float_shares,upper_limit_price,updated_at,fundamentals_updated_at "
                     "FROM stocks WHERE code='005930'"
                 ).fetchone()
-            self.assertEqual((420000.0, 75.0, 100000, 71000), row)
+            self.assertEqual((420000.0, 75.0, 100000, 71000, "2031-01-02T00:05:00+09:00", "2031-01-02T00:05:00+09:00"), row)
 
     def test_daily_high_enqueue_does_not_wait_for_sqlite_writer_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -335,7 +335,7 @@ class MarketCacheWriterTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute("INSERT INTO stocks(code,name) VALUES (?,?)", ("005930", "삼성전자"))
                 connection.commit()
-            writer = MarketCacheWriter(path)
+            writer = MarketCacheWriter(path, now_provider=lambda: datetime(2031, 1, 1, 15, 5, tzinfo=timezone.utc))
             writer.start()
             with closing(sqlite3.connect(path)) as blocker:
                 blocker.execute("BEGIN IMMEDIATE")
@@ -348,8 +348,8 @@ class MarketCacheWriterTests(unittest.TestCase):
                 blocker.rollback()
             self.assertTrue(writer.stop_and_drain())
             with closing(sqlite3.connect(path)) as connection:
-                high = connection.execute("SELECT high_250_price FROM stocks WHERE code='005930'").fetchone()
-            self.assertEqual((71000,), high)
+                high = connection.execute("SELECT high_250_price,updated_at FROM stocks WHERE code='005930'").fetchone()
+            self.assertEqual((71000, "2026-09-15T10:31:00+09:00"), high)
 
     def test_daily_high_and_minute_bars_are_saved_outside_caller(self) -> None:
         application = QCoreApplication.instance() or QCoreApplication([])

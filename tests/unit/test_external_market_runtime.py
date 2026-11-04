@@ -209,8 +209,8 @@ class ExternalMarketRuntimeTests(unittest.IsolatedAsyncioTestCase):
             raise StopAfterCycle
 
         self.collector._daily_collection_complete = False
-        with patch.object(self.collector, "collect_once", new=AsyncMock(return_value={})), patch(
-            "kiwoom_monitor.central_server.external_market_collector.is_paused",
+        with patch.object(self.collector, "collect_once", new=AsyncMock(return_value={})), patch.object(
+            self.collector, "_workload_paused",
             return_value=False,
         ), patch(
             "kiwoom_monitor.central_server.external_market_collector.asyncio",
@@ -282,7 +282,7 @@ class ExternalMarketPollFailureTests(unittest.IsolatedAsyncioTestCase):
                         "create_task", "shield", "gather", "to_thread", "CancelledError",
                     )}, sleep=cycle_sleep)
                     with patch.object(collector_module, "asyncio", proxy), patch.object(
-                        collector_module, "is_paused", return_value=False,
+                        collector, "_workload_paused", return_value=False,
                     ):
                         close_results = []
                         try:

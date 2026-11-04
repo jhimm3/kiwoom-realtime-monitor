@@ -7,14 +7,16 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
-from functools import wraps
+from contextlib import contextmanager
 import copy
 import json
 import time
+from typing import Any
 from uuid import uuid4
 
 from . import diagnostic_trace as trace
-from .diagnostic_replay_contract import freeze_payload, thaw_payload
+from .diagnostic_replay_contract import (freeze_payload, thaw_payload,
+    COLLECTOR_INPUT_VERSION, COLLECTOR_EVENT_FIELDS, captured_workload_scope)
 
 VERSION = "top20-realtime-tape/v1"
 EVENT = "top20_realtime_input"
@@ -67,15 +69,83 @@ def _emit(owner, kind, value, *, identifier=None):
         return CapturedControlReceipt(token, component, fields["input_id"], kind, False)
 
 
-def hub_initial(hub):
-    """Snapshot before the first observed mutation; do not infer cold readiness."""
-    token = trace.input_token("top20_inputs")
-    if token is None or getattr(hub, "_recorded_lifecycle_epoch", None) == token:
-        return
-    receipt = _emit(hub, "hub_initial", {"subscriptions": contributions(hub),
-        "upstream_ready": hub.upstream_ready, "upstream_codes": sorted(hub._upstream_codes)})
-    hub._recorded_lifecycle_epoch = token
-    hub._recorded_lifecycle_initial_complete = bool(receipt and receipt.complete)
+class HubInputRecorder:
+    """One Hub's optional lifecycle epoch and causal readiness receipt.
+
+    Native topology, approval, queues and publication stay with RealtimeHub.
+    Installed tool callers share this exact observer with their recorders.
+    """
+
+    def __init__(self):
+        self.lifecycle_epoch = None
+        self.ready_receipt = None
+
+    def before_mutation(self, hub):
+        """Observe the original topology before normal Hub state changes."""
+        try:
+            self.hub_initial(hub)
+        except Exception:
+            reject(hub, "top20_realtime_initial_invalid")
+
+    def prepare_publish(self, hub, event):
+        """Installed composition supplies existing delivery callbacks directly."""
+        event = self.record_hub_event(hub, event)
+        if (any(subscriber.capture_component for subscriber in hub._subscribers)
+                and trace.input_token("top20_inputs") is not None):
+            from .diagnostic_top20_input import queue_delivery, dropped_delivery
+            return event, queue_delivery, dropped_delivery
+        return event, None, None
+
+    def hub_initial(self, hub):
+        """Snapshot before the first observed mutation; do not infer cold readiness."""
+        token = trace.input_token("top20_inputs")
+        if token is None or self.lifecycle_epoch == token:
+            return
+        _emit(hub, "hub_initial", {"subscriptions": contributions(hub),
+            "upstream_ready": hub.upstream_ready, "upstream_codes": sorted(hub._upstream_codes)})
+        self.lifecycle_epoch = token
+
+    def record_intent(self, hub, subscriber, action):
+        if trace.input_token("top20_inputs") is None:
+            return
+        try:
+            subscription_intent(hub, subscriber, action)
+        except Exception:
+            reject(hub, "top20_realtime_intent_invalid")
+
+    def record_ready(self, hub, codes, ready, approval=None):
+        if trace.input_token("top20_inputs") is None:
+            return None
+        try:
+            self.hub_initial(hub)
+            valid = bool(approval and approval.trace_id == trace.input_token("top20_inputs") and approval.complete)
+            receipt = _emit(hub, "upstream_ready", {"codes": _codes(codes), "ready": bool(ready),
+                "approval_input_id": approval.input_id if valid else "", "approval_complete": valid})
+            self.ready_receipt = receipt
+            return receipt
+        except Exception:
+            reject(hub, "top20_realtime_ready_invalid")
+            return None
+
+    def record_hub_event(self, hub, event):
+        if event.get("type") not in CONTROL_EVENTS or trace.input_token("top20_inputs") is None:
+            return event
+        from .realtime_hub import CapturedHubEvent
+        try:
+            self.hub_initial(hub)
+            # TOP20 consumes no server error text. Retain only explicit public state.
+            value = {key: event[key] for key in ("type", "scope", "codes", "source_resets") if key in event}
+            status = event.get("payload") if event["type"] == "connection_status" else event.get("connection_status")
+            if isinstance(status, dict):
+                value["status"] = {key: status[key] for key in ("generation", "phase", "paused", "shutdown",
+                    "planned_reconnect", "outcome", "observation_expected", "gap_seconds") if key in status}
+            parent = self.ready_receipt
+            parent_id = parent.input_id if parent and parent.trace_id == trace.input_token("top20_inputs") else ""
+            receipt = _emit(hub, "hub_event", {"event": value, "ready_input_id": parent_id})
+            return CapturedHubEvent(event, source=receipt)
+        except Exception:
+            reject(hub, "top20_realtime_control_event_invalid")
+            return event
 
 
 def subscription_intent(hub, subscriber, action):
@@ -95,51 +165,6 @@ def reject(owner, reason):
             pass
 
 
-def record_intent(hub, subscriber, action):
-    if trace.input_token("top20_inputs") is None:
-        return
-    try:
-        subscription_intent(hub, subscriber, action)
-    except Exception:
-        reject(hub, "top20_realtime_intent_invalid")
-
-
-def record_ready(hub, codes, ready, approval=None):
-    if trace.input_token("top20_inputs") is None:
-        return None
-    try:
-        hub_initial(hub)
-        valid = bool(approval and approval.trace_id == trace.input_token("top20_inputs") and approval.complete)
-        receipt = _emit(hub, "upstream_ready", {"codes": _codes(codes), "ready": bool(ready),
-            "approval_input_id": approval.input_id if valid else "", "approval_complete": valid})
-        hub._recorded_ready_receipt = receipt
-        return receipt
-    except Exception:
-        reject(hub, "top20_realtime_ready_invalid")
-        return None
-
-
-def record_hub_event(hub, event):
-    if event.get("type") not in CONTROL_EVENTS or trace.input_token("top20_inputs") is None:
-        return event
-    from .realtime_hub import CapturedHubEvent
-    try:
-        hub_initial(hub)
-        # TOP20 consumes no server error text. Retain only explicit public state.
-        value = {key: event[key] for key in ("type", "scope", "codes", "source_resets") if key in event}
-        status = event.get("payload") if event["type"] == "connection_status" else event.get("connection_status")
-        if isinstance(status, dict):
-            value["status"] = {key: status[key] for key in ("generation", "phase", "paused", "shutdown",
-                "planned_reconnect", "outcome", "observation_expected", "gap_seconds") if key in status}
-        parent = getattr(hub, "_recorded_ready_receipt", None)
-        parent_id = parent.input_id if parent and parent.trace_id == trace.input_token("top20_inputs") else ""
-        receipt = _emit(hub, "hub_event", {"event": value, "ready_input_id": parent_id})
-        return CapturedHubEvent(event, source=receipt)
-    except Exception:
-        reject(hub, "top20_realtime_control_event_invalid")
-        return event
-
-
 def record_market_operation(collector, tick):
     if trace.input_token("top20_inputs") is None or collector._input_replay_only:
         return None
@@ -153,33 +178,26 @@ def record_gap(collector, clear_continuous):
                                     "source_time": collector._now_provider()})
 
 
-def captured_subscription(function):
-    @wraps(function)
-    async def run(collector, websocket, session, codes, nxt_codes, program_codes=None,
-                  priority_codes=None, *, previous_groups=None):
-        token = trace.input_token("top20_inputs")
-        receipt = None
-        if token is not None and not collector._input_replay_only:
-            try:
-                hub_initial(collector._hub)
-                receipt = _emit(collector, "subscription_start", {
-                    "hub_component": f"realtime_hub:{id(collector._hub):x}",
-                    "generation": collector._connection_generation, "session": session,
-                    "codes": _codes(codes), "nxt_codes": _codes(nxt_codes),
-                    "program_codes": _codes(codes if program_codes is None else program_codes),
-                    "priority_codes": _codes(priority_codes or ()),
-                    "subscriptions": contributions(collector._hub)})
-            except Exception:
-                reject(collector, "top20_realtime_subscription_invalid")
-        collector._recorded_subscription_batch = None
+@contextmanager
+def captured_subscription_scope(recorder, collector, session, codes, nxt_codes, program_codes=None,
+                                priority_codes=None):
+    token = trace.input_token("top20_inputs")
+    receipt = None
+    if token is not None and not collector._input_replay_only:
         try:
-            result = await function(collector, websocket, session, codes, nxt_codes, program_codes,
-                                    priority_codes, previous_groups=previous_groups)
-        except BaseException as error:
-            if receipt:
-                _emit(collector, "subscription_end", {"outcome": "failed", "error_type": type(error).__name__},
-                      identifier=receipt.input_id)
-            raise
+            recorder.hub_observer.hub_initial(collector._hub)
+            receipt = _emit(collector, "subscription_start", {
+                "hub_component": f"realtime_hub:{id(collector._hub):x}",
+                "generation": collector._connection_generation, "session": session,
+                "codes": _codes(codes), "nxt_codes": _codes(nxt_codes),
+                "program_codes": _codes(codes if program_codes is None else program_codes),
+                "priority_codes": _codes(priority_codes or ()),
+                "subscriptions": contributions(collector._hub)})
+        except Exception:
+            reject(collector, "top20_realtime_subscription_invalid")
+    recorder.subscription_batch = None
+
+    def returned(result):
         if receipt:
             try:
                 public = {group: [{"item": part["item"], "type": part["type"]}
@@ -187,19 +205,25 @@ def captured_subscription(function):
                           for group, parts in result.items()}
                 end = _emit(collector, "subscription_end", {"outcome": "returned", "groups": public},
                             identifier=receipt.input_id)
-                collector._recorded_subscription_batch = {"receipt": receipt, "end": end,
+                recorder.subscription_batch = {"receipt": receipt, "end": end,
                     "acks": 0, "group_count": len(result)}
             except Exception:
                 reject(collector, "top20_realtime_subscription_result_invalid")
-        return result
-    return run
+
+    try:
+        yield returned
+    except BaseException as error:
+        if receipt:
+            _emit(collector, "subscription_end", {"outcome": "failed", "error_type": type(error).__name__},
+                  identifier=receipt.input_id)
+        raise
 
 
 def record_ack(collector, message):
     token = trace.input_token("top20_inputs")
     if token is None or collector._input_replay_only:
         return None
-    batch = getattr(collector, "_recorded_subscription_batch", None)
+    batch = getattr(collector._input_observer, "subscription_batch", None)
     if not batch or batch["receipt"].trace_id != token:
         reject(collector, "top20_realtime_ack_without_subscription")
         return None
@@ -551,3 +575,161 @@ class SubscriptionTape:
     def report(self):
         return {"failure": self.failure, "unused_subscriptions": sorted(set(self.tape["subscriptions"]) - self.used),
                 "top20_session_execution_ready": False}
+
+
+class CollectorInputRecorder:
+    """One Collector's optional tape, accepted-input anchor and legacy receipts.
+
+    No transport, parser, native writer or retry is invoked by this observer.
+    Context scopes only bind evidence around work executed by the native owner.
+    """
+
+    def __init__(self, *, hub_observer: HubInputRecorder):
+        self.hub_observer = hub_observer
+        self.capture_epoch = None
+        self.input_high_water = (None, "")
+        self.subscription_batch = None
+
+    def ram_capture_anchor(self, collector) -> dict[str, Any] | None:
+        """Reuse the recorder's accepted-input high water as an unverified hint.
+
+        This never starts recording, reads the manifest, or promises that the
+        current RAM values, excluded fields or earlier prefix were captured.
+        """
+        if collector._input_replay_only:
+            return None
+        from .diagnostic_trace import input_token
+        trace_id = input_token("collector_inputs")
+        high_water = self.input_high_water
+        if (not trace_id or self.capture_epoch != trace_id
+                or type(high_water) is not tuple or len(high_water) != 2
+                or high_water[0] != trace_id or type(high_water[1]) is not str
+                or not 1 <= len(high_water[1]) <= 160):
+            return None
+        return {"trace_id": trace_id, "producer_component": f"realtime_collector:{id(collector):x}",
+                "input_id": high_water[1], "collector_input_version": COLLECTOR_INPUT_VERSION,
+                "role": "last_accepted_collector_input", "verified": False}
+
+    def record_input(self, collector, kind: str, payload: dict, *, excluded_types: dict | None = None) -> str | None:
+        from . import diagnostic_trace as trace
+        trace_id = trace.input_token("collector_inputs")
+        if trace_id is None or collector._input_replay_only:
+            return
+        fields = {"workload_id": "realtime", "producer_component": f"realtime_collector:{id(collector):x}",
+                  "input_kind": kind, "input_id": uuid4().hex, "excluded_types": excluded_types or {},
+                  "collector_input_version": COLLECTOR_INPUT_VERSION,
+                  "entered_mono_ns": time.monotonic_ns(), "entered_wall_ns": time.time_ns()}
+        try:
+            if self.capture_epoch != trace_id:
+                initial = {"source_time": collector._now_provider(),
+                           "approved_sources": tuple(sorted(collector._approved_trade_sources)),
+                           "continuous_from": tuple((code, market, at) for (code, market), at in
+                                                    sorted(collector._continuous_from.items())),
+                           "initial_state": "cold_with_prefix",
+                           "warm_accumulators": bool(collector._pending_snapshots or collector._minute_bars._dirty)}
+                trace.emit_payload(trace_id, "collector_input", {
+                    **fields, "input_kind": "initial_state", "input_id": uuid4().hex,
+                }, initial)
+                self.capture_epoch = trace_id
+            if trace.emit_payload(trace_id, "collector_input", fields,
+                                  {"source_time": collector._now_provider(), **payload}):
+                self.input_high_water = (trace_id, fields["input_id"])
+                return fields["input_id"]
+        except Exception:
+            try:
+                trace.reject_input(trace_id, {**fields, "reason": "collector_capture_error"})
+            except Exception:
+                pass
+
+    def record_message(self, collector, message: dict[str, Any]) -> CapturedMessageReceipt | None:
+        from .realtime_hub import CapturedMessageReceipt
+        from . import diagnostic_trace as trace
+        trace_id = trace.input_token("collector_inputs")
+        if trace_id is None or collector._input_replay_only or str(message.get("trnm", "")).upper() != "REAL":
+            return
+        receipt_enabled = trace.input_token("top20_inputs") == trace_id
+        parents = []
+        complete = True
+        message_id = uuid4().hex
+        try:
+            rows = message.get("data")
+            if type(rows) is not list or len(rows) > 10000:
+                raise ValueError("collector_message_bounds")
+            selected, excluded = [], {}
+            offset = 0
+            def flush_group():
+                nonlocal offset, selected, excluded, complete
+                identifier = self.record_input(collector, "message", {"message_id": message_id, "row_offset": offset,
+                    "message": {"trnm": "REAL", "data": selected}}, excluded_types=excluded)
+                if receipt_enabled:
+                    if identifier:
+                        parents.append(identifier)
+                    else:
+                        complete = False
+                offset += len(selected)
+                selected, excluded = [], {}
+            for row in rows:
+                if type(row) is not dict:
+                    raise ValueError("collector_row_type")
+                kind = row.get("type")
+                if type(kind) is not str or len(kind) > 8:
+                    raise ValueError("collector_event_type")
+                fields = COLLECTOR_EVENT_FIELDS.get(kind)
+                if fields is None:
+                    label = kind if kind in {"0w", "0J", "0U", "00", "04"} else "other"
+                    excluded[label] = excluded.get(label, 0) + 1
+                    continue  # Never copy account fields or credentials.
+                values = row.get("values")
+                if type(values) is not dict:
+                    raise ValueError("collector_values_type")
+                selected.append({**{key: row[key] for key in ("item", "stk_cd", "code") if key in row},
+                                 "type": kind, "values": {key: values[key] for key in fields
+                                    if key in values}})
+                if len(selected) == 100:
+                    flush_group()
+            if selected or excluded:
+                flush_group()
+        except Exception:
+            complete = False
+            try:
+                trace.reject_input(trace_id, {"workload_id": "realtime",
+                    "producer_component": f"realtime_collector:{id(collector):x}",
+                    "reason": "collector_message_not_captureable"})
+            except Exception:
+                pass
+        if receipt_enabled:
+            receipt = CapturedMessageReceipt(trace_id, f"realtime_collector:{id(collector):x}",
+                                             message_id, tuple(parents), complete)
+            try:
+                trace.emit(trace_id, "collector_message_receipt", {
+                    "producer_component": receipt.producer_component, "message_id": message_id,
+                    "parent_input_ids": receipt.input_ids, "complete": complete,
+                })
+            except Exception:
+                return CapturedMessageReceipt(trace_id, receipt.producer_component, message_id,
+                                              receipt.input_ids, False)
+            return receipt
+
+    def record_gap(self, collector, clear_continuous):
+        record_gap(collector, clear_continuous)
+        self.record_input(collector, "capture_gap", {"clear_continuous": clear_continuous})
+
+    def market_operation(self, collector, tick):
+        return record_market_operation(collector, tick)
+
+    def workload_scope(self, collector):
+        return captured_workload_scope(collector, "realtime", "realtime_collector",
+                                       input_high_water=self.input_high_water)
+
+    @contextmanager
+    def flush_scope(self):
+        from .diagnostic_metrics import CURRENT_FLUSH_ID
+        marker = CURRENT_FLUSH_ID.set(uuid4().hex)
+        try:
+            yield
+        finally:
+            CURRENT_FLUSH_ID.reset(marker)
+
+    def subscription_scope(self, collector, session, codes, nxt_codes, program_codes, priority_codes):
+        return captured_subscription_scope(self, collector, session, codes, nxt_codes,
+                                           program_codes, priority_codes)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Protocol
@@ -21,17 +22,19 @@ from kiwoom_monitor.domain.order_contract import (
 class ExecutionStore(Protocol):
     def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
-    def load_execution_intent(self, intent_id: str) -> dict[str, Any] | None: ...
+    def load_execution_intent(self, intent_id: str, *, _reader: Any = None) -> dict[str, Any] | None: ...
     def load_active_execution_intents(
-        self, environment: str, account_ref: str, run_id: str,
+        self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None,
     ) -> list[dict[str, Any]]: ...
-    def load_account_active_execution_intents(self, environment: str, account_ref: str, limit: int) -> list[dict[str, Any]]: ...
+    def load_account_active_execution_intents(
+        self, environment: str, account_ref: str, limit: int, *, _reader: Any = None,
+    ) -> list[dict[str, Any]]: ...
     def find_execution_intent_by_broker_order_id(
         self, environment: str, account_ref: str, run_id: str, broker_order_id: str,
     ) -> dict[str, Any] | None: ...
-    def load_execution_events(self, intent_id: str) -> list[dict[str, Any]]: ...
+    def load_execution_events(self, intent_id: str, *, _reader: Any = None) -> list[dict[str, Any]]: ...
     def load_account_execution_events(
-        self, environment: str, account_ref: str, after_sequence: int, limit: int,
+        self, environment: str, account_ref: str, after_sequence: int, limit: int, *, _reader: Any = None,
     ) -> list[dict[str, Any]]: ...
     def save_execution_account_snapshot(self, value: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def acquire_execution_runtime(
@@ -123,6 +126,17 @@ class ExecutionRepository:
         self._ownership: dict[str, str] | None = None
         self._automation_control: dict[str, Any] | None = None
 
+    def uses_store(self, store: ExecutionStore) -> bool:
+        return self._store is store
+
+    def mock_automation_read_scope(self) -> AbstractContextManager[Any]:
+        factory = getattr(self._store, "mock_automation_read_scope", None)
+        return factory() if callable(factory) else nullcontext()
+
+    def broker_reconciliation_scope(self) -> AbstractContextManager[Any]:
+        factory = getattr(type(self._store), "_broker_reconciliation_scope", None)
+        return factory(self._store) if factory is not None else nullcontext()
+
     def bind_runtime_owner(self, account_ref: str, run_id: str, owner_token: str) -> None:
         ownership = {"owner_key": f"mock:{account_ref}", "owner_token": f"{run_id}:{owner_token}", "run_id": run_id}
         if self._ownership is not None and self._ownership != ownership:
@@ -171,7 +185,9 @@ class ExecutionRepository:
             raise ValueError("intent_id already belongs to a different order")
         return existing
 
-    def apply(self, record: ExecutionRecord, event: OrderEvent, **changes: object) -> ExecutionRecord:
+    def apply(
+        self, record: ExecutionRecord, event: OrderEvent, *, _connection: Any = None, **changes: object,
+    ) -> ExecutionRecord:
         updated = ExecutionRecord(
             intent=record.intent,
             state=event.state,
@@ -187,46 +203,55 @@ class ExecutionRepository:
                 "broker_reported_filled_quantity", record.broker_reported_filled_quantity,
             )),
         )
-        if not self._store.append_execution_event(_record_document(updated), _event_document(event), **self._write_options()):
-            return self.load(record.intent.intent_id) or record
+        connection_args = {} if _connection is None else {"_connection": _connection}
+        if not self._store.append_execution_event(
+            _record_document(updated), _event_document(event), **self._write_options(), **connection_args,
+        ):
+            return self.load(record.intent.intent_id, **connection_args) or record
         return updated
 
-    def load(self, intent_id: str) -> ExecutionRecord | None:
-        value = self._store.load_execution_intent(intent_id)
+    def load(self, intent_id: str, *, _reader: Any = None, _connection: Any = None) -> ExecutionRecord | None:
+        reader_args = {} if _reader is None else {'_reader': _reader}
+        connection_args = {} if _connection is None else {"_connection": _connection}
+        value = self._store.load_execution_intent(intent_id, **reader_args, **connection_args)
         return _record_from_document(value) if value else None
 
     def active_intents(
-        self, environment: str, account_ref: str, run_id: str,
+        self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None,
     ) -> tuple[ExecutionRecord, ...]:
         if environment != "mock" or not account_ref.strip() or not run_id.strip():
             raise ValueError("mock environment, account_ref and run_id are required")
+        reader_args = {} if _reader is None else {"_reader": _reader}
         return tuple(
             _record_from_document(value)
             for value in self._store.load_active_execution_intents(
-                environment, account_ref, run_id,
+                environment, account_ref, run_id, **reader_args,
             )
         )
 
     def find_by_broker_order_id(
-        self, environment: str, account_ref: str, run_id: str, broker_order_id: str,
+        self, environment: str, account_ref: str, run_id: str, broker_order_id: str, *, _connection: Any = None,
     ) -> ExecutionRecord | None:
         if environment != "mock" or not account_ref.strip() or not run_id.strip() or not broker_order_id.strip():
             raise ValueError("mock environment, account_ref, run_id and broker_order_id are required")
+        connection_args = {} if _connection is None else {"_connection": _connection}
         value = self._store.find_execution_intent_by_broker_order_id(
-            environment, account_ref, run_id, broker_order_id,
+            environment, account_ref, run_id, broker_order_id, **connection_args,
         )
         return _record_from_document(value) if value else None
 
-    def account_active_intents(self, account_ref: str) -> tuple[tuple[ExecutionRecord, ...], bool]:
+    def account_active_intents(self, account_ref: str, *, _reader: Any = None) -> tuple[tuple[ExecutionRecord, ...], bool]:
         """One bounded account-wide read, including QUEUED records with no events."""
-        values = self._store.load_account_active_execution_intents("mock", account_ref, 401)
+        reader_args = {} if _reader is None else {"_reader": _reader}
+        values = self._store.load_account_active_execution_intents("mock", account_ref, 401, **reader_args)
         records = tuple(_record_from_document(value) for value in values[:400])
         if any(r.intent.account_ref != account_ref or r.intent.environment != "mock" for r in records):
             raise ValueError("account-wide ledger crossed the requested scope")
         return records, len(values) <= 400
 
-    def events(self, intent_id: str) -> tuple[dict[str, Any], ...]:
-        return tuple(self._store.load_execution_events(intent_id))
+    def events(self, intent_id: str, *, _reader: Any = None) -> tuple[dict[str, Any], ...]:
+        reader_args = {} if _reader is None else {'_reader': _reader}
+        return tuple(self._store.load_execution_events(intent_id, **reader_args))
 
     def claim_approval(self, intent_id: str) -> dict[str, Any] | None:
         value = self._store.load_execution_intent(intent_id)
@@ -248,7 +273,7 @@ class ExecutionRepository:
         return dict(claim) if claim is not None else None
 
     def account_events(
-        self, environment: str, account_ref: str, *, after_sequence: int = 0, limit: int = 500,
+        self, environment: str, account_ref: str, *, after_sequence: int = 0, limit: int = 500, _reader: Any = None,
     ) -> AccountExecutionEventPage:
         """Read one stable account page across run changes without mutating the ledger."""
         if environment != "mock" or not account_ref.strip():
@@ -257,8 +282,9 @@ class ExecutionRepository:
             raise ValueError("after_sequence must be a non-negative integer")
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("limit must be between 1 and 1000")
+        reader_args = {} if _reader is None else {"_reader": _reader}
         rows = self._store.load_account_execution_events(
-            environment, account_ref, after_sequence, limit + 1,
+            environment, account_ref, after_sequence, limit + 1, **reader_args,
         )
         has_more = len(rows) > limit
         selected = rows[:limit]
@@ -294,26 +320,29 @@ class ExecutionRepository:
 
     def claim_runtime(
         self, environment: str, account_ref: str, run_id: str, owner_token: str,
-        now: datetime, lease_seconds: int = 60,
+        now: datetime, lease_seconds: int = 60, *, _connection: Any = None,
     ) -> bool:
         if environment != "mock":
             raise ValueError("execution runtime supports only mock")
         owner_key = f"{environment}:{account_ref}"
         lease_owner = f"{run_id}:{owner_token}"
-        from kiwoom_monitor.central_server.diagnostic_account_input import source_execution_owner
-        with source_execution_owner(owner_key, run_id):
+        from kiwoom_monitor.central_server.postgres_access import database_observer
+        observer = database_observer()
+        connection_args = {} if _connection is None else {"_connection": _connection}
+        with observer.account.source_execution_owner(owner_key, run_id) if observer is not None else nullcontext():
             return self._store.acquire_execution_runtime(
                 owner_key, lease_owner, now.isoformat(),
-                (now + timedelta(seconds=max(1, lease_seconds))).isoformat(),
+                (now + timedelta(seconds=max(1, lease_seconds))).isoformat(), **connection_args,
             )
 
 
     def release_runtime(self, environment: str, account_ref: str, run_id: str, owner_token: str) -> bool:
         if environment != "mock" or not all(value.strip() for value in (account_ref, run_id, owner_token)):
             raise ValueError("mock environment, account_ref, run_id and owner_token are required")
-        from kiwoom_monitor.central_server.diagnostic_account_input import source_execution_owner
+        from kiwoom_monitor.central_server.postgres_access import database_observer
+        observer = database_observer()
         owner_key = f"{environment}:{account_ref}"
-        with source_execution_owner(owner_key, run_id):
+        with observer.account.source_execution_owner(owner_key, run_id) if observer is not None else nullcontext():
             return self._store.release_execution_runtime(owner_key, f"{run_id}:{owner_token}")
 
 

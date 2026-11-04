@@ -1,5 +1,7 @@
 # JSON 문서 종류 지도
 
+> **문서 종류의 기준.** 아래 건수는 카탈로그 작성 당시 코드 조사값이다. 현재 문서 종류·수락·transaction은 writer/reader와 DB 계약에서 확인한다. [관련 계약](../../DB_SCHEMA.md).
+
 `central_documents`는 물리 테이블 하나지만 최소 **94개 코드상 문서 종류**를 확인했다. 이 중 **88개**는 범용 document 관측 registry에 등록되어 있고 나머지는 계좌·제어 등 전용 저장 경로에서 발견했다. 실제 DB의 DISTINCT collection 목록이나 문서 건수를 읽은 결과가 아니며, 동적으로 만들어지는 모든 문자열을 망라했다고 주장하지 않는다.
 
 공통 키는 `(collection, owner, document_key)`이고 `document_json`에 도메인별 내용이 들어간다. 같은 `owner` 문자열이어도 다른 collection이면 다른 자료다. 최신 투영, 불변 이력, 완료 표식이 섞여 있으므로 collection을 빼고 연결하거나 일괄 삭제하면 안 된다.

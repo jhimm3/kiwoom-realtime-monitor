@@ -2,7 +2,7 @@
 
 # 기능 보존 검증의 현재 판정
 
-정리 기준: **2026-10-11**. 현재 소스 SHA·실제 배포 release·검증 결과의 공통 정본은 [CURRENT_STATUS 상단 표](../../../CURRENT_STATUS.md#current-summary)다. 아래 판정은 이 계획의 완료 범위와 다음 검증만 다룬다.
+정리 기준: **2026-10-11**. 현재 소스 SHA·실제 배포 release·검증 결과의 공통 정본은 [CURRENT_STATUS 상단 표](../../2026-11-05/product-and-r3-status.md#current-summary)다. 아래 판정은 이 계획의 완료 범위와 다음 검증만 다룬다.
 
 | 범위 | 현재 판정과 남은 검증 |
 |---|---|

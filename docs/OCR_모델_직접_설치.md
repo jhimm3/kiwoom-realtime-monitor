@@ -1,5 +1,7 @@
 # 이미지 OCR 모델 직접 설치
 
+> **설치 역할.** OCR 설치는 이미지 가져오기를 쓰는 구성에서 확인한다. 조회 전용 설치의 필수 패키지와 구분한다. [관련 계약](architecture/app-target-20261023.md#portable-execution-target).
+
 [현재 구현·검증 상태](CURRENT_STATUS.md) · [남은 확인 사항](OPEN_ITEMS.md)
 
 이미지 테마 업데이트는 아래 두 PaddleOCR 모델만 사용합니다.

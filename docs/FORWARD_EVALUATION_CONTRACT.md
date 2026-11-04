@@ -1,5 +1,7 @@
 # 모의 전진평가 계약
 
+> **현재 연구 연결.** 동결 입력·판본·평가 결과를 보존한다. 분리된 실행 후보는 승인한 특정 판본의 선택·철회를 따른다. 조회·결과 보관과 주문 실행 권한은 각각 확인한다. [관련 계약](architecture/r3-ownership.md#research).
+
 기준: **2.1.0**, 2026-09-22 문서 정리. 이 문서는 동결 전진평가·피드백·별도 자동 모의운용 연결의 상세 계약이다.
 구현·배포·운영 확인 범위는 [현재 상태](CURRENT_STATUS.md), 미완료·보류 작업은 [남은 작업](OPEN_ITEMS.md)을 따른다.
 A5 피드백과 O2-M0/Me1~Me3의 runner·제어 API·UI는 구현되어 있다. 코드 연결, NAS 적용, 실제 모의계좌·장시간 검증은 각각 구분한다.
@@ -164,7 +166,7 @@ O2-Md와 M0의 지속 gate는 위 통과 뒤의 각 action Decision을 별도로
 
 `inspect-preparation`과 PC `후보·final 동결 준비 점검`은 같은 함수를 사용한다. 모든 개발 fold의 **실제 끝(제외) 시각** 뒤의 시간순 final 범위만 검토하며 시간대 누락·역전·개발 겹침은 입력 관측을 읽기 전에 거절한다. 기존 eligibility policy 계약으로 기준의 타입·범위를 검사하지만 임시 검사용 시각·policy ID를 동결 근거로 반환하지 않는다. 과학적 후보 hash는 기존 계약상 날짜·입력 경로를 제외하므로, 고정 요청의 설정 일치와 final 입력/기간 승인은 다르다. 둘 다 시각이 있어야 범위 대조 완료를 표시하며 비용 유효기간 초과와 현재 모의 Shadow가 미지원인 눌림은 확인 이유로 남긴다. 실제 비용·종일 완전성·개발 성과 승인·final 자료/미사용 원장·같은 설정 Shadow는 항상 별도 미검증 상태다. 보고서는 `REVIEW_REQUIRED`이며 기존 동결·final 실행/입장 gate를 대체하지 않는다.
 
-2026-10-12 사용자 요청의 [기준·final 범위 초안](MOCK_CANDIDATE_CRITERIA_PROPOSAL.md)은 별도 검토 자료다. 제안 값을 UI·CLI 기본값이나 실제 policy로 자동 채우지 않고, 채택되지 않은 상태에서는 기존 미정 값을 유지한다.
+2026-10-12 사용자 요청의 [기준·final 범위 초안](archive/2026-11-05/MOCK_CANDIDATE_CRITERIA_PROPOSAL.md)은 별도 검토 자료다. 제안 값을 UI·CLI 기본값이나 실제 policy로 자동 채우지 않고, 채택되지 않은 상태에서는 기존 미정 값을 유지한다.
 
 준비 기능의 새 검사는 기존 등록된 `test_research_final_execution`과 `test_mock_automation_dialog` 모듈에 포함했다. 최종 전체 catalog 확인은 별도 뉴스 작업의 `tests.unit.test_seed_news_jobs_from_nas_rankings` 미등록 한 개로 실패했으며, 이 준비 기능의 관련 통과를 전체 CI 성공으로 보고하지 않는다.
 

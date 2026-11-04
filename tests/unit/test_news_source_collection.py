@@ -6,10 +6,11 @@ import tempfile
 import threading
 import unittest
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from kiwoom_monitor.domain.time_basis import KST
 from kiwoom_monitor.application.news_analysis import NewsAssessment
 from kiwoom_monitor.central_server import news_sources
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -17,6 +18,7 @@ from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
 from kiwoom_monitor.central_server.news_service import CentralNewsService
 from kiwoom_monitor.central_server.news_sources import QuerySetNewsCollector
 from kiwoom_monitor.infrastructure.naver_news import NaverNewsPage, StockNewsItem
+from kiwoom_monitor.infrastructure import news_source_documents
 
 
 def _item(identity: str, title: str = "삼성전자 공급계약 체결", *, minute: int = 0,
@@ -53,8 +55,8 @@ class _PageClient:
 
 
 class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
-    def _store(self, directory: str) -> SQLiteQueryStore:
-        store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+    def _store(self, directory: str, *, now_provider=None) -> SQLiteQueryStore:
+        store = SQLiteQueryStore(Path(directory) / "central.sqlite3", now_provider=now_provider)
         store.initialize()
         store.replace_documents("stock_catalog", [
             {"owner": "krx", "key": "005930", "document": {"code": "005930", "name": "삼성전자", "market": "KOSPI"}},
@@ -62,11 +64,14 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
         return store
 
     async def test_service_start_collects_without_desktop_request(self) -> None:
+        fixed = datetime(2020, 1, 3, 0, 5)  # Existing broker-compatible naive KST.
+        epoch = fixed.replace(tzinfo=KST).timestamp()
         with tempfile.TemporaryDirectory() as directory:
-            store = self._store(directory)
+            store = self._store(directory, now_provider=lambda: fixed)
             client = _PageClient({("증권", 1): NaverNewsPage((_item("a"),), 1, 1, 1)})
             service = CentralNewsService(
-                client, store, jobs_enabled=False, query_set=("증권",), query_set_refresh_seconds=60,
+                client, store, query_set=("증권",), query_set_refresh_seconds=60,
+                now_provider=lambda: fixed,
             )  # type: ignore[arg-type]
             await service.start()
             for _ in range(20):
@@ -75,9 +80,56 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
             await service.close()
             history = store.load_news_history("article", target="GLOBAL")
+            diagnostics = store.load_news_source_diagnostics()
+            jobs = store.claim_news_jobs(now=epoch)
             store.close()
         self.assertEqual([("증권", 1)], client.calls)
         self.assertEqual("query_set", history[0]["collection_scope"])
+        self.assertEqual(["BODY"], [job["stage"] for job in jobs])
+        self.assertEqual({"query_set": 1}, diagnostics["summary"]["budget"])
+        self.assertEqual((epoch, epoch, epoch + 60), (
+            diagnostics["runs"][0]["checked_at"], diagnostics["runs"][0]["completed_at"],
+            diagnostics["sources"][0]["next_schedule_at"],
+        ))
+        self.assertEqual("2026-09-12T01:00:00+00:00", history[0]["document"]["published_at"])
+
+
+    def test_source_page_receipts_use_store_clock_and_preserve_explicit_source_times(self) -> None:
+        fixed = datetime(2020, 1, 3, 10, 5, tzinfo=KST)
+        epoch = fixed.timestamp()
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory, now_provider=lambda: fixed)
+            item = news_sources._page_items([_item("clock")], (("005930", "삼성전자"),))[0]
+            store.save_news_source_page({
+                "source_id": "clock-source", "query_text": "증권", "items": [item],
+                "checked_at": epoch - 20, "completed_at": epoch - 10,
+                "next_schedule_at": epoch + 40, "last_success": epoch - 10,
+            })
+            with closing(sqlite3.connect(Path(directory) / "central.sqlite3")) as connection:
+                self.assertEqual((epoch, epoch), connection.execute(
+                    "SELECT received_at,available_at FROM central_news_article_revisions",
+                ).fetchone())
+                self.assertEqual((epoch, epoch), connection.execute(
+                    "SELECT received_at,available_at FROM central_news_source_observations",
+                ).fetchone())
+                self.assertEqual((epoch,), connection.execute(
+                    "SELECT available_at FROM central_news_article_target_revisions",
+                ).fetchone())
+                self.assertEqual((epoch, epoch), connection.execute(
+                    "SELECT next_retry_at,updated_at FROM central_news_jobs WHERE stage='BODY'",
+                ).fetchone())
+            diagnostics = store.load_news_source_diagnostics(source_id="clock-source")
+            cursor = store.load_news_source_cursor("clock-source")
+            jobs = store.claim_news_jobs(now=epoch)
+            store.close()
+        self.assertEqual(["BODY"], [job["stage"] for job in jobs])
+        self.assertEqual((epoch - 20, epoch - 10), (
+            diagnostics["runs"][0]["checked_at"], diagnostics["runs"][0]["completed_at"],
+        ))
+        self.assertEqual((epoch + 40, epoch - 10, epoch), (
+            cursor["next_schedule_at"], cursor["last_success"], cursor["updated_at"],
+        ))
+        self.assertEqual("2026-09-12T01:00:00+00:00", diagnostics["observations"][0]["published_at"])
 
     async def test_ingest_skips_title_only_and_clearly_irrelevant_search_noise(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -446,19 +498,26 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"000660"}, final_keys)
 
     async def test_late_confirmed_target_reuses_body_and_enqueues_rule_idempotently(self) -> None:
+        first = datetime(2020, 1, 3, 10, 5, tzinfo=KST)
+        later = first + timedelta(seconds=301)
+        clock = [first]
         item = _item(
             "late-target", "신규기업 공급계약 체결", description="신규기업과 500억원 공급계약 체결",
         )
         with tempfile.TemporaryDirectory() as directory:
-            store = self._store(directory)
+            store = self._store(directory, now_provider=lambda: clock[0])
             page = NaverNewsPage((item,), 1, 1, 1)
             await QuerySetNewsCollector(
-                _PageClient({("증권", 1): page}), store, queries=("증권",),
+                _PageClient({("증권", 1): page}), store, queries=("증권",), now_provider=lambda: clock[0],
             ).run_once()  # type: ignore[arg-type]
-            runner = NewsJobRunner(store, fetcher=lambda *_args, **_kwargs: "신규기업 공급계약 체결")
+            runner = NewsJobRunner(
+                store, fetcher=lambda *_args, **_kwargs: "신규기업 공급계약 체결",
+                now_provider=lambda: clock[0],
+            )
             await runner.run_once()  # BODY; unresolved라 RULE 없음
             self.assertEqual([], [job for job in store.claim_news_jobs(now=10_000_000_000.0) if job["stage"] == "RULE"])
 
+            clock[0] = later
             store.upsert_documents("stock_catalog", [{
                 "owner": "krx", "key": "NEW001",
                 "document": {"code": "NEW001", "name": "신규기업", "market": "KOSDAQ"},
@@ -467,29 +526,34 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
                 connection.execute("UPDATE central_news_source_cursors SET next_schedule_at=0")
                 connection.commit()
             await QuerySetNewsCollector(
-                _PageClient({("증권", 1): page}), store, queries=("증권",),
+                _PageClient({("증권", 1): page}), store, queries=("증권",), now_provider=lambda: clock[0],
             ).run_once()  # type: ignore[arg-type]
             await runner.run_once()  # 기존 BODY를 입력으로 새 target RULE
             # 동일 confirmed 재관측은 안정 키로 완료 RULE을 다시 만들지 않는다.
+            clock[0] = later + timedelta(seconds=301)
             with closing(sqlite3.connect(Path(directory) / "central.sqlite3")) as connection:
                 connection.execute("UPDATE central_news_source_cursors SET next_schedule_at=0")
                 connection.commit()
             await QuerySetNewsCollector(
-                _PageClient({("증권", 1): page}), store, queries=("증권",),
+                _PageClient({("증권", 1): page}), store, queries=("증권",), now_provider=lambda: clock[0],
             ).run_once()  # type: ignore[arg-type]
             articles = store.load_news_history("article", target="GLOBAL", identity="https://origin/late-target")
             bodies = store.load_news_history("body", target=articles[0]["article_revision_id"])
             events = store.load_news_history("event", target="NEW001")
             with closing(sqlite3.connect(Path(directory) / "central.sqlite3")) as connection:
                 rule_jobs = connection.execute(
-                    "SELECT COUNT(*) FROM central_news_jobs WHERE stage='RULE' AND target_id='NEW001'",
-                ).fetchone()[0]
+                    "SELECT COUNT(*),MIN(next_retry_at) FROM central_news_jobs "
+                    "WHERE stage='RULE' AND target_id='NEW001'",
+                ).fetchone()
             store.close()
 
         self.assertEqual(1, len(articles))
         self.assertEqual(1, len(bodies))
         self.assertEqual(1, len(events))
-        self.assertEqual(1, rule_jobs)
+        self.assertEqual((1, later.timestamp()), rule_jobs)
+        self.assertEqual((first.timestamp(), first.timestamp()), (
+            articles[0]["received_at"], articles[0]["available_at"],
+        ))
 
     async def test_failed_second_page_restarts_from_persisted_page_progress(self) -> None:
         first_page = tuple(_item(f"p1-{index}", minute=index % 60) for index in range(100))
@@ -527,18 +591,25 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(diagnostics["runs"][0]["document"]["missing_gap"])
 
     async def test_auth_or_rate_failure_does_not_stop_other_query(self) -> None:
+        fixed = datetime(2020, 1, 3, 0, 5, tzinfo=KST)
         with tempfile.TemporaryDirectory() as directory:
-            store = self._store(directory)
+            store = self._store(directory, now_provider=lambda: fixed)
             client = _PageClient({
                 ("증권", 1): _ProviderFailure(429),
                 ("코스피", 1): NaverNewsPage((_item("ok"),), 1, 1, 1),
             })
-            await QuerySetNewsCollector(client, store, queries=("증권", "코스피")).run_once()  # type: ignore[arg-type]
+            await QuerySetNewsCollector(
+                client, store, queries=("증권", "코스피"), now_provider=lambda: fixed,
+            ).run_once()  # type: ignore[arg-type]
             diagnostics = store.load_news_source_diagnostics()
             store.close()
         self.assertEqual(1, len([row for row in diagnostics["runs"] if row["error"]]))
         self.assertEqual(1, len([row for row in diagnostics["observations"] if row["identity"] == "https://origin/ok"]))
         self.assertEqual(2, sum(diagnostics["summary"]["budget"].values()))
+        self.assertEqual({fixed.timestamp() + 300}, {
+            source["next_schedule_at"] for source in diagnostics["sources"]
+        })
+        self.assertEqual({fixed.timestamp()}, {run["checked_at"] for run in diagnostics["runs"]})
 
     async def test_exact_target_schedules_direct_rule_while_ambiguous_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -605,8 +676,8 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_company_pattern_is_built_only_for_present_names_and_reused(self) -> None:
         news_sources._company_name_pattern.cache_clear()
-        compile_pattern = news_sources.re.compile
-        with patch.object(news_sources.re, "compile", wraps=compile_pattern) as compile_mock:
+        compile_pattern = news_source_documents.re.compile
+        with patch.object(news_source_documents.re, "compile", wraps=compile_pattern) as compile_mock:
             self.assertFalse(news_sources._exact_company_name("없는회사", "삼성전자 공급계약"))
             self.assertTrue(news_sources._exact_company_name("삼성전자", "삼성전자 공급계약"))
             self.assertTrue(news_sources._exact_company_name("삼성전자", "삼성전자는 실적을 발표했다"))

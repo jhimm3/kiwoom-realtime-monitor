@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -153,6 +154,138 @@ class CentralAIServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([], store.load_documents("news_ai", "005930"))
             self.assertEqual([], store.load_news_history("ai", target="005930"))
             store.close()
+
+    def test_mixed_bundle_freezes_actual_raw_status_omissions_and_unicode_spans(self):
+        from datetime import datetime
+        from kiwoom_monitor.domain.news_ai_contract import freeze_news_ai_input, validate_news_ai_input
+        when = datetime.fromisoformat("2026-10-29T09:00:00.125+09:00")
+        articles = [{"identity": "a", "title": "A", "description": "old A", "link": "https://a", "input_source": {
+                        "version": 1, "article_revision_id": "article-A", "article_available_at": 100.25}},
+                    {"identity": "b", "title": "B", "description": "  summary B  ", "link": "https://b"},
+                    {"identity": "c", "title": "C", "description": "", "link": ""}]
+        def fetch(url):
+            if url == "https://a": return "😀 raw A"
+            raise ValueError("source blocked")
+        with patch("kiwoom_monitor.central_server.ai_service.fetch_article_text", side_effect=fetch):
+            event = _prepare_events([{"identity": "a", "title": "A", "articles": articles}], "company", now_provider=lambda: when)[0]
+        first = "[관련 기사 1/3: A]\n😀 raw A"
+        second = "[관련 기사 2/3: B]\nsummary B"
+        expected = first + "\n\n" + second
+        self.assertEqual(expected, event["body"])
+        members = event["_source_members"]
+        self.assertEqual(["fulltext", "summary_only", "unavailable"], [member["body_status"] for member in members])
+        self.assertEqual([True, True, False], [member["used"] for member in members])
+        self.assertEqual([[0, len(first)], [len(first) + 2, len(expected)], None], [member["span"] for member in members])
+        self.assertEqual(["😀 raw A", "  summary B  ", ""], [member["raw_body"] for member in members])
+        self.assertEqual([when.timestamp()] * 3, [member["observed_at"] for member in members])
+        self.assertEqual(100.25, members[0]["source_ref"]["article_available_at"])
+        frozen = freeze_news_ai_input("a", "A", expected, event["body_hash"], members, kind="bundle")
+        validate_news_ai_input(frozen)
+        self.assertEqual("unicode_code_points_half_open", frozen["input_binding"]["span_unit"])
+
+    async def test_actual_bundle_stores_only_representative_raw_body_and_cache_keeps_original_sources(self):
+        from datetime import datetime, timedelta
+        from kiwoom_monitor.domain.news_observation import stable_document_hash
+        with tempfile.TemporaryDirectory() as directory:
+            clock = [datetime.fromisoformat("2026-10-29T09:00:00.125+09:00")]
+            store = SQLiteQueryStore(Path(directory) / "native.sqlite3", now_provider=lambda: clock[0])
+            store.initialize()
+            service = CentralAIService(CentralServerSettings("sqlite:///:memory:", "token", gemini_api_key="fixture"), store, now_provider=lambda: clock[0])
+            articles = []
+            original_bodies = []
+            try:
+                for name, raw, status in (("A", "original A", "fulltext"), ("B", "summary B", "summary_only")):
+                    identity = f"https://origin/{name}"
+                    document = {"stock_code": "005930", "identity": identity, "title": name, "description": f"summary {name}",
+                                "link": f"https://portal/{name}", "original_link": identity, "published_at": "2026-10-28T08:00:00+09:00"}
+                    store.upsert_documents("news_article", [{"owner": "005930", "key": identity, "collector_id": "oracle",
+                                                             "collection_scope": "watchlist", "document": document}])
+                    revision = store.load_news_history("article", target="005930", identity=identity)[0]
+                    receipt = store.save_news_body_revision_receipt({"article_revision_id": revision["article_revision_id"],
+                        "body_text": raw, "status": status, "fetched_at": 101.25, "extractor_version": "source-v7"})
+                    original_bodies.append(store.load_news_body_revision(receipt["body_revision_id"]))
+                    articles.append({key: document[key] for key in ("identity", "title", "description", "link", "original_link", "published_at")})
+                    articles[-1]["input_source"] = {"version": 1, "article_revision_id": revision["article_revision_id"],
+                        "article_content_hash": revision["content_hash"], "article_available_at": revision["available_at"],
+                        "body_revision_id": receipt["body_revision_id"], "body_content_hash": receipt["content_hash"],
+                        "body_status": status, "body_fetched_at": receipt["fetched_at"], "body_available_at": receipt["available_at"]}
+                def fetch(url):
+                    if url.endswith("/A"): return "fetched 😀 A"
+                    raise ValueError("B summary fallback")
+                expected = "[관련 기사 1/2: A]\nfetched 😀 A\n\n[관련 기사 2/2: B]\nsummary B"
+                analysis = AINewsAnalysis("model summary", "긍정", 80, "source reason")
+                clock[0] += timedelta(seconds=2)
+                with patch("kiwoom_monitor.central_server.ai_service.fetch_article_text", side_effect=fetch), \
+                     patch("kiwoom_monitor.central_server.ai_service.analyze_articles", return_value=((analysis,), AIRequestUsage(10, 5, 15))) as provider:
+                    event = {"identity": articles[0]["identity"], "title": "A", "articles": articles}
+                    first = await service.analyze("005930", "company", "gemini", "model", [event], 2)
+                    self.assertEqual((("A", expected),), provider.call_args[0][2])
+                    rows = store.load_news_history("body")
+                    self.assertEqual(3, len(rows))
+                    self.assertEqual("fetched 😀 A", rows[0]["body_text"])
+                    self.assertTrue(all("[관련 기사" not in row["body_text"] for row in rows))
+                    for old in original_bodies:
+                        self.assertEqual(old, store.load_news_body_revision(old["body_revision_id"]))
+                    produced = store.load_news_history("inference", target="005930")[0]["document"]
+                    self.assertEqual(1, produced["input_envelope_version"])
+                    actual = produced["inputs"][0]
+                    self.assertEqual(expected, actual["body"])
+                    self.assertEqual(["fulltext", "summary_only"], [part["body_status"] for part in actual["source_snapshot"]["members"]])
+                    self.assertEqual(["DIFFERENT", "MATCH"], [part["body_reference_status"] for part in actual["input_binding"]["members"]])
+                    self.assertEqual(rows[0]["body_revision_id"], actual["input_binding"]["members"][0]["native_body"]["body_revision_id"])
+                    self.assertEqual(actual["input_binding"], first["analysis_provenance"][0]["input_binding"])
+                    self.assertNotIn("raw_body", json.dumps(first["analysis_provenance"]))
+                    clock[0] += timedelta(seconds=19)
+                    newer = store.save_news_body_revision_receipt({"article_revision_id": articles[1]["input_source"]["article_revision_id"],
+                        "body_text": "summary B", "status": "summary_only", "fetched_at": clock[0].timestamp()})
+                    articles[1]["input_source"] = {**articles[1]["input_source"], "body_revision_id": newer["body_revision_id"],
+                                                    "body_fetched_at": newer["fetched_at"], "body_available_at": newer["available_at"]}
+                    before_cache = store.load_news_history("body")
+                    cached = await service.analyze("005930", "company", "gemini", "model", [event], 2)
+                    self.assertTrue(cached["cache_hit"])
+                    self.assertEqual(first["analysis_provenance"], cached["analysis_provenance"])
+                    self.assertEqual(before_cache, store.load_news_history("body"))
+                    self.assertEqual(1, provider.call_count)
+                    self.assertEqual(1, len(store.load_news_history("inference", target="005930")))
+                    self.assertEqual(1, len(store.load_documents("news_request_usage")))
+            finally:
+                await service.close()
+                store.close()
+
+
+    async def test_inline_body_records_receiver_observation_without_fabricating_source_fetch_or_body_row(self):
+        from datetime import datetime
+        clock = datetime.fromisoformat("2026-10-29T09:00:00.125+09:00")
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "inline.sqlite3", now_provider=lambda: clock)
+            store.initialize()
+            service = CentralAIService(CentralServerSettings("sqlite:///:memory:", "token", gemini_api_key="fixture"), store, now_provider=lambda: clock)
+            try:
+                original = {"identity": "inline", "title": "title", "description": "description", "link": "https://inline", "original_link": ""}
+                store.upsert_documents("news_article", [{"owner": "005930", "key": "inline", "collector_id": "oracle",
+                                                         "collection_scope": "watchlist", "document": original}])
+                article = store.load_news_history("article", target="005930")[0]
+                event = {**original, "body": "  provided 😀 body  ", "input_source": {
+                    "version": 1, "article_revision_id": article["article_revision_id"],
+                    "article_content_hash": article["content_hash"], "article_available_at": article["available_at"]}}
+                with patch("kiwoom_monitor.central_server.ai_service.fetch_article_text", side_effect=AssertionError("inline input must not fetch")), \
+                     patch("kiwoom_monitor.central_server.ai_service.analyze_articles", return_value=((AINewsAnalysis("summary", "중립", 50, "reason"),), AIRequestUsage())) as provider:
+                    result = await service.analyze("005930", "company", "gemini", "model", [event], 1)
+                self.assertEqual((("title", "provided 😀 body"),), provider.call_args[0][2])
+                self.assertEqual([], store.load_news_history("body", target=article["article_revision_id"]))
+                raw = store.load_news_history("inference", target="005930")[0]["document"]["inputs"][0]
+                member = raw["source_snapshot"]["members"][0]
+                self.assertEqual("  provided 😀 body  ", member["raw_body"])
+                self.assertEqual(clock.timestamp(), member["observed_at"])
+                self.assertEqual("input_receiver_now_provider", member["clock_source"])
+                self.assertEqual("UNKNOWN", member["body_status"])
+                self.assertIsNone(member["native_body"])
+                self.assertNotIn("body_fetched_at", member["source_ref"])
+                self.assertEqual("UNKNOWN", result["analysis_provenance"][0]["status"])
+                self.assertEqual(raw["input_binding"], result["analysis_provenance"][0]["input_binding"])
+            finally:
+                await service.close()
+                store.close()
 
 
 if __name__ == "__main__":

@@ -93,7 +93,7 @@ class MarketCacheWriter(QThread):
 
     def run(self) -> None:
         minute_repository = MinuteBarRepository(self._database_path, now_provider=self._now)
-        stock_repository = StockRepository(self._database_path)
+        stock_repository = StockRepository(self._database_path, now_provider=self._now)
         daily_repository = DailyBarRepository(self._database_path, now_provider=self._now)
         while not self.isInterruptionRequested() or not self._queue.empty():
             try:
@@ -166,7 +166,7 @@ class MarketCacheWriter(QThread):
                          observed_at: datetime) -> None:
         try:
             if targets.period_verified("250"):
-                stock_repository.update_adjusted_high_250_price(code, targets.high_250_price)
+                stock_repository.update_adjusted_high_250_price(code, targets.high_250_price, observed_at=observed_at)
             daily_repository.upsert_targets(code, targets, trade_date, observed_at=observed_at)
         except Exception as error:
             self.daily_high_failed.emit(code, str(error))

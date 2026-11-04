@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
-from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
+
+if TYPE_CHECKING:
+    from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
 

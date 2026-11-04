@@ -1,3 +1,5 @@
+
+from tests.unit.test_mock_automation_runner import _prepared_runner, _apply_runner_fills, _replace_runner_strategy_state
 """Native fill-owned facts use one RAM borrow, without changing execution."""
 from copy import deepcopy
 from dataclasses import asdict,replace
@@ -13,6 +15,7 @@ from kiwoom_monitor.application.mock_automation_risk import build_mock_automatio
 from kiwoom_monitor.application.position_target import (
     PositionAccountObservation,PositionRunnerAccountObservation,validate_position_runner_state)
 from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+from kiwoom_monitor.central_server.mock_automation_episode import MockAutomationEpisode
 from kiwoom_monitor.domain.order_contract import AccountSnapshot
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 
@@ -25,15 +28,15 @@ class NativeRunnerStateTests(unittest.TestCase):
         self.base.bundle.runtime=self.runtime
         self.base.bundle.monitor=SimpleNamespace(position_observation_matches=lambda observation:observation==self.latest_observation)
         self.latest_observation=None
-        self.runner=MockAutomationRunner(self.base.store,self.base.bundle,self.base.spec)
-        self.runner._bootstrap_pending=False
+        self.runner=_prepared_runner(self.base.store,self.base.bundle,self.base.spec)
+        self.runner.episode._input_progress._bootstrap_pending=False
 
     def fill(self,sequence,side,quantity,price):
         self.base.events.values.append(self.base.event(sequence,f'fill-{sequence}',side,quantity,price))
-        self.runner._apply_new_fills()
+        _apply_runner_fills(self.runner)
 
     def observation(self):
-        state=self.runner._state
+        state=self.runner.episode._episode_position._state
         positions={state.symbol:state.position_quantity} if state.status=='open' else {}
         account=AccountSnapshot(native.ACCOUNT_REF,90000,0,positions,self.now)
         daily=tuple(replace(cost(self.now.date(),'매수' if event.side=='BUY' else '매도',event.quantity*event.price,0),
@@ -46,61 +49,61 @@ class NativeRunnerStateTests(unittest.TestCase):
 
     def test_real_fill_basis_partial_sell_preserves_opened_time_and_zero_getter_io(self):
         self.fill(1,'BUY',2,1000);self.fill(2,'BUY',2,1200)
-        opened=self.runner._state.opened_at;self.fill(3,'SELL',1,1300)
-        observation=self.observation();before=(self.runner._state,self.runner._fill_cursor,self.base.store.load_documents(native.CHECKPOINT_COLLECTION))
+        opened=self.runner.episode._episode_position._state.opened_at;self.fill(3,'SELL',1,1300)
+        observation=self.observation();before=(self.runner.episode._episode_position._state,self.runner.episode._episode_position._fill_cursor,self.base.store.load_documents(native.CHECKPOINT_COLLECTION))
         with patch.object(self.base.events,'account_events',side_effect=AssertionError('getter fill read')),patch('sqlite3.connect',side_effect=AssertionError('getter DB')):
-            first=self.runner.position_study_state(observation);second=self.runner.position_study_state(observation)
+            first=self.runner.episode.position_study_state(observation);second=self.runner.episode.position_study_state(observation)
         self.assertIsNotNone(first);self.assertEqual(first,second)
         self.assertEqual(1100,first['strategy_state']['entry_price']);self.assertEqual(3,first['strategy_state']['position_quantity'])
         self.assertEqual(opened,first['strategy_state']['opened_at']);self.assertEqual(self.now.isoformat(),first['state_available_at'])
-        self.assertEqual(before,(self.runner._state,self.runner._fill_cursor,self.base.store.load_documents(native.CHECKPOINT_COLLECTION)))
+        self.assertEqual(before,(self.runner.episode._episode_position._state,self.runner.episode._episode_position._fill_cursor,self.base.store.load_documents(native.CHECKPOINT_COLLECTION)))
         first['strategy_state']['entry_price']=1
-        self.assertEqual(1100,self.runner.position_study_state(observation)['strategy_state']['entry_price'])
+        self.assertEqual(1100,self.runner.episode.position_study_state(observation)['strategy_state']['entry_price'])
 
     def test_misaligned_hwm_price_scope_warmup_close_and_busy_are_unavailable(self):
         self.fill(1,'BUY',2,1000);observation=self.observation()
-        for state in (replace(self.runner._state,entry_price=999),replace(self.runner._state,position_quantity=3)):
-            before=self.runner._state;self.runner._replace_strategy_state(state)
-            self.assertIsNone(self.runner.position_study_state(observation));self.runner._replace_strategy_state(before)
-        self.runner._fill_cursor=0;self.assertIsNone(self.runner.position_study_state(observation));self.runner._fill_cursor=1
-        self.runner._bootstrap_pending=True;self.assertIsNone(self.runner.position_study_state(observation));self.runner._bootstrap_pending=False
-        self.runtime.observation_in_progress=True;self.assertIsNone(self.runner.position_study_state(observation));self.runtime.observation_in_progress=False
-        for lock in (self.runner._position_state_lock,self.runner._protection_lock):
+        for state in (replace(self.runner.episode._episode_position._state,entry_price=999),replace(self.runner.episode._episode_position._state,position_quantity=3)):
+            before=self.runner.episode._episode_position._state;_replace_runner_strategy_state(self.runner, state)
+            self.assertIsNone(self.runner.episode.position_study_state(observation));_replace_runner_strategy_state(self.runner, before)
+        self.runner.episode._episode_position._fill_cursor=0;self.assertIsNone(self.runner.episode.position_study_state(observation));self.runner.episode._episode_position._fill_cursor=1
+        self.runner.episode._input_progress._bootstrap_pending=True;self.assertIsNone(self.runner.episode.position_study_state(observation));self.runner.episode._input_progress._bootstrap_pending=False
+        self.runtime.observation_in_progress=True;self.assertIsNone(self.runner.episode.position_study_state(observation));self.runtime.observation_in_progress=False
+        for lock in (self.runner.episode._episode_position._position_state_lock,self.runner.episode._protection_lock):
             lock.acquire()
-            try:self.assertIsNone(self.runner.position_study_state(observation))
+            try:self.assertIsNone(self.runner.episode.position_study_state(observation))
             finally:lock.release()
-        self.runner._closing=True;self.assertIsNone(self.runner.position_study_state(observation))
+        self.runner.episode._closing=True;self.assertIsNone(self.runner.episode.position_study_state(observation))
 
     def test_fill_read_inflight_is_not_a_ready_snapshot_and_failure_stays_unavailable(self):
         self.fill(1,'BUY',2,1000);observation=self.observation()
         entered=threading.Event();release=threading.Event();original=self.base.events.account_events
         def held(*args,**kwargs):entered.set();release.wait(5);return original(*args,**kwargs)
         with patch.object(self.base.events,'account_events',side_effect=held):
-            thread=threading.Thread(target=self.runner._apply_new_fills);thread.start()
+            thread=threading.Thread(target=_apply_runner_fills, args=(self.runner,));thread.start()
             try:
-                self.assertTrue(entered.wait(2));self.assertIsNone(self.runner.position_study_state(observation))
+                self.assertTrue(entered.wait(2));self.assertIsNone(self.runner.episode.position_study_state(observation))
             finally:release.set();thread.join(5)
-        self.assertIsNotNone(self.runner.position_study_state(observation))
+        self.assertIsNotNone(self.runner.episode.position_study_state(observation))
         with patch.object(self.base.events,'account_events',side_effect=OSError('controlled fill failure')):
-            with self.assertRaises(OSError):self.runner._apply_new_fills()
-        self.assertIsNone(self.runner.position_study_state(observation))
+            with self.assertRaises(OSError):_apply_runner_fills(self.runner)
+        self.assertIsNone(self.runner.episode.position_study_state(observation))
 
     def test_protection_notice_first_time_is_preserved_and_repeated_getter_does_not_refresh(self):
         self.fill(1,'BUY',2,1000);observation=self.observation()
-        notice=self.runner.request_protection_review(reason='controlled risk',input_ref='first-price',requested_at=self.now)
+        notice=self.runner.episode.request_protection_review(reason='controlled risk',input_ref='first-price',requested_at=self.now)
         self.now+=timedelta(seconds=1)
         with patch.object(self.base.events,'account_events',side_effect=AssertionError('source read')):
-            first=self.runner.position_study_state(observation);second=self.runner.position_study_state(observation)
+            first=self.runner.episode.position_study_state(observation);second=self.runner.episode.position_study_state(observation)
         self.assertEqual(notice,first['protection_review']);self.assertEqual(first,second)
         self.assertEqual(observation.observed_at.isoformat(),first['state_available_at'])
-        self.runner._apply_new_fills()
-        self.assertEqual(observation.observed_at.isoformat(),self.runner.position_study_state(observation)['state_available_at'])
+        _apply_runner_fills(self.runner)
+        self.assertEqual(observation.observed_at.isoformat(),self.runner.episode.position_study_state(observation)['state_available_at'])
 
     def test_owner_registry_enrichment_is_detached_and_disappears_on_owner_change(self):
         from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
         self.fill(1,'BUY',2,1000);observation=self.observation()
         owner=MockAutomationSupervisor(self.base.store,SimpleNamespace());owner._runners[native.ACCOUNT_REF]=self.runner
-        with patch.object(self.runner,'position_shadow_observation',wraps=self.runner.position_shadow_observation) as public:
+        with patch.object(self.runner.episode,'position_shadow_observation',wraps=self.runner.episode.position_shadow_observation) as public:
             first=owner.position_shadow_observation(observation)
         public.assert_called_once()
         self.assertEqual(observation,public.call_args.args[0])
@@ -120,10 +123,10 @@ class NativeRunnerStateTests(unittest.TestCase):
         owner=MockAutomationSupervisor(self.base.store,SimpleNamespace());owner._runners[native.ACCOUNT_REF]=self.runner
         with patch.object(self.base.bundle.monitor,'position_observation_matches',side_effect=[True,False]):
             self.assertIs(type(owner.position_shadow_observation(observation)),PositionAccountObservation)
-        original=self.runner.position_study_state
+        original=self.runner.episode.position_study_state
         def replaced(value):
             result=original(value);owner._runners.clear();return result
-        with patch.object(self.runner,'position_study_state',side_effect=replaced):
+        with patch.object(self.runner.episode,'position_study_state',side_effect=replaced):
             self.assertIs(type(owner.position_shadow_observation(observation)),PositionAccountObservation)
 
         for retired_at in ('portfolio','policy'):
@@ -137,7 +140,7 @@ class NativeRunnerStateTests(unittest.TestCase):
                     owner._closing=True
                     return None
                 with (patch.object(self.base.bundle.monitor,'position_study_portfolio',side_effect=portfolio,create=True) as read,
-                      patch.object(self.runner,'position_study_policy',side_effect=policy) as read_policy,
+                      patch.object(self.runner.episode,'position_study_policy',side_effect=policy) as read_policy,
                       patch('sqlite3.connect',side_effect=AssertionError('observation must remain RAM-only'))):
                     result=owner.position_shadow_observation(observation)
                 self.assertIs(type(result),PositionAccountObservation)
@@ -152,14 +155,14 @@ class NativeRunnerStateTests(unittest.TestCase):
         def status_forbidden(value):
             raise AssertionError('identity lookup must not build status')
         with (patch('sqlite3.connect',side_effect=AssertionError('identity lookup DB')),
-              patch.object(MockAutomationRunner,'status',property(status_forbidden))):
-            self.assertEqual(native.ACCOUNT_REF,self.runner.account_ref)
-            self.assertEqual('profile-a',self.runner.credential_profile_id)
-            self.assertTrue(self.runner.is_bound_to(self.base.bundle))
-            self.assertFalse(self.runner.is_bound_to(same_values))
-            self.assertFalse(self.runner.is_bound_to(None))
+              patch.object(MockAutomationEpisode,'status',property(status_forbidden))):
+            self.assertEqual(native.ACCOUNT_REF,self.runner.episode.account_ref)
+            self.assertEqual('profile-a',self.runner.episode.credential_profile_id)
+            self.assertTrue(self.runner.episode.is_bound_to(self.base.bundle))
+            self.assertFalse(self.runner.episode.is_bound_to(same_values))
+            self.assertFalse(self.runner.episode.is_bound_to(None))
             for field in ('account_ref','credential_profile_id'):
-                with self.assertRaises(AttributeError):setattr(self.runner,field,'different')
+                with self.assertRaises(AttributeError):setattr(self.runner.episode,field,'different')
 
     def test_monitor_epoch_check_uses_existing_ram_without_an_extra_borrow(self):
         from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor
@@ -174,7 +177,7 @@ class NativeRunnerStateTests(unittest.TestCase):
 
     def test_resigned_cut_state_or_notice_tamper_is_not_native_equivalence(self):
         import hashlib,json
-        self.fill(1,'BUY',2,1000);observation=self.observation();state=self.runner.position_study_state(observation)
+        self.fill(1,'BUY',2,1000);observation=self.observation();state=self.runner.episode.position_study_state(observation)
         for mutate in (lambda p:p.update(account_input_ref='other'),lambda p:p.update(fill_cursor=2),
                        lambda p:p['strategy_state'].update(entry_price=999),lambda p:p.update(session_clock=3)):
             bad=deepcopy(state);mutate(bad)
@@ -187,19 +190,19 @@ class NativeRunnerStateTests(unittest.TestCase):
         self.fill(1,'BUY',2,1000);observation=self.observation()
         validate=position_target.validate_position_runner_state
         def changed(*args):
-            result=validate(*args);self.runner._replace_strategy_state(self.runner._state);return result
+            result=validate(*args);_replace_runner_strategy_state(self.runner, self.runner.episode._episode_position._state);return result
         with patch.object(position_target,'validate_position_runner_state',side_effect=changed):
-            self.assertIsNone(self.runner.position_study_state(observation))
+            self.assertIsNone(self.runner.episode.position_study_state(observation))
         def protected(*args):
             result=validate(*args)
-            self.runner.request_protection_review(reason='race',input_ref='first',requested_at=self.now)
+            self.runner.episode.request_protection_review(reason='race',input_ref='first',requested_at=self.now)
             return result
         with patch.object(position_target,'validate_position_runner_state',side_effect=protected):
-            self.assertIsNone(self.runner.position_study_state(observation))
+            self.assertIsNone(self.runner.episode.position_study_state(observation))
         def clock_changed(*args):
-            result=validate(*args);self.runner._session_clock={'phase':'STOPPING'};return result
+            result=validate(*args);self.runner.episode._session_clock={'phase':'STOPPING'};return result
         with patch.object(position_target,'validate_position_runner_state',side_effect=clock_changed):
-            self.assertIsNone(self.runner.position_study_state(observation))
+            self.assertIsNone(self.runner.episode.position_study_state(observation))
 
 
 class RunnerStateRamTests(unittest.IsolatedAsyncioTestCase):
@@ -217,10 +220,10 @@ class RunnerStateRamTests(unittest.IsolatedAsyncioTestCase):
             binding_revision=risk.binding_revision,data_path=risk.data_path)
         state.base.bundle.account_ref=current.account.account_ref;state.base.bundle.run_id=risk.execution_run_id
         state.base.bundle.automation_context=SimpleNamespace(execution_run_id=risk.execution_run_id,spec_id=state.base.spec.spec_id)
-        state.runner=MockAutomationRunner(state.base.store,state.base.bundle,state.base.spec);state.runner._bootstrap_pending=False
+        state.runner=_prepared_runner(state.base.store,state.base.bundle,state.base.spec);state.runner.episode._input_progress._bootstrap_pending=False
         event=replace(state.base.event(1,'native-current-fill','BUY',10,1000),run_id=risk.execution_run_id,
             account_ref=current.account.account_ref,occurred_at=current.observed_at,received_at=current.observed_at)
-        state.base.events.values=[event];state.runner._apply_new_fills();state.latest_observation=current
+        state.base.events.values=[event];_apply_runner_fills(state.runner);state.latest_observation=current
         owner=MockAutomationSupervisor(state.base.store,SimpleNamespace());owner._runners[current.account.account_ref]=state.runner
         source.side_effect=lambda account_ref:owner.position_shadow_observation(current)
         return runtime,collector,clock,source,packet,state,owner
@@ -270,7 +273,7 @@ class RunnerStateRamTests(unittest.IsolatedAsyncioTestCase):
         source.side_effect=lambda account_ref:owner.position_shadow_observation(current)
         # Controlled owner fixture: even an exact copied historical state cannot
         # manufacture source evidence for native protection or continuation.
-        state.runner._replace_strategy_state(StrategyState(**{**original,
+        _replace_runner_strategy_state(state.runner, StrategyState(**{**original,
             'emitted_candidate_keys':tuple(original['emitted_candidate_keys'])}))
         runtime.offer_allocation_models(packet,decoded)
         with patch('sqlite3.connect',side_effect=AssertionError('support hot path DB')):
@@ -288,13 +291,13 @@ class RunnerStateRamTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_pending_protection_and_owner_loss_never_become_supported_goals(self):
         from kiwoom_monitor.central_server.market_theme_shadow_inputs import decode_dynamic_allocation_model_publication
         runtime,_,_,source,packet,state,owner=self.prepare(2)
-        notice=state.runner.request_protection_review(reason='controlled native risk',input_ref='first-trigger',requested_at=state.now)
+        notice=state.runner.episode.request_protection_review(reason='controlled native risk',input_ref='first-trigger',requested_at=state.now)
         runtime.offer_allocation_models(packet,decode_dynamic_allocation_model_publication(packet,runtime._allocation,1))
         await runtime._dispatch(runtime._snapshot())
         goal=runtime.latest_results['position_allocation']['r4_action_comparison']['goals'][0]
         self.assertTrue(goal['native_owner_facts']['protection_pending'])
         self.assertIn('native_protection_preempts_position_study',goal['reasons'])
-        self.assertEqual(notice,state.runner._protection_snapshot())
+        self.assertEqual(notice,state.runner.episode._protection_snapshot())
         owner._runners.clear();await runtime._refresh_position_inputs(runtime._snapshot())
         goal=runtime.latest_results['position_allocation']['r4_action_comparison']['goals'][0]
         self.assertNotIn('native_owner_facts',goal);self.assertIn('current_position_protection_state_unavailable',goal['reasons'])

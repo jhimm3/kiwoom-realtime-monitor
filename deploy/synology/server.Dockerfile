@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md requirements.lock.txt ./
 COPY src ./src
 COPY scripts/check_postgres_integration.py ./scripts/check_postgres_integration.py
 COPY scripts/register_account_identity.py ./scripts/register_account_identity.py
@@ -40,13 +40,14 @@ RUN PYTHONPATH=/app/src python -c "import kiwoom_monitor.infrastructure.kiwoom_r
 # 프로젝트 자체는 의존성 없이 설치하고 중앙 서버 실행에 필요한 패키지만
 # 별도로 넣어 ARM/저사양 시놀로지에서도 이미지가 불필요하게 커지지 않게 한다.
 RUN pip install --no-cache-dir --no-deps . \
-    && pip install --no-cache-dir \
+    && pip install --no-cache-dir --constraint requirements.lock.txt \
         "fastapi>=0.116,<1" \
         "uvicorn[standard]>=0.35,<1" \
         "psycopg[binary]>=3.2,<4" \
         "cryptography>=46,<47" \
         "google-auth==2.41.1" \
-        "websockets==16.1.1"
+        "websockets==16.1.1" \
+        "tzdata==2026.3"
 
 # 실행 시에도 이미지에 복사한 최신 소스를 우선 사용한다.
 ENV PYTHONPATH=/app/src

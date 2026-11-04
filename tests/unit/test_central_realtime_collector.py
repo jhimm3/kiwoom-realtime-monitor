@@ -338,6 +338,13 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         collector = CentralRealtimeCollector(lambda: 'not-requested', 'real', RealtimeHub(), lambda: at)
         collector._observe_reconnect_trade()
         self.assertEqual(collector._last_trade_observed_at, at.isoformat())
+        detached = collector.minute_read_status()
+        self.assertEqual({"configured": False, "minute_bars_committed_at": None,
+                          "minute_finalizations_committed_at": None}, detached)
+        detached["configured"] = True
+        detached["minute_bars_committed_at"] = "not-an-owner-marker"
+        self.assertEqual({"configured": False, "minute_bars_committed_at": None,
+                          "minute_finalizations_committed_at": None}, collector.minute_read_status())
         with collector._observe_save('fixture', [{'updated_at': at.timestamp()}]):
             self.assertEqual(collector._active_save['started_at'], at.isoformat())
             self.assertEqual(collector._active_save['oldest_record_at'], at.isoformat())
@@ -390,6 +397,8 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                     health = collector.operational_status()['persistence']
                     self.assertEqual(('saving', 0, 1), (health['state'], health['pending_records'], health['inflight_records']))
                     self.assertIsNone(health['last_success_at'])
+                    self.assertEqual({"configured": True, "minute_bars_committed_at": None,
+                                      "minute_finalizations_committed_at": None}, collector.minute_read_status())
                     from kiwoom_monitor.central_server.market_observations import KST
                     self.assertEqual(datetime.fromtimestamp(at.timestamp(), KST).isoformat(), health['oldest_record_at'])
                     [during] = await collector.load_live_minute_bars('005930', '2026-10-06', 'KRX')
@@ -402,6 +411,7 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                 failed = collector.operational_status()['persistence']
                 self.assertEqual(('degraded', 1, 0), (failed['state'], failed['pending_records'], failed['inflight_records']))
                 self.assertIsNone(failed['last_success_at'])  # DB committed, but its ACK was lost.
+                self.assertIsNone(collector.minute_read_status()["minute_bars_committed_at"])
                 collector._pending_snapshots[('trade', '005930')] = {
                     'event_type': 'trade', 'item_key': '005930', 'received_at': at.timestamp(),
                     'event': {'type': 'trade', 'payload': {}},
@@ -420,6 +430,8 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                 self.assertEqual(('observed', 0, 0), (recovered['state'], recovered['pending_records'], recovered['inflight_records']))
                 self.assertFalse(recovered['unresolved_failures'])
                 self.assertIn('minute_bars', recovered['last_success_by_kind'])
+                self.assertEqual(at.replace(tzinfo=KST).isoformat(),
+                                 collector.minute_read_status()["minute_bars_committed_at"])
                 self.assertEqual(5, store.load_minute_bars('005930', '2026-10-06', 'KRX')[0]['volume'])
 
             try:
@@ -461,6 +473,10 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                 after = collector.operational_status()['persistence']
                 self.assertEqual(set(before['pending_by_kind'])-{'second_bars'}, set(after['last_success_by_kind']))
                 self.assertEqual((0, 0), (after['pending_records'], after['inflight_records']))
+                self.assertEqual({"configured": True,
+                    "minute_bars_committed_at": (at + timedelta(seconds=15)).isoformat(),
+                    "minute_finalizations_committed_at": (at + timedelta(seconds=15)).isoformat()},
+                    collector.minute_read_status())
                 stamp = after['last_success_at']
                 asyncio.run(collector._flush_snapshots())
                 self.assertEqual(stamp, collector.operational_status()['persistence']['last_success_at'])

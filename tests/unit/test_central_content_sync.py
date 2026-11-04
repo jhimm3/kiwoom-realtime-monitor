@@ -24,9 +24,15 @@ from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
+from tests.unit.test_theme_generation_sync import NativeThemeClient
+from tests.unit.test_theme_generation import NOW
 
 
 class _Client:
+    def load_current_theme_snapshot(self):
+        # Exercise the real older-server HTTP404 compatibility contract.
+        raise CentralContentHttpError(404, "older theme server fixture")
+
     def __init__(
         self, *, journal_v2: bool = False, journal_news_links_v2: bool = False,
     ) -> None:
@@ -59,6 +65,35 @@ class _Client:
 
 
 class CentralContentSyncServiceTest(unittest.TestCase):
+    def test_news_pg_authority_uses_effective_connection_scope_when_url_omits_parameters(self) -> None:
+        from types import SimpleNamespace
+        from kiwoom_monitor.central_server.database_documents import _news_native_authority
+
+        class EffectiveInfo(SimpleNamespace):
+            def __getattr__(self, name):
+                raise AssertionError(f"Scope must not read other connection fields: {name}")
+
+        class UnreadableConfiguration:
+            @property
+            def _database_url(self):
+                raise AssertionError("Scope must not parse the configured DSN")
+
+        # All four parameters are omitted, so libpq supplies the active connection values.
+        store = SimpleNamespace(_database_url="postgresql://")
+        scope = {"host": "native-alpha", "hostaddr": "192.0.2.10", "port": 5432, "dbname": "monitor_alpha"}
+        def cursor_for(effective):
+            return SimpleNamespace(connection=SimpleNamespace(info=EffectiveInfo(**effective)))
+
+        authority = _news_native_authority(store, cursor_for(scope), postgres=True)
+        self.assertEqual("c57dbbc76d9a006f1c7832b6353b737a5a5824fbb572b74158aab314ff0c4a02", authority)
+        for name, value in {"host": "native-beta", "hostaddr": "192.0.2.11", "port": 5433,
+                            "dbname": "monitor_beta"}.items():
+            with self.subTest(effective_parameter=name):
+                self.assertNotEqual(authority, _news_native_authority(
+                    store, cursor_for({**scope, name: value}), postgres=True))
+        self.assertEqual(authority, _news_native_authority(
+            UnreadableConfiguration(), cursor_for(scope), postgres=True))
+
     def test_theme_manifest_ignores_only_full_backup_generation_time(self) -> None:
         first = {"owner": "default", "key": "full", "document": {
             "format": ThemeBackupService.FORMAT, "version": ThemeBackupService.VERSION,
@@ -84,105 +119,46 @@ class CentralContentSyncServiceTest(unittest.TestCase):
 
     def test_theme_noop_preserves_native_completion_after_restart_pull_and_inflight_edit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            main, news = root / "main.sqlite3", root / "news.sqlite3"
+            root = Path(temporary); main = root / "main.sqlite3"
             Database(main).initialize()
             with closing(sqlite3.connect(main)) as connection, connection:
                 connection.execute("INSERT INTO stocks(code,name,market) VALUES('005930','원래 이름','KOSPI')")
-            now = [datetime.fromisoformat("2030-01-02T09:00:00+09:00")]
-            store = SQLiteQueryStore(root / "central.sqlite3", now_provider=lambda: now[0])
-            store.initialize()
-
-            class NativeClient(_Client):
-                def __init__(self):
-                    super().__init__()
-                    self.calls = []
-                    self.after_write = None
-                    self.fail = False
-
-                def upsert(self, collection, documents):
-                    if self.fail and collection == "theme_metadata":
-                        raise RuntimeError("native upload retry fixture")
-                    store.upsert_documents(collection, documents)
-                    self.calls.append((collection, deepcopy(documents)))
-                    callback, self.after_write = self.after_write, None
-                    if callback is not None:
-                        callback()
-                    return len(documents)
-
-                def load_all(self, collection, **kwargs):
-                    return store.load_documents(collection, updated_after=kwargs.get("updated_after", 0))
-
-            client = NativeClient()
+            store = SQLiteQueryStore(root / "central.sqlite3", now_provider=lambda: NOW)
+            store.initialize(); self.addCleanup(store.close)
+            client = NativeThemeClient(store)
             service = CentralContentSyncService(client)
-            try:
-                with patch("kiwoom_monitor.infrastructure.persistence.theme_backup.kst_now", side_effect=lambda: now[0]):
-                    artifact1 = root / "backup-first.json"
-                    ThemeBackupService(main).export_to(artifact1)
-                    self.assertEqual(1, service.push(main, news).theme_metadata)
-                    accepted = store.load_documents("theme_metadata")
-                    history = store.load_theme_snapshots()
-                    self.assertEqual(1, len(history))
-                    manifest_path = root / "central_content_push_manifest.json"
-                    manifest = manifest_path.read_bytes()
-                    client.calls.clear()
-                    now[0] += timedelta(minutes=1)
-                    artifact2 = root / "backup-later.json"
-                    ThemeBackupService(main).export_to(artifact2)
-                    self.assertNotEqual(artifact1.read_bytes(), artifact2.read_bytes())
-                    with patch.object(service, "_save_push_manifest", wraps=service._save_push_manifest) as save:
-                        self.assertEqual(0, service.push(main, news).total)
-                    save.assert_not_called()
-                    self.assertEqual([], client.calls)
-                    self.assertEqual(manifest, manifest_path.read_bytes())
-                    self.assertEqual(accepted, store.load_documents("theme_metadata"))
-                    self.assertEqual(history, store.load_theme_snapshots())
+            self.assertEqual(1, service.replace_themes(main).theme_metadata)
+            accepted, history = store.load_documents("theme_metadata"), store.load_theme_snapshots()
+            client.calls.clear()
+            self.assertEqual(0, CentralContentSyncService(client).replace_themes(main).total)
+            self.assertEqual(["GET"], [c[0] for c in client.calls])
+            self.assertEqual(accepted, store.load_documents("theme_metadata"))
+            self.assertEqual(history, store.load_theme_snapshots())
+            self.assertFalse((root / "central_content_push_manifest.json").exists())
+            other = root / "other.sqlite3"; Database(other).initialize()
+            with self.assertRaisesRegex(ValueError, "revision conflict"):
+                CentralContentSyncService(client).replace_themes(other)
+            self.assertEqual(accepted, store.load_documents("theme_metadata"))
+            def edit(name):
+                with closing(sqlite3.connect(main)) as connection, connection:
+                    connection.execute("UPDATE stocks SET name=? WHERE code='005930'", (name,))
+            edit("보낸 편집")
+            client.after_publish = lambda: edit("전송 중 다음 편집")
+            self.assertEqual(("theme_generation",), service.replace_themes(main).pending_collections)
+            self.assertEqual("보낸 편집", store.load_documents("theme_metadata")[0]["document"]["stock_catalog"][0]["name"])
+            self.assertEqual(1, service.replace_themes(main).theme_metadata)
+            self.assertEqual("전송 중 다음 편집", store.load_documents("theme_metadata")[0]["document"]["stock_catalog"][0]["name"])
+            self.assertEqual(0, service.replace_themes(main).total)
+            edit("실패 후 재시도"); client.lose_ack = True
+            with self.assertRaisesRegex(RuntimeError, "ACK loss"):
+                service.replace_themes(main)
+            self.assertEqual(1, CentralContentSyncService(client).replace_themes(main).theme_metadata)
+            self.assertEqual(0, service.replace_themes(main).total)
+            final = store.load_documents("theme_metadata")[0]
+            self.assertEqual("실패 후 재시도", final["document"]["stock_catalog"][0]["name"])
+            self.assertEqual(NOW.isoformat(timespec="seconds"), final["document"]["created_at"])
+            self.assertEqual(4, len(store.load_theme_snapshots()))
 
-                    service = CentralContentSyncService(client)
-                    self.assertEqual(0, service.push(main, news).total)
-                    self.assertEqual(0, service.pull(main, news).total)
-                    self.assertEqual(0, service.push(main, news).total)
-                    other_root = root / "other-pc"
-                    other_root.mkdir()
-                    other_main, other_news = other_root / "main.sqlite3", other_root / "news.sqlite3"
-                    Database(other_main).initialize()
-                    other = CentralContentSyncService(client)
-                    self.assertEqual(1, other.pull(other_main, other_news).theme_metadata)
-                    self.assertEqual(0, other.push(other_main, other_news).total)
-                    self.assertEqual(accepted, store.load_documents("theme_metadata"))
-
-                    def edit(name):
-                        with closing(sqlite3.connect(main)) as connection, connection:
-                            connection.execute("UPDATE stocks SET name=? WHERE code='005930'", (name,))
-
-                    now[0] += timedelta(minutes=1)
-                    edit("보낸 편집")
-                    client.after_write = lambda: edit("전송 중 다음 편집")
-                    self.assertEqual(1, service.push(main, news).theme_metadata)
-                    self.assertEqual("보낸 편집", store.load_documents("theme_metadata")[0]["document"]["stock_catalog"][0]["name"])
-                    now[0] += timedelta(minutes=1)
-                    self.assertEqual(1, service.push(main, news).theme_metadata)
-                    self.assertEqual("전송 중 다음 편집", store.load_documents("theme_metadata")[0]["document"]["stock_catalog"][0]["name"])
-                    self.assertEqual(0, service.push(main, news).total)
-
-                    now[0] += timedelta(minutes=1)
-                    edit("실패 후 재시도")
-                    client.fail = True
-                    manifest = manifest_path.read_bytes()
-                    with self.assertRaisesRegex(RuntimeError, "native upload retry fixture"):
-                        service.push(main, news)
-                    self.assertEqual(manifest, manifest_path.read_bytes())
-                    client.fail = False
-                    service = CentralContentSyncService(client)
-                    self.assertEqual(1, service.push(main, news).theme_metadata)
-                    self.assertEqual(0, service.push(main, news).total)
-                    final = store.load_documents("theme_metadata")[0]
-                    self.assertEqual("실패 후 재시도", final["document"]["stock_catalog"][0]["name"])
-                    self.assertEqual(now[0].isoformat(timespec="seconds"), client.calls[-1][1][0]["effective_at"])
-                    self.assertEqual(now[0].isoformat(timespec="seconds"), final["document"]["created_at"])
-                    self.assertEqual(4, len(store.load_theme_snapshots()))
-            finally:
-                store.close()
 
     def test_nas_mode_skips_bulk_news_catalog_but_keeps_local_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -447,7 +423,7 @@ class CentralContentSyncServiceTest(unittest.TestCase):
                 set(), repository.journal_linked_identities("legacy-group", "005930", real),
             )
 
-    def test_pushes_news_ai_and_profile_themes_with_stable_keys(self) -> None:
+    def test_pushes_news_ai_stable_keys_without_bypassing_theme_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             news, main = root / "news.sqlite3", root / "monitor.sqlite3"
@@ -479,14 +455,14 @@ class CentralContentSyncServiceTest(unittest.TestCase):
             client = _Client()
             result = CentralContentSyncService(client, batch_size=1).push(main, news)  # type: ignore[arg-type]
 
-            self.assertEqual(result.total, 7)
+            self.assertEqual(result.total, 5)
             self.assertEqual(client.saved["news_article"][0]["owner"], "005930")
             self.assertEqual(client.saved["news_article"][0]["key"], "article-1")
             self.assertEqual(
                 "local_projection_sync", client.saved["news_article"][0]["collection_scope"],
             )
             self.assertTrue(str(client.saved["news_article"][0]["collector_id"]).startswith("local-sync:"))
-            self.assertEqual(client.saved["theme_stock"][0]["key"], "005930|반도체")
+            self.assertNotIn("theme_stock", client.saved)
             self.assertEqual(client.saved["journal_news_link"][0]["owner"], "group-1")
 
     def test_missing_databases_are_safe(self) -> None:
@@ -497,25 +473,22 @@ class CentralContentSyncServiceTest(unittest.TestCase):
 
     def test_replace_themes_removes_deleted_central_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            main = Path(temporary) / "monitor.sqlite3"
-            connection = sqlite3.connect(main)
-            connection.executescript("""
-                CREATE TABLE theme_profiles(profile_id INTEGER,profile_name TEXT);
-                INSERT INTO theme_profiles VALUES(1,'기본 테마');
-                CREATE TABLE profile_themes(profile_id INTEGER,theme_name TEXT,default_color TEXT);
-                INSERT INTO profile_themes VALUES(1,'원전','#fff');
-                CREATE TABLE profile_stock_themes(profile_id INTEGER,stock_code TEXT,theme_name TEXT,custom_color TEXT);
-            """)
-            connection.close()
-            client = _Client()
-            client.saved["theme_profile"] = [{"key": "삭제된 테마"}]
-            client.saved["theme_stock"] = [{"key": "005930|삭제된 테마"}]
-
-            result = CentralContentSyncService(client).replace_themes(main)  # type: ignore[arg-type]
-
+            root = Path(temporary); main = root / "monitor.sqlite3"
+            Database(main).initialize()
+            with closing(sqlite3.connect(main)) as connection, connection:
+                connection.execute("INSERT INTO profile_themes(profile_id,theme_name,default_color) SELECT profile_id,'삭제된 테마','#fff' FROM theme_profiles LIMIT 1")
+            store = SQLiteQueryStore(root / "central.sqlite3", now_provider=lambda: NOW)
+            store.initialize(); self.addCleanup(store.close)
+            client = NativeThemeClient(store); service = CentralContentSyncService(client)
+            service.replace_themes(main)
+            with closing(sqlite3.connect(main)) as connection, connection:
+                connection.execute("UPDATE profile_themes SET theme_name='원전'")
+            result = service.replace_themes(main)
             self.assertEqual(1, result.theme_profiles)
-            self.assertEqual([], client.saved["theme_stock"])
-            self.assertEqual("원전", client.saved["theme_profile"][0]["key"])
+            self.assertEqual([], store.load_documents("theme_stock"))
+            self.assertEqual("원전", store.load_documents("theme_profile")[0]["key"])
+            self.assertEqual(["PUT", "PUT"], [c[0] for c in client.calls])
+
 
     def test_load_theme_snapshot_uses_metadata_as_completed_timestamp(self) -> None:
         client = _Client()
@@ -553,11 +526,13 @@ class CentralContentSyncServiceTest(unittest.TestCase):
                   FROM theme_profiles WHERE profile_name='내 테마';
             """)
             connection.close()
-            client = _Client()
+            store = SQLiteQueryStore(Path(temporary) / "central.sqlite3", now_provider=lambda: NOW)
+            store.initialize(); self.addCleanup(store.close)
+            client = NativeThemeClient(store)
 
             CentralContentSyncService(client).replace_themes(main)  # type: ignore[arg-type]
 
-            metadata = client.saved["theme_metadata"][0]["document"]
+            metadata = store.load_documents("theme_metadata")[0]["document"]
             self.assertEqual("내 테마", metadata["active_profile"])
             self.assertIn({"alias": "삼전", "code": "005930"}, metadata["aliases"])
             self.assertIn({"code": "005930", "name": "삼성전자", "market": "KOSPI"}, metadata["stock_catalog"])
@@ -565,15 +540,15 @@ class CentralContentSyncServiceTest(unittest.TestCase):
             self.assertEqual("alias", profile["theme_name_decisions"][0]["kind"])
             self.assertEqual("인공지능", profile["theme_name_decisions"][0]["source"])
             self.assertEqual(
-                metadata["created_at"], client.saved["theme_metadata"][0]["effective_at"],
+                metadata["created_at"], store.load_accepted_theme_snapshot()["effective_at"],
             )
-            self.assertTrue(client.saved["theme_metadata"][0]["origin_device"])
+            self.assertTrue(store.load_accepted_theme_snapshot()["origin_device"])
 
             connection = sqlite3.connect(main)
             connection.execute("UPDATE settings SET value='기본 테마' WHERE key='theme_active_profile'")
             connection.execute("DELETE FROM profile_theme_name_decisions")
             connection.commit(); connection.close()
-            CentralContentSyncService(client).pull(main, Path(temporary) / "missing-news.sqlite3")  # type: ignore[arg-type]
+            CentralContentSyncService(client).apply_theme_snapshot(main, store.load_current_theme_snapshot()["collections"], expected_revision=ThemeBackupService(main).revision())  # type: ignore[arg-type]
             connection = sqlite3.connect(main)
             restored = connection.execute(
                 "SELECT value FROM settings WHERE key='theme_active_profile'"
@@ -588,7 +563,7 @@ class CentralContentSyncServiceTest(unittest.TestCase):
                 ("alias", "인공지능", "AI", "llm_review"), restored_decision,
             )
 
-    def test_pulls_central_news_and_themes_into_local_cache(self) -> None:
+    def test_pulls_central_news_without_bypassing_theme_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             news, main = root / "news.sqlite3", root / "monitor.sqlite3"
@@ -618,13 +593,13 @@ class CentralContentSyncServiceTest(unittest.TestCase):
 
             result = CentralContentSyncService(client).pull(main, news)  # type: ignore[arg-type]
 
-            self.assertEqual(result.total, 4)
+            self.assertEqual(result.total, 2)
             connection = sqlite3.connect(news)
             self.assertEqual("중앙 뉴스", connection.execute("SELECT title FROM stock_news").fetchone()[0])
             self.assertEqual(("group-1",), connection.execute("SELECT group_id FROM journal_news_links").fetchone())
             connection.close()
             connection = sqlite3.connect(main)
-            self.assertEqual("반도체", connection.execute("SELECT theme_name FROM profile_stock_themes").fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM profile_stock_themes").fetchone()[0])
             connection.close()
 
     def test_pull_cursor_survives_service_restart(self) -> None:
@@ -829,6 +804,116 @@ class CentralContentSyncServiceTest(unittest.TestCase):
                     'SELECT updated_at,is_deleted,source_content_hash FROM journal_news_links WHERE id=?',('id',)
                 ).fetchone())
         connection.close()
+
+    def test_accepted_result_metadata_survives_sync_reopen_and_legacy_result_is_unknown(self) -> None:
+        from kiwoom_monitor.domain.news_ai_contract import AINewsAnalysis, AICompanyImpact, StockNewsItem, NewsAssessment
+        from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository, news_identity
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Two installations need separate local sync cursor/manifest roots.
+            source = root / "source-profile" / "news.sqlite3"
+            target = root / "target-profile" / "news.sqlite3"
+            main = root / "unused-main.sqlite3"
+            self.assertNotEqual(source.parent, target.parent)
+            item = StockNewsItem("title", "description", "https://fixture/article", "", NOW,
+                                 NewsAssessment(True, "category", "중립", "reason", 80, 0))
+            analysis = AINewsAnalysis("summary", "중립", 80, "reason", company_impacts=(
+                AICompanyImpact("fixture company", "중립", 80, "source impact"),))
+            provenance = {"version": 1, "status": "ACCEPTED", "origin": "native_accepted", "analysis_revision_id": "native-analysis",
+                          "target_id": "005930", "article_revision_id": "native-article",
+                          "body_revision_id": "native-body", "computed_at": 100.0, "available_at": 105.0,
+                          "input_hash": "original-body-hash", "output_hash": "original-output-hash",
+                          "provider": "provider", "model": "model", "prompt_version": "original-prompt",
+                          "schema_version": "original-schema", "requester": {"kind": "direct"},
+                          "inference_ref": {"inference_id": "native-inference", "content_hash": "original-input-hash", "input_index": 0}}
+            NewsAIRepository(source, now_provider=lambda: NOW).save(
+                "005930", item, "provider", "model", "original-body-hash", analysis, provenance=provenance)
+            expected = NewsAIRepository(source).load("005930", item)
+            NewsAIRepository(target)
+            client = _Client()
+            pushed = CentralContentSyncService(client).push(main, source)
+            self.assertEqual(1, pushed.news_ai)
+            self.assertEqual(1, pushed.news_ai_shared)
+            self.assertTrue(source.with_name("central_content_push_manifest.json").is_file())
+            self.assertFalse(target.with_name("central_content_push_manifest.json").exists())
+            pulled = CentralContentSyncService(client).pull(main, target)
+            self.assertEqual(1, pulled.news_ai)
+            self.assertEqual(1, pulled.news_ai_shared)
+            self.assertEqual(expected, NewsAIRepository(target).load("005930", item))
+            shared = NewsAIRepository(target).load_many("000002", (item,), "fixture company")[news_identity(item)]
+            self.assertEqual(provenance, shared.provenance)
+            self.assertEqual("005930", shared.provenance["target_id"], "shared copy must retain the original accepted target")
+            reported = {**provenance, "status": "REPORTED", "origin": "reported_copy",
+                        "reported_status": "ACCEPTED", "reported_origin": "native_accepted"}
+            import json
+            from kiwoom_monitor.infrastructure.persistence.news_ai_backup import NewsAIBackupService
+            for collection in ("news_ai", "news_ai_shared"):
+                client.saved[collection][0]["document"]["provenance_json"] = json.dumps(reported)
+            CentralContentSyncService(client).pull(main, target)
+            self.assertEqual(reported, NewsAIRepository(target).load("005930", item).provenance)
+            exported, restored = root / "reported-v3.json", root / "reported-restored.sqlite3"
+            NewsAIBackupService(target).export_to(exported)
+            NewsAIBackupService(restored).import_from(exported)
+            self.assertEqual(reported, NewsAIRepository(restored).load("005930", item).provenance)
+            self.assertEqual(reported, NewsAIRepository(restored).load_many("000002", (item,), "fixture company")[news_identity(item)].provenance)
+            client.saved["news_ai"][0]["document"].pop("provenance_json")
+            CentralContentSyncService(client).pull(main, target)
+            legacy = NewsAIRepository(target).load("005930", item)
+            self.assertEqual(expected.analysis, legacy.analysis)
+            self.assertEqual(expected.body_hash, legacy.body_hash)
+            self.assertEqual({"status": "UNKNOWN"}, legacy.provenance)
+
+    def test_source_carrier_changes_copy_without_new_article_body_job_or_legacy_rehash(self):
+        import json
+        from dataclasses import replace
+        from kiwoom_monitor.domain.news_ai_contract import StockNewsItem, NewsAssessment
+        from kiwoom_monitor.domain.news_observation import stable_document_hash, news_projection_article_hash
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "pc.sqlite3"
+            item = StockNewsItem("title", "summary", "https://portal/1", "https://origin/1", NOW,
+                                 NewsAssessment(True, "category", "중립", "reason", 70, 0))
+            repository = StockNewsRepository(path)
+            repository.upsert("005930", (item,))
+            exported = CentralContentSyncService._read_news(path)["news_article"][0]
+            legacy = deepcopy(exported)
+            legacy["document"].pop("input_source_json")
+            legacy["document"].pop("input_source_contract")
+            expected_hash = stable_document_hash(legacy["document"])
+            self.assertEqual(expected_hash, news_projection_article_hash(exported["document"], "local_projection_sync"))
+            store = SQLiteQueryStore(root / "native.sqlite3")
+            store.initialize()
+            try:
+                store.upsert_documents("news_article", [legacy])
+                original = store.load_news_history("article", target="005930")
+                def job_rows():
+                    with closing(sqlite3.connect(root / "native.sqlite3")) as connection:
+                        return connection.execute("SELECT job_key,article_revision_id,stage,state,attempts,output_ref FROM central_news_jobs ORDER BY job_key").fetchall()
+                jobs = job_rows()
+                source = {"version": 1, "article_revision_id": "original-article", "body_revision_id": "original-body",
+                          "article_available_at": 100.25, "body_available_at": 102.75, "body_content_hash": "source-body-hash"}
+                repository.upsert("005930", (replace(item, input_source=source),))
+                copied = CentralContentSyncService._read_news(path)["news_article"][0]
+                self.assertEqual(expected_hash, news_projection_article_hash(copied["document"], "local_projection_sync"))
+                store.upsert_documents("news_article", [copied])
+                self.assertEqual(original, store.load_news_history("article", target="005930"))
+                self.assertEqual(jobs, job_rows())
+                current = store.load_document("news_article", "005930", "https://origin/1")["document"]
+                self.assertEqual("original-body", json.loads(current["input_source_json"])["body_revision_id"])
+                for scope, marker in (("watchlist", "v1"), ("local_projection_sync", "future"), ("local_projection_sync", None)):
+                    reported = {**copied["document"], "input_source_contract": marker}
+                    self.assertEqual(stable_document_hash(reported), news_projection_article_hash(reported, scope))
+                changed = {**copied["document"], "title": "actual revised title"}
+                self.assertNotEqual(expected_hash, news_projection_article_hash(changed, "local_projection_sync"))
+                target = root / "reopened.sqlite3"
+                StockNewsRepository(target)
+                CentralContentSyncService._write_news(target, {"news_article": [copied]})
+                self.assertEqual("original-body", StockNewsRepository(target).load("005930")[0].input_source["body_revision_id"])
+                copied["document"].pop("input_source_json")
+                CentralContentSyncService._write_news(target, {"news_article": [copied]})
+                self.assertIsNone(StockNewsRepository(target).load("005930")[0].input_source)
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

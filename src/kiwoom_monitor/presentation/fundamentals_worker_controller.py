@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import (
     FundamentalsWorker,
@@ -24,6 +24,7 @@ class FundamentalsWorkerController(QObject):
         super().__init__(parent)
         self._worker_factory = worker_factory
         self._worker: FundamentalsWorker | None = None
+        self._followup_codes: dict[FundamentalsWorker, tuple[str, ...]] = {}
 
     @property
     def worker(self) -> FundamentalsWorker | None:
@@ -60,11 +61,20 @@ class FundamentalsWorkerController(QObject):
             return False
         worker.received.connect(self.received.emit)
         worker.failed.connect(self.failed.emit)
-        worker.completed.connect(lambda: self.completed.emit(followup_codes))
+        # Use a QObject receiver so child signal cleanup cannot destroy the
+        # parent recursively through the last reference in a captured lambda.
+        self._followup_codes[worker] = followup_codes
+        worker.completed.connect(self._forward_completed)
         worker.finished.connect(self._release_finished_worker)
         self._worker = worker
         worker.start()
         return True
+
+    @Slot()
+    def _forward_completed(self) -> None:
+        codes = self._followup_codes.get(self.sender())
+        if codes is not None:
+            self.completed.emit(codes)
 
     def _release_finished_worker(self) -> None:
         worker = self.sender()
@@ -72,4 +82,5 @@ class FundamentalsWorkerController(QObject):
             return
         if self._worker is worker:
             self._worker = None
+        self._followup_codes.pop(worker, None)
         worker.deleteLater()

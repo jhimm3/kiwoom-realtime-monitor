@@ -10,7 +10,6 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from functools import wraps
 import time
 from uuid import uuid4
 
@@ -274,35 +273,33 @@ def _emit(cycle, kind, value):
             pass
 
 
-def captured_ranking_refresh(function):
-    @wraps(function)
-    async def run(self, observed_at=None):
-        token = trace.input_token("top20_inputs")
-        if token is None:
-            return await function(self, observed_at)
-        now = observed_at or self._now()
-        task = asyncio.current_task()
-        cycle = {"trace_id": token, "input_id": uuid4().hex, "workload_id": "top20",
-                 "producer_component": f"autonomous_top20:{id(self):x}",
-                 "actor_id": f"autonomous_top20:{id(self):x}:{id(task):x}"}
-        marker = _CYCLE.set(cycle)
-        _emit(cycle, "cycle_start", {"source_time": now,
-                                     "retry_limit": self.STALE_RANKING_RETRY_LIMIT,
-                                     "background_started": bool(self._tasks)})
-        outcome = "error"
-        try:
-            with capture_owner("top20", cycle["producer_component"], cycle["actor_id"],
-                               cause_input_id=cycle["input_id"]):
-                result = await function(self, now)
-            outcome = "returned"
-            return result
-        except asyncio.CancelledError:
-            outcome = "cancelled"
-            raise
-        finally:
-            _emit(cycle, "cycle_end", {"outcome": outcome})
-            _CYCLE.reset(marker)
-    return run
+@contextmanager
+def ranking_refresh_scope(service, now):
+    """Own one optional ranking capture at the actual native refresh boundary."""
+    token = trace.input_token("top20_inputs")
+    if token is None:
+        yield
+        return
+    task = asyncio.current_task()
+    cycle = {"trace_id": token, "input_id": uuid4().hex, "workload_id": "top20",
+             "producer_component": f"autonomous_top20:{id(service):x}",
+             "actor_id": f"autonomous_top20:{id(service):x}:{id(task):x}"}
+    marker = _CYCLE.set(cycle)
+    _emit(cycle, "cycle_start", {"source_time": now,
+                                 "retry_limit": service.STALE_RANKING_RETRY_LIMIT,
+                                 "background_started": bool(service._tasks)})
+    outcome = "error"
+    try:
+        with capture_owner("top20", cycle["producer_component"], cycle["actor_id"],
+                           cause_input_id=cycle["input_id"]):
+            yield
+        outcome = "returned"
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        _emit(cycle, "cycle_end", {"outcome": outcome})
+        _CYCLE.reset(marker)
 
 
 async def ranking_request(request, attempt):

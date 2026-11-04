@@ -32,6 +32,51 @@ if __name__ == "__main__" and len(sys.argv) == 2:
 if _MODE != "empty":
     class RegressionWorkerFixtureTests(unittest.TestCase):
         def test_selected_worker_outcome(self) -> None:
+            if _MODE == "registry-native":
+                import importlib.util
+                import uuid
+                import winreg
+                from scripts.regression_registry import join_from_environment
+                scope = join_from_environment()
+                organization = "KiwoomMonitorRegressionProbe-" + str(uuid.uuid4())
+                location = "Software\\" + organization + "\\Native"
+                for branch, value in (("User", "user-canary"), ("Unrelated", "unrelated-canary")):
+                    with winreg.CreateKeyEx(scope.root, branch + "\\" + location) as key:
+                        winreg.SetValueEx(key, "probe", 0, winreg.REG_SZ, value)
+                child = r'''
+import json, os, runpy, sys
+from pathlib import Path
+scope = runpy.run_path(os.environ['KIWOOM_REGRESSION_REGISTRY_HELPER'])['join_from_environment']()
+# -I/-S ignore PYTHONPATH/sitecustomize; only the installed native Qt runtime is added.
+sys.path.append(sys.argv[1])
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QWidget
+QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+settings = QSettings(sys.argv[2], 'Native')
+assert settings.format() == QSettings.Format.NativeFormat
+assert settings.value('probe') == sys.argv[3]
+settings.setValue('probe', sys.argv[4]); settings.sync()
+assert settings.status() == QSettings.Status.NoError
+app = QApplication([]); widget = QWidget(); widget.show(); app.processEvents(); widget.close()
+print(json.dumps({'native_format': True, 'user_scope': True, 'HKLM_fallback': 'outside_scope',
+                  'qt_application': True, 'scope': scope.description['key']}))
+'''
+                runtime = str(Path(importlib.util.find_spec("PySide6").origin).parent.parent)
+                results = []
+                user = "user-canary"
+                for index, flags in enumerate(([], ["-I"], ["-S"])):
+                    next_user = "user-" + str(index)
+                    result = subprocess.run([sys.executable, *flags, "-c", child, runtime,
+                        organization, user, next_user],
+                        capture_output=True, text=True, timeout=15)
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    results.append({"flags": flags, **json.loads(result.stdout.strip())})
+                    for branch, expected in (("User", next_user), ("Unrelated", "unrelated-canary")):
+                        with winreg.OpenKey(scope.root, branch + "\\" + location) as key:
+                            self.assertEqual(expected, winreg.QueryValueEx(key, "probe")[0])
+                    user = next_user
+                (Path(os.environ["REGRESSION_FIXTURE_DIR"]) / "registry-native.json").write_text(
+                    json.dumps(results), encoding="utf-8")
             if _MODE == "temp-env":
                 (Path(os.environ["REGRESSION_FIXTURE_DIR"]) / "temp-env.json").write_text(json.dumps({
                     "TEMP": os.environ["TEMP"], "TMP": os.environ["TMP"],

@@ -7,6 +7,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker, market_session
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import RealtimeSourceRoute, RealtimeSourceTransition
 
 
 class MarketSessionTests(unittest.TestCase):
@@ -89,8 +90,10 @@ class MarketSessionTests(unittest.TestCase):
         )
         opened: list[tuple[str, ...]] = []
         ready: list[bool] = []
+        sources = []
         worker.connection_opened.connect(opened.append)
         worker.subscription_ready.connect(lambda: ready.append(True))
+        worker.source_changed.connect(sources.append)
         with patch(
             "kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker.connect",
             return_value=Connection(),
@@ -99,6 +102,7 @@ class MarketSessionTests(unittest.TestCase):
                 asyncio.run(worker._receive("KRX"))
         self.assertEqual([("005930",)], opened)
         self.assertEqual([True], ready)
+        self.assertEqual([RealtimeSourceTransition(RealtimeSourceRoute.LOCAL, 0, True)], sources)
 
     def test_worker_raises_registration_rejection_instead_of_looking_connected(self) -> None:
         class Socket:

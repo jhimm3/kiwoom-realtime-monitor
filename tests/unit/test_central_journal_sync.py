@@ -22,7 +22,7 @@ from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRe
 from kiwoom_monitor.infrastructure.persistence.journal_schema import initialize_journal_database
 from kiwoom_monitor.infrastructure.persistence.journal_backup import JournalBackupService
 from kiwoom_monitor.application.trade_history_service import TradeFill
-from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 
 
 class _Client:
@@ -74,6 +74,175 @@ def _settings_rows(path: Path) -> None:
 
 
 class CentralJournalSyncServiceTests(unittest.TestCase):
+    def test_analysis_native_sync_replays_committed_ack_loss_and_converges_after_backup_reopen(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        from kiwoom_monitor.infrastructure.persistence.journal_trade_repository import JournalTradeRepositoryMixin
+        from tests.unit.test_central_server_database import CentralServerDatabaseTests
+        collection = "journal_v2_analysis_revisions"
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "source.db", Path(directory) / "target.db"
+            JournalRepository(source)
+            JournalRepository(target)
+            value = CentralServerDatabaseTests._journal_analysis_value()
+            with closing(sqlite3.connect(source)) as connection, connection:
+                JournalTradeRepositoryMixin.accept_journal_analysis_document(connection, value["document"])
+            store = SQLiteQueryStore(Path(directory) / "central.db")
+            self.addCleanup(store.close)
+            store.initialize()
+            class NativeClient:
+                lose_ack = True
+                revision_posts = 0
+                def capabilities(self): return {"journal_v2_sync": True}
+                def load_all(self, kind): return store.load_documents(kind)
+                def upsert(self, kind, values):
+                    if kind == collection:
+                        self.revision_posts += 1
+                        receipt = store.accept_journal_analysis_revisions(values)
+                        if self.lose_ack:
+                            self.lose_ack = False
+                            raise RuntimeError("controlled committed ACK loss")
+                        return receipt["saved"]
+                    store.upsert_documents(kind, values)
+                    return len(values)
+            client = NativeClient()
+            with self.assertRaisesRegex(RuntimeError, "committed ACK loss"):
+                CentralJournalSyncService(client).sync(source)
+            central_before = store.load_documents(collection)
+            self.assertEqual(value["document"], central_before[0]["document"])
+            CentralJournalSyncService(client).sync(source)
+            self.assertEqual(1, client.revision_posts)
+            CentralJournalSyncService(client).sync(target)
+            self.assertEqual(1, client.revision_posts)
+            backup, restored = Path(directory) / "backup.db", Path(directory) / "restored.db"
+            JournalBackupService(target).export_to(backup)
+            JournalBackupService(restored).import_from(backup)
+            JournalRepository(restored)
+            self.assertEqual(0, CentralJournalSyncService(client).sync(restored))
+            self.assertEqual(central_before, store.load_documents(collection))
+            with closing(sqlite3.connect(restored)) as connection:
+                raw = connection.execute("SELECT content_json,created_at FROM journal_analysis_revisions").fetchone()
+                self.assertEqual((value["document"]["content_json"], value["document"]["created_at"]), raw)
+
+    def test_analysis_sync_ignores_only_receipt_and_json_format_while_preserving_both_originals(self):
+        from kiwoom_monitor.infrastructure.persistence.journal_trade_repository import JournalTradeRepositoryMixin
+        from tests.unit.test_central_server_database import CentralServerDatabaseTests
+        class Client(_SnapshotClient):
+            def capabilities(self): return {"journal_v2_sync": True}
+        value = CentralServerDatabaseTests._journal_analysis_value()
+        replay = deepcopy(value)
+        replay["document"].update(created_at="2030-01-02T09:00:00", content_json='{"selected_types":["돌파"]}')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            JournalRepository(path)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                JournalTradeRepositoryMixin.accept_journal_analysis_document(connection, value["document"])
+            client = Client()
+            client.remote["journal_v2_analysis_revisions"] = [replay]
+            CentralJournalSyncService(client).sync(path)
+            self.assertFalse(any(kind == "journal_v2_analysis_revisions" for kind, _ in client.uploads))
+            self.assertEqual([replay], client.remote["journal_v2_analysis_revisions"])
+            client.uploads.clear()
+            self.assertEqual(0, CentralJournalSyncService(client).sync(path))
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual((value["document"]["content_json"], value["document"]["created_at"]),
+                                 connection.execute("SELECT content_json,created_at FROM journal_analysis_revisions").fetchone())
+
+    def test_analysis_sync_keeps_authorized_delete_stale_false_order_and_new_revision_recreation(self):
+        from kiwoom_monitor.infrastructure.persistence.journal_trade_repository import JournalTradeRepositoryMixin
+        from tests.unit.test_central_server_database import CentralServerDatabaseTests
+        class Client(_SnapshotClient):
+            def capabilities(self): return {"journal_v2_sync": True}
+        value = CentralServerDatabaseTests._journal_analysis_value()
+        state_document = {"collection": "journal_v2_analysis_revisions", "owner": value["owner"],
+                          "document_key": value["key"], "is_deleted": True, "origin_broker": "kiwoom",
+                          "origin_environment": "mock", "origin_account_ref": value["owner"],
+                          "canonical_account_ref": value["owner"], "updated_at": "2030-01-02T09:00:00+09:00"}
+        state = {**value, "document": state_document}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            JournalRepository(path)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                JournalTradeRepositoryMixin.accept_journal_analysis_document(connection, value["document"])
+            client = Client()
+            client.remote["journal_v2_sync_states"] = [deepcopy(state)]
+            client.remote["journal_v2_analysis_revisions"] = [deepcopy(value)]
+            CentralJournalSyncService(client).sync(path)
+            self.assertEqual([state], client.remote["journal_v2_sync_states"])
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM journal_analysis_revisions").fetchone()[0])
+                old_state = tuple(connection.execute("SELECT * FROM journal_sync_states").fetchone())
+            stale_false = deepcopy(state)
+            stale_false["document"].update(is_deleted=False, updated_at="2020-01-02T09:00:00+09:00")
+            client.remote["journal_v2_sync_states"] = [stale_false]
+            CentralJournalSyncService(client).sync(path)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM journal_analysis_revisions").fetchone()[0])
+                self.assertEqual(old_state, tuple(connection.execute("SELECT * FROM journal_sync_states").fetchone()))
+            regenerated = CentralServerDatabaseTests._journal_analysis_value("new-revision")
+            regenerated["document"]["created_at"] = "2030-01-02T10:00:00+09:00"
+            client.remote["journal_v2_analysis_revisions"].append(regenerated)
+            CentralJournalSyncService(client).sync(path)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual([("new-revision",)], connection.execute("SELECT revision_id FROM journal_analysis_revisions").fetchall())
+                self.assertEqual(old_state, tuple(connection.execute("SELECT * FROM journal_sync_states WHERE document_key=?", (value["key"],)).fetchone()))
+
+    def test_scoped_setup_keys_sync_without_overwriting_unassigned_or_other_account_and_delete_only_owner(self):
+        from kiwoom_monitor.application.trade_setup_classification import TradeSetupClassification
+        class Client(_SnapshotClient):
+            def capabilities(self): return {"journal_v2_sync": True}
+        first = AccountScope("kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111")
+        other = AccountScope("kiwoom", AccountEnvironment.MOCK, "22222222-2222-4222-8222-222222222222")
+        now = datetime.fromisoformat("2026-10-23T10:00:00+09:00")
+        later = datetime.fromisoformat("2026-10-23T11:00:00+09:00")
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "source.db", Path(directory) / "target.db"
+            a, b = JournalRepository(source), JournalRepository(target)
+            for scope, value in ((LEGACY_ACCOUNT_SCOPE, "상따"), (first, "눌림")):
+                a.save_trade_setup("same", TradeSetupClassification(value, 10, (value,)), now=now, account_scope=scope)
+                a.save_trade_setup_cycle_override("same", 0, value, now=now, account_scope=scope)
+            b.save_trade_setup("same", TradeSetupClassification("돌파", 20, ("local",)), now=now, account_scope=other)
+            b.save_trade_setup_cycle_override("same", 0, "돌파", now=now, account_scope=other)
+            client = Client()
+            CentralJournalSyncService(client).sync(source)
+            CentralJournalSyncService(client).sync(target)
+            for scope, value in ((LEGACY_ACCOUNT_SCOPE, "상따"), (first, "눌림"), (other, "돌파")):
+                self.assertEqual(value, b.load_trade_setup("same", scope)[0].setup_type)
+                self.assertEqual({0: value}, b.load_trade_setup_cycle_overrides("same", scope))
+            a.save_trade_setup_cycle_override("same", 0, "", now=later, account_scope=first)
+            CentralJournalSyncService(client).sync(source)
+            CentralJournalSyncService(client).sync(target)
+            reopened = JournalRepository(target)
+            self.assertEqual({}, reopened.load_trade_setup_cycle_overrides("same", first))
+            self.assertEqual({0: "상따"}, reopened.load_trade_setup_cycle_overrides("same", LEGACY_ACCOUNT_SCOPE))
+            self.assertEqual({0: "돌파"}, reopened.load_trade_setup_cycle_overrides("same", other))
+            client.uploads.clear()
+            CentralJournalSyncService(client).sync(target)
+            self.assertEqual([], client.uploads)
+
+    def test_immutable_revision_import_keeps_original_bytes_and_rejects_newer_receipt_content_change(self):
+        class Client(_SnapshotClient):
+            def capabilities(self): return {"journal_v2_sync": True}
+        account = "11111111-1111-4111-8111-111111111111"
+        document = {"revision_id": "original-id", "group_id": "same", "analysis_kind": "trade_setup", "input_fingerprint": "original-fingerprint", "analysis_version": "trade-analysis/v2", "content_json": ' { "selected_types" : [ "돌파" ] } ', "created_at": "2026-10-23T09:00:00.123+09:00", "origin_broker": "kiwoom", "origin_environment": "mock", "origin_account_ref": account, "canonical_account_ref": account}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            JournalRepository(path)
+            client = Client()
+            client.remote["journal_v2_analysis_revisions"] = [{"owner": account, "key": "original-id", "document": deepcopy(document)}]
+            CentralJournalSyncService(client).sync(path)
+            with closing(sqlite3.connect(path)) as connection:
+                before = tuple(connection.execute("SELECT * FROM journal_analysis_revisions").fetchone())
+                self.assertEqual(document["content_json"], connection.execute("SELECT content_json FROM journal_analysis_revisions").fetchone()[0])
+                self.assertEqual(document["created_at"], connection.execute("SELECT created_at FROM journal_analysis_revisions").fetchone()[0])
+            client.uploads.clear()
+            CentralJournalSyncService(client).sync(path)
+            self.assertEqual([], client.uploads)
+            client.remote["journal_v2_analysis_revisions"][0]["document"].update({"created_at": "2030-01-01T09:00:00+09:00", "content_json": '{"selected_types":["눌림"]}'})
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "같은 분석 revision ID"):
+                CentralJournalSyncService(client).sync(path)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(before, tuple(connection.execute("SELECT * FROM journal_analysis_revisions").fetchone()))
+
     def test_same_round_snapshot_skips_unchanged_and_sends_only_full_document_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "journal.sqlite3"

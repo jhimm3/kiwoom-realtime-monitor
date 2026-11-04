@@ -16,7 +16,7 @@ from dataclasses import dataclass, fields
 from datetime import date, datetime
 from functools import wraps
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from kiwoom_monitor.domain.market_data_contract import (
@@ -80,6 +80,8 @@ def validate_collector_message(message: Any, *, version: str = COLLECTOR_INPUT_V
             raise ValueError("recorded_execution_collector_message_invalid")
 
 
+
+
 MAX_COPY_BYTES = 8 * 1024 * 1024
 MAX_NODES = 120_000
 MAX_DEPTH = 32
@@ -117,7 +119,7 @@ _METHOD_GROUPS = {
     "documents": ("upsert_documents", "replace_documents", "load_documents", "load_document"),
     "news": (
         "enqueue_news_ai_jobs", "claim_news_jobs", "finish_news_job", "retry_news_job",
-        "save_news_body_revision", "save_news_ai_results", "save_news_event_revision",
+        "save_news_body_revision", "save_news_body_revision_receipt", "save_news_ai_results", "save_news_event_revision",
         "save_news_source_page", "load_news_source_cursor", "load_news_source_diagnostics",
         "load_market_news_feed", "load_news_history", "load_latest_news_body",
         "load_news_body_revision", "load_news_article_revision", "load_stock_news_articles",
@@ -485,21 +487,35 @@ def capture_owner(workload_id: str, producer_component: str, actor_id: str, *, c
         _OWNER.reset(token)
 
 
-def captured_workload(workload_id: str, component: str, *, actor_per_invocation: bool = False):
+@contextmanager
+def captured_workload_scope(owner, workload_id: str, component: str, *, actor_per_invocation: bool = False,
+                            producer_identity: Callable[[Any], str] | None = None,
+                            input_high_water: tuple | None = None):
+    """Bind the actual owned worker at execution, shared with the decorator."""
+    task = asyncio.current_task()
+    producer = (producer_identity(owner) if producer_identity is not None
+                else f"{component}:{id(owner):x}")
+    actor = f"{producer}:{uuid4().hex}" if actor_per_invocation else f"{producer}:{id(task):x}"
+    from .diagnostic_trace import input_token
+    # Non-Collector owners keep their existing compatibility until migrated.
+    high_water = (input_high_water if input_high_water is not None
+                  else getattr(owner, "_recorded_input_high_water", (None, "")))
+    cause = high_water[1] if high_water[0] == input_token("collector_inputs") else ""
+    parent = _OWNER.get()
+    if not cause and parent is not None and parent.producer_component == producer:
+        cause = parent.cause_input_id
+    with capture_owner(workload_id, producer, actor, cause_input_id=cause):
+        yield
+
+
+def captured_workload(workload_id: str, component: str, *, actor_per_invocation: bool = False,
+                      producer_identity: Callable[[Any], str] | None = None):
     """Give an actual owned task a stable actor before asyncio.to_thread copies context."""
     def decorate(function):
         @wraps(function)
         async def run(self, *args, **kwargs):
-            task = asyncio.current_task()
-            producer = f"{component}:{id(self):x}"
-            actor = f"{producer}:{uuid4().hex}" if actor_per_invocation else f"{producer}:{id(task):x}"
-            from .diagnostic_trace import input_token
-            high_water = getattr(self, "_recorded_input_high_water", (None, ""))
-            cause = high_water[1] if high_water[0] == input_token("collector_inputs") else ""
-            parent = _OWNER.get()
-            if not cause and parent is not None and parent.producer_component == producer:
-                cause = parent.cause_input_id
-            with capture_owner(workload_id, producer, actor, cause_input_id=cause):
+            with captured_workload_scope(self, workload_id, component,
+                    actor_per_invocation=actor_per_invocation, producer_identity=producer_identity):
                 return await function(self, *args, **kwargs)
         return run
     return decorate
@@ -524,6 +540,10 @@ def _result_summary(method: str, result: Any) -> dict:
     # No arbitrary object repr or full reader result copying on the return path.
     if result is None or type(result) in (bool, int):
         return {"result": result}
+    if method == "save_news_body_revision_receipt" and type(result) is dict:
+        return {"result_type": "dict", "result_count": len(result), "result_binding": {
+            "operation": method, "source_id": str(result.get("body_revision_id") or "")[:160],
+        }}
     if type(result) in (list, tuple, dict):
         return {"result_type": type(result).__name__, "result_count": len(result)}
     if type(result) is str and method in {"save_news_body_revision", "save_news_event_revision", "find_news_ai_revision"}:
@@ -535,13 +555,15 @@ def install_store_capture(store: Any) -> None:
     """Instrument explicit entry boundaries, preserving the original bound native method.
 
     Unknown/excluded public methods produce metadata only when payload capture is on.
-    Private connection/cursor methods and property access are never wrapped.
+    Connection and cursor factories are outside the recorded operation stream.
     """
+    from .diagnostic_metrics import install_postgres_observation
+    install_postgres_observation()
     if getattr(store, "_recorded_input_installed", False):
         return
     from . import diagnostic_trace as trace
     for name in dir(type(store)):
-        if name.startswith("_"):
+        if name.startswith("_") or name == "mock_automation_read_scope":
             continue
         descriptor = inspect.getattr_static(type(store), name)
         if not inspect.isfunction(descriptor):
@@ -576,6 +598,8 @@ def install_store_capture(store: Any) -> None:
                 bound = __signature.bind(*args, **kwargs)
                 bound.apply_defaults()
                 arguments = dict(bound.arguments)
+                arguments.pop("_reader", None)  # Native handles are local to their owner.
+                arguments.pop("_connection", None)
                 if is_account_document_operation(__name, arguments):
                     fields['workload_id'] = 'account'
                     if trace.input_token('account_inputs') != trace_id:

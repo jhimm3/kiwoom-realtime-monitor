@@ -13,6 +13,9 @@ from kiwoom_monitor.domain.top20_reconciliation import (
     cohort_weights, display_statistics, metadata_fingerprint, minute_keys, select_top20_series,
 )
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server import diagnostic_workloads
+from kiwoom_monitor.central_server.diagnostic_metrics import install_postgres_observation
+from kiwoom_monitor.central_server.diagnostic_replay_contract import install_store_capture
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
@@ -158,7 +161,9 @@ class AllocationTests(unittest.TestCase):
 
 class NativeStoreTests(unittest.TestCase):
     def setUp(self):
+        install_postgres_observation()
         self.store = SQLiteQueryStore(Path(":memory:"))
+        install_store_capture(self.store)
         self.store.initialize()
 
     def tearDown(self):
@@ -243,7 +248,7 @@ class NativeStoreTests(unittest.TestCase):
                         return connection
 
                     with patch.object(store, "_connect", side_effect=connect) as connections, \
-                            patch("kiwoom_monitor.central_server.database_top20_reconciliation.environment_value", return_value=NOW.isoformat()):
+                            patch("kiwoom_monitor.central_server.diagnostic_top20_display_input.environment_value", return_value=NOW.isoformat()):
                         data = store.load_top20_reconciliation_inputs(DAY)
                     connections.assert_called_once_with()
                     normalized = [statement.lstrip().upper() for statement in statements]
@@ -256,7 +261,7 @@ class NativeStoreTests(unittest.TestCase):
                     self.assertEqual(({}, {}, []), (data.eligibility, data.markets, data.sources))
                     self.assertEqual(NOW.isoformat(), data.input_as_of)
                     with store._connection() as connection, \
-                            patch("kiwoom_monitor.central_server.database_top20_reconciliation.environment_value", return_value=NOW.isoformat()):
+                            patch("kiwoom_monitor.central_server.diagnostic_top20_display_input.environment_value", return_value=NOW.isoformat()):
                         connection.execute("BEGIN")
                         cursor = PostgresShapeCursor(connection.cursor())
                         shaped = _inputs(cursor, DAY, "%s")
@@ -272,7 +277,7 @@ class NativeStoreTests(unittest.TestCase):
 
         self.seed()
         service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW)
-        published = asyncio.run(service.reconcile_top20_day(DAY))
+        published = asyncio.run(service.after_close.reconcile(DAY))
         with self.store._connection() as connection:
             connection.execute("UPDATE central_documents SET document_json='[]' "
                                "WHERE collection='market_data_coverage' AND owner=? AND document_key='complete'",
@@ -288,7 +293,7 @@ class NativeStoreTests(unittest.TestCase):
 
         with patch.object(self.store, "_connect", side_effect=connect), \
                 self.assertRaisesRegex(ValueError, "TOP20 stored document is not an object"):
-            asyncio.run(service.reconcile_top20_day(DAY))
+            asyncio.run(service.after_close.reconcile(DAY))
         self.assertEqual(1, len(connections))
         with self.assertRaises(sqlite3.ProgrammingError):
             connections[0].execute("SELECT 1")
@@ -297,7 +302,7 @@ class NativeStoreTests(unittest.TestCase):
         self.store.upsert_documents("market_data_coverage", [{
             "owner": DAY + ":A:KRX", "key": "complete", "document": pair()["coverage"],
         }])
-        self.assertEqual(published, asyncio.run(service.reconcile_top20_day(DAY)))
+        self.assertEqual(published, asyncio.run(service.after_close.reconcile(DAY)))
 
     def test_atomic_projection_cache_invalidation_and_raw_preservation(self):
         self.seed()
@@ -356,8 +361,10 @@ class NativeStoreTests(unittest.TestCase):
             original(*args, **kwargs)
         service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW)
         async def run():
-            parent = asyncio.create_task(service.reconcile_top20_day(DAY))
-            service._fundamentals_tasks.add(parent)
+            service.after_close.run_day = service.after_close.reconcile
+            service.after_close.schedule(DAY)
+            parent = service.after_close._backfill_task
+            self.assertNotIn(parent, service._fundamentals_tasks)
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))
             close = asyncio.create_task(service.close())
             try:
@@ -374,32 +381,34 @@ class NativeStoreTests(unittest.TestCase):
     def test_service_publish_is_idempotent_and_failed_write_keeps_previous(self):
         self.seed()
         service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW)
-        first = asyncio.run(service.reconcile_top20_day(DAY))
+        first = asyncio.run(service.after_close.reconcile(DAY))
         before = self.store.load_dataset_snapshots(RECONCILED_KIND, DAY)
         with patch.object(self.store, "save_dataset_snapshot", side_effect=AssertionError("unchanged writes")):
-            self.assertEqual(first, asyncio.run(service.reconcile_top20_day(DAY)))
+            self.assertEqual(first, asyncio.run(service.after_close.reconcile(DAY)))
         self.store.upsert_documents("stock_catalog", [{"owner": "krx", "key": "A", "document": {"as_of": DAY, "market": "KOSDAQ"}}])
         with patch.object(self.store, "save_dataset_snapshot", side_effect=RuntimeError("write failed")), self.assertRaises(RuntimeError):
-            asyncio.run(service.reconcile_top20_day(DAY))
+            asyncio.run(service.after_close.reconcile(DAY))
         self.assertEqual(before, self.store.load_dataset_snapshots(RECONCILED_KIND, DAY))
 
     def test_service_diagnostic_pause_and_open_window(self):
-        service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW)
-        with patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", return_value=True):
-            self.assertIsNone(asyncio.run(service.reconcile_top20_day(DAY)))
-        service._now = lambda: NOW.replace(hour=19)
+        service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW,
+            workload_paused=lambda name: diagnostic_workloads.is_paused(name))
+        with patch("kiwoom_monitor.central_server.diagnostic_workloads.is_paused", return_value=True):
+            self.assertIsNone(asyncio.run(service.after_close.reconcile(DAY)))
+        service.after_close._now = lambda: NOW.replace(hour=19)
         with self.assertRaises(RuntimeError):
-            asyncio.run(service.reconcile_top20_day(DAY))
+            asyncio.run(service.after_close.reconcile(DAY))
 
     def test_pause_started_during_calculation_prevents_publication(self):
-        service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW)
+        service = AutonomousTop20Service(object(), RealtimeHub(), self.store, now_provider=lambda: NOW,
+            workload_paused=lambda name: diagnostic_workloads.is_paused(name))
         paused = [False]
         def calculate(*args, **kwargs):
             paused[0] = True
             return build_top20_reconciliation(*args, **kwargs)
-        with patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", side_effect=lambda *_: paused[0]), \
+        with patch("kiwoom_monitor.central_server.diagnostic_workloads.is_paused", side_effect=lambda *_: paused[0]), \
                 patch("kiwoom_monitor.central_server.autonomous_top20.build_top20_reconciliation", side_effect=calculate):
-            self.assertIsNone(asyncio.run(service.reconcile_top20_day(DAY)))
+            self.assertIsNone(asyncio.run(service.after_close.reconcile(DAY)))
         self.assertEqual([], self.store.load_dataset_snapshots(RECONCILED_KIND, DAY))
 
     def test_backfill_receipt_checks_actual_ingest_and_absent_minute(self):

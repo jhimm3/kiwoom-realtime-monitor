@@ -1,5 +1,7 @@
 # PostgreSQL 공통 접근·관측 경계 설계 검토
 
+> **관측의 용도.** 아래 수치와 실패·보완은 기록된 소스/격리 환경의 근거다. 기본 오류·작업 상태·지연 기록은 유지하고, 정밀 진단의 전용 코드와 자료는 공통 저장 안전 경계에서 분리한다. [관련 계약](architecture/app-target-20261023.md#46-선택-기능의-수명과-제거-계약).
+
 **2026-10-23 R3 종료검증 최소 보완(로컬/격리PG):** 두 replay clock write의 observed_kinds 등록 누락1항목만 추가했다. 최초 실제PG22record/20관측 FAIL·격리진단 n20/o20/c22·누락ordinal1,3을 보존하며 최종 실제PG5는 별도 영수증이다. SQL/connection/transaction·나머지moduleAST·검사원문/22calls·19commit·3rollback oracle는 불변이다. local build3marker `2026.10.23-r3-closeout-pg-clock-v1`는 미배포이며 운영DB/새hostedCI/전체성능 수락이 아니다. [최종 검증](../data/diagnostics/r3-closeout-20261023/verification.json).
 
 

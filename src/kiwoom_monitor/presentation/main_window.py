@@ -17,7 +17,6 @@ from dataclasses import replace
 from kiwoom_monitor.domain.realtime_gap import RealtimeGap
 from kiwoom_monitor.domain.market_data_contract import DataCompleteness
 from pathlib import Path
-from collections import deque
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, time as clock_time, timedelta
 from typing import Protocol
@@ -25,7 +24,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from PySide6.QtGui import QBrush, QCloseEvent, QResizeEvent, QShowEvent, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPolygon, QPalette
-from PySide6.QtCore import QDate, QEvent, QEventLoop, QThread, QTimer, QUrl, QSize, QPoint, Signal
+from PySide6.QtCore import QDate, QEvent, QEventLoop, QThread, QTimer, QUrl, QSize, QPoint, Signal, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -82,11 +81,9 @@ from kiwoom_monitor.infrastructure.central_credentials_client import CentralCred
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 from kiwoom_monitor.infrastructure.persistence.database import DEFAULT_SETTINGS
 from kiwoom_monitor.infrastructure.persistence.market_cache_writer import MarketCacheWriter
-from kiwoom_monitor.presentation.candidate_monitor_dialog import CandidateMonitorDialog
-from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationDialog
-from kiwoom_monitor.presentation.research_dialog import ResearchDialog
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
-    MarketIndexTick, OrderExecution, StockPriceReference, TradeTick,
+    MarketIndexTick, OrderExecution, RealtimeSourceRoute, RealtimeSourceTransition,
+    StockPriceReference, TradeTick,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
 from kiwoom_monitor.infrastructure.kiwoom_rest.minute_history_worker import MinuteHistoryWorker
@@ -118,7 +115,6 @@ from kiwoom_monitor.application.secondary_data_schedule import (
     daily_catalog_sync_due,
     daily_high_candidates,
     fundamentals_candidates,
-    minute_history_candidates,
     nxt_eligibility_candidates,
 )
 from kiwoom_monitor.application.historical_high_service import (
@@ -137,10 +133,12 @@ from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository impor
 )
 from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
 from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupError, ThemeBackupService
+from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository as DatabaseThemeRepository
 from kiwoom_monitor.infrastructure.persistence.google_drive_sync import (
     GoogleDriveSyncError,
     GoogleDriveSyncResult,
     GoogleDriveSyncService,
+    has_pending_google_drive_changes,
 )
 from kiwoom_monitor.domain.theme_parser import parse_themes
 from kiwoom_monitor.domain.theme_text_import import parse_theme_text
@@ -251,11 +249,10 @@ from kiwoom_monitor.presentation.update_worker_controller import UpdateWorkerCon
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import ApiProfiles, LocalApiConfig
 from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomApiError, KiwoomRestClient, KiwoomSettings
 from kiwoom_monitor.domain.strength_level import strength_badge
+from kiwoom_monitor.application.pc_market_session import PcMarketSession
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv, MinuteTradeValueAggregator
 from kiwoom_monitor.application.market_session_schedule import (
     after_hours_data_pause,
-    top20_collection_available,
-    top20_collection_open,
 )
 from kiwoom_monitor.application.theme_ranking import (
     aggregate_theme_metrics,
@@ -268,7 +265,6 @@ from kiwoom_monitor.application.top20_trade_value_collector import (
     Top20TradeValueCollector,
 )
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
-from kiwoom_monitor.infrastructure.news_ai import DEFAULT_MODELS, MODEL_OPTIONS
 from kiwoom_monitor.infrastructure.update_planner import UpdatePlan, UpdateStep, build_update_plan
 
 class RankingLoader(Protocol):
@@ -461,7 +457,6 @@ class MainWindow(QMainWindow):
         historical_high_worker_factory: Callable[[tuple[str, ...]], HistoricalHighWorker] | None = None,
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
         google_drive_sync: GoogleDriveSyncService | None = None,
-        initial_google_drive_download: bool = False,
         api_runtime_factory: Callable[[], dict[str, object]] | None = None,
         news_config_path: Path | None = None,
         news_database_path: Path | None = None,
@@ -474,8 +469,17 @@ class MainWindow(QMainWindow):
         research_data_dir: Path | None = None,
         mock_automation_credentials_client: CentralCredentialsClient | None = None,
         market_data_client: object | None = None,
+        query_only: bool = False,
+        data_dir: Path | None = None,
+        settings_role: str | None = None,
+        owned_observers: tuple[object, ...] = (),
+        unpublished_observer_error: BaseException | None = None,
     ) -> None:
         super().__init__()
+        self._startup_pending = True
+        self._query_only = query_only
+        self._data_dir = data_dir
+        self._settings_role = settings_role
         self._settings = settings
         self._app_controller = AppController(
             self, realtime_worker_factory=realtime_worker_factory,
@@ -486,14 +490,16 @@ class MainWindow(QMainWindow):
             nxt_eligibility_worker_factory=nxt_eligibility_worker_factory,
             monitor_database_path=monitor_database_path,
             minute_bar_repository=minute_bar_repository, stock_lookup=stock_lookup,
-            journal_database_path=journal_database_path,
+            journal_database_path=None if query_only else journal_database_path,
             news_database_path=news_database_path,
             entry_investor_loader=entry_investor_loader,
             program_trade_loader=program_trade_loader,
             ranking_loader=ranking_loader, api_runtime_factory=api_runtime_factory,
             market_data_client=market_data_client,
+            owned_observers=owned_observers,
+            unpublished_observer_error=unpublished_observer_error,
         )
-        for repository in (minute_bar_repository, daily_bar_repository, theme_store, google_drive_sync):
+        for repository in (settings, columns, minute_bar_repository, daily_bar_repository, theme_store, google_drive_sync, stock_lookup):
             bind_clock = getattr(repository, "set_now_provider", None)
             if callable(bind_clock):
                 # The controller reads the currently applied API runtime, so
@@ -515,6 +521,7 @@ class MainWindow(QMainWindow):
         self._columns = columns
         self._stock_lookup = stock_lookup
         self._theme_store = theme_store
+        self._theme_unapplied = False
         self._theme_save_request: SettingsRequestWorker | None = None
         self._theme_save_completion: tuple[str, str] | None = None
         self._theme_confirmation_active = False
@@ -525,7 +532,8 @@ class MainWindow(QMainWindow):
         # 뉴스는 별도 프로세스와 전용 DB로 실행해 실시간 표의 Qt 이벤트 루프와
         # SQLite 잠금을 공유하지 않는다.
         self._news_window = NewsWindowCoordinator(
-            news_config_path, news_database_path, self.frameGeometry,
+            None if query_only else news_config_path,
+            None if query_only else news_database_path, self.frameGeometry,
             lambda message: self.statusBar().showMessage(message), self,
         )
         self._news_api_settings_dialog: QDialog | None = None
@@ -541,22 +549,24 @@ class MainWindow(QMainWindow):
             self._market_cache_writer.daily_high_failed.connect(
                 lambda code, message: logger.warning("일봉 캐시 저장 실패 (%s): %s", code, message)
             )
-            self._app_controller.start_market_cache_writer()
-        self._candidate_dialog = (
-            CandidateMonitorDialog(candidate_client, candidate_settings_client, self)
-            if candidate_client is not None else None
-        )
-        self._research_dialog = (
-            ResearchDialog(research_data_dir, self, theme_repository=self._theme_store,
-                           now_provider=self._app_controller.ranking_now) if research_data_dir is not None else None
-        )
-        self._mock_automation_dialog = (
-            MockAutomationDialog(
-                candidate_client, mock_automation_credentials_client, self,
-            )
-            if candidate_client is not None and mock_automation_credentials_client is not None
-            else None
-        )
+        self._candidate_dialog = None
+        self._research_dialog = None
+        self._mock_automation_dialog = None
+        if not query_only:
+            if candidate_client is not None:
+                from kiwoom_monitor.presentation.candidate_monitor_dialog import CandidateMonitorDialog
+                self._candidate_dialog = CandidateMonitorDialog(candidate_client, candidate_settings_client, self)
+            if research_data_dir is not None:
+                from kiwoom_monitor.presentation.research_dialog import ResearchDialog
+                self._research_dialog = ResearchDialog(
+                    research_data_dir, self, theme_repository=self._theme_store,
+                    now_provider=self._app_controller.ranking_now,
+                )
+            if candidate_client is not None and mock_automation_credentials_client is not None:
+                from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationDialog
+                self._mock_automation_dialog = MockAutomationDialog(
+                    candidate_client, mock_automation_credentials_client, self,
+                )
         self._journal_process_manager = AuxiliaryProcessManager()
         self._journal_command_path = journal_database_path.with_name("journal_command.json") if journal_database_path else None
         self._journal_command_channel = JsonCommandChannel(self._journal_command_path, time_based_ids=True)
@@ -565,16 +575,13 @@ class MainWindow(QMainWindow):
         self._journal_news_inbox = JsonRequestInbox(self._journal_news_request_path)
         self._journal_background_sync_day: date | None = None
         self._investor_backfill_days: set[date] = set()
-        if journal_database_path is not None:
+        if journal_database_path is not None and not query_only:
             self._entry_snapshot_writer.failed.connect(lambda message: logger.warning("%s", message))
-            self._app_controller.start_entry_snapshot_writer()
         # 이전 메인 세션이 남긴 매매일지를 재사용하면 새 코드가 반영되지 않고
         # 메인 종료 연동도 끊긴다. 시작할 때 정확한 PID만 정리해 이번 세션에서 새로 띄운다.
-        self._stop_stale_journal_process()
         self._journal_news_timer = QTimer(self)
         self._journal_news_timer.setInterval(150)
         self._journal_news_timer.timeout.connect(self._poll_journal_news_request)
-        self._journal_news_timer.start()
         self._google_drive_worker_controller.completed.connect(
             self._on_google_drive_sync_completed
         )
@@ -608,7 +615,7 @@ class MainWindow(QMainWindow):
         self._google_drive_strict_restore_staged = False
         self._google_drive_pending_target = ""
         self._google_drive_active_target = ""
-        self._google_drive_dirty = self._has_newer_local_google_drive_changes()
+        self._google_drive_dirty = False if query_only else self._has_newer_local_google_drive_changes()
         self._google_drive_first_backup_pending = False
         # Drive 수정 시각 확인/다운로드는 순위 표 표시를 막지 않는다. 시작 시에는
         # 항상 로컬 데이터로 즉시 순위를 조회하고, Drive 결과는 완료되는 즉시 반영한다.
@@ -619,8 +626,7 @@ class MainWindow(QMainWindow):
         # 사용자가 선택한 데이터 원본과 현재 실제 사용 중인 경로는 다를 수
         # 있다. 시놀로지 장애 시에는 설정을 바꾸지 않고 현재 경로만 로컬로
         # 표시하며, 복구되면 다시 시놀로지로 표시한다.
-        self._active_api_route = ""
-        self._latest_market_state: dict[str, object] = {}
+        self._pc_market_session = PcMarketSession(minute_aggregator)
         self._realtime_diagnostics: dict[str, object] = {
             "abnormal_disconnects": 0, "reconnects": 0, "last_disconnect_reason": "",
         }
@@ -646,25 +652,12 @@ class MainWindow(QMainWindow):
         self._ranked_stock_names: dict[str, str] = {}
         self._stock_markets: dict[str, str] = {}
         self._current_prices: dict[str, int] = {}
-        self._last_change_rates: dict[str, float] = {}
-        self._realtime_pressure: dict[str, deque[tuple[datetime, int]]] = {}
-        self._latest_execution_strength: dict[str, float] = {}
-        self._latest_session_type: dict[str, str] = {}
-        self._latest_program_trade: dict[str, dict[str, object]] = {}
         # 0B FID 311 수신값. 장중 표 시가총액에는 ka10001 캐시보다 우선한다.
         self._realtime_market_caps: dict[str, float] = {}
-        self._today_high_prices: dict[str, int] = {}
-        self._today_high_prices_date: date | None = None
         self._near_high_codes: set[str] = set()
         self._near_high_levels: dict[str, str] = {}
         self._near_high_sound_last_played: dict[tuple[str, str], float] = {}
         self._near_high_sound_players: dict[str, tuple[QMediaPlayer, QAudioOutput]] = {}
-        self._minute_history_codes: set[str] = set()
-        self._minute_aggregator = minute_aggregator or MinuteTradeValueAggregator()
-        self._minute_recovery_requests: dict[str, int] = {}
-        self._minute_coverage_requests: dict[str, int | None] = {}
-        self._pressure_gap_until: dict[str, datetime] = {}
-        self._restored_gap_days: set[tuple[str, object]] = set()
         self._minute_gap_retry_timer = QTimer(self)
         self._minute_gap_retry_timer.setInterval(30_000)
         self._minute_gap_retry_timer.timeout.connect(self._retry_minute_gaps)
@@ -745,15 +738,16 @@ class MainWindow(QMainWindow):
         self._realtime_worker_controller.diagnostics_changed.connect(self._on_realtime_diagnostics_changed)
         self._realtime_worker_controller.realtime_gap.connect(self._on_realtime_gap)
         self._realtime_worker_controller.status_changed.connect(self._on_realtime_status_changed)
+        self._realtime_worker_controller.source_changed.connect(self._on_realtime_source_changed)
         self._realtime_worker_controller.connection_failed.connect(self._on_realtime_failure)
         self._realtime_worker_controller.connection_opened.connect(
-            lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes)
+            lambda codes: self._pc_market_session.reset_cumulative_baselines(codes)
         )
         self._realtime_worker_controller.codes_added.connect(
-            lambda codes: self._minute_aggregator.reset_cumulative_baselines(codes)
+            lambda codes: self._pc_market_session.reset_cumulative_baselines(codes)
         )
         self._realtime_worker_controller.sources_activated.connect(
-            self._minute_aggregator.reset_cumulative_sources
+            self._on_realtime_sources_activated
         )
         # 코호트·기준값·분 마감은 화면과 독립된 수집 객체가 소유한다.
         self._top20_collector = Top20TradeValueCollector()
@@ -779,7 +773,6 @@ class MainWindow(QMainWindow):
             except Exception as error:
                 logger.warning("TOP20 거래대금 지수 저장값 로드 실패: %s", error)
         self._daily_bar_repository = daily_bar_repository
-        self._minute_bar_storage_date: date | None = None
         self._rank_changed_highlight_timer = QTimer(self)
         self._rank_changed_highlight_timer.setSingleShot(True)
         self._rank_changed_highlight_timer.timeout.connect(self._clear_rank_changed_highlights)
@@ -787,7 +780,6 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._clock_label)
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock_label)
-        self._clock_timer.start(1000)
         self._update_clock_label()
         # 일반 상태 메시지를 가리지 않도록 안내문은 일정 시간만 표시한 뒤,
         # 그 사이 다른 메시지가 없다면 직전 문구로 되돌린다.
@@ -795,7 +787,6 @@ class MainWindow(QMainWindow):
         self._investment_notice_timer = QTimer(self)
         self._investment_notice_timer.setInterval(15 * 60 * 1_000)
         self._investment_notice_timer.timeout.connect(self._show_investment_notice)
-        self._investment_notice_timer.start()
         self._investment_notice_restore_timer = QTimer(self)
         self._investment_notice_restore_timer.setSingleShot(True)
         self._investment_notice_restore_timer.setInterval(8_000)
@@ -830,16 +821,19 @@ class MainWindow(QMainWindow):
         top20_index_button.clicked.connect(self._show_top20_trade_value_window)
         market_news_button = QPushButton("뉴스")
         market_news_button.setObjectName("market_news_button")
+        market_news_button.setEnabled(not query_only)
         market_news_button.setToolTip("공통뉴스·실시간 속보·해외뉴스")
         market_news_button.clicked.connect(self._show_market_news)
         toolbar.addWidget(market_news_button)
         morning_brief_button = QPushButton("아침 시황")
         morning_brief_button.setObjectName("morning_market_brief_button")
+        morning_brief_button.setEnabled(not query_only)
         morning_brief_button.setToolTip("AI가 직접 조사한 아침 시황 · 프롬프트·모델·예약 설정")
         morning_brief_button.clicked.connect(self._show_morning_market_brief)
         toolbar.addWidget(morning_brief_button)
         toolbar.addWidget(top20_index_button)
         journal_button = QPushButton("매매일지")
+        journal_button.setEnabled(not query_only)
         journal_button.setToolTip("과거 매매목록을 열고, 종목이 선택되어 있으면 오늘 분봉도 함께 표시합니다.")
         journal_button.clicked.connect(self._show_trading_journal)
         toolbar.addWidget(journal_button)
@@ -958,7 +952,7 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.addWidget(table_area, 1)
-        self._top20_trade_value_window = Top20TradeValueWindow(self)
+        self._top20_trade_value_window = Top20TradeValueWindow(self, data_dir=data_dir)
         self._top20_trade_value_chart = self._top20_trade_value_window.chart
         self._top20_trade_value_window.dateRequested.connect(self._show_top20_trade_value_date)
         self._top20_trade_value_window.modeRequested.connect(self._show_top20_trade_value_mode)
@@ -966,12 +960,12 @@ class MainWindow(QMainWindow):
         self._top20_index_timer = QTimer(self)
         self._top20_index_timer.setInterval(250)
         self._top20_index_timer.timeout.connect(self._update_top20_trade_value_index)
-        self._top20_index_timer.start()
-        QTimer.singleShot(0, self._start_top20_market_repair)
         self._theme_trade_summary = ClickableLabel(self._cycle_theme_trade_summary_period, "상위 테마 거래대금: 순위 조회 후 표시됩니다.")
         self._theme_trade_summary.setStyleSheet("padding: 5px 8px; color: #333; background: #F5F7FA; border: 1px solid #D9E2F3;")
         self._theme_trade_summary.setToolTip("클릭하면 1분 · 5분 · 60분 · 1일 기준으로 전환합니다.")
-        self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
+        self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1" or self._data_dir is not None and self._theme_store is None)
+        if self._data_dir is not None and self._theme_store is None:
+            self._theme_trade_summary.setText("테마 원자료 미준비: 원래 선택을 보존하고 테마를 적용하지 않습니다.")
         layout.addWidget(self._theme_trade_summary)
         self._theme_trade_excluded_summary = ClickableLabel(self._cycle_theme_trade_summary_period)
         self._theme_trade_excluded_summary.setStyleSheet("padding: 5px 8px; color: #333; background: #F8F3FF; border: 1px solid #D8C8EE;")
@@ -984,10 +978,13 @@ class MainWindow(QMainWindow):
         self._theme_trade_summary_timer.timeout.connect(self._refresh_theme_trade_summary)
         self.setCentralWidget(content)
         self._apply_table_visuals()
-        message = "키움 REST 순위를 자동으로 조회합니다." if ranking_loader else "상단 API 설정에서 키를 입력해 연결할 수 있습니다."
+        message = ("공통 데이터 공급 연결이 필요합니다. 조회 연결 설정에서 주소와 접속 토큰을 입력하세요."
+                   if query_only and ranking_loader is None else
+                   "키움 REST 순위를 자동으로 조회합니다." if ranking_loader else "상단 API 설정에서 키를 입력해 연결할 수 있습니다.")
         self.statusBar().showMessage(message)
         self._app_controller.minute_cache_saved.connect(self._start_top20_market_repair)
         self._app_controller.shutdown_progress.connect(self.statusBar().showMessage)
+        self._app_controller.shutdown_save_retry_needed.connect(self._show_shutdown_save_retry)
         self._app_controller.shutdown_ready.connect(self.close)
         self._app_controller.configure_shutdown(AppShutdownActions(
             timers=(
@@ -1007,6 +1004,7 @@ class MainWindow(QMainWindow):
             start_exit_backup_if_needed=self._start_shutdown_backup,
             flush_partial_top20=self._flush_partial_top20,
             stop_auxiliaries=self._stop_shutdown_auxiliaries,
+            producer_workers=lambda: tuple(self.findChildren(QThread)),
         ))
         self._app_controller.configure_ranking(AppRankingActions(
             query_type=lambda: self._settings.get("rank_query_type"),
@@ -1041,7 +1039,29 @@ class MainWindow(QMainWindow):
         self._app_controller.api_reload_status.connect(self.statusBar().showMessage)
         self._app_controller.api_reload_failed.connect(self._on_api_reload_failed)
         self._app_controller.api_reload_completed.connect(self._on_api_reload_completed)
-        if ranking_loader is not None:
+
+
+    def activate_startup(self, *, initial_google_drive_download: bool = False) -> None:
+        """Start owned work only after the caller has published this complete window."""
+        if not self._startup_pending or self._app_controller.closing:
+            return
+        self._startup_pending = False
+        if self._monitor_database_path is not None:
+            self._app_controller.start_market_cache_writer()
+        if self._candidate_dialog is not None:
+            self._candidate_dialog.activate_startup()
+        if self._research_dialog is not None:
+            self._research_dialog.activate_startup()
+        if self._journal_database_path is not None and not self._query_only:
+            self._app_controller.start_entry_snapshot_writer()
+        if not self._query_only:
+            self._stop_stale_journal_process()
+            self._journal_news_timer.start()
+        self._clock_timer.start(1000)
+        self._investment_notice_timer.start()
+        self._top20_index_timer.start()
+        QTimer.singleShot(0, self._start_top20_market_repair)
+        if self._app_controller.ranking_loader is not None:
             if initial_google_drive_download:
                 self._app_controller.start_initial_ranking()
                 QTimer.singleShot(0, lambda: self._start_google_drive_sync("metadata"))
@@ -1092,39 +1112,50 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(self._investment_notice_previous_message)
 
     def _open_settings(self) -> None:
+        if self._app_controller.closing:
+            return
         if self._settings_dialog is not None and self._settings_dialog.isVisible():
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
             return
-        dialog = SettingsDialog(
-            self._settings,
-            self._api_config_path(),
-            self._open_log_file,
-            self._open_theme_manager,
-            self,
-            self._open_column_manager,
-            self._export_settings_backup,
-            self._import_settings_backup,
-            lambda parent: ThemeManagerDialog(self._theme_store, self._settings, None, self._select_theme_image, self._sync_krx_stock_catalog, parent, self._on_themes_changed, self._news_window.database_path, stock_lookup=self._stock_lookup, status_callback=lambda message: self.statusBar().showMessage(message)) if self._theme_store is not None else QWidget(parent),
-            column_manager_panel_factory=lambda parent: ColumnManagerDialog(self._columns, self.COLUMNS, self._table, parent, embedded=True, on_applied=self._apply_column_settings) if self._columns is not None else QWidget(parent),
-            stock_lookup=self._stock_lookup,
-            drive_connector=self._connect_google_drive,
-            drive_downloader=lambda: self._start_google_drive_sync("download", notify_on_success=True),
-            drive_restorer=lambda: self._start_google_drive_sync("restore", notify_on_success=True),
-            drive_uploader=lambda: self._start_google_drive_sync("upload", notify_on_success=True),
-            drive_disconnector=self._disconnect_google_drive,
-            drive_status=self._google_drive_status,
-            drive_client_importer=self._select_google_drive_client,
-            theme_backup_exporter=self._export_theme_backup,
-            theme_backup_importer=self._import_theme_backup,
-            update_checker=self._check_for_updates,
-            journal_backup_exporter=self._export_journal_backup,
-            journal_backup_importer=self._import_journal_backup,
-            news_api_settings_opener=self._open_news_api_settings,
-            shadow_settings_opener=self._show_candidate_monitor,
-            research_opener=self._show_research_dialog,
-            mock_automation_opener=self._show_mock_automation,
-        )
+        try:
+            dialog = SettingsDialog(
+                self._settings,
+                self._api_config_path(),
+                self._open_log_file,
+                self._open_theme_manager,
+                self,
+                self._open_column_manager,
+                None if self._query_only else self._export_settings_backup,
+                None if self._query_only else self._import_settings_backup,
+                lambda parent: ThemeManagerDialog(self._theme_store, self._settings, None, self._select_theme_image, self._sync_krx_stock_catalog, parent, self._on_themes_changed, self._news_window.database_path, stock_lookup=self._stock_lookup, status_callback=lambda message: self.statusBar().showMessage(message), theme_save_pending=self._has_pending_theme_save, on_theme_unapplied=self._deactivate_theme_projection, on_profile_renamed=self._publish_profile_rename, on_profile_selected=self._publish_profile_selection) if self._theme_store is not None else QLabel("테마 변경 후 화면 미적용: DB 결과를 확인하고 다시 여세요." if self._theme_unapplied else "테마 원자료 미준비: 원래 선택은 보존됩니다. 현재 형식의 테마 DB 백업을 복원한 뒤 다시 여세요.", parent) if (self._data_dir is not None or self._theme_unapplied) else QWidget(parent),
+                column_manager_panel_factory=lambda parent: ColumnManagerDialog(self._columns, self.COLUMNS, self._table, parent, embedded=True, on_applied=self._apply_column_settings) if self._columns is not None else QWidget(parent),
+                stock_lookup=self._stock_lookup,
+                drive_connector=None if self._query_only else self._connect_google_drive,
+                drive_downloader=None if self._query_only else lambda: self._start_google_drive_sync("download", notify_on_success=True),
+                drive_restorer=None if self._query_only else lambda: self._start_google_drive_sync("restore", notify_on_success=True),
+                drive_uploader=None if self._query_only else lambda: self._start_google_drive_sync("upload", notify_on_success=True),
+                drive_disconnector=None if self._query_only else self._disconnect_google_drive,
+                drive_status=None if self._query_only else self._google_drive_status,
+                drive_client_importer=None if self._query_only else self._select_google_drive_client,
+                theme_backup_exporter=self._export_theme_backup,
+                theme_backup_importer=self._import_theme_backup,
+                update_checker=self._check_for_updates,
+                journal_backup_exporter=None if self._query_only else self._export_journal_backup,
+                journal_backup_importer=None if self._query_only else self._import_journal_backup,
+                news_api_settings_opener=None if self._query_only else self._open_news_api_settings,
+                shadow_settings_opener=None if self._query_only else self._show_candidate_monitor,
+                research_opener=None if self._query_only else self._show_research_dialog,
+                mock_automation_opener=None if self._query_only else self._show_mock_automation,
+                query_only=self._query_only,
+                data_dir=self._data_dir,
+                finish_size_request=self._app_controller.finish_settings_size_request,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            if self._data_dir is None:
+                raise
+            QMessageBox.warning(self, "조회 설정 미적용", str(error))
+            return
         # 기본 설정은 메인 표를 막지 않는 별도 창으로 연다. 따라서 순위 갱신은
         # 설정 창이 열려 있어도 즉시 표에 반영된다.
         dialog.setWindowModality(Qt.WindowModality.NonModal)
@@ -1136,6 +1167,8 @@ class MainWindow(QMainWindow):
 
     def _open_news_api_settings(self) -> None:
         """기본설정에서 뉴스·공시·AI 키를 한곳에서 편집한다."""
+        if self._query_only:
+            return
         if self._news_api_settings_dialog is not None and self._news_api_settings_dialog.isVisible():
             self._news_api_settings_dialog.raise_()
             self._news_api_settings_dialog.activateWindow()
@@ -1253,7 +1286,8 @@ class MainWindow(QMainWindow):
         progress.canceled.connect(self._update_worker_controller.request_download_interruption)
         self.statusBar().showMessage("업데이트 파일을 다운로드하고 있습니다…")
         progress.show()
-        if not self._update_worker_controller.start_download(steps):
+        download_options = {"download_dir": self._updates_directory()} if self._data_dir is not None else {}
+        if not self._update_worker_controller.start_download(steps, **download_options):
             self._close_update_progress()
 
     def _on_update_download_progress(self, value: int) -> None:
@@ -1266,12 +1300,17 @@ class MainWindow(QMainWindow):
             self._update_progress_dialog.close()
             self._update_progress_dialog = None
 
+    def _updates_directory(self) -> Path:
+        if self._data_dir is not None:
+            return self._data_dir / "updates"
+        return self._api_config_path().parent.parent / "updates"
+
     def _apply_downloaded_updates(self, archive_paths: object) -> None:
         if not isinstance(archive_paths, (tuple, list)) or not archive_paths:
             QMessageBox.critical(self, "앱 업데이트", "다운로드한 업데이트 파일을 찾을 수 없습니다.")
             return
         app_root = Path(sys.executable).resolve().parent
-        updates_dir = AppPaths.for_current_user().data_dir.parent / "updates"
+        updates_dir = self._updates_directory()
         bundled_helper = app_root / "_internal" / "update_helper" / "UpdateHelper.exe"
         helper = updates_dir / "UpdateHelper.exe"
         log_path = updates_dir / "apply_update.log"
@@ -1286,6 +1325,14 @@ class MainWindow(QMainWindow):
                 "--exe", str(app_root / Path(sys.executable).name),
                 "--log", str(log_path),
             ]
+            if self._query_only:
+                arguments_list.append("--query-only")
+                if self._data_dir is not None and self._settings_role is not None:
+                    arguments_list.extend(("--query-data-dir", str(self._data_dir),
+                                           "--query-settings-role", self._settings_role))
+            elif self._data_dir is not None and self._settings_role is not None:
+                arguments_list.extend(("--full-data-dir", str(self._data_dir),
+                                       "--full-settings-role", self._settings_role))
             for archive_path in archive_paths:
                 arguments_list.extend(("--archive", str(archive_path)))
             arguments = subprocess.list2cmdline(arguments_list)
@@ -1323,7 +1370,7 @@ class MainWindow(QMainWindow):
         self._app_controller.schedule_next_ranking_refresh()
         self._apply_table_visuals()
         self._update_clock_label()
-        self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
+        self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1" or self._data_dir is not None and self._theme_store is None)
         for code in self._row_by_code:
             self._apply_near_high_background(code)
             current_price = self._current_prices.get(code)
@@ -1344,9 +1391,11 @@ class MainWindow(QMainWindow):
                 self._news_window.send_command(action="reload_settings", activate=False)
             self._app_controller.restart_for_api_settings()
 
-    def _on_themes_changed(self) -> None:
+    def _on_themes_changed(self, *, notify_repository: bool = True) -> None:
         if self._theme_store is not None:
             self._themes = self._theme_store.all_by_name()
+            if notify_repository:
+                self._theme_store.notify_changed()
         # 테마 저장 직후에는 현재 표부터 갱신한다. 순위 worker가 이미
         # 실행 중이면 _refresh_rankings()가 반환하므로, 전체 재조회에만
         # 맡기면 표는 빈 테마인데 편집창에는 저장된 테마가 보일 수 있다.
@@ -1426,14 +1475,9 @@ class MainWindow(QMainWindow):
     def _has_newer_local_google_drive_changes(self) -> bool:
         local_changed_at = self._settings.get("google_drive_local_changed_at")
         last_upload_at = self._settings.get("google_drive_last_upload_success_at")
-        local_time = MainWindow._parse_google_drive_time(local_changed_at or "")
-        uploaded_time = MainWindow._parse_google_drive_time(last_upload_at or "")
-        newer = (local_time > uploaded_time
-                 if local_time is not None and uploaded_time is not None
-                 and local_time.tzinfo is not None and uploaded_time.tzinfo is not None
-                 else bool(local_changed_at) and (not last_upload_at or local_changed_at > last_upload_at))
-        return self._settings.get("google_drive_unsynced_changes") == "1" or (
-            newer
+        return has_pending_google_drive_changes(
+            local_changed_at or "", last_upload_at or "",
+            unsynced=self._settings.get("google_drive_unsynced_changes") == "1",
         )
 
     def _resume_pending_google_drive_upload(self) -> None:
@@ -1636,7 +1680,7 @@ class MainWindow(QMainWindow):
             self._render_new_high_price(code)
             self._render_high_distance(code)
         self._apply_table_visuals()
-        self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1")
+        self._theme_trade_summary.setVisible(self._settings.get("theme_trade_summary_enabled") == "1" or self._data_dir is not None and self._theme_store is None)
         self._update_clock_label()
         if self._initial_ranking_waits_for_google_drive:
             self._app_controller.start_initial_ranking()
@@ -1760,6 +1804,8 @@ class MainWindow(QMainWindow):
 
     def _show_trading_journal(self) -> None:
         """과거 매매목록을 별도 프로세스로 열어 메인 실시간 표를 보호한다."""
+        if self._query_only:
+            return
         row = self._selected_table_cell[0] if self._selected_table_cell is not None else self._table.currentRow()
         code = ""
         name = ""
@@ -1774,6 +1820,8 @@ class MainWindow(QMainWindow):
         self._ensure_journal_process()
 
     def _ensure_journal_process(self) -> None:
+        if self._query_only:
+            return
         if self._journal_process_manager.is_running:
             return
         if self._journal_process_path is not None:
@@ -1836,9 +1884,13 @@ class MainWindow(QMainWindow):
         self._journal_process_manager.stop(graceful_timeout=2.0, terminate_timeout=1.0)
 
     def _show_market_news(self) -> None:
+        if self._query_only:
+            return
         self._news_window.show_market_news()
 
     def _show_morning_market_brief(self) -> None:
+        if self._query_only:
+            return
         from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
         from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
         from kiwoom_monitor.presentation.morning_market_brief_dialog import MorningMarketBriefDialog
@@ -1860,6 +1912,8 @@ class MainWindow(QMainWindow):
         current.activateWindow()
 
     def _poll_journal_news_request(self) -> None:
+        if self._query_only:
+            return
         document = self._journal_news_inbox.read_new()
         if document is None:
             return
@@ -1898,12 +1952,14 @@ class MainWindow(QMainWindow):
 
     def _open_theme_manager(self) -> None:
         if self._theme_store is None:
+            if (self._data_dir is not None or self._theme_unapplied):
+                self.statusBar().showMessage("테마 변경 후 화면 미적용: DB 결과를 확인하고 다시 여세요." if self._theme_unapplied else "테마 선택 원자료가 없어 테마 편집을 적용할 수 없습니다. 저장된 자료는 보존됩니다.")
             return
         if self._theme_manager_dialog is not None and self._theme_manager_dialog.isVisible():
             self._theme_manager_dialog.raise_()
             self._theme_manager_dialog.activateWindow()
             return
-        dialog = ThemeManagerDialog(self._theme_store, self._settings, None, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed, self._news_window.database_path, stock_lookup=self._stock_lookup, status_callback=lambda message: self.statusBar().showMessage(message))
+        dialog = ThemeManagerDialog(self._theme_store, self._settings, None, self._select_theme_image, self._sync_krx_stock_catalog, self, self._on_themes_changed, self._news_window.database_path, stock_lookup=self._stock_lookup, status_callback=lambda message: self.statusBar().showMessage(message), theme_save_pending=self._has_pending_theme_save, on_theme_unapplied=self._deactivate_theme_projection, on_profile_renamed=self._publish_profile_rename, on_profile_selected=self._publish_profile_selection)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         dialog.finished.connect(lambda _result, source=dialog: self._clear_theme_manager_dialog(source))
         self._theme_manager_dialog = dialog
@@ -1920,64 +1976,45 @@ class MainWindow(QMainWindow):
     def _set_connected_api_status(self) -> None:
         if self._ranking_uses_local_fallback:
             self._set_api_status("API: 로컬 전환", "#B36B00")
-        elif self._active_api_route == "local":
+        elif self._pc_market_session.source_route == "local":
             self._set_api_status("API: 이 PC", "#008000")
-        elif self._active_api_route == "local_fallback":
+        elif self._pc_market_session.source_route == "local_fallback":
             self._set_api_status("API: 로컬 전환", "#B36B00")
-        elif self._active_api_route == "central":
+        elif self._pc_market_session.source_route == "central":
             self._set_api_status("API: NAS", "#008000")
-        elif self._active_api_route == "central_waiting":
+        elif self._pc_market_session.source_route == "central_waiting":
             # 설정 교체 직후나 장 종료 뒤에는 중앙 WebSocket이 체결을
             # 기다려도 순위·저장 자료의 실제 API 경로는 이미 NAS다.
             # 상단 표시는 데이터 출처만 나타내고 세부 대기 상태는
             # 상태표시줄에 맡긴다.
             self._set_api_status("API: NAS", "#008000")
-        elif self._active_api_route == "central_retry":
+        elif self._pc_market_session.source_route == "central_retry":
             self._set_api_status("API: NAS 재연결 중…", "#B36B00")
         else:
             self._set_api_status("API: 연결됨", "#008000")
 
     def _on_realtime_status_changed(self, message: str) -> None:
-        """실시간 수신 경로를 상단에 표시하고 일반 상태 문구도 유지한다."""
+        """표시 문구는 업무 source나 복구 권한을 바꾸지 않는다."""
         self.statusBar().showMessage(message)
-        previous_route = self._active_api_route
-        if "로컬" in message and ("전환" in message or "실시간" in message):
-            self._active_api_route = "local_fallback"
-        elif message.startswith("실시간 체결 구독"):
-            # NAS worker는 문구에 항상 '나스/중앙/시놀로지'가 포함된다.
-            # 접두어 없는 이 문구는 이 PC의 키움 WebSocket 직접 연결이다.
-            self._active_api_route = "local"
-        elif "복구 여부" in message:
-            self._active_api_route = "central_retry"
-        elif (
-            "중앙 실시간 체결 구독 중" in message
-            or "나스 실시간 체결 구독 중" in message
-            or "나스 실시간 체결 재개" in message
-            or "중앙 실시간 체결 정상" in message
-            or "NAS 키움 실시간 수집" in message
-        ):
-            self._active_api_route = "central"
-        elif "시놀로지 서버 연결됨" in message and "원본 대기" in message:
-            self._active_api_route = "central_waiting"
-        elif "나스 실시간 연결 변경 중" in message or "나스 실시간 연결 대기" in message:
-            self._active_api_route = "central_waiting"
-        else:
+
+    @Slot(object)
+    def _on_realtime_sources_activated(self, sources: object) -> None:
+        # Runtime install/rollback may replace the aggregator after connection.
+        self._pc_market_session.activate_sources(sources)
+
+    @Slot(object)
+    def _on_realtime_source_changed(self, transition: object) -> None:
+        if not isinstance(transition, RealtimeSourceTransition):
             return
+        reload_history = self._pc_market_session.source_changed(transition)
         self._set_connected_api_status()
-        if (
-            self._active_api_route == "central"
-            and previous_route in {"local_fallback", "central_retry"}
-        ):
-            # NAS 재시작 동안 로컬 체결만 이어 받은 경우 중앙 DB에는 그
-            # 사이 확정·진행 분봉이 더 쌓였을 수 있다. 기존 loaded 표식을
-            # 버리고 TOP20을 다시 읽어 1·5·60분·당일 값을 즉시 맞춘다.
-            self._minute_history_codes.clear()
+        if reload_history:
             self._start_minute_history_loading(tuple(self._row_by_code), force=True)
 
     def _open_log_file(self) -> None:
         # 설치본의 Program Files는 읽기 전용이다. 로그는 항상 사용자 데이터
         # 폴더(%LocalAppData%\\KiwoomMonitor\\data\\logs)를 연다.
-        log_dir = AppPaths.for_current_user().log_dir
+        log_dir = self._api_config_path().parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         logger.info("사용자가 로그 폴더를 열었습니다: %s", log_dir)
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir))):
@@ -2038,14 +2075,20 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "설정 복원", "설정을 복원하고 바로 적용했습니다.")
 
     def _export_theme_backup(self) -> None:
-        default_name = f"키움_모니터_테마DB_{kst_wall_now():%Y%m%d}.json"
+        if (self._data_dir is not None or self._theme_unapplied) and self._theme_store is None:
+            QMessageBox.warning(self, "테마 DB 저장", "테마 변경 후 화면 미적용: DB 결과를 확인하기 전 백업하지 않습니다." if self._theme_unapplied else "테마 원자료 미준비: 저장된 선택을 보존하며 빈 자료를 백업하지 않습니다.")
+            return
+        now = self._app_controller.ranking_now() if self._data_dir is not None else kst_wall_now()
+        default_name = f"키움_모니터_테마DB_{now:%Y%m%d}.json"
         path, _ = QFileDialog.getSaveFileName(self, "테마 DB 저장", str(Path.home() / "Documents" / default_name), "테마 DB 백업 (*.json)")
         if not path:
             return
         target = Path(path).with_suffix(".json")
         try:
-            ThemeBackupService(self._settings.database_path).export_to(target)
-        except OSError as error:
+            ThemeBackupService(self._settings.database_path,
+                               settings=self._settings if self._data_dir is not None else None,
+                               now_provider=self._app_controller.ranking_now if self._data_dir is not None else None).export_to(target)
+        except (OSError, ThemeBackupError) as error:
             QMessageBox.warning(self, "테마 DB 저장", f"테마 DB 백업을 저장하지 못했습니다.\n{error}")
             return
         QMessageBox.information(self, "테마 DB 저장", "모든 테마 프로필의 테마·종목 연결·테마 색·별칭·등록 종목을 저장했습니다.\n일반 설정, 필드 구성, API 키, 로그는 포함하지 않았습니다.")
@@ -2056,10 +2099,35 @@ class MainWindow(QMainWindow):
             return
         if QMessageBox.question(self, "테마 DB 불러오기", "모든 테마 프로필의 테마·종목 연결·테마 색·별칭을 백업 내용으로 바꿉니다. 일반 설정은 바뀌지 않습니다. 계속할까요?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
+        if self._data_dir is not None and self._has_pending_theme_save():
+            QMessageBox.warning(self, "테마 DB 불러오기", "이전 테마 저장과 화면 반영이 끝난 뒤 복원을 다시 요청하세요. 진행 중인 저장은 계속됩니다.")
+            return
         try:
-            ThemeBackupService(self._settings.database_path).import_from(Path(path))
+            ThemeBackupService(self._settings.database_path,
+                               settings=self._settings if self._data_dir is not None else None,
+                               now_provider=self._app_controller.ranking_now if self._data_dir is not None else None).import_from(Path(path))
         except ThemeBackupError as error:
+            if self._data_dir is not None and error.native_committed is not False:
+                self._deactivate_theme_projection()
             QMessageBox.warning(self, "테마 DB 불러오기", str(error))
+            return
+        if self._data_dir is not None:
+            self._close_theme_editors()
+            try:
+                store = DatabaseThemeRepository.open_existing(self._settings.database_path,
+                    self._settings.get("theme_active_profile"), now_provider=self._app_controller.ranking_now)
+                if store is None:
+                    raise ValueError("복원된 현재 테마 프로필을 열 수 없습니다.")
+                themes = store.all_by_name()
+                self._theme_store, self._themes = store, themes
+                self._theme_unapplied = False
+                self._refresh_theme_badges()
+                self._schedule_theme_trade_summary()
+            except (KeyError, ValueError, sqlite3.Error) as error:
+                self._deactivate_theme_projection()
+                QMessageBox.warning(self, "테마 DB 불러오기", f"테마 복원은 DB에 저장됐지만 현재 화면에 적용하지 못했습니다. 다시 열어 확인하세요.\n{error}")
+                return
+            QMessageBox.information(self, "테마 DB 불러오기", "모든 테마 프로필을 불러왔습니다.")
             return
         if self._theme_store is not None:
             profiles = self._theme_store.list_profiles()
@@ -2069,6 +2137,49 @@ class MainWindow(QMainWindow):
             self._settings.set("theme_active_profile", selected)
         self._on_themes_changed()
         QMessageBox.information(self, "테마 DB 불러오기", "모든 테마 프로필을 불러왔습니다.")
+
+    def _publish_profile_rename(self) -> None:
+        """One current-name read serves every actual editor of this repository."""
+        profiles = self._theme_store.list_profiles()
+        active = self._theme_store.active_profile
+        for dialog in self.findChildren(ThemeManagerDialog):
+            dialog.show_profile_names(self._theme_store, profiles, active)
+
+    def _publish_profile_selection(self) -> None:
+        store = self._theme_store
+        profiles = store.list_profiles()
+        self._on_themes_changed(notify_repository=False)
+        rows_by_text = {}
+        for dialog in self.findChildren(ThemeManagerDialog):
+            text = dialog.profile_search_text(store)
+            if text is None:
+                continue
+            if text not in rows_by_text:
+                rows_by_text[text] = store.search(text)
+            dialog.show_profile_names(store, profiles, store.active_profile)
+            dialog.show_theme_rows(store, rows_by_text[text])
+
+    def _has_pending_theme_save(self) -> bool:
+        """Actual accepted main/editor writes include queued result publication."""
+        return (self._theme_save_request is not None
+                or any(dialog.has_pending_theme_save for dialog in self.findChildren(ThemeManagerDialog)))
+
+    def _close_theme_editors(self) -> None:
+        editors = self.findChildren(ThemeManagerDialog)
+        for dialog in editors:
+            dialog.setEnabled(False)
+        for dialog in editors:
+            dialog.close()
+        if self._settings_dialog is not None:
+            self._settings_dialog.close()
+
+    def _deactivate_theme_projection(self) -> None:
+        """Native result/publication is not applied; never keep the former view."""
+        self._theme_unapplied = True
+        self._theme_store, self._themes = None, {}
+        self._close_theme_editors()
+        self._refresh_theme_badges()
+        self._schedule_theme_trade_summary()
 
     def _export_journal_backup(self) -> None:
         if self._journal_database_path is None:
@@ -2184,11 +2295,20 @@ class MainWindow(QMainWindow):
         if not self._closing:
             self._on_background_failure(f"테마 저장: {message}")
 
-    @staticmethod
-    def _api_config_path() -> Path:
-        return AppPaths.for_current_user().data_dir / "api.env"
+    def _api_config_path(self) -> Path:
+        root = self._data_dir if self._data_dir is not None else AppPaths.for_current_user().data_dir
+        return root / "api.env"
+
+    def _local_asset_path(self, stored: str) -> Path:
+        path = Path(stored)
+        if self._data_dir is not None and not path.is_absolute() and path.parts[:1] == ("data",):
+            return self._data_dir.joinpath(*path.parts[1:])
+        return self._api_config_path().parent.parent / path
 
     def _restore_environment_selector(self) -> None:
+        if self._query_only:
+            self._environment_selector.setEnabled(False)
+            return
         path = self._api_config_path()
         if not path.exists():
             self._environment_selector.setEnabled(False)
@@ -2200,6 +2320,8 @@ class MainWindow(QMainWindow):
             self._environment_selector.setEnabled(False)
 
     def _change_environment(self) -> None:
+        if self._query_only:
+            return
         path = self._api_config_path()
         if not path.exists():
             return
@@ -2224,20 +2346,22 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         path = self._api_config_path()
-        dialog = ApiSettingsDialog(path, self, active_route=self._active_api_route)
+        dialog = ApiSettingsDialog(path, self, active_route=self._pc_market_session.source_route,
+                                   query_only=self._query_only)
         if dialog.exec():
-            LocalApiConfig(path).save_profiles(dialog.values)
+            if not self._query_only:
+                LocalApiConfig(path).save_profiles(dialog.values)
             self._app_controller.restart_for_api_settings()
 
     def _on_api_reload_started(self) -> None:
         self._set_api_status("API: 설정 적용 중…", "#B36B00")
 
     def _capture_api_runtime_view(self):
-        names = ("_market_cap_reference_codes", "_market_cap_reference_pending", "_realtime_market_caps", "_minute_history_codes")
+        names = ("_market_cap_reference_codes", "_market_cap_reference_pending", "_realtime_market_caps")
         previous = {name: (getattr(self, name), getattr(self, name).copy()) for name in names}
-        route, aggregator = self._active_api_route, self._minute_aggregator
+        restore_market = self._pc_market_session.capture_runtime()
         def restore():
-            self._active_api_route, self._minute_aggregator = route, aggregator
+            restore_market()
             for name, (original, contents) in previous.items():
                 original.clear()
                 original.update(contents)
@@ -2246,12 +2370,10 @@ class MainWindow(QMainWindow):
 
     def _apply_api_runtime_view(self, runtime: dict[str, object]) -> None:
         source_mode = str(runtime.get("source_mode", ""))
-        self._active_api_route = "local" if source_mode == "local" else "central_waiting"
+        self._pc_market_session.apply_runtime(source_mode)
         self._market_cap_reference_codes.clear()
         self._market_cap_reference_pending.clear()
         self._realtime_market_caps.clear()
-        self._minute_history_codes.clear()
-        self._minute_aggregator = MinuteTradeValueAggregator()
 
     def _on_api_reload_failed(self, message: str) -> None:
         self._set_api_status("API: 오류", "#C00000")
@@ -2335,6 +2457,10 @@ class MainWindow(QMainWindow):
             return
         if self._krx_stock_catalog_worker_controller.is_running:
             return
+        if self._query_only:
+            if not self._is_after_hours_data_pause():
+                self._start_historical_high_loading(tuple(self._row_by_code))
+            return
         today = self._ranking_now().strftime("%Y-%m-%d")
         visible_codes = tuple(self._row_by_code)
         # KRX 법인 목록에는 ETF·ETN·일부 우선주가 없어 이 종목들은 다시
@@ -2342,7 +2468,7 @@ class MainWindow(QMainWindow):
         # 쓰면 해당 종목이 TOP20에 보일 때마다 2,700여 행을 다시 저장해
         # 메인 SQLite 조회까지 잠금 대기시키므로 성공 날짜만 기준으로 삼는다.
         if not daily_catalog_sync_due(
-            self._settings.get("krx_stock_catalog_date"), today,
+            self._settings.get("krx_stock_catalog_date", DEFAULT_SETTINGS["krx_stock_catalog_date"]), today,
         ):
             if not self._is_after_hours_data_pause():
                 self._start_historical_high_loading(visible_codes)
@@ -2606,14 +2732,14 @@ class MainWindow(QMainWindow):
         self._prepare_top20_trade_value_index(codes, self._ranking_now())
         saved_nxt: dict[str, bool] = {}
         high_date = self._ranking_now().date()
-        self._ensure_intraday_high_date(high_date)
+        self._pc_market_session.ensure_high_date(high_date)
         if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_ranking_cache"):
             cached = self._stock_lookup.load_ranking_cache(
                 codes, self._top20_realtime_codes(codes), high_date,
             )
             self._stock_markets.update(cached.markets)
             self._current_prices.update(cached.last_prices)
-            self._today_high_prices.update(cached.intraday_highs)
+            self._pc_market_session.restore_highs(cached.intraday_highs)
             self._fundamentals.update(cached.fundamentals)
             saved_nxt = cached.nxt_enabled
         else:
@@ -2623,7 +2749,7 @@ class MainWindow(QMainWindow):
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_last_prices"):
                 self._current_prices.update(self._stock_lookup.load_last_prices(codes))
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_intraday_highs"):
-                self._today_high_prices.update(self._stock_lookup.load_intraday_highs(codes, high_date))
+                self._pc_market_session.restore_highs(self._stock_lookup.load_intraday_highs(codes, high_date))
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_fundamentals"):
                 self._fundamentals.update(self._stock_lookup.load_fundamentals(codes))
             if self._stock_lookup is not None and hasattr(self._stock_lookup, "load_nxt_enabled"):
@@ -2638,10 +2764,7 @@ class MainWindow(QMainWindow):
         for row, stock in enumerate(stocks):
             self._row_by_code[stock.code] = row
             self._ranked_stock_names[stock.code] = stock.name
-            try:
-                self._last_change_rates[stock.code] = float(stock.change_rate)
-            except (TypeError, ValueError):
-                pass
+            self._pc_market_session.accept_ranking_rate(stock.code, stock.change_rate)
             ranking_price = getattr(stock, "current_price", None)
             if use_ranking_price and isinstance(ranking_price, int) and ranking_price > 0:
                 self._current_prices[stock.code] = ranking_price
@@ -2800,7 +2923,7 @@ class MainWindow(QMainWindow):
             daily=self._daily_highs.get(code),
             fundamentals=self._fundamentals.get(code),
             historical_high=self._historical_high_prices.get(code),
-            today_high=self._today_high_prices.get(code),
+            today_high=self._pc_market_session.current_high(code),
         )
 
     def _edit_badge_color(self, code: str, theme: str) -> None:
@@ -2944,9 +3067,9 @@ class MainWindow(QMainWindow):
             if code.casefold() in excluded or "".join(name.split()).casefold() in excluded:
                 continue
             value = (
-                self._minute_aggregator.today_trade_value_eok(code, now)
+                self._pc_market_session.minute_aggregator.today_trade_value_eok(code, now)
                 if period == "day"
-                else self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
+                else self._pc_market_session.minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
             )
             entries.append((parse_themes(self._themes.get("".join(name.split()), ""), ","), value))
         return aggregate_theme_metrics(entries)
@@ -2969,64 +3092,33 @@ class MainWindow(QMainWindow):
             self._render_trade_values(code)
         self.statusBar().showMessage(f"{label} 거래대금·{label}강도: " + (f"직전 완료 {label}" if completed else f"실시간 진행 중 {label}"))
 
-    def _ensure_intraday_high_date(self, today: date) -> None:
-        if self._today_high_prices_date != today:
-            self._today_high_prices.clear()
-            self._today_high_prices_date = today
 
-    def _ensure_today_minute_bar_storage(self, now: datetime) -> None:
-        """날짜별 RAM을 정리하고 기존 저장 경로에 30일 보존 작업을 넘긴다."""
-        today = now.date()
-        self._ensure_intraday_high_date(today)
-        if self._minute_bar_storage_date == today:
-            return
-        self._app_controller.flush_minute_cache()
-        self._minute_aggregator.discard_before(today)
-        self._minute_history_codes.clear()
-        if self._minute_bar_repository is not None:
-            self._app_controller.queue_minute_retention(today - timedelta(days=30))
-        self._minute_bar_storage_date = today
+
+
 
 
 
 
     def _on_trade_tick(self, tick: TradeTick) -> None:
-        # 서버의 별도 '구독 완료' 통지가 누락되더라도 실제 체결이 한 건
-        # 도착했다면 중앙 실시간 경로가 정상이라는 가장 확실한 증거다.
-        if self._active_api_route == "central_waiting":
-            self._active_api_route = "central"
-            self._set_connected_api_status()
         row = self._row_by_code.get(tick.code)
         # 현재 표에서는 빠졌어도 현재·다음 30초 지수 구성 종목이면 집계를
         # 계속한다. UI 갱신만 생략하고 0B 분봉 누적은 유지한다.
-        if row is None and tick.code not in self._top20_collector.active_codes:
+        if not self._pc_market_session.accepts_tick(tick.code, visible=row is not None, collector=self._top20_collector):
             return
         if tick.market_cap_eok is not None and tick.market_cap_eok > 0:
             self._realtime_market_caps[tick.code] = float(tick.market_cap_eok)
             self._app_controller.queue_price_cache(tick.code, market_cap=float(tick.market_cap_eok))
         observed_at = self._ranking_now()
-        if tick.change_rate is not None:
-            self._last_change_rates[tick.code] = tick.change_rate
-        if tick.execution_strength is not None:
-            self._latest_execution_strength[tick.code] = tick.execution_strength
-        if tick.session_type:
-            self._latest_session_type[tick.code] = tick.session_type
-        if tick.trade_volume:
-            pressure = self._realtime_pressure.setdefault(tick.code, deque())
-            pressure.append((observed_at, tick.trade_volume))
-            cutoff = observed_at - timedelta(seconds=60)
-            while pressure and pressure[0][0] < cutoff:
-                pressure.popleft()
+        high, bar = self._pc_market_session.accept_market_tick(
+            tick, observed_at,
+            flush=self._app_controller.flush_minute_cache,
+            retain=self._app_controller.queue_minute_retention if self._minute_bar_repository is not None else None,
+        )
         if tick.current_price is not None:
-            self._ensure_today_minute_bar_storage(observed_at)
             self._current_prices[tick.code] = tick.current_price
             self._app_controller.queue_price_cache(tick.code, price=tick.current_price)
-            if tick.high_price and tick.high_price > 0:
-                previous_high = self._today_high_prices.get(tick.code, 0)
-                if tick.high_price > previous_high:
-                    self._today_high_prices[tick.code] = tick.high_price
-                    self._app_controller.queue_price_cache(tick.code, high=tick.high_price, observed_at=observed_at)
-            bar = self._minute_aggregator.ingest(tick, observed_at)
+            if high is not None:
+                self._app_controller.queue_price_cache(tick.code, high=high, observed_at=observed_at)
             if bar is not None:
                 self._app_controller.queue_minute_bar(tick.code, bar)
         if not hasattr(self, "_pending_trade_ticks"):
@@ -3049,16 +3141,10 @@ class MainWindow(QMainWindow):
         self._render_change_rate(reference.code)
 
     def _prepare_top20_trade_value_index(self, codes: tuple[str, ...], observed_at: datetime) -> None:
-        """현재 순위 구성을 다음 30초 경계부터 사용할 대상으로 예약한다."""
-        self._top20_collector.prepare(
-            codes, observed_at,
-            enabled=self._settings.get("rank_query_type") == "5",
-            collection_open=self._top20_collection_open(observed_at),
-        )
+        self._pc_market_session.prepare_top20(self._top20_collector, codes, observed_at,
+            enabled=self._settings.get("rank_query_type") == "5")
 
-    @staticmethod
-    def _top20_collection_open(moment: datetime) -> bool:
-        return top20_collection_open(moment)
+
 
     def _top20_realtime_codes(self, visible_codes: tuple[str, ...]) -> tuple[str, ...]:
         """표의 최신 20개와 지수에 필요한 고정 구성만 합쳐 구독한다."""
@@ -3068,23 +3154,14 @@ class MainWindow(QMainWindow):
 
     def _update_top20_trade_value_index(self) -> None:
         now = self._ranking_now()
-        nas_interrupted = self._active_api_route in {
+        nas_interrupted = self._pc_market_session.source_route in {
             "central_waiting", "central_retry", "local_fallback",
         }
-        update = self._top20_collector.advance(
-            now,
-            enabled=self._settings.get("rank_query_type") == "5",
-            # NAS 원본이 끊긴 동안 로컬 페일오버 체결로 중앙 수집 기록을
-            # 메우면 NAS DB가 연속 수집된 것처럼 보인다. 해당 구간은 비워
-            # 기존 차트의 '수집 중단' 경계로 명확히 표시한다.
-            collection_open=top20_collection_available(now, self._active_api_route),
-            value_provider=self._top20_trade_value,
-            market_provider=self._top20_market,
+        update = self._pc_market_session.advance_top20(
+            self._top20_collector, now, enabled=self._settings.get("rank_query_type") == "5",
+            visible_codes=tuple(self._row_by_code), markets=self._stock_markets,
+            persist=self._app_controller.store_top20_record, subscribe=self._app_controller.start_realtime_subscription,
         )
-        if update.completed is not None:
-            self._save_top20_record(update.completed)
-        if update.cohort_changed and self._row_by_code:
-            self._app_controller.start_realtime_subscription(self._top20_realtime_codes(tuple(self._row_by_code)))
         if not self._top20_trade_value_window.isVisible():
             return
         completed_rows = list(self._top20_collector.completed)
@@ -3150,20 +3227,13 @@ class MainWindow(QMainWindow):
             f"현재 30초 구성 {len(self._top20_collector.active_codes)}종목 · 두 구간을 1분으로 합산합니다.",
         )
 
-    def _top20_trade_value(self, code: str, minute: datetime) -> float:
-        return self._minute_aggregator.bucket_trade_value_eok(code, 1, minute)
 
-    def _top20_market(self, code: str) -> str:
-        return self._stock_markets.get(code, "")
 
-    def _save_top20_record(self, record: Top20MinuteRecord) -> None:
-        self._save_top20_trade_value_index(
-            record.minute, record.total, record.codes, record.capture_state,
-            record.market_values, record.market_counts, record.cohort_segments,
-        )
 
-    def _top20_market_counts(self, codes: tuple[str, ...]) -> tuple[int, int, int]:
-        return self._top20_collector.market_counts(codes, self._top20_market)
+
+
+
+
 
     def _show_top20_trade_value_window(self) -> None:
         window = self._top20_trade_value_window
@@ -3176,11 +3246,7 @@ class MainWindow(QMainWindow):
         window.activateWindow()
 
     def _uses_nas_market_data_source(self) -> bool:
-        client = self._market_data_client
-        return (
-            self._active_api_route not in {"local", "local_fallback"}
-            and callable(getattr(client, "load_stored_minute_bars", None))
-        )
+        return self._pc_market_session.uses_nas_market_data(self._market_data_client)
 
     def _uses_nas_top20_source(self) -> bool:
         client = self._market_data_client
@@ -3208,13 +3274,9 @@ class MainWindow(QMainWindow):
         worker.setParent(self._app_controller)
         self._top20_nas_workers.add(worker)
         self._top20_nas_callbacks[worker] = (on_completed, on_failed)
-        worker.completed.connect(
-            lambda _request, result, source=worker: self._finish_top20_nas_request(source, result, "")
-        )
-        worker.failed.connect(
-            lambda _request, message, source=worker: self._finish_top20_nas_request(source, None, message)
-        )
-        worker.finished.connect(lambda source=worker: self._release_top20_nas_worker(source))
+        worker.completed.connect(self._on_top20_nas_completed)
+        worker.failed.connect(self._on_top20_nas_failed)
+        worker.finished.connect(self._release_top20_nas_worker)
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
@@ -3222,7 +3284,7 @@ class MainWindow(QMainWindow):
         """Restore last NAS 0B market caps once per visible symbol in the background."""
         client = self._market_data_client
         if (
-            self._active_api_route in {"local", "local_fallback"}
+            self._pc_market_session.source_route in {"local", "local_fallback"}
             or not callable(getattr(client, "load_stored_market_caps", None))
         ):
             return
@@ -3282,6 +3344,22 @@ class MainWindow(QMainWindow):
         self._market_cap_reference_pending.difference_update(requested)
         logger.warning("NAS 마지막 0B 시가총액 복원 실패: %s", message)
 
+    @Slot(object, object)
+    def _on_top20_nas_completed(self, _request: object, result: object) -> None:
+        worker = self.sender()
+        if worker not in self._top20_nas_workers:
+            logger.warning("등록되지 않은 NAS 시장자료 작업의 완료 신호를 받았습니다.")
+            return
+        self._finish_top20_nas_request(worker, result, "")
+
+    @Slot(object, str)
+    def _on_top20_nas_failed(self, _request: object, message: str) -> None:
+        worker = self.sender()
+        if worker not in self._top20_nas_workers:
+            logger.warning("등록되지 않은 NAS 시장자료 작업의 실패 신호를 받았습니다.")
+            return
+        self._finish_top20_nas_request(worker, None, message)
+
     def _finish_top20_nas_request(
         self, worker: Top20NasDataWorker, result: object, message: str,
     ) -> None:
@@ -3299,7 +3377,12 @@ class MainWindow(QMainWindow):
             # The user may close the statistics dialog before the HTTP read ends.
             return
 
-    def _release_top20_nas_worker(self, worker: Top20NasDataWorker) -> None:
+    @Slot()
+    def _release_top20_nas_worker(self) -> None:
+        worker = self.sender()
+        if worker not in self._top20_nas_workers:
+            logger.warning("등록되지 않은 NAS 시장자료 작업의 종료 신호를 받았습니다.")
+            return
         self._top20_nas_callbacks.pop(worker, None)
         self._top20_nas_workers.discard(worker)
 
@@ -3616,44 +3699,9 @@ class MainWindow(QMainWindow):
         else:
             self._show_top20_trade_value_date(self._top20_view_date)
 
-    def _save_top20_trade_value_index(
-        self, minute: datetime | None, value: float,
-        codes: tuple[str, ...], capture_state: str,
-        market_values: tuple[float, float, float] | None = None,
-        market_counts: tuple[int, int, int] | None = None,
-        cohort_segments: tuple[tuple[str, tuple[str, ...]], ...] = (),
-    ) -> None:
-        if minute is None or not codes or self._minute_bar_repository is None:
-            return
-        try:
-            if market_values is None or market_counts is None:
-                kospi, kosdaq, unknown, counts = self._top20_market_values(codes, minute)
-                market_values = (kospi, kosdaq, unknown)
-                market_counts = counts
-            self._minute_bar_repository.upsert_top20_trade_value_index(
-                minute, value, codes, capture_state,
-                kospi_trade_value_eok=market_values[0],
-                kosdaq_trade_value_eok=market_values[1],
-                unknown_trade_value_eok=market_values[2],
-                kospi_stock_count=market_counts[0],
-                kosdaq_stock_count=market_counts[1],
-                unknown_stock_count=market_counts[2],
-                cohort_segments=cohort_segments,
-            )
-        except Exception as error:
-            logger.warning("TOP20 거래대금 지수 저장 실패: %s", error)
 
-    def _top20_market_values(
-        self, codes: tuple[str, ...], minute: datetime,
-    ) -> tuple[float, float, float, tuple[int, int, int]]:
-        values = [0.0, 0.0, 0.0]
-        counts = [0, 0, 0]
-        for code in codes:
-            market = self._stock_markets.get(code, "")
-            index = 0 if ("KOSPI" in market or "코스피" in market or market in {"유가", "STK", "1"}) else (1 if ("KOSDAQ" in market or "코스닥" in market or market in {"KSQ", "2"}) else 2)
-            values[index] += self._minute_aggregator.bucket_trade_value_eok(code, 1, minute)
-            counts[index] += 1
-        return values[0], values[1], values[2], (counts[0], counts[1], counts[2])
+
+
 
     def _on_order_execution(self, execution: OrderExecution) -> None:
         """계좌 체결 순간의 화면 문맥을 복기용 DB에 비동기로 보존한다."""
@@ -3672,10 +3720,11 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         name = execution.name or self._ranked_stock_names.get(execution.code, execution.code)
-        normalized_name = "".join(name.split())
-        themes = tuple(theme.strip() for theme in self._themes.get(normalized_name, "").split(",") if theme.strip())
-        target = self._selected_high_price(execution.code)
-        high_distance = max(0.0, (target - execution.price) / target * 100) if target else None
+        market_fields = self._pc_market_session.entry_market_fields(
+            execution.code, name, execution.price, self._selected_high_price(execution.code), now,
+            self._ranking_execution.rank_by_code, self._ranked_stock_names,
+            self._themes, getattr(self, "_visible_theme_frequency", {}),
+        )
         broker_key = ":".join(filter(None, (execution.order_no, execution.execution_no)))
         source_execution_key = f"{executed_at.date().isoformat()}:{execution.code}:{broker_key}" if broker_key else ""
         if not source_execution_key:
@@ -3685,19 +3734,11 @@ class MainWindow(QMainWindow):
         execution_key = scoped_snapshot_execution_key(
             source_execution_key, execution.origin_scope,
         )
-        program = dict(self._latest_program_trade.get(execution.code, {}))
-        investor_flow = {"program_trade": program} if program else {"program_trade": {"available": False, "backfill_pending": True}}
         writer.enqueue(TradeEntrySnapshot(
             execution_key=execution_key, order_no=execution.order_no,
             stock_code=execution.code, stock_name=name, side=execution.side,
             executed_at=executed_at, price=execution.price, quantity=execution.quantity,
-            market=execution.market, rank=self._ranking_execution.rank_by_code.get(execution.code),
-            trade_value_1m_eok=self._minute_aggregator.trade_value_eok(execution.code, 1),
-            trade_value_5m_eok=self._minute_aggregator.trade_value_eok(execution.code, 5),
-            themes=themes, theme_ranks=self._theme_ranks_at_entry(execution.code, themes),
-            high_distance_percent=high_distance, orderbook=self._execution_pressure_at_entry(execution.code, now),
-            investor_flow=investor_flow,
-            market_state=self._entry_market_state(),
+            market=execution.market, **market_fields,
             capture_state="realtime_core",
             origin_scope=execution.origin_scope,
         ))
@@ -3706,87 +3747,18 @@ class MainWindow(QMainWindow):
         from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import ProgramTradeTick
         if not isinstance(tick, ProgramTradeTick):
             return
-        self._latest_program_trade[tick.code] = {
-            "available": True, "source": "kiwoom_realtime_0w",
-            "observed_at": self._ranking_now().isoformat(timespec="seconds"),
-            "trade_time": tick.trade_time, "market": tick.market,
-            "net_buy_quantity": tick.net_buy_quantity,
-            "net_buy_quantity_change": tick.net_buy_quantity_change,
-            "net_buy_amount_million_won": tick.net_buy_amount_million_won,
-            "net_buy_amount_change_million_won": tick.net_buy_amount_change_million_won,
-        }
+        self._pc_market_session.accept_program_trade(tick, self._ranking_now())
 
-    def _theme_ranks_at_entry(self, target_code: str, themes: tuple[str, ...]) -> dict[str, int]:
-        result: dict[str, int] = {}
-        for theme in themes:
-            members = []
-            for code, name in self._ranked_stock_names.items():
-                stock_themes = tuple(value.strip().casefold() for value in self._themes.get("".join(name.split()), "").split(","))
-                if theme.casefold() in stock_themes and code in self._ranking_execution.rank_by_code:
-                    members.append((self._ranking_execution.rank_by_code[code], code))
-            members.sort()
-            for position, (_, code) in enumerate(members, 1):
-                if code == target_code:
-                    result[theme] = position
-                    break
-        return result
 
-    def _entry_market_state(self) -> dict[str, object]:
-        ordered = sorted(self._ranking_execution.rank_by_code.items(), key=lambda item: item[1])
-        rates = [self._last_change_rates[code] for code, _ in ordered if code in self._last_change_rates]
-        visible_state = {
-            "visible_stock_count": len(ordered),
-            "advancing_count": sum(rate > 0 for rate in rates),
-            "declining_count": sum(rate < 0 for rate in rates),
-            "flat_count": sum(rate == 0 for rate in rates),
-            "average_change_rate": sum(rates) / len(rates) if rates else None,
-            "visible_trade_value_1m_eok": sum(self._minute_aggregator.trade_value_eok(code, 1) for code, _ in ordered),
-            "visible_trade_value_5m_eok": sum(self._minute_aggregator.trade_value_eok(code, 5) for code, _ in ordered),
-            "top_stocks": [
-                {"rank": rank, "code": code, "name": self._ranked_stock_names.get(code, code)}
-                for code, rank in ordered[:10]
-            ],
-            "theme_frequency": dict(getattr(self, "_visible_theme_frequency", {})),
-        }
-        now = self._ranking_now()
-        input_quality = {code: {str(minutes): self._minute_aggregator.recent_quality(code, minutes, now).value
-                               for minutes in (1, 5)} for code, _ in ordered}
-        return {**self._latest_market_state, "ranking_table": visible_state, "input_quality": input_quality}
+
+
 
     def _on_market_index_tick(self, tick: object) -> None:
         if not isinstance(tick, MarketIndexTick):
             return
-        state = dict(self._latest_market_state)
-        market = dict(state.get(tick.market, {}))
-        updates = {
-            "index": tick.index_value,
-            "change_rate": tick.change_rate,
-            "trade_value_million_won": tick.cumulative_trade_value_million_won,
-            "trade_value_eok": (
-                tick.cumulative_trade_value_million_won / 100
-                if tick.cumulative_trade_value_million_won is not None else None
-            ),
-            "advancing_count": tick.advancing_count,
-            "declining_count": tick.declining_count,
-            "flat_count": tick.flat_count,
-        }
-        market.update({key: value for key, value in updates.items() if value is not None})
-        state[tick.market] = market
-        state["source"] = "kiwoom_realtime_0J_0U"
-        state["observed_at"] = kst_wall_now().isoformat(timespec="seconds")
-        state["trade_time"] = tick.trade_time
-        self._latest_market_state = state
-        if tick.index_value is not None:
-            now = self._ranking_now()
-            digits = "".join(character for character in str(tick.trade_time or "") if character.isdigit())
-            clock = digits[-6:] if len(digits) >= 6 else digits
-            if len(clock) >= 4:
-                hour, minute = int(clock[:2]), int(clock[2:4])
-                if 0 <= hour <= 23 and 0 <= minute <= 59:
-                    now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            minute = now.replace(second=0, microsecond=0)
-            trade_value = float(tick.cumulative_trade_value_million_won) / 100 if tick.cumulative_trade_value_million_won is not None else None
-            self._app_controller.queue_market_index(tick.market, minute, float(tick.index_value), trade_value)
+        record = self._pc_market_session.accept_market_index(tick, self._ranking_now())
+        if record is not None:
+            self._app_controller.queue_market_index(*record)
 
     def _on_realtime_diagnostics_changed(self, diagnostics: object) -> None:
         if not isinstance(diagnostics, dict):
@@ -3803,31 +3775,6 @@ class MainWindow(QMainWindow):
         self._realtime_diagnostics["last_disconnect_reason"] = diagnostics.get("last_disconnect_reason", "")
         self._realtime_diagnostics["updated_at"] = diagnostics.get("updated_at", "")
 
-    def _execution_pressure_at_entry(self, code: str, now: datetime) -> dict[str, object]:
-        pressure = self._realtime_pressure.get(code, deque())
-        now = as_kst(now)
-        cutoff = now - timedelta(seconds=60)
-        buy_volume = sell_volume = 0
-        for observed, volume in pressure:
-            if as_kst(observed) < cutoff:
-                continue
-            if volume > 0:
-                buy_volume += volume
-            elif volume < 0:
-                sell_volume += abs(volume)
-        total = buy_volume + sell_volume
-        recovery_until = self._pressure_gap_until.get(code)
-        if recovery_until is not None and now < as_kst(recovery_until):
-            return {"source": "0B_execution_flow", "window_seconds": 60, "available": False,
-                    "completeness": "partial", "recovery_until": self._pressure_gap_until[code].isoformat(),
-                    "buy_execution_volume": None, "sell_execution_volume": None, "buy_share_percent": None}
-        return {
-            "source": "0B_execution_flow", "window_seconds": 60,
-            "execution_strength": self._latest_execution_strength.get(code),
-            "buy_execution_volume": buy_volume, "sell_execution_volume": sell_volume,
-            "buy_share_percent": buy_volume / total * 100 if total else None,
-            "session_type": self._latest_session_type.get(code, ""),
-        }
 
     def _flush_trade_tick_updates(self) -> None:
         pending = tuple(self._pending_trade_ticks.values())
@@ -3853,7 +3800,7 @@ class MainWindow(QMainWindow):
             self._set_near_high_level(tick.code, tick.current_price)
             self._apply_near_high_background(tick.code)
             self._render_high_distance(tick.code)
-            self._render_trade_values(tick.code, live_only=tick.code not in self._minute_history_codes)
+            self._render_trade_values(tick.code, live_only=not self._pc_market_session.history_loaded(tick.code))
 
 
 
@@ -3935,121 +3882,66 @@ class MainWindow(QMainWindow):
             return False
         if self._minute_history_worker_controller.is_running:
             return True
-        missing_codes = minute_history_candidates(codes, self._minute_history_codes, force=force)
+        try:
+            missing_codes = self._pc_market_session.prepare_history(
+                codes, self._ranking_now(), force=force,
+                gap_loader=self._app_controller.load_minute_gaps if self._minute_bar_repository is not None else None,
+            )
+        except Exception as error:
+            logger.warning("분봉 누락 상태 복원 실패: %s", error)
+            self._minute_gap_retry_timer.start()
+            return False
         if not missing_codes:
             return False
-        if self._minute_bar_repository is not None:
-            day = self._ranking_now().date()
-            to_restore = tuple(code for code in missing_codes if (code, day) not in self._restored_gap_days)
-            loader = getattr(self._minute_bar_repository, "load_gap_minutes", None)
-            try:
-                restored = loader(to_restore, day) if callable(loader) else {}
-            except Exception as error:
-                logger.warning("분봉 누락 상태 복원 실패: %s", error)
-                self._minute_aggregator.mark_gap(RealtimeGap(1), to_restore, self._ranking_now())
-                self._minute_gap_retry_timer.start()
-                return False
-            else:
-                self._restored_gap_days.update((code, day) for code in to_restore)
-                from kiwoom_monitor.domain.realtime_gap import GapRange
-                ranges = tuple(GapRange("trade", code, "", minute, minute) for code, minutes in restored.items() for minute in minutes)
-                if ranges:
-                    self._minute_aggregator.mark_gap(RealtimeGap(len(ranges), ranges, False), (), self._ranking_now())
-        for code in missing_codes:
-            self._minute_recovery_requests[code] = self._minute_aggregator.gap_generation(code)
-        return self._minute_history_worker_controller.start(
-            missing_codes,
-            followup_codes=codes,
-            forced=force,
-        )
+        return self._minute_history_worker_controller.start(missing_codes, followup_codes=codes, forced=force)
 
     def _on_history_received(self, code: str, bars: object) -> None:
         if not isinstance(bars, tuple):
             return
         now = self._ranking_now()
-        generation = self._minute_recovery_requests.pop(code, None)
-        self._minute_coverage_requests[code] = generation
-        bars = self._minute_aggregator.history_for_storage(code, bars, generation)
-        self._ensure_today_minute_bar_storage(now)
-        self._minute_aggregator.seed(
-            code, bars, now,
-            include_current_snapshot=self._uses_nas_market_data_source(),
-            query_authoritative=not self._uses_nas_market_data_source(),
-            recovery_generation=generation,
+        update = self._pc_market_session.accept_history(
+            code, bars, now, client=self._market_data_client,
+            flush=self._app_controller.flush_minute_cache,
+            retain=self._app_controller.queue_minute_retention if self._minute_bar_repository is not None else None,
         )
-        if code in self._after_close_finalization_codes and self._finalization_minute_bars_complete(code, bars):
+        if code in self._after_close_finalization_codes and self._finalization_minute_bars_complete(code, update.bars):
             self._after_close_minute_received.add(code)
-        same_day_highs = tuple(
-            int(bar.high_price) for bar in bars
-            if getattr(bar, "minute", None) is not None
-            and bar.minute.date() == now.date()
-            and getattr(bar, "high_price", 0) > 0
+        if update.high is not None:
+            self._app_controller.queue_price_cache(code, high=update.high, observed_at=now)
+        stored = self._app_controller.store_minute_history(
+            code, update.bars, now, update.generation,
+            on_committed=lambda minutes: self._pc_market_session.history_committed(code, update.generation, minutes),
         )
-        if same_day_highs:
-            restored_high = max(same_day_highs)
-            previous_high = self._today_high_prices.get(code, 0)
-            if restored_high > previous_high:
-                self._today_high_prices[code] = restored_high
-                self._app_controller.queue_price_cache(code, high=restored_high, observed_at=now)
-        stored = self._minute_bar_repository is None
-        if stored and generation is not None:
-            self._minute_aggregator.confirm_history_saved(code, generation, tuple(bar.minute for bar in bars))
-        if self._minute_bar_repository is not None and self._market_cache_writer is not None:
-            self._market_cache_writer.enqueue_history_bars(code, bars, now.date(), now, recovery_generation=generation)
-        elif self._minute_bar_repository is not None:
-            try:
-                self._minute_bar_repository.upsert_bars(code, bars)
-                self._minute_bar_repository.record_history_sync(code, now.date(), now, len(bars))
-                stored = True
-                if generation is not None:
-                    self._minute_aggregator.confirm_history_saved(code, generation)
-            except Exception as error:
-                logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
-            self._app_controller.enforce_minute_retention(bar.minute for bar in bars)
         if stored:
-            self._minute_history_codes.add(code)
+            self._pc_market_session.history_cache_saved(code)
         if self._defer_table_update_while_modal():
             return
         self._apply_near_high_background(code)
         self._render_trade_values(code)
 
     def _on_history_cache_saved(self, code: str) -> None:
-        self._minute_history_codes.add(code)
+        self._pc_market_session.history_cache_saved(code)
 
     def _on_history_cache_failed(self, code: str, error: str) -> None:
-        self._minute_aggregator.history_save_failed(code)
+        self._pc_market_session.history_cache_failed(code)
         logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
 
     def _on_history_quality_saved(self, code: str, generation: object) -> None:
-        if isinstance(generation, dict) and type(generation.get("generation")) is int:
-            self._minute_aggregator.confirm_history_saved(code, generation["generation"], generation["minutes"], empty=generation.get("empty") is True)
+        if self._pc_market_session.history_quality_saved(code, generation):
             self._render_trade_values(code)
 
     def _on_minute_coverage_received(self, code: str, coverage: object) -> None:
-        generation = self._minute_coverage_requests.pop(code, None)
-        if (not isinstance(coverage, dict) or coverage.get("complete") is not True or coverage.get("empty_authority") is not True
-                or not isinstance(coverage.get("checked_at"), datetime)):
-            return
-        minutes = self._minute_aggregator.empty_recovery_candidates(code, coverage["present_minutes"], coverage["checked_at"], generation)
+        minutes, generation = self._pc_market_session.accept_coverage(code, coverage)
         if not minutes or generation is None:
             return
-        if self._market_cache_writer is not None:
-            self._market_cache_writer.enqueue_empty_coverage(code, minutes, generation)
-        elif self._minute_bar_repository is not None:
-            try:
-                committed = self._minute_bar_repository.confirm_empty_minutes(code, minutes)
-            except Exception as error:
-                self._on_history_cache_failed(code, str(error))
-            else:
-                self._minute_aggregator.confirm_history_saved(code, generation, committed, empty=True)
-            self._app_controller.enforce_minute_retention(minutes)
-        else:
-            self._minute_aggregator.confirm_history_saved(code, generation, minutes, empty=True)
+        self._app_controller.store_empty_minute_coverage(code, minutes, generation,
+            on_committed=lambda committed: self._pc_market_session.history_committed(code, generation, committed, empty=True),
+            on_failed=lambda error: self._on_history_cache_failed(code, error))
 
     def _retry_minute_gaps(self) -> None:
         if self._closing:
             return
-        codes = self._minute_aggregator.recovery_codes()
+        codes = self._pc_market_session.recovery_codes()
         if codes:
             self._start_minute_history_loading(codes, force=True)
         else:
@@ -4161,14 +4053,14 @@ class MainWindow(QMainWindow):
         stored = self._settings.get(f"near_high_icon_{level}_image").strip()
         if not stored:
             return None
-        path = self._api_config_path().parent.parent / stored
+        path = self._local_asset_path(stored)
         return path if path.is_file() else None
 
     def _play_near_high_sound(self, level: str) -> None:
         if self._settings.get("near_high_sound_enabled") != "1":
             return
         stored = self._settings.get(f"near_high_sound_{level}").strip()
-        path = self._api_config_path().parent.parent / stored if stored else None
+        path = self._local_asset_path(stored) if stored else None
         if path is None or not path.is_file():
             return
         player_pair = self._near_high_sound_players.get(level)
@@ -4208,7 +4100,9 @@ class MainWindow(QMainWindow):
         refreshed = self._daily_bar_repository.refreshed_today(codes, today) if self._daily_bar_repository is not None else set()
         # 기존 ka10001 250일 최고가는 권리 조정 전 값이었다. 설치 후 한 번은
         # 모든 현재 종목을 ka10081 수정주가 기준으로 다시 계산해 교체한다.
-        refresh_adjusted_basis = self._settings.get("daily_high_adjusted_basis_version") != "1"
+        refresh_adjusted_basis = self._settings.get(
+            "daily_high_adjusted_basis_version", DEFAULT_SETTINGS["daily_high_adjusted_basis_version"],
+        ) != "1"
         missing = daily_high_candidates(
             codes, {code for code, target in self._daily_highs.items()
                     if target.collection_verified and target.query_basis_date == today.isoformat()}, refreshed,
@@ -4347,7 +4241,9 @@ class MainWindow(QMainWindow):
             return False
         if self._historical_high_worker_controller.is_running:
             return True
-        refresh_basis = self._settings.get("historical_high_adjusted_basis_version") != HISTORICAL_HIGH_BASIS_VERSION
+        refresh_basis = self._settings.get(
+            "historical_high_adjusted_basis_version", DEFAULT_SETTINGS["historical_high_adjusted_basis_version"],
+        ) != HISTORICAL_HIGH_BASIS_VERSION
         today = self._ranking_now().strftime("%Y-%m-%d")
         checked_today = (
             self._stock_lookup.historical_high_checked_today(codes, today)
@@ -4418,9 +4314,9 @@ class MainWindow(QMainWindow):
         for period in periods:
             previous = display_modes[period] == "completed"
             if period == "day":
-                value = self._previous_day_trade_values.get(code, 0.0) if previous else self._minute_aggregator.today_trade_value_eok(code, now)
+                value = self._previous_day_trade_values.get(code, 0.0) if previous else self._pc_market_session.minute_aggregator.today_trade_value_eok(code, now)
             else:
-                value = self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now, previous=previous)
+                value = self._pc_market_session.minute_aggregator.bucket_trade_value_eok(code, minutes[period], now, previous=previous)
             values.append(value)
             qualities[period] = self._trade_value_quality(code, period, now)
         visible_values = zip((6,) if live_only else range(6, 10), periods, values)
@@ -4429,7 +4325,7 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem(f"{value:.{self._decimal_places('trade_value')}f}")
             item.setToolTip(
                 f"수신값으로 표시·강도·알림 계산\n자료 상태: {self._minute_quality_label(code, quality).rstrip(' · ') or '정상'}"
-                f" · {quality.value} · {self._minute_aggregator.recovery_state(code)}")
+                f" · {quality.value} · {self._pc_market_session.minute_aggregator.recovery_state(code)}")
             threshold = float(self._settings.get(f"trade_value_{period}_alert_eok"))
             is_alert = self._settings.get("trade_value_alert_enabled") == "1" and threshold > 0 and value >= threshold
             row = self._row_by_code.get(code, 0)
@@ -4468,7 +4364,7 @@ class MainWindow(QMainWindow):
                 ))
                 item.setToolTip(
                     f"수신 거래대금 기준 강도\n자료 상태: {self._minute_quality_label(code, quality).rstrip(' · ') or '정상'}"
-                    f" · {quality.value} · {self._minute_aggregator.recovery_state(code)}")
+                    f" · {quality.value} · {self._pc_market_session.minute_aggregator.recovery_state(code)}")
                 level = "fire" if strength is not None and strength >= fire else "caution" if strength is not None and strength >= caution else "interest" if strength is not None and strength >= interest else ""
                 image = self._strength_icon_image_path(level) if level else None
                 if image is not None:
@@ -4487,13 +4383,13 @@ class MainWindow(QMainWindow):
         if period == "day":
             if previous:
                 return DataCompleteness.COMPLETE if code in self._previous_day_trade_values else DataCompleteness.MISSING
-            return self._minute_aggregator.quality_for_range(code, now.replace(hour=0, minute=0, second=0, microsecond=0), now + timedelta(minutes=1))
-        return self._minute_aggregator.bucket_quality(code, {"1m": 1, "5m": 5, "60m": 60}[period], now, previous=previous)
+            return self._pc_market_session.minute_aggregator.quality_for_range(code, now.replace(hour=0, minute=0, second=0, microsecond=0), now + timedelta(minutes=1))
+        return self._pc_market_session.minute_aggregator.bucket_quality(code, {"1m": 1, "5m": 5, "60m": 60}[period], now, previous=previous)
 
     def _minute_quality_label(self, code: str, quality: DataCompleteness) -> str:
         if quality == DataCompleteness.COMPLETE:
             return ""
-        if self._minute_aggregator.recovery_state(code) == "recovering":
+        if self._pc_market_session.minute_aggregator.recovery_state(code) == "recovering":
             return "복구 중 · "
         return "부분 · " if quality == DataCompleteness.PARTIAL else "미확인 · "
 
@@ -4530,6 +4426,11 @@ class MainWindow(QMainWindow):
             return
         show_summary = self._settings.get("theme_trade_summary_enabled") == "1"
         show_excluded_summary = self._settings.get("theme_trade_summary_excluded_enabled") == "1"
+        if (self._data_dir is not None or self._theme_unapplied) and self._theme_store is None:
+            self._theme_trade_summary.setVisible(True)
+            self._theme_trade_summary.setText("테마 변경 후 화면 미적용: DB 결과를 확인하고 다시 여세요." if self._theme_unapplied else "테마 원자료 미준비: 원래 선택을 보존하고 테마를 적용하지 않습니다.")
+            self._theme_trade_excluded_summary.setVisible(False)
+            return
         if not show_summary and not show_excluded_summary:
             self._theme_trade_summary.setVisible(False)
             self._theme_trade_excluded_summary.setVisible(False)
@@ -4549,8 +4450,8 @@ class MainWindow(QMainWindow):
         minutes = {"1m": 1, "5m": 5, "60m": 60}
         digits = self._decimal_places("trade_value")
         quality_notice = "부분/미확인 자료 포함 · " if any(
-            (self._minute_aggregator.quality_for_range(code, now.replace(hour=0, minute=0, second=0, microsecond=0), now + timedelta(minutes=1))
-             if period == "day" else self._minute_aggregator.bucket_quality(code, minutes[period], now)) != DataCompleteness.COMPLETE
+            (self._pc_market_session.minute_aggregator.quality_for_range(code, now.replace(hour=0, minute=0, second=0, microsecond=0), now + timedelta(minutes=1))
+             if period == "day" else self._pc_market_session.minute_aggregator.bucket_quality(code, minutes[period], now)) != DataCompleteness.COMPLETE
             for code in self._ranked_stock_names
         ) else ""
         for summary in (self._theme_trade_summary, self._theme_trade_excluded_summary):
@@ -4561,7 +4462,7 @@ class MainWindow(QMainWindow):
         for code, name in self._ranked_stock_names.items():
             if not show_summary and (not excluded or code.casefold() in excluded or "".join(name.split()).casefold() in excluded):
                 continue
-            value = self._minute_aggregator.today_trade_value_eok(code, now) if period == "day" else self._minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
+            value = self._pc_market_session.minute_aggregator.today_trade_value_eok(code, now) if period == "day" else self._pc_market_session.minute_aggregator.bucket_trade_value_eok(code, minutes[period], now)
             entries.append((code, name, value))
         if show_summary:
             top = top_theme_trade_values(entries, self._themes)
@@ -4680,7 +4581,7 @@ class MainWindow(QMainWindow):
     def _render_change_rate(self, code: str) -> None:
         """실제 상한가 가격에 닿은 종목의 등락률을 배경으로 강조한다."""
         row = self._row_by_code.get(code)
-        rate = self._last_change_rates.get(code)
+        rate = self._pc_market_session.change_rate(code)
         if row is None or rate is None:
             return
         text = f"{rate:+.{self._decimal_places('change_rate')}f}%"
@@ -4721,7 +4622,7 @@ class MainWindow(QMainWindow):
         stored = self._settings.get(f"strength_icon_{level}_image").strip()
         if not stored:
             return None
-        path = self._api_config_path().parent.parent / stored
+        path = self._local_asset_path(stored)
         return path if path.is_file() else None
 
     def _start_fundamentals_loading(self, codes: tuple[str, ...], *, force: bool = False) -> bool:
@@ -4836,9 +4737,6 @@ class MainWindow(QMainWindow):
 
     def _on_realtime_failure(self, message: str) -> None:
         logger.warning("실시간 체결 연결 실패: %s", message)
-        if self._active_api_route in {"central", "central_waiting"}:
-            self._active_api_route = "central_retry"
-            self._set_connected_api_status()
         self.statusBar().showMessage("실시간 체결 연결에 실패했습니다. 새로고침으로 다시 시도하세요.")
 
     def _on_realtime_gap(self, dropped: object) -> None:
@@ -4847,41 +4745,19 @@ class MainWindow(QMainWindow):
         if gap is None:
             return
         dropped = gap.dropped_events
-        self._top20_collector.mark_gap()
         self._realtime_diagnostics["gap_events"] = int(self._realtime_diagnostics.get("gap_events", 0)) + 1
         self._realtime_diagnostics["dropped_events"] = int(self._realtime_diagnostics.get("dropped_events", 0)) + dropped
         now = self._ranking_now()
-        affected = self._minute_aggregator.mark_gap(gap, self._realtime_subscription.current_codes, now)
-        market_gaps = {}
-        for scope in gap.ranges:
-            if scope.event_type == "market_state" and scope.market in {"kospi", "kosdaq"}:
-                minute = scope.start.replace(second=0, microsecond=0)
-                minutes = []
-                while minute <= scope.end:
-                    minutes.append(minute)
-                    minute += timedelta(minutes=1)
-                market_gaps[f"market:{scope.market}"] = tuple(minutes)
-        if gap.scope_unknown:
-            for market in ("kospi", "kosdaq"):
-                # Empty market scope asks the writer to invalidate retained rows as well.
-                market_gaps[f"market:{market}"] = ()
-        pressure_codes = set(affected)
-        for scope in gap.ranges:
-            if scope.event_type == "program_trade":
-                self._latest_program_trade[scope.code] = {"available": False, "source": "subscriber-gap", "completeness": "partial"}
-        if gap.scope_unknown:
-            for code in self._latest_program_trade:
-                self._latest_program_trade[code] = {"available": False, "source": "subscriber-gap", "completeness": "unconfirmed"}
-            pressure_codes.update(self._realtime_subscription.current_codes)
-        for code in pressure_codes:
-            self._pressure_gap_until[code] = now + timedelta(seconds=60)
+        current_codes = self._realtime_subscription.current_codes
+        affected, persisted_gaps, gap_bars = self._pc_market_session.mark_market_gap(
+            gap, self._top20_collector, current_codes, now,
+        )
+        for code, bar in gap_bars:
+            self._app_controller.queue_minute_bar(code, bar)
         for code in affected:
-            for bar in self._minute_aggregator.bars(code):
-                if bar.minute in affected[code]:
-                    self._app_controller.queue_minute_bar(code, bar)
             self._render_trade_values(code)
-        if affected or market_gaps:
-            self._app_controller.queue_minute_gaps({**affected, **market_gaps})
+        if persisted_gaps:
+            self._app_controller.queue_minute_gaps(persisted_gaps)
         if affected:
             self._minute_gap_retry_timer.start()
             QTimer.singleShot(0, self._retry_minute_gaps)
@@ -4893,6 +4769,8 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event: QEvent) -> None:
         """독립 뉴스 프로세스의 최소화 상태만 메인창과 맞춘다."""
         super().changeEvent(event)
+        if hasattr(self, "_app_controller") and self._app_controller.closing:
+            return
         if not hasattr(self, "_news_window"):
             return
         if event.type() == QEvent.Type.WindowStateChange:
@@ -4900,8 +4778,21 @@ class MainWindow(QMainWindow):
         elif event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
             self._news_window.on_activation()
 
+    def _show_shutdown_save_retry(self) -> None:
+        if not self.isVisible():
+            self.show()
+
+    def finish_shutdown(self) -> None:
+        self._app_controller.finish_shutdown()
+
+
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._app_controller.request_close():
+        try:
+            completed = self._app_controller.request_close()
+        except BaseException:
+            event.ignore()
+            raise
+        if completed:
             event.accept()
         else:
             event.ignore()
@@ -4912,19 +4803,33 @@ class MainWindow(QMainWindow):
         self._save_columns()
 
     def _flush_partial_top20(self) -> None:
-        partial = self._top20_collector.partial_record(
-            self._top20_trade_value, self._top20_market,
-        )
-        if partial is not None:
-            self._save_top20_record(partial)
+        self._pc_market_session.flush_partial_top20(
+            self._top20_collector, self._stock_markets, self._app_controller.store_top20_record)
 
     def _stop_shutdown_visual_work(self) -> None:
-        for player, _ in self._near_high_sound_players.values():
-            player.stop()
-        for dialog in (self._candidate_dialog, self._research_dialog, self._mock_automation_dialog):
-            if dialog is not None:
-                dialog.stop()
+        errors = []
+        owners = [player for player, _ in self._near_high_sound_players.values()]
+        owners.extend(dialog for dialog in (self._candidate_dialog, self._research_dialog, self._mock_automation_dialog)
+                      if dialog is not None)
+        for owner in owners:
+            try:
+                owner.stop()
+            except BaseException as error:
+                errors.append((owner, error))
+        # Close only the current settings window before producer drain.
+        # done() stops its timer and submits the final dimensions to the same
+        # MainWindow Qt owner, even after finished clears the dialog field.
+        settings_dialog = self._settings_dialog
+        if settings_dialog is not None:
+            try:
+                settings_dialog.close()
+            except BaseException as error:
+                errors.append((settings_dialog, error))
         self._refresh_button.setEnabled(False)
+        if errors:
+            first = errors[0][1]
+            setattr(first, "window_shutdown_visual_cleanup", tuple(errors))
+            raise first
 
     def _start_shutdown_backup(self) -> None:
         if (self._google_drive_sync is not None and self._google_drive_sync.connected
@@ -4934,6 +4839,8 @@ class MainWindow(QMainWindow):
             self._start_google_drive_sync("upload", close_after=True)
 
     def _stop_shutdown_auxiliaries(self) -> None:
+        if self._query_only:
+            return
         self._news_window.stop()
         if self._journal_command_path is not None:
             self._stop_current_journal_process()
@@ -5056,6 +4963,8 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        if hasattr(self, "_app_controller") and self._app_controller.closing:
+            return
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
         if hasattr(self, "_news_window"):
@@ -5071,6 +4980,8 @@ class MainWindow(QMainWindow):
 
     def moveEvent(self, event: object) -> None:
         super().moveEvent(event)
+        if hasattr(self, "_app_controller") and self._app_controller.closing:
+            return
         if hasattr(self, "_window_geometry_save_timer"):
             self._window_geometry_save_timer.start()
         if hasattr(self, "_news_window"):
@@ -5078,6 +4989,8 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        if hasattr(self, "_app_controller") and self._app_controller.closing:
+            return
         # show 과정에서 예약된 자동 맞춤은 아직 막혀 있다. 모두 끝난 뒤부터
         # 실제 사용자의 창 크기 변경에만 자동 맞춤을 허용한다.
         if not self._column_controller.auto_fit_ready:

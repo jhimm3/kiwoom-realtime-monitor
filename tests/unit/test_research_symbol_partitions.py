@@ -1,4 +1,11 @@
 from copy import deepcopy
+import ast
+from contextlib import chdir
+import hashlib
+import subprocess
+import sys
+import tempfile
+from zipfile import ZipFile
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -15,7 +22,7 @@ from kiwoom_monitor.application.research_evaluation import build_independent_dev
 from kiwoom_monitor.infrastructure.research_data_source import prepare_development_partition, development_partition_start
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.research_process import load_research_process_request, execute_process_request
-from scripts import run_research as runner
+from kiwoom_monitor import research_run as runner
 
 
 def symbol(bucket=0, salt='research-2026', count=4):
@@ -216,6 +223,122 @@ class SymbolPartitionTests(unittest.TestCase):
             else: document['report']['fold_reports'][0]['by_symbol'] = []
             result = build_independent_development_comparison((document,))
             self.assertEqual('INVALID', result.partitions[0].status)
+
+
+CANONICAL_IMPLEMENTATION_INPUTS = (
+    'src/kiwoom_monitor/application/market_session_schedule.py',
+    'src/kiwoom_monitor/application/research_factors.py',
+    'src/kiwoom_monitor/application/research_replay.py',
+    'src/kiwoom_monitor/application/market_research_features.py',
+    'src/kiwoom_monitor/application/market_theme_shadow.py',
+    'src/kiwoom_monitor/application/theme_leadership.py',
+    'src/kiwoom_monitor/application/breakout_strategy.py',
+    'src/kiwoom_monitor/application/leader_breakout.py',
+    'src/kiwoom_monitor/application/pullback_reacceleration_strategy.py',
+    'src/kiwoom_monitor/application/research_families.py',
+    'src/kiwoom_monitor/infrastructure/persistence/research_repository.py',
+    'src/kiwoom_monitor/infrastructure/research_data_source.py',
+    'src/kiwoom_monitor/application/research_execution.py',
+    'src/kiwoom_monitor/application/position_target.py',
+    'src/kiwoom_monitor/application/research_evaluation.py',
+    'src/kiwoom_monitor/application/research_splits.py',
+    'src/kiwoom_monitor/domain/ranking.py',
+    'src/kiwoom_monitor/research_run.py',
+    'src/kiwoom_monitor/domain/strategy_contract.py',
+    'src/kiwoom_monitor/domain/simulation_contract.py',
+)
+
+
+class ScientificImplementationResourceTests(unittest.TestCase):
+    def _source(self):
+        return Path(__file__).resolve().parents[2]
+
+    def _canonical_oracle(self, corpus):
+        digest = hashlib.sha256()
+        for label in CANONICAL_IMPLEMENTATION_INPUTS:
+            digest.update(label.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(corpus[label])
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def test_source_resources_match_independent_path_and_raw_byte_oracle(self):
+        corpus = {label: (self._source() / label).read_bytes() for label in CANONICAL_IMPLEMENTATION_INPUTS}
+        self.assertEqual(20, len(corpus))
+        self.assertEqual(self._canonical_oracle(corpus), runner.research_implementation_hash(fixtures.PROFILE))
+
+    def test_zip_package_without_src_tree_preserves_raw_bytes_and_missing_input_fails(self):
+        source = self._source()
+        corpus = {label: (source / label).read_bytes() for label in CANONICAL_IMPLEMENTATION_INPUTS}
+        expected_source = self._canonical_oracle(corpus)
+        source_hash = runner.research_implementation_hash(fixtures.PROFILE)
+        provider = (source / "src/kiwoom_monitor/application/research_implementation.py").read_bytes()
+        provider_dependencies = (
+            "src/kiwoom_monitor/domain/research_contract.py",
+            "src/kiwoom_monitor/domain/market_data_contract.py",
+        )
+        # Preserve the original CRLF/missing-input probe while extending the oracle to all20 inputs.
+        probe_input = "src/kiwoom_monitor/research_run.py"
+        child = ("import json,sys;sys.path.insert(0,sys.argv[1]);"
+                 "from kiwoom_monitor.application.research_implementation import research_implementation_hash;"
+                 "print(json.dumps({'current':research_implementation_hash('krx-regular/v1'),"
+                 "'legacy':research_implementation_hash(),"
+                 "'scripts_loaded':any(n=='scripts' or n.startswith('scripts.') for n in sys.modules)}))")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "research-package.zip"
+            def write_package(missing=False):
+                with ZipFile(archive, "w") as package:
+                    for name in ("kiwoom_monitor/__init__.py", "kiwoom_monitor/application/__init__.py",
+                                 "kiwoom_monitor/domain/__init__.py"):
+                        package.writestr(name, b"")
+                    package.writestr("kiwoom_monitor/application/research_implementation.py", provider)
+                    for dependency in provider_dependencies:
+                        package.writestr(dependency.removeprefix("src/"), (source / dependency).read_bytes())
+                    for label, raw in corpus.items():
+                        if missing and label == probe_input:
+                            continue
+                        package.writestr(label.removeprefix("src/"), raw)
+            write_package()
+            same_input = subprocess.run([sys.executable, "-I", "-c", child, str(archive)],
+                cwd=root, capture_output=True, text=True, timeout=30, check=True)
+            same_result = json.loads(same_input.stdout)
+            self.assertEqual(expected_source, same_result["current"])
+            self.assertEqual(source_hash, same_result["current"])
+            self.assertFalse(same_result["scripts_loaded"])
+            # A CRLF fixture must remain raw bytes; the hashed run module is never executed here.
+            corpus[probe_input] += b"\r\n# raw package byte fixture\r\n"
+            expected = self._canonical_oracle(corpus)
+            write_package()
+            completed = subprocess.run([sys.executable, "-I", "-c", child, str(archive)],
+                cwd=root, capture_output=True, text=True, timeout=30, check=True)
+            result = json.loads(completed.stdout)
+            self.assertEqual(expected, result["current"])
+            self.assertNotEqual(source_hash, result["current"])
+            self.assertEqual("a7f4d77894d29723bad8b3d7a22ad4c0d35b88c2f9e7f182c81a606914e8db5f", result["legacy"])
+            self.assertFalse(result["scripts_loaded"])
+            self.assertFalse((root / "src").exists())
+            write_package(missing=True)
+            refused = subprocess.run([sys.executable, "-I", "-c", child, str(archive)],
+                cwd=root, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("FileNotFoundError", refused.stderr)
+
+    def test_frozen_spec_includes_exact_hash_sources_without_run_cli_hiddenimport(self):
+        source = self._source()
+        text = (source / "KiwoomMonitor.spec").read_text(encoding="utf-8")
+        start = text.index("# Exact raw-byte inputs used by the product scientific implementation hash.")
+        end = text.index("# End scientific raw-byte resource inputs.")
+        namespace = {"ast": ast, "Path": Path, "datas": []}
+        with chdir(source):
+            exec(compile(text[start:end], "scientific-spec-data", "exec"), namespace)
+        expected = [(label, str(Path(label).relative_to("src").parent)) for label in CANONICAL_IMPLEMENTATION_INPUTS]
+        self.assertEqual(expected, namespace["datas"])
+        parsed = ast.parse(text)
+        hidden = next(keyword.value for node in ast.walk(parsed) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == "Analysis"
+            for keyword in node.keywords if keyword.arg == "hiddenimports")
+        self.assertNotIn("scripts.run_research", [node.value for node in hidden.elts if isinstance(node, ast.Constant)])
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 
 from kiwoom_monitor.application.research_replay import (
+    MinuteStrategyInputs,
     ResearchReplayCursor,
     normalize_candidate_codes,
     replay_candidate_universe,
@@ -42,6 +43,11 @@ class ResearchReplayTests(unittest.TestCase):
         ordered = replay_candidate_universe(mixed, as_of=cutoff, chronological=True)
         self.assertEqual(["a", "b"], [frame.revision_id for frame in ordered])
         self.assertEqual(ordered, replay_candidate_universe(reversed(mixed), as_of=cutoff, chronological=True))
+        self.assertEqual(ordered, replay_candidate_universe(mixed, as_of=cutoff))
+        self.assertEqual(
+            ["2026-09-12T09:00:01+09:00", "2026-09-12T00:00:03+00:00"],
+            [frame.available_at for frame in ordered],
+        )
 
 
     def test_naive_virtual_clock_is_rejected(self) -> None:
@@ -104,6 +110,81 @@ class ResearchReplayTests(unittest.TestCase):
         frames = replay_krx_minute_bars((regular, after))
 
         self.assertEqual((regular["observation_key"],), tuple(frame.observation_key for frame in frames))
+
+
+class MinuteStrategyInputsTests(unittest.TestCase):
+    @staticmethod
+    def observation(index, *, code="005930", close=1005):
+        from datetime import timedelta
+        start = datetime.fromisoformat("2026-10-16T09:00:00+09:00") + timedelta(minutes=index)
+        end = start + timedelta(minutes=1)
+        return {
+            "accepted_sequence": index + 1, "revision_id": f"{code}:{index}:{close}",
+            "kind": "minute_bar", "subject": f"{code}:KRX", "venue": "KRX",
+            "observation_key": start.isoformat(), "available_at": end.isoformat(),
+            "completeness": "complete", "value_kind": "actual",
+            "payload": {"market": "KRX", "code": code, "bar_start": start.isoformat(),
+                "bar_end": end.isoformat(), "open": 1000, "high": 1010, "low": 990,
+                "close": close, "volume": 100, "trade_value_million_won": 1,
+                "window_closed": True, "capture_quality": "complete", "finalization_source": "timer"},
+        }
+
+    @staticmethod
+    def inputs():
+        return MinuteStrategyInputs(session_profile="krx-regular/v1", keep_bars=3, universe_horizon=60)
+
+    def test_invalid_live_correction_retains_last_accepted_bar(self):
+        inputs = self.inputs()
+        original = self.observation(0)
+        accepted = inputs.accept_observation(original)
+        invalid = {**original, "revision_id": "invalid-correction", "completeness": "partial"}
+        self.assertIsNone(inputs.accept_observation(invalid))
+        self.assertEqual([accepted], list(inputs.frames_for_checkpoint()[0]))
+        self.assertEqual("005930:0:1005", accepted.revision_id)
+
+    def test_seed_keeps_bounded_window_per_symbol_and_live_universe_uses_arrival_time(self):
+        inputs = self.inputs()
+        inputs.seed([self.observation(index, code=code)
+                     for code in ("005930", "000660") for index in range(5)])
+        bars = tuple(inputs.frames_for_checkpoint()[0])
+        self.assertEqual(6, len(bars))
+        self.assertEqual({2, 3, 4}, {int(bar.revision_id.split(":")[1]) for bar in bars})
+        for revision, at in (("late", "09:10:00"), ("out-of-order", "09:00:00")):
+            inputs.accept_observation({"kind": "top20_membership", "revision_id": revision,
+                "available_at": f"2026-10-16T{at}+09:00", "payload": {"codes": ["005930"]}})
+        self.assertEqual(["late", "out-of-order"],
+                         [frame.revision_id for frame in inputs.frames_for_checkpoint()[1]])
+
+        seeded = self.inputs()
+        seeded.seed([
+            {"kind": "top20_membership", "revision_id": "early", "accepted_sequence": 1,
+             "available_at": "2026-10-16T09:00:00+09:00", "payload": {"codes": ["005930"]}},
+            {"kind": "top20_membership", "revision_id": "late", "accepted_sequence": 2,
+             "available_at": "2026-10-16T00:02:00+00:00", "payload": {"codes": ["005930"]}},
+        ])
+        self.assertEqual(["late"],
+                         [frame.revision_id for frame in seeded.frames_for_checkpoint()[1]])
+
+    def test_clock_selection_is_read_only_and_filters_future_available_frame(self):
+        inputs = self.inputs()
+        inputs.seed([self.observation(0)])
+        before = tuple(inputs.frames_for_checkpoint()[0])
+        bar = inputs.clock_price_frame("005930", datetime.fromisoformat("2026-10-16T09:02:00+09:00"),
+                                       (self.observation(1), self.observation(2)))
+        self.assertEqual("2026-10-16T09:02:00+09:00", bar.bar_end)
+        self.assertEqual(before, tuple(inputs.frames_for_checkpoint()[0]))
+
+    def test_family_receives_owned_window_and_same_fill_state_without_mutation(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        inputs = self.inputs()
+        bar = inputs.accept_observation(self.observation(0))
+        state, config, result = object(), object(), object()
+        kernel = Mock(return_value=result)
+        self.assertIs(result, inputs.evaluate_bar(family=SimpleNamespace(evaluate_bar=kernel),
+            run_id="test-run", evaluation_bar=bar, config=config, state=state))
+        kernel.assert_called_once_with(run_id="test-run", evaluation_bar=bar,
+            bar_history=(bar,), universe_frames=(), config=config, state=state)
 
 
 if __name__ == "__main__":

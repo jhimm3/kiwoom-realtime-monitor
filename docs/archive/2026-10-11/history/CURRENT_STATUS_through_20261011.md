@@ -2002,8 +2002,8 @@ P9는 창이 닫혀도 주기 유지가 필요하다: 실패한 기사/AI/매매
 PC cache로 가져오며, `EntrySnapshotWriter`는 그 로컬 뉴스 DB를 체결 시점 뉴스 snapshot에 사용한다.
 닫힌 동안의 delta pull 호출량은 미측정이라 주기 축소를 결정하지 않았다.
 
-2026-10-06 O12 앱 전체 감사: [부하 원장](../../../WHOLE_APP_LOAD_OPTIMIZATION_REVIEW.md)과
-[외부 입력 lifecycle](../../../EXTERNAL_INPUT_LIFECYCLE_AUDIT.md)에 PC/NAS 소비자·시작/종료·
+2026-10-06 O12 앱 전체 감사: [부하 원장](../../2026-11-05/WHOLE_APP_LOAD_OPTIMIZATION_REVIEW.md)과
+[외부 입력 lifecycle](../../2026-11-05/EXTERNAL_INPUT_LIFECYCLE_AUDIT.md)에 PC/NAS 소비자·시작/종료·
 과수집·갱신 부족을 정리했다. 468개 Python 파일의 lifecycle 후보 구문 검색은 parse error 0;
 이를 실제 활성 collector 수로 해석하지 않는다. 18:57 KST 기존 API 확인은
 `2026.10.06-recorded-capture-api-v1`이며 DART·외부시장·Shadow·조건검색 ON, Naver 수집 옵션 OFF다.
@@ -3040,7 +3040,7 @@ PostgreSQL gate는 미완료다. 단순 8GiB/5M 확대를 승인하지 않으며
 
 - 전체 D 완료: **3,912/3,912건·279/279 worker·422개 모듈**, 실패·오류·skip·미실행·빈 발견·잔류 자손 0, 실제 worker/tree 종료·현재 소스 일치 확인. 19:35:26~20:06:47 KST, 위 LF/raw 지문 유지. `tmp/regression/release-20261011-d/verification-audit.json`에 대조 근거 보존. C의 rename 오류는 원인 해결로 판정하지 않는다.
 - NAS D required **163건 통과**, cleanup·post-job fence·운영 release/컨테이너 보존 확인. 후속 adapter는 Linux credential lifespan 2건의 TestClient import 위치에서 실패했으며 candidate 14·native PG/API·extended 24는 통과했다. 예약 finally 복구: PID 28060, 이전 plan 그대로 `armed`. `tmp/release-validation-20261011/nas-d-report.json`에 내부 실패 위치 보존.
-- 사용자 후속 요청에 따라 최근 Actions 40개 실행, 실패 11개 실행의 로그와 Windows artifact 8개를 대조했다. 날짜·timer fixture, 미등록 module, 기존 capture 기대값, sealed fixed-count 판정, 비밀 파일 권한 및 registry rate limit을 실제 실패 단계로 구분했다. 이미 수정된 항목은 재개하지 않았으며 상세 근거는 [CI 재감사](../../../TEST_FINAL_QUALITY_AUDIT.md#2026-10-11-로컬actions-차이-재감사)에 기록했다.
+- 사용자 후속 요청에 따라 최근 Actions 40개 실행, 실패 11개 실행의 로그와 Windows artifact 8개를 대조했다. 날짜·timer fixture, 미등록 module, 기존 capture 기대값, sealed fixed-count 판정, 비밀 파일 권한 및 registry rate limit을 실제 실패 단계로 구분했다. 이미 수정된 항목은 재개하지 않았으며 상세 근거는 [CI 재감사](../../2026-11-05/TEST_FINAL_QUALITY_AUDIT.md#2026-10-11-로컬actions-차이-재감사)에 기록했다.
 - 기존 `all-local`에 catalog·97개 lock 버전 preflight와 환경/외부 미실행 범위 표시를 추가했다. 기존 CI Windows 판정을 로컬 보고서 재사용에 연결하고 `deploy/`·플랫폼 독립 정렬·줄바꿈 지문을 포함했다. 확장 Windows/장시간 job은 전체 보고서의 같은 SHA/지문/실행/종료 증거를 검증하며 같은 테스트를 다시 실행하지 않는다. 봉인 gate는 각 suite의 비어 있지 않은 발견 계획과 실제 실행 수를 대조한다. Linux credential 2건은 기존 ASGI 요청 함수·실제 lifespan으로 모든 원래 검사를 유지했다.
 - 관련 실행기/봉인 operator **36건 통과**, 추가 deployment 지문 1건 통과, catalog unit 427/integration 25와 lock 97개 일치. 새 소스에서 이전 D 보고서를 검사하면 `Windows report is stale`로 거부됨을 실제 확인했다. 수정된 실행기·workflow의 최종 전수 E는 20:08:56 KST 시작, code tree 1,060개·LF `61b67c412a4e7e716b2d798a6f1e78b8228955ceaec9591f7be0b543869877ca`. 이전 결과를 새 소스 통과로 옮기지 않는다.
 - NAS 후속은 검증 전용 `2026.10.11-mock-state-api-v1-9093a1a96159fa8f`에서 실패했던 Linux 필수 5개 모듈만 실행한다. 원본 파일 1,042개, 임시 검증 파일 2개, 운영 selector·runtime 보존. 이 스냅샷도 배포하지 않는다.

@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
-from typing import Awaitable, Callable, Iterator
+from typing import Any, Awaitable, Callable, Iterator
 
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
@@ -148,8 +148,19 @@ class ExecutionRuntime:
         """Read a deterministic intent before deciding whether a retry may submit."""
         return self._repository.load(intent_id)
 
-    def load_active_intents(self) -> tuple[ExecutionRecord, ...]:
-        return self._repository.active_intents("mock", self.account_ref, self.run_id)
+    def active_intent_reader_for(
+        self, repository: object,
+    ) -> Callable[..., tuple[ExecutionRecord, ...]] | None:
+        """Offer the runtime's own run-scoped reader for a shared native scope."""
+        shares_reader = getattr(type(repository), "shares_active_intent_reader", None)
+        if (type(self._repository) is ExecutionRepository
+                and callable(shares_reader) and shares_reader(repository, self._repository)):
+            return self.load_active_intents
+        return None
+
+    def load_active_intents(self, *, _reader: Any = None) -> tuple[ExecutionRecord, ...]:
+        reader_args = {} if _reader is None else {"_reader": _reader}
+        return self._repository.active_intents("mock", self.account_ref, self.run_id, **reader_args)
 
     def load_account_active_intents(self):
         return self._repository.account_active_intents(self.account_ref)
@@ -216,6 +227,21 @@ class ExecutionRuntime:
             self._require_active(record.intent)
             return self._lifecycle.reconcile(intent_id, snapshot)
 
+    def reconcile_by_broker_order(self, snapshot: BrokerOrderSnapshot) -> ExecutionRecord | None:
+        scope = (self._repository.broker_reconciliation_scope()
+                 if type(self._repository) is ExecutionRepository else nullcontext())
+        with scope as connection:
+            connection_args = {} if connection is None else {"_connection": connection}
+            record = self._repository.find_by_broker_order_id(
+                "mock", self.account_ref, self.run_id, snapshot.broker_order_id, **connection_args,
+            )
+            if record is None or record.intent.run_id != self.run_id:
+                return None
+            with self._operation_lock, self._observe_operation():
+                self._require_active(record.intent, **connection_args)
+                # Start a fresh read after the lease commit, even on the same session.
+                return self._lifecycle.reconcile(record.intent.intent_id, snapshot, **connection_args)
+
     def cancel(self, intent_id: str, quantity: int = 0) -> ExecutionRecord:
         with self._operation_lock, self._observe_operation():
             record = self._repository.load(intent_id)
@@ -241,12 +267,14 @@ class ExecutionRuntime:
                 raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
             self._repository.bind_automation_control(spec_id=spec_id, control_revision=control_revision)
             try:
-                record = self._repository.load(expected.intent.intent_id)
-                if record is None:
-                    raise KeyError(f"unknown order intent: {expected.intent.intent_id}")
-                if cancel_retry_claim is not None and record.state in TERMINAL_ORDER_STATES:
-                    return record  # REST resolved it; do not submit another cancellation.
-                history = self._repository.events(record.intent.intent_id)
+                with self._repository.mock_automation_read_scope() as reader:
+                    reader_args = {} if reader is None else {'_reader': reader}
+                    record = self._repository.load(expected.intent.intent_id, **reader_args)
+                    if record is None:
+                        raise KeyError(f"unknown order intent: {expected.intent.intent_id}")
+                    if cancel_retry_claim is not None and record.state in TERMINAL_ORDER_STATES:
+                        return record  # REST resolved it; do not submit another cancellation.
+                    history = self._repository.events(record.intent.intent_id, **reader_args)
                 if cancel_retry_claim is None and any(event.get("event_type") == "CANCEL_STARTED" for event in history):
                     return record  # Includes ACK loss, rejection and a restored runtime.
                 if cancel_retry_claim is not None:
@@ -282,15 +310,16 @@ class ExecutionRuntime:
                 self._repository.clear_automation_control()
                 self._new_orders_enabled = False
 
-    def _require_active(self, intent: OrderIntent) -> None:
+    def _require_active(self, intent: OrderIntent, *, _connection: Any = None) -> None:
         with self._state_lock:
             if not self._active:
                 raise RuntimeError("mock execution runtime has not acquired ownership")
             if intent.environment != "mock" or intent.account_ref != self.account_ref or intent.run_id != self.run_id:
                 raise ValueError("intent does not belong to this mock runtime")
+            connection_args = {} if _connection is None else {"_connection": _connection}
             if not self._repository.claim_runtime(
                 "mock", self.account_ref, self.run_id, self.owner_token,
-                self.server_now(), self._lease_seconds,
+                self.server_now(), self._lease_seconds, **connection_args,
             ):
                 self._active = False
                 raise RuntimeError("mock execution ownership was lost")
@@ -427,10 +456,7 @@ class ManualMockOrderGateway:
         cancel_retry_claim: dict | None = None,
     ) -> ExecutionRecord:
         async with self._command_lock:
-            current = await asyncio.to_thread(self.load, expected.intent.intent_id)
-            if current.intent != expected.intent:
-                raise ValueError("MOCK_AUTOMATION_CANCEL_ASSESSED_ORDER_CHANGED")
-            history = await asyncio.to_thread(self._repository.events, current.intent.intent_id)
+            current, history = await asyncio.to_thread(self._read_automation_cancel, expected)
             if (current.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
                     and (cancel_retry_claim is not None or not any(event.get("event_type") == "CANCEL_STARTED" for event in history))):
                 await self._account_refresh()
@@ -441,6 +467,14 @@ class ManualMockOrderGateway:
                 **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
             )
 
+    def _read_automation_cancel(self, expected: ExecutionRecord) -> tuple[ExecutionRecord, tuple[dict, ...]]:
+        with self._repository.mock_automation_read_scope() as reader:
+            reader_args = {} if reader is None else {'_reader': reader}
+            current = self.load(expected.intent.intent_id, **reader_args)
+            if current.intent != expected.intent:
+                raise ValueError("MOCK_AUTOMATION_CANCEL_ASSESSED_ORDER_CHANGED")
+            return current, self._repository.events(current.intent.intent_id, **reader_args)
+
     async def _cancel(self, intent_id: str, quantity: int) -> ExecutionRecord:
         async with self._command_lock:
             await asyncio.to_thread(self.load, intent_id)
@@ -449,8 +483,9 @@ class ManualMockOrderGateway:
             await self._account_refresh()
             return await asyncio.to_thread(self._runtime.cancel, intent_id, quantity)
 
-    def load(self, intent_id: str) -> ExecutionRecord:
-        record = self._repository.load(intent_id)
+    def load(self, intent_id: str, *, _reader=None) -> ExecutionRecord:
+        reader_args = {} if _reader is None else {'_reader': _reader}
+        record = self._repository.load(intent_id, **reader_args)
         if record is None:
             raise KeyError(f"unknown order intent: {intent_id}")
         if (

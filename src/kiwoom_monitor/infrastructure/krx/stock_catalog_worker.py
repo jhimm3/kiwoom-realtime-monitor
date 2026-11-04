@@ -25,7 +25,7 @@ class KrxStockCatalogWorker(QThread):
             sync_history = getattr(self._stocks, "sync_kind_name_history", None)
             if callable(sync_history) and not self.isInterruptionRequested():
                 try:
-                    initial = not bool(self._settings.get("kind_name_history_sync_date"))
+                    initial = not bool(self._settings.get("kind_name_history_sync_date", ""))
                     sync_history(initial=initial)
                     self._settings.set("kind_name_history_sync_date", now.strftime("%Y-%m-%d %H:%M:%S"))
                 except Exception as error:

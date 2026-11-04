@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -125,6 +128,76 @@ class SourceRuntimeDeployTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode, result.stderr)
         self.assertFalse(any(line.startswith("stop ") for line in log))
         self.assertEqual(("old", "true"), (pinned, running))
+
+    def test_production_server_subset_install_is_constrained_by_copied_lock(self):
+        root = Path(__file__).resolve().parents[2]
+        recipe = (root / "deploy/synology/server.Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("COPY pyproject.toml README.md requirements.lock.txt ./", recipe.splitlines())
+        install = recipe.split("&& pip install ", 1)[1].split("\n\n", 1)[0].replace("\\\n", " ")
+        self.assertEqual([
+            "--no-cache-dir", "--constraint", "requirements.lock.txt",
+            "fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1", "psycopg[binary]>=3.2,<4",
+            "cryptography>=46,<47", "google-auth==2.41.1", "websockets==16.1.1",
+            "tzdata==2026.3",
+        ], shlex.split(install))
+        ci_recipe = (root / "tests/ci_runtime.Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("COPY pyproject.toml README.md requirements.lock.txt ./", ci_recipe.splitlines())
+        ci_install = ci_recipe.split("&& pip install ", 1)[1].split("\n\n", 1)[0].replace("\\\n", " ")
+        self.assertEqual([
+            "--no-cache-dir", "--constraint", "requirements.lock.txt",
+            "fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1", "psycopg[binary]>=3.2,<4",
+            "cryptography>=46,<47", "websockets==16.1.1", "tzdata==2026.3",
+        ], shlex.split(ci_install))
+
+    def test_role_metadata_keeps_query_and_headless_dependencies_separate(self):
+        root = Path(__file__).resolve().parents[2]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+        self.assertEqual(["websockets==16.1.1", "tzdata==2026.3"], project["dependencies"])
+        extras = project["optional-dependencies"]
+        self.assertEqual({"query", "server", "ocr", "drive", "chatgpt", "full"}, set(extras))
+        self.assertEqual(["PySide6==6.11.1", "Pillow==12.3.0"], extras["query"])
+        self.assertEqual([
+            "fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1", "psycopg[binary]>=3.2,<4",
+            "cryptography>=46,<47", "google-auth==2.41.1",
+        ], extras["server"])
+        self.assertEqual([
+            "PySide6==6.11.1", "Pillow==12.3.0", "paddlepaddle==3.2.2", "paddleocr==3.7.0",
+        ], extras["ocr"])
+        self.assertEqual([
+            "google-api-python-client==2.187.0", "google-auth-oauthlib==1.2.3",
+        ], extras["drive"])
+        self.assertEqual(["google-auth==2.41.1", "cryptography>=46,<47"], extras["chatgpt"])
+
+    def test_role_metadata_preserves_full_features_entrypoints_and_existing_lock_pins(self):
+        root = Path(__file__).resolve().parents[2]
+        document = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        project = document["project"]
+        self.assertEqual("kiwoom-realtime-monitor", project["name"])
+        self.assertEqual("2.1.0", project["version"])
+        self.assertEqual(">=3.13", project["requires-python"])
+        self.assertEqual({
+            "kiwoom-monitor": "kiwoom_monitor.bootstrap:main",
+            "kiwoom-monitor-server": "kiwoom_monitor.central_server.__main__:main",
+            "kiwoom-monitor-check": "kiwoom_monitor.central_server.deployment_check:main",
+        }, project["scripts"])
+        self.assertEqual({"requires": ["setuptools>=68"], "build-backend": "setuptools.build_meta"},
+                         document["build-system"])
+        full = project["dependencies"] + project["optional-dependencies"]["full"]
+        self.assertEqual({
+            "websockets==16.1.1", "tzdata==2026.3", "PySide6==6.11.1", "Pillow==12.3.0",
+            "paddlepaddle==3.2.2", "paddleocr==3.7.0", "google-api-python-client==2.187.0",
+            "google-auth-oauthlib==1.2.3", "fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1",
+            "psycopg[binary]>=3.2,<4", "cryptography>=46,<47", "google-auth==2.41.1",
+        }, set(full))
+        lock = dict(line.lower().replace("_", "-").split("==", 1) for line in
+                    (root / "requirements.lock.txt").read_text(encoding="utf-8").splitlines()
+                    if "==" in line and not line.startswith("#"))
+        for requirement in full:
+            name = re.split(r"[<>=!\[]", requirement, maxsplit=1)[0].lower().replace("_", "-")
+            with self.subTest(requirement=requirement):
+                self.assertIn(name, lock)
+                if "==" in requirement:
+                    self.assertEqual(requirement.split("==", 1)[1], lock[name])
 
     def test_known_downgrade_converts_only_after_stop_and_before_source_selection(self):
         result, log, pinned, running = self.run_fixture("downgrade", "old")

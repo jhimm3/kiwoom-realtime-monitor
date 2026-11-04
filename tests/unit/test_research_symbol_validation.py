@@ -18,7 +18,7 @@ from kiwoom_monitor.application.research_splits import DevelopmentSymbolPartitio
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import prepare_development_partition
 from kiwoom_monitor.presentation.research_dialog import DevelopmentValidationDialog
-from scripts import run_research as runner
+from kiwoom_monitor import research_run as runner
 
 
 class SymbolValidationTests(unittest.TestCase):

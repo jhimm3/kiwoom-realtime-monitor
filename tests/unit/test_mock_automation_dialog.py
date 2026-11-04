@@ -6,6 +6,7 @@ import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication
@@ -21,7 +22,7 @@ from kiwoom_monitor.presentation.mock_automation_dialog import (
 from kiwoom_monitor.presentation.mock_automation_candidate_dialog import (
     MockAutomationCandidateDialog, MockCandidateFileWorker,
 )
-from scripts import prepare_mock_automation_candidate as candidate_files
+from kiwoom_monitor import research_candidate as candidate_files
 from tests.unit.test_mock_automation_candidate import _package, _policy
 from kiwoom_monitor.application.mock_automation_candidate import evaluate_candidate_eligibility
 
@@ -227,6 +228,13 @@ class MockAutomationDialogPolicyTests(unittest.TestCase):
         self.assertEqual(
             {"start": False, "stop": False, "resume": True}, stopped,
         )
+        managing = operation_availability({
+            **base, "status": {
+                "runtime_mode": MockAccountRuntimeMode.AUTOMATIC.value, "runner": {"state": "READY"},
+                "control": {"desired_state": "RUNNING", "active_spec_id": "ready", "entry_resume_required": True},
+            },
+        })
+        self.assertEqual({"start": False, "stop": True, "resume": True}, managing)
 
     def test_failed_status_read_does_not_make_ready_spec_startable(self):
         content = FakeContent()
@@ -305,6 +313,25 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         self.dialog._completed("refresh", self.context)
         self.assertTrue(self.dialog._stop.isEnabled())
         self.assertFalse(self.dialog._start.isEnabled())
+
+        for desired, runner, runner_state in (
+            ("RUNNING", {"state": "READY"}, "READY"),
+            ("STOPPED", None, "없음"),
+        ):
+            with self.subTest(desired_state=desired):
+                self.context["status"].update(
+                    control={"desired_state": desired, "active_spec_id": "ready",
+                        "entry_resume_required": True},
+                    runner=runner,
+                )
+                self.dialog._completed("refresh", self.context)
+                self.assertEqual(
+                    f"모드 AUTOMATIC · 제어 {desired} · 신규 진입 재개 대기 · runner {runner_state}",
+                    self.dialog._runtime.text(),
+                )
+                self.assertNotIn("기존 주문 관리 중", self.dialog._runtime.text())
+                self.assertEqual(desired, self.dialog._context["status"]["control"]["desired_state"])
+                self.assertEqual(runner, self.dialog._context["status"]["runner"])
 
     def test_ack_followup_failure_keeps_ack_message_and_closes_stale_controls(self):
         for operation, text in (("start", "시작 요청이 반영"), ("stop", "신규 자동 주문을 중지"),
@@ -589,6 +616,8 @@ class MockCandidateFileWorkflowTests(unittest.TestCase):
         self.binding = FakeContent().load_mock_automation_candidates(PROFILE['account_ref'], credential_profile_id=PROFILE['profile_id'])['binding']
         self.content = Mock()
         self.content.load_mock_automation_candidates.return_value = {'binding': self.binding}
+        self.freeze_time = datetime.fromisoformat('2026-10-24T08:59:00+09:00')
+        self.content.server_now = lambda: self.freeze_time
         self.content.publish_mock_automation_candidate.return_value = {
             'status': 'saved', 'orders_started': False,
             'package_hash': self.document['package']['package_hash'],
@@ -757,6 +786,7 @@ class MockCandidateFileWorkflowTests(unittest.TestCase):
         self.assertIsNone(dialog._worker)
         self.assertIn('미정 기준', dialog._status.text())
         policy = json.loads(policy_path.read_text(encoding='utf-8'))
+        self.assertEqual(self.freeze_time.isoformat(), policy['frozen_at'])
         self.assertIsNone(policy['minimum_closed_trades'])
         self.assertEqual([], list(dataset.iterdir()))
         self.assertFalse((self.root / 'absent.sqlite3').exists())
@@ -827,7 +857,7 @@ class MockCandidateFileWorkflowTests(unittest.TestCase):
 
     def test_development_review_invalidates_publish_and_does_not_fill_criteria(self):
         from tests.unit.test_historical_baseline_requests import seed_development_baselines
-        from scripts.summarize_historical_baseline_results import inspect_development_baselines
+        from kiwoom_monitor.research_candidate import inspect_development_baselines
         seed_development_baselines(self.root)
         dialog = MockAutomationCandidateDialog(self.content, PROFILE, self.binding)
         dialog._completed('review', {'documents': self.document})
@@ -862,7 +892,7 @@ class MockCandidateFileWorkflowTests(unittest.TestCase):
     def test_open_position_diagnostic_is_visible_without_eligibility_or_posting(self):
         from tests.unit.test_historical_baseline_requests import seed_development_baselines
         from tests.unit.test_research_execution import late_exit_trace
-        from scripts.summarize_historical_baseline_results import inspect_development_baselines, position_observation_summary
+        from kiwoom_monitor.research_candidate import inspect_development_baselines, position_observation_summary
         seed_development_baselines(self.root)
         review = inspect_development_baselines(self.root)
         _, events, _, _ = late_exit_trace()
@@ -891,6 +921,7 @@ class DailyInputCandidateDialogTests(unittest.TestCase):
         from scripts.prepare_historical_baseline_requests import prepare_daily_requests
         prepare_daily_requests(self.selection, self.source, self.output)
         content = Mock()
+        content.server_now = lambda: datetime.fromisoformat("2026-10-24T08:59:00+09:00")
         result = MockCandidateFileWorker(content, PROFILE, {}, "inputs", {
             "development_root": str(self.output),
         }).execute()["input_review"]
@@ -911,6 +942,7 @@ class DailyInputCandidateDialogTests(unittest.TestCase):
         plan = json.loads((self.output / "daily-plan.json").read_text())
         reference.write_text(json.dumps(cost_reference_fixture(plan, manifest)))
         content = Mock()
+        content.server_now = lambda: datetime.fromisoformat("2026-10-24T08:59:00+09:00")
         result = MockCandidateFileWorker(content, PROFILE, {}, "inputs", {
             "development_root": str(self.output), "cost_reference": str(reference),
         }).execute()["input_review"]
@@ -927,6 +959,7 @@ class DailyInputCandidateDialogTests(unittest.TestCase):
     def test_inputs_qt_worker_requires_folder_and_invalidates_previous_review(self):
         from scripts.prepare_historical_baseline_requests import prepare_daily_requests
         content = Mock()
+        content.server_now = lambda: datetime.fromisoformat("2026-10-24T08:59:00+09:00")
         dialog = MockAutomationCandidateDialog(content, PROFILE, {})
         dialog._request("inputs")
         self.assertIsNone(dialog._worker)
@@ -953,6 +986,7 @@ class DailyInputCandidateDialogTests(unittest.TestCase):
         from scripts.prepare_historical_baseline_requests import prepare_daily_requests
         prepare_daily_requests(self.selection, self.source, self.output)
         content = Mock()
+        content.server_now = lambda: datetime.fromisoformat("2026-10-24T08:59:00+09:00")
         dialog = MockAutomationCandidateDialog(content, PROFILE, {})
         self.addCleanup(dialog.deleteLater)
         self.addCleanup(dialog.stop)
@@ -979,6 +1013,7 @@ class DailyInputCandidateDialogTests(unittest.TestCase):
         from scripts.prepare_historical_baseline_requests import prepare_daily_requests
         prepare_daily_requests(self.selection, self.source, self.output)
         content = Mock()
+        content.server_now = lambda: datetime.fromisoformat("2026-10-24T08:59:00+09:00")
         dialog = MockAutomationCandidateDialog(content, PROFILE, {})
         self.addCleanup(dialog.deleteLater)
         self.addCleanup(dialog.stop)

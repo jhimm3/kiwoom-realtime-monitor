@@ -178,7 +178,9 @@ def worker(args):
     sys.path.insert(0, str(source / "src"))
     from kiwoom_monitor.central_server import diagnostic_trace as trace
     from kiwoom_monitor.central_server.database import SQLiteQueryStore
+    from kiwoom_monitor.central_server.diagnostic_replay_contract import install_store_capture
     from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_trace
+    from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder, HubInputRecorder
     from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
     from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
     import kiwoom_monitor.central_server.realtime_collector as module
@@ -191,8 +193,8 @@ def worker(args):
     transactions = Counter()
     now = [origin]
     class Hub(RealtimeHub):
-        def __init__(self):
-            super().__init__()
+        def __init__(self, *, observer):
+            super().__init__(observer=observer)
             self.count = 0
         def publish(self, *a, **kw):
             self.count += 1
@@ -276,13 +278,17 @@ def worker(args):
                     connection.set_trace_callback(observe)
                     return connection
             store = CountedStore(Path(":memory:"))
+            install_store_capture(store)
             store.initialize()
             if args.profile == 'account-large':
                 account = AccountLargeFixture(store, origin)
-            hub = Hub()
-            collector = CentralRealtimeCollector(lambda: "", "real", hub, lambda: now[0])
+            hub_observer = HubInputRecorder()
+            hub = Hub(observer=hub_observer)
+            collector = CentralRealtimeCollector(lambda: "", "real", hub, lambda: now[0], input_observer=CollectorInputRecorder(hub_observer=hub_observer))
             # Warm parser imports outside capture/timing; discard its accumulator state.
-            warm = CentralRealtimeCollector(lambda: "", "real", RealtimeHub(), lambda: origin)
+            warm_hub_observer = HubInputRecorder()
+            capture_hub = RealtimeHub(observer=warm_hub_observer)
+            warm = CentralRealtimeCollector(lambda: "", "real", capture_hub, lambda: origin, input_observer=CollectorInputRecorder(hub_observer=warm_hub_observer))
             warm._publish_parsed(inputs[0])
             baseline_rss = rss()
             if args.mode == "on":

@@ -7,13 +7,15 @@ from kiwoom_monitor.domain.time_basis import kst_wall_now
 from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from kiwoom_monitor.domain.market_data_contract import (
     CandidateUniverse, DataCompleteness, DataUnit, DataValueKind, MarketDataMetadata,
     ObservationOrigin, TradingVenue,
 )
 from kiwoom_monitor.domain.realtime_gap import RealtimeGap
-from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+if TYPE_CHECKING:
+    from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
 
 
 @dataclass(frozen=True)

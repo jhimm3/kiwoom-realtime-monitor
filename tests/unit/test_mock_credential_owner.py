@@ -128,7 +128,7 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         for request in document["requests"]: request["account_ref"] = account_ref
         evaluate_position_action_comparison_document(document)  # Same validated policy contract used by app prepare.
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            position_document=document, position_account_source=self.owner.position_shadow_observation)
+            position_document=document, position_account_source=self.owner.position_shadow_observation, now_provider=collector._now_provider)
         bundle.monitor.set_position_observation_listener(lambda: runtime.context_changed("account"))
         bundle.monitor._now = lambda: now[0]
         try:
@@ -421,7 +421,10 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, new.client._base_request_interval_seconds)
         self.assertIsNotNone(new.client._last_request_at)
         self.assertEqual("token:a2", new.client._token)
-        self.assertEqual(2, new.binding.binding_revision)
+        self.assertEqual(old.binding, new.binding)
+        receipt = self.store.find_credential_activation(operation_id=operation.operation_id)
+        self.assertEqual(2, receipt["credential_revision"])
+        self.assertEqual(old.binding.binding_revision, receipt["binding_revision"])
         self.assertIsNone(old._resolve_scope("1234567890"))
         self.assertIsNotNone(new._resolve_scope("1234567890"))
 

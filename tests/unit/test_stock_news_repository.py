@@ -293,6 +293,69 @@ class StockNewsRepositoryTest(unittest.TestCase):
             self.assertGreater(datetime.fromisoformat(restored[1]), datetime.fromisoformat(deleted[1]))
             self.assertEqual(0, restored[2])
 
+    def test_input_source_only_refresh_reopens_and_missing_overwrite_clears_refs(self):
+        from dataclasses import replace
+        from kiwoom_monitor.application.news_grouping import group_similar_news
+        from kiwoom_monitor.domain.news_ai_contract import news_ai_article_input
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source-carrier.sqlite3"
+            repository = StockNewsRepository(path)
+            original = self._item(1)
+            source = {"version": 1, "article_revision_id": "source-article-A", "article_content_hash": "article-hash-A",
+                      "article_available_at": 100.25, "body_revision_id": "source-body-A", "body_content_hash": "raw-hash-A",
+                      "body_status": "summary_only", "body_fetched_at": 101.5, "body_available_at": 102.75}
+            self.assertEqual(1, repository.upsert("005930", (original,)))
+            repository.set_journal_link("group", "005930", news_identity(original), True)
+            revised = replace(original, input_source=source)
+            self.assertEqual(original, revised, "source is additive to the original six values")
+            with self._observe_native_writes() as metrics:
+                self.assertEqual(0, repository.upsert("005930", (revised,)))
+            self.assertEqual(1, metrics["connections"])
+            self.assertEqual(1, metrics["article_rows"], "metadata-only change must not be hidden by six-value equality")
+            reopened = StockNewsRepository(path)
+            loaded = reopened.load("005930")[0]
+            expected = {**source, "status": "REFERENCE"}
+            self.assertEqual(expected, loaded.input_source)
+            self.assertEqual(expected, reopened.load_journal_linked("group", "005930")[0].input_source)
+            group = group_similar_news((loaded,))[0]
+            self.assertEqual(expected, news_ai_article_input(group.items[0])["input_source"])
+            self.assertEqual(original.published_at.isoformat(), news_ai_article_input(group.items[0])["published_at"])
+            self.assertEqual(0, reopened.upsert("005930", (original,)))
+            self.assertIsNone(StockNewsRepository(path).load("005930")[0].input_source)
+
+
+    def test_repeated_source_receipt_preserves_null_and_only_real_source_change_writes_article(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stable-source.sqlite3"
+            now = datetime(2026, 10, 29, 9, tzinfo=UTC)
+            repository = StockNewsRepository(path, now_provider=lambda: now)
+            item = self._item(1)
+            repository.upsert("005930", (item,))
+            with self._observe_native_writes() as legacy:
+                repository.upsert("005930", (item,))
+            self.assertEqual(0, legacy["article_rows"])
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertIsNone(connection.execute("SELECT input_source_json FROM stock_news").fetchone()[0])
+            source = {"version": 1, "article_revision_id": "stable-article", "article_content_hash": "stable-content",
+                      "article_available_at": 100.25, "article_published_at": "2026-10-28T09:00:00+09:00",
+                      "body_revision_id": "stable-body", "body_content_hash": "stable-raw",
+                      "body_status": "summary_only", "body_fetched_at": 101.5, "body_available_at": 102.75}
+            first = replace(item, input_source=source)
+            with self._observe_native_writes() as changed:
+                repository.upsert("005930", (first,))
+            self.assertEqual(1, changed["article_rows"])
+            now += timedelta(minutes=1)
+            with self._observe_native_writes() as repeated:
+                repository.upsert("005930", (first,))
+            self.assertEqual(0, repeated["article_rows"], "new page/check clock must not rewrite stable source evidence")
+            self.assertEqual(1, repeated["connections"])
+            second = replace(item, input_source={**source, "body_revision_id": "actually-new-body"})
+            with self._observe_native_writes() as revised:
+                repository.upsert("005930", (second,))
+            self.assertEqual(1, revised["article_rows"])
+            self.assertEqual("actually-new-body", StockNewsRepository(path).load("005930")[0].input_source["body_revision_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

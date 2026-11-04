@@ -11,7 +11,7 @@ from unittest.mock import patch
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository, _MIGRATIONS
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigrationRunner
-from scripts.export_research_dataset import export_daily_dataset
+from kiwoom_monitor.infrastructure.research_data_source import export_daily_dataset
 import test_research_campaign_nas as nas_fixture_module
 
 
@@ -64,7 +64,7 @@ class ResearchStorageCapacityTests(unittest.TestCase):
         self.cap(1024)
         manual = self.fixture.watch / 'manual.txt'
         manual.write_bytes(b'x' * 1024)
-        with patch('scripts.export_research_dataset.export_daily_dataset') as export:
+        with patch('kiwoom_monitor.infrastructure.research_data_source.export_daily_dataset') as export:
             result = self.fixture.scan()
         export.assert_not_called()
         self.assertEqual(1, result['waiting_storage'])
@@ -85,7 +85,7 @@ class ResearchStorageCapacityTests(unittest.TestCase):
         self.assertEqual([], list(self.fixture.watch.iterdir()))
 
     def test_redirected_root_is_rejected_even_when_unlimited(self):
-        with patch('scripts.export_research_dataset.validate_research_storage_root', side_effect=ValueError('root was redirected')):
+        with patch('kiwoom_monitor.infrastructure.research_data_source.validate_research_storage_root', side_effect=ValueError('root was redirected')):
             result = self.fixture.scan()
         self.assertIn('redirected', result['errors'][0])
         self.assertEqual([], list(self.fixture.watch.iterdir()))
@@ -128,7 +128,7 @@ class ResearchStorageCapacityTests(unittest.TestCase):
             result = export_daily_dataset(*args, **kwargs)
             self.repo.set_campaign_desired_state('c', 'PAUSED')
             return result
-        with patch('scripts.export_research_dataset.export_daily_dataset', side_effect=pause_after_export):
+        with patch('kiwoom_monitor.infrastructure.research_data_source.export_daily_dataset', side_effect=pause_after_export):
             result = self.fixture.scan()
         self.assertIn('no longer active', result['errors'][0])
         self.assertEqual('FAILED', self.ledger()[0]['state'])

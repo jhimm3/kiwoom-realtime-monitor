@@ -1,5 +1,7 @@
 # 장중 경량 trace와 장후 선택 재생 설계
 
+> **진단 도구 수명.** 경량 trace와 부분 replay를 기존 진단 용도로 유지한다. 선택 도구를 제외할 때 공통 수신·저장·주문·종료 계약과 기본 운영 기록을 검증한다. [관련 계약](architecture/app-target-20261023.md#46-선택-기능의-수명과-제거-계약).
+
 > 문서 역할 정리(2026-10-11): 경량 scalar trace·synthetic/부분 recorded-operation replay의 독립 계약을 유지한다. 전체 원인 입력 Replay의 후속은 [기록 workload 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md), 현재 완료/잔여는 [현재 상태](CURRENT_STATUS.md)·[O12](OPEN_ITEMS.md)를 따른다. 두 설계의 보존 범위·완료 조건은 서로 대신하지 않는다.
 
 2026-10-05 후속 [고정 장중 입력의 다중 workload 실험 계약](RECORDED_WORKLOAD_EXPERIMENT_DESIGN.md)은

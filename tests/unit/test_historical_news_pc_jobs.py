@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import io
 import json
 import tempfile
@@ -82,17 +83,29 @@ async def capture_historical_job_http_contract(client, store):
                        "assessment": assessment, "feed": store.load_market_news_feed("world")}}
 
 
+@contextmanager
 def fixed_historical_job_inputs():
-    """Freeze input identities and DB observation clocks, never response fields."""
+    """Freeze actual input owners; preserve original identities/epoch and raw responses."""
     import uuid
     from contextlib import ExitStack
-    stack = ExitStack()
-    stack.enter_context(patch("uuid.uuid4", side_effect=(uuid.UUID(int=i) for i in range(1, 1000))))
-    stack.enter_context(patch("time.time", return_value=1790300000.0))
-    for module in ("database_historical_news", "database_news_revisions", "database_news_sources",
-                   "database_news_jobs"):
-        stack.enter_context(patch(f"kiwoom_monitor.central_server.{module}.time", return_value=1790300000.0))
-    return stack
+    from datetime import datetime
+    from kiwoom_monitor.domain.time_basis import KST
+
+    fixed = datetime.fromtimestamp(1790300000.0, KST)
+
+    class FixedAppDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.astimezone(tz) if tz is not None else fixed.replace(tzinfo=None)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("uuid.uuid4", side_effect=(uuid.UUID(int=i) for i in range(1, 1000))))
+        stack.enter_context(patch("time.time", return_value=1790300000.0))
+        for module in ("database_news_revisions", "database_news_jobs"):
+            stack.enter_context(patch(f"kiwoom_monitor.central_server.{module}.time", return_value=1790300000.0))
+        # Broker-free app.server_now() passes this existing fallback to the real native store.
+        stack.enter_context(patch("kiwoom_monitor.central_server.app.datetime", FixedAppDatetime))
+        yield lambda: fixed
 
 def _article(title: str = "첫 제목") -> list[dict[str, object]]:
     document = {
@@ -110,10 +123,10 @@ class HistoricalNewsPcJobsTests(unittest.TestCase):
         from kiwoom_monitor.central_server.config import CentralServerSettings
 
         async def verify(path):
-            with fixed_historical_job_inputs():
+            with fixed_historical_job_inputs() as fixed_now:
                 app = create_app(CentralServerSettings(f"sqlite:///{path}", "private-token"))
                 async with app.router.lifespan_context(app):
-                    store = SQLiteQueryStore(path)
+                    store = SQLiteQueryStore(path, now_provider=fixed_now)
                     try:
                         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                                      base_url="http://historical-news.test", timeout=5) as client:
@@ -505,3 +518,141 @@ class HistoricalNewsPcJobsTests(unittest.TestCase):
 
             nas.close()
             pc.close()
+
+
+class HistoricalSourceClockNativeTests(unittest.TestCase):
+    """The same public source/claim/finish contract is inherited by actual PG."""
+    postgres = False
+
+    def _make_store(self, path):
+        return SQLiteQueryStore(path, now_provider=lambda: self.clock[0])
+
+    def _rows(self, store, sql, params=()):
+        if self.postgres:
+            with store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(sql.replace("?", "%s"), params)
+                return cursor.fetchall()
+        with store._connection() as connection:
+            return connection.execute(sql, params).fetchall()
+
+    def _cases(self):
+        from datetime import datetime
+        from kiwoom_monitor.domain.time_basis import KST
+        before = datetime(2026, 10, 24, 23, 59, 58, tzinfo=KST)
+        after = datetime(2026, 10, 25, 0, 0, 2, tzinfo=KST)
+        return (("C_after_H", before, after), ("C_before_H", after, before))
+
+    def _seed(self, directory, case, corrected):
+        self.clock = [corrected]
+        store = self._make_store(Path(directory) / (case + ".sqlite3"))
+        store.initialize()
+        item = {"identity": "https://example.test/historical-clock/" + case,
+                "document": {"title": "삼성전자 500억원 공급계약 체결", "description": "삼성전자 공급계약",
+                             "link": "https://example.test/clock", "published_at": "2020-01-02T09:00:03+09:00"},
+                "targets": [{"stock_code": "005930", "stock_name": "삼성전자",
+                             "relation_status": "confirmed", "rule_version": "exact-v1"}]}
+        store.save_historical_market_news_batch("flash", "2020-01-02", "clock-" + case, [item], processing_owner="pc")
+        return store
+
+    def test_historical_public_body_rule_receipts_and_ack_keep_one_clock_across_host_skew(self):
+        from kiwoom_monitor.central_server import database_historical_news as historical
+        for case, host, corrected in self._cases():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(historical, "time", return_value=host.timestamp(), create=True), \
+                    patch("kiwoom_monitor.central_server.database_news_revisions.time", return_value=host.timestamp()):
+                store = self._seed(directory, case, corrected)
+                try:
+                    job = store.claim_external_historical_news_job("BODY", scope="pc_market")
+                    self.assertIsNotNone(job)
+                    self.assertEqual(1, job["attempts"])
+                    article = store.load_news_article_revision(job["article_revision_id"])
+                    self.assertEqual((corrected.timestamp(), "2020-01-02T09:00:03+09:00"),
+                                     (article["received_at"], article["published_at"]))
+                    wakes = []
+                    store.set_news_job_wakeup(lambda: wakes.append(len(store.load_news_history("body", target=article["article_revision_id"]))))
+                    result = {"job_key": job["job_key"], "attempts": 1, "stage": "BODY",
+                              "body_text": "삼성전자가 500억원 공급계약을 체결했다.", "body_status": "fulltext",
+                              "fetched_at": 1577923203.0, "original_published_at": "2020-01-02T09:00:01+09:00",
+                              "source_url": "https://example.test/raw"}
+                    receipt = store.complete_external_historical_news_job(result)
+                    self.assertEqual("completed", receipt["state"])
+                    self.assertEqual("already_completed", store.complete_external_historical_news_job(result)["state"])
+                    body = store.load_news_body_revision(receipt["output_ref"])
+                    self.assertEqual((1577923203.0, corrected.timestamp()), (body["fetched_at"], body["available_at"]))
+                    self.assertEqual([1, 1], wakes)  # Existing public BODY wake happens after commit, including replay.
+                    jobs = []
+                    for _ in range(2):
+                        rule = store.claim_external_historical_news_job("RULE", scope="pc_market")
+                        self.assertIsNotNone(rule)
+                        jobs.append(rule)
+                        self.assertEqual(corrected.timestamp(), rule["queued_at"])
+                        payload = prepare_job(rule, article, body, allow_network=False)
+                        saved = store.complete_external_historical_news_job(payload)
+                        self.assertEqual("completed", saved["state"])
+                        self.assertEqual("already_completed", store.complete_external_historical_news_job(payload)["state"])
+                    self.assertEqual({"GLOBAL", "005930"}, {rule["target_id"] for rule in jobs})
+                    self.assertIsNone(store.claim_external_historical_news_job("RULE", scope="pc_market"))
+                    self.assertEqual({corrected.timestamp()}, {row[0] for row in self._rows(store,
+                        "SELECT updated_at FROM central_news_jobs WHERE article_revision_id=?", (article["article_revision_id"],))})
+                    events = store.load_news_history("event", target="005930")
+                    self.assertEqual(1, len(events))
+                    self.assertEqual(corrected.timestamp(), events[0]["available_at"])
+                    publication = store.load_document("news_original_publication", article["article_revision_id"], "published_at")
+                    self.assertEqual("2020-01-02T09:00:01+09:00", publication["document"]["published_at"])
+                finally:
+                    store.close()
+
+    def test_historical_retry_stale120_and_final_failure_use_store_clock_across_host_skew(self):
+        from datetime import timedelta
+        from kiwoom_monitor.central_server import database_historical_news as historical
+        for case, host, corrected in self._cases():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(historical, "time", return_value=host.timestamp(), create=True), \
+                    patch("kiwoom_monitor.central_server.database_news_revisions.time", return_value=host.timestamp()):
+                store = self._seed(directory, case, corrected)
+                try:
+                    first = store.claim_external_historical_news_job("BODY", scope="pc_market")
+                    self.assertIsNotNone(first)
+                    error = {"job_key": first["job_key"], "attempts": 1, "stage": "BODY", "error": "fixed failure"}
+                    self.assertEqual("pending", store.complete_external_historical_news_job(error)["state"])
+                    self.assertEqual([(corrected.timestamp() + 2, corrected.timestamp())], self._rows(store,
+                        "SELECT next_retry_at,updated_at FROM central_news_jobs WHERE job_key=?", (first["job_key"],)))
+                    self.assertIsNone(store.claim_external_historical_news_job("BODY", scope="pc_market"))
+                    self.clock[0] = corrected + timedelta(seconds=2)
+                    second = store.claim_external_historical_news_job("BODY", scope="pc_market")
+                    self.assertEqual(2, second["attempts"])
+                    self.clock[0] += timedelta(seconds=120)
+                    self.assertEqual([], store.claim_news_jobs(now=self.clock[0].timestamp()))
+                    self.assertIsNone(store.claim_external_historical_news_job("BODY", scope="pc_market"))
+                    self.clock[0] += timedelta(milliseconds=1)
+                    self.assertEqual([], store.claim_news_jobs(now=self.clock[0].timestamp()))
+                    third = store.claim_external_historical_news_job("BODY", scope="pc_market")
+                    self.assertEqual(3, third["attempts"])
+                    with self.assertRaisesRegex(ValueError, "소유권"):
+                        store.complete_external_historical_news_job({**error, "attempts": 2})
+                    self.assertEqual("failed", store.complete_external_historical_news_job({**error, "attempts": 3})["state"])
+                    self.assertEqual([(self.clock[0].timestamp() + 8, self.clock[0].timestamp(), "FAILED")], self._rows(store,
+                        "SELECT next_retry_at,updated_at,state FROM central_news_jobs WHERE job_key=?", (first["job_key"],)))
+                    self.assertIsNone(store.claim_external_historical_news_job("BODY", scope="pc_market"))
+                    self.assertEqual([], store.load_news_history("body", target=first["article_revision_id"]))
+                finally:
+                    store.close()
+
+
+class HistoricalProcessingClockTests(unittest.TestCase):
+    def test_prepare_job_uses_supplied_clock_for_new_receipt_and_preserves_snapshot_instant(self):
+        from datetime import datetime
+        from kiwoom_monitor.domain.time_basis import KST
+        corrected = datetime(2026, 10, 25, 0, 0, 2, tzinfo=KST)
+        job = {"job_key": "fixed-job", "attempts": 1, "stage": "BODY", "processing_version": "article-text-v7"}
+        article = {"document": {"description": "원래 목록 요약", "historical_source": {
+            "provider": "naver", "office_id": "001", "article_id": "old"}}}
+        with patch("scripts.preprocess_historical_news_to_nas.time.time", return_value=1.0):
+            result = prepare_job(job, article, allow_network=False, now_provider=lambda: corrected)
+            self.assertEqual(corrected.timestamp(), result["fetched_at"])
+            snapshot = {"body_text": "원래 본문", "fetched_at": "2020-01-02T09:00:03",
+                        "published_at": "2020-01-02T09:00:01+09:00", "source_url": "https://example.test/old"}
+            with patch("scripts.preprocess_historical_news_to_nas.load_article_body_snapshot", return_value=snapshot):
+                original = prepare_job(job, article, search_database=Path("unused"), now_provider=lambda: corrected)
+            self.assertEqual(datetime(2020, 1, 2, 9, 0, 3, tzinfo=KST).timestamp(), original["fetched_at"])
+            self.assertEqual(snapshot["published_at"], original["original_published_at"])

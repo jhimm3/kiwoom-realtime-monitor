@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server.diagnostic_replay_contract import validate_collector_message
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder, HubInputRecorder
+
 import asyncio
 import sqlite3
 import tempfile
@@ -66,9 +69,11 @@ class CollectorReplayTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 store = SQLiteQueryStore(Path(directory) / 'input.sqlite3')
                 store.initialize()
-                collector = CentralRealtimeCollector(lambda: 'never', 'real', RealtimeHub(), datetime.now, store)
+                hub_observer = HubInputRecorder()
+                capture_hub = RealtimeHub(observer=hub_observer)
+                collector = CentralRealtimeCollector(lambda: 'never', 'real', capture_hub, datetime.now, store, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
                 try:
-                    await collector.start_input_replay()
+                    await collector.start_input_replay(message_validator=validate_collector_message)
                     with self.assertRaisesRegex(RuntimeError, 'CANNOT_OPEN_NETWORK'):
                         await collector.start()
                     for rows in ([{'type': '00'}], [{'type': '0B'}, {'type': '04'}], []):
@@ -134,9 +139,11 @@ class CollectorReplayTests(unittest.TestCase):
                 store = SQLiteQueryStore(Path(directory) / 'sources.sqlite3')
                 store.initialize()
                 now = [datetime(2026, 10, 6, 10, tzinfo=timezone(timedelta(hours=9)))]
-                collector = CentralRealtimeCollector(lambda: 'never', 'real', RealtimeHub(), lambda: now[0], store)
+                hub_observer = HubInputRecorder()
+                capture_hub = RealtimeHub(now_provider=lambda: now[0], observer=hub_observer)
+                collector = CentralRealtimeCollector(lambda: 'never', 'real', capture_hub, lambda: now[0], store, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
                 try:
-                    await collector.start_input_replay()
+                    await collector.start_input_replay(message_validator=validate_collector_message)
                     collector.accept_replay_sources({('005930', 'KRX')}, reset_all=True)
                     message = {'trnm': 'REAL', 'data': [{'type': '0B', 'item': '005930',
                                'values': {'10': '100', '14': '1000', '15': '1', '20': '100000'}}]}
@@ -166,10 +173,12 @@ class CollectorReplayTests(unittest.TestCase):
                 store.initialize()
                 now = [datetime(2026, 10, 6, 10, 3, 59, tzinfo=timezone(timedelta(hours=9)))]
                 sleep_gate = asyncio.Event()
-                collector = CentralRealtimeCollector(lambda: 'never', 'real', RealtimeHub(), lambda: now[0],
-                                                     store, snapshot_sleep=lambda _: sleep_gate.wait())
+                hub_observer = HubInputRecorder()
+                capture_hub = RealtimeHub(now_provider=lambda: now[0], observer=hub_observer)
+                collector = CentralRealtimeCollector(lambda: 'never', 'real', capture_hub, lambda: now[0],
+                                                     store, snapshot_sleep=lambda _: sleep_gate.wait(), input_observer=CollectorInputRecorder(hub_observer=hub_observer))
                 try:
-                    await collector.start_input_replay()
+                    await collector.start_input_replay(message_validator=validate_collector_message)
                     collector.accept_replay_sources({('005930', 'KRX')}, reset_all=True)
                     def feed(price, volume, trade_time):
                         collector.accept_replay_message({'trnm': 'REAL', 'data': [{'type': '0B', 'item': '005930',

@@ -24,7 +24,8 @@ class RealCredentialOwnerTests(RealCredentialOwnerTestSupport):
         self.assertIs(manager, rotated.account_queries)
         self.assertEqual(run_id, rotated.run_id)
         self.assertEqual(binding.scope, rotated.binding.scope)
-        self.assertEqual(binding.binding_revision + 1, rotated.binding.binding_revision)
+        self.assertEqual(binding, rotated.binding)
+        self.assertEqual(2, self.owner.active_revision("nas-real-default"))
         self.assertEqual("token:a2", rotated.client._token)
         with self.assertRaises(ValueError):
             await self.query(context, batch_id=old["batch_id"], page_index=1, next_key=old["next_key"])

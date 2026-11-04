@@ -1,5 +1,7 @@
 # NAS 전체 테이블·컬럼 사전
 
+> **카탈로그의 기준.** 아래 migration 20 표는 2026-10-01 PostgreSQL 실측이다. 최신 설치물의 코드 DDL과 실제 운영 카탈로그는 각각 해당 판본에서 대조한다. [관련 계약](../../DB_SCHEMA.md).
+
 기준: **2026-10-01 23:41:36 KST**, `kiwoom_monitor` PostgreSQL 17.11 / migration 20. **43개 테이블, 418개 컬럼**. 카탈로그의 타입·NULL·기본값·PK/UNIQUE·인덱스를 그대로 보존했다. 데이터 행은 조회하지 않았다.
 
 [전체 지도](README.md) · [선택형 관계도](atlas.html) · [분야별 관계도](RELATIONSHIPS.md) · [문서 종류](COLLECTIONS.md) · [원본 카탈로그+설명](catalog.json)

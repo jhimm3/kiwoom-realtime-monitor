@@ -18,6 +18,56 @@ from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
 
 
 class StockRepositoryTests(unittest.TestCase):
+    def test_reference_receipts_follow_corrected_clock_without_rewriting_original_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            Database(path).initialize()
+            samples = []
+            current = [datetime(2031, 1, 2, 0, 5)]  # Existing naive broker protocol is KST.
+
+            def clock():
+                samples.append(current[0])
+                return current[0]
+
+            stocks = StockRepository(path, now_provider=clock)
+            stocks.upsert_many((("A", "old", "KOSPI"), ("306620", "지아이에스", "KOSDAQ")))
+            self.assertEqual(1, len(samples))
+            current[0] = datetime(2031, 1, 2, 3, 30, tzinfo=timezone.utc)
+            stocks.upsert("A", "new", "")
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual(("new", "KOSPI", "2031-01-02T00:05:00+09:00"), con.execute(
+                    "SELECT name,market,updated_at FROM stocks WHERE code='A'").fetchone())
+                self.assertEqual(("2031-01-02T12:30:00+09:00",), con.execute(
+                    "SELECT changed_at FROM stock_name_history WHERE stock_code='A'").fetchone())
+                self.assertEqual(("2031-01-02T00:05:00+09:00",), con.execute(
+                    "SELECT changed_at FROM stock_name_history WHERE stock_code='306620'").fetchone())
+            stocks.update_fundamentals("A", 1000, 50, 200, 100, 250)
+            current[0] = datetime(2031, 1, 3, 0, 1)
+            stocks.update_fundamentals("A", 1000, 50, 200, 100, 250)
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual(("2031-01-02T12:30:00+09:00", "2031-01-03T00:01:00+09:00"), con.execute(
+                    "SELECT updated_at,fundamentals_updated_at FROM stocks WHERE code='A'").fetchone())
+            # Existing owner rebinding follows a replaced source, not a captured old client.
+            stocks.set_now_provider(lambda: datetime(2031, 1, 4, 15, 1, tzinfo=timezone.utc))
+            stocks.update_nxt_enabled("A", True, "2031-01-02")
+            stocks.set_now_provider(lambda: datetime(2031, 1, 6, 12))
+            stocks.update_nxt_enabled("A", True, "2031-01-03")
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual((1, "2031-01-03", "2031-01-05T00:01:00+09:00"), con.execute(
+                    "SELECT nxt_enabled,nxt_checked_at,updated_at FROM stocks WHERE code='A'").fetchone())
+            # The input receipt belongs to the original daily-high job.
+            stocks.update_adjusted_high_250_price("A", 240, observed_at=datetime(2030, 12, 31, 23, 59))
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual((240, "2030-12-31T23:59:00+09:00"), con.execute(
+                    "SELECT high_250_price,updated_at FROM stocks WHERE code='A'").fetchone())
+            stocks.update_historical_high_price("A", 300, 1990, 2030, "2030-12-30", occurred_on="20290501",
+                                                evidence=(HistoricalHighEvidence("month", "20290501", 300),))
+            with closing(sqlite3.connect(path)) as con:
+                self.assertEqual(("2030-12-30", "20290501", "2031-01-06T12:00:00+09:00", "2031-01-06T12:00:00+09:00"), con.execute(
+                    "SELECT historical_high_checked_on,historical_high_occurred_on,historical_high_updated_at,updated_at FROM stocks WHERE code='A'").fetchone())
+                self.assertEqual(("month", "20290501", 300), con.execute(
+                    "SELECT period,trade_date,high_price FROM historical_high_evidence WHERE stock_code='A'").fetchone())
+
     def test_catalog_batch_preserves_current_first_native_duplicate_order_and_chunk_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
@@ -504,6 +554,180 @@ StockRepository(Path(database)).update_price_cache({'A':100},{'A':110},{'A':1000
             self.assertEqual("030200", repository.find_code_by_name("KT"))
             self.assertEqual("150900", repository.find_code_by_name("파수"))
 
+    def _selected_catalog_store(self, layout):
+        from tests.unit import test_preserve_current_settings as preservation
+        fixture = preservation.PreservedCurrentStateArtifactTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        with closing(sqlite3.connect(fixture.source)) as connection, connection:
+            connection.executemany("INSERT INTO stocks VALUES(?,?,?,?,?)", [
+                ("030200", "케이티", "KOSPI", "2020-01-01T00:00:00Z", None),
+                ("150900", "파수AI", "KOSDAQ", "2020-01-01T09:00:00+09:00", None),
+            ])
+            connection.executemany("INSERT INTO stock_aliases VALUES(?,?)", [("KT", "030200"), ("파수", "150900")])
+        source_before = fixture.source.read_bytes()
+        fixture.capture()
+        selection = fixture.selection()
+        role = selection["target_role"] = f"{layout}-local"
+        _, records, _ = preservation.operator.verified_current_state_rows(fixture.artifact)
+        for entry in selection["records"]:
+            record = records[entry["record_id"]]
+            row = tuple(preservation.operator.decode_value(value) for value in record["row"])
+            if (entry["placement"] == "TRANSFER"
+                    or record["relation"] == "stocks" and row[0] in {"030200", "150900"}
+                    or record["relation"] == "stock_aliases" and row[1] in {"030200", "150900"}):
+                entry.update(placement="TRANSFER", target_role=role)
+        state = preservation.operator.select_current_state_rows(fixture.artifact, selection)
+        state.update(target_operation_id="fixture-catalog-install", target_id="fixture-catalog-target", target_layout=layout)
+        path = fixture.root / f"{layout}-catalog.sqlite3"
+        database = Database(path)
+        initialize = database.initialize_full_role if layout == "full" else database.initialize_query_role
+        first = initialize(role=role, preserved_state=state, receipt_at=lambda: "2031-01-02T09:00:00+09:00")
+        return fixture, source_before, path, initialize, role, first
+
+    def _catalog_state_rows(self, path):
+        from kiwoom_monitor.infrastructure.persistence.database import QUERY_STATE_TABLES
+        with closing(sqlite3.connect(path)) as connection:
+            return {table: connection.execute(
+                        f"SELECT {'stock_code,old_name,new_name,source,decision,changed_at' if table == 'stock_name_history' else '*'} "
+                        f"FROM {table} ORDER BY rowid").fetchall()
+                    for table in (*QUERY_STATE_TABLES, "role_settings_schema", "stock_name_history")}
+
+    def test_owned_role_catalog_preserves_selected_aliases_receipt_and_observed_rename_at_native_cost(self) -> None:
+        for layout in ("full", "query"):
+            with self.subTest(layout=layout):
+                fixture, source_before, path, initialize, role, first = self._selected_catalog_store(layout)
+                before = self._catalog_state_rows(path)
+                self.assertEqual([], before["stock_name_history"])
+                self.assertEqual([(" PRIVATE-ALIAS ", "000001"), ("KT", "030200"), ("파수", "150900")], before["stock_aliases"])
+                batch = (("030200", "케이티", ""), ("150900", "새파수AI", "KOSDAQ"))
+                native_connect = sqlite3.connect
+                for operation in ("batch", "single", "same_batch_reopened", "ranking"):
+                    statements, opened, samples = [], [], []
+                    now = datetime(2031, 1, 2, 10)
+                    def clock():
+                        samples.append(now)
+                        return now
+                    def connect(*args, **kwargs):
+                        connection = native_connect(*args, **kwargs)
+                        connection.set_trace_callback(statements.append)
+                        opened.append(connection)
+                        return connection
+                    repository = StockRepository(path, now_provider=clock)
+                    with patch("kiwoom_monitor.infrastructure.persistence.stock_repository.sqlite3.connect", side_effect=connect):
+                        if operation == "single":
+                            repository.upsert("030200", "케이티", "")
+                        elif operation == "ranking":
+                            repository.cache_ranking_stocks(batch)
+                        else:
+                            repository.upsert_many(batch)
+                    self.assertEqual([now], samples)
+                    self.assertEqual(1, len(opened))
+                    self.assertEqual(1, sum(sql.startswith("BEGIN") for sql in statements))
+                    self.assertEqual(1, statements.count("COMMIT"))
+                    self.assertEqual(0 if operation == "ranking" else 1,
+                                     sum("FROM sqlite_master" in sql for sql in statements))
+                    self.assertEqual({"batch": 4, "single": 2, "same_batch_reopened": 3, "ranking": 2}[operation],
+                                     sum(sql.startswith("SELECT") for sql in statements))
+                    self.assertFalse(any(sql.startswith("DELETE FROM stock_aliases") or "기본 과거명 자료" in sql for sql in statements))
+                    with self.assertRaises(sqlite3.ProgrammingError):
+                        opened[0].execute("SELECT 1")
+                    after = self._catalog_state_rows(path)
+                    self.assertEqual({key: value for key, value in before.items() if key not in {"stocks", "stock_name_history"}},
+                                     {key: value for key, value in after.items() if key not in {"stocks", "stock_name_history"}})
+                    self.assertEqual([("150900", "파수AI", "새파수AI", "KRX", "pending", "2031-01-02T10:00:00+09:00")],
+                                     after["stock_name_history"])
+                self.assertEqual({"KT": "030200", "파수": "150900", "파수AI": None},
+                                 repository.find_codes_by_names(("KT", "파수", "파수AI")))
+                repository.review_name_changes({("150900", "파수AI"): True})
+                self.assertEqual("150900", repository.find_code_by_name("파수AI"))
+                document = """<tr><td>2031-01-02 09:00</td>
+                    <td><a onclick="companysummary_open('03020')" title='케이티'>케이티</a></td>
+                    <td><a onclick="openDisclsViewer('20310102000001','')">상호변경안내</a></td></tr>"""
+                with patch("kiwoom_monitor.infrastructure.krx.kind_name_history.kst_today", return_value=date(2031, 1, 2)), \
+                     patch("kiwoom_monitor.infrastructure.krx.kind_name_history.KindNameHistorySync._get", return_value=""), \
+                     patch("kiwoom_monitor.infrastructure.krx.kind_name_history.KindNameHistorySync._search", return_value=document), \
+                     patch("kiwoom_monitor.infrastructure.krx.kind_name_history.KindNameHistorySync._load_former_names", return_value=("공시이전케이티",)):
+                    self.assertEqual(1, repository.sync_kind_name_history(initial=False))
+                self.assertEqual((("030200", "공시이전케이티", "케이티", "KIND 상호변경안내"),), repository.pending_name_changes())
+                self.assertEqual({"KT": "030200", "파수": "150900"}, repository.find_codes_by_names(("KT", "파수")))
+                self.assertEqual(first["receipt"], initialize(role=role)["receipt"])
+                self.assertEqual(source_before, fixture.source.read_bytes())
+
+        # The same explicit catalog batch keeps legacy user-review cleanup.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.sqlite3"
+            Database(path).initialize()
+            repository = StockRepository(path, now_provider=lambda: datetime(2031, 1, 2, 10))
+            batch = (("030200", "케이티", ""), ("150900", "파수AI", "KOSDAQ"))
+            repository.upsert_many(batch)
+            repository.save_alias("KT", "030200")
+            repository.save_alias("파수", "150900")
+            statements, opened = [], []
+            native_connect = sqlite3.connect
+            def connect(*args, **kwargs):
+                connection = native_connect(*args, **kwargs)
+                connection.set_trace_callback(statements.append)
+                opened.append(connection)
+                return connection
+            with patch("kiwoom_monitor.infrastructure.persistence.stock_repository.sqlite3.connect", side_effect=connect):
+                repository.upsert_many(batch)
+            self.assertEqual(1, len(opened))
+            self.assertEqual(11, sum(sql.startswith("SELECT") for sql in statements))
+            self.assertEqual(3, sum(sql.startswith("DELETE FROM stock_aliases") for sql in statements))
+            self.assertEqual(1, statements.count("COMMIT"))
+            with self.assertRaises(sqlite3.ProgrammingError):
+                opened[0].execute("SELECT 1")
+            self.assertEqual({"KT": None, "파수": None}, repository.find_codes_by_names(("KT", "파수")))
+            self.assertEqual({("030200", "KT", "케이티", "기본 과거명 자료"),
+                              ("150900", "파수", "파수AI", "기본 과거명 자료"),
+                              ("150900", "파수에이아이", "파수AI", "기본 과거명 자료")}, set(repository.pending_name_changes()))
+
+    def test_owned_role_catalog_marker_read_failure_rolls_back_native_batch_and_single_then_retries(self) -> None:
+        for layout in ("full", "query"):
+            for operation in ("batch", "single"):
+                with self.subTest(layout=layout, operation=operation):
+                    fixture, source_before, path, initialize, role, first = self._selected_catalog_store(layout)
+                    before = self._catalog_state_rows(path)
+                    native_connect = sqlite3.connect
+                    statements, opened, denied = [], [], []
+                    def authorize(action, table, column, *_):
+                        if action == sqlite3.SQLITE_READ and table == "sqlite_master":
+                            denied.append((table, column))
+                            return sqlite3.SQLITE_DENY
+                        return sqlite3.SQLITE_OK
+                    def connect(*args, **kwargs):
+                        connection = native_connect(*args, **kwargs)
+                        connection.set_authorizer(authorize)
+                        connection.set_trace_callback(statements.append)
+                        opened.append(connection)
+                        return connection
+                    repository = StockRepository(path, now_provider=lambda: datetime(2031, 1, 2, 10))
+                    batch = (("030200", "케이티", ""), ("150900", "새파수AI", "KOSDAQ"))
+                    with patch("kiwoom_monitor.infrastructure.persistence.stock_repository.sqlite3.connect", side_effect=connect):
+                        with self.assertRaises(sqlite3.DatabaseError):
+                            if operation == "single":
+                                repository.upsert(*batch[1])
+                            else:
+                                repository.upsert_many(batch)
+                    self.assertTrue(denied)
+                    self.assertTrue(any(sql.startswith("INSERT INTO stocks") for sql in statements))
+                    self.assertTrue(any(sql.startswith("INSERT INTO stock_name_history") for sql in statements))
+                    self.assertEqual(1, len(opened))
+                    self.assertNotIn("COMMIT", statements)
+                    with self.assertRaises(sqlite3.ProgrammingError):
+                        opened[0].execute("SELECT 1")
+                    self.assertEqual(before, self._catalog_state_rows(path))
+                    reopened = StockRepository(path, now_provider=lambda: datetime(2031, 1, 2, 11))
+                    if operation == "single":
+                        reopened.upsert(*batch[1])
+                    else:
+                        reopened.upsert_many(batch)
+                    self.assertEqual(before["stock_aliases"], self._catalog_state_rows(path)["stock_aliases"])
+                    self.assertEqual((("150900", "파수AI", "새파수AI", "KRX"),), reopened.pending_name_changes())
+                    self.assertEqual(first["receipt"], initialize(role=role)["receipt"])
+                    self.assertEqual(source_before, fixture.source.read_bytes())
+
     def test_saves_historical_high_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "monitor.sqlite3"
@@ -580,13 +804,14 @@ StockRepository(Path(database)).update_price_cache({'A':100},{'A':110},{'A':1000
             stocks.update_fundamentals(
                 "005930", 2_000_000, 55.5, 72_000, 4_000_000, 91_900,
             )
-            with closing(sqlite3.connect(database_path)) as connection:
-                # 22:30 UTC on Sep 30 is 07:30 KST on Oct 1.
-                connection.execute(
-                    "UPDATE stocks SET fundamentals_updated_at=? WHERE code=?",
-                    ("2026-09-30 22:30:00", "005930"),
-                )
-                connection.commit()
-
-            self.assertEqual((), stocks.fundamentals_to_refresh(("005930",), "2026-10-01"))
-            self.assertEqual(("005930",), stocks.fundamentals_to_refresh(("005930",), "2026-09-30"))
+            for receipt in ("2026-09-30 22:30:00",  # Legacy SQLite UTC: 07:30 KST on Oct 1.
+                            "2026-10-01T00:05:00+09:00", "2026-10-01T23:55:00+09:00"):
+                with self.subTest(receipt=receipt):
+                    with closing(sqlite3.connect(database_path)) as connection:
+                        connection.execute("UPDATE stocks SET fundamentals_updated_at=? WHERE code=?", (receipt, "005930"))
+                        connection.commit()
+                    self.assertEqual((), stocks.fundamentals_to_refresh(("005930",), "2026-10-01"))
+                    self.assertEqual(("005930",), stocks.fundamentals_to_refresh(("005930",), "2026-09-30"))
+                    with closing(sqlite3.connect(database_path)) as connection:
+                        self.assertEqual((receipt,), connection.execute(
+                            "SELECT fundamentals_updated_at FROM stocks WHERE code='005930'").fetchone())

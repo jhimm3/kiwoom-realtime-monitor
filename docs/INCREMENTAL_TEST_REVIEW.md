@@ -1,5 +1,7 @@
 # 증분 테스트 관리
 
+> **현재 증거의 연결.** 기존 감사 판정을 유지하고 소스·환경·실행 ID가 맞는 증거만 재사용한다. CI 코드 회귀, 실제 NAS operator 수락, 최종 설치·운영 적용은 구분한다. [관련 계약](architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
+
 2026-10-18 사용자 요청. 정본 감사는 [5,504개/460모듈 개별 원장](workstreams/test-case-review-20261018/README.md)이다. 원래 판정(유지5,208·보강216·기대값수정19·정리12·미결49)과 [후속 수정/실행](workstreams/test-case-review-20261018/FOLLOWUP.md)을 덮어쓰지 않는다. 본 체계는 원래 전수 의미 검토를 반복하지 않고 **그 뒤 변경분의 근거와 실행**을 관리한다.
 
 ## 기존 구조와 새 연결
@@ -26,6 +28,10 @@
 4. `module_counts`에는 변경된 모듈의 실제 unittest 발견 수를 쓴다. 정적 정의 수를 그대로 복사하지 않는다. 기존 좁은 profile 또는 지정된 관련 suite를 사용해 발견·실행을 확인한다. 이름 변경/파일 이동은 `renames`의 이전ID→현재ID로 연결한다. 상속/동적 실행 이름은 테스트 항목의 선택 `executed_as`에 실제 ID를 대응한다. 삭제는 목적 종료·대체 검증/호환 범위를 근거로 기록한다.
 5. 검토한 JSON 객체 한 개를 **한 줄 JSON**으로 `tests/test_review_changes.jsonl` 끝에 추가한다. 기존 줄을 수정/삭제하지 않는다. `counts`의 추가·수정·삭제/전후 정의 수는 실제 차이와 맞아야 한다. 공용 fixture 변경은 `support`에 별도로 기록하고 그 fixture를 실제 쓰는 `tests` ID를 정한다. module entry가 없는 테스트 본문 수정도 빠짐없이 기록해야 한다.
 6. `python -m scripts.check_test_changes --base-ref HEAD --report tmp/test-review-static.json`으로 원장·현재 소스·기존 등록을 대조한다. 관련 테스트 실행 후 `python -m scripts.check_test_changes --base-ref HEAD --execution <관련 실행기의 run.json> --report tmp/test-review-execution.json`으로 현재 소스의 실행 ID와 모듈 수를 확인한다. 여러 플랫폼 보고서는 `--execution`을 반복한다. 이전 소스의 보고서는 재사용하지 않는다.
+
+기존 원장의 모듈명 참조는 해당 모듈 전체의 실행 요구다. 누적 검증기는 등록 프로필이나 검증된 `--selection` 실행에서 모듈 계획, worker 요청, 모듈별 발견 수와 해당 검사 ID의 계획·실행·통과를 대조한다. Windows CI의 병합 `all-local` 보고서에도 같은 기준을 적용한다. 개별 ID 및 플랫폼 보고서는 기존 정확 ID 요구의 증거로 사용한다. 새 변경 검토에는 실제 관련 검사 ID를 기록한다.
+
+제품과 fixture의 이전 검사 ID는 원장에 명시된 `renames` 연결을 따라 현재 검사 실행과 대조한다. 후속 연결 없이 폐기된 검사의 참조는 미충족으로 남는다. 해당 이름을 나중에 다시 사용해도 끊긴 연결은 복원되지 않는다.
 
 이 명령은 테스트를 실행하지 않는다. **로컬 전체회귀는 사용자 명시 요청 시에만** 실행한다. 이 작업에서는 기존 `runner` profile에 관리 도구와 PG 실행기 단위 검사를 연결해 세 모듈을 실행한다. 실제 PostgreSQL 연결을 뜻하지 않는다. CI에는 Windows 전체와 기존 Linux/PG 필수 결과를 유지한다. 플랫폼이 다른 관련 검사는 필요한 환경에서 확인하고 미실행 범위를 구분한다.
 
@@ -66,6 +72,12 @@ python -m scripts.run_regression --summarize tmp/selected-run/run.json
 자동으로 확인하는 것은 등록 누락, 중복 정의/실행 ID, 기록되지 않은 추가·본문/fixture/decorator 수정·삭제, 동일 본문 이름 변경의 연결 누락, 예상 정의/발견 수 불일치, 원장/채택점 재작성, 필요한 검토 필드, 명시 관련 테스트의 현재 소스 실행 여부다. skip·expectedFailure는 검토 문장을 적어도 기존 실행기에서 성공이 되지 않는다. 실패를 보고서의 제외로 숨기지 않는다.
 
 현재 요구사항과의 일치, 의미상 중복, 유효한 독립 oracle, mock/빈 fixture/상수 왕복이 결과를 우회하는지, 삭제할 만큼 목적이 끝났는지, 연결된 모든 기능을 골랐는지는 Codex가 판단한다. CI는 검토 문장의 진실이나 수익성·실제 장중 동작을 증명하지 않는다. 과거 버그·자료 복구·호환성·연구 비교를 보호하는 검사는 근거 없이 제거하지 않는다.
+
+## GitHub 회귀와 실제 NAS 수락
+
+- **GitHub CI**는 기존 Windows·Linux·PostgreSQL·선택된 봉인/격리 operator 등 호스팅에서 실행 가능한 필수 회귀를 자동으로 재실행한다. 마지막 증분 확인의 `--hosted-ci`는 검증된 카탈로그의 `nas_operator_owned` 의무만 별도 목록에 기록한다. 나머지 실행 ID·발견 수·소스 지문·실패 판정은 그대로 적용한다.
+- **실제 NAS 수락**은 기존 operator의 격리 작업·정확 ID·반입 지문·정리 증거를 보존한다. 실제 실행 경로·공통 안전·런타임/DB 계약에 영향을 주는 변경이 있으면 해당 범위만 재검증한다. 영향이 없는 CI 배선이나 독립 검사 변경은 원 판본의 증거를 유지할 수 있다. 원 보고서를 새 소스 지문으로 재표기하지 않는다. `--hosted-ci` 없이 실행하는 종합 검증은 기존 동일 판본 계약을 유지한다.
+- **C24 최종 수락**은 실제 GitHub CI 성공과 유효한 NAS 수락 증거를 정본에서 함께 확인한다. GitHub 판정은 실제 NAS 접속이나 운영 적용을 요구하지 않는다. [C24 현황](architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
 
 ## 한계
 

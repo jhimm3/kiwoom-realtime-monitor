@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.market_data_metadata_schema import (
+    MARKET_DATA_METADATA_TABLE,
     create_market_data_metadata_table,
 )
 from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
@@ -15,7 +16,33 @@ from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
 )
 
 
-JOURNAL_SCHEMA_VERSION = 9
+JOURNAL_SCHEMA_VERSION = 11
+# Only an interrupted initialization belonging to this native schema may be
+# resumed by the one-time selected-settings command. Normal legacy migrations
+# keep their existing compatibility path and do not use this catalog boundary.
+JOURNAL_SCHEMA_TABLES = frozenset({
+    "journal_schema_migrations", "journal_minute_bars", "journal_stocks", "trade_fills",
+    "trade_group_overrides", "trade_reviews", "daily_trade_costs", "journal_bar_backfill",
+    "journal_daily_bars", "journal_settings", "trade_setup_classifications",
+    "trade_setup_cycle_overrides", "trade_entry_snapshots", MARKET_DATA_METADATA_TABLE,
+    "journal_sync_states", "journal_legacy_imports", "journal_enrichment_tasks",
+    "journal_analysis_revisions", "journal_research_links", "journal_execution_projection_states",
+    "journal_execution_event_projections", "journal_selected_settings_receipts",
+})
+JOURNAL_SCHEMA_INDEXES = frozenset({
+    "idx_journal_bars_code_date", "idx_trade_fills_time", "idx_trade_entry_snapshots_time",
+    "idx_daily_trade_costs_scope_date", "idx_journal_enrichment_due", "idx_journal_research_links_execution",
+    "idx_trade_entry_snapshots_scope_time", "idx_trade_reviews_scope", "idx_journal_enrichment_scope_due",
+    "idx_journal_analysis_scope_group", "idx_journal_research_scope_execution",
+    "idx_journal_execution_projection_order",
+})
+
+
+def _create_selected_settings_receipts(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE journal_selected_settings_receipts ("
+        "operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)"
+    )
 
 
 def _create_journal_sync_state_table(connection: sqlite3.Connection) -> None:
@@ -278,6 +305,34 @@ def _migrate_account_scoped_journal_artifacts(connection: sqlite3.Connection) ->
     )
 
 
+def _migrate_scoped_trade_setup_keys_v10(connection: sqlite3.Connection) -> None:
+    """Keep unassigned edits intact while allowing a new explicit scoped edit."""
+    definitions = (
+        ("trade_setup_classifications",
+         "group_id TEXT NOT NULL,automatic_type TEXT NOT NULL,confidence INTEGER NOT NULL,"
+         "evidence_json TEXT NOT NULL,manual_type TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,",
+         "group_id,origin_broker,origin_environment,origin_account_ref"),
+        ("trade_setup_cycle_overrides",
+         "group_id TEXT NOT NULL,cycle_index INTEGER NOT NULL,manual_type TEXT NOT NULL DEFAULT '',"
+         "updated_at TEXT NOT NULL,",
+         "group_id,cycle_index,origin_broker,origin_environment,origin_account_ref"),
+    )
+    for table, columns, primary_key in definitions:
+        connection.execute(f"ALTER TABLE {table} RENAME TO {table}_v9")
+        connection.execute(
+            f"CREATE TABLE {table} (" + columns
+            + "origin_broker TEXT NOT NULL DEFAULT 'legacy',"
+            "origin_environment TEXT NOT NULL DEFAULT 'unknown',"
+            "origin_account_ref TEXT NOT NULL DEFAULT 'legacy-unassigned',"
+            "canonical_account_ref TEXT NOT NULL DEFAULT 'legacy-unassigned',"
+            f"PRIMARY KEY({primary_key}))"
+        )
+        # Identical column order and values: no inferred owner, normalization or
+        # receipt rewrite is part of this migration.
+        connection.execute(f"INSERT INTO {table} SELECT * FROM {table}_v9")
+        connection.execute(f"DROP TABLE {table}_v9")
+
+
 def initialize_journal_database(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path)) as connection:
@@ -409,6 +464,16 @@ def initialize_journal_database(path: Path) -> None:
                         9,
                         "execution_event_projection_ledger",
                         _create_execution_projection_ledger_v9,
+                    ),
+                    SQLiteMigration(
+                        10,
+                        "scoped_trade_setup_keys",
+                        _migrate_scoped_trade_setup_keys_v10,
+                    ),
+                    SQLiteMigration(
+                        11,
+                        "selected_journal_settings_receipts",
+                        _create_selected_settings_receipts,
                     ),
                 )
             )

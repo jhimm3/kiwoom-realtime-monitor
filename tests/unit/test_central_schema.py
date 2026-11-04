@@ -39,7 +39,7 @@ class CentralSchemaTests(unittest.TestCase):
         sqlite = central_schema_migrations("sqlite")
         self.assertEqual(CENTRAL_SCHEMA_VERSION, postgres[-1].version)
         self.assertEqual(CENTRAL_SQLITE_SCHEMA_VERSION, sqlite[-1].version)
-        self.assertEqual(postgres[:20], sqlite)
+        self.assertEqual(postgres[:CENTRAL_SQLITE_SCHEMA_VERSION], sqlite)
         self.assertTrue(all(not migration.sqlite_statements for migration in postgres[len(sqlite):]))
         with self.assertRaisesRegex(ValueError, "dialect"):
             central_schema_migrations("unsupported")
@@ -145,10 +145,24 @@ class CentralSchemaTests(unittest.TestCase):
         self.assertEqual(CENTRAL_CREDENTIAL_ACTIVATION_MIGRATION_NAME, migrations[18].name)
         self.assertEqual(20, migrations[19].version)
         self.assertEqual(CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME, migrations[19].name)
-        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[20].version)
+        self.assertEqual(21, migrations[20].version)
         self.assertEqual("shadow_checkpoint_frames", migrations[20].name)
         self.assertEqual((), migrations[20].sqlite_statements)
         self.assertIn("ON DELETE CASCADE", "\n".join(migrations[20].postgres_statements))
+        self.assertEqual(22, migrations[21].version)
+        self.assertEqual("central-news-ai-inference-v1", migrations[21].name)
+        self.assertIn("document_json TEXT", "\n".join(migrations[21].sqlite_statements))
+        self.assertIn("document_json JSONB", "\n".join(migrations[21].postgres_statements))
+        self.assertEqual(23, migrations[22].version)
+        self.assertEqual("news_body_processor_attempt_owner", migrations[22].name)
+        self.assertIn("body_processor_owner", "\n".join(migrations[22].sqlite_statements))
+        self.assertIn("body_input_ref", "\n".join(migrations[22].postgres_statements))
+        self.assertEqual(24, migrations[23].version)
+        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[23].version)
+        self.assertEqual("rank_current_revision_heads", migrations[23].name)
+        for statements in (migrations[23].sqlite_statements, migrations[23].postgres_statements):
+            self.assertIn("revision_id", "\n".join(statements))
+            self.assertIn("slot_order_key", "\n".join(statements))
 
 
 if __name__ == "__main__":

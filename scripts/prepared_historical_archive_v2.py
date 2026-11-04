@@ -396,6 +396,7 @@ def code_digest() -> str:
             "scripts/seal_prepared_historical_archive_v2.py",
                  "src/kiwoom_monitor/infrastructure/historical_backfill.py",
                  "src/kiwoom_monitor/infrastructure/naver_stock_market_news.py",
+                  "src/kiwoom_monitor/infrastructure/naver_stock_market_news_source.py",
                  "src/kiwoom_monitor/infrastructure/article_text.py"):
         data = (ROOT / name).read_bytes()
         digest.update(name.encode()); digest.update(len(data).to_bytes(8, "big")); digest.update(data)

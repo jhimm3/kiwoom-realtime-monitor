@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst
 
 from datetime import date, datetime, time, timedelta
+from typing import Callable
 
 from PySide6.QtCore import QThread, Signal
 
 from kiwoom_monitor.application.market_index_chart_service import MarketIndexChartService
 from kiwoom_monitor.application.minute_chart_service import MinuteChartService
+from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
 from kiwoom_monitor.application.trade_chart import DailyTradeChartService
 from kiwoom_monitor.application.trade_cost_service import TradeCostService
 from kiwoom_monitor.application.trade_history_service import TradeFill, TradeHistoryService
@@ -22,13 +24,18 @@ class ConfirmWorker(QThread):
     completed = Signal(str, object, object, str)
     failed = Signal(str)
 
-    def __init__(self, service: MinuteChartService, code: str, target_day: date | None = None, include_previous: bool = False) -> None:
+    def __init__(self, service: MinuteChartService, code: str, target_day: date | None = None, include_previous: bool = False,
+                 *, save_bars: Callable[[str, tuple[MinuteOhlcv, ...], str, datetime], None],
+                 now_provider: Callable[[], datetime]) -> None:
         super().__init__()
         self._service, self._code, self._target_day, self._include_previous = service, code, target_day, include_previous
+        self._save_bars, self._now_provider = save_bars, now_provider
 
     def run(self) -> None:
         try:
-            now = kst_wall_now()
+            # Freeze the query scope/current-bar cutoff at request time.
+            # Chart minutes and checked_at retain their naive KST boundary.
+            now = as_kst(self._now_provider()).replace(tzinfo=None)
             target = datetime.combine(self._target_day, time()) if self._target_day else now
             after_close = target.date() < now.date() or now.hour >= 20
             bars = (
@@ -37,10 +44,13 @@ class ConfirmWorker(QThread):
                 (self._service.load_today(self._code, target) if after_close else self._service.load_recent(self._code, target))
             )
             current = now.replace(second=0, microsecond=0)
-            self.completed.emit(
-                self._code, tuple(bar for bar in bars if bar.minute < current), now,
-                "after_close_confirmed" if after_close else "api_confirmed",
-            )
+            bars = tuple(bar for bar in bars if bar.minute < current)
+            source = "after_close_confirmed" if after_close else "api_confirmed"
+            # Collection may cross a minute/session boundary. Observe its result
+            # separately; a clock correction cannot precede the request cut.
+            observed_at = max(now, as_kst(self._now_provider()).replace(tzinfo=None))
+            self._save_bars(self._code, bars, source, observed_at)
+            self.completed.emit(self._code, bars, observed_at, source)
         except Exception as error:
             self.failed.emit(str(error))
 
@@ -48,10 +58,13 @@ class ConfirmWorker(QThread):
 class MarketIndexBackfillWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
+    storage_failed = Signal(str)
 
-    def __init__(self, service: MarketIndexChartService, day: date) -> None:
+    def __init__(self, service: MarketIndexChartService, day: date,
+                 *, save_history: Callable[[dict, dict], None]) -> None:
         super().__init__()
         self._service, self._day = service, day
+        self._save_history = save_history
 
     def run(self) -> None:
         try:
@@ -60,9 +73,15 @@ class MarketIndexBackfillWorker(QThread):
             for market in ("kospi", "kosdaq"):
                 combined.update(self._service.load(market, datetime.combine(self._day, time())))
                 daily[market] = self._service.load_daily(market, datetime.combine(self._day, time()))
-            self.completed.emit((combined, daily))
         except Exception as error:
             self.failed.emit(str(error))
+            return
+        try:
+            self._save_history(combined, daily)
+        except Exception as error:
+            self.storage_failed.emit(str(error))
+            return
+        self.completed.emit((combined, daily))
 
 
 class HistoryWorker(QThread):

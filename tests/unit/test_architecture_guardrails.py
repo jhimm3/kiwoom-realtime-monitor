@@ -57,6 +57,21 @@ class ArchitectureGuardrailTests(unittest.TestCase):
         self.assertEqual(1, len(report['violations']))
         self.assertEqual('cycle', report['violations'][0]['kind'])
 
+    def test_source_resource_backref_is_not_an_import_cycle(self):
+        self.source('application/identity.py', 'RESOURCE = None\n')
+        self.source('application/run.py', 'from .identity import RESOURCE\n')
+        contract = self.contract()
+        resources = ('RESOURCE = "src/kiwoom_monitor/application/run.py"\n'
+                     'MODULE_NAME = "kiwoom_monitor.application.run"\n')
+        self.source('application/identity.py', resources)
+        self.assertEqual('pass', check(self.root, contract)['status'])
+        self.source('application/identity.py', resources +
+                    'from importlib import import_module as load\n'
+                    'load("kiwoom_monitor.application.run")\n')
+        report = check(self.root, contract)
+        self.assertEqual('fail', report['status'])
+        self.assertEqual({'cycle'}, {v['kind'] for v in report['violations']})
+
     def test_alias_driver_connection_and_extra_commit_are_rejected(self):
         self.source('infrastructure/store.py', 'def save(c):\n c.commit()\n')
         contract = self.contract()

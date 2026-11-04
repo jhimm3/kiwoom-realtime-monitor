@@ -4,6 +4,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from time import perf_counter
+from typing import Callable
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -12,7 +13,6 @@ from kiwoom_monitor.application.morning_market_brief import (
     render_prompt, validate_output, context_from_run, output_schema, SCHEMA,
 )
 from kiwoom_monitor.infrastructure.chatgpt_plan import validate_reasoning
-from .diagnostic_workloads import is_paused
 
 KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
@@ -34,9 +34,11 @@ async def _join(task):
 
 class MorningMarketBrief:
     """Owns schedule, immutable run inputs, claim-before-POST and shutdown drain."""
-    def __init__(self, store, ai_service, *, clock=None):
+    def __init__(self, store, ai_service, *, clock=None,
+                 workload_paused: Callable[[str], bool] | None = None):
         self.store, self.ai = store, ai_service
         self.clock = clock or (lambda: datetime.now(KST))
+        self._workload_paused = workload_paused or (lambda _workload: False)
         rows = store.load_documents(SETTINGS_COLLECTION, "global", 1)
         self.settings = {**DEFAULT_SETTINGS, **(rows[0]["document"] if rows else {})}
         self._lock = asyncio.Lock()
@@ -108,7 +110,7 @@ class MorningMarketBrief:
 
     async def request(self, *, manual=False):
         async with self._lock:
-            if self._closing or is_paused("morning_market_brief"):
+            if self._closing or self._workload_paused("morning_market_brief"):
                 raise ValueError("시황 실행이 중지 상태입니다.")
             if self._run_task is not None and not self._run_task.done():
                 return {"status": "running"}

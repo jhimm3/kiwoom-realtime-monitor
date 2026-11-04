@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -12,6 +13,30 @@ from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 
 
 class CentralServerSettingsTests(unittest.TestCase):
+    def test_selected_research_artifact_is_an_explicit_protected_startup_choice(self):
+        from tests.unit.test_nas_source_runtime import selected_research_artifact_fixture
+        with tempfile.TemporaryDirectory() as directory:
+            selected_file, metadata = selected_research_artifact_fixture(Path(directory))
+            base = {"MONITOR_SERVER_ACCESS_TOKEN": "private-token"}
+            with patch.dict(os.environ, base, clear=True):
+                settings = CentralServerSettings.from_environment()
+                self.assertIsNone(settings.selected_research_artifact())
+            with patch.dict(os.environ, {**base,
+                    "MONITOR_SERVER_SELECTED_RESEARCH_ARTIFACT_FILE": str(selected_file)}, clear=True):
+                settings = CentralServerSettings.from_environment()
+                chosen = settings.selected_research_artifact()
+            self.assertEqual(metadata["implementation_hash"], chosen.expected_implementation_hash("krx-regular/v1"))
+            self.assertIsNone(chosen.expected_implementation_hash("krx-after/v1"))
+            selected_file.unlink()
+            self.assertEqual(metadata["implementation_hash"], chosen.expected_implementation_hash("krx-regular/v1"))
+            with self.assertRaises(FileNotFoundError):
+                settings.selected_research_artifact()
+            with patch.dict(os.environ, base, clear=True):
+                self.assertIsNone(CentralServerSettings.from_environment().selected_research_artifact())
+            for path in ("deploy/synology/docker-compose.yml", "deploy/synology/.env.example"):
+                text = (Path(__file__).resolve().parents[2] / path).read_text(encoding="utf-8")
+                self.assertIn("MONITOR_SERVER_SELECTED_RESEARCH_ARTIFACT_FILE", text)
+
     def test_synology_compose_pins_proxy_gateway_as_single_trust_source(self) -> None:
         compose = (
             Path(__file__).resolve().parents[2] / "deploy" / "synology" / "docker-compose.yml"
@@ -266,6 +291,24 @@ class DataSourceConfigTests(unittest.TestCase):
     def test_local_is_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(DataSourceSettings(), DataSourceConfig(Path(directory) / "missing.json").load())
+
+    def test_nonobject_connection_is_rejected_after_one_read_and_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'connection.json'
+            read, parse = Path.read_text, json.loads
+            for value in ([], None, 1, 'invalid-shape'):
+                with self.subTest(value=value):
+                    path.write_text(json.dumps(value), encoding='utf-8')
+                    reads, parses = [], []
+                    def traced_read(target, *args, **kwargs):
+                        reads.append(target); return read(target, *args, **kwargs)
+                    def traced_parse(encoded, *args, **kwargs):
+                        parses.append(encoded); return parse(encoded, *args, **kwargs)
+                    with patch.object(Path, 'read_text', traced_read), patch.object(json, 'loads', traced_parse):
+                        with self.assertRaisesRegex(ValueError, 'JSON 객체'):
+                            DataSourceConfig(path).load()
+                    self.assertEqual([path], reads)
+                    self.assertEqual(1, len(parses))
 
 
 class ServerContractTests(unittest.TestCase):

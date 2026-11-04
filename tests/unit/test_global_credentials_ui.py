@@ -200,7 +200,7 @@ class GlobalCredentialsUITests(unittest.TestCase):
             dialog._data_source_mode.setCurrentIndex(dialog._data_source_mode.findData("personal_server"))
             dialog._server_url.setText("https://nas.test"); dialog._server_token.setText("token")
             self.assertEqual(list(PROVIDER_LABELS.values()), [a.text() for a in dialog._nas_provider_button.menu().actions()])
-            with patch("kiwoom_monitor.presentation.api_settings_dialog.NasCredentialsDialog") as form:
+            with patch("kiwoom_monitor.presentation.nas_credentials_dialog.NasCredentialsDialog") as form:
                 dialog._open_nas_provider_credentials("gemini")
                 client = form.call_args.args[0]
                 client.operation_id = str(uuid.uuid4()); client.operation_profile = "nas-gemini-default"; client.operation_state = "READY"

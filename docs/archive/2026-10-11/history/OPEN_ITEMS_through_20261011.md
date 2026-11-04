@@ -2,7 +2,7 @@
 
 # 남은 작업 요약
 
-정리 기준: **2026-10-11**. 소스 SHA·배포 release·통과한 검증·미실행 검증은 [현재 상태의 한 표](../../../CURRENT_STATUS.md#current-summary)를 정본으로 사용한다.
+정리 기준: **2026-10-11**. 소스 SHA·배포 release·통과한 검증·미실행 검증은 [현재 상태의 한 표](../../2026-11-05/product-and-r3-status.md#current-summary)를 정본으로 사용한다.
 
 | 범위 | 현재 남은 일 |
 |---|---|
@@ -1738,8 +1738,8 @@ database container는 unchanged였다. 이는 정상 재시작 후 health 확인
 검사 전 로컬에서는 해당 2건이 skip된 상태였음을 함께 기록한다.
 
 2026-10-06 O12 전체 부하·외부 입력 감사 후속:
-[부하 분류/검증 기준](../../../WHOLE_APP_LOAD_OPTIMIZATION_REVIEW.md),
-[collector lifecycle/최신성 원장](../../../EXTERNAL_INPUT_LIFECYCLE_AUDIT.md).
+[부하 분류/검증 기준](../../2026-11-05/WHOLE_APP_LOAD_OPTIMIZATION_REVIEW.md),
+[collector lifecycle/최신성 원장](../../2026-11-05/EXTERNAL_INPUT_LIFECYCLE_AUDIT.md).
 숨김+알람 OFF 후보 polling(A1)과 뉴스 child close timer(P8)는 PC 소스에서 수정·기능 검증했다.
 뉴스창 close 시 60초 준비 timer를 멈추고 재열기 시 저장 자료를 즉시 다시 준비한다. 실제
 외부 요청 수·DB/CPU 절감량은 미측정이다.

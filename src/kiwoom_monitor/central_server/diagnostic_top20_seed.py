@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from .autonomous_top20 import AutonomousTop20Service, KST
+from .autonomous_top20 import AutonomousTop20Service, DailyReferenceState, Top20AfterCloseWorkflow, KST
 from .program_snapshot_writer import ProgramSnapshotWriter
 from .diagnostic_replay_baseline import DEFAULT_CONFIG, TABLES, TABLES_V2, ReplayDatabaseLease
 from .realtime_hub import RealtimeHub
@@ -29,8 +29,6 @@ CLOCK_POLICY = "source_wall_real_elapsed/v1"
 _SERVICE_EMPTY = {
     "preparation": {
         "_fundamentals_ready": dict, "_entry_stage_ready": dict, "_entry_data_ready": dict,
-        "_daily_input_versions": dict, "_daily_verified_versions": dict,
-        "_daily_stage_versions": dict, "_daily_history_locks": dict,
     },
     "catalog_subscription": {
         "_markets": dict, "_nxt_eligible": dict, "_nxt_checked_on": dict,
@@ -38,26 +36,35 @@ _SERVICE_EMPTY = {
     "ranking_entrants": {
         "_last_aux_ranking_slots": dict, "_entrant_first_seen": dict,
         "_entrant_persisted_codes": set, "_account_entry_codes": tuple,
-        "_backfill_entrant_persisted_codes": set,
     },
     "backfill_calendar": {
-        "_krx_trading_day_cache": dict, "_calendar_unknown_logged_days": set,
-        "_backfill_completed_steps": dict,
+        "_krx_trading_day_cache": dict,
     },
     "pending_storage": {"_pending_index_records": dict},
 }
+_DAILY_REFERENCE_EMPTY = {
+    "_daily_input_versions": dict, "_daily_verified_versions": dict,
+    "_daily_stage_versions": dict, "_daily_history_locks": dict,
+}
 _SERVICE_SCALARS = {
     "_observed_dropped_events": 0, "_market_catalog_day": "", "_subscription_revision": 0,
-    "_subscription_day": "", "_last_ranking_slot": "", "_last_backfill_day": "",
-    "_backfill_retry_day": "", "_backfill_retry_at": 0.0, "_backfill_attempts": 0,
-    "_backfill_progress_day": "", "_entrants_day": "",
-    "_backfill_entrant_first_seen": None, "_latest_membership_snapshot": None,
+    "_subscription_day": "", "_last_ranking_slot": "", "_entrants_day": "",
+    "_latest_membership_snapshot": None,
 }
 _SERVICE_LIFECYCLE = {
     "_tasks": list, "_fundamentals_pending": set, "_fundamentals_tasks": set,
     "_subscriber": None, "_market_catalog_task": None, "_subscription_task": None,
-    "_backfill_task": None, "_close_task": None,
+    "_close_task": None,
 }
+_AFTER_CLOSE_EMPTY = {
+    "ranking_entrants": {"_backfill_entrant_persisted_codes": set},
+    "backfill_calendar": {"_calendar_unknown_logged_days": set, "_backfill_completed_steps": dict},
+}
+_AFTER_CLOSE_SCALARS = {
+    "_last_backfill_day": "", "_backfill_retry_day": "", "_backfill_retry_at": 0.0,
+    "_backfill_attempts": 0, "_backfill_progress_day": "", "_backfill_entrant_first_seen": None,
+}
+_AFTER_CLOSE_LIFECYCLE = {"_backfill_task": None}
 _COLLECTOR_EMPTY = {
     "active_codes": tuple, "next_codes": tuple, "samples": list,
     "segment_baselines": dict, "minute_codes": set, "cohort_segments": list,
@@ -71,7 +78,7 @@ _AGGREGATOR_EMPTY = (
     "_estimated_since_cumulative", "_source_mode_by_code", "_query_completed_minutes",
 )
 _BROKER_EMPTY = {
-    "_inflight": dict, "_flow_inflight": dict, "_lookup_tasks": set, "_cache": dict,
+    "_inflight": dict, "_lookup_tasks": set, "_cache": dict,
 }
 _BROKER_SCALARS = {
     "_worker": None, "_persist_worker": None, "_credential_paused": False,
@@ -182,15 +189,36 @@ def _cold_state(service, clock, outbox_fixture=None):
             raise ValueError("top20_seed_durable_outbox_adapter_missing")
         outbox_identity = outbox_fixture.identity()
     state = {name: _empty(service, fields) for name, fields in _SERVICE_EMPTY.items()}
-    state["service_markers"] = _scalars(service, _SERVICE_SCALARS)
+    daily_reference = service.daily_reference
+    if type(daily_reference) is not DailyReferenceState:
+        raise ValueError("top20_seed_daily_reference_owner_required")
+    # Preserve the v1 semantic document while checking the actual state owner.
+    state["preparation"].update(_empty(daily_reference, _DAILY_REFERENCE_EMPTY))
+    state["service_markers"] = dict(_scalars(service, _SERVICE_SCALARS))
     state["lifecycle"] = _empty(service, _SERVICE_LIFECYCLE)
+    after_close = service.after_close
+    if (type(after_close) is not Top20AfterCloseWorkflow
+            or after_close._store is not service._store
+            or after_close._now != service._now
+            or type(after_close._minute_backfill_enabled) is not bool
+            or after_close._minute_backfill_enabled != service._minute_backfill_enabled
+            or after_close._capture_identity != f"autonomous_top20:{id(service):x}"):
+        raise ValueError("top20_seed_after_close_owner_required")
+    # Project the actual owner's fields into the unchanged canonical v1 keys.
+    for name, fields in _AFTER_CLOSE_EMPTY.items():
+        state[name].update(_empty(after_close, fields))
+    state["service_markers"].update(_scalars(after_close, _AFTER_CLOSE_SCALARS))
+    state["lifecycle"].update(_empty(after_close, _AFTER_CLOSE_LIFECYCLE))
+    # Validate the current owner without changing the canonical v1 seed document.
+    _empty(service, {"_index_save_task": None})
     writer = service._program_snapshots
     if type(writer) is not ProgramSnapshotWriter or writer._store is not service._store:
         raise ValueError("top20_seed_program_writer_missing_or_shared")
     # Keep v1's semantic seed document while its native state owner moves.
     state["pending_storage"]["_pending_program_snapshots"] = _empty(writer, {"_pending": dict})["_pending"]
     state["lifecycle"]["_program_save_task"] = _empty(writer, {"_save_task": None})["_save_task"]
-    for owner, names in ((service, ("_collector_lock", "_index_outbox_lock", "_daily_input_lock")),
+    for owner, names in ((service, ("_collector_lock", "_index_outbox_lock", "_index_flush_lock")),
+                         (daily_reference, ("_daily_input_lock",)),
                          (broker, ("_guard",))):
         if any(getattr(owner, name).locked() for name in names):
             raise ValueError("top20_seed_lock_in_use")
@@ -210,6 +238,13 @@ def _cold_state(service, clock, outbox_fixture=None):
         queue = getattr(broker, name)
         if not queue.empty() or queue._unfinished_tasks:
             raise ValueError("top20_seed_broker_queue_not_drained")
+    from . import diagnostic_top20_lifecycle_input as hub_capture
+    if hub._now_provider != clock.now or type(hub._observer) is not hub_capture.HubInputRecorder:
+        raise ValueError("top20_seed_hub_clock_or_observer_not_bound")
+    # No independent flow registry remains: all live observations belong to
+    # the actual inflight/lookup/jobs/workers/credential/queue owners proved cold
+    # above. Preserve the existing semantic seed key only after that proof.
+    state["broker"]["_flow_inflight"] = "empty_dict"
     if hub.client_count or hub._upstream_codes or hub.upstream_ready:
         raise ValueError("top20_seed_shared_or_live_subscription")
     if type(service._minute_backfill_enabled) is not bool:

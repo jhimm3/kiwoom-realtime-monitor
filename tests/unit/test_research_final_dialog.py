@@ -344,6 +344,7 @@ class FinalHoldoutDialogTests(unittest.TestCase):
         settings.value.side_effect = lambda key, default=None, **kwargs: default
         with patch('kiwoom_monitor.presentation.research_dialog.QSettings', return_value=settings):
             parent = ResearchDialog(self.root / 'parent-state')
+            parent.activate_startup()
         self.dialogs.append(parent)
         parent._worker_retry_timer.stop()
         parent._evaluate_final.click()

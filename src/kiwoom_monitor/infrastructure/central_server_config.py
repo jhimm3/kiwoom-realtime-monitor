@@ -29,6 +29,11 @@ class DataSourceSettings:
 class DataSourceConfig:
     """PC별 서버 주소 설정. API 공급자 비밀키는 여기에 저장하지 않는다."""
 
+    @staticmethod
+    def connection_path(api_path: Path, *, query_only: bool = False) -> Path:
+        """Keep explicit query connection settings separate from full credentials."""
+        return api_path.with_name("query_connection.json" if query_only else "data_source.json")
+
     def __init__(self, path: Path) -> None:
         self._path = path
 
@@ -36,6 +41,8 @@ class DataSourceConfig:
         if not self._path.exists():
             return DataSourceSettings()
         values = json.loads(self._path.read_text(encoding="utf-8"))
+        if not isinstance(values, dict):
+            raise ValueError("서버 연결 설정은 JSON 객체여야 합니다.")
         result = DataSourceSettings(
             mode=str(values.get("mode", "local")),
             server_url=str(values.get("server_url", "")).rstrip("/"),

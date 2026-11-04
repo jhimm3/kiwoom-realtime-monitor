@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now
+from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 
 import json
 import sqlite3
@@ -20,6 +20,8 @@ from kiwoom_monitor.application.journal_enrichment import (
     JournalExecutionProjectionPage,
     JournalExecutionProjectionResult,
     JournalResearchLink,
+    TradeAnalysisPublication,
+    TradeSetupManualInput,
 )
 from kiwoom_monitor.application.trade_journal_summary import TradeReview, trade_fill_key
 from kiwoom_monitor.application.trade_setup_classification import TradeSetupClassification
@@ -241,18 +243,22 @@ class JournalTradeRepositoryMixin:
         scope = account_scope or LEGACY_ACCOUNT_SCOPE
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
-                connection.execute(
+                cursor = connection.execute(
                     "INSERT INTO trade_setup_classifications("
                     "group_id,automatic_type,confidence,evidence_json,manual_type,updated_at,"
                     "origin_broker,origin_environment,origin_account_ref,canonical_account_ref) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(group_id) DO UPDATE SET automatic_type=excluded.automatic_type, "
+                    "ON CONFLICT(group_id,origin_broker,origin_environment,origin_account_ref) "
+                    "DO UPDATE SET automatic_type=excluded.automatic_type, "
                     "confidence=excluded.confidence, evidence_json=excluded.evidence_json, "
-                    "manual_type=excluded.manual_type, updated_at=excluded.updated_at",
+                    "manual_type=excluded.manual_type, updated_at=excluded.updated_at "
+                    "WHERE canonical_account_ref=excluded.canonical_account_ref",
                     (group_id, classification.setup_type, classification.confidence,
                      json.dumps(list(classification.evidence), ensure_ascii=False), manual_type, updated_at,
                      *_scope_values(scope, canonical_scope)),
                 )
+                if cursor.rowcount != 1:
+                    raise sqlite3.IntegrityError("매매일지 판정의 계좌 scope가 다릅니다.")
 
     def load_trade_setup(
         self, group_id: str, account_scope: AccountScope | None = None,
@@ -301,15 +307,18 @@ class JournalTradeRepositoryMixin:
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
                 if manual_type:
-                    connection.execute(
+                    cursor = connection.execute(
                         "INSERT INTO trade_setup_cycle_overrides("
                         "group_id,cycle_index,manual_type,updated_at,origin_broker,origin_environment,"
                         "origin_account_ref,canonical_account_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT(group_id, cycle_index) DO UPDATE SET "
-                        "manual_type=excluded.manual_type, updated_at=excluded.updated_at",
+                        "ON CONFLICT(group_id,cycle_index,origin_broker,origin_environment,origin_account_ref) "
+                        "DO UPDATE SET manual_type=excluded.manual_type, updated_at=excluded.updated_at "
+                        "WHERE canonical_account_ref=excluded.canonical_account_ref",
                         (group_id, cycle_index, manual_type, updated_at,
                          *_scope_values(scope, canonical_scope)),
                     )
+                    if cursor.rowcount != 1:
+                        raise sqlite3.IntegrityError("매매일지 수동 유형의 계좌 scope가 다릅니다.")
                     self._record_sync_state(
                         connection, "journal_cycle_overrides", f"{group_id}|{cycle_index}", False,
                         updated_at, scope, canonical_scope,
@@ -317,10 +326,11 @@ class JournalTradeRepositoryMixin:
                 else:
                     connection.execute(
                         "DELETE FROM trade_setup_cycle_overrides WHERE group_id=? AND cycle_index=? "
-                        "AND origin_broker=? AND origin_environment=? AND origin_account_ref=?",
+                        "AND origin_broker=? AND origin_environment=? AND origin_account_ref=? "
+                        "AND canonical_account_ref=?",
                         (
                             group_id, cycle_index, scope.broker,
-                            scope.environment.value, scope.account_ref,
+                            scope.environment.value, scope.account_ref, (canonical_scope or scope).account_ref,
                         ),
                     )
                     self._record_sync_state(
@@ -371,35 +381,95 @@ class JournalTradeRepositoryMixin:
         scope = account_scope or LEGACY_ACCOUNT_SCOPE
         with closing(sqlite3.connect(self._path)) as connection:
             with connection:
-                connection.execute(
-                    "INSERT INTO trade_setup_classifications("
-                    "group_id,automatic_type,confidence,evidence_json,manual_type,updated_at,"
-                    "origin_broker,origin_environment,origin_account_ref,canonical_account_ref) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(group_id) DO UPDATE SET automatic_type=excluded.automatic_type, "
-                    "confidence=excluded.confidence, evidence_json=excluded.evidence_json, "
-                    "manual_type=excluded.manual_type, updated_at=excluded.updated_at",
-                    (
-                        group_id, classification.setup_type, classification.confidence,
-                        json.dumps(list(classification.evidence), ensure_ascii=False), "", updated_at,
-                        *_scope_values(scope, canonical_scope),
-                    ),
+                self._write_trade_analysis_setup(
+                    connection, group_id, classification, legacy_override, updated_at,
+                    scope, canonical_scope,
                 )
-                if legacy_override is not None:
-                    cycle_index, manual_type = legacy_override
-                    connection.execute(
-                        "INSERT INTO trade_setup_cycle_overrides("
-                        "group_id,cycle_index,manual_type,updated_at,origin_broker,origin_environment,"
-                        "origin_account_ref,canonical_account_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT(group_id, cycle_index) DO UPDATE SET "
-                        "manual_type=excluded.manual_type, updated_at=excluded.updated_at",
-                        (group_id, cycle_index, manual_type, updated_at,
-                         *_scope_values(scope, canonical_scope)),
+
+    def _write_trade_analysis_setup(
+        self, connection: sqlite3.Connection, group_id: str,
+        classification: TradeSetupClassification, legacy_override: tuple[int, str] | None,
+        updated_at: str, scope: AccountScope, canonical_scope: AccountScope | None,
+    ) -> None:
+        cursor = connection.execute(
+            "INSERT INTO trade_setup_classifications("
+            "group_id,automatic_type,confidence,evidence_json,manual_type,updated_at,"
+            "origin_broker,origin_environment,origin_account_ref,canonical_account_ref) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(group_id,origin_broker,origin_environment,origin_account_ref) "
+            "DO UPDATE SET automatic_type=excluded.automatic_type, "
+            "confidence=excluded.confidence, evidence_json=excluded.evidence_json, "
+            "manual_type=excluded.manual_type, updated_at=excluded.updated_at "
+            "WHERE canonical_account_ref=excluded.canonical_account_ref",
+            (group_id, classification.setup_type, classification.confidence,
+             json.dumps(list(classification.evidence), ensure_ascii=False), "", updated_at,
+             *_scope_values(scope, canonical_scope)),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.IntegrityError("매매일지 판정의 계좌 scope가 다릅니다.")
+        if legacy_override is not None:
+            cycle_index, manual_type = legacy_override
+            cursor = connection.execute(
+                "INSERT INTO trade_setup_cycle_overrides("
+                "group_id,cycle_index,manual_type,updated_at,origin_broker,origin_environment,"
+                "origin_account_ref,canonical_account_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(group_id,cycle_index,origin_broker,origin_environment,origin_account_ref) "
+                "DO UPDATE SET manual_type=excluded.manual_type, updated_at=excluded.updated_at "
+                "WHERE canonical_account_ref=excluded.canonical_account_ref",
+                (group_id, cycle_index, manual_type, updated_at, *_scope_values(scope, canonical_scope)),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.IntegrityError("매매일지 수동 유형의 계좌 scope가 다릅니다.")
+            self._record_sync_state(
+                connection, "journal_cycle_overrides", f"{group_id}|{cycle_index}", False,
+                updated_at, scope, canonical_scope,
+            )
+
+    def load_trade_setup_manual_input(
+        self, group_id: str, *, account_scope: AccountScope,
+        canonical_scope: AccountScope | None = None,
+    ) -> TradeSetupManualInput:
+        with closing(sqlite3.connect(self._path)) as connection:
+            return self._read_trade_setup_manual_input(connection, group_id, account_scope, canonical_scope)
+
+    @staticmethod
+    def _read_trade_setup_manual_input(
+        connection: sqlite3.Connection, group_id: str, scope: AccountScope,
+        canonical_scope: AccountScope | None,
+    ) -> TradeSetupManualInput:
+        # One statement is one SQLite read snapshot, including both manual forms.
+        where = (" WHERE group_id=? AND origin_broker=? AND origin_environment=? "
+                 "AND origin_account_ref=? AND canonical_account_ref=?")
+        parameters = (group_id, *_scope_values(scope, canonical_scope))
+        rows = connection.execute(
+            "SELECT 0 AS kind,0 AS cycle_index,manual_type FROM trade_setup_classifications" + where
+            + " UNION ALL SELECT 1 AS kind,cycle_index,manual_type FROM trade_setup_cycle_overrides" + where
+            + " ORDER BY kind,cycle_index", (*parameters, *parameters),
+        ).fetchall()
+        legacy = next((str(row[2] or "") for row in rows if row[0] == 0), "")
+        overrides = tuple((int(row[1]), str(row[2])) for row in rows if row[0] == 1)
+        return TradeSetupManualInput(group_id, legacy, overrides, scope, canonical_scope)
+
+    def publish_trade_analysis(
+        self, revision: JournalAnalysisRevision, classification: TradeSetupClassification, *,
+        expected_manual_revision: str, legacy_override: tuple[int, str] | None = None,
+        now: datetime,
+    ) -> TradeAnalysisPublication:
+        """Preserve the frozen result, publish current only for the same manual input."""
+        with closing(sqlite3.connect(self._path)) as connection:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                manual = self._read_trade_setup_manual_input(
+                    connection, revision.group_id, revision.origin_scope, revision.canonical_scope,
+                )
+                stored = self.accept_journal_analysis_revision(connection, revision)
+                publish_current = manual.revision == expected_manual_revision
+                if publish_current:
+                    self._write_trade_analysis_setup(
+                        connection, revision.group_id, classification, legacy_override,
+                        as_kst(now).isoformat(timespec="seconds"), revision.origin_scope, revision.canonical_scope,
                     )
-                    self._record_sync_state(
-                        connection, "journal_cycle_overrides", f"{group_id}|{cycle_index}", False,
-                        updated_at, scope, canonical_scope,
-                    )
+        return TradeAnalysisPublication(stored, publish_current, manual.revision)
 
     @staticmethod
     def _record_sync_state(
@@ -816,6 +886,15 @@ class JournalTradeRepositoryMixin:
         self, revision: JournalAnalysisRevision,
     ) -> JournalAnalysisRevision:
         """동일 입력·분석 버전은 한 revision으로 보존하고 사용자 복기는 건드리지 않는다."""
+        with closing(sqlite3.connect(self._path)) as connection:
+            with connection:
+                return self.accept_journal_analysis_revision(connection, revision)
+
+    @staticmethod
+    def accept_journal_analysis_revision(
+        connection: sqlite3.Connection, revision: JournalAnalysisRevision,
+    ) -> JournalAnalysisRevision:
+        """Accept an immutable row inside the caller's existing native transaction."""
         payload = (
             revision.revision_id, revision.group_id, revision.analysis_kind,
             revision.input_fingerprint, revision.analysis_version,
@@ -823,19 +902,35 @@ class JournalTradeRepositoryMixin:
             revision.created_at.isoformat(timespec="seconds"),
             *_scope_values(revision.origin_scope, revision.effective_scope),
         )
-        with closing(sqlite3.connect(self._path)) as connection:
-            with connection:
-                connection.execute(
-                    "INSERT OR IGNORE INTO journal_analysis_revisions("
-                    "revision_id,group_id,analysis_kind,input_fingerprint,analysis_version,content_json,"
-                    "created_at,origin_broker,origin_environment,origin_account_ref,canonical_account_ref) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    payload,
-                )
-                row = connection.execute(
-                    f"SELECT {_ANALYSIS_REVISION_COLUMNS} FROM journal_analysis_revisions WHERE revision_id=?",
-                    (revision.revision_id,),
-                ).fetchone()
+        return JournalTradeRepositoryMixin._accept_analysis_revision_payload(connection, payload)
+
+    @staticmethod
+    def accept_journal_analysis_document(
+        connection: sqlite3.Connection, document: Mapping[str, object],
+    ) -> JournalAnalysisRevision:
+        """Import original immutable bytes without reencoding content or receipt time."""
+        names = tuple(_ANALYSIS_REVISION_COLUMNS.split(","))
+        if any(name not in document for name in names):
+            raise ValueError("일지 분석 revision의 필수 입력이 없습니다.")
+        return JournalTradeRepositoryMixin._accept_analysis_revision_payload(
+            connection, tuple(document[name] for name in names),
+        )
+
+    @staticmethod
+    def _accept_analysis_revision_payload(
+        connection: sqlite3.Connection, payload: tuple[object, ...],
+    ) -> JournalAnalysisRevision:
+        revision = _analysis_revision_from_row(payload)
+        connection.execute(
+            "INSERT OR IGNORE INTO journal_analysis_revisions("
+            "revision_id,group_id,analysis_kind,input_fingerprint,analysis_version,content_json,"
+            "created_at,origin_broker,origin_environment,origin_account_ref,canonical_account_ref) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)", payload,
+        )
+        row = connection.execute(
+            f"SELECT {_ANALYSIS_REVISION_COLUMNS} FROM journal_analysis_revisions WHERE revision_id=?",
+            (revision.revision_id,),
+        ).fetchone()
         if row is None:
             raise sqlite3.IntegrityError("매매일지 분석 revision을 읽을 수 없습니다.")
         stored = _analysis_revision_from_row(row)

@@ -33,13 +33,16 @@ class AuxiliaryProcessManager:
         working_directory: Path,
         *,
         below_normal_priority: bool = False,
+        env: Mapping[str, str] | None = None,
     ) -> subprocess.Popen[bytes]:
+        environment_options = {} if env is None else {"env": env}
         self._process = (
             launch_auxiliary_process(
                 command, working_directory, below_normal_priority=True,
+                **environment_options,
             )
             if below_normal_priority
-            else launch_auxiliary_process(command, working_directory)
+            else launch_auxiliary_process(command, working_directory, **environment_options)
         )
         return self._process
 
@@ -247,15 +250,18 @@ def launch_auxiliary_process(
     working_directory: Path,
     *,
     below_normal_priority: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.Popen[bytes]:
     """Windows에서 명령창을 띄우지 않고 보조 프로세스를 시작한다."""
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if below_normal_priority:
         creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+    environment_options = {} if env is None else {"env": env}
     return subprocess.Popen(
         list(command),
         cwd=str(working_directory),
         creationflags=creationflags,
+        **environment_options,
     )
 
 
@@ -267,7 +273,7 @@ def stop_auxiliary_process(
     terminate_timeout: float = 1.0,
     kill_timeout: float | None = None,
 ) -> None:
-    """보조 프로세스를 정상 종료부터 강제종료 순서로 정리한다."""
+    """정상 종료부터 강제종료 순서로 요청하고 실제 종료까지 확인한다."""
     if process is None or process.poll() is not None:
         return
     if request_shutdown is not None:
@@ -282,5 +288,4 @@ def stop_auxiliary_process(
         return
     except subprocess.TimeoutExpired:
         process.kill()
-    if kill_timeout is not None:
-        process.wait(timeout=kill_timeout)
+    process.wait(timeout=kill_timeout)

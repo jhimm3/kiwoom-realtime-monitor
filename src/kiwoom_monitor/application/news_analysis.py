@@ -1,17 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class NewsAssessment:
-    relevant: bool
-    category: str
-    outlook: str
-    reason: str
-    relevance_score: int
-    outlook_score: int
+from kiwoom_monitor.domain.news_ai_contract import NewsAssessment
 
 
 SECURITIES_TERMS = {

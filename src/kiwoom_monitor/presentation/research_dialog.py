@@ -4,6 +4,7 @@ from kiwoom_monitor.application.research_queue import decode_campaign_spec, Lead
 
 import json
 import hashlib
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -44,6 +45,23 @@ from kiwoom_monitor.application.research_hypotheses import (
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 
 
+def _research_process_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Keep runtime/isolation values; research uses explicit input/result connections."""
+    unused_credentials = {
+        'KIWOOM_APP_KEY', 'KIWOOM_SECRET_KEY', 'KIWOOM_MOCK_APP_KEY', 'KIWOOM_MOCK_SECRET_KEY',
+        'ACCOUNT_IDENTITY_HMAC_KEY', 'MOCK_ACCOUNT_REF', 'MOCK_EXECUTION_RUN_ID',
+        'MONITOR_SERVER_ACCESS_TOKEN', 'KIWOOM_SERVER_ACCESS_TOKEN', 'MONITOR_SERVER_QUERY_ACCESS_TOKEN',
+        'MONITOR_SERVER_RESEARCH_INPUT_GRANTS_JSON', 'MONITOR_SERVER_RESEARCH_RESULT_GRANTS_JSON',
+        'MONITOR_SERVER_NEWS_BODY_GRANTS_JSON', 'KIWOOM_SERVER_DATABASE_URL', 'KIWOOM_SERVER_SECRET_DIR',
+        'CREDENTIAL_TRUSTED_PROXIES', 'NAVER_NEWS_CLIENT_ID', 'NAVER_NEWS_CLIENT_SECRET',
+        'DART_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'ANTHROPIC_API_KEY',
+    }
+    return {
+        key: value for key, value in environment.items()
+        if key.upper() not in unused_credentials
+    }
+
+
 def _record_research_operation_owner(files: Mapping[str, Path], process: object, kind: str) -> bool:
     """Persist a child identity only when its PID and creation token are verifiable."""
     pid = getattr(process, 'pid', None)
@@ -69,6 +87,7 @@ class ResearchDialog(QDialog):
     def __init__(self, state_dir: Path, parent=None, *, theme_repository: object | None = None,
                  now_provider=None) -> None:
         super().__init__(parent)
+        self._startup_pending = True
         self.setWindowTitle("전략 연구")
         self.resize(880, 480)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -194,12 +213,19 @@ class ResearchDialog(QDialog):
         self._worker_retry_timer.setSingleShot(True)
         self._worker_retry_timer.timeout.connect(self._restore_campaign)
         self._request_path.editingFinished.connect(self._preview_request)
-        if self._request_path.text().strip():
-            QTimer.singleShot(0, self._preview_request)
-        QTimer.singleShot(0, self._restore_campaign)
         geometry = self._settings.value("geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
+
+
+    def activate_startup(self) -> None:
+        """Schedule this dialog's existing startup work after owner publication."""
+        if not self._startup_pending or self._campaign_suspended:
+            return
+        self._startup_pending = False
+        if self._request_path.text().strip():
+            QTimer.singleShot(0, self._preview_request)
+        QTimer.singleShot(0, self._restore_campaign)
 
     def _show_historical_news_review(self) -> None:
         if self._historical_news_review_dialog is None:
@@ -238,6 +264,8 @@ class ResearchDialog(QDialog):
         return ResearchRepository(Path(self._campaign_selection['database']))
 
     def _restore_campaign(self) -> None:
+        if self._startup_pending or self._campaign_suspended:
+            return
         if self._registration is not None:
             return
         if self._campaign_selection is None:
@@ -334,7 +362,8 @@ class ResearchDialog(QDialog):
                 '--request', str(files['request']), '--register-campaign', selection['campaign_id'],
                 '--result', str(files['result']), '--cancel', str(files['cancel']),
             ])
-            self._manager.start(command, Path.cwd(), below_normal_priority=True)
+            self._manager.start(command, Path.cwd(), below_normal_priority=True,
+                                env=_research_process_environment(os.environ))
         except (OSError, ValueError, RuntimeError):
             self._clear_campaign_registration()
             raise
@@ -764,6 +793,14 @@ class ResearchDialog(QDialog):
         enabled = QCheckBox('자동 등록 켜기', editor)
         enabled.setChecked(True)
         nas_prepare = QCheckBox('NAS에서 새 자료 자동 준비', editor)
+        connection = QLineEdit(editor)
+        connection.setObjectName('research_input_connection')
+        connection.setPlaceholderText('연구 입력용 서버 연결 JSON 파일을 선택하세요')
+        connection.setEnabled(False)
+        connection_browse = QPushButton('연구 입력 연결 파일 선택', editor)
+        connection_browse.setEnabled(False)
+        nas_prepare.toggled.connect(connection.setEnabled)
+        nas_prepare.toggled.connect(connection_browse.setEnabled)
         rolling_daily = QCheckBox('새 거래일의 TRAIN/VALIDATION 평가 기간 확장', editor)
         storage_cap = QSpinBox(editor)
         storage_cap.setRange(0, 1000000)
@@ -776,10 +813,19 @@ class ResearchDialog(QDialog):
             if selected:
                 folder.setText(selected)
         browse.clicked.connect(choose_folder)
+        def choose_connection():
+            selected, _ = QFileDialog.getOpenFileName(
+                editor, '연구 입력 연결 파일 선택', connection.text(),
+                '서버 연결 파일 (*.json);;모든 파일 (*)',
+            )
+            if selected:
+                connection.setText(selected)
+        connection_browse.clicked.connect(choose_connection)
         def select_template():
             source = next((item for item in sources if item['template_job_id'] == template.currentData()), None)
             folder.setText(source['root'] if source else '')
             enabled.setChecked(bool(source['enabled']) if source else True)
+            connection.setText(source['nas_config_path'] if source else '')
             nas_prepare.setChecked(bool(source['nas_auto_prepare']) if source else False)
             rolling_daily.setChecked(bool(source['rolling_daily']) if source else False)
             storage_cap.setValue((int(source['storage_cap_bytes']) + 1024 ** 3 - 1) // 1024 ** 3 if source else 0)
@@ -790,6 +836,8 @@ class ResearchDialog(QDialog):
         layout.addRow(browse)
         layout.addRow(enabled)
         layout.addRow(nas_prepare)
+        layout.addRow('연구 입력 연결 파일', connection)
+        layout.addRow(connection_browse)
         layout.addRow(rolling_daily)
         layout.addRow('새 자료 폴더 용량 상한 (0=무제한)', storage_cap)
         layout.addRow(QLabel('거래일 확장과 NAS 자동 준비를 함께 켜면 완료된 새 날짜를 하루씩 준비합니다. FINAL/OOS는 확장하지 않습니다.', editor))
@@ -800,7 +848,10 @@ class ResearchDialog(QDialog):
             try:
                 if not folder.text().strip():
                     raise ValueError('자료 폴더를 선택해 주세요')
-                repository.save_campaign_input_source(campaign_id, template.currentData(), Path(folder.text()), enabled=enabled.isChecked(), nas_auto_prepare=nas_prepare.isChecked(), nas_config_path=self._state_dir.parent / 'data_source.json' if nas_prepare.isChecked() else None, storage_cap_bytes=storage_cap.value() * 1024 ** 3, rolling_daily=rolling_daily.isChecked())
+                connection_path = connection.text().strip()
+                if nas_prepare.isChecked() and not connection_path:
+                    raise ValueError('연구 입력 연결 파일을 선택해 주세요')
+                repository.save_campaign_input_source(campaign_id, template.currentData(), Path(folder.text()), enabled=enabled.isChecked(), nas_auto_prepare=nas_prepare.isChecked(), nas_config_path=Path(connection_path) if connection_path else None, storage_cap_bytes=storage_cap.value() * 1024 ** 3, rolling_daily=rolling_daily.isChecked())
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                 status.setText(str(exc))
                 return
@@ -905,7 +956,8 @@ class ResearchDialog(QDialog):
             '--worker-token', claim['owner_token'], '--worker-generation', str(claim['generation']),
         ])
         try:
-            self._manager.start(command, Path.cwd(), below_normal_priority=True)
+            self._manager.start(command, Path.cwd(), below_normal_priority=True,
+                                env=_research_process_environment(os.environ))
         except OSError as exc:
             self._campaign_status.setText(f'캠페인 실행 실패 · {exc}')
             self._finish_worker('FAILED', f'launch_error: {exc}')
@@ -958,6 +1010,8 @@ class ResearchDialog(QDialog):
             self._preview_request()
 
     def _preview_request(self) -> bool:
+        if self._startup_pending or self._campaign_suspended:
+            return False
         path = Path(self._request_path.text().strip())
         try:
             request = load_research_process_request(path)
@@ -1021,6 +1075,7 @@ class ResearchDialog(QDialog):
         try:
             self._manager.start(
                 command, Path.cwd(), below_normal_priority=True,
+                env=_research_process_environment(os.environ),
             )
         except OSError as exc:
             self._status.setText(f"실행 실패 · {exc}")
@@ -1388,7 +1443,7 @@ class DevelopmentValidationDialog(QDialog):
                 '--validate-partitions', str(files['request']), '--result', str(files['result']),
                 '--cancel', str(files['cancel']),
                 '--validation-owner-token', 'development-ui-owner-' + operation_id]),
-                Path.cwd(), below_normal_priority=True)
+                Path.cwd(), below_normal_priority=True, env=_research_process_environment(os.environ))
             try:
                 if not _record_research_operation_owner(files, process, 'development_validation'):
                     self._status.setToolTip('자식 프로세스 시작 토큰을 확인할 수 없어 비정상 종료 자동 판정은 보류합니다.')
@@ -1757,7 +1812,8 @@ class FinalHoldoutDialog(QDialog):
                 '--evaluate-final', str(files['request']), '--result', str(files['result']),
                 '--cancel', str(files['cancel']),
             ])
-            process = self._manager.start(command, Path.cwd(), below_normal_priority=True)
+            process = self._manager.start(command, Path.cwd(), below_normal_priority=True,
+                                          env=_research_process_environment(os.environ))
             if source_path is None or not request.recoveries:
                 try:
                     if not _record_research_operation_owner(files, process, 'final_holdout'):
@@ -1832,7 +1888,8 @@ class FinalHoldoutDialog(QDialog):
                 '--expose-final', str(files['request']), '--result', str(files['result']),
                 '--cancel', str(files['cancel']),
             ])
-            self._manager.start(command, Path.cwd(), below_normal_priority=True)
+            self._manager.start(command, Path.cwd(), below_normal_priority=True,
+                                env=_research_process_environment(os.environ))
             self._run.setEnabled(False)
             self._resume.setEnabled(False)
             self._cancel.setEnabled(True)
@@ -2130,7 +2187,7 @@ class IndependentComparisonDialog(QDialog):
             }, ensure_ascii=False), encoding='utf-8')
             self._manager.start(build_auxiliary_command('kiwoom_monitor.research_process', '--research-process', [
                 '--compare-runs', str(files['request']), '--result', str(files['result']), '--cancel', str(files['cancel']),
-            ]), Path.cwd(), below_normal_priority=True)
+            ]), Path.cwd(), below_normal_priority=True, env=_research_process_environment(os.environ))
         except (OSError, TypeError, ValueError) as exc:
             self._clear_operation()
             self._status.setText(f'비교 시작 실패 · {exc}')

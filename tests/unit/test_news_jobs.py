@@ -4,6 +4,10 @@ import asyncio
 import sqlite3
 import time
 import tempfile
+import threading
+import uuid
+from contextlib import closing, contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,17 +21,22 @@ from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AIRequestUsage
 from tests.unit.test_news_observation_history import _article
 
 
-class _AI:
-    def __init__(self, *, delay: float = 0.0, fail: bool = False) -> None:
+class _AI(CentralAIService):
+    def __init__(self, store, *, delay: float = 0.0, fail: bool = False) -> None:
+        super().__init__(CentralServerSettings("sqlite:///:memory:", "token", gemini_api_key="fake-key"), store)
         self.delay, self.fail, self.calls = delay, fail, 0
 
-    async def analyze(self, *_args):
+    def _invoke(self, *_args, **_kwargs):
         self.calls += 1
         if self.delay:
-            await asyncio.sleep(self.delay)
+            time.sleep(self.delay)
         if self.fail:
             raise RuntimeError("provider failed")
-        return {"analysis_revision_ids": ["analysis-1"]}
+        return ((AINewsAnalysis("fake summary", "긍정", 80, "fake reason"),), AIRequestUsage())
+
+    async def analyze_job(self, *args, **kwargs):
+        with patch("kiwoom_monitor.central_server.ai_service.analyze_articles", side_effect=self._invoke):
+            return await super().analyze_job(*args, **kwargs)
 
 
 class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -38,40 +47,42 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                     path = Path(directory) / "central.sqlite3"
                     first = SQLiteQueryStore(path)
                     first.initialize()
-                    first.upsert_documents("news_article", _article())
+                    first.upsert_documents("news_article", _article(description=""))
                     old_wakes = []
                     first.set_news_job_wakeup(lambda: old_wakes.append("unexpected stale wake"))
                     second = SQLiteQueryStore(path)
-                    old, new = NewsJobRunner(first), NewsJobRunner(second)
-                    old_entered, old_release = asyncio.Event(), asyncio.Event()
-                    new_entered, new_release = asyncio.Event(), asyncio.Event()
-                    async def old_body(_job):
+                    old_entered, old_release = threading.Event(), threading.Event()
+                    new_entered, new_release = threading.Event(), threading.Event()
+                    def old_body(*_args, **_kwargs):
                         old_entered.set()
-                        await old_release.wait()
+                        if not old_release.wait(8):
+                            raise TimeoutError("old fetch was not released")
                         if old_fails:
                             raise RuntimeError("old owner failed")
-                        return "old-owner-output"
-                    async def new_body(_job):
+                        return "old-owner-output", "2026-10-23T08:01:00+09:00"
+                    def new_body(*_args, **_kwargs):
                         new_entered.set()
-                        await new_release.wait()
-                        return "new-owner-output"
+                        if not new_release.wait(8):
+                            raise TimeoutError("new fetch was not released")
+                        return "new-owner-output", "2026-10-23T08:02:00+09:00"
                     def row():
                         with first._connection() as connection:
                             return connection.execute(
                                 "SELECT state,attempts,output_ref,error,next_retry_at,updated_at FROM central_news_jobs"
                             ).fetchone()
                     clock = [time.time() + 1]
+                    now_provider = lambda: datetime.fromtimestamp(clock[0], timezone.utc)
+                    old = NewsJobRunner(first, fetcher=old_body, now_provider=now_provider)
+                    new = NewsJobRunner(second, fetcher=new_body, now_provider=now_provider)
                     tasks = []
                     try:
-                        with patch("kiwoom_monitor.central_server.database_news_jobs.time", side_effect=lambda: clock[0]), \
-                                patch.object(old, "_run_body", side_effect=old_body), \
-                                patch.object(new, "_run_body", side_effect=new_body):
+                        with patch("kiwoom_monitor.central_server.database_news_jobs.time", side_effect=lambda: clock[0]):
                             tasks.append(asyncio.create_task(old.run_once()))
-                            await asyncio.wait_for(old_entered.wait(), 2)
+                            self.assertTrue(await asyncio.to_thread(old_entered.wait, 2))
                             self.assertEqual(("RUNNING", 1), row()[:2])
                             clock[0] += 121
                             tasks.append(asyncio.create_task(new.run_once()))
-                            await asyncio.wait_for(new_entered.wait(), 2)
+                            self.assertTrue(await asyncio.to_thread(new_entered.wait, 2))
                             self.assertEqual(("RUNNING", 2), row()[:2])
                             if new_finished:
                                 new_release.set()
@@ -83,7 +94,13 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual([], old_wakes)
                             new_release.set()
                             self.assertEqual(1, await tasks[1])
-                            self.assertEqual(("COMPLETED", 2, "new-owner-output", ""), row()[:4])
+                            bodies = first.load_news_history("body", target=first.load_news_history("article")[0]["article_revision_id"])
+                            self.assertEqual(["new-owner-output"], [value["body_text"] for value in bodies])
+                            self.assertEqual(("COMPLETED", 2, bodies[0]["body_revision_id"], ""), row()[:4])
+                            publication = first.load_documents("news_original_publication", bodies[0]["article_revision_id"], 1)
+                            self.assertEqual("2026-10-23T08:02:00+09:00", publication[0]["document"]["published_at"])
+                            with first._connection() as connection:
+                                self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM central_news_jobs WHERE stage='RULE'").fetchone()[0])
                     finally:
                         old_release.set()
                         new_release.set()
@@ -120,13 +137,19 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
             store.upsert_documents("news_article", _article())
             wakes = []
             store.set_news_job_wakeup(lambda: wakes.append("wake"))
-            native_finish = store.finish_news_job
+            native_finish = store.accept_news_job_result
+            ack_lost = False
             def finish_with_lost_ack(*args, **kwargs):
-                native_finish(*args, **kwargs)
-                raise ConnectionError("finish committed, response lost")
+                nonlocal ack_lost
+                receipt = native_finish(*args, **kwargs)
+                if not ack_lost:
+                    ack_lost = True
+                    raise ConnectionError("finish committed, response lost")
+                return receipt
             runner = NewsJobRunner(store, fetcher=lambda *_args, **_kwargs: "immutable body")
-            with patch.object(store, "finish_news_job", side_effect=finish_with_lost_ack):
+            with patch.object(store, "accept_news_job_result", side_effect=finish_with_lost_ack):
                 self.assertEqual(1, await runner.run_once())
+            self.assertTrue(ack_lost)
             with store._connection() as connection:
                 state = connection.execute(
                     "SELECT state,attempts,output_ref,error FROM central_news_jobs WHERE stage='BODY'"
@@ -241,11 +264,13 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
             store.close()
 
     async def test_diagnostic_pause_resumes_claiming_without_restarting_worker(self) -> None:
-        runner = NewsJobRunner(object(), poll_seconds=0.05)
-        runner.run_once = AsyncMock(return_value=0)
+        from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
         paused = {"value": True}
-        with patch("kiwoom_monitor.central_server.news_jobs.is_paused",
+        with patch("kiwoom_monitor.central_server.diagnostic_workloads.is_paused",
                    side_effect=lambda _name: paused["value"]):
+            from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+            runner = NewsJobRunner(object(), poll_seconds=0.05, paused=lambda: is_paused("news_jobs"))
+            runner.run_once = AsyncMock(return_value=0)
             await runner.start()
             try:
                 await asyncio.sleep(0.12)
@@ -405,7 +430,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "payload": {"stock_name": "삼성전자", "provider": "gemini", "model": "model",
                             "article_count": 1, "event": {"identity": "article-1", "title": "제목"}},
             }])
-            ai = _AI()
+            ai = _AI(store)
             runner.set_ai_service(ai)
             self.assertEqual(1, await runner.run_once())
             self.assertEqual(1, ai.calls)
@@ -440,7 +465,7 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
             store.initialize()
             store.upsert_documents("news_article", _article())
             runner = NewsJobRunner(
-                store, fetcher=lambda *_args, **_kwargs: "본문", ai_service=_AI(delay=0.15, fail=True),
+                store, fetcher=lambda *_args, **_kwargs: "본문", ai_service=_AI(store, delay=0.15, fail=True),
             )
             await runner.run_once()
             store.enqueue_news_ai_jobs([{
@@ -516,7 +541,10 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             connection = sqlite3.connect(path)
             connection.execute(
-                "UPDATE central_news_jobs SET updated_at=0 WHERE job_key=?", (ai_job["job_key"],),
+                # Model the preserved historical split-save interruption. The
+                # new accepted native command atomically completes fresh jobs.
+                "UPDATE central_news_jobs SET state='RUNNING',output_ref='',updated_at=0 WHERE job_key=?",
+                (ai_job["job_key"],),
             )
             connection.commit(); connection.close()
             with patch("kiwoom_monitor.central_server.ai_service.analyze_articles") as analyze_again:
@@ -531,6 +559,436 @@ class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("COMPLETED", state)
         self.assertEqual(committed_revision_id, output_ref)
+
+
+class NewsJobResultNativeTests(unittest.IsolatedAsyncioTestCase):
+    """The same output/authority oracle runs on SQLite and real PostgreSQL."""
+
+    postgres = False
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "results.sqlite3"
+        self.clock = [datetime(2026, 10, 23, 9, 0, tzinfo=timezone.utc).timestamp()]
+        self.store = self._make_store(self.path)
+        self.addCleanup(self.store.close)
+        self.store.initialize()
+
+    def _now(self):
+        return datetime.fromtimestamp(self.clock[0], timezone.utc)
+
+    def _make_store(self, path):
+        return SQLiteQueryStore(path, now_provider=self._now)
+
+    def _peer(self):
+        target = self.store._database_url if self.postgres else self.path
+        peer = type(self.store)(target, now_provider=self._now)
+        self.addCleanup(peer.close)
+        return peer
+
+    def _sql(self, statement, parameters=()):
+        with closing(self.store._connect()) as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(statement.replace("?", "%s") if self.postgres else statement, parameters)
+                rows = cursor.fetchall() if cursor.description else []
+                connection.commit()
+                return rows
+            finally:
+                cursor.close()
+
+    def _article(self, *, contract=False):
+        code, identity = "N" + uuid.uuid4().hex[:12], uuid.uuid4().hex
+        value = _article(description="")
+        document = {**value[0]["document"], "stock_code": code, "stock_name": "테스트기업",
+                    "identity": identity, "title": "테스트기업, 삼성전자와 500억원 공급계약 체결" if contract else "기사 제목"}
+        self.store.upsert_documents("news_article", [{**value[0], "owner": code, "key": identity, "document": document}])
+        revision = self.store.load_news_history("article", target=code)[0]
+        return code, revision
+
+    def _claim(self, code, stage="BODY", store=None):
+        jobs = (store or self.store).claim_news_jobs(
+            now=self.clock[0] + 1, priority_stock_code=code, preferred_stage=stage,
+        )
+        self.assertEqual(1, len(jobs))
+        self.assertEqual(code, jobs[0]["target_id"])
+        self.assertEqual(stage, jobs[0]["stage"])
+        return jobs[0]
+
+    @contextmanager
+    def _reject(self, table, event, condition):
+        name = "ar04_" + uuid.uuid4().hex
+        if self.postgres:
+            self._sql(f"CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'native result rejected'; END $$")
+            self._sql(f"CREATE TRIGGER {name} BEFORE {event} ON {table} FOR EACH ROW WHEN ({condition}) EXECUTE FUNCTION {name}()")
+        else:
+            self._sql(f"CREATE TRIGGER {name} BEFORE {event} ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT,'native result rejected'); END")
+        try:
+            yield
+        finally:
+            self._sql(f"DROP TRIGGER {name}" + (f" ON {table}" if self.postgres else ""))
+            if self.postgres:
+                self._sql(f"DROP FUNCTION {name}()")
+
+    async def test_actual_stale_body_cannot_publish_or_enqueue_after_reclaim(self):
+        code, article = self._article()
+        entered, release = threading.Event(), threading.Event()
+        old_wakes = []
+        self.store.set_news_job_wakeup(lambda: old_wakes.append("stale wake"))
+        def old_fetch(*_args, **_kwargs):
+            entered.set()
+            if not release.wait(8):
+                raise TimeoutError("fetch was not released")
+            return "OLD BODY", "2026-10-23T08:01:00+09:00"
+        old = NewsJobRunner(self.store, fetcher=old_fetch, now_provider=self._now)
+        peer = self._peer()
+        new = NewsJobRunner(peer, fetcher=lambda *a, **k: ("NEW BODY", "2026-10-23T08:02:00+09:00"), now_provider=self._now)
+        task = asyncio.create_task(old.run_once())
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            self.clock[0] += 121
+            self.assertEqual(1, await new.run_once())
+            release.set()
+            self.assertEqual(1, await task)
+            bodies = self.store.load_news_history("body", target=article["article_revision_id"])
+            self.assertEqual(["NEW BODY"], [row["body_text"] for row in bodies])
+            self.assertEqual([], old_wakes)
+            publication = self.store.load_document("news_original_publication", article["article_revision_id"], "published_at")
+            self.assertEqual("2026-10-23T08:02:00+09:00", publication["document"]["published_at"])
+            self.assertEqual(article, self.store.load_news_article_revision(article["article_revision_id"]))
+            self.assertEqual([(1,)], self._sql("SELECT COUNT(*) FROM central_news_jobs WHERE article_revision_id=? AND stage='RULE'", (article["article_revision_id"],)))
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await old.close()
+            await new.close()
+
+    async def test_same_attempt_parallel_acceptance_writes_once_and_wakes_after_terminal(self):
+        code, article = self._article()
+        job = self._claim(code)
+        peer, wakes = self._peer(), []
+        def wake():
+            wakes.append(self._sql("SELECT state,output_ref FROM central_news_jobs WHERE job_key=?", (job["job_key"],))[0])
+        self.store.set_news_job_wakeup(wake)
+        peer.set_news_job_wakeup(wake)
+        result = {"stage": "BODY", "body": {"status": "fulltext", "body_text": "one immutable body"},
+                  "original_publication": {"published_at": "2026-10-23T08:02:00+09:00"}}
+        def accept(store):
+            return store.accept_news_job_result(job["job_key"], result, attempts=job["attempts"])
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            receipts = list(executor.map(accept, (self.store, peer)))
+        self.assertEqual({"completed", "already_completed"}, {r["state"] for r in receipts})
+        self.assertEqual(1, len({r["output_ref"] for r in receipts}))
+        self.assertEqual([("COMPLETED", receipts[0]["output_ref"])], wakes)
+        bodies = self.store.load_news_history("body", target=article["article_revision_id"])
+        self.assertEqual(1, len(bodies))
+        self.assertEqual(self.clock[0], bodies[0]["available_at"])
+        self.assertEqual([(1,)], self._sql("SELECT COUNT(*) FROM central_news_jobs WHERE article_revision_id=? AND stage='RULE'", (article["article_revision_id"],)))
+
+    async def test_body_publication_and_rule_job_roll_back_with_terminal_failure(self):
+        code, article = self._article()
+        job, wakes = self._claim(code), []
+        self.store.set_news_job_wakeup(lambda: wakes.append("wake"))
+        runner = NewsJobRunner(self.store, fetcher=lambda *a, **k: ("body", "2026-10-23T08:02:00+09:00"), now_provider=self._now)
+        try:
+            with self._reject("central_news_jobs", "UPDATE", f"NEW.job_key='{job['job_key']}' AND NEW.state='COMPLETED'"):
+                with self.assertRaisesRegex(Exception, "native result rejected"):
+                    await runner._run_body(job)
+            self.assertEqual([], self.store.load_news_history("body", target=article["article_revision_id"]))
+            self.assertIsNone(self.store.load_document("news_original_publication", article["article_revision_id"], "published_at"))
+            self.assertEqual([("RUNNING", 1)], self._sql("SELECT state,attempts FROM central_news_jobs WHERE job_key=?", (job["job_key"],)))
+            self.assertEqual([(0,)], self._sql("SELECT COUNT(*) FROM central_news_jobs WHERE article_revision_id=? AND stage='RULE'", (article["article_revision_id"],)))
+            self.assertEqual([], wakes)
+            self.assertTrue(await runner._run_body(job))
+            self.assertEqual(["wake"], wakes)
+        finally:
+            await runner.close()
+
+    async def test_rule_assessment_event_membership_and_terminal_share_attempt(self):
+        for failure_table in ("central_news_event_membership_revisions", "central_news_jobs"):
+            with self.subTest(failure_table=failure_table):
+                code, article = self._article(contract=True)
+                runner = NewsJobRunner(self.store, fetcher=lambda *a, **k: "공급계약 체결", now_provider=self._now)
+                try:
+                    await runner._run_body(self._claim(code))
+                    job = self._claim(code, "RULE")
+                    condition = (f"NEW.job_key='{job['job_key']}' AND NEW.state='COMPLETED'" if failure_table == "central_news_jobs"
+                                 else f"NEW.article_revision_id='{article['article_revision_id']}'")
+                    with self._reject(failure_table, "UPDATE" if failure_table == "central_news_jobs" else "INSERT", condition):
+                        with self.assertRaisesRegex(Exception, "native result rejected"):
+                            await runner._run_rule(job)
+                    self.assertIsNone(self.store.load_document("news_assessment", code, article["article_revision_id"]))
+                    self.assertEqual([], self.store.load_news_history("event", target=code))
+                    self.assertEqual([(0,)], self._sql("SELECT COUNT(*) FROM central_news_event_membership_revisions WHERE article_revision_id=?", (article["article_revision_id"],)))
+                    self.assertEqual([("RUNNING", 1)], self._sql("SELECT state,attempts FROM central_news_jobs WHERE job_key=?", (job["job_key"],)))
+                    self.clock[0] += 121
+                    reclaimed = self._claim(code, "RULE", self._peer())
+                    self.assertEqual("", await runner._run_rule(job))
+                    self.assertIsNone(self.store.load_document("news_assessment", code, article["article_revision_id"]))
+                    ref = await runner._run_rule(reclaimed)
+                    self.assertEqual(ref, await runner._run_rule(reclaimed))
+                    self.assertEqual([ref], [r["event_revision_id"] for r in self.store.load_news_history("event", target=code)])
+                    self.assertEqual([(1,)], self._sql("SELECT COUNT(*) FROM central_news_event_membership_revisions WHERE article_revision_id=?", (article["article_revision_id"],)))
+                    assessment = self.store.load_document("news_assessment", code, article["article_revision_id"])
+                    self.assertEqual(reclaimed["payload"]["body_revision_id"], assessment["document"]["body_revision_id"])
+                finally:
+                    await runner.close()
+
+    async def test_third_body_failure_rolls_back_and_rejects_stale_error(self):
+        code, article = self._article()
+        self._sql("UPDATE central_news_jobs SET attempts=2 WHERE article_revision_id=?", (article["article_revision_id"],))
+        job, wakes = self._claim(code), []
+        self.store.set_news_job_wakeup(lambda: wakes.append("wake"))
+        error_result = {"stage": "BODY", "error": "original fetch failed", "next_retry_at": self.clock[0] + 8}
+        self.assertEqual("stale", self.store.accept_news_job_result(job["job_key"], error_result, attempts=2)["state"])
+        with self._reject("central_news_jobs", "UPDATE", f"NEW.job_key='{job['job_key']}' AND NEW.state='FAILED'"):
+            with self.assertRaisesRegex(Exception, "native result rejected"):
+                self.store.accept_news_job_result(job["job_key"], error_result, attempts=3)
+        self.assertEqual([], self.store.load_news_history("body", target=article["article_revision_id"]))
+        self.assertEqual([], wakes)
+        receipt = self.store.accept_news_job_result(job["job_key"], error_result, attempts=3)
+        self.assertEqual("failed", receipt["state"])
+        terminal_before = self._sql("SELECT * FROM central_news_jobs WHERE job_key=?", (job["job_key"],))
+        body_before = self.store.load_news_history("body", target=article["article_revision_id"])
+        self.clock[0] += 17
+        replay = self.store.accept_news_job_result(job["job_key"], error_result, attempts=3)
+        self.assertEqual({"state": "already_failed", "output_ref": receipt["output_ref"]}, replay)
+        self.assertEqual(terminal_before, self._sql("SELECT * FROM central_news_jobs WHERE job_key=?", (job["job_key"],)))
+        self.assertEqual(body_before, self.store.load_news_history("body", target=article["article_revision_id"]))
+        body = self.store.load_news_history("body", target=article["article_revision_id"])
+        self.assertEqual([("failed", "original fetch failed")], [(r["status"], r["error"]) for r in body])
+        self.assertEqual(body[0]["body_revision_id"], receipt["output_ref"])
+        self.assertEqual(["wake"], wakes)
+        self.assertEqual([("FAILED", 3, receipt["output_ref"], "original fetch failed")], self._sql("SELECT state,attempts,output_ref,error FROM central_news_jobs WHERE job_key=?", (job["job_key"],)))
+
+    async def test_body_ack_loss_replays_terminal_receipt_without_second_publication(self):
+        code, article = self._article()
+        native, lost, receipts = self.store.accept_news_job_result, False, []
+        def lost_ack(*args, **kwargs):
+            nonlocal lost
+            receipt = native(*args, **kwargs)
+            receipts.append(receipt)
+            if not lost:
+                lost = True
+                raise ConnectionError("native result committed, ACK lost")
+            return receipt
+        runner = NewsJobRunner(self.store, fetcher=lambda *a, **k: "one committed body", now_provider=self._now)
+        with patch.object(self.store, "accept_news_job_result", side_effect=lost_ack):
+            self.assertEqual(1, await runner.run_once())
+        self.assertEqual(["completed", "already_completed"], [r["state"] for r in receipts])
+        self.assertEqual(receipts[0]["output_ref"], receipts[1]["output_ref"])
+        await runner.close()
+        restarted = NewsJobRunner(self._peer(), fetcher=lambda *a, **k: self.fail("completed BODY fetched again"), now_provider=self._now)
+        try:
+            self.assertEqual(1, await restarted.run_once())
+            self.assertEqual(0, await restarted.run_once())
+            self.assertEqual(1, len(self.store.load_news_history("body", target=article["article_revision_id"])))
+        finally:
+            await restarted.close()
+
+
+class NewsRunnerCompositionTests(unittest.IsolatedAsyncioTestCase):
+    def test_runner_uses_existing_source_branch_flag_and_same_native_callbacks(self):
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import install_store_capture
+        from kiwoom_monitor.central_server.news_service import CentralNewsService
+        for source_enabled in (False, True):
+            for jobs_enabled in (False, True):
+                with self.subTest(source=source_enabled, jobs=jobs_enabled):
+                    store = SQLiteQueryStore(Path(":memory:"))
+                    install_store_capture(store)
+                    native_enqueue = store.enqueue_news_ai_jobs
+                    try:
+                        with patch.dict(create_app.__globals__, {"create_query_store": lambda *_a, **_k: store}), \
+                             patch("kiwoom_monitor.central_server.news_jobs.NewsJobRunner", wraps=NewsJobRunner) as constructor, \
+                             patch("kiwoom_monitor.central_server.news_service.CentralNewsService", wraps=CentralNewsService) as source:
+                            create_app(CentralServerSettings("sqlite:///:memory:", "fixture-token",
+                                news_naver_api_enabled=False, news_naver_stock_enabled=source_enabled,
+                                news_naver_market_enabled=False, news_query_set_enabled=False,
+                                news_history_jobs_enabled=jobs_enabled, autonomous_top20_enabled=False,
+                                market_event_collection_enabled=False, external_market_symbols=""))
+                            if source_enabled and jobs_enabled:
+                                constructor.assert_called_once()
+                                self.assertEqual(3, constructor.call_args.kwargs["parallelism"])
+                                callbacks = source.call_args.kwargs
+                                self.assertIsInstance(callbacks["prioritize_stock"].__self__, NewsJobRunner)
+                                self.assertIs(native_enqueue, callbacks["enqueue_ai_jobs"])
+                            else:
+                                constructor.assert_not_called()
+                                if source_enabled:
+                                    self.assertIsNone(source.call_args.kwargs["prioritize_stock"])
+                                    self.assertIsNone(source.call_args.kwargs["enqueue_ai_jobs"])
+                                else:
+                                    source.assert_not_called()
+                    finally:
+                        store.close()
+
+    async def _accepted_close(self, *, source_fails=False, runner_fails=False):
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import install_store_capture
+        from kiwoom_monitor.central_server.news_service import CentralNewsService
+        fixed = datetime(2026, 10, 24, 1, 0, tzinfo=timezone.utc)
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "composition.sqlite3"
+            store = SQLiteQueryStore(path, now_provider=lambda: fixed)
+            install_store_capture(store)
+            store.initialize()
+            store.upsert_documents("news_article", _article())
+            article = store.load_news_history("article", target="005930")[0]
+            peer = SQLiteQueryStore(path, now_provider=lambda: fixed)
+            entered, release, source_closed = threading.Event(), threading.Event(), asyncio.Event()
+            events, runners, sources, ai_owners, wakeups, claims = [], [], [], [], [], []
+            primary, secondary = RuntimeError("controlled-source-close"), RuntimeError("controlled-runner-close")
+            native_accept, native_claim, native_wakeup = store.accept_news_job_result, store.claim_news_jobs, store.set_news_job_wakeup
+            native_enqueue = store.enqueue_news_ai_jobs
+            native_close, native_ai_close = store.close, CentralAIService.close
+            def accept(*args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("native acceptance barrier was not released")
+                receipt = native_accept(*args, **kwargs)
+                events.append("native-accepted")
+                return receipt
+            def claim(*args, **kwargs):
+                result = native_claim(*args, **kwargs)
+                claims.extend(result)
+                return result
+            def wakeup(callback):
+                wakeups.append(callback)
+                return native_wakeup(callback)
+            def close_store():
+                events.append("store-close")
+                native_close()
+            async def close_ai(owner):
+                ai_owners.append(owner)
+                events.append("ai-close")
+                await native_ai_close(owner)
+            def create_runner(*args, **kwargs):
+                runner = NewsJobRunner(*args, **kwargs, fetcher=lambda *_a, **_k: ("fixture native body", ""))
+                original_close = runner.close
+                async def close():
+                    events.append("runner-close-enter")
+                    try:
+                        await original_close()
+                        if runner_fails:
+                            raise secondary
+                    finally:
+                        events.append("runner-close-exit")
+                runner.close = close
+                runners.append((runner, kwargs))
+                return runner
+            def create_source(*args, **kwargs):
+                source = CentralNewsService(*args, **kwargs)
+                original_close = source.close
+                async def close():
+                    await original_close()
+                    events.append("source-close")
+                    source_closed.set()
+                    if source_fails:
+                        raise primary
+                source.close = close
+                sources.append(source)
+                return source
+
+            closing_task, scope, scope_entered = None, None, False
+            try:
+                with patch.dict(create_app.__globals__, {"create_query_store": lambda *_a, **_k: store, "datetime": FixedDateTime}), \
+                     patch("kiwoom_monitor.central_server.news_jobs.NewsJobRunner", side_effect=create_runner), \
+                     patch("kiwoom_monitor.central_server.news_service.CentralNewsService", side_effect=create_source), \
+                     patch.object(store, "claim_news_jobs", side_effect=claim), \
+                     patch.object(store, "accept_news_job_result", side_effect=accept), \
+                     patch.object(store, "set_news_job_wakeup", side_effect=wakeup), \
+                     patch.object(store, "close", side_effect=close_store), \
+                     patch.object(CentralAIService, "close", close_ai):
+                    app = create_app(CentralServerSettings(f"sqlite:///{path}", "fixture-token",
+                        news_naver_api_enabled=False, news_naver_stock_enabled=True,
+                        news_naver_market_enabled=False, news_query_set_enabled=False,
+                        autonomous_top20_enabled=False, market_event_collection_enabled=False,
+                        external_market_symbols="", ai_provider="gemini", gemini_api_key="fixture-unused"))
+                    scope = app.router.lifespan_context(app)
+                    await scope.__aenter__()
+                    scope_entered = True
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                    self.assertEqual(1, len(runners))
+                    runner, kwargs = runners[0]
+                    self.assertEqual(3, kwargs["parallelism"])
+                    self.assertEqual(fixed.timestamp(), kwargs["now_provider"]().timestamp())
+                    self.assertEqual(9 * 3600, kwargs["now_provider"]().utcoffset().total_seconds())
+                    self.assertIs(runner, sources[0]._prioritize_stock.__self__)
+                    self.assertIs(native_enqueue, sources[0]._enqueue_ai_jobs)
+                    self.assertFalse(hasattr(sources[0], "_job_runner"))
+                    closing_task = asyncio.create_task(scope.__aexit__(None, None, None))
+                    await asyncio.wait_for(source_closed.wait(), 5)
+                    # The source is shut, but its separate processor still owns
+                    # a real native acceptance. A peer reader remains usable.
+                    self.assertFalse(closing_task.done())
+                    self.assertEqual([], peer.load_news_history("body", target=article["article_revision_id"]))
+                    self.assertEqual(1, len(peer.load_news_history("article", target="005930")))
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual("RUNNING", connection.execute(
+                            "SELECT state FROM central_news_jobs WHERE job_key=?", (claims[0]["job_key"],)).fetchone()[0])
+                    self.assertNotIn("ai-close", events)
+                    self.assertNotIn("store-close", events)
+                    self.assertIsNone(wakeups[-1])
+                    release.set()
+                    if source_fails:
+                        with self.assertRaises(RuntimeError) as raised:
+                            await asyncio.wait_for(closing_task, 5)
+                        self.assertIs(primary, raised.exception)
+                        self.assertEqual({"state": "failed", "stage": "news"}, app.state.shutdown_status)
+                        self.assertNotIn("ai-close", events)
+                        self.assertNotIn("store-close", events)
+                        if runner_fails:
+                            self.assertIn("NEWS_RUNNER_CLOSE_FAILED:RuntimeError", primary.__notes__)
+                    else:
+                        await asyncio.wait_for(closing_task, 5)
+                        self.assertEqual("completed", app.state.shutdown_status["state"])
+                        self.assertLess(events.index("runner-close-exit"), events.index("ai-close"))
+                        self.assertLess(events.index("ai-close"), events.index("store-close"))
+                    self.assertLess(events.index("source-close"), events.index("runner-close-enter"))
+                    self.assertLess(events.index("native-accepted"), events.index("runner-close-exit"))
+                    self.assertEqual((), runner._tasks)
+                    self.assertIsNone(runner._task)
+                    self.assertIsNone(wakeups[-1])
+                    bodies = peer.load_news_history("body", target=article["article_revision_id"])
+                    self.assertEqual(1, len(bodies))
+                    self.assertEqual(fixed.timestamp(), bodies[0]["fetched_at"])
+                    # Reaccepting the same authority returns the original receipt
+                    # and cannot replace the accepted BODY after owner close.
+                    receipt = peer.accept_news_job_result(claims[0]["job_key"], {
+                        "stage": "BODY", "body": {"body_text": "late replacement"},
+                    }, attempts=claims[0]["attempts"])
+                    self.assertEqual({"state": "already_completed", "output_ref": bodies[0]["body_revision_id"]}, receipt)
+                    self.assertEqual(bodies, peer.load_news_history("body", target=article["article_revision_id"]))
+            finally:
+                release.set()
+                if closing_task is None and scope_entered:
+                    closing_task = asyncio.create_task(scope.__aexit__(None, None, None))
+                if closing_task is not None:
+                    await asyncio.gather(closing_task, return_exceptions=True)
+                for source in sources:
+                    await CentralNewsService.close(source)
+                for runner, _ in runners:
+                    await NewsJobRunner.close(runner)
+                for owner in ai_owners:
+                    await native_ai_close(owner)
+                peer.close()
+                native_close()
+
+    async def test_headless_composition_drains_native_before_ai_store_and_keeps_peer_reader(self):
+        await self._accepted_close()
+
+    async def test_source_close_failure_still_drains_runner_and_keeps_primary_fail_stop(self):
+        await self._accepted_close(source_fails=True)
+
+    async def test_source_and_runner_close_failures_preserve_original_source_error(self):
+        await self._accepted_close(source_fails=True, runner_fails=True)
 
 
 if __name__ == "__main__":

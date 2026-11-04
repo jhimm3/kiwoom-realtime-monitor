@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder, HubInputRecorder
+
 import asyncio
 import json
 import tempfile
@@ -90,6 +92,7 @@ class RecordedCaptureTests(unittest.TestCase):
         now = datetime.fromisoformat('2026-10-16T11:00:00+09:00')
         with tempfile.TemporaryDirectory() as root:
             store = SQLiteQueryStore(Path(root) / 'recent-recorded.sqlite3', now_provider=lambda: now)
+            install_store_capture(store)
             store.initialize()
             self.addCleanup(store.close)
             base = dict(code='005930', minute='10:00', market='KRX', open=100, high=110,
@@ -139,6 +142,7 @@ class RecordedCaptureTests(unittest.TestCase):
 
     def test_native_minute_range_and_legacy_full_day_arguments_survive_capture_and_replay(self):
         store = SQLiteQueryStore(Path(':memory:'))
+        install_store_capture(store)
         store.initialize()
         self.addCleanup(store.close)
         with capture(store_inputs=True, collector_inputs=False) as session:
@@ -163,7 +167,9 @@ class RecordedCaptureTests(unittest.TestCase):
 
     def test_mixed_market_capture_preserves_order_fields_and_omissions_across_bounded_groups(self):
         now = datetime(2026, 10, 7, 1, tzinfo=timezone.utc)
-        collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(), lambda: now)
+        hub_observer = HubInputRecorder()
+        capture_hub = RealtimeHub(observer=hub_observer)
+        collector = CentralRealtimeCollector(lambda: '', 'real', capture_hub, lambda: now, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
         source_rows = [
             {'type': '0B', 'item': '005930_AL', 'values': {'10': '100', '20': '100000', 'unused': 'discard'}},
             {'type': '0w', 'item': ['005930_NX'], 'values': {'20': '100000', '210': '-5', '211': '2',
@@ -175,7 +181,7 @@ class RecordedCaptureTests(unittest.TestCase):
         rows = source_rows * 26 + [{'type': '00', 'values': {'9201': 'private-account'}},
                                   {'type': '0g', 'item': '005930', 'values': {'305': '100'}}]
         with capture(store_inputs=False) as session:
-            collector._record_upstream_message({'trnm': 'REAL', 'data': rows})
+            collector._input_observer.record_message(collector, {'trnm': 'REAL', 'data': rows})
             trace.stop()
             manifest, recorded = trace.recorded_events(session['trace_id'])
             self.assertEqual(0, manifest['input_rejected'])
@@ -428,9 +434,13 @@ class RecordedCaptureTests(unittest.TestCase):
             self.assertEqual(0, manifest['copy_reserved_bytes'])
 
     def test_actual_0b_source_and_background_compile_without_duplicating_collector_sinks(self):
-        store = SQLiteQueryStore(Path(':memory:')); store.initialize()
+        store = SQLiteQueryStore(Path(':memory:'))
+        install_store_capture(store)
+        store.initialize()
         now = datetime(2026, 10, 6, 1, 4, 15, tzinfo=timezone.utc)
-        collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(), lambda: now, store)
+        hub_observer = HubInputRecorder()
+        capture_hub = RealtimeHub(observer=hub_observer)
+        collector = CentralRealtimeCollector(lambda: '', 'real', capture_hub, lambda: now, store, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
         component = f'realtime_collector:{id(collector):x}'
         message = {'trnm': 'REAL', 'data': [
             {'type': '0B', 'item': '005930_AL', 'values': {'10': '10000', '13': '10', '14': '1',
@@ -599,8 +609,10 @@ class RecordedCaptureTests(unittest.TestCase):
             return original(value)
 
         store = NativeStore()
-        collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(),
-                                             lambda: datetime(2026, 10, 8, tzinfo=timezone.utc))
+        hub_observer = HubInputRecorder()
+        capture_hub = RealtimeHub(observer=hub_observer)
+        collector = CentralRealtimeCollector(lambda: '', 'real', capture_hub,
+                                             lambda: datetime(2026, 10, 8, tzinfo=timezone.utc), input_observer=CollectorInputRecorder(hub_observer=hub_observer))
         message = {'trnm': 'REAL', 'data': [
             {'type': '0B', 'item': '005930_AL', 'values': {'10': '100', '20': '092320'}}]}
         with capture() as session:
@@ -611,7 +623,7 @@ class RecordedCaptureTests(unittest.TestCase):
                 try:
                     with condition:
                         self.assertTrue(condition.wait_for(lambda: active == 2, timeout=2))
-                    collector._record_upstream_message(message)
+                    collector._input_observer.record_message(collector, message)
                     state = trace.status()
                     self.assertEqual(0, state['input_rejected'])
                     self.assertEqual(2, state['payload_accepted'])  # initial state and actual message
@@ -716,3 +728,235 @@ class RecordedCaptureTests(unittest.TestCase):
             self.assertEqual({}, final['blobs'])
             with self.assertRaisesRegex(ValueError, 'incomplete'):
                 trace.recorded_events(session['trace_id'])
+
+    def test_body_receipt_registry_preserves_old_string_binding_and_narrow_new_receipt(self):
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import OPERATIONS, _result_summary
+        self.assertEqual("news", OPERATIONS["save_news_body_revision"])
+        self.assertEqual("news", OPERATIONS["save_news_body_revision_receipt"])
+        self.assertEqual({"result_binding": {"operation": "save_news_body_revision", "source_id": "old-body-id"}},
+                         _result_summary("save_news_body_revision", "old-body-id"))
+        receipt = {"body_revision_id": "new-body-id", "article_revision_id": "actual-article", "content_hash": "raw-hash",
+                   "extractor_version": "source-v7", "fetched_at": 100.125, "available_at": 102.75, "status": "summary_only"}
+        self.assertEqual({"result_type": "dict", "result_count": 7, "result_binding": {
+            "operation": "save_news_body_revision_receipt", "source_id": "new-body-id"}},
+            _result_summary("save_news_body_revision_receipt", receipt))
+        self.assertEqual((100.125, 102.75), (receipt["fetched_at"], receipt["available_at"]))
+
+
+class CollectorInputObserverBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_or_none_replay_validator_cannot_start_native_work(self):
+        at = datetime.fromisoformat('2026-10-12T11:00:00+09:00')
+        collector = CentralRealtimeCollector(lambda: self.fail('replay requested credentials'),
+            'real', RealtimeHub(now_provider=lambda: at), lambda: at, object())
+        tasks = set(asyncio.all_tasks())
+        with self.assertRaises(TypeError):
+            await collector.start_input_replay()
+        self.assertFalse(collector._input_replay_only)
+        self.assertIsNone(collector._snapshot_task)
+        self.assertEqual(tasks, set(asyncio.all_tasks()))
+        with self.assertRaisesRegex(TypeError, 'INPUT_REPLAY_MESSAGE_VALIDATOR_REQUIRED'):
+            await collector.start_input_replay(message_validator=None)
+        self.assertFalse(collector._input_replay_only)
+        self.assertIsNone(collector._replay_message_validator)
+        self.assertIsNone(collector._snapshot_task)
+        self.assertIsNone(collector._task)
+        self.assertEqual(tasks, set(asyncio.all_tasks()))
+
+    async def test_recorder_owns_high_water_legacy_batch_and_native_flush_cause(self):
+        from kiwoom_monitor.central_server.diagnostic_metrics import CURRENT_FLUSH_ID
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import operation_identity
+
+        at = datetime.fromisoformat('2026-10-12T11:00:00+09:00')
+        hub_observer = HubInputRecorder()
+        hub = RealtimeHub(now_provider=lambda: at, observer=hub_observer)
+        other_hub_observer = HubInputRecorder()
+        other_hub = RealtimeHub(now_provider=lambda: at, observer=other_hub_observer)
+        recorder = CollectorInputRecorder(hub_observer=hub_observer)
+        other = CollectorInputRecorder(hub_observer=other_hub_observer)
+        calls = []
+
+        class Store:
+            def save_realtime_snapshots(self, values):
+                calls.append((values, operation_identity(), CURRENT_FLUSH_ID.get()))
+
+        collector = CentralRealtimeCollector(lambda: self.fail('network credentials requested'),
+            'real', hub, lambda: at, Store(), input_observer=recorder)
+        component = f'realtime_collector:{id(collector):x}'
+        with patch.object(trace, 'input_token', return_value='collector-owner-fixture'), \
+                patch.object(trace, 'emit_payload', return_value=True) as emit, \
+                patch.object(trace, 'reject_input'):
+            accepted = recorder.record_input(collector, 'capture_gap', {'clear_continuous': False})
+            self.assertEqual(('collector-owner-fixture', accepted), recorder.input_high_water)
+            self.assertEqual((None, ''), other.input_high_water)
+            self.assertIsNone(other.capture_epoch)
+            emit.return_value = False
+            self.assertIsNone(recorder.record_input(collector, 'capture_gap', {'clear_continuous': False}))
+            self.assertEqual(('collector-owner-fixture', accepted), recorder.input_high_water)
+            emit.return_value = True
+            groups = {'1000': [{'item': ['005930'], 'type': ['0B']}]}
+            with recorder.subscription_scope(collector, 'KRX', ('005930',), (), None, None) as returned:
+                returned(groups)
+            self.assertEqual(1, recorder.subscription_batch['group_count'])
+            self.assertIsNone(other.subscription_batch)
+            self.assertIs(hub._observer, recorder.hub_observer)
+            self.assertEqual('collector-owner-fixture', hub._observer.lifecycle_epoch)
+            self.assertIsNone(other_hub._observer.lifecycle_epoch)
+            hub.connect()
+            self.assertEqual(1, sum(call.args[2].get('input_kind') == 'hub_initial'
+                                    for call in emit.call_args_list))
+            collector._pending_snapshots[('trade', '005930')] = {
+                'event_type': 'trade', 'item_key': '005930', 'received_at': at.timestamp(), 'event': {}}
+            outer = asyncio.current_task()
+            await collector._flush_snapshots()
+            self.assertEqual(1, len(calls))
+            identity = calls[0][1]
+            self.assertEqual(component, identity['producer_component'])
+            self.assertEqual(f'{component}:{id(outer):x}', identity['actor_id'])
+            self.assertEqual(accepted, identity['cause_input_id'])
+            self.assertTrue(calls[0][2])
+            self.assertEqual('', operation_identity()['cause_input_id'])
+            self.assertFalse(CURRENT_FLUSH_ID.get())
+            self.assertEqual(set(), collector._approved_trade_sources)
+            self.assertFalse(any(key.startswith('_recorded_') for key in vars(collector)))
+            emit.return_value = False
+            with recorder.subscription_scope(collector, 'KRX', ('005930',), (), None, None):
+                self.assertIsNone(recorder.subscription_batch)
+            self.assertIsNone(recorder.subscription_batch)
+
+    async def test_native_collector_input_and_flush_run_with_all_diagnostic_source_absent(self):
+        import hashlib
+        import shutil
+        import subprocess
+        import sys
+        import textwrap
+
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / 'src' / 'kiwoom_monitor'
+            shutil.copytree(root / 'src' / 'kiwoom_monitor', copied,
+                ignore=shutil.ignore_patterns('__pycache__', 'diagnostic_*.py'))
+            self.assertFalse(list(copied.rglob('diagnostic_*.py')))
+            expected = hashlib.sha256((root / 'src/kiwoom_monitor/central_server/realtime_collector.py').read_bytes()).hexdigest()
+            program = r'''
+import asyncio, hashlib, json, os, runpy, sys, time
+from pathlib import Path
+from datetime import datetime
+from threading import Event
+from unittest.mock import patch
+runpy.run_path(os.environ['KIWOOM_REGRESSION_REGISTRY_HELPER'])['join_from_environment']()
+copied, expected = Path(sys.argv[1]), sys.argv[2]
+sys.path.insert(0, str(copied.parent))
+from kiwoom_monitor.central_server import realtime_collector as module
+from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+actual = Path(module.__file__).resolve()
+assert actual == (copied / 'central_server' / 'realtime_collector.py').resolve()
+assert hashlib.sha256(actual.read_bytes()).hexdigest() == expected
+assert not list(copied.rglob('diagnostic_*.py'))
+at = datetime.fromisoformat('2026-10-12T11:00:00+09:00')
+
+class Store:
+    # Deliberate protocol fixture: real SQLite/PG construction is a separate gate.
+    def __init__(self):
+        self.fail = True
+        self.hold = False
+        self.entered, self.release = Event(), Event()
+        self.snapshots, self.minutes = [], []
+    def save_realtime_snapshots(self, values):
+        if self.fail:
+            self.fail = False
+            raise LookupError('native retry fixture')
+        if self.hold:
+            self.entered.set()
+            if not self.release.wait(3): raise TimeoutError('native release missing')
+        self.snapshots.extend(values)
+    def save_minute_bars(self, values, **kwargs): self.minutes.extend(values)
+    def finalize_minute_bars(self, values): pass
+    def save_dataset_snapshots(self, values): pass
+    def upsert_documents(self, collection, values): pass
+
+class Socket:
+    def __init__(self): self.responses = asyncio.Queue()
+    async def send(self, raw):
+        frame = json.loads(raw)
+        self.responses.put_nowait({'trnm': frame['trnm'], 'return_code': 0})
+    async def recv(self): return json.dumps(await self.responses.get())
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): return False
+
+async def until(predicate):
+    deadline = time.monotonic() + 3
+    while not predicate():
+        if time.monotonic() >= deadline: raise AssertionError('native fixture did not progress')
+        await asyncio.sleep(.002)
+
+async def exercise():
+    store, socket = Store(), Socket()
+    hub = RealtimeHub(now_provider=lambda: at)
+    sub = hub.connect()
+    hub.update_subscription(sub, ['005930'], [], program_codes=[], priority_codes=[])
+    async def snapshot_sleep(seconds): await asyncio.Event().wait()
+    collector = module.CentralRealtimeCollector(lambda: 'fixture', 'real', hub, lambda: at, store,
+                                                snapshot_sleep=snapshot_sleep)
+    before = set(asyncio.all_tasks())
+    with patch.object(module, 'connect', return_value=socket), \
+            patch.object(module, 'REALTIME_REG_INTERVAL_SECONDS', 0):
+        await collector.start()
+        try:
+            await until(lambda: hub.upstream_ready)
+            assert collector._approved_trade_sources == {('005930', 'KRX')}
+            collector.set_ram_observation_retention(20)
+            message = {'trnm': 'REAL', 'data': [{'type': '0B', 'item': '005930',
+                'values': {'10': '1000', '20': '110000', '15': '1', '13': '10', '14': '1'}}]}
+            socket.responses.put_nowait(message)
+            await until(lambda: bool(collector._pending_snapshots))
+            snapshot = collector.ram_observation_snapshot(('005930',), seconds=20)
+            assert snapshot['capture_anchor'] is None and len(snapshot['rows']) == 1
+            assert snapshot['decision_time'] == at.isoformat()
+            try: await collector._flush_snapshots()
+            except LookupError: pass
+            else: raise AssertionError('native writer error lost')
+            assert ('trade', '005930') in collector._pending_snapshots
+            await collector._flush_snapshots()
+            assert len(store.snapshots) == 1 and not collector._pending_snapshots
+            assert len(store.minutes) == 1
+            generation = collector._ram_observation_generation
+            collector._mark_capture_gap()
+            assert collector._ram_observation_generation == generation + 1
+            assert collector.ram_observation_snapshot(('005930',), seconds=20)['rows'] == ()
+            message['data'][0]['values']['10'] = '1001'
+            socket.responses.put_nowait(message)
+            await until(lambda: bool(collector._pending_snapshots))
+            store.hold = True
+            flushing = asyncio.create_task(collector._flush_snapshots())
+            assert await asyncio.to_thread(store.entered.wait, 3)
+            flushing.cancel()
+            try: await flushing
+            except asyncio.CancelledError: pass
+            else: raise AssertionError('caller cancellation lost')
+            assert collector._flush_tasks and any(not task.done() for task in collector._flush_tasks)
+            store.release.set()
+        finally:
+            store.release.set()
+            await collector.close()
+        assert len(store.snapshots) == 2
+        assert not collector._flush_tasks and not collector._pending_snapshots
+        assert collector._credential_phase == 'STOPPED'
+        assert not any(key.startswith('_recorded_') for key in vars(collector))
+        await collector.start()
+        await until(lambda: hub.upstream_ready)
+        await collector.close()
+    await asyncio.sleep(0)
+    assert set(asyncio.all_tasks()) == before
+    assert not [name for name in sys.modules if name.startswith('kiwoom_monitor.') and '.diagnostic_' in name]
+    return {'actual_origin': str(actual), 'diagnostic_sources_absent': True,
+            'native_receive_retry_cancel_drain_restart': 'passed', 'store_scope': 'protocol_fixture'}
+print(json.dumps(asyncio.run(exercise())))
+'''
+            result = await asyncio.to_thread(subprocess.run,
+                [sys.executable, '-I', '-B', '-X', 'utf8', '-c', textwrap.dedent(program),
+                 str(copied), expected], capture_output=True, text=True, encoding='utf-8', timeout=15)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            proof = json.loads(result.stdout.strip())
+            self.assertTrue(proof['diagnostic_sources_absent'])
+            self.assertEqual('protocol_fixture', proof['store_scope'])
+            self.assertEqual('passed', proof['native_receive_retry_cancel_drain_restart'])

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
 
 from PySide6.QtCore import QObject, QThread
 
@@ -41,6 +44,39 @@ class InvalidWorker(QObject):
 
 
 class UpdateWorkerControllerTests(unittest.TestCase):
+    def test_explicit_download_directory_reaches_existing_worker_factory(self) -> None:
+        worker = FakeDownloadWorker()
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "selected-profile" / "updates"
+            factory = lambda steps, **options: worker
+            from unittest.mock import Mock
+            factory = Mock(side_effect=factory)
+            controller = UpdateWorkerController(download_factory=factory)
+            self.assertTrue(controller.start_download((), download_dir=folder))
+            factory.assert_called_once_with((), download_dir=folder)
+            worker.running = False
+            worker.finished.emit()
+
+    def test_download_worker_uses_owned_directory_and_preserves_default(self) -> None:
+        from types import SimpleNamespace
+        from kiwoom_monitor.presentation import background_workers as module
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                default_data = root / "default" / "data"
+                chosen = root / "chosen" / "updates"
+                worker = UpdateDownloadWorker((), download_dir=chosen if explicit else None)
+                completed, failed = [], []
+                worker.completed.connect(completed.append)
+                worker.failed.connect(failed.append)
+                with patch.object(module.AppPaths, "for_current_user", return_value=SimpleNamespace(data_dir=default_data)) as default:
+                    worker.run()
+                self.assertEqual([], failed)
+                self.assertEqual([()], completed)
+                self.assertTrue((chosen if explicit else default_data.parent / "updates").is_dir())
+                self.assertEqual(0 if explicit else 1, default.call_count)
+                self.assertFalse((default_data.parent if explicit else chosen).exists())
+
     def test_check_forwards_silent_context_and_releases_on_finish(self) -> None:
         worker = FakeCheckWorker()
         controller = UpdateWorkerController(check_factory=lambda: worker)

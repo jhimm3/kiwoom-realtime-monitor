@@ -1,5 +1,7 @@
 # QueryStore 도메인 분류와 첫 물리 분리 계약
 
+> **도메인 지도 사용.** 이 문서의 도메인 분리 수와 연결은 해당 시점의 근거다. 현재 수정은 QueryStore 호출자·공개 계약·native transaction과 실제 영향을 확인한다. [관련 계약](../architecture/r3-ownership.md).
+
 2026-10-05: 21개 도메인 분리 후 [QueryStore 계약 재평가](query_store_protocol_review.md)를
 마쳤고 REST 캐시 두 메서드의 작은 소비자 계약과 상속 계약 감사를 현재 워크트리에 적용했다.
 후보 NAS 검사가 5/5 통과했다. 추가 소비자별 계약은 실제 책임 경계를 좁히지 못해 만들지

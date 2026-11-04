@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 import time
@@ -35,8 +36,8 @@ def control_path() -> Path | None:
     return Path(value) if value else None
 
 
-def evaluate_diagnostic_control(payload: object, *, now: float | None = None) -> dict[str, object]:
-    """Evaluate parent and children from the same immutable file generation."""
+def _evaluate_diagnostic_control(payload: object, *, now: float | None = None) -> tuple[dict[str, object], bool]:
+    """Keep the native result and whether it was obtained from interpretable state."""
     empty = {"enabled": False, "expires_at": None, "owner": None, "session_id": None}
     result: dict[str, object] = {
         "diagnostic_tool": empty, "metrics_capture": dict(empty),
@@ -44,24 +45,30 @@ def evaluate_diagnostic_control(payload: object, *, now: float | None = None) ->
         "paused": frozenset(), "workload_expiries": {}, "expires_at": None,
         "control_revision": 0,
     }
-    if (not isinstance(payload, dict) or payload.get("schema") != 1
-            or payload.get("instance_id") != instance_id()):
-        return result
+    if not isinstance(payload, dict) or payload.get("schema") != 1:
+        return result, False
+    if payload.get("instance_id") != instance_id():
+        # The existing owner invalidates another process lifetime's leases.
+        return result, isinstance(payload.get("instance_id"), str) and bool(payload["instance_id"])
     try:
         result["control_revision"] = max(0, int(payload.get("control_revision", 0)))
     except (ValueError, TypeError):
-        return result
+        return result, False
     current_time = time.time() if now is None else now
     parent = payload.get("diagnostic_tool")
     if not isinstance(parent, dict):
-        return result
+        return result, parent is None
     try:
         parent_expiry = float(parent.get("expires_at", 0))
         monotonic_deadline = parent.get("monotonic_deadline")
-        if (parent_expiry <= current_time or
-                (monotonic_deadline is not None
-                 and float(monotonic_deadline) <= time.monotonic())):
-            return result
+        known = math.isfinite(parent_expiry)
+        if parent_expiry <= current_time:
+            return result, known
+        if monotonic_deadline is not None:
+            deadline = float(monotonic_deadline)
+            known = known and math.isfinite(deadline)
+            if deadline <= time.monotonic():
+                return result, known
         parent_status = {
             "enabled": True, "expires_at": parent_expiry,
             "owner": str(parent.get("owner", "manual")),
@@ -73,10 +80,12 @@ def evaluate_diagnostic_control(payload: object, *, now: float | None = None) ->
         if isinstance(leases, dict):
             valid = {name: min(float(expiry), parent_expiry)
                      for name, expiry in leases.items() if name in WORKLOADS}
+            known = known and all(math.isfinite(expiry) for expiry in valid.values())
             expiries = {name: expiry for name, expiry in valid.items()
                         if expiry > current_time}
         else:
             legacy_expiry = min(float(payload.get("expires_at", 0)), parent_expiry)
+            known = known and math.isfinite(legacy_expiry)
             values = payload.get("paused", [])
             expiries = ({name: legacy_expiry for name in values if name in WORKLOADS}
                         if legacy_expiry > current_time and isinstance(values, list) else {})
@@ -85,6 +94,7 @@ def evaluate_diagnostic_control(payload: object, *, now: float | None = None) ->
         capture = payload.get("capture")
         if isinstance(capture, dict):
             capture_expiry = min(float(capture.get("expires_at", 0)), parent_expiry)
+            known = known and math.isfinite(capture_expiry)
             if capture_expiry > current_time:
                 result["metrics_capture"] = {
                     "enabled": True, "expires_at": capture_expiry,
@@ -94,19 +104,44 @@ def evaluate_diagnostic_control(payload: object, *, now: float | None = None) ->
         trace = payload.get("trace")
         if isinstance(trace, dict):
             trace_expiry = min(float(trace.get("expires_at", 0)), parent_expiry)
+            known = known and math.isfinite(trace_expiry)
             if trace_expiry > current_time:
                 result["trace_capture"] = {
                     "enabled": True, "expires_at": trace_expiry,
                     "owner": str(trace.get("owner", "manual")),
                     "session_id": parent_status["session_id"],
                 }
-        return result
+        return result, known
     except (ValueError, TypeError, AttributeError):
         # Invalid diagnostic state cannot turn on a pause or a sampler.
         return {"diagnostic_tool": empty, "metrics_capture": dict(empty),
                 "trace_capture": dict(empty),
                 "paused": frozenset(), "workload_expiries": {}, "expires_at": None,
-                "control_revision": 0}
+                "control_revision": 0}, False
+
+
+def evaluate_diagnostic_control(payload: object, *, now: float | None = None) -> dict[str, object]:
+    """Evaluate parent and children from the same immutable file generation."""
+    return _evaluate_diagnostic_control(payload, now=now)[0]
+
+
+def maintenance_status(path: Path | None = None, *, now: float | None = None) -> dict[str, object]:
+    """Observe control provenance without turning unreadable state into disabled fact."""
+    path = path if path is not None else control_path()
+    if path is None:
+        return {"source": "unconfigured"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"source": "unknown"}
+    try:
+        control, known = _evaluate_diagnostic_control(payload, now=now)
+    except (ValueError, TypeError, OverflowError):
+        return {"source": "unknown"}
+    if not known:
+        return {"source": "unknown"}
+    return {"source": "known", "master_enabled": control["diagnostic_tool"]["enabled"],
+            "trace_enabled": control["trace_capture"]["enabled"], "paused_count": len(control["paused"])}
 
 
 def control_snapshot(path: Path | None = None, *, now: float | None = None) -> dict[str, object]:

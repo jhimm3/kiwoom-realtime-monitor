@@ -2,7 +2,31 @@ from __future__ import annotations
 
 import os
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kiwoom_monitor.domain.research_contract import SelectedResearchArtifact
+
+
+@dataclass(frozen=True)
+class ProducerGrant:
+    """One plain producer credential; role membership is explicit in server settings."""
+
+    owner: str
+    token: str = field(repr=False)
+
+
+def _producer_grants_from_environment(name: str) -> tuple[ProducerGrant, ...]:
+    try:
+        values = json.loads(os.environ.get(name, "[]"))
+        if not isinstance(values, list) or any(not isinstance(value, dict) or set(value) != {"owner", "token"} for value in values):
+            raise ValueError
+        return tuple(ProducerGrant(**value) for value in values)
+    except (TypeError, ValueError):
+        raise ValueError(name + " requires owner/token entries") from None
 
 
 @dataclass(frozen=True)
@@ -70,6 +94,30 @@ class CentralServerSettings:
     account_identity_registry_enabled: bool = False
     credential_directory: str = ""
     credential_trusted_proxies: tuple[str, ...] = ()
+    query_access_token: str = field(default="", repr=False)
+    research_result_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
+    news_body_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
+    # Protected startup configuration. Unset + explicit restart revokes new strict publications.
+    selected_research_artifact_file: str = ""
+    research_input_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
+
+    def __post_init__(self) -> None:
+        if self.query_access_token and self.query_access_token == self.access_token:
+            raise ValueError("조회 토큰과 관리자 토큰은 달라야 합니다.")
+        tokens = {self.access_token, self.query_access_token}
+        for role, grants in (("research input", self.research_input_grants),
+                             ("research result", self.research_result_grants), ("news BODY", self.news_body_grants)):
+            owners: set[str] = set()
+            if not isinstance(grants, tuple):
+                raise ValueError(role + " grants must be an immutable tuple")
+            for grant in grants:
+                if (not isinstance(grant, ProducerGrant) or not isinstance(grant.owner, str)
+                        or (not 1 <= len(grant.owner) <= 96 or any(not (character.isalnum() or character in "_-") for character in grant.owner))
+                        or not isinstance(grant.token, str) or not grant.token.strip()
+                        or grant.token != grant.token.strip() or grant.token in tokens or grant.owner in owners):
+                    raise ValueError("invalid or ambiguous " + role + " grant")
+                tokens.add(grant.token)
+                owners.add(grant.owner)
 
     @classmethod
     def from_environment(cls) -> "CentralServerSettings":
@@ -180,6 +228,11 @@ class CentralServerSettings:
         return cls(
             database_url=database_url,
             access_token=access_token,
+            query_access_token=os.environ.get("MONITOR_SERVER_QUERY_ACCESS_TOKEN", "").strip(),
+            research_input_grants=_producer_grants_from_environment("MONITOR_SERVER_RESEARCH_INPUT_GRANTS_JSON"),
+            research_result_grants=_producer_grants_from_environment("MONITOR_SERVER_RESEARCH_RESULT_GRANTS_JSON"),
+            news_body_grants=_producer_grants_from_environment("MONITOR_SERVER_NEWS_BODY_GRANTS_JSON"),
+            selected_research_artifact_file=os.environ.get("MONITOR_SERVER_SELECTED_RESEARCH_ARTIFACT_FILE", "").strip(),
             host=os.environ.get("KIWOOM_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=port,
             kiwoom_environment=environment,
@@ -271,6 +324,15 @@ class CentralServerSettings:
             credential_directory=credential_directory,
             credential_trusted_proxies=credential_trusted_proxies,
         )
+
+    def selected_research_artifact(self) -> SelectedResearchArtifact | None:
+        """Read the explicit operator choice once at startup; no engine/source fallback."""
+        from kiwoom_monitor.domain.research_contract import SelectedResearchArtifact
+        if not self.selected_research_artifact_file:
+            return None
+        return SelectedResearchArtifact.from_document(json.loads(
+            Path(self.selected_research_artifact_file).read_text(encoding="utf-8"),
+        ))
 
     def account_identity_key(self) -> bytes:
         value = self.account_identity_hmac_key.encode("utf-8")

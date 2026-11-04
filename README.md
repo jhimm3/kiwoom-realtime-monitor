@@ -12,7 +12,7 @@
 
 - **[현재 문서 안내](docs/README.md)** — 기능·기획·계약·운영 문서를 찾는 시작점
 - [현재 앱 상태](docs/CURRENT_STATUS.md) · [개발 로드맵](FUTURE_DEVELOPMENT_ROADMAP.md)
-- [다음 작업: 대신 과거 봉·네이버 증권 뉴스 확보](docs/HISTORICAL_BACKFILL_PLAN.md)
+- [현재 AR 단계·전환 조건](docs/architecture/app-target-20261023.md#0-현재-기준과-진행-현황) · [실행 컴퓨터와 NAS의 목표 배치](docs/architecture/app-target-20261023.md#portable-execution-target)
 - [남은 작업과 보류](docs/OPEN_ITEMS.md) · [현재 아키텍처](ARCHITECTURE_CURRENT.md) · [모듈 지도](MODULE_MAP.md)
 - [작업 지침](AGENTS.md) · [개발 불변 규칙](DEVELOPMENT_GUARDRAILS.md)
 

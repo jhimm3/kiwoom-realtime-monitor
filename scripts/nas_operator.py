@@ -35,9 +35,11 @@ CAPACITY_DISK_FREE = 12 * 1024 ** 3
 WORD = re.compile(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,99}\Z')
 LABEL = 'com.kiwoom.operator-job'
 CLEAN_ENV = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': '/'}
-CONTRACT = ('pyproject.toml', 'deploy/synology/server.Dockerfile',
+CONTRACT_VERSION = 2
+LEGACY_CONTRACT = ('pyproject.toml', 'deploy/synology/server.Dockerfile',
             'src/kiwoom_monitor/central_server/central_schema.py',
             'src/kiwoom_monitor/central_server/schema_migrations.py')
+CONTRACT = LEGACY_CONTRACT + ('requirements.lock.txt',)
 
 
 class Rejected(RuntimeError):
@@ -390,23 +392,44 @@ class Tree:
 
 def source_name(name):
     relative(name)
-    require(name == 'pyproject.toml' or name.startswith(('src/', 'tests/', 'scripts/')), 'source_outside_allowlist')
+    require(name in ('pyproject.toml', 'requirements.lock.txt') or
+            name.startswith(('src/', 'tests/', 'scripts/')), 'source_outside_allowlist')
+
+
+def validate_isolated_test_runtime(value):
+    """Copy the one administrator-owned test policy; never mutate prod config."""
+    require(type(value) is dict and set(value) == {'format', 'contract', 'runtime_image_id'} and
+            type(value.get('format')) is int and value['format'] == 1,
+            'invalid_isolated_test_runtime')
+    contract, image = value['contract'], value['runtime_image_id']
+    require(type(contract) is dict and set(contract) == set(CONTRACT) and
+            all(type(item) is str and HEX.fullmatch(item) for item in contract.values()) and
+            type(image) is str and re.fullmatch(r'sha256:[a-f0-9]{64}', image),
+            'invalid_isolated_test_runtime')
+    return {'format': 1, 'contract': dict(contract), 'runtime_image_id': image}
 
 
 def validate_manifest(manifest, release_id, contract):
     require(type(manifest) is dict and manifest.get('format') == 1 and
             manifest.get('release_id') == release_id, 'invalid_release_manifest')
     candidate_contract = manifest.get('contract')
-    require(type(candidate_contract) is dict and set(candidate_contract) == set(CONTRACT) and
+    version = manifest.get('contract_version', 1)
+    require(type(version) is int and version in (1, CONTRACT_VERSION), 'invalid_release_contract_version')
+    contract_files = CONTRACT if version == CONTRACT_VERSION else LEGACY_CONTRACT
+    require(type(candidate_contract) is dict and set(candidate_contract) == set(contract_files) and
             all(type(value) is str and HEX.fullmatch(value) for value in candidate_contract.values()),
             'invalid_release_contract')
     # Dockerfile/build markers do not change the already pinned image. The
     # migration driver's ordinary code is covered by source admission, not DDL.
-    require(all(candidate_contract[name] == contract.get(name) for name in
-                ('pyproject.toml', 'src/kiwoom_monitor/central_server/central_schema.py')),
+    require(('requirements.lock.txt' in contract) == (version == CONTRACT_VERSION) and
+            all(candidate_contract[name] == contract.get(name) for name in
+                ('pyproject.toml', 'src/kiwoom_monitor/central_server/central_schema.py') +
+                (('requirements.lock.txt',) if version == CONTRACT_VERSION else ())),
             'contract_requires_admin_update')
     files = manifest.get('files')
     require(type(files) is dict and 0 < len(files) <= 20000, 'invalid_source_files')
+    require(('requirements.lock.txt' in files) == (version == CONTRACT_VERSION),
+            'dependency_contract_version_mismatch')
     for name, digest in files.items():
         source_name(name)
         require(type(digest) is str and HEX.fullmatch(digest), 'invalid_file_hash')
@@ -418,7 +441,7 @@ def validate_manifest(manifest, release_id, contract):
     expected_src = hashlib.sha256(json.dumps({k: v for k, v in files.items() if k.startswith('src/')},
                                             sort_keys=True).encode()).hexdigest()
     require(manifest.get('src_hash') == expected_src, 'source_manifest_hash_mismatch')
-    for name in CONTRACT:
+    for name in contract_files:
         if name != 'deploy/synology/server.Dockerfile':
             require(name in files, 'contract_source_missing')
             require(files[name] == candidate_contract[name], 'contract_file_hash_mismatch')
@@ -525,12 +548,79 @@ def fingerprint_matches(value, approved):
     return False
 
 
+def validate_operator_state(value):
+    """Validate protocol shape; UNKNOWN is valid observation, never idle proof."""
+    require(type(value) is dict and set(value) == {
+        'contract', 'version', 'scope', 'checked_at', 'composition', 'control', 'trace', 'runs'},
+        'operator_state_invalid')
+    require(type(value['version']) is int and value['version'] == 1, 'operator_state_version_unsupported')
+    require(value['contract'] == 'operator-state' and value['scope'] == 'diagnostic_exclusion' and
+            value['composition'] in ('not_installed', 'installed'), 'operator_state_invalid')
+    at = value['checked_at']
+    require(type(at) is str and len(at) <= 64, 'operator_state_invalid')
+    try:
+        parsed = datetime.fromisoformat(at)
+        valid_time = parsed.utcoffset() is not None and parsed.utcoffset().total_seconds() == 32400
+    except (ValueError, TypeError, OverflowError):
+        valid_time = False
+    require(valid_time, 'operator_state_invalid')
+    control, trace, runs = value['control'], value['trace'], value['runs']
+    require(all(type(part) is dict for part in (control, trace, runs)), 'operator_state_invalid')
+    if value['composition'] == 'not_installed':
+        require(all(part == {'state': 'not_created'} for part in (control, trace, runs)), 'operator_state_invalid')
+        return
+    source = control.get('source')
+    require(source in ('known', 'unconfigured', 'unknown'), 'operator_state_invalid')
+    if source == 'known':
+        require(set(control) == {'source', 'master_enabled', 'trace_enabled', 'paused_count'} and
+                type(control['master_enabled']) is bool and type(control['trace_enabled']) is bool and
+                type(control['paused_count']) is int and control['paused_count'] >= 0, 'operator_state_invalid')
+    else:
+        require(set(control) == {'source'}, 'operator_state_invalid')
+    if trace.get('state') in ('not_created', 'unknown'):
+        require(set(trace) == {'state'}, 'operator_state_invalid')
+    else:
+        fields = ('queued', 'pending_events', 'copy_reserved_bytes', 'charged_bytes',
+                  'packing_events', 'packed_events', 'accepted', 'written')
+        require(set(trace) == {'state', 'worker', *fields} and
+                trace.get('state') in ('running', 'stopping', 'awaiting_persistence', 'persisting',
+                                       'interrupted', 'failed', 'complete', 'incomplete') and
+                trace.get('worker') in ('running', 'exited', 'unknown') and
+                all(type(trace.get(key)) is int and trace[key] >= 0 for key in fields), 'operator_state_invalid')
+    if runs.get('state') in ('not_created', 'unknown'):
+        require(set(runs) == {'state'}, 'operator_state_invalid')
+    else:
+        require(set(runs) == {'state', 'worker', 'phase'} and runs.get('state') == 'owned' and
+                runs.get('worker') in ('running', 'exited', 'unknown') and
+                runs.get('phase') in ('starting', 'running', 'finalizing', 'completed', 'incomplete',
+                                      'aborted', 'failed', 'unknown'), 'operator_state_invalid')
+
+
 def idle(snapshot):
     require(type(snapshot) is dict, 'diagnostic_state_unknown')
-    for key in ('diagnostic_tool', 'trace_capture'):
-        require(type(snapshot.get(key)) is dict and snapshot[key].get('enabled') is False, 'diagnostics_enabled')
-    require(snapshot.get('paused_workloads') == [] and snapshot.get('active_runs') == [], 'workload_or_run_active')
-    trace = snapshot.get('trace')
+    if 'operator_state' in snapshot:
+        value = snapshot['operator_state']
+        validate_operator_state(value)
+        if value['composition'] == 'not_installed':
+            return
+        control, trace, runs = value['control'], value['trace'], value['runs']
+        require(control['source'] != 'unknown' and trace.get('state') != 'unknown' and
+                runs.get('state') != 'unknown' and trace.get('worker') != 'unknown' and
+                runs.get('worker') != 'unknown' and runs.get('phase') != 'unknown', 'diagnostic_state_unknown')
+        if control['source'] == 'known':
+            require(control['master_enabled'] is False and control['trace_enabled'] is False, 'diagnostics_enabled')
+            require(control['paused_count'] == 0, 'workload_or_run_active')
+        require(runs['state'] == 'not_created' or
+                runs.get('worker') == 'exited' and runs.get('phase') in ('completed', 'incomplete', 'aborted', 'failed'),
+                'workload_or_run_active')
+        if trace['state'] == 'not_created':
+            return
+        require(trace.get('worker') == 'exited', 'trace_not_durably_idle')
+    else:
+        for key in ('diagnostic_tool', 'trace_capture'):
+            require(type(snapshot.get(key)) is dict and snapshot[key].get('enabled') is False, 'diagnostics_enabled')
+        require(snapshot.get('paused_workloads') == [] and snapshot.get('active_runs') == [], 'workload_or_run_active')
+        trace = snapshot.get('trace')
     require(type(trace) is dict and trace.get('state') in ('off', 'complete', 'incomplete'),
             'trace_not_durably_idle')
     if trace['state'] != 'off':
@@ -546,19 +636,38 @@ def idle(snapshot):
                 'trace_incomplete')
 
 
-SNAPSHOT_CODE = '''import json,os,urllib.request
+SNAPSHOT_CODE = '''import json,os,sys,urllib.error,urllib.request
 from pathlib import Path
 base='http://127.0.0.1:'+os.environ.get('KIWOOM_SERVER_PORT','8787')
 headers={'Authorization':'Bearer '+os.environ['MONITOR_SERVER_ACCESS_TOKEN']}
-def get(p):
-    with urllib.request.urlopen(urllib.request.Request(base+p,headers=headers),timeout=5) as r:return json.load(r)
-h=get('/health');w=get('/api/v1/diagnostics/workloads');t=get('/api/v1/diagnostics/trace');r=get('/api/v1/diagnostics/reports?limit=20')
+observation_only=len(sys.argv)==2 and sys.argv[1]=='status'
+unavailable=[]
+absent=object()
+def get(p,optional=False):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(base+p,headers=headers),timeout=5) as r:return json.load(r)
+    except urllib.error.HTTPError as error:
+        if not (observation_only and optional and error.code==404):raise
+        error.close()
+        unavailable.append(p)
+        return absent
+h=get('/health')
+if 'operator_state_version' in h:
+    if type(h['operator_state_version']) is not int or h['operator_state_version']!=1:raise ValueError('operator_state_version_unsupported')
+    owner=get('/api/v1/operator/state')
+else:
+    w=get('/api/v1/diagnostics/workloads',optional=True);t=get('/api/v1/diagnostics/trace',optional=True);r=get('/api/v1/diagnostics/reports?limit=20',optional=True)
 env=dict(x.split(b'=',1) for x in Path('/proc/1/environ').read_bytes().split(b'\\0') if b'=' in x)
-print(json.dumps({'health':h.get('status'),'server_build':h.get('server_build'),
-'source_path':env.get(b'PYTHONPATH',b'').decode(),'diagnostic_tool':w.get('diagnostic_tool'),
-'trace_capture':w.get('trace_capture'),'trace':{k:t[k] for k in ('state','queued','pending_events','copy_reserved_bytes','charged_bytes','packing_events','packed_events','accepted','written','known_dropped','input_rejected','input_capture_censored') if k in t},
-'paused_workloads':[k for k,v in w['workloads'].items() if v.get('paused_by_diagnostic')],
-'active_runs':[x.get('report_id') for x in r['items'] if x.get('state') in ('starting','running','finalizing')]}))
+snapshot={'health':h.get('status'),'server_build':h.get('server_build'),'source_path':env.get(b'PYTHONPATH',b'').decode()}
+if 'operator_state_version' in h:
+    snapshot['operator_state']=owner
+else:
+    snapshot.update({'diagnostic_tool':w.get('diagnostic_tool') if w is not absent else None,
+'trace_capture':w.get('trace_capture') if w is not absent else None,'trace':{k:t[k] for k in ('state','queued','pending_events','copy_reserved_bytes','charged_bytes','packing_events','packed_events','accepted','written','known_dropped','input_rejected','input_capture_censored') if k in t} if t is not absent else None,
+'paused_workloads':[k for k,v in w['workloads'].items() if v.get('paused_by_diagnostic')] if w is not absent else None,
+'active_runs':[x.get('report_id') for x in r['items'] if x.get('state') in ('starting','running','finalizing')] if r is not absent else None})
+if unavailable:snapshot['diagnostic_observation']={'version':1,'state':'UNAVAILABLE','idle':'UNKNOWN','missing_endpoints':unavailable}
+print(json.dumps(snapshot))
 '''
 
 
@@ -778,6 +887,14 @@ class Operator:
                 report['worker_result_available'] = False
                 return
             summary = {}
+            identity_keys = ('discovered_test_ids', 'executed_test_ids', 'passed_test_ids')
+            if any(key in outcome for key in identity_keys):
+                available = all(type(outcome.get(key)) is list and all(
+                    type(identity) is str and len(identity) <= 256 and TEST.fullmatch(identity)
+                    for identity in outcome[key]) for key in identity_keys)
+                summary['test_identity_receipt_available'] = available
+                if available:
+                    summary.update((key, outcome[key]) for key in identity_keys)
             reason = outcome.get('failure_reason')
             if (type(reason) is str and
                     (reason in ('worker_isolation_required', 'worker_memory_limit_not_enforced',
@@ -840,8 +957,14 @@ class Operator:
             if running or kind == 'database':
                 require(value['State']['Running'] is True, 'required_container_stopped')
 
-    def snapshot(self):
-        return decode(self.docker(['exec', self.config['server_id'], 'python', '-I', '-c', SNAPSHOT_CODE]))
+    def snapshot(self, *, observation_only=False):
+        command = ['exec', self.config['server_id'], 'python', '-I', '-c', SNAPSHOT_CODE]
+        if observation_only:
+            command.append('status')
+        result = decode(self.docker(command))
+        if type(result) is dict and 'operator_state' in result:
+            validate_operator_state(result['operator_state'])
+        return result
 
     def assert_mount_inode(self, host, destination):
         raw = self.docker(['exec', self.config['server_id'], 'python', '-I', '-c',
@@ -994,10 +1117,12 @@ class Operator:
             return {'temporary_access_revoked': True, 'access_files_restored': True,
                     'private_reports_and_inputs_preserved': True, 'server_restarted': False}
 
-    def source(self, release_id):
+    def source(self, release_id, *, isolated_test_runtime=None):
         with Tree(self.config['store'] + '/releases/' + identifier(release_id),
                   owners=(0, self.config['allowed_uid'])) as incoming:
-            return admit_source(incoming, self.private, release_id, self.config['contract'])
+            contract = (self.config['contract'] if isolated_test_runtime is None
+                        else isolated_test_runtime['contract'])
+            return admit_source(incoming, self.private, release_id, contract)
 
     def active_release(self):
         with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as store:
@@ -1016,13 +1141,16 @@ class Operator:
         with Tree(self.config['store'], owners=(0, self.config['allowed_uid'])) as tree:
             result['active_release'] = tree.json('active.json')['release_id']
         if self.inspect(self.config['server_id'])['State']['Running']:
-            snapshot = self.snapshot()
+            snapshot = self.snapshot(observation_only=True)
             result.update(snapshot=snapshot)
-            try:
-                idle(snapshot)
-                result['diagnostics_idle'] = True
-            except Rejected as error:
-                result.update(diagnostics_idle=False, blocker=str(error))
+            if snapshot.get('diagnostic_observation', {}).get('state') == 'UNAVAILABLE':
+                result.update(diagnostics_idle=False, blocker='diagnostic_state_unknown')
+            else:
+                try:
+                    idle(snapshot)
+                    result['diagnostics_idle'] = True
+                except Rejected as error:
+                    result.update(diagnostics_idle=False, blocker=str(error))
         else:
             result.update(diagnostics_idle=False, blocker='server_stopped')
         return result
@@ -1121,7 +1249,8 @@ class Operator:
                 'realtime_loss_verified': False, 'paused_at': record.get('paused_at'),
                 'resumed_at': record['resumed_at']}
 
-    def worker_argv(self, job, pg_name, release_id, extra_mounts=(), *, worker_memory=None):
+    def worker_argv(self, job, pg_name, release_id, extra_mounts=(), *, worker_memory=None,
+                    runtime_image_id=None):
         root = self.private.path
         memory = self.config['worker_memory'] if worker_memory is None else worker_memory
         require(memory in (self.config['worker_memory'], CAPACITY_WORKER_MEMORY), 'invalid_worker_resource_profile')
@@ -1134,8 +1263,10 @@ class Operator:
                 '--mount', 'type=bind,src=' + root + '/releases/' + release_id + ',dst=/app/candidate,readonly',
                 '--mount', 'type=bind,src=' + self.config['helper_dir'] + ',dst=/opt/kiwoom-operator,readonly',
                 '--mount', 'type=bind,src=' + root + '/job-' + job + '/worker,dst=/run/operator',
-                '--env', 'PYTHONDONTWRITEBYTECODE=1', '--env', 'HOME=/tmp'] + list(extra_mounts) + ['--entrypoint', 'python',
-                self.config['runtime_image_id'], '-I', '/opt/kiwoom-operator/nas_operator_worker.py']
+                '--env', 'PYTHONDONTWRITEBYTECODE=1', '--env', 'HOME=/tmp'] + list(extra_mounts) + (
+                [] if runtime_image_id is None else ['--pull=never']) + ['--entrypoint', 'python',
+                self.config['runtime_image_id'] if runtime_image_id is None else runtime_image_id,
+                '-I', '/opt/kiwoom-operator/nas_operator_worker.py']
 
     def cleanup_containers(self, job):
         require(re.fullmatch('[a-f0-9]{32}', job), 'invalid_job_id')
@@ -1178,7 +1309,12 @@ class Operator:
             except FileNotFoundError:
                 pass
 
-    def run_job(self, args, manifest, content):
+    def run_job(self, args, manifest, content, *, isolated_test_runtime=None):
+        isolated = bool(getattr(args, 'isolated_test_runtime', False))
+        require(isolated == (isolated_test_runtime is not None) and
+                (not isolated or (args.command == 'test' and args.profile == 'selected' and
+                                 not getattr(args, 'pause_operational', False))),
+                'isolated_test_runtime_requires_selected')
         self.last_docker_action = None
         self.last_docker_failure_class = None
         resources = job_resources(args, self.config)
@@ -1218,12 +1354,17 @@ class Operator:
             pg += ['--mount', 'type=bind,src=' + str(data) + ',dst=/var/lib/postgresql/data']
         pg += [self.config['pg_image_id'], 'postgres', '-c', 'shared_buffers=16MB', '-c', 'max_connections=20',
                '-c', 'kiwoom.replay_fixture_id=' + job]
+        runtime_image = (self.config['runtime_image_id'] if isolated_test_runtime is None
+                         else isolated_test_runtime['runtime_image_id'])
         report = {'job_id': job, 'command': args.command, 'release_id': args.release,
                   'source_hash': content, 'storage': storage, 'source_state_equivalent': source_state_equivalent,
-                  'runtime_image_id': self.config['runtime_image_id'], 'pg_image_id': self.config['pg_image_id'],
+                  'runtime_image_id': runtime_image, 'pg_image_id': self.config['pg_image_id'],
                   'worker_cpuset': self.config['worker_cpuset'], 'pg_cpuset': self.config['pg_cpuset'],
                   'pids_support': 'not_yet_verified', 'state': 'failed'}
         report.update(resource_profile=resources['profile'], worker_memory_requested=resources['worker_memory'])
+        if isolated:
+            report.update(admission_scope='isolated-test', isolated_test_runtime_sha256=hashlib.sha256(
+                json.dumps(isolated_test_runtime, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
         stage = 'prepare_job'
         self.private.put_json('job.json', {'state': 'running', 'job_id': job, 'command': args.command,
                                            'operational_pause': 'not_requested' if not pause_operational else 'pending'})
@@ -1296,14 +1437,19 @@ class Operator:
             verify_cpu_affinity(actual_cpu, self.config['pg_cpuset'])
             report['pg_cpu_affinity'] = actual_cpu
             stage = 'worker_create'
+            worker_options = {'worker_memory': resources['worker_memory']}
+            if isolated:
+                worker_options['runtime_image_id'] = runtime_image
             self.docker(self.worker_argv(job, pg_name, args.release, extra_mounts,
-                                         worker_memory=resources['worker_memory']))
+                                         **worker_options))
             stage = 'container_isolation_inspection'
             for name, cpus in ((pg_name, self.config['pg_cpuset']),
                                ('kiwoom-op-worker-' + job, self.config['worker_cpuset'])):
                 value = self.inspect(name)
                 require(value['HostConfig']['Memory'] > 0 and not value['HostConfig']['Privileged'] and
                         value['Config']['Labels'][LABEL] == job, 'job_isolation_invalid')
+                if isolated and name != pg_name:
+                    require(value.get('Image') == runtime_image, 'isolated_test_runtime_image_changed')
                 if resources['profile'] == 'recorder-capacity':
                     expected_memory = self.config['pg_memory'] if name == pg_name else CAPACITY_WORKER_MEMORY
                     require(value['HostConfig']['Memory'] == expected_memory, 'capacity_memory_limit_not_enforced')
@@ -1321,6 +1467,8 @@ class Operator:
                 self.docker(['start', '-a', 'kiwoom-op-worker-' + job], timeout=resources['job_timeout'], log=log)
             stage = 'worker_result_inspection'
             value = self.inspect('kiwoom-op-worker-' + job)
+            if isolated:
+                require(value.get('Image') == runtime_image, 'isolated_test_runtime_image_changed')
             require(value['State']['ExitCode'] == 0 and not value['State'].get('OOMKilled'), 'worker_failed')
             stage = 'worker_result_read'
             with Tree(str(worker), owners=(65534,)) as output:
@@ -1636,6 +1784,8 @@ def parser():
     test.add_argument('release', type=identifier)
     test.add_argument('--profile', default='replay-cache')
     test.add_argument('--test', action='append', default=[])
+    test.add_argument('--isolated-test-runtime', action='store_true', default=argparse.SUPPRESS,
+                      help='use the administrator-pinned selected-test runtime without publishing a deployment gate')
     test.add_argument('--pause-operational', action='store_true',
                       help='required only for fixed recorder capacity profiles; resume the approved server after cleanup')
     for name in ('register-trace', 'register-baseline'):
@@ -1676,6 +1826,9 @@ def job_resources(args, config):
 
 
 def validate_args(args, config):
+    require(not getattr(args, 'isolated_test_runtime', False) or
+            (args.command == 'test' and getattr(args, 'profile', None) == 'selected' and
+             not getattr(args, 'pause_operational', False)), 'isolated_test_runtime_requires_selected')
     if args.command == 'report':
         require(re.fullmatch('[a-f0-9]{32}', args.job_id), 'invalid_job_id')
     if args.command == 'test':
@@ -1744,10 +1897,13 @@ def main(argv=None):
         for number in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(number, interrupted)
     args = None
+    isolated_test_runtime = None
     try:
         args = parser().parse_args(argv)
         config = load_config(revoking=args.command == 'revoke')
         validate_args(args, config)
+        if getattr(args, 'isolated_test_runtime', False):
+            isolated_test_runtime = validate_isolated_test_runtime(config.get('isolated_test_runtime'))
         with Tree(config['private'], owners=(0,), protected=True) as private:
             operator = Operator(config, private)
             if args.command == 'status':
@@ -1773,8 +1929,14 @@ def main(argv=None):
                             result = operator.register(kind, args.input_id,
                                 capture_policy=getattr(args, 'capture_policy', 'complete'))
                         else:
-                            manifest, content = operator.source(args.release)
-                            result = operator.run_job(args, manifest, content)
+                            if isolated_test_runtime is None:
+                                manifest, content = operator.source(args.release)
+                                result = operator.run_job(args, manifest, content)
+                            else:
+                                manifest, content = operator.source(args.release,
+                                    isolated_test_runtime=isolated_test_runtime)
+                                result = operator.run_job(args, manifest, content,
+                                    isolated_test_runtime=isolated_test_runtime)
                 except BaseException as error:
                     if isinstance(result, dict) and re.fullmatch('[a-f0-9]{32}', result.get('job_id', '')):
                         result.update(state='failed', post_job_fence_verified=False,
@@ -1789,7 +1951,7 @@ def main(argv=None):
                 if args.command in ('test', 'replay'):
                     result['post_job_fence_verified'] = True
                     private.put_json('reports/' + result['job_id'] + '.json', result)
-                    if args.command == 'test':
+                    if args.command == 'test' and isolated_test_runtime is None:
                         private.put_json('gates/' + args.release + '.json',
                                          {'source_hash': result['source_hash'],
                                           'profile': args.profile, 'passed': True,

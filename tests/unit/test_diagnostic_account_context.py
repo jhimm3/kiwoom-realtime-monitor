@@ -177,6 +177,7 @@ class AccountContextTests(unittest.TestCase):
 
     def store(self, name):
         store = SQLiteQueryStore(Path(self.root.name) / (name + '.sqlite3'))
+        install_store_capture(store)
         store.initialize()
         self.addCleanup(store.close)
         return store

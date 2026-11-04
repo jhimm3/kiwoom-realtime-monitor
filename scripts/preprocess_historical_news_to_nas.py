@@ -16,6 +16,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.application.news_analysis import assess_stock_news, extractive_news_summary
 from kiwoom_monitor.application.news_rules import classify_supply_contract
 from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION
@@ -30,8 +31,11 @@ def prepare_job(job: dict, article: dict, body: dict | None = None,
                 *, search_database: Path | None = None,
                 allow_network: bool = True,
                 body_timeout_seconds: float = 15.0,
-                body_request_observer: Callable[[str, str, int, str], None] | None = None) -> dict:
+                body_request_observer: Callable[[str, str, int, str], None] | None = None,
+                now_provider: Callable[[], datetime] | None = None) -> dict:
     """Use the same extraction and rule functions as the NAS runner."""
+    # The online CLI supplies the existing response-derived server clock; offline callers use common KST fallback.
+    now_provider = now_provider or kst_now
     result: dict = {"job_key": job["job_key"], "attempts": job["attempts"], "stage": job["stage"]}
     document = dict(article["document"])
     if job["stage"] == "BODY":
@@ -53,9 +57,9 @@ def prepare_job(job: dict, article: dict, body: dict | None = None,
             )
             if snapshot and snapshot["body_text"]:
                 try:
-                    fetched_at = datetime.fromisoformat(snapshot["fetched_at"]).timestamp()
+                    fetched_at = as_kst(datetime.fromisoformat(snapshot["fetched_at"])).timestamp()
                 except ValueError:
-                    fetched_at = time.time()
+                    fetched_at = as_kst(now_provider()).timestamp()
                 result.update(body_text=snapshot["body_text"], body_status="fulltext",
                               fetched_at=fetched_at,
                               original_published_at=snapshot["published_at"],
@@ -83,7 +87,7 @@ def prepare_job(job: dict, article: dict, body: dict | None = None,
             text = str(document.get("description") or "").strip()
         if not text:
             raise ValueError("기사 본문과 목록 요약을 가져오지 못했습니다.")
-        result.update(body_text=text, body_status=status, fetched_at=time.time(),
+        result.update(body_text=text, body_status=status, fetched_at=as_kst(now_provider()).timestamp(),
                       original_published_at=published_at, source_url=fetched_url)
         return result
 
@@ -169,7 +173,7 @@ def main() -> int:
                 continue
             idle_since = time.monotonic()
             futures = [pool.submit(prepare_job, item["job"], item["article"], item.get("body"),
-                                   search_database=args.search_database)
+                                   search_database=args.search_database, now_provider=client.server_now)
                        for item in claimed]
             for item, future in zip(claimed, futures, strict=True):
                 job = item["job"]

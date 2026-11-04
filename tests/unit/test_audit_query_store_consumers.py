@@ -30,7 +30,32 @@ class QueryStoreConsumerAuditTests(unittest.TestCase):
         self.assertEqual([], result["all_candidate_delta"]["removed"])
         self.assertGreater(result["counts"]["reviewed_store_sites"], 0)
         self.assertGreater(result["counts"]["forwarding_edges"], 0)
-        self.assertEqual(6, result["counts"]["store_internal_delegate_sites"])
+        # Connection reuse binds the existing native methods without changing their owners.
+        reuse_delegates = {
+            "PostgresDocumentStoreMixin._mock_automation_recovery_scope": (
+                "mock_automation_read_scope", "insert_immutable_document", "load_document", "upsert_documents",
+            ),
+            "PostgresDocumentStoreMixin._mock_automation_risk_write_scope": (
+                "insert_immutable_document", "publish_mock_automation_current_risk",
+            ),
+        }
+        delegates = result["store_internal_delegates"]
+        reuse_sites = [site for site in delegates if site["owner"] in reuse_delegates]
+        self.assertCountEqual(
+            [(owner, "self", method, "bound_reference")
+             for owner, methods in reuse_delegates.items() for method in methods],
+            [(site["owner"], site["receiver"], site["method"], site["reference_kind"]) for site in reuse_sites],
+        )
+        self.assertEqual(8, result["counts"]["store_internal_delegate_sites"] - len(reuse_sites))
+        # Two real legacy string adapters now delegate to their same native owner.
+        self.assertEqual({
+            ("PostgresNewsRevisionStoreMixin.save_news_body_revision", "PostgresNewsRevisionStoreMixin"),
+            ("SQLiteNewsRevisionStoreMixin.save_news_body_revision", "SQLiteNewsRevisionStoreMixin"),
+        }, {
+            (site["owner"], site["receiver"])
+            for site in result["store_internal_delegates"]
+            if site["method"] == "save_news_body_revision_receipt"
+        })
         # Similar method names are retained for review rather than asserted as DB calls.
         self.assertGreater(result["counts"]["unresolved_same_name_candidates"], 0)
         self.assertTrue(all(
@@ -50,11 +75,16 @@ class QueryStoreConsumerAuditTests(unittest.TestCase):
             (central / "app.py").write_text(
                 "from .diagnostic_replay_runtime import owned_to_thread as dispatch\n"
                 "from . import diagnostic_replay_runtime as runtime\n"
+                "from .async_lifetime import owned_to_thread as common_dispatch\n"
+                "from . import async_lifetime as common_runtime\n"
                 "from other import owned_to_thread\n"
                 "from .diagnostic_replay_runtime import owned_to_thread as rebound\n"
                 "from other import owned_to_thread as rebound\n"
                 "async def alias(): await dispatch(store.load_documents, 'one')\n"
                 "async def module_alias(): await runtime.owned_to_thread(store.load_documents, 'two')\n"
+                "async def common_alias(): await common_dispatch(store.load_documents, 'common-one')\n"
+                "async def common_module_alias(): await common_runtime.owned_to_thread(store.load_documents, 'common-two')\n"
+                "async def common_parameter_shadow(common_dispatch): await common_dispatch(store.load_documents, 'common-shadow')\n"
                 "async def unrelated(): await owned_to_thread(store.load_documents, 'three')\n"
                 "async def parameter_shadow(dispatch): await dispatch(store.load_documents, 'four')\n"
                 "async def local_shadow():\n dispatch = other\n await dispatch(store.load_documents, 'five')\n"
@@ -69,11 +99,11 @@ class QueryStoreConsumerAuditTests(unittest.TestCase):
             result = inventory(root, approvals)
             sites = {row["owner"]: row for row in result["unresolved_same_name_candidates"]}
             canonical = "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread"
-            for owner in ("alias", "module_alias"):
+            for owner in ("alias", "module_alias", "common_alias", "common_module_alias"):
                 with self.subTest(owner=owner):
                     self.assertEqual("callable_argument", sites[owner]["reference_kind"])
                     self.assertEqual(canonical, sites[owner]["dispatch"])
-            for owner in ("unrelated", "parameter_shadow", "local_shadow", "import_shadow"):
+            for owner in ("unrelated", "parameter_shadow", "local_shadow", "import_shadow", "common_parameter_shadow"):
                 with self.subTest(owner=owner):
                     self.assertEqual("bound_reference", sites[owner]["reference_kind"])
                     self.assertEqual("", sites[owner]["dispatch"])

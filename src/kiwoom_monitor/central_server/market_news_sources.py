@@ -8,19 +8,18 @@ import logging
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from time import time
 from typing import Any, Callable
 from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
-from kiwoom_monitor.infrastructure.naver_stock_market_news import (
+from kiwoom_monitor.infrastructure.naver_stock_market_news_source import (
     ENDPOINT, PAGE_SIZE, SOURCES, MarketNewsPage, fetch_page,
 )
 
-from .news_sources import _marker, _page_items
-from .diagnostic_workloads import is_paused
+from kiwoom_monitor.infrastructure.news_source_documents import article_marker, page_items
 
 
 LOGGER = logging.getLogger(__name__)
@@ -45,8 +44,13 @@ class MarketFeedNewsCollector:
     def __init__(self, store: Any, *, poll_seconds: int = 300,
                  fetcher: Callable[..., MarketNewsPage] = fetch_page,
                  processing_excluded_providers: tuple[str, ...] = (),
-                 enabled: bool = True, endpoints: dict[str, str] | None = None) -> None:
+                 enabled: bool = True, endpoints: dict[str, str] | None = None,
+                 now_provider: Callable[[], datetime] | None = None,
+                 workload_paused: Callable[[str], bool] | None = None) -> None:
         self._store = store
+        # Standalone/offline collection uses the common explicit KST fallback.
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
+        self._workload_paused = workload_paused or (lambda _workload: False)
         self._poll_seconds = max(60, int(poll_seconds))
         self._fetcher = fetcher
         self._enabled = bool(enabled)
@@ -76,15 +80,15 @@ class MarketFeedNewsCollector:
         self._endpoints = dict(endpoints)
 
     async def run_once(self, *, now: datetime | None = None) -> None:
-        if not self._enabled or is_paused("news_market_feed"):
+        if not self._enabled or self._workload_paused("news_market_feed"):
             return
-        current = (now or datetime.now(KST)).astimezone(KST)
+        current = as_kst(now or self._now())
         dates = [current.date().isoformat()]
         if current.hour < 2:
             dates.append((current.date() - timedelta(days=1)).isoformat())
         for target_date in dates:
             for source in SOURCES:
-                if self._closing.is_set() or not self._enabled or is_paused("news_market_feed"):
+                if self._closing.is_set() or not self._enabled or self._workload_paused("news_market_feed"):
                     return
                 try:
                     await self._collect(source, target_date)
@@ -96,17 +100,17 @@ class MarketFeedNewsCollector:
     async def _collect(self, source: str, target_date: str) -> None:
         source_id = _source_id(source, target_date)
         cursor = await asyncio.to_thread(self._store.load_news_source_cursor, source_id) or {}
-        if float(cursor.get("next_schedule_at") or 0) > time():
+        if float(cursor.get("next_schedule_at") or 0) > self._now().timestamp():
             return
         page_number = max(1, int(cursor.get("next_start") or 1))
         old_marker = (str(cursor.get("cursor_published_at") or ""), str(cursor.get("cursor_identity") or ""))
         pending = (str(cursor.get("pending_published_at") or ""), str(cursor.get("pending_identity") or ""))
-        run_id, checked_at = uuid.uuid4().hex, time()
+        run_id, checked_at = uuid.uuid4().hex, self._now().timestamp()
         last_marker: tuple[str, str] | None = None
         catalog = await asyncio.to_thread(self._catalog)
         pages_this_run = 0
         while (page_number <= 300 and pages_this_run < 10 and not self._closing.is_set()
-               and self._enabled and not is_paused("news_market_feed")):
+               and self._enabled and not self._workload_paused("news_market_feed")):
             try:
                 for attempt in range(3):
                     try:
@@ -127,24 +131,24 @@ class MarketFeedNewsCollector:
                 if page.older_count and page_number == 1 and not page.articles:
                     raise ValueError("first page contains only earlier-date rows")
                 items = _news_items(page)
-                marker = _marker(items[-1]) if items else None
+                marker = article_marker(items[-1]) if items else None
                 repeat = marker is not None and marker == last_marker
                 if repeat:
                     items = []
                 elif marker is not None:
                     last_marker = marker
                 if not pending[1] and items:
-                    pending = _marker(items[0])
-                reached = bool(old_marker[1]) and any(_marker(item) == old_marker for item in items)
+                    pending = article_marker(items[0])
+                reached = bool(old_marker[1]) and any(article_marker(item) == old_marker for item in items)
                 exhausted = (len(items) < PAGE_SIZE[source] or bool(page.older_count)) and not repeat
                 capped = page_number == 300
                 completed = reached or exhausted or repeat or capped
                 truncated = repeat or capped
                 promoted = pending if completed else old_marker
                 accepted = await asyncio.to_thread(
-                    _page_items, items, catalog, self._excluded, retain_market_articles=True,
+                    page_items, items, catalog, self._excluded, retain_market_articles=True,
                 )
-                now = time()
+                now = self._now().timestamp()
                 await asyncio.to_thread(self._store.save_news_source_page, {
                     "source_id": source_id, "scope": "naver_stock_market", "query_text": source,
                     "run_id": run_id, "page_start": page_number, "checked_at": checked_at,
@@ -173,7 +177,7 @@ class MarketFeedNewsCollector:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                now = time()
+                now = self._now().timestamp()
                 await asyncio.to_thread(self._store.save_news_source_page, {
                     "source_id": source_id, "scope": "naver_stock_market", "query_text": source,
                     "run_id": run_id, "page_start": page_number, "checked_at": checked_at,

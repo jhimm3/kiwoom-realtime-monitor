@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+
 import asyncio
 import copy
 from contextlib import contextmanager
@@ -20,6 +27,7 @@ from kiwoom_monitor.central_server.diagnostic_top20_flow_input import (
     VERSION, _replay_candidate_flow, candidate_flow_cycle,
 )
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+from kiwoom_monitor.central_server import diagnostic_rest_input as rest_inputs
 from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
 
 NOW = datetime.fromisoformat("2026-10-07T09:01:02+09:00")
@@ -67,8 +75,10 @@ def identifier(events):
 class FlowInputTests(unittest.IsolatedAsyncioTestCase):
     async def source(self, store, outcomes, events=None):
         client = Client(outcomes)
-        broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest)
-        service = AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW)
+        broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest, input_observer=rest_inputs)
+        service = AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW,
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         try:
             if events is None:
                 with patch.object(trace, "input_token", return_value=None):
@@ -138,13 +148,15 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = self.store(directory, "source")
             client = Client([PAYLOAD])
-            broker = CentralRestBroker(client, source, MarketDataIngestor(source).ingest)
+            broker = CentralRestBroker(client, source, MarketDataIngestor(source).ingest, input_observer=rest_inputs)
             body = {"stk_cd": CODE + "_AL", "strt_dt": "20261007", "end_dt": "20261007", "orgn_prsm_unp_tp": "1", "for_prsm_unp_tp": "1"}
             await broker.request("ka10045", "/api/dostk/mrkcond", body)
             events = []
             try:
                 with capture_events(events):
-                    await AutonomousTop20Service(broker, None, source, now_provider=lambda: NOW)._capture_candidate_investor_flow(CODE, DAY)
+                    await AutonomousTop20Service(broker, None, source, now_provider=lambda: NOW,
+                        capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+                        flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)._capture_candidate_investor_flow(CODE, DAY)
             finally:
                 await broker.close()
             attempt = candidate_flow_cycle(events, identifier(events))[2][0]
@@ -163,19 +175,21 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
             store = self.store(directory)
             client = Client([PAYLOAD, PAYLOAD])
             client.release.clear()
-            broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest)
+            broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest, input_observer=rest_inputs)
             events = []
             try:
                 with capture_events(events):
-                    service = AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW)
+                    service = AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW,
+                        capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+                        flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
                     first = asyncio.create_task(service._capture_candidate_investor_flow(CODE, DAY))
                     self.assertTrue(await asyncio.to_thread(client.entered.wait, 2))
                     second = asyncio.create_task(service._capture_candidate_investor_flow(CODE, DAY))
                     for _ in range(100):
-                        if any(link["receipt"]["shared"] for link in broker._flow_inflight.values()):
+                        if any(entry.observation.flow_link["receipt"]["shared"] for entry in broker._inflight.values()):
                             break
                         await asyncio.sleep(.001)
-                    self.assertTrue(any(link["receipt"]["shared"] for link in broker._flow_inflight.values()))
+                    self.assertTrue(any(entry.observation.flow_link["receipt"]["shared"] for entry in broker._inflight.values()))
                     client.release.set()
                     await asyncio.gather(first, second)
                     await broker.request("ka10045", "/api/dostk/mrkcond", {"stk_cd": "000660", "end_dt": "20261007"})
@@ -184,13 +198,21 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
                 await broker.close()
             self.assertEqual(2, len(client.codes))
             ids = {row["input_id"] for row in events if row.get("event_type") == "market_input"}
+            self.assertEqual(2, len(ids))
             for flow_id in ids:
                 with self.assertRaisesRegex(ValueError, "receipt_unsupported"):
                     candidate_flow_cycle(events, flow_id)
             writes = [row for row in events if row.get("event_type") == "operation_start" and row.get("method") == "save_dataset_snapshot"]
             self.assertEqual(2, len(writes))
             self.assertEqual("", writes[-1]["cause_input_id"])
-            self.assertFalse(broker._flow_inflight)
+            self.assertFalse(broker._inflight)
+            self.assertFalse(broker._lookup_tasks)
+            for queue in (broker._queue, broker._persist_queue):
+                self.assertTrue(queue.empty())
+                self.assertEqual(0, queue._unfinished_tasks)
+            self.assertIsNone(broker._worker)
+            self.assertIsNone(broker._persist_worker)
+            self.assertTrue(broker._close_task.done())
 
     async def test_ack_loss_and_malformed_inputs_fail_before_replay_store_access(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,11 +334,13 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
             store = self.store(directory)
             client = Client([PAYLOAD])
             client.release.clear()
-            broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest)
+            broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest, input_observer=rest_inputs)
             events = []
             try:
                 with capture_events(events):
-                    task = asyncio.create_task(AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW)._capture_candidate_investor_flow(CODE, DAY))
+                    task = asyncio.create_task(AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW,
+                        capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+                        flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)._capture_candidate_investor_flow(CODE, DAY))
                     self.assertTrue(await asyncio.to_thread(client.entered.wait, 2))
                     task.cancel()
                     with self.assertRaises(asyncio.CancelledError):
@@ -357,9 +381,11 @@ class FlowInputTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(trace, "emit_payload", side_effect=OSError("observer")), \
                     patch.object(trace, "input_token", side_effect=lambda key: "capture" if key == "store_inputs" else None):
                 client = Client([PAYLOAD])
-                broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest)
+                broker = CentralRestBroker(client, store, MarketDataIngestor(store).ingest, input_observer=rest_inputs)
                 try:
-                    await AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW)._capture_candidate_investor_flow(CODE, DAY)
+                    await AutonomousTop20Service(broker, None, store, now_provider=lambda: NOW,
+                        capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+                        flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)._capture_candidate_investor_flow(CODE, DAY)
                 finally:
                     await broker.close()
             self.assertTrue(rejected.called)

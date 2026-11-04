@@ -1,5 +1,7 @@
 # PC SQLite 보조 사전
 
+> **물리 구조 표본.** 아래 테이블·컬럼 수는 당시 세 파일의 조회 결과다. 새 설치의 물리 구조와 실제 이전할 자료는 해당 설치물·선별 인계에서 확인한다. [관련 계약](../architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
+
 이 부록은 현재 PC `data/monitor.sqlite3`, `data/news.sqlite3`, `data/journal.sqlite3`의 **60개 테이블·478개 컬럼**을 읽기 전용으로 조회한 물리 구조다. NAS 43개 테이블과 별도로 센다. FK는 SQLite 선언이며 실행 연결의 `PRAGMA foreign_keys` 활성 여부까지 확인한 것은 아니다.
 
 PC 기능/키 의미의 기존 상세 설명은 [DB_SCHEMA.md](../../DB_SCHEMA.md), NAS와 연결되는 문서 종류는 [COLLECTIONS.md](COLLECTIONS.md)를 함께 본다. 이 부록은 물리 구조를 보존하며, 로컬 모든 컬럼의 도메인 의미를 재검증한 전수 계보 감사는 아니다.

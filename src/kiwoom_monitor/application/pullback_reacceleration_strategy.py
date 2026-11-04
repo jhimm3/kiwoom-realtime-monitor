@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.strategy_contract import (
+    PULLBACK_STRATEGY_ID as STRATEGY_ID, PULLBACK_STRATEGY_VERSION as STRATEGY_VERSION,
+    PULLBACK_FAMILY_ID as FAMILY_ID, PULLBACK_CONTRACT as FAMILY_CONTRACT,
+    PullbackReaccelerationConfig,
+)
+
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
@@ -27,90 +33,6 @@ from kiwoom_monitor.application.research_replay import (
     KrxMinuteBarFrame,
 )
 from kiwoom_monitor.domain.ranking import normalize_stock_code
-
-
-STRATEGY_ID = "krx_pullback_reacceleration"
-STRATEGY_VERSION = "v1"
-FAMILY_ID = f"{STRATEGY_ID}/{STRATEGY_VERSION}"
-FAMILY_CONTRACT: Mapping[str, Any] = {
-    "required_inputs": ("minute_bar/KRX/closed/complete", "top20_membership/as_available"),
-    "state_contract": "flat/candidate/open/cooldown",
-    "entry_contract": "pullback_reacceleration_then_optional_rank_filter",
-    "exit_contract": "stop_loss_or_target_or_max_hold",
-    "size_contract": "fixed_quantity_with_capital_limit",
-    "execution_environments": ("replay", "simulation"),
-}
-
-
-@dataclass(frozen=True)
-class PullbackReaccelerationConfig:
-    strategy_version: str
-    pullback_factor_version: str
-    rank_factor_version: str
-    lookback_bars: int
-    minimum_pullback_bps: int
-    minimum_reacceleration_bps: int
-    rank_persistence_enabled: bool
-    rank_persistence_required: bool
-    rank_top_k: int | None
-    rank_window_seconds: int | None
-    rank_max_gap_seconds: int | None
-    rank_min_residency_seconds: int | None
-    stop_loss_bps: int
-    target_bps: int
-    max_hold_minutes: int
-    quantity: int
-    capital_won: int
-    signal_valid_seconds: int
-    cooldown_seconds: int
-    session_exit_policy: str = ""
-    session_exit_buffer_seconds: int = 0
-
-    def __post_init__(self) -> None:
-        validate_session_exit_policy(self.session_exit_policy, self.session_exit_buffer_seconds)
-        if self.strategy_version != STRATEGY_VERSION:
-            raise ValueError(f"unregistered strategy: {STRATEGY_ID}/{self.strategy_version}")
-        get_factor_definition(PULLBACK_REACCELERATION_ID, self.pullback_factor_version)
-        get_factor_definition(RANK_PERSISTENCE_ID, self.rank_factor_version)
-        PullbackReaccelerationParameters(
-            self.lookback_bars, self.minimum_pullback_bps,
-            self.minimum_reacceleration_bps,
-        )
-        if self.rank_persistence_enabled:
-            if None in (
-                self.rank_top_k, self.rank_window_seconds, self.rank_max_gap_seconds,
-                self.rank_min_residency_seconds,
-            ):
-                raise ValueError("enabled rank persistence requires all rank parameters")
-            RankPersistenceParameters(
-                int(self.rank_top_k), int(self.rank_window_seconds),
-                int(self.rank_max_gap_seconds),
-            )
-            if int(self.rank_min_residency_seconds) < 0:
-                raise ValueError("rank_min_residency_seconds must not be negative")
-        elif self.rank_persistence_required:
-            raise ValueError("disabled rank persistence cannot be required")
-        if self.stop_loss_bps <= 0 or self.target_bps <= 0:
-            raise ValueError("stop_loss_bps and target_bps must be positive")
-        if self.max_hold_minutes <= 0 or self.quantity <= 0 or self.capital_won <= 0:
-            raise ValueError("hold duration, quantity, and capital must be positive")
-        if self.signal_valid_seconds <= 0 or self.cooldown_seconds < 0:
-            raise ValueError("signal validity must be positive and cooldown must not be negative")
-
-    def to_dict(self) -> dict[str, Any]:
-        document = asdict(self)
-        if not self.session_exit_policy:
-            document.pop("session_exit_policy")
-            document.pop("session_exit_buffer_seconds")
-        if not self.rank_persistence_enabled:
-            document.update({
-                "rank_persistence_required": False,
-                "rank_top_k": None,
-                "rank_window_seconds": None,
-                "rank_max_gap_seconds": None,
-                "rank_min_residency_seconds": None,
-            })
-        return document
 
 
 def evaluate_pullback_reacceleration_bar(

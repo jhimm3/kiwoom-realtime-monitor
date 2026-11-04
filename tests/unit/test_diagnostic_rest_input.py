@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+
 import asyncio
 import copy
 from contextlib import contextmanager
@@ -13,12 +20,13 @@ from unittest.mock import patch
 
 from kiwoom_monitor.central_server import diagnostic_trace as trace
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
-from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner, freeze_payload, operation_identity
+from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner, freeze_payload, operation_identity, thaw_payload
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
 from kiwoom_monitor.central_server.diagnostic_rest_input import (
     EVENT, RequestTapeClient, TapeInputUnavailable, read_request_tape,
 )
+from kiwoom_monitor.central_server import diagnostic_rest_input as rest_inputs
 from kiwoom_monitor.central_server.rest_broker import BrokerResult, CentralRestBroker
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 
@@ -84,7 +92,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
             client.error = TimeoutError("secret response text must not be recorded")
         handlers = []
         broker = CentralRestBroker(client, store,
-            lambda *args: handlers.append((args, operation_identity())))
+            lambda *args: handlers.append((args, operation_identity())), input_observer=rest_inputs)
         try:
             with recording(events), capture_owner("top20", "service:one", "lane:basics", cause_input_id="ranking-root"):
                 if failure:
@@ -117,7 +125,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         events, _, _, _ = await self.collect(cached=True)
         tape = read_request_tape(events)
         client, store, handlers = RequestTapeClient(tape, preserve_transport_delay=False), Store(), []
-        broker = CentralRestBroker(client, store, lambda *args: handlers.append(args))
+        broker = CentralRestBroker(client, store, lambda *args: handlers.append(args), input_observer=rest_inputs)
         try:
             with client.lane("lane:basics"):
                 await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -133,7 +141,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         # If a new run loses the cache path, a past cache-hit payload is unavailable
         # as a transport input; nothing seeds it into the new store.
         client, empty = RequestTapeClient(tape, preserve_transport_delay=False), Store()
-        broker = CentralRestBroker(client, empty)
+        broker = CentralRestBroker(client, empty, input_observer=rest_inputs)
         try:
             with client.lane("lane:basics"):
                 await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -148,7 +156,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_requests_keep_all_parents_and_only_one_native_transport(self):
         events, client = [], Client()
         client.release.clear()
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         async def request(lane):
             with capture_owner("top20", "service:one", lane):
                 return await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -173,7 +181,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         tape = read_request_tape(events)
         self.assertNotIn("secret response text", str(events))
         client = RequestTapeClient(tape, preserve_transport_delay=False)
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with client.lane("lane:basics"), self.assertRaises(TimeoutError):
                 await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -183,7 +191,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_continuation_identity_and_missing_or_changed_input_fail_closed(self):
         events, client = [], Client()
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with recording(events), capture_owner("top20", "service:one", "lane:pages"):
                 await broker.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"}, cont_yn="Y", next_key="key1")
@@ -191,7 +199,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
             await broker.close()
         tape = read_request_tape(events)
         client = RequestTapeClient(tape, preserve_transport_delay=False)
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with client.lane("lane:pages"), self.assertRaises(TapeInputUnavailable):
                 await broker.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"}, cont_yn="Y", next_key="wrong")
@@ -213,7 +221,9 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
             count.append(True)
             return (("005930", "삼성전자", "KOSPI"),)
         now = datetime.fromisoformat("2001-04-03T09:00:02+09:00")
-        service = AutonomousTop20Service(broker, None, store, catalog_loader=loader, now_provider=lambda: now)
+        service = AutonomousTop20Service(broker, None, store, catalog_loader=loader, now_provider=lambda: now,
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         with recording(events), capture_owner("top20", "service:one", "lane:catalog"):
             await service._ensure_market_catalog("2001-04-03")
             await service._ensure_market_catalog("2001-04-03")
@@ -222,7 +232,9 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(iter(tape["catalogs"])), store.effects[-1][1]["cause_input_id"])
         client, other = RequestTapeClient(tape, preserve_transport_delay=False), Store()
         service = AutonomousTop20Service(broker, None, other,
-            catalog_loader=client.catalog_loader("lane:catalog"), now_provider=lambda: now)
+            catalog_loader=client.catalog_loader("lane:catalog"), now_provider=lambda: now,
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         await service._ensure_market_catalog("2001-04-03")
         self.assertEqual(store.documents, other.documents)
         await service._ensure_market_catalog("2001-04-03")
@@ -231,7 +243,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_capture_off_and_account_paths_do_not_copy_or_change_results(self):
         client, events = Client(), []
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with patch.object(trace, "input_token", return_value=None), patch.object(trace, "emit_payload") as emit:
                 result = await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -245,7 +257,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_omitting_an_unneeded_different_request_does_not_shift_the_remaining_lane(self):
         events, client = [], Client()
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with recording(events), capture_owner("top20", "service:one", "lane:prep"):
                 await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -254,7 +266,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
             await broker.close()
         tape = read_request_tape(events)
         client = RequestTapeClient(tape, preserve_transport_delay=False)
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with client.lane("lane:prep"):
                 await broker.request("ka10100", PATH, {"stk_cd": "005930"})
@@ -272,7 +284,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         def handler(*args):
             entered.set()
             release.wait(3)
-        broker = CentralRestBroker(client, response_handler=handler)
+        broker = CentralRestBroker(client, response_handler=handler, input_observer=rest_inputs)
         async def request(lane):
             with capture_owner("top20", "service:one", lane):
                 await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -294,7 +306,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
             await broker.close()
 
     async def test_observer_rejection_does_not_break_native_request(self):
-        broker = CentralRestBroker(Client())
+        broker = CentralRestBroker(Client(), input_observer=rest_inputs)
         try:
             with recording([]), patch("kiwoom_monitor.central_server.diagnostic_rest_input._signature",
                     side_effect=ValueError("observer fixture")), patch.object(trace, "reject_input") as rejected:
@@ -311,7 +323,9 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         items = [{"stk_cd": f"{index:06d}"} for index in range(20)]
         store = Store()
         store.save_dataset_snapshot = lambda *args, **kwargs: None
-        service = AutonomousTop20Service(None, RealtimeHub(), store, now_provider=lambda: now[0])
+        service = AutonomousTop20Service(None, RealtimeHub(), store, now_provider=lambda: now[0],
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         service._entrants_day = "2001-04-03"
         service._entrant_persisted_codes = {item["stk_cd"] for item in items}
         async def delayed(*args):
@@ -341,7 +355,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
                 ingestor = MarketDataIngestor(store,
                     now_provider=lambda: datetime.fromisoformat("2001-04-03T09:00:02+09:00"),
                     on_daily_change=lambda *args: changes.append(args))
-                broker = CentralRestBroker(client, store, ingestor.ingest)
+                broker = CentralRestBroker(client, store, ingestor.ingest, input_observer=rest_inputs)
                 try:
                     scope = recording(events) if mode == "capture" else client.lane("lane:daily")
                     with scope, capture_owner("top20", "service:one", "lane:daily"):
@@ -356,7 +370,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_capture_started_mid_request_keeps_native_result_and_rejects_missing_primary(self):
         events, client = [], Client()
         client.release.clear()
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with patch.object(trace, "input_token", return_value=None):
                 first = asyncio.create_task(broker.request("ka10001", PATH, {"stk_cd": "005930"}))
@@ -380,7 +394,7 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         client = RequestTapeClient(tape, preserve_transport_delay=False)
         first = next(iter(tape["calls"]))
         tape["calls"][first]["transport"][-1][1]["result"][0]["code"] = "tampered"
-        broker = CentralRestBroker(client)
+        broker = CentralRestBroker(client, input_observer=rest_inputs)
         try:
             with client.lane("lane:basics"):
                 result = await broker.request("ka10001", PATH, {"stk_cd": "005930"})
@@ -390,3 +404,274 @@ class RequestInputTests(unittest.IsolatedAsyncioTestCase):
         missing_effect = [row for row in events if row["input_kind"] not in {"effect_start", "effect_end"}]
         with self.assertRaisesRegex(ValueError, "effect_incomplete"):
             read_request_tape(missing_effect)
+
+
+    async def test_explicit_connection_tracks_late_activation_epochs_and_same_broker_restart(self):
+        broker = CentralRestBroker(Client(), input_observer=rest_inputs)
+        other = CentralRestBroker(Client(), input_observer=rest_inputs)
+        events, token = [], [None]
+        try:
+            with recording(events), capture_owner("top20", "source:epochs", "lane:epochs"), patch.object(
+                    trace, "input_token", side_effect=lambda kind: token[0] if kind == "top20_inputs" else None):
+                await broker.request("ka10001", PATH, {"stk_cd": "005930"})
+                self.assertEqual([], events)
+                token[0] = "epoch-one"
+                await broker.request("ka10001", PATH, {"stk_cd": "005930"})
+                await broker.close()
+                await broker.request("ka10001", PATH, {"stk_cd": "005930"})
+                await other.request("ka10001", PATH, {"stk_cd": "005930"})
+                token[0] = "epoch-two"
+                await broker.request("ka10001", PATH, {"stk_cd": "005930"})
+            starts = [thaw_payload(row["payload"]) for row in events if row.get("input_kind") == "logical_start"]
+            self.assertEqual([1, 2, 1, 1], [row["ordinal"] for row in starts])
+            self.assertIsNot(broker._input_observer_state, other._input_observer_state)
+            self.assertFalse(hasattr(broker, "_market_input_sequences"))
+            self.assertFalse(hasattr(broker, "_flow_inflight"))
+            self.assertIsNone(rest_inputs._REQUEST.get())
+            self.assertIsNone(rest_inputs._TRANSPORT.get())
+        finally:
+            await broker.close()
+            await other.close()
+
+    async def test_flow_only_primary_late_tape_and_combined_use_actual_worker_identity(self):
+        from kiwoom_monitor.central_server.diagnostic_top20_flow_input import _FLOW
+        from kiwoom_monitor.central_server.diagnostic_metrics import CURRENT_API_ID
+        client, events, top20 = Client(), [], [None]
+        seen = []
+        def ingest(*args):
+            seen.append((operation_identity(), CURRENT_API_ID.get(), rest_inputs._TRANSPORT.get()))
+        broker = CentralRestBroker(client, response_handler=ingest, input_observer=rest_inputs)
+        outer = []
+        owner_task = None
+        raw_effect = rest_inputs.broker_effect_scope
+        @contextmanager
+        def observe_effect(group, phase, *, response_handler=None):
+            # MAIN108 recording_scope + flow_recording_scope, independently
+            # observed in rest-legacy-probes-v1: outer worker and inner handler
+            # have distinct owners when a traced tape primary exists.
+            if phase != "ingest":
+                with raw_effect(group, phase, response_handler=response_handler):
+                    yield
+                return
+            task = asyncio.current_task()
+            before = (operation_identity(), CURRENT_API_ID.get(), id(task), task.get_name())
+            try:
+                with raw_effect(group, phase, response_handler=response_handler):
+                    yield
+            finally:
+                outer.append((before, (operation_identity(), CURRENT_API_ID.get(),
+                                       id(asyncio.current_task()), asyncio.current_task().get_name())))
+        def cycle(code, identity):
+            body = {"stk_cd": code}
+            receipt = {"origin": "unobserved", "handler_called": False,
+                       "handler_supported": False, "handler_outcome": "none", "shared": False}
+            value = {"trace_id": "flow-fixture", "input_id": identity}
+            link = {"cycle": value, "body": body, "receipt": receipt}
+            value["attempt_link"] = link
+            return value, link, body
+        async def request(value, body):
+            marker = _FLOW.set(value)
+            try:
+                with capture_owner("top20", "source:flow", "lane:flow"):
+                    return await broker.request("ka10045", "/api/dostk/mrkcond", body)
+            finally:
+                _FLOW.reset(marker)
+        first = second = combined = None
+        try:
+            with recording(events), patch.object(trace, "input_token", side_effect=lambda kind:
+                    "flow-fixture" if kind == "store_inputs" else top20[0] if kind == "top20_inputs" else None), \
+                    patch.object(rest_inputs, "broker_effect_scope", observe_effect):
+                value, link, body = cycle("005930", "flow-only-source")
+                client.release.clear()
+                first = asyncio.create_task(request(value, body))
+                self.assertTrue(await asyncio.to_thread(client.entered.wait, 2))
+                owner_task = broker._persist_worker
+                group = next(iter(broker._inflight.values())).observation
+                self.assertIsNone(group.primary)
+                self.assertIs(link, group.flow_link)
+                top20[0] = "late-tape"
+                second = asyncio.create_task(broker.request("ka10045", "/api/dostk/mrkcond", body))
+                for _ in range(100):
+                    if link["receipt"]["shared"]:
+                        break
+                    await asyncio.sleep(.001)
+                self.assertTrue(link["receipt"]["shared"])
+                self.assertIsNone(group.primary)
+                client.release.set()
+                self.assertTrue((await first).recording_succeeded)
+                self.assertTrue((await second).recording_succeeded)
+                client.entered.clear()
+                client.release.clear()
+                value2, link2, body2 = cycle("000660", "combined-source")
+                combined = asyncio.create_task(request(value2, body2))
+                self.assertTrue(await asyncio.to_thread(client.entered.wait, 2))
+                self.assertIs(owner_task, broker._persist_worker)
+                group2 = next(iter(broker._inflight.values())).observation
+                self.assertIsNotNone(group2.primary)
+                self.assertIs(link2, group2.flow_link)
+                client.release.set()
+                self.assertTrue((await combined).recording_succeeded)
+            endings = [thaw_payload(row["payload"]) for row in events if row.get("input_kind") == "logical_end"]
+            self.assertEqual(["shared_unobserved", "network"], [row["origin"] for row in endings])
+            self.assertEqual(2, len(client.calls))
+            self.assertEqual(["flow-only-source", "combined-source"], [row[0]["cause_input_id"] for row in seen])
+            producer = f"rest_broker:{id(broker):x}"
+            worker_actor = f"{producer}:{id(owner_task):x}"
+            expected_outer = ("rest_market", producer, worker_actor)
+            triple = lambda value: tuple(value[key] for key in ("workload_id", "producer_component", "actor_id"))
+            self.assertEqual(2, len(outer))
+            for before, after in outer:
+                for state in (before, after):
+                    self.assertEqual(expected_outer, triple(state[0]))
+                    self.assertEqual("", state[0]["cause_input_id"])
+                    self.assertEqual("ka10045", state[1])
+                    self.assertEqual(id(owner_task), state[2])
+                    self.assertEqual("kiwoom-broker-persistence", state[3])
+            self.assertEqual(["rest_market", "top20"], [row[0]["workload_id"] for row in seen])
+            self.assertEqual([producer, "source:flow"], [row[0]["producer_component"] for row in seen])
+            self.assertEqual([worker_actor, f"broker-effect:{id(owner_task):x}"], [row[0]["actor_id"] for row in seen])
+            self.assertEqual(["ka10045"] * 2, [row[1] for row in seen])
+            self.assertEqual([None] * 2, [row[2] for row in seen])
+            self.assertEqual("", CURRENT_API_ID.get())
+            self.assertIsNone(rest_inputs._REQUEST.get())
+            self.assertIsNone(rest_inputs._TRANSPORT.get())
+        finally:
+            client.release.set()
+            await asyncio.gather(*(task for task in (first, second, combined) if task is not None), return_exceptions=True)
+            await broker.close()
+
+    async def test_bypassed_namespace_preserves_inherited_request_on_actual_ram_hit(self):
+        client = Client()
+        broker = CentralRestBroker(client, namespace="account-fixture", input_observer=rest_inputs)
+        parent = {"origin": "before"}
+        try:
+            with patch.object(trace, "input_token", return_value=None):
+                await broker.request("ka10001", PATH, {"stk_cd": "005930"})
+                marker = rest_inputs._REQUEST.set(parent)
+                try:
+                    result = await broker.request("ka10001", PATH, {"stk_cd": "005930"})
+                    self.assertTrue(result.cache_hit)
+                    self.assertIs(parent, rest_inputs._REQUEST.get())
+                    self.assertEqual("ram_cache", parent["origin"])
+                finally:
+                    rest_inputs._REQUEST.reset(marker)
+            self.assertEqual(1, len(client.calls))
+        finally:
+            await broker.close()
+
+    async def test_taped_waiter_cancellation_drains_native_transport_and_ingest_then_restarts(self):
+        for phase in ("transport", "ingest"):
+            with self.subTest(phase=phase):
+                events, client, ingested = [], Client(), []
+                entered, release = Event(), Event()
+                if phase == "transport":
+                    client.release.clear()
+                def ingest(*args):
+                    ingested.append(args)
+                    entered.set()
+                    if phase == "ingest":
+                        self.assertTrue(release.wait(3))
+                broker = CentralRestBroker(client, response_handler=ingest, input_observer=rest_inputs)
+                first = second = closing = None
+                try:
+                    with recording(events), capture_owner("top20", "source:cancel", "lane:cancel"):
+                        first = asyncio.create_task(broker.request("ka10001", PATH, {"stk_cd": "005930"}))
+                        self.assertTrue(await asyncio.to_thread((client.entered if phase == "transport" else entered).wait, 2))
+                        second = asyncio.create_task(broker.request("ka10001", PATH, {"stk_cd": "005930"}))
+                        for _ in range(100):
+                            group = next(iter(broker._inflight.values())).observation
+                            if len(group.members) == 2:
+                                break
+                            await asyncio.sleep(.001)
+                        self.assertEqual(2, len(group.members))
+                        for task in (first, second):
+                            task.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await task
+                        closing = asyncio.create_task(broker.close())
+                        await asyncio.sleep(0)
+                        self.assertFalse(closing.done())
+                        client.release.set()
+                        release.set()
+                        await closing
+                    self.assertEqual(1, len(client.calls))
+                    self.assertEqual(1, len(ingested))
+                    ends = [thaw_payload(row["payload"]) for row in events if row.get("input_kind") == "logical_end"]
+                    self.assertEqual(["cancelled", "cancelled"], [row["outcome"] for row in ends])
+                    with self.assertRaises(ValueError):
+                        read_request_tape(events)
+                    self.assertFalse(broker._inflight)
+                    self.assertFalse(broker._lookup_tasks)
+                    for queue in (broker._queue, broker._persist_queue):
+                        self.assertTrue(queue.empty())
+                        self.assertEqual(0, queue._unfinished_tasks)
+                    self.assertIsNone(broker._worker)
+                    self.assertIsNone(broker._persist_worker)
+                    with patch.object(trace, "input_token", return_value=None):
+                        result = await broker.request("ka10001", PATH, {"stk_cd": "000660"})
+                    self.assertTrue(result.recording_succeeded)
+                    self.assertEqual(2, len(client.calls))
+                    self.assertIsNone(rest_inputs._REQUEST.get())
+                    self.assertIsNone(rest_inputs._TRANSPORT.get())
+                finally:
+                    client.release.set()
+                    release.set()
+                    await asyncio.gather(*(task for task in (first, second, closing) if task is not None), return_exceptions=True)
+                    await broker.close()
+
+
+    async def test_api_context_resets_before_actual_lookup_and_persistence_final_guards(self):
+        from kiwoom_monitor.central_server.diagnostic_metrics import CURRENT_API_ID
+        seen, guards, handled = [], [], [False]
+        class MetricClient(Client):
+            def request_with_continuation(inner, *args, **kwargs):
+                seen.append(("transport", CURRENT_API_ID.get()))
+                return super().request_with_continuation(*args, **kwargs)
+            def prepare_credential_token(inner, settings):
+                seen.append(("credential-token", CURRENT_API_ID.get()))
+                return settings
+            def verify_prepared_credentials(inner, value):
+                seen.append(("credential-identity", CURRENT_API_ID.get()))
+                return value
+        class MetricStore(Store):
+            def save_query(inner, *args):
+                seen.append(("cache-write", CURRENT_API_ID.get()))
+                return super().save_query(*args)
+        client, store, fail = MetricClient(), MetricStore(), [False]
+        def ingest(*args):
+            handled[0] = True
+            seen.append(("handler", CURRENT_API_ID.get()))
+            if fail[0]:
+                raise OSError("fixture handler error")
+        broker = CentralRestBroker(client, store, ingest, input_observer=rest_inputs)
+        class ActualGuard(asyncio.Lock):
+            async def __aenter__(inner):
+                name = asyncio.current_task().get_name()
+                if name.startswith("broker-cache-lookup-") and handled[0]:
+                    guards.append(("lookup", CURRENT_API_ID.get()))
+                if name == "kiwoom-broker-persistence" and broker._inflight and all(
+                        entry.future.done() for entry in broker._inflight.values()):
+                    guards.append(("persistence-final", CURRENT_API_ID.get()))
+                return await super().__aenter__()
+        broker._guard = ActualGuard()
+        try:
+            with patch.object(trace, "input_token", return_value=None):
+                self.assertTrue((await broker.request("ka10001", PATH, {"stk_cd": "005930"})).recording_succeeded)
+                await broker._persist_queue.join()
+                broker._cache.clear()
+                handled[0] = False
+                self.assertTrue((await broker.request("ka10001", PATH, {"stk_cd": "005930"})).recording_succeeded)
+                fail[0] = True
+                self.assertFalse((await broker.request("ka10001", PATH, {"stk_cd": "000660"})).recording_succeeded)
+                await broker._persist_queue.join()
+                candidate = object()
+                self.assertIs(candidate, await broker.prepare_credentials(candidate))
+            self.assertIn(("lookup", ""), guards)
+            self.assertIn(("persistence-final", ""), guards)
+            self.assertTrue(all(value == "" for _, value in guards))
+            self.assertTrue(all(value == "ka10001" for kind, value in seen if kind in {"handler", "cache-write"}))
+            self.assertEqual(["", ""], [value for kind, value in seen if kind.startswith("credential-")])
+            self.assertTrue(all(value == "" for kind, value in seen if kind == "transport"))
+            self.assertEqual("", CURRENT_API_ID.get())
+        finally:
+            await broker.close()

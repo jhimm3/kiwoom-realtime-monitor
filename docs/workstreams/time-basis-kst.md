@@ -1,5 +1,41 @@
 # 앱 전체 시각의 KST 통일
 
+**2026-11-02 AR05 Drive 판정 책임(246r2):** 초기bootstrap과UI 재개가같은기존Drive모듈순수함수로pending시각을판정한다.명시offset의UTC/KST는같은순간으로비교하며기존dirty·missing/invalid/naive표식fallback은유지한다.키움client/새현재시계·시간자료변환저장·원시각/hash/판본변경은없다.같은실제시작경로의혼합offset 반례와ACK/복원/종료를현재관련27에서검증했고실제Drive quiet/최종ACK/인계·전체시계정상화를뜻하지않는다. [책임 이전·실패와수락범위](../architecture/app-target-20261023.md#ar05-drive-pending-policy-246).
+
+
+**2026-10-28 현재책임이전:** MAIN143 Confirm은미래/current봉제외·20시분류·checked_at에기존 query_client.server_now를필수주입하고 as_kst→기존naiveKST 경계를유지한다. 같은순간naiveKST/awareKST/UTC×host±9h6subcase 및실SQLite row/metadata/rollback을관련61에서검증했다. 기존UTC/KST/hash/revision변환은없고다른worker/구형운영전체정상화를뜻하지않는다. [단일정본/전후근거](../architecture/app-target-20261023.md#main143-confirm-native).
+
+
+**이 문서는 시간 관련 근거·계약 원장이다. 현재 단계·순서·잔여 상태는 [단일 정본0절](../architecture/app-target-20261023.md#0-현재-기준과-진행-현황)을 따른다.** 제목의 KST 통일은 모든 원본/저장값을 KST로 재작성하거나 키움 client를 모든 기능에 연결한다는 뜻이 아니다. 동일 사건의 순간과 당시 이용 가능했던 입력/판본을 보존한다.
+
+<a id="time-audit-20261027"></a>
+## 2026-10-27 현재 소스·저장 표본 감사와 후속 계약
+
+**이후 실제 구현·검증(과거 감사와 구분):** MAIN126/127의 기존cursor/공유decoder를 재사용한 단일일·membership/seed 근거를 유지한다. MAIN129은 기존 market frame의 actual-instant 기본순서와 새 프로필 final cut을 통합했다. 실제 UTC/KST 혼합 cut00:05:20→00:07:20UTC·native 성숙180s0→1/기존 판단건수8 유지, 관련151·동결4 PASS와 nonempty None 전체JSON/ID/hash 동일을 확인했다. 원본문·시각/동결입력·원결과/hash/판본은 재작성하지 않았다. 원180초 INCOMPLETE·JSON comparator FAIL과 수정 근거도 보존한다. [MAIN129 정확한 소스·검사·한계](../../tmp/ar-v1-wave40-20261027/market-frame-integration/acceptance129.json). 전체strictPIT는 남으며 큰sort 취소/메모리는 기존 AR07/08 수명 후속이지 새 시계 완료조건이 아니다.
+
+AR09의 소스128 로그 경계 근거는 신규PC로그만현재KST일+직전13일을보관하는기존handler수명으로전환했다. 관련logging21/app97=118PASS와실제Windows2process1PASS에서독립파일·열린만료파일보존·닫힌후정리·실제종료/정리를확인했다. 기존/미표식로그·NAS로그는보존하며운영자료삭제는없다. PC KST는파일명/보관만허용하고업무시계에확장하지않는다. source127시간의존18파일은128에서raw동일하여검증된경계를재실행하지않고소스별근거를재사용했다. [통합/소스/한계](../../tmp/time-followup-20261027/final-integration/integration.json). 최신단계·다음작업은정본0절/11.54만따른다.
+
+
+**후속 범위 정정:** 현재 AR의 새 책임에서 KST 사용자 표시·UTC/KST 순간 정합성·당시 가용성과 불필요한 직접 키움 의존 제거를 구현/검증한다. 교체될 운영/구형 코드는 별도 완전 정상화하지 않는다. 과거6건은 현재/필수이전/실제 선택 연구입력 사용 여부를 우선 확인하고 미사용의 상세복구는 보류한다. 운영 차이는 이전·연결·미완료 주문/복구·전환 안전 영향만 확인한다. 기존27건은 MAIN125에서 실제 PASS이며 변경 영향이 없으면 재실행하지 않는다. [정확한 기존 검사 실행](../../tmp/time-followup-20261027/research-baseline-run1/run.json)·[6행/제한 사용 추적](../../tmp/time-followup-20261027/minute6-usage/REPORT.md).
+
+최초 읽기 전용 감사에서는 코드/DB/원본/hash/판본을 변경하지 않고 구현·과거 적용 증거·실제PC 표본·NAS active source/API를 대조했다([상세 감사](../../tmp/time-audit-20261027/REPORT.md)). 이 감사 사실 자체를 해결 완료로 계산하지 않는다. 현재 시계 작업은 새 구조의 순간 비교/당시 가용성·KST 표시 → 과거6건의 실제 필수/선택 입력 사용 확인 → 관련 owner 시계 공급/변환/저장/조회 → 전환 안전에 필요한 NAS/로컬 차이 순으로 기존 AR에 통합한다. 교체될 구형 운영 코드의 전수 정상화와 미사용6건 상세복구를 추가 완료조건으로 삼지 않는다. 담당 AR/F·실제 수락환경·최신 상태는 [정본11.54/0절](../architecture/app-target-20261023.md#time-audit-followup)을 따른다.
+
+- **저장 표기 변환은 실제로 있었다:** 10/17 PC28,813셀/NAS15,013셀·22대상. 이번에 PC old/new28,813쌍을 다시 순간 비교해 불일치0을 확인했다. `stock_news.published_at` scalar14,909셀도 포함됐지만 canonical article 문서·hash 입력과 구분한다. [변환 범위/커밋/보호 근거](../../tmp/time-audit-20261027/migration-history.md). 아래 과거 영수증·실패 원문은 보존한다.
+- **현재시각 공급 교체는 별도:** 로컬 R3-023의10/18 ingestor/TOP20/dataset·일지 후속은 HEAD의 실제 조상 커밋이다. active NAS는10/17 release이며 REST Ingestor/TOP20의 provider 주입이 빠지고 뉴스 claim/완료/retry는 OS 시계를 사용한다. 공통 server_now/PG Asia/Seoul은 active에도 있다. [활성24파일 본문/SHA 대조](../../tmp/time-audit-20261027/active-code-comparison.md). 로컬 수정과 운영 반영을 합산하지 않는다.
+- **잘못된 순간의 복구는 또 별도:** `data/diagnostics/nas-integrated-validation-20261015/clock-lineage/v2/analysis.json`의 realtime6건은 available−received32,395.874983~32,399.289004초. payload15/15 hash 일치는 해당 metadata 정확성의 증거가 아니다. 당시 correction 적용0이며 이번에는 현재 revision/projection·dataset/run 사용 및 결과 영향은 미확인이다. 기존 UTC/KST 전부에9시간을 더하거나 원 revision/hash를 새로 만들지 않는다.
+- **이번 실제 표본:** PC5 DB immutable read, 테이블별 rowid 최대64·전수집계 아님. monitor 주가격/meta는 KST와 legacy naive 공존, 일지 키/수명은 legacy naive KST, news.first_seen은 UTC 기본값의 naive이며 historical 수집 receipt는 aware UTC다. NAS history article/body/ai 각1행은 발행+09/수신·처리epoch를 반환했다. [PC 표본](../../tmp/time-audit-20261027/sqlite-time-samples-readonly.json)·[NAS 읽기](../../tmp/time-audit-20261027/nas-api-time-samples-readonly.json). live PG catalog/각 session·전체 residual·현재 PC 실행객체·broker 동기화 나이는 미확인이다.
+
+| 구분 | 시각/책임과 현재 판단 | 후속 범위·위험 |
+|---|---|---|
+| 보정 현재시각 유지 | 시장 거래일/세션·완료분/실시간 freshness·판단 cut. 기존 producer/controller/server의 now_provider를 재사용 | wrapper·fallback·교체/종료를 먼저 검증. 정상 보정 연결은 검증 없이 제거하지 않음 |
+| 공통 절대시각 필수, 직접 키움 의존은 불필요 | 뉴스/연구 결과의 수락·available, 공유 claim/retry/lease. 저장·실행 owner가 권한 있는 시각/첫receipt를 소유 | processor의 OS시각/서버 수락시각/원발생을 구분. clock 계약 대체와 가용/복구/소유권 검증 전 기존 server_now 유지 |
+| 현재시계 불필요·변환/입력만 필요 | 원 기사/봉/체결 epoch의 해석, UTC canonical/PG 표현, frozen replay/partition/as_of의 순간·순서 비교 | 원본·precision·가용시각으로 비교. pure 변환이 불필요한 clock/client를 받는지 확인한 뒤 제거 후보만 정함. 원본·hash·판본 불변 |
+| 경과/부수 메타데이터·판정 대기 | process timeout은 monotonic; 연구run/일지/캐시/동기화 updated는 실제 소비에 따라 분류 | 공유lease·재시작/판단 gate에 쓰이는 값을 표시전용과 섞지 않음. naive 문자열은 owner별 KST/UTC 의미를 추정으로 덮어쓰지 않음 |
+| 로그 예외 | 파일명·14 KST calendar dates 정리만 PC KST 허용 | 업무자료/가용성/판단 current-time 예외가 아님. MAIN125는14일 자동정리 없음, TMP 후보HOLD이며 기존자료 삭제0 |
+
+위 분류는 **보정시계 필수 / 직접 보정시계 불필요 / 필요성 미확인**을 구분하기 위한 계약이다. 기존 연결을 일괄 제거하거나 모든 host UTC 호출을 오류로 취급하지 않는다. UTC와 KST의 aware 표현·epoch/native instant·monotonic·date/minute key는 의미가 다르며, 사건시각과 수락/가용/처리시각을 합치지 않는다. 특히 final/reconstructed 연구 모드는 당시 이용 가능했던 입력의 엄격한 재생과 분리하고 기존 불확실성/사용 제한을 보존한다.
+
+
 2026-10-18 R3-002 로컬: 기존 PC 가격 cache writer에 AppController `ranking_now`를 주입하고 가격·시총·고가 신규 timestamp3필드를 한 job의 KST ISO(+09:00)로 저장한다. standalone/legacy clock 없는 진입점은 공통 KST fallback이며 키움 동기화로 보고하지 않는다. 기존 저장 자료는 변환하지 않는다. 후속 공유 시계 변경의 aware 현재 시각과 legacy naive KST 분봉 비교가 실제 writer/controller 검사에서 실패해 비교 시에만 `as_kst(bar.minute)`를 적용했다. 거래일/분 키는 보존한다. 현재 검증·실패 기록은 [R3-002](../../REFACTOR_BACKLOG.md#r3-002--한-가격-캐시-job의-다중-transaction)에 모으며 이 항목으로 전체 시계 감사 완료를 선언하지 않는다.
 
 2026-10-15 · 사용자 요청: 앱이 사용하는 시각 전체, 신규 저장과 기존 저장 자료를 KST로 통일한다. 표시만 바꾸는 작업으로 축소하지 않는다.
@@ -591,3 +627,11 @@ R3-023은 **검증 완료(등록된 정밀 코드감사·로컬 관련검증 범
 ## 2026-10-18 R3-003 확인시각 의미 보존
 
 `622c2d9`의 cap no-op은 해당 UPDATE의 shared updated_at 기록만 생략한다. 가격 last_price_updated_at은 같은 가격도 새 수신 확인시각을 유지하고, fundamentals_updated_at 당일 gate·기존 키움 보정 KST·원래 고가 일자와 receipt 인계는 그대로다. 시계 원천/조회·저장자료 변환은 추가하지 않았다. 동일 시총20종목의 SQLite 반영행20→0, UPDATE시도20·연결1·SELECT0·BEGIN1·COMMIT1은 그대로다. 같은 가격20개의 후속 확인시각 갱신/반영20은 유지한다. 물리 I/O·WAL/lock wait·실제 장중 지연은 미측정이다. 관련8모듈 **165건/101.115초 통과**. F06/F10/F22/F24·요약/상세는003로 갱신했고029의 hash 책임 결합은 별도다. 이번 push/GitHub CI·NAS 배포·로컬 전수 회귀·실제 키움/장중·운영 DB/주문·PostgreSQL·다중PC/외부 동기화 수락은 미실행이다. F 부모의 부분 연결/확인 불가를 전체 정상으로 승격하지 않는다.
+
+## 2026-10-25 AR06 NEWS 현재 시계의 직접 연결
+
+NEWS store/service/source의 기존 now_provider를 source page/일정/진단 reader·historical batch→외부 claim/finish/재시도/BODY·RULE 및 PC 전처리/직접 importer까지 전달했다. 업무 receipt/현재 일정과 원 발행/fetched·유효 snapshot의 순간을 구분하며 과거 DB 일괄 변환은 없다. 온라인 PC는 기존 응답 시계, broker 없는 일회성 경로는 명시 공통 KST fallback을 사용한다. 새 polling/HTTP/TR/시계 owner는 없으며 fallback을 키움 동기화로 보고하지 않는다. source102 동일소스 관련189(실제PC PG20)/정적3종 PASS·원 실패/소스별 근거와 전체 시간 통일/운영 미수락을 구분한다. [현재 정본](../architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
+
+### S1 명시 조회 역할의 기존 시계 연결
+
+기존 bootstrap/AppController 공개 보정 clock을 role Settings/Columns/Theme 및 ThemeBackup now_provider에 전달한다. API 교체 뒤에도 현재 공개 provider를 사용하며 새 clock owner·TR/polling은 없다. 원 발생/저장 시각·raw first receipt를 유지한다. legacy no-port/full의 기존 clock/fallback은 별도 유효 경계이며 전체 전환 완료가 아니다. [현재 범위/근거](../architecture/app-target-20261023.md#1138-s1-조회-역할-native-소유권-통합--2026-10-26).

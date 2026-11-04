@@ -144,20 +144,24 @@ class Top20ReplayRuntimePostgresTests(unittest.TestCase):
             def native_service():
                 service = AutonomousTop20Service(MagicMock(), RealtimeHub(), store,
                     outbox_path=fixture.path, now_provider=lambda: self.origin)
-                for name in ('_schedule_loop', '_event_loop', '_index_loop'):
+                # Isolate start recovery from the independent live retry loop.
+                for name in ('_schedule_loop', '_event_loop', '_index_loop', '_persistence_loop'):
                     setattr(service, name, waiting)
                 return service
+            service = None
             with patch.object(store, 'save_dataset_snapshot', side_effect=ack_loss):
-                with runtime.activate():
-                    first = native_service()
-                    await first.start()
-                    self.assertEqual(records, JsonRecordOutbox(fixture.path).load())
-                    await first.close()
-                    self.assertEqual(records, JsonRecordOutbox(fixture.path).load())
-                    second = native_service()
-                    await second.start()
-                    self.assertEqual({}, JsonRecordOutbox(fixture.path).load())
-                receipt = await close_top20_replay_resources(runtime, second, None)
+                try:
+                    with runtime.activate():
+                        service = native_service()
+                        await service.start()
+                        self.assertEqual(records, JsonRecordOutbox(fixture.path).load())
+                        await service.close()
+                        self.assertEqual(records, JsonRecordOutbox(fixture.path).load())
+                        service = native_service()
+                        await service.start()
+                        self.assertEqual({}, JsonRecordOutbox(fixture.path).load())
+                finally:
+                    receipt = await close_top20_replay_resources(runtime, service, None)
             self.assertEqual(2, len(calls))
             self.assertFalse(receipt['execution_succeeded'])
             self.assertEqual(0, lease.status()['owned_connections'])

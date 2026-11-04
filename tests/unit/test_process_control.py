@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 from unittest.mock import Mock, call, patch
 
 from kiwoom_monitor.presentation.process_control import (
@@ -14,6 +15,7 @@ from kiwoom_monitor.presentation.process_control import (
     build_auxiliary_command,
     JsonCommandChannel,
     JsonRequestInbox,
+    launch_auxiliary_process,
     process_is_alive,
     process_identity_document,
     process_identity_is_alive,
@@ -137,6 +139,75 @@ class ProcessControlTests(unittest.TestCase):
             call.wait(timeout=1.0), call.kill(), call.wait(timeout=1.0),
         ], process.mock_calls)
 
+    def _start_owned_child(self, manager: AuxiliaryProcessManager) -> subprocess.Popen[bytes]:
+        process = manager.start(
+            [sys.executable, "-c", "import time; time.sleep(30)"], Path.cwd(),
+        )
+
+        def cleanup() -> None:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+        self.addCleanup(cleanup)
+        return process
+
+    def test_default_kill_waits_for_owned_child_exit_before_releasing_handle(self) -> None:
+        manager = AuxiliaryProcessManager()
+        process = self._start_owned_child(manager)
+        token = process_start_token(process.pid)
+        self.assertTrue(token)
+
+        # On Windows terminate and kill both use TerminateProcess. Keep this
+        # real child alive through terminate to exercise the final native kill.
+        with patch.object(process, "terminate"), patch.object(process, "wait", wraps=process.wait) as wait:
+            manager.stop(graceful_timeout=0, terminate_timeout=0)
+
+        self.assertEqual([call(timeout=0), call(timeout=0), call(timeout=None)], wait.call_args_list)
+        self.assertIsNotNone(process.returncode)
+        self.assertEqual("exited", process_identity_state(process.pid, token))
+        self.assertIsNone(manager.process)
+
+    def test_explicit_kill_timeout_retains_owned_child_until_retry_then_allows_restart(self) -> None:
+        manager = AuxiliaryProcessManager()
+        process = self._start_owned_child(manager)
+        token = process_start_token(process.pid)
+        self.assertTrue(token)
+
+        # A failed native kill request must not be mistaken for child exit.
+        with patch.object(process, "terminate"), patch.object(process, "kill"):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                manager.stop(graceful_timeout=0, terminate_timeout=0, kill_timeout=0)
+
+        self.assertIs(process, manager.process)
+        self.assertTrue(manager.is_running)
+        self.assertEqual("running", process_identity_state(process.pid, token))
+
+        manager.stop(graceful_timeout=0, terminate_timeout=1, kill_timeout=1)
+        self.assertIsNotNone(process.returncode)
+        self.assertEqual("exited", process_identity_state(process.pid, token))
+        self.assertIsNone(manager.process)
+
+        restarted = self._start_owned_child(manager)
+        self.assertIsNot(process, restarted)
+        self.assertIs(restarted, manager.process)
+        manager.stop(graceful_timeout=0, terminate_timeout=1, kill_timeout=1)
+        self.assertIsNotNone(restarted.returncode)
+        self.assertIsNone(manager.process)
+
+    def test_shutdown_request_failure_retains_owned_child_for_retry(self) -> None:
+        manager = AuxiliaryProcessManager()
+        process = self._start_owned_child(manager)
+
+        with self.assertRaisesRegex(OSError, "cancel publication failed"):
+            manager.stop(request_shutdown=Mock(side_effect=OSError("cancel publication failed")))
+
+        self.assertIs(process, manager.process)
+        self.assertTrue(manager.is_running)
+        manager.stop(graceful_timeout=0, terminate_timeout=1, kill_timeout=1)
+        self.assertIsNotNone(process.returncode)
+        self.assertIsNone(manager.process)
+
     def test_command_channel_increments_and_writes_request_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "news_command.json"
@@ -223,6 +294,57 @@ class ProcessControlTests(unittest.TestCase):
                           | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
         self.assertEqual(expected_flags, popen.call_args.kwargs["creationflags"])
         self.assertEqual("workspace", popen.call_args.kwargs["cwd"])
+
+    def test_launch_process_preserves_default_environment_inheritance(self) -> None:
+        process = Mock()
+        for below_normal_priority in (False, True):
+            for environment_options in ({}, {"env": None}):
+                with self.subTest(priority=below_normal_priority, options=environment_options):
+                    with patch("kiwoom_monitor.presentation.process_control.subprocess.Popen",
+                               return_value=process) as popen:
+                        result = launch_auxiliary_process(
+                            ("child", "--request", "request.json"), Path("workspace"),
+                            below_normal_priority=below_normal_priority,
+                            **environment_options,
+                        )
+
+                    expected_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    if below_normal_priority:
+                        expected_flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+                    popen.assert_called_once_with(
+                        ["child", "--request", "request.json"],
+                        cwd="workspace", creationflags=expected_flags,
+                    )
+                    self.assertIs(process, result)
+
+    def test_process_manager_passes_explicit_environment_without_mutating_it(self) -> None:
+        process = Mock()
+        process.poll.return_value = None
+        for environment in ({"PATH": "child-runtime", "CHILD_INPUT": "request"}, {}):
+            for below_normal_priority in (False, True):
+                with self.subTest(environment=environment, priority=below_normal_priority):
+                    supplied = MappingProxyType(environment)
+                    original = dict(supplied)
+                    manager = AuxiliaryProcessManager()
+                    with patch("kiwoom_monitor.presentation.process_control.subprocess.Popen",
+                               return_value=process) as popen:
+                        result = manager.start(
+                            ("child", "--request", "request.json"), Path("workspace"),
+                            below_normal_priority=below_normal_priority, env=supplied,
+                        )
+
+                    expected_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    if below_normal_priority:
+                        expected_flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+                    popen.assert_called_once_with(
+                        ["child", "--request", "request.json"],
+                        cwd="workspace", creationflags=expected_flags, env=supplied,
+                    )
+                    self.assertIs(supplied, popen.call_args.kwargs["env"])
+                    self.assertEqual(original, environment)
+                    self.assertIs(process, result)
+                    self.assertIs(process, manager.process)
+                    self.assertTrue(manager.is_running)
 
     def test_process_manager_clears_process_after_stop(self) -> None:
         process = Mock()

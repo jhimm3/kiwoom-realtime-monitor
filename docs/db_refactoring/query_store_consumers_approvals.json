@@ -2,64 +2,580 @@
   "schema_version": 1,
   "purpose": "Reviewed static receiver bindings; this is source evidence, not runtime reachability proof.",
   "reviewed_bindings": [
-    {"id":"central-morning-brief-constructor","file":"src/kiwoom_monitor/central_server/morning_market_brief.py","owner":"MorningMarketBrief.__init__","receiver":"store","backend_scope":"same create_app-selected native QueryStore passed to CentralAIService and MorningMarketBrief","reason":"Read existing global schedule settings once at construction. The app owns store lifetime; no new connection, pool, transaction or writer is introduced."},
-    {"id":"central-morning-brief-documents","file":"src/kiwoom_monitor/central_server/morning_market_brief.py","owner_prefix":"MorningMarketBrief","receiver":"self.store","backend_scope":"same app-selected native document store; morning_market_brief_settings/runs collections","reason":"Existing native load_documents/upsert_documents calls run in asyncio.to_thread. Save-and-publish settings, durable claim before inference, bounded latest/history reads and final result writes retain separate native transactions. Owned cancellation drains writes; no transaction spans external inference and no order path is invoked."},
-    {"id":"central-stock-thesis-source-check","file":"src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py","owner":"read_stock_thesis_source_check","receiver":"store","backend_scope":"same app-selected native backend under the existing operational owner lock","reason":"Explicit authenticated bounded diagnostic makes one theme snapshot read and one current second-bar read using separate native transactions. Cancellation drains before selection/shutdown releases the existing lock. No writes, live polling, collector ownership, source approval or replay promotion."},
-    {"id":"central-shared-shadow-page","file":"src/kiwoom_monitor/central_server/candidate_monitor.py","owner":"run_shadow_monitors_once","receiver":"store","backend_scope":"same native store identity verified across registered CandidateMonitor consumers","reason":"One bounded safe-prefix observation page feeds separate strategy cursors in RAM. Native reader frontier, per-monitor evaluation/checkpoint transactions, recovery and cancellation drain remain owned by their existing implementations; no new writer or runtime task."},
-    {"id":"central-market-theme-shadow-inputs","file":"src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py","owner":"read_market_theme_shadow_inputs","receiver":"store","backend_scope":"three-read MarketThemeShadowReadStore supplied with a native backend","reason":"Bounded ranking revisions, availability-filtered theme snapshots, and second-trade current rows feed order-free H1/H2 evaluation. Separate native read snapshots are explicit; no writer, schema, runtime ownership, or continuity promotion."},
-    {"id":"central-program-snapshot-writer","file":"src/kiwoom_monitor/central_server/program_snapshot_writer.py","owner_prefix":"ProgramSnapshotWriter","receiver":"self._store","backend_scope":"single-method ProgramSnapshotStore supplied with the TOP20-selected native backend","reason":"The existing program_flow batch write moved from AutonomousTop20Service; one owned save, failed pending restoration, lost COMMIT ACK retry, and producer-stop before actual save drain preserve native transaction ownership."},
-    {"id":"central-realtime-router-store","file":"src/kiwoom_monitor/central_server/realtime_routes.py","owner_prefix":"create_realtime_router","receiver":"store","backend_scope":"single-method realtime snapshot reader on the same app-selected native store","reason":"Unchanged to_thread snapshot read for sorted requested codes; hub subscription, RAM overlay, sender cancellation and native DB transaction ownership preserved."},
-    {"id":"central-diagnostic-read-router-store","file":"src/kiwoom_monitor/central_server/diagnostic_read_routes.py","owner_prefix":"create_diagnostic_read_router","receiver":"store","backend_scope":"two-method storage read protocol and explicit optional PostgreSQL diagnostic capabilities on the same app-selected native store","reason":"Unchanged concurrent size/breakdown reads, optional feature availability precedence, read-only plan bounds and BODY/RULE forwarding; native DB/transaction/metrics/control ownership unchanged."},
-    {"id":"central-operational-settings-router-store","file":"src/kiwoom_monitor/central_server/operational_settings_routes.py","owner_prefix":"create_operational_settings_routers","receiver":"store","backend_scope":"same app-selected native QueryStore for settings writes and existing CandidateMonitor constructor","reason":"Same native upsert_documents thread boundary, saved/applied revision, candidate constructor and close/start order. Per-app state replaces closure slots; native connections, transactions, service work and lifespan order unchanged."},
-    {"id":"central-account-contexts-router-store","file":"src/kiwoom_monitor/central_server/account_query_routes.py","owner_prefix":"create_account_contexts_router","receiver":"store","backend_scope":"single-method AccountQueryProfileStore supplied with the same app-selected native QueryStore","reason":"Native credential label lookup unchanged. Runtime owners and live legacy binding/session getter preserve publication and account ordering; no writes, transaction or connection ownership change."},
-    {"id":"central-market-query-router-store","file":"src/kiwoom_monitor/central_server/market_query_routes.py","owner_prefix":"create_market_query_router","receiver":"store","backend_scope":"three-method MarketQueryStore supplied with the same app-selected QueryStore","reason":"Same archive-first helper reads, account endpoint exclusion and selected broker/collector reconnect fencing. Native writes, connections, transactions, broker scheduling and lifecycle unchanged."},
-    {"id":"central-account-settings-read-store","file":"src/kiwoom_monitor/central_server/account_settings_routes.py","owner_prefix":"create_account_settings_router","receiver":"store","backend_scope":"two-method AccountSettingsReadStore supplied with the same app-selected QueryStore","reason":"Unchanged market profile and account scope reads; applied revisions and monitor state remain selected-owner values. Market role writes delegate to existing owner; native transactions, admission, rollback and lifecycle unchanged."},
-    {"id":"central-market-event-read-store","file":"src/kiwoom_monitor/central_server/market_read_routes.py","owner_prefix":"create_market_event_read_router","receiver":"store","backend_scope":"three-method MarketEventReadStore supplied with the same app-selected QueryStore","reason":"Unchanged event history code/limit and active_only=False current cohort reads, with condition document and existing app-owned service state. Collection, storage, transactions and lifecycle remain unchanged."},
-    {"id":"central-market-live-read-store","file":"src/kiwoom_monitor/central_server/market_read_routes.py","owner_prefix":"create_market_live_read_router","receiver":"store","backend_scope":"six-method MarketReadStore supplied with the same app-selected QueryStore","reason":"Original market read arguments, source tags, SOR selection and completion/cutoff policy retained. Collector is resolved from current app.state on each request; collection, storage and lifecycle ownership unchanged."},
-    {"id":"central-market-archive-read-store","file":"src/kiwoom_monitor/central_server/market_read_routes.py","owner_prefix":"create_market_archive_read_router","receiver":"store","backend_scope":"six-method MarketReadStore supplied with the same app-selected QueryStore","reason":"Original market read arguments, source tags, SOR selection and completion/cutoff policy retained. Collector is resolved from current app.state on each request; collection, storage and lifecycle ownership unchanged."},
-    {"id":"central-mock-publication-evidence-store","file":"src/kiwoom_monitor/central_server/mock_publication_routes.py","owner_prefix":"create_mock_publication_router","receiver":"store","backend_scope":"two-method MockPublicationEvidenceStore supplied with the same create_app-selected store","reason":"Unchanged binding selection and bounded shadow evidence search; existing stateless ForwardEvaluationRepository assembled once by app with same store, preserving native publication validation/storage contracts."},
-    {"id":"central-market-dataset-read-router-store","file":"src/kiwoom_monitor/central_server/market_dataset_read_routes.py","owner_prefix":"create_market_dataset_read_router","receiver":"store","backend_scope":"four-method MarketDatasetReadStore supplied with the same create_app-selected QueryStore","reason":"Legacy snapshot/statistics defaults remain unchanged. Opt-in display series/statistics use consistent native read snapshots and a separate cache with per-call transactions; app live-service lifecycle ownership remains unchanged."},
-    {"id":"central-app-store-closure","file":"src/kiwoom_monitor/central_server/app.py","owner_prefix":"create_app","receiver":"store","backend_scope":"create_app query-store factory result","reason":"Factory chooses SQLite/PostgreSQL QueryStore and closes over the selected store in route handlers."},
-    {"id":"central-news-read-router-store","file":"src/kiwoom_monitor/central_server/news_read_routes.py","owner_prefix":"create_news_read_router","receiver":"store","backend_scope":"four-method NewsReadStore protocol supplied with the create_app-selected QueryStore","reason":"The authenticated history, sources, and market-feed routes use only their declared read queries."},
-    {"id":"central-historical-news-processing-router-store","file":"src/kiwoom_monitor/central_server/historical_news_processing_routes.py","owner_prefix":"create_historical_news_processing_router","receiver":"store","backend_scope":"five-method HistoricalNewsProcessingStore supplied with the same create_app-selected QueryStore","reason":"Claim, complete, and market batch routes moved with identical arguments/bodies; native leases, revisions, transactions, and wake-up ownership remain in the existing store."},
-    {"id":"central-content-router-store","file":"src/kiwoom_monitor/central_server/content_routes.py","owner_prefix":"create_content_router","receiver":"store","backend_scope":"five-method ContentStore supplied with the same create_app-selected QueryStore","reason":"Four content/theme HTTP routes and journal identity validation moved with identical arguments/bodies and allowlist; the native store retains transaction, revision, alias verification, and post-commit wake-up ownership."},
-    {"id":"central-research-read-router-store","file":"src/kiwoom_monitor/central_server/research_read_routes.py","owner_prefix":"create_research_read_router","receiver":"store","backend_scope":"ResearchReadStore supplied with the same create_app-selected QueryStore","reason":"Observation export/page and candidate reads retain original arguments and DB calls. Optional RAM diagnostic load_document reads one fixed key only on explicit authenticated request; no candidate approval or runtime restore. Fixed membership transactions stay in native storage; monitor lifecycle/replacement stays in app with request-time access to its current owner."},
-    {"id":"central-ram-shadow-selected-record-store","file":"src/kiwoom_monitor/central_server/market_theme_shadow_monitor.py","owner":"MarketThemeShadowRuntime._record_once.write","receiver":"self._record_store","backend_scope":"optional same app-owned QueryStore selected explicitly in create_app","reason":"Native upsert_documents writes one bounded diagnostic latest document, shared context once, only selected categorical transitions with interval/coalescing. Owned thread drain joins before store close; retry reuses the fixed key and exact document. No input collection, schema change, candidate checkpoint, replay approval, account or order write."},
-    {"id":"central-app-archived-chart","file":"src/kiwoom_monitor/central_server/market_query_routes.py","owner":"_archived_chart_response","receiver":"store","backend_scope":"injected QueryStore helper","reason":"Explicit store argument loads archived chart documents and bars."},
-    {"id":"central-app-stored-market","file":"src/kiwoom_monitor/central_server/market_query_routes.py","owner":"_stored_market_response","receiver":"store","backend_scope":"injected QueryStore helper","reason":"Explicit store argument serves stored market response."},
-    {"id":"central-app-coverage-helper","file":"src/kiwoom_monitor/central_server/market_read_routes.py","owner":"_explicit_coverage_complete","receiver":"store","backend_scope":"injected QueryStore helper","reason":"Explicit store argument reads daily coverage documents."},
-    {"id":"central-rest-broker","file":"src/kiwoom_monitor/central_server/rest_broker.py","owner_prefix":"CentralRestBroker","receiver":"self._store","backend_scope":"injected QueryStore","reason":"REST cache reads and persistence writes use the injected store."},
-    {"id":"central-market-ingest","file":"src/kiwoom_monitor/central_server/market_ingest.py","owner_prefix":"MarketDataIngestor","receiver":"self._store","backend_scope":"injected QueryStore","reason":"REST response ingestion persists market bars and coverage through the injected store."},
-    {"id":"central-realtime-collector","file":"src/kiwoom_monitor/central_server/realtime_collector.py","owner_prefix":"CentralRealtimeCollector","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Realtime flush path persists snapshots, bars, datasets and documents."},
-    {"id":"central-autonomous-top20","file":"src/kiwoom_monitor/central_server/autonomous_top20.py","owner_prefix":"AutonomousTop20Service","receiver":"self._store","backend_scope":"injected QueryStore","reason":"TOP20 collection, enrichment, coverage and persistence use the injected store. After-close display derivation reads consistent inputs and minute metadata, then publishes through the existing generic dataset transaction; raw research/capture contracts remain unchanged."},
-    {"id":"central-market-events","file":"src/kiwoom_monitor/central_server/market_events.py","owner_prefix":"MarketEventService","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Market event revisions and projections use the injected store."},
-    {"id":"central-external-market","file":"src/kiwoom_monitor/central_server/external_market_collector.py","owner_prefix":"YahooDelayedMarketCollector","receiver":"self._store","backend_scope":"injected QueryStore","reason":"External market bars and collection state use the injected store."},
-    {"id":"central-candidate-monitor","file":"src/kiwoom_monitor/central_server/candidate_monitor.py","owner_prefix":"CandidateMonitor","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Candidate evaluation and checkpoint state use the injected store."},
-    {"id":"central-observation-frame-recovery","file":"src/kiwoom_monitor/central_server/observation_frame_recovery.py","owner":"ObservationFrameRecovery.advance","receiver":"store","backend_scope":"injected QueryStore page contract","reason":"Legacy checkpoint repair reads bounded observation pages without replaying decisions."},
-    {"id":"central-news-service","file":"src/kiwoom_monitor/central_server/news_service.py","owner_prefix":"CentralNewsService","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Central news readers use the injected store."},
-    {"id":"central-news-jobs","file":"src/kiwoom_monitor/central_server/news_jobs.py","owner_prefix":"NewsJobRunner","receiver":"self._store","backend_scope":"injected QueryStore","reason":"News job claim, finish and retry use the injected store."},
-    {"id":"central-news-query-collector","file":"src/kiwoom_monitor/central_server/news_sources.py","owner_prefix":"QuerySetNewsCollector","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Query-set news collection reads cursors and persists source pages through the injected store."},
-    {"id":"central-market-feed-collector","file":"src/kiwoom_monitor/central_server/market_news_sources.py","owner_prefix":"MarketFeedNewsCollector","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Market feed news collection uses the injected store."},
-    {"id":"central-ai-service","file":"src/kiwoom_monitor/central_server/ai_service.py","owner_prefix":"CentralAIService","receiver":"self._store","backend_scope":"injected QueryStore","reason":"AI news revisions, results and documents use the injected store."},
-    {"id":"central-ai-credentials","file":"src/kiwoom_monitor/central_server/ai_credentials.py","owner_prefix":"AICredentialOwner","receiver":"service._store","backend_scope":"injected AI service wrapping QueryStore","reason":"Credential profile registration is issued through the constructed AI service."},
-    {"id":"central-news-credentials-dart","file":"src/kiwoom_monitor/central_server/news_credentials.py","owner_prefix":"DartCredentialOwner","receiver":"service._store","backend_scope":"injected news service wrapping QueryStore","reason":"DART credential profile registration is issued through the constructed news service."},
-    {"id":"central-news-credentials-naver","file":"src/kiwoom_monitor/central_server/news_credentials.py","owner_prefix":"NaverCredentialOwner","receiver":"service._store","backend_scope":"injected news service wrapping QueryStore","reason":"Naver credential profile registration is issued through the constructed news service."},
-    {"id":"central-credential-settings-compose","file":"src/kiwoom_monitor/central_server/credential_store.py","owner":"compose_credential_settings","receiver":"store","backend_scope":"injected QueryStore","reason":"Legacy credential startup composition reads and finalizes QueryStore activation records."},
-    {"id":"central-credential-vault","file":"src/kiwoom_monitor/central_server/credential_store.py","owner_prefix":"CredentialStore","receiver":"self._metadata","backend_scope":"injected metadata QueryStore","reason":"Credential vault activation metadata uses the injected store."},
-    {"id":"central-credential-runtime","file":"src/kiwoom_monitor/central_server/credential_runtime.py","owner_prefix":"CredentialRuntime","receiver":"self.store","backend_scope":"injected QueryStore","reason":"Credential runtime uses the selected store for activation and profile state."},
-    {"id":"central-mock-runtime","file":"src/kiwoom_monitor/central_server/mock_runtime.py","owner_prefix":"MockCredentialOwner","receiver":"self.store","backend_scope":"injected QueryStore","reason":"Mock account owner uses the injected store for credential and account state."},
-    {"id":"central-mock-bundle","file":"src/kiwoom_monitor/central_server/mock_runtime.py","owner_prefix":"MockAccountBundle","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Mock account bundle uses the injected store."},
-    {"id":"central-real-runtime","file":"src/kiwoom_monitor/central_server/real_runtime.py","owner_prefix":"RealCredentialOwner","receiver":"self.store","backend_scope":"injected QueryStore","reason":"Real account owner uses the injected store for profile, settings and recovery state."},
-    {"id":"central-real-runtime-constructor-store","file":"src/kiwoom_monitor/central_server/real_runtime.py","owner":"RealCredentialOwner.__init__","receiver":"store","backend_scope":"injected QueryStore","reason":"Constructor loads the initial market profile from the selected QueryStore."},
-    {"id":"central-mock-supervisor","file":"src/kiwoom_monitor/central_server/mock_automation_supervisor.py","owner_prefix":"MockAutomationSupervisor","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Automation supervisor control and recovery reads use the injected store."},
-    {"id":"central-mock-runner","file":"src/kiwoom_monitor/central_server/mock_automation_runner.py","owner_prefix":"MockAutomationRunner","receiver":"self._store","backend_scope":"injected QueryStore","reason":"Automation runner lifecycle and result writes use the injected store."},
-    {"id":"execution-repository","file":"src/kiwoom_monitor/infrastructure/persistence/execution_repository.py","owner_prefix":"ExecutionRepository","receiver":"self._store","backend_scope":"injected QueryStore protocol","reason":"Execution ledger and lease operations delegate to the injected store."},
-    {"id":"forward-evaluation-repository","file":"src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py","owner_prefix":"ForwardEvaluationRepository","receiver":"self._store","backend_scope":"injected QueryStore protocol","reason":"Research and mock-automation projections delegate to the injected store."},
-    {"id":"diagnostic-replay-store","file":"src/kiwoom_monitor/central_server/diagnostic_replay.py","owner_prefix":"run_replay","receiver":"store","backend_scope":"dedicated diagnostic replay QueryStore","reason":"Selected diagnostic trace writers replay through the injected diagnostic store."},
-    {"id":"diagnostic-replay-minute-store","file":"src/kiwoom_monitor/central_server/diagnostic_replay.py","owner":"run_replay.execute","receiver":"minute_store","backend_scope":"dedicated diagnostic replay QueryStore instance","reason":"Replay switches between isolated history-enabled and history-disabled store instances per recorded call."},
-    {"id":"diagnostic-replay-no-history-store","file":"src/kiwoom_monitor/central_server/diagnostic_replay.py","owner":"run_replay","receiver":"no_history_store","backend_scope":"dedicated diagnostic replay QueryStore instance","reason":"Recorded replay seeds isolated canonical minute bars without revision history."},
-    {"id":"account-identity-append","file":"src/kiwoom_monitor/application/account_identity.py","owner":"bind_verified_account_identity","receiver":"store","backend_scope":"AccountRegistryStore protocol","reason":"Explicit registry protocol argument appends verified account binding."},
-    {"id":"account-identity-register","file":"src/kiwoom_monitor/application/account_identity.py","owner":"prepare_verified_account_identity","receiver":"store","backend_scope":"AccountRegistryStore protocol","reason":"Explicit registry protocol argument registers verified identity."},
-    {"id":"account-identity-alias","file":"src/kiwoom_monitor/application/account_identity.py","owner":"link_local_scope_to_verified_binding","receiver":"store","backend_scope":"AccountRegistryStore protocol","reason":"Explicit registry protocol argument adds local account scope alias; source caller reachability remains separate."}
+    {
+      "id": "central-morning-brief-constructor",
+      "file": "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "owner": "MorningMarketBrief.__init__",
+      "receiver": "store",
+      "backend_scope": "same create_app-selected native QueryStore passed to CentralAIService and MorningMarketBrief",
+      "reason": "Read existing global schedule settings once at construction. The app owns store lifetime; no new connection, pool, transaction or writer is introduced."
+    },
+    {
+      "id": "central-morning-brief-documents",
+      "file": "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "owner_prefix": "MorningMarketBrief",
+      "receiver": "self.store",
+      "backend_scope": "same app-selected native document store; morning_market_brief_settings/runs collections",
+      "reason": "Existing native load_documents/upsert_documents calls run in asyncio.to_thread. Save-and-publish settings, durable claim before inference, bounded latest/history reads and final result writes retain separate native transactions. Owned cancellation drains writes; no transaction spans external inference and no order path is invoked."
+    },
+    {
+      "id": "central-stock-thesis-source-check",
+      "file": "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py",
+      "owner": "read_stock_thesis_source_check",
+      "receiver": "store",
+      "backend_scope": "same app-selected native backend under the existing operational owner lock",
+      "reason": "Explicit authenticated bounded diagnostic makes one theme snapshot read and one current second-bar read using separate native transactions. Cancellation drains before selection/shutdown releases the existing lock. No writes, live polling, collector ownership, source approval or replay promotion."
+    },
+    {
+      "id": "central-shared-shadow-page",
+      "file": "src/kiwoom_monitor/central_server/candidate_monitor.py",
+      "owner": "run_shadow_monitors_once",
+      "receiver": "store",
+      "backend_scope": "same native store identity verified across registered CandidateMonitor consumers",
+      "reason": "One bounded safe-prefix observation page feeds separate strategy cursors in RAM. Native reader frontier, per-monitor evaluation/checkpoint transactions, recovery and cancellation drain remain owned by their existing implementations; no new writer or runtime task."
+    },
+    {
+      "id": "central-market-theme-shadow-inputs",
+      "file": "src/kiwoom_monitor/central_server/market_theme_shadow_inputs.py",
+      "owner": "read_market_theme_shadow_inputs",
+      "receiver": "store",
+      "backend_scope": "three-read MarketThemeShadowReadStore supplied with a native backend",
+      "reason": "Bounded ranking revisions, availability-filtered theme snapshots, and second-trade current rows feed order-free H1/H2 evaluation. Separate native read snapshots are explicit; no writer, schema, runtime ownership, or continuity promotion."
+    },
+    {
+      "id": "central-program-snapshot-writer",
+      "file": "src/kiwoom_monitor/central_server/program_snapshot_writer.py",
+      "owner_prefix": "ProgramSnapshotWriter",
+      "receiver": "self._store",
+      "backend_scope": "single-method ProgramSnapshotStore supplied with the TOP20-selected native backend",
+      "reason": "The existing program_flow batch write moved from AutonomousTop20Service; one owned save, failed pending restoration, lost COMMIT ACK retry, and producer-stop before actual save drain preserve native transaction ownership."
+    },
+    {
+      "id": "central-realtime-router-store",
+      "file": "src/kiwoom_monitor/central_server/realtime_routes.py",
+      "owner_prefix": "create_realtime_router",
+      "receiver": "store",
+      "backend_scope": "single-method realtime snapshot reader on the same app-selected native store",
+      "reason": "Unchanged to_thread snapshot read for sorted requested codes; hub subscription, RAM overlay, sender cancellation and native DB transaction ownership preserved."
+    },
+    {
+      "id": "central-diagnostic-read-router-store",
+      "file": "src/kiwoom_monitor/central_server/diagnostic_read_routes.py",
+      "owner_prefix": "create_diagnostic_read_router",
+      "receiver": "store",
+      "backend_scope": "two-method storage read protocol and explicit optional PostgreSQL diagnostic capabilities on the same app-selected native store",
+      "reason": "Unchanged concurrent size/breakdown reads, optional feature availability precedence, read-only plan bounds and BODY/RULE forwarding; native DB/transaction/metrics/control ownership unchanged."
+    },
+    {
+      "id": "central-operational-settings-router-store",
+      "file": "src/kiwoom_monitor/central_server/operational_settings_routes.py",
+      "owner_prefix": "create_operational_settings_routers",
+      "receiver": "store",
+      "backend_scope": "same app-selected native QueryStore for settings writes and existing CandidateMonitor constructor",
+      "reason": "Same native upsert_documents thread boundary, saved/applied revision, candidate constructor and close/start order. Per-app state replaces closure slots; native connections, transactions, service work and lifespan order unchanged."
+    },
+    {
+      "id": "central-account-contexts-router-store",
+      "file": "src/kiwoom_monitor/central_server/account_query_routes.py",
+      "owner_prefix": "create_account_contexts_router",
+      "receiver": "store",
+      "backend_scope": "single-method AccountQueryProfileStore supplied with the same app-selected native QueryStore",
+      "reason": "Native credential label lookup unchanged. Runtime owners and live legacy binding/session getter preserve publication and account ordering; no writes, transaction or connection ownership change."
+    },
+    {
+      "id": "central-market-query-router-store",
+      "file": "src/kiwoom_monitor/central_server/market_query_routes.py",
+      "owner_prefix": "create_market_query_router",
+      "receiver": "store",
+      "backend_scope": "three-method MarketQueryStore supplied with the same app-selected QueryStore",
+      "reason": "Same archive-first helper reads, account endpoint exclusion and selected broker/collector reconnect fencing. Native writes, connections, transactions, broker scheduling and lifecycle unchanged."
+    },
+    {
+      "id": "central-account-settings-read-store",
+      "file": "src/kiwoom_monitor/central_server/account_settings_routes.py",
+      "owner_prefix": "create_account_settings_router",
+      "receiver": "store",
+      "backend_scope": "two-method AccountSettingsReadStore supplied with the same app-selected QueryStore",
+      "reason": "Unchanged market profile and account scope reads; applied revisions and monitor state remain selected-owner values. Market role writes delegate to existing owner; native transactions, admission, rollback and lifecycle unchanged."
+    },
+    {
+      "id": "central-market-event-read-store",
+      "file": "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "owner_prefix": "create_market_event_read_router",
+      "receiver": "store",
+      "backend_scope": "three-method MarketEventReadStore supplied with the same app-selected QueryStore",
+      "reason": "Unchanged event history code/limit and active_only=False current cohort reads, with condition document and existing app-owned service state. Collection, storage, transactions and lifecycle remain unchanged."
+    },
+    {
+      "id": "central-market-live-read-store",
+      "file": "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "owner_prefix": "create_market_live_read_router",
+      "receiver": "store",
+      "backend_scope": "six-method MarketReadStore supplied with the same app-selected QueryStore",
+      "reason": "Original market read arguments, source tags, SOR selection and completion/cutoff policy retained. Collector is resolved from current app.state on each request; collection, storage and lifecycle ownership unchanged."
+    },
+    {
+      "id": "central-market-archive-read-store",
+      "file": "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "owner_prefix": "create_market_archive_read_router",
+      "receiver": "store",
+      "backend_scope": "six-method MarketReadStore supplied with the same app-selected QueryStore",
+      "reason": "Original market read arguments, source tags, SOR selection and completion/cutoff policy retained. Collector is resolved from current app.state on each request; collection, storage and lifecycle ownership unchanged."
+    },
+    {
+      "id": "central-mock-publication-evidence-store",
+      "file": "src/kiwoom_monitor/central_server/mock_publication_routes.py",
+      "owner_prefix": "create_mock_publication_router",
+      "receiver": "store",
+      "backend_scope": "two-method MockPublicationEvidenceStore supplied with the same create_app-selected store",
+      "reason": "Unchanged binding selection and bounded shadow evidence search; existing stateless ForwardEvaluationRepository assembled once by app with same store, preserving native publication validation/storage contracts."
+    },
+    {
+      "id": "central-market-dataset-read-router-store",
+      "file": "src/kiwoom_monitor/central_server/market_dataset_read_routes.py",
+      "owner_prefix": "create_market_dataset_read_router",
+      "receiver": "store",
+      "backend_scope": "four-method MarketDatasetReadStore supplied with the same create_app-selected QueryStore",
+      "reason": "Legacy snapshot/statistics defaults remain unchanged. Opt-in display series/statistics use consistent native read snapshots and a separate cache with per-call transactions; app live-service lifecycle ownership remains unchanged."
+    },
+    {
+      "id": "central-app-store-closure",
+      "file": "src/kiwoom_monitor/central_server/app.py",
+      "owner_prefix": "create_app",
+      "receiver": "store",
+      "backend_scope": "create_app query-store factory result",
+      "reason": "Factory chooses SQLite/PostgreSQL QueryStore and closes over the selected store in route handlers."
+    },
+    {
+      "id": "central-news-read-router-store",
+      "file": "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "owner_prefix": "create_news_read_router",
+      "receiver": "store",
+      "backend_scope": "six-method NewsReadStore protocol on the existing create_app-selected native QueryStore",
+      "reason": "The authenticated history, sources, and market-feed routes use only their declared read queries."
+    },
+    {
+      "id": "central-historical-news-processing-router-store",
+      "file": "src/kiwoom_monitor/central_server/historical_news_processing_routes.py",
+      "owner_prefix": "create_historical_news_processing_router",
+      "receiver": "store",
+      "backend_scope": "five-method HistoricalNewsProcessingStore supplied with the same create_app-selected QueryStore",
+      "reason": "Claim, complete, and market batch routes moved with identical arguments/bodies; native leases, revisions, transactions, and wake-up ownership remain in the existing store."
+    },
+    {
+      "id": "central-content-router-store",
+      "file": "src/kiwoom_monitor/central_server/content_routes.py",
+      "owner_prefix": "create_content_router",
+      "receiver": "store",
+      "backend_scope": "five-method ContentStore supplied with the same create_app-selected QueryStore",
+      "reason": "Four content/theme HTTP routes and journal identity validation moved with identical arguments/bodies and allowlist; the native store retains transaction, revision, alias verification, and post-commit wake-up ownership."
+    },
+    {
+      "id": "central-research-read-router-store",
+      "file": "src/kiwoom_monitor/central_server/research_read_routes.py",
+      "owner_prefix": "create_research_read_router",
+      "receiver": "store",
+      "backend_scope": "ResearchReadStore supplied with the same create_app-selected QueryStore",
+      "reason": "Observation export/page and candidate reads retain original arguments and DB calls. Optional RAM diagnostic load_document reads one fixed key only on explicit authenticated request; no candidate approval or runtime restore. Fixed membership transactions stay in native storage; monitor lifecycle/replacement stays in app with request-time access to its current owner. Reviewed AR-v1 wave20 addition: own accept_research_result POST and own immutable load_document GET use a dedicated server-derived result-only principal and expected-owner header; data/first receipt share native transaction, cancellation joins before close, no scientific/job/order authority. Exact three added static candidate identities and one method on three declarations are separately pinned; future call additions still require baseline delta review.",
+      "review_evidence": "tmp/ar-v1-wave20-20261024/root-native-contract-review.json"
+    },
+    {
+      "id": "central-ram-shadow-selected-record-store",
+      "file": "src/kiwoom_monitor/central_server/market_theme_shadow_monitor.py",
+      "owner": "MarketThemeShadowRuntime._record_once.write",
+      "receiver": "self._record_store",
+      "backend_scope": "optional same app-owned QueryStore selected explicitly in create_app",
+      "reason": "Native upsert_documents writes one bounded diagnostic latest document, shared context once, only selected categorical transitions with interval/coalescing. Owned thread drain joins before store close; retry reuses the fixed key and exact document. No input collection, schema change, candidate checkpoint, replay approval, account or order write."
+    },
+    {
+      "id": "central-app-archived-chart",
+      "file": "src/kiwoom_monitor/central_server/market_query_routes.py",
+      "owner": "_archived_chart_response",
+      "receiver": "store",
+      "backend_scope": "injected QueryStore helper",
+      "reason": "Explicit store argument loads archived chart documents and bars."
+    },
+    {
+      "id": "central-app-stored-market",
+      "file": "src/kiwoom_monitor/central_server/market_query_routes.py",
+      "owner": "_stored_market_response",
+      "receiver": "store",
+      "backend_scope": "injected QueryStore helper",
+      "reason": "Explicit store argument serves stored market response."
+    },
+    {
+      "id": "central-app-coverage-helper",
+      "file": "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "owner": "_explicit_coverage_complete",
+      "receiver": "store",
+      "backend_scope": "injected QueryStore helper",
+      "reason": "Explicit store argument reads daily coverage documents."
+    },
+    {
+      "id": "central-rest-broker",
+      "file": "src/kiwoom_monitor/central_server/rest_broker.py",
+      "owner_prefix": "CentralRestBroker",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "REST cache reads and persistence writes use the injected store."
+    },
+    {
+      "id": "central-market-ingest",
+      "file": "src/kiwoom_monitor/central_server/market_ingest.py",
+      "owner_prefix": "MarketDataIngestor",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "REST response ingestion persists market bars and coverage through the injected store."
+    },
+    {
+      "id": "central-realtime-collector",
+      "file": "src/kiwoom_monitor/central_server/realtime_collector.py",
+      "owner_prefix": "CentralRealtimeCollector",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Realtime flush path persists snapshots, bars, datasets and documents."
+    },
+    {
+      "id": "central-autonomous-top20",
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "owner_prefix": "AutonomousTop20Service",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "TOP20 collection, enrichment, coverage and persistence use the injected store. After-close display derivation reads consistent inputs and minute metadata, then publishes through the existing generic dataset transaction; raw research/capture contracts remain unchanged."
+    },
+    {
+      "id": "central-market-events",
+      "file": "src/kiwoom_monitor/central_server/market_events.py",
+      "owner_prefix": "MarketEventService",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Market event revisions and projections use the injected store."
+    },
+    {
+      "id": "central-external-market",
+      "file": "src/kiwoom_monitor/central_server/external_market_collector.py",
+      "owner_prefix": "YahooDelayedMarketCollector",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "External market bars and collection state use the injected store."
+    },
+    {
+      "id": "central-candidate-monitor",
+      "file": "src/kiwoom_monitor/central_server/candidate_monitor.py",
+      "owner_prefix": "CandidateMonitor",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Candidate evaluation and checkpoint state use the injected store."
+    },
+    {
+      "id": "central-observation-frame-recovery",
+      "file": "src/kiwoom_monitor/central_server/observation_frame_recovery.py",
+      "owner": "ObservationFrameRecovery.advance",
+      "receiver": "store",
+      "backend_scope": "injected QueryStore page contract",
+      "reason": "Legacy checkpoint repair reads bounded observation pages without replaying decisions."
+    },
+    {
+      "id": "central-news-service",
+      "file": "src/kiwoom_monitor/central_server/news_service.py",
+      "owner_prefix": "CentralNewsService",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Central news readers use the injected store."
+    },
+    {
+      "id": "central-news-jobs",
+      "file": "src/kiwoom_monitor/central_server/news_jobs.py",
+      "owner_prefix": "NewsJobRunner",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "News job claim, finish and retry use the injected store."
+    },
+    {
+      "id": "central-news-query-collector",
+      "file": "src/kiwoom_monitor/central_server/news_sources.py",
+      "owner_prefix": "QuerySetNewsCollector",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Query-set news collection reads cursors and persists source pages through the injected store."
+    },
+    {
+      "id": "central-market-feed-collector",
+      "file": "src/kiwoom_monitor/central_server/market_news_sources.py",
+      "owner_prefix": "MarketFeedNewsCollector",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Market feed news collection uses the injected store."
+    },
+    {
+      "id": "central-ai-service",
+      "file": "src/kiwoom_monitor/central_server/ai_service.py",
+      "owner_prefix": "CentralAIService",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "AI news revisions, results and documents use the injected store."
+    },
+    {
+      "id": "central-ai-credentials",
+      "file": "src/kiwoom_monitor/central_server/ai_credentials.py",
+      "owner_prefix": "AICredentialOwner",
+      "receiver": "service._store",
+      "backend_scope": "injected AI service wrapping QueryStore",
+      "reason": "Credential profile registration is issued through the constructed AI service."
+    },
+    {
+      "id": "central-news-credentials-dart",
+      "file": "src/kiwoom_monitor/central_server/news_credentials.py",
+      "owner_prefix": "DartCredentialOwner",
+      "receiver": "service._store",
+      "backend_scope": "injected news service wrapping QueryStore",
+      "reason": "DART credential profile registration is issued through the constructed news service."
+    },
+    {
+      "id": "central-news-credentials-naver",
+      "file": "src/kiwoom_monitor/central_server/news_credentials.py",
+      "owner_prefix": "NaverCredentialOwner",
+      "receiver": "service._store",
+      "backend_scope": "injected news service wrapping QueryStore",
+      "reason": "Naver credential profile registration is issued through the constructed news service."
+    },
+    {
+      "id": "central-credential-settings-compose",
+      "file": "src/kiwoom_monitor/central_server/credential_store.py",
+      "owner": "compose_credential_settings",
+      "receiver": "store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Legacy credential startup composition reads and finalizes QueryStore activation records."
+    },
+    {
+      "id": "central-credential-vault",
+      "file": "src/kiwoom_monitor/central_server/credential_store.py",
+      "owner_prefix": "CredentialStore",
+      "receiver": "self._metadata",
+      "backend_scope": "injected metadata QueryStore",
+      "reason": "Credential vault activation metadata uses the injected store."
+    },
+    {
+      "id": "central-credential-runtime",
+      "file": "src/kiwoom_monitor/central_server/credential_runtime.py",
+      "owner_prefix": "CredentialRuntime",
+      "receiver": "self.store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Credential runtime uses the selected store for activation and profile state."
+    },
+    {
+      "id": "central-mock-runtime",
+      "file": "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "owner_prefix": "MockCredentialOwner",
+      "receiver": "self.store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Mock account owner uses the injected store for credential and account state."
+    },
+    {
+      "id": "central-mock-bundle",
+      "file": "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "owner_prefix": "MockAccountBundle",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Mock account bundle uses the injected store."
+    },
+    {
+      "id": "central-real-runtime",
+      "file": "src/kiwoom_monitor/central_server/real_runtime.py",
+      "owner_prefix": "RealCredentialOwner",
+      "receiver": "self.store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Real account owner uses the injected store for profile, settings and recovery state."
+    },
+    {
+      "id": "central-real-runtime-constructor-store",
+      "file": "src/kiwoom_monitor/central_server/real_runtime.py",
+      "owner": "RealCredentialOwner.__init__",
+      "receiver": "store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Constructor loads the initial market profile from the selected QueryStore."
+    },
+    {
+      "id": "central-mock-supervisor",
+      "file": "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "owner_prefix": "MockAutomationSupervisor",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore",
+      "reason": "Automation supervisor control and recovery reads use the injected store."
+    },
+    {
+      "id": "central-mock-episode-store",
+      "file": "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "owner_prefix": "MockAutomationEpisode",
+      "receiver": "self._store",
+      "backend_scope": "same Supervisor-injected QueryStore; Episode owns business state, native store remains owner",
+      "reason": "Relocate the six originally reviewed Runner self._store sites: prepare runner+clock reads2, leader result writes2, session-clock write1, observation revisions read1. Same native capabilities/multiplicity/dispatch. Repository lookalikes remain unresolved; no new DB/lease/transaction authority."
+    },
+    {
+      "id": "central-mock-input-progress-bootstrap-store",
+      "file": "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "owner": "MockAutomationInputProgress.bootstrap",
+      "receiver": "store",
+      "backend_scope": "per-call borrowed same Episode/Supervisor QueryStore",
+      "reason": "One originally reviewed Runner._bootstrap load_observation_bootstrap moved with cursor/bootstrap ownership. No retained store/task/authority, no additional read."
+    },
+    {
+      "id": "central-mock-checkpoint-commit-store",
+      "file": "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "owner": "MockAutomationCheckpoint.commit",
+      "receiver": "store",
+      "backend_scope": "per-call borrowed same Episode/Supervisor QueryStore",
+      "reason": "One originally reviewed Runner._save_checkpoint upsert_documents moved with aggregate checkpoint attempt/pending/ACK state. Same native write and ACK/no-op/force boundary, no added SQL or COMMIT."
+    },
+    {
+      "id": "execution-repository",
+      "file": "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+      "owner_prefix": "ExecutionRepository",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore protocol",
+      "reason": "Execution ledger and lease operations delegate to the injected store."
+    },
+    {
+      "id": "forward-evaluation-repository",
+      "file": "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
+      "owner_prefix": "ForwardEvaluationRepository",
+      "receiver": "self._store",
+      "backend_scope": "injected QueryStore protocol",
+      "reason": "Research and mock-automation projections delegate to the injected store."
+    },
+    {
+      "id": "diagnostic-replay-store",
+      "file": "src/kiwoom_monitor/central_server/diagnostic_replay.py",
+      "owner_prefix": "run_replay",
+      "receiver": "store",
+      "backend_scope": "dedicated diagnostic replay QueryStore",
+      "reason": "Selected diagnostic trace writers replay through the injected diagnostic store."
+    },
+    {
+      "id": "diagnostic-replay-minute-store",
+      "file": "src/kiwoom_monitor/central_server/diagnostic_replay.py",
+      "owner": "run_replay.execute",
+      "receiver": "minute_store",
+      "backend_scope": "dedicated diagnostic replay QueryStore instance",
+      "reason": "Replay switches between isolated history-enabled and history-disabled store instances per recorded call."
+    },
+    {
+      "id": "diagnostic-replay-no-history-store",
+      "file": "src/kiwoom_monitor/central_server/diagnostic_replay.py",
+      "owner": "run_replay",
+      "receiver": "no_history_store",
+      "backend_scope": "dedicated diagnostic replay QueryStore instance",
+      "reason": "Recorded replay seeds isolated canonical minute bars without revision history."
+    },
+    {
+      "id": "account-identity-append",
+      "file": "src/kiwoom_monitor/application/account_identity.py",
+      "owner": "bind_verified_account_identity",
+      "receiver": "store",
+      "backend_scope": "AccountRegistryStore protocol",
+      "reason": "Explicit registry protocol argument appends verified account binding."
+    },
+    {
+      "id": "account-identity-register",
+      "file": "src/kiwoom_monitor/application/account_identity.py",
+      "owner": "prepare_verified_account_identity",
+      "receiver": "store",
+      "backend_scope": "AccountRegistryStore protocol",
+      "reason": "Explicit registry protocol argument registers verified identity."
+    },
+    {
+      "id": "account-identity-alias",
+      "file": "src/kiwoom_monitor/application/account_identity.py",
+      "owner": "link_local_scope_to_verified_binding",
+      "receiver": "store",
+      "backend_scope": "AccountRegistryStore protocol",
+      "reason": "Explicit registry protocol argument adds local account scope alias; source caller reachability remains separate."
+    },
+    {
+      "id": "ram-shadow-session-constructor-store",
+      "file": "src/kiwoom_monitor/central_server/ram_shadow_selection_session.py",
+      "receiver": "store",
+      "owner": "RamShadowSelectionSession.__init__",
+      "backend_scope": "Same app-selected SQLite/PostgreSQL QueryStore instance; native transaction/connection owner unchanged.",
+      "reason": "AR02 v1: actual saved/applied/error/runtime/update/close state moved from create_app and RAM settings route into the selection session, not a relay or second store. Six actual SQLite before/after result/SQL paths equal; source mapping is in consumer-owner-migration.json.",
+      "evidence": "tmp/ar-v1-20261023/ar02-report.json; docs/architecture/app-target-20261023.md#118-1차-구현--ci-원인-보완ar02-선택-상태"
+    },
+    {
+      "id": "ram-shadow-session-owned-store",
+      "file": "src/kiwoom_monitor/central_server/ram_shadow_selection_session.py",
+      "receiver": "self._store",
+      "owner_prefix": "RamShadowSelectionSession",
+      "backend_scope": "Same app-selected SQLite/PostgreSQL QueryStore instance; native transaction/connection owner unchanged.",
+      "reason": "AR02 v1: actual saved/applied/error/runtime/update/close state moved from create_app and RAM settings route into the selection session, not a relay or second store. Six actual SQLite before/after result/SQL paths equal; source mapping is in consumer-owner-migration.json.",
+      "evidence": "tmp/ar-v1-20261023/ar02-report.json; docs/architecture/app-target-20261023.md#118-1차-구현--ci-원인-보완ar02-선택-상태"
+    },
+    {
+      "id": "central-top20-after-close-owner",
+      "file": "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "owner_prefix": "Top20AfterCloseWorkflow",
+      "receiver": "self._store",
+      "backend_scope": "Same app-selected native QueryStore passed by AutonomousTop20Service.__init__ to the actual after-close workflow owner",
+      "reason": "Existing day/progress/entrant/retry/task and actual backfill/reconciliation bodies move together. The same store/native transaction/publication lock is reused; live ACK/source/outbox and DailyReferenceState remain with their existing owners. No relay service, copied state or additional transaction.",
+      "evidence": "tmp/ar-v1-wave6-20261024/review-after-close.json; tmp/ar-v1-wave8-20261024/root-integration/integration.json"
+    },
+    {
+      "id": "central-accepted-news-load-cached-news",
+      "file": "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "owner": "load_cached_news",
+      "receiver": "store",
+      "backend_scope": "same create_app-selected native QueryStore; existing CentralNewsService also passes its identical self._store",
+      "reason": "Exactly the existing load_stock_news_articles read moved with its unchanged merge/codec to the accepted-result reader. No SQL copy, new connection/transaction/cache or producer command. Native source/body/judgment semantics unchanged, including explicit legacy inference residual."
+    },
+    {
+      "id": "central-accepted-news-merge-confirmed-news",
+      "file": "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "owner": "merge_confirmed_news",
+      "receiver": "store",
+      "backend_scope": "same create_app-selected native QueryStore; existing CentralNewsService also passes its identical self._store",
+      "reason": "Exactly the existing load_confirmed_news_articles read moved with its unchanged merge/codec to the accepted-result reader. No SQL copy, new connection/transaction/cache or producer command. Native source/body/judgment semantics unchanged, including explicit legacy inference residual."
+    },
+    {
+      "id": "central-accepted-news-load-stored-news-page",
+      "file": "src/kiwoom_monitor/central_server/news_read_routes.py",
+      "owner_prefix": "load_stored_news_page",
+      "receiver": "store",
+      "backend_scope": "same application-owned native store forwarded into the two reviewed accepted-result readers",
+      "reason": "Query stored-page forwards only the existing accepted-result read chain, independent of news producer. Explicit automation fields are rejected. Admin still uses existing service semantics. No writer, new polling, lifecycle or native transaction introduced."
+    },
+    {
+      "id": "central-accepted-news-create-news-search-router",
+      "file": "src/kiwoom_monitor/central_server/news_service_routes.py",
+      "owner_prefix": "create_news_search_router",
+      "receiver": "store",
+      "backend_scope": "same application-owned native store forwarded into the two reviewed accepted-result readers",
+      "reason": "Query stored-page forwards only the existing accepted-result read chain, independent of news producer. Explicit automation fields are rejected. Admin still uses existing service semantics. No writer, new polling, lifecycle or native transaction introduced."
+    },
+    {
+      "id": "central-news-body-producer-native-store",
+      "file": "src/kiwoom_monitor/central_server/news_body_routes.py",
+      "owner_prefix": "create_news_body_router",
+      "receiver": "store",
+      "backend_scope": "Same create_app-selected SQLite/PostgreSQL QueryStore; no client-side native DB access.",
+      "reason": "Only four scoped BODY producer handlers: owner authentication precedes native claim/input/result/receipt. Native attempt/source/version/cache pin owns acceptance and transaction; handler joins the actual native call during cancellation.",
+      "evidence": "tmp/ar-v1-wave26-20261025/native-rehome.json; docs/architecture/app-target-20261023.md#0-현재-기준과-진행-현황"
+    },
+    {
+      "id": "ar09-explicit-tool-compose-application-inputs",
+      "file": "src/kiwoom_monitor/central_server/diagnostic_read_routes.py",
+      "owner": "compose_application_inputs",
+      "receiver": "store",
+      "backend_scope": "The identical create_app-owned SQLite/PostgreSQL QueryStore, never a second store or transaction owner.",
+      "reason": "Explicit optional-tool assembly receives the existing native store. compose_application_inputs installs the existing capture wrapper once; install_application_routes forwards the same store to the unchanged diagnostic read/control factories. Native lifecycle, SQL and storage contracts are unchanged. Product resource reads remain in create_app when tool files are absent.",
+      "evidence": "tmp/ar-v1-wave35-20261027/ar09-composition-review.json; tmp/ar-v1-wave35-20261027/ar09-native-review.json"
+    },
+    {
+      "id": "ar09-explicit-tool-install-application-routes",
+      "file": "src/kiwoom_monitor/central_server/diagnostic_read_routes.py",
+      "owner": "install_application_routes",
+      "receiver": "store",
+      "backend_scope": "The identical create_app-owned SQLite/PostgreSQL QueryStore, never a second store or transaction owner.",
+      "reason": "Explicit optional-tool assembly receives the existing native store. compose_application_inputs installs the existing capture wrapper once; install_application_routes forwards the same store to the unchanged diagnostic read/control factories. Native lifecycle, SQL and storage contracts are unchanged. Product resource reads remain in create_app when tool files are absent.",
+      "evidence": "tmp/ar-v1-wave35-20261027/ar09-composition-review.json; tmp/ar-v1-wave35-20261027/ar09-native-review.json"
+    }
   ]
 }

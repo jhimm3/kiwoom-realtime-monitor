@@ -672,6 +672,13 @@ def _worker(output_path: Path, modules: Sequence[str]) -> int:
         "source": source, "status": "failed",
     }
     try:
+        if os.name == "nt":
+            from scripts.regression_registry import join_from_environment
+            registry = join_from_environment()
+            result_document["registry_isolation"] = {
+                "key": registry.description["key"], "scope": ["HKCU"], "HKLM_fallback": "outside_scope",
+                "joined_before_test_imports": True,
+            }
         if not source["verified"]:
             raise RuntimeError(f"kiwoom_monitor did not resolve to this worktree src: {source}")
         loaded = []
@@ -776,11 +783,11 @@ def _code_tree_identity() -> dict[str, Any]:
         ".py", ".json", ".jsonl", ".yml", ".yaml", ".sh", ".ps1",
         ".bat", ".cmd", ".txt", ".md", ".lock", ".toml", ".cfg",
         ".ini", ".dockerfile", ".sql", ".html", ".css", ".svg",
-        ".csv", ".tsv", ".xml",
+        ".csv", ".tsv", ".xml", ".spec",
     }
     paths = [p for relative in ("src", "scripts", "tests", "deploy", ".github/workflows")
              for p in (ROOT / relative).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
-    paths.extend(ROOT / name for name in ("requirements.lock.txt", "pyproject.toml")
+    paths.extend(ROOT / name for name in ("requirements.lock.txt", "pyproject.toml", "KiwoomMonitor.spec")
                  if (ROOT / name).is_file())
     for path in sorted(paths, key=lambda value: value.relative_to(ROOT).as_posix()):
         name = path.relative_to(ROOT).as_posix().encode("utf-8")
@@ -871,6 +878,8 @@ def _run_process(
     execution_error = None
     temporary_directory = None
     temporary_state = "not_created"
+    registry_scope = None
+    registry_isolation = None
     try:
         if result_path.exists():
             raise FileExistsError(f"Refusing to reuse a worker result: {result_path}")
@@ -895,6 +904,8 @@ def _run_process(
         environment["TEMP"] = str(temporary_directory)
         environment["TMP"] = environment["TEMP"]
         environment["TMPDIR"] = environment["TEMP"]
+        from scripts.regression_registry import prepare_scope
+        registry_scope = prepare_scope(environment, temporary_directory, result_path=result_path)
         job = _WindowsJob()
         with log_path.open("wb") as log:
             process = job.start(command, environment, log)
@@ -932,6 +943,14 @@ def _run_process(
             if process is not None:
                 process.close()
 
+    if registry_scope is not None:
+        try:
+            registry_isolation = registry_scope.finish(
+                processes_exited=worker_exit_confirmed and tree_exit_confirmed)
+        except (OSError, ValueError, RuntimeError) as error:
+            registry_isolation = {"key": registry_scope.description["key"], "state": "cleanup_failed"}
+            execution_error = f"Registry cleanup {type(error).__name__}: {error}"
+
     try:
         worker_result = json.loads(result_path.read_text(encoding="utf-8"))
         if not isinstance(worker_result, dict):
@@ -949,6 +968,11 @@ def _run_process(
         ):
             raise ValueError("Worker success does not contain complete passing evidence")
         if worker_result.get("status") == "passed":
+            if registry_scope is not None and worker_result.get("registry_isolation") != {
+                "key": registry_scope.description["key"], "scope": ["HKCU"], "HKLM_fallback": "outside_scope",
+                "joined_before_test_imports": True,
+            }:
+                raise ValueError("Worker registry isolation evidence does not match its owned scope")
             discovery_error = _discovery_evidence_error(worker_result, modules, count)
             if discovery_error:
                 raise ValueError(discovery_error)
@@ -997,6 +1021,7 @@ def _run_process(
         "exit_code": exit_code,
         "temporary_directory": str(temporary_directory) if temporary_directory else None,
         "temporary_state": temporary_state,
+        "registry_isolation": registry_isolation,
         "log": str(log_path), "result": str(result_path), "result_error": result_error,
         "test_count": worker_result.get("test_count", 0) if worker_result else 0,
         "planned_test_count": worker_result.get("planned_test_count", 0) if worker_result else 0,

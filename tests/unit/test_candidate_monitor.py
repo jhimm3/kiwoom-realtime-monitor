@@ -584,7 +584,7 @@ class RegisteredFamilyShadowTests(unittest.TestCase):
             monitors = [CandidateMonitor(store, config, poll_seconds=1, universe_max_age_seconds=300)
                         for config in configs]
             self.assertNotEqual(monitors[0].monitor_id, monitors[1].monitor_id)
-            with patch("kiwoom_monitor.central_server.mock_automation_runner."
+            with patch("kiwoom_monitor.central_server.mock_automation_episode."
                        "dispatch_mock_automation_decision_from_risk",
                        side_effect=AssertionError("shadow must not dispatch an order")) as dispatch:
                 for monitor in monitors:
@@ -1437,11 +1437,20 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
         from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
         now = [datetime(2026, 9, 14, 9, tzinfo=timezone(timedelta(hours=9)))]
-        hub = RealtimeHub()
-        collector = CentralRealtimeCollector(lambda: "unused-offline-token", "real", hub, lambda: now[0], store)
+        try:
+            from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder, HubInputRecorder
+        except ModuleNotFoundError as error:
+            if error.name != "kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input":
+                raise
+            hub_observer = None
+        else:
+            hub_observer = HubInputRecorder()
+        hub = RealtimeHub(observer=hub_observer)
+        collector_observer = CollectorInputRecorder(hub_observer=hub_observer) if hub_observer is not None else None
+        collector = CentralRealtimeCollector(lambda: "unused-offline-token", "real", hub, lambda: now[0], store, input_observer=collector_observer)
         collector._apply_trade_source_approval({("005930", "KRX"), ("000660", "KRX")}, now[0], reset_all=True)
         monitors = tuple(MarketThemeShadowMonitor(theme_id="반도체", leadership_venue="KRX") for _ in range(count))
-        runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors)) if count else None
+        runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors), now_provider=collector._now_provider) if count else None
         if runtime and cleanup:
             self.addAsyncCleanup(runtime.close)
         if runtime:
@@ -1676,6 +1685,8 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 collector, runtime = app.state.realtime_collector, app.state.market_theme_shadow_runtime
                 now = [datetime(2026, 9, 14, 9, tzinfo=timezone(timedelta(hours=9)))]
                 collector._now_provider = lambda: now[0]
+                runtime._now = collector._now_provider
+                app.state.ram_shadow_selection_session._now = collector._now_provider
                 collector._apply_trade_source_approval({("005930", "KRX"), ("000660", "KRX")}, now[0], reset_all=True)
                 async def start(instance):
                     self.assertEqual("RUNNING", runtime.status["state"])
@@ -1707,7 +1718,7 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for bindings in ((), ((monitors[0], shadow_inputs()),) * 2,
                          ((monitors[0], replace(shadow_inputs(), theme_membership=None)),)):
             with self.assertRaises(ValueError):
-                MarketThemeShadowRuntime(hub, collector, bindings)
+                MarketThemeShadowRuntime(hub, collector, bindings, now_provider=collector._now_provider)
         await monitors[0].start()
         with self.assertRaises(RuntimeError):
             await runtime.start()
@@ -1717,7 +1728,7 @@ class CollectorRamShadowRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_collector_cannot_have_two_runtime_owners_or_lose_retention_on_failed_start(self):
         now, hub, collector, monitors, runtime = self.fixture()
         other_monitor = MarketThemeShadowMonitor(theme_id="반도체", leadership_venue="KRX")
-        other = MarketThemeShadowRuntime(hub, collector, ((other_monitor, shadow_inputs()),))
+        other = MarketThemeShadowRuntime(hub, collector, ((other_monitor, shadow_inputs()),), now_provider=collector._now_provider)
         self.addAsyncCleanup(other.close)
         await runtime.start()
         with self.assertRaisesRegex(RuntimeError, "already has an owner"):
@@ -1757,7 +1768,7 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
         ranking = Mock(side_effect=lambda: source["ranking"])
         themes = Mock(side_effect=lambda cutoff: source["theme"])
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, replace(shadow_inputs(), market_venue="COMBINED")) for m in monitors),
-                                          ranking_source=ranking, theme_source=theme_source or themes)
+                                          ranking_source=ranking, theme_source=theme_source or themes, now_provider=collector._now_provider)
         self.addAsyncCleanup(runtime.close)
         if runtime:
             collector.set_ram_observation_retention(runtime._retention)
@@ -1844,7 +1855,7 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
                     raise AssertionError("native context read not released")
             return [self.theme(now[0].replace(second=19))] if len(calls) == 1 else [snapshot]
         collector._apply_trade_source_approval({("005930", "KRX"), ("000660", "KRX"), ("100003", "KRX")}, now[0], reset_all=False)
-        runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors), theme_source=read)
+        runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors), theme_source=read, now_provider=collector._now_provider)
         self.addAsyncCleanup(runtime.close)
         await runtime.start()
         self.trades(collector, now)
@@ -1908,6 +1919,8 @@ class OwnerContextShadowTests(unittest.IsolatedAsyncioTestCase):
                 collector, runtime = app.state.realtime_collector, app.state.market_theme_shadow_runtime
                 now = [datetime(2026, 9, 14, 9, tzinfo=timezone(timedelta(hours=9)))]
                 collector._now_provider = lambda: now[0]
+                runtime._now = collector._now_provider
+                app.state.ram_shadow_selection_session._now = collector._now_provider
                 collector._apply_trade_source_approval({("005930", "KRX"), ("000660", "KRX")}, now[0], reset_all=True)
                 document = {"format": THEME_BACKUP_FORMAT, "version": THEME_BACKUP_VERSION,
                             **self.theme(now[0])["document"]}
@@ -2151,8 +2164,8 @@ class RamShadowCaptureAnchorTests(unittest.IsolatedAsyncioTestCase):
         path = "kiwoom_monitor.central_server.diagnostic_trace.input_token"
         with patch(path, return_value="trace-a"):
             self.assertIsNone(collector.ram_observation_snapshot(("005930",), seconds=20)["capture_anchor"])
-            collector._recorded_capture_epoch = "trace-a"
-            collector._recorded_input_high_water = ("trace-a", "accepted-a")
+            collector._input_observer.capture_epoch = "trace-a"
+            collector._input_observer.input_high_water = ("trace-a", "accepted-a")
             anchor = collector.ram_observation_snapshot(("005930",), seconds=20)["capture_anchor"]
             self.assertEqual(("trace-a", "accepted-a", False), (anchor["trace_id"], anchor["input_id"], anchor["verified"]))
             self.assertEqual("last_accepted_collector_input", anchor["role"])
@@ -2160,24 +2173,24 @@ class RamShadowCaptureAnchorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(collector.ram_observation_snapshot(("005930",), seconds=20)["capture_anchor"])
             collector._input_replay_only = False
             for high_water in (("trace-b", "wrong-session"), ("trace-a", ""), None, ("trace-a", 7)):
-                collector._recorded_input_high_water = high_water
+                collector._input_observer.input_high_water = high_water
                 self.assertIsNone(collector.ram_observation_snapshot(("005930",), seconds=20)["capture_anchor"])
-            collector._recorded_input_high_water = ("trace-a", "accepted-a")
-            collector._recorded_capture_epoch = "trace-b"
+            collector._input_observer.input_high_water = ("trace-a", "accepted-a")
+            collector._input_observer.capture_epoch = "trace-b"
             self.assertIsNone(collector.ram_observation_snapshot(("005930",), seconds=20)["capture_anchor"])
-        collector._recorded_capture_epoch = "trace-a"
+        collector._input_observer.capture_epoch = "trace-a"
         with patch(path, return_value=None):
             self.assertIsNone(collector.ram_observation_snapshot(("005930",), seconds=20)["capture_anchor"])
 
     async def test_rejected_capture_does_not_invent_new_anchor_or_verification(self):
         now, hub, collector, _, _ = self.fixture(0)
-        collector._recorded_capture_epoch = "trace-a"
+        collector._input_observer.capture_epoch = "trace-a"
         with patch("kiwoom_monitor.central_server.diagnostic_trace.input_token", return_value="trace-a"), \
              patch("kiwoom_monitor.central_server.diagnostic_trace.emit_payload", return_value=True):
-            accepted = collector._record_upstream("capture_gap", {"clear_continuous": False})
+            accepted = collector._input_observer.record_input(collector, "capture_gap", {"clear_continuous": False})
         with patch("kiwoom_monitor.central_server.diagnostic_trace.input_token", return_value="trace-a"), \
              patch("kiwoom_monitor.central_server.diagnostic_trace.emit_payload", return_value=False):
-            self.assertIsNone(collector._record_upstream("capture_gap", {"clear_continuous": False}))
+            self.assertIsNone(collector._input_observer.record_input(collector, "capture_gap", {"clear_continuous": False}))
             anchor = collector.ram_observation_snapshot(("005930",), seconds=20)["capture_anchor"]
         self.assertEqual(accepted, anchor["input_id"])
         self.assertFalse(anchor["verified"])
@@ -2187,12 +2200,12 @@ class RamShadowCaptureAnchorTests(unittest.IsolatedAsyncioTestCase):
         await runtime.start(); self.trades(collector, now)
         await self.wait_for(lambda: monitors[0].status["evaluations"] == 1)
         now[0] = now[0].replace(second=40)
-        collector._recorded_capture_epoch = "trace-a"
-        collector._recorded_input_high_water = ("trace-a", "accepted-a")
+        collector._input_observer.capture_epoch = "trace-a"
+        collector._input_observer.input_high_water = ("trace-a", "accepted-a")
         with patch("kiwoom_monitor.central_server.diagnostic_trace.input_token", return_value="trace-a"):
             snapshot = runtime._snapshot()
-        collector._recorded_capture_epoch = "trace-b"
-        collector._recorded_input_high_water = ("trace-b", "accepted-b")
+        collector._input_observer.capture_epoch = "trace-b"
+        collector._input_observer.input_high_water = ("trace-b", "accepted-b")
         with patch("kiwoom_monitor.central_server.diagnostic_trace.input_token", return_value="trace-b"):
             await runtime._dispatch(snapshot)
         snapshot["capture_anchor"]["input_id"] = "caller-mutation"
@@ -2236,7 +2249,7 @@ class RamShadowCaptureAnchorTests(unittest.IsolatedAsyncioTestCase):
                     await self.wait_for(lambda: runtime.status["recording"]["writes"] == 1)
                     source = next(iter(runtime.latest_results["source_coverage"].values()))
                     anchor = source["capture_anchor"]
-                    self.assertEqual(collector._recorded_input_high_water, (anchor["trace_id"], anchor["input_id"]))
+                    self.assertEqual(collector._input_observer.input_high_water, (anchor["trace_id"], anchor["input_id"]))
                     self.assertEqual(session["trace_id"], anchor["trace_id"])
                     accepted = trace.status()["payload_accepted"]
                     for _ in range(3):
@@ -2268,7 +2281,7 @@ class SelectedRamShadowRecordingTests(unittest.IsolatedAsyncioTestCase):
     def recorded_runtime(self, store, count=8, interval=30):
         now, hub, collector, monitors, _ = self.fixture(count, cleanup=False)
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            record_store=store, record_interval_seconds=interval)
+            record_store=store, record_interval_seconds=interval, now_provider=collector._now_provider)
         if runtime:
             collector.set_ram_observation_retention(runtime._retention)
         return now, hub, collector, monitors, runtime
@@ -2436,7 +2449,7 @@ class SelectedRamShadowRecordingTests(unittest.IsolatedAsyncioTestCase):
             stock_thesis=request, leadership_parameters=thesis_fixtures.PARAMETERS) for request in requests)
         _, hub, collector, _, _ = self.fixture(0, cleanup=False)
         store = Mock()
-        runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, inputs) for m in monitors), record_store=store)
+        runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, inputs) for m in monitors), record_store=store, now_provider=collector._now_provider)
         try:
             for monitor in monitors:
                 await monitor.offer_inputs(inputs)
@@ -2555,6 +2568,9 @@ class RamShadowSelectionTests(unittest.IsolatedAsyncioTestCase):
         collector = app.state.realtime_collector
         if collector:
             collector._now_provider = lambda: now[0]
+            app.state.ram_shadow_selection_session._now = collector._now_provider
+            if app.state.market_theme_shadow_runtime is not None:
+                app.state.market_theme_shadow_runtime._now = collector._now_provider
             collector._apply_trade_source_approval({("005930", "KRX"), ("000660", "KRX")}, now[0], reset_all=True)
         store._now_provider = lambda: now[0]
         theme = OwnerContextShadowTests().theme(now[0])
@@ -2708,6 +2724,200 @@ class RamShadowSelectionTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await asyncio.gather(*(task for task in (first, second) if task), return_exceptions=True)
                 await self.cleanup_app(app, store)
+
+    async def test_session_direct_update_and_repeated_close_cancellation_drain_native_save(self):
+        from kiwoom_monitor.central_server.market_theme_shadow_monitor import SHADOW_SELECTION_COLLECTION
+        from kiwoom_monitor.central_server.ram_shadow_selection_session import RamShadowSelectionConflict
+        with tempfile.TemporaryDirectory() as directory:
+            app, store, now, collector = self.app_fixture(directory)
+            session = app.state.ram_shadow_selection_session
+            entered, release = threading.Event(), threading.Event()
+            original = store.upsert_documents
+            def write(collection, values):
+                if collection == SHADOW_SELECTION_COLLECTION:
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("session save was not released")
+                return original(collection, values)
+            update = closer = competing = None
+            try:
+                with patch.object(store, "upsert_documents", side_effect=write):
+                    update = asyncio.create_task(session.update(0, {"enabled": True, "theme_ids": ["반도체"]}))
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                    update.cancel()
+                    closer = asyncio.create_task(session.close())
+                    competing = asyncio.create_task(session.update(0, {"enabled": False}))
+                    await asyncio.sleep(0.02)
+                    update.cancel(); closer.cancel()
+                    await asyncio.sleep(0.02)
+                    closer.cancel()
+                    self.assertFalse(update.done()); self.assertFalse(closer.done()); self.assertFalse(competing.done())
+                    self.assertEqual(0, session.selection()["revision"])
+                    release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await update
+                    with self.assertRaises(asyncio.CancelledError):
+                        await closer
+                    with self.assertRaises(RamShadowSelectionConflict):
+                        await competing
+                self.assertEqual((1, 1), (session.selection()["revision"], session.selection()["applied_revision"]))
+                self.assertIs(session.runtime, app.state.market_theme_shadow_runtime)
+                self.assertEqual("STOPPED", session.runtime.status["state"])
+                self.assertEqual(0, app.state.realtime_hub.client_count)
+                self.assertIsNone(collector._ram_observation_owner)
+                self.assertEqual(1, store.load_document(SHADOW_SELECTION_COLLECTION, "global", "current")["document"]["revision"])
+                with self.assertRaisesRegex(RuntimeError, "RAM_SHADOW_SERVER_CLOSING"):
+                    await session.update(1, {"enabled": False})
+                await session.close()
+            finally:
+                release.set()
+                await asyncio.gather(*(task for task in (update, closer, competing) if task), return_exceptions=True)
+                await session.close()
+                store.close()
+
+    async def test_general_settings_and_selection_mutations_have_independent_fences(self):
+        import httpx
+        from kiwoom_monitor.central_server.market_theme_shadow_monitor import SHADOW_SELECTION_COLLECTION
+        operations = "server_operational_settings"
+        headers = {"Authorization": "Bearer offline-token"}
+        selection_url = "/api/v1/research/ram-shadow/selection"
+        operations_url = "/api/v1/settings/operations"
+        for held_collection in (operations, SHADOW_SELECTION_COLLECTION):
+            with self.subTest(held_collection=held_collection), tempfile.TemporaryDirectory() as directory:
+                app, store, _, _ = self.app_fixture(directory)
+                session = app.state.ram_shadow_selection_session
+                entered, release = asyncio.Event(), threading.Event()
+                loop = asyncio.get_running_loop()
+                native_write, native_connect = store.upsert_documents, store._connect
+                statements = []
+                def connect():
+                    connection = native_connect()
+                    connection.set_trace_callback(statements.append)
+                    return connection
+                def write(collection, values):
+                    if collection == held_collection:
+                        # Hold before the native connection/transaction lock: those remain shared.
+                        loop.call_soon_threadsafe(entered.set)
+                        if not release.wait(10):
+                            raise AssertionError("held settings mutation was not released")
+                    return native_write(collection, values)
+                held = independent = competing = None
+                try:
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://offline") as client:
+                        initial = (await client.get(operations_url, headers=headers)).json()
+                        operations_body = {"expected_revision": 0,
+                            "news_refresh_seconds": initial["news_refresh_seconds"] + 60}
+                        selection_body = {"expected_revision": 0, "recording": True}
+                        held_url, held_body = ((operations_url, operations_body) if held_collection == operations
+                                               else (selection_url, selection_body))
+                        free_url, free_body = ((selection_url, selection_body) if held_collection == operations
+                                               else (operations_url, operations_body))
+                        with patch.object(store, "_connect", side_effect=connect), \
+                             patch.object(store, "upsert_documents", side_effect=write):
+                            held = asyncio.create_task(client.put(held_url, headers=headers, json=held_body))
+                            await asyncio.wait_for(entered.wait(), 3)
+                            if held_collection == SHADOW_SELECTION_COLLECTION:
+                                competing = asyncio.create_task(client.put(selection_url, headers=headers,
+                                    json={"expected_revision": 0, "recording": False}))
+                            independent = asyncio.create_task(client.put(free_url, headers=headers, json=free_body))
+                            response = await asyncio.wait_for(asyncio.shield(independent), 3)
+                            self.assertEqual(200, response.status_code, response.text)
+                            self.assertFalse(held.done())
+                            if competing is not None:
+                                self.assertFalse(competing.done())
+                            release.set()
+                            response = await held
+                            self.assertEqual(200, response.status_code, response.text)
+                            if competing is not None:
+                                self.assertEqual(409, (await competing).status_code)
+                            before_noop = len(statements)
+                            result = await session.update(1, {"recording": True})
+                            self.assertEqual((1, 1, "ACTIVE"),
+                                (result["revision"], result["applied_revision"], result["apply_status"]))
+                            self.assertEqual(before_noop, len(statements))
+                            saved_selection = store.load_document(SHADOW_SELECTION_COLLECTION, "global", "current")["document"]
+                            saved_operations = store.load_document(operations, "global", "current")["document"]
+                        self.assertTrue(saved_selection["recording"])
+                        self.assertEqual(1, saved_selection["revision"])
+                        self.assertEqual((1, operations_body["news_refresh_seconds"]),
+                            (saved_operations["revision"], saved_operations["news_refresh_seconds"]))
+                        self.assertEqual(2, sum(sql.startswith("INSERT INTO central_documents") for sql in statements))
+                        self.assertEqual(2, sum(sql.startswith("BEGIN") for sql in statements))
+                        self.assertEqual(2, statements.count("COMMIT"))
+                finally:
+                    release.set()
+                    await asyncio.gather(*(task for task in (held, independent, competing) if task), return_exceptions=True)
+                    await session.close()
+                    store.close()
+
+    async def test_account_callbacks_and_repeated_close_cancellation_preserve_selection_fence(self):
+        import httpx
+        from kiwoom_monitor.central_server.market_theme_shadow_monitor import SHADOW_SELECTION_COLLECTION
+        document, _ = PositionAccountRamShadowTests().policy()
+        account_ref = document["requests"][0]["account_ref"]
+        headers = {"Authorization": "Bearer offline-token"}
+        url = "/api/v1/research/ram-shadow/selection"
+        with tempfile.TemporaryDirectory() as directory:
+            app, store, _, collector = self.app_fixture(directory)
+            session = app.state.ram_shadow_selection_session
+            entered, release = asyncio.Event(), threading.Event()
+            loop = asyncio.get_running_loop()
+            native_write = store.upsert_documents
+            def write(collection, values):
+                if collection == SHADOW_SELECTION_COLLECTION:
+                    loop.call_soon_threadsafe(entered.set)
+                    if not release.wait(10):
+                        raise AssertionError("selection close barrier was not released")
+                return native_write(collection, values)
+            update = closer = late = None
+            try:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://offline") as client:
+                    selected = await client.put(url, headers=headers, json={"expected_revision": 0,
+                        "enabled": True, "theme_ids": ["반도체"], "position_comparison": document,
+                        "position_account_live": True})
+                    self.assertEqual(200, selected.status_code, selected.text)
+                    runtime = session.runtime
+                    self.assertIsNone(runtime.latest_results["position_comparison"]["result"])
+                    with patch.object(store, "upsert_documents", side_effect=write):
+                        update = asyncio.create_task(client.put(url, headers=headers,
+                            json={"expected_revision": 1, "enabled": False}))
+                        await asyncio.wait_for(entered.wait(), 3)
+                        with patch.object(runtime, "context_changed", wraps=runtime.context_changed) as changed, \
+                             patch.object(store, "_connect", side_effect=AssertionError("account callback queried native state")):
+                            session.account_position_changed("another-account")
+                            changed.assert_not_called()
+                            session.account_position_changed(account_ref)
+                            changed.assert_called_once_with("account")
+                        session.begin_close()
+                        closer = asyncio.create_task(session.close())
+                        late = asyncio.create_task(client.put(url, headers=headers,
+                            json={"expected_revision": 2, "enabled": False}))
+                        await asyncio.sleep(0)
+                        closer.cancel()
+                        await asyncio.sleep(0)
+                        closer.cancel()
+                        await asyncio.sleep(0)
+                        self.assertFalse(update.done())
+                        self.assertFalse(closer.done())
+                        self.assertFalse(late.done())
+                        self.assertEqual(1, store.load_document(SHADOW_SELECTION_COLLECTION, "global", "current")["document"]["revision"])
+                        release.set()
+                        self.assertEqual(200, (await update).status_code)
+                        with self.assertRaises(asyncio.CancelledError):
+                            await closer
+                        self.assertEqual(503, (await late).status_code)
+                    self.assertEqual((2, 2), (session.selection()["revision"], session.selection()["applied_revision"]))
+                    self.assertIsNone(session.runtime)
+                    self.assertEqual("STOPPED", runtime.status["state"])
+                    self.assertEqual(0, app.state.realtime_hub.client_count)
+                    self.assertIsNone(collector._ram_observation_owner)
+                    self.assertFalse(runtime.latest_results.get("order_authorized", False))
+            finally:
+                release.set()
+                await asyncio.gather(*(task for task in (update, closer, late) if task), return_exceptions=True)
+                await session.close()
+                store.close()
+
 
     async def test_saved_selection_restart_and_shutdown_fence_restore_no_thesis_or_orders(self):
         import httpx
@@ -3080,7 +3290,7 @@ class PositionComparisonSelectionTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(collector, "ram_observation_snapshot", wraps=collector.ram_observation_snapshot) as reads:
                 result = selected_position_comparison({"position_comparison": self.document()})
                 runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-                    position_comparison=result, record_store=store)
+                    position_comparison=result, record_store=store, now_provider=collector._now_provider)
                 expected = json.loads(json.dumps(result))
                 result["targets"]["HOLD"]["actual_quantity"] = 999
                 try:
@@ -3221,7 +3431,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
             account=replace(fixture.account,as_of=now[0]);risk=fixture.risk_snapshot(observed=now[0],account_at=now[0])
             source=Mock(return_value=PositionAccountObservation(account,(),'action-context-account',now[0],True,True,(),(),(),risk))
             runtime=MarketThemeShadowRuntime(hub,collector,tuple((m,shadow_inputs()) for m in monitors),
-                position_document=fixture.document(),position_account_source=source)
+                position_document=fixture.document(),position_account_source=source, now_provider=collector._now_provider)
             try:
                 with patch.object(position_target,'evaluate_position_action_comparison_shadow',wraps=position_target.evaluate_position_action_comparison_shadow) as evaluate, \
                      patch('sqlite3.connect',side_effect=AssertionError('action matrix SQLite')), \
@@ -3249,7 +3459,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         record=Mock(); ranking=Mock(side_effect=AssertionError('unused ranking source'))
         theme=Mock(side_effect=AssertionError('unused theme source'))
         runtime=MarketThemeShadowRuntime(hub,collector,(),position_document=fixture.document(),
-            position_account_source=source,ranking_source=ranking,theme_source=theme,record_store=record)
+            position_account_source=source,ranking_source=ranking,theme_source=theme,record_store=record, now_provider=collector._now_provider)
         try:
             with patch('sqlite3.connect',side_effect=AssertionError('R4-only SQLite')), \
                  patch('psycopg.connect',side_effect=AssertionError('R4-only PostgreSQL')):
@@ -3281,8 +3491,8 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
                        fixture.capability_policy(('theme_context',))):
             fixture.parameters=replace(fixture.parameters,selection_policy=policy)
             with self.assertRaises(ValueError):
-                MarketThemeShadowRuntime(hub,collector,(),position_document=fixture.document(),position_account_source=source)
-        with self.assertRaises(ValueError):MarketThemeShadowRuntime(hub,collector,())
+                MarketThemeShadowRuntime(hub,collector,(),position_document=fixture.document(),position_account_source=source, now_provider=collector._now_provider)
+        with self.assertRaises(ValueError):MarketThemeShadowRuntime(hub,collector,(), now_provider=collector._now_provider)
 
     async def test_theme_independent_authenticated_selection_persists_without_theme_snapshot_reads(self):
         import httpx
@@ -3358,7 +3568,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
                 risk=fixture.risk_snapshot(observed=now[0],account_at=now[0])
                 source=Mock(return_value=PositionAccountObservation(account,(),'capability-native-cut',now[0],True,True,(),(),(),risk))
                 runtime=MarketThemeShadowRuntime(hub,collector,tuple((m,shadow_inputs()) for m in monitors),
-                    position_document=fixture.document(),position_account_source=source)
+                    position_document=fixture.document(),position_account_source=source, now_provider=collector._now_provider)
                 try:
                     runtime._apply_theme_snapshot(())
                     with patch.object(collector,'ram_observation_snapshot',wraps=collector.ram_observation_snapshot) as read, \
@@ -3392,7 +3602,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
                 source = Mock(return_value=PositionAccountObservation(
                     replace(account, as_of=now[0]), (), 'independent-price-account', now[0], True, True, ()))
                 runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-                    position_document=document, position_account_source=source)
+                    position_document=document, position_account_source=source, now_provider=collector._now_provider)
                 try:
                     runtime._apply_theme_snapshot(())
                     dirty = (set(collector._minute_bars._dirty), tuple(r["input_ref"] for r in collector._ram_trades))
@@ -3435,7 +3645,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         source = Mock(return_value=PositionAccountObservation(
             account, (), 'independent-price-risk', now[0], True, True, (), (), (), risk))
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            position_document=fixture.document(), position_account_source=source)
+            position_document=fixture.document(), position_account_source=source, now_provider=collector._now_provider)
         try:
             runtime._apply_theme_snapshot(())
             await runtime._refresh_position_inputs(runtime._snapshot())
@@ -3456,7 +3666,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         source = Mock(return_value=PositionAccountObservation(
             replace(account, as_of=now[0]), (), 'independent-price-boundaries', now[0], True, True, ()))
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            position_document=document, position_account_source=source)
+            position_document=document, position_account_source=source, now_provider=collector._now_provider)
         try:
             runtime._apply_theme_snapshot(())
             original = runtime._snapshot()
@@ -3506,7 +3716,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         risk = fixture.risk_snapshot(observed=cut)
         source = Mock(return_value=PositionAccountObservation(account,(),'native-cut:1',cut,True,True,(),(),(),risk))
         runtime = MarketThemeShadowRuntime(hub,collector,tuple((m,shadow_inputs()) for m in monitors),
-            position_document=document,position_account_source=source)
+            position_document=document,position_account_source=source, now_provider=collector._now_provider)
         with patch.object(position_target,'evaluate_position_action_comparison_shadow',
                           wraps=position_target.evaluate_position_action_comparison_shadow) as evaluate, \
              patch('sqlite3.connect',side_effect=AssertionError('native inputs opened SQLite')), \
@@ -3557,7 +3767,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         account = replace(fixture.account, as_of=cut)
         source = Mock(return_value=PositionAccountObservation(account,(),'risk-cut:1',cut,True,True,(),(),()))
         runtime = MarketThemeShadowRuntime(hub,collector,tuple((m,shadow_inputs()) for m in monitors),
-            position_document=document,position_account_source=source)
+            position_document=document,position_account_source=source, now_provider=collector._now_provider)
         with patch.object(position_target,'evaluate_position_action_comparison_shadow',
                           wraps=position_target.evaluate_position_action_comparison_shadow) as evaluate, \
              patch('sqlite3.connect',side_effect=AssertionError('selection opened SQLite')), \
@@ -3602,7 +3812,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         account = replace(account,as_of=now[0]+timedelta(seconds=39))
         source = Mock(return_value=PositionAccountObservation(account,(),'sizing-cut:1',account.as_of,True,True,(),(),()))
         runtime = MarketThemeShadowRuntime(hub,collector,tuple((m,shadow_inputs()) for m in monitors),
-            position_document=document,position_account_source=source)
+            position_document=document,position_account_source=source, now_provider=collector._now_provider)
         with patch.object(position_target,'evaluate_position_action_comparison_shadow',
                           wraps=position_target.evaluate_position_action_comparison_shadow) as evaluate, \
              patch('sqlite3.connect',side_effect=AssertionError('sizing RAM opened DB')), \
@@ -3649,7 +3859,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         source.return_value = replace(source.return_value, account=replace(account, as_of=now[0].replace(second=39)),
                                       observed_at=now[0].replace(second=39))
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            position_document=document, position_account_source=source)
+            position_document=document, position_account_source=source, now_provider=collector._now_provider)
         with patch.object(position_target, "evaluate_position_action_comparison_shadow",
                           wraps=position_target.evaluate_position_action_comparison_shadow) as evaluate, \
              patch("sqlite3.connect", side_effect=AssertionError("Shadow accessed DB")), \
@@ -3695,7 +3905,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
                                                   ("account_wide_intent_coverage_unverified",))
         source = Mock(return_value=observation)
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            position_document=document, position_account_source=source)
+            position_document=document, position_account_source=source, now_provider=collector._now_provider)
         with patch.object(collector, "ram_observation_snapshot", wraps=collector.ram_observation_snapshot) as reads, \
              patch.object(position_target, "evaluate_position_action_comparison_shadow",
                           wraps=position_target.evaluate_position_action_comparison_shadow) as evaluate, \
@@ -3748,7 +3958,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
         now, hub, collector, monitors, _ = self.fixture(1, cleanup=False)
         source = Mock(return_value=None)
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            position_document=document, position_account_source=source)
+            position_document=document, position_account_source=source, now_provider=collector._now_provider)
         try:
             snapshot = runtime._snapshot()
             runtime._refresh_position_comparison(snapshot)
@@ -3823,7 +4033,7 @@ class PositionAccountRamShadowTests(unittest.IsolatedAsyncioTestCase):
             False, False, ("account_wide_intent_coverage_unverified",)))
         store = SQLiteQueryStore(Path(":memory:")); store.initialize()
         runtime = MarketThemeShadowRuntime(hub, collector, tuple((m, shadow_inputs()) for m in monitors),
-            position_document=document, position_account_source=source, record_store=store)
+            position_document=document, position_account_source=source, record_store=store, now_provider=collector._now_provider)
         sql = []; connect = store._connect
         def traced():
             connection = connect(); connection.set_trace_callback(sql.append); return connection
@@ -4142,7 +4352,7 @@ class CollectorUpperLimitShadowTests(unittest.IsolatedAsyncioTestCase):
         inputs = tuple(replace(shadow_inputs(), theme_membership=replace(shadow_inputs().theme_membership, theme_id=f"limit-theme-{index}"))
                        for index in range(8))
         monitors = tuple(MarketThemeShadowMonitor(theme_id=value.theme_membership.theme_id, leadership_venue="KRX") for value in inputs)
-        runtime = MarketThemeShadowRuntime(hub, collector, tuple(zip(monitors, inputs)))
+        runtime = MarketThemeShadowRuntime(hub, collector, tuple(zip(monitors, inputs)), now_provider=collector._now_provider)
         self.addAsyncCleanup(runtime.close)
         with patch.object(collector, "ram_observation_snapshot", wraps=collector.ram_observation_snapshot) as reads, \
              patch.object(shadow_context, "compute_market_regime", wraps=shadow_context.compute_market_regime) as h1, \
@@ -4704,7 +4914,7 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before, len(monitors[0]._pending.second_points))
         helper = CollectorRamShadowRuntimeTests()
         _, hub, collector, _, _ = helper.fixture(0, cleanup=False)
-        runtime = MarketThemeShadowRuntime(hub, collector, tuple(zip(monitors, (first, second))))
+        runtime = MarketThemeShadowRuntime(hub, collector, tuple(zip(monitors, (first, second))), now_provider=collector._now_provider)
         self.addAsyncCleanup(runtime.close)
         self.assertIs(first.market_frames, runtime._bindings[0][1].market_frames)
         self.assertIs(first.market_frames, runtime._bindings[1][1].market_frames)
@@ -4928,7 +5138,7 @@ class CrossThemeH1SharingTests(unittest.IsolatedAsyncioTestCase):
                 now, hub, collector, _, _ = helper.fixture(0, store, cleanup=False)
                 values = tuple(self.inputs(index) for index in range(count))
                 monitors = tuple(MarketThemeShadowMonitor(theme_id=value.theme_membership.theme_id, leadership_venue="KRX") for value in values)
-                runtime = MarketThemeShadowRuntime(hub, collector, tuple(zip(monitors, values)), record_store=store if record else None) if count else None
+                runtime = MarketThemeShadowRuntime(hub, collector, tuple(zip(monitors, values)), record_store=store if record else None, now_provider=collector._now_provider) if count else None
                 statements = []
                 connect = store._connect
                 def traced():
@@ -5127,7 +5337,7 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
             position_document['parameters'].pop('selection_policy',None)
         runtime=MarketThemeShadowRuntime(hub,collector,tuple((m,shadow_inputs()) for m in monitors),
             position_document=position_document,position_account_source=source,
-            position_allocation=compile_dynamic_allocation_ram_selection(document))
+            position_allocation=compile_dynamic_allocation_ram_selection(document), now_provider=collector._now_provider)
         collector.set_ram_observation_retention(runtime._retention)
         collector._ram_retention_since=now[0]
         self.trades(collector,now)
@@ -5302,7 +5512,7 @@ class DynamicAllocationRamTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(module,'dynamic_allocation_inputs_from_ram',side_effect=held):
                 await runtime.start();self.assertTrue(await asyncio.to_thread(entered.wait,2))
                 before=len(case.transport.calls);case.tick(case.stop_price())
-                self.assertTrue(case.runner._protection_pending());self.assertEqual(before,len(case.transport.calls))
+                self.assertTrue(case.runner.episode._protection_pending());self.assertEqual(before,len(case.transport.calls))
                 close=asyncio.create_task(runtime.close());await asyncio.sleep(.02)
                 self.assertFalse(close.done());release.set();await asyncio.wait_for(close,2)
                 self.assertTrue(runtime._closed)
@@ -5432,7 +5642,7 @@ class AllocationModelPublicationTests(unittest.IsolatedAsyncioTestCase):
             theme_membership=replace(context.theme_membership,available_at=now[0].isoformat()),
             breakout_evidence=replace(context.breakout_evidence,available_at=now[0].isoformat()))
         runtime=MarketThemeShadowRuntime(hub,collector,tuple((m,context) for m in monitors),
-            position_account_source=source,position_allocation=compile_dynamic_allocation_ram_selection(document))
+            position_account_source=source,position_allocation=compile_dynamic_allocation_ram_selection(document), now_provider=collector._now_provider)
         for second in range(40):
             now[0]=now[0].replace(second=second)
             collector._publish_parsed({'trnm':'REAL','data':[{'type':'0B','item':code,'values':{
@@ -5455,6 +5665,171 @@ class AllocationModelPublicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(receipt['result']['allocations'][0]['new_buy_quantity'],0)
         self.assertEqual(receipt['result']['allocations'][0]['target_notional_won'],receipt['lower_targets'][0]['target_notional_won'])
         self.assertEqual('EV_UNAVAILABLE',receipt['r4_action_comparison']['status']);self.assertFalse(receipt['order_authorized'])
+
+    async def test_runtime_prepares_its_own_models_and_rejects_close_before_offer(self):
+        from kiwoom_monitor.central_server import market_theme_shadow_inputs as module
+        runtime,_,_,_,_,_,packet=self.prepare(1)
+        with patch('sqlite3.connect',side_effect=AssertionError('model preparation must not read a DB')), \
+                patch.object(module,'decode_dynamic_allocation_model_publication',wraps=module.decode_dynamic_allocation_model_publication) as replay:
+            decoded,duplicate=await runtime.prepare_allocation_models(packet,expected_selection_revision=1)
+            self.assertIsNone(duplicate);self.assertEqual(1,replay.call_count)
+            self.assertEqual(0,runtime._allocation_model_generation)
+            self.assertFalse(runtime.offer_allocation_models(packet,decoded)['duplicate'])
+            repeated,duplicate=await runtime.prepare_allocation_models(packet,expected_selection_revision=1)
+            self.assertIsNone(repeated);self.assertTrue(duplicate['duplicate'])
+            self.assertEqual(1,replay.call_count)
+        await runtime.close()
+        with self.assertRaisesRegex(RuntimeError,'ALLOCATION_RUNTIME_NOT_READY'):
+            runtime.offer_allocation_models(packet,decoded)
+
+    async def test_runtime_close_waits_for_owned_model_preparation_and_rejects_late_result(self):
+        from kiwoom_monitor.central_server import market_theme_shadow_inputs as module
+        native=module.decode_dynamic_allocation_model_publication
+        for outcome in ('valid','invalid','cancelled'):
+            with self.subTest(outcome=outcome):
+                runtime,_,_,_,_,_,packet=self.prepare(1)
+                entered=threading.Event();release=threading.Event()
+                def held(*args):
+                    entered.set();release.wait(10)
+                    if outcome=='invalid':raise ValueError('invalid supplied model')
+                    return native(*args)
+                with patch.object(module,'decode_dynamic_allocation_model_publication',side_effect=held):
+                    preparing=asyncio.create_task(runtime.prepare_allocation_models(packet,expected_selection_revision=1))
+                    await self.wait_for(entered.is_set)
+                    closing=asyncio.create_task(runtime.close())
+                    try:
+                        if outcome=='cancelled':
+                            preparing.cancel();await asyncio.sleep(.01);preparing.cancel()
+                        await asyncio.sleep(.01);self.assertFalse(closing.done());self.assertFalse(preparing.done())
+                        release.set()
+                        expected=(ValueError if outcome=='invalid' else asyncio.CancelledError
+                                  if outcome=='cancelled' else RuntimeError)
+                        with self.assertRaises(expected):await preparing
+                        await closing
+                        self.assertEqual(0,runtime._allocation_model_generation)
+                        self.assertEqual(set(),runtime._allocation_preparations)
+                    finally:
+                        release.set()
+                        await asyncio.gather(preparing,closing,return_exceptions=True)
+
+    async def test_malformed_publication_objects_and_private_error_text_are_rejected_safely(self):
+        import hashlib
+        import httpx
+        from fastapi import HTTPException
+        from fastapi.exception_handlers import http_exception_handler
+        from kiwoom_monitor.central_server import market_theme_shadow_inputs as module
+        runtime,_,clock,_,_,allocation,packet=self.prepare(1)
+        helper=RamShadowSelectionTests();headers={'Authorization':'Bearer offline-token'}
+        malformed=[]
+        for field in ('evidence','outcomes'):
+            body=deepcopy(packet);receipt=body['rows'][0]['ev_receipt']
+            receipt[field]=(list(receipt[field].items()) if field=='evidence'
+                            else [list(outcome.items()) for outcome in receipt[field]])
+            malformed.append(body)
+        body=deepcopy(packet);body['rows'][0]['ev_receipt']['comparison']['targets']=['HOLD','ADD'];malformed.append(body)
+        for body in malformed:
+            body['publication_ref']='allocation-model-publication:'+hashlib.sha256(json.dumps(
+                {k:v for k,v in body.items() if k!='publication_ref'},sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+            with self.assertRaises(ValueError):module.decode_dynamic_allocation_model_publication(body,runtime._allocation,1)
+        bad=deepcopy(allocation);bad['policy']['available_at']='private://sensitive-value'
+        with self.assertRaises(ValueError) as invalid:module.compile_dynamic_allocation_ram_selection(bad)
+        self.assertIsInstance(invalid.exception.__cause__,ValueError)
+        self.assertNotIn('private',str(invalid.exception))
+        with tempfile.TemporaryDirectory() as directory:
+            app,store,now,_=helper.app_fixture(directory);now[0]=clock[0]
+            received=[]
+            async def capture(request,error):
+                received.append(error)
+                return await http_exception_handler(request,error)
+            app.add_exception_handler(HTTPException,capture)
+            try:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://offline') as client:
+                    selected=await client.put('/api/v1/research/ram-shadow/selection',headers=headers,
+                        json={'expected_revision':0,'enabled':True,'theme_ids':['반도체'],'position_allocation':allocation})
+                    self.assertEqual(200,selected.status_code,selected.text)
+                    url='/api/v1/research/ram-shadow/allocation-models'
+                    for body in malformed:
+                        rejected=await client.post(url,headers=headers,json=body)
+                        self.assertEqual((422,{'detail':'ALLOCATION_MODEL_INPUT_INVALID'}),(rejected.status_code,rejected.json()))
+                    original=ValueError('private://sensitive-value')
+                    with patch.object(app.state.market_theme_shadow_runtime,'prepare_allocation_models',side_effect=original):
+                        response=await client.post(url,headers=headers,json=packet)
+                        self.assertIs(original,received[-1].__cause__)
+                    self.assertEqual((422,{'detail':'ALLOCATION_MODEL_INPUT_INVALID'}),(response.status_code,response.json()))
+                    with patch.object(app.state.market_theme_shadow_runtime,'prepare_allocation_models',side_effect=RuntimeError('private://sensitive-value')):
+                        failed=await client.post(url,headers=headers,json=packet)
+                    self.assertEqual((503,{'detail':'ALLOCATION_MODEL_PUBLICATION_FAILED'}),(failed.status_code,failed.json()))
+                    self.assertEqual(0,app.state.market_theme_shadow_runtime._allocation_model_generation)
+            finally:await helper.cleanup_app(app,store)
+
+    async def test_malformed_nested_selection_objects_never_save_or_replace_runtime(self):
+        import httpx
+        from kiwoom_monitor.central_server.market_theme_shadow_monitor import validate_ram_shadow_selection
+        _,_,clock,_,_,allocation,_=self.prepare(1)
+        helper=PositionComparisonSelectionTests();comparison=helper.document()
+        selection={'version':'ram-shadow-selection/v1','revision':1,'enabled':True,
+            'theme_ids':['반도체'],'leadership_venue':'KRX','recording':False}
+        malformed=[]
+        for key,value in (('parameters',[]),('requests',[list(row.items()) for row in comparison['requests']]),
+                          ('account',list(comparison['account'].items()))):
+            document=deepcopy(comparison);document[key]=value;malformed.append({'position_comparison':document})
+        for key,value in (('policy',list(allocation['policy'].items())),('cost_model',[]),
+                          ('symbols',[{}])):
+            document=deepcopy(allocation);document[key]=value;malformed.append({'position_allocation':document})
+        document=deepcopy(allocation);document['policy']['context_weights']={'a':1,'b':2,'c':3}
+        malformed.append({'position_allocation':document})
+        for empty_request in (True,False):
+            document=deepcopy(comparison)
+            for request in document['requests']:request['account_ref']=allocation['policy']['account_ref']
+            if empty_request:document['requests'][0]={}
+            else:document['requests'][0].pop('account_ref')
+            malformed.append({'position_allocation':allocation,'position_comparison':document})
+        compatible=deepcopy(allocation);compatible['policy']['context_weights']=tuple(compatible['policy']['context_weights'])
+        self.assertEqual(compatible,validate_ram_shadow_selection({**selection,'position_allocation':compatible})['position_allocation'])
+        with tempfile.TemporaryDirectory() as directory:
+            app,store,now,_=helper.app_fixture(directory);now[0]=clock[0]
+            try:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://offline') as client:
+                    selected=await client.put(helper.url,headers=helper.headers,
+                        json={'expected_revision':0,'enabled':True,'theme_ids':['반도체']})
+                    self.assertEqual(200,selected.status_code,selected.text)
+                    runtime=app.state.market_theme_shadow_runtime
+                    with patch.object(store,'upsert_documents',wraps=store.upsert_documents) as writes:
+                        for changes in malformed:
+                            with self.subTest(field=next(iter(changes))):
+                                with self.assertRaises(ValueError):validate_ram_shadow_selection({**selection,**changes})
+                                response=await client.put(helper.url,headers=helper.headers,json={'expected_revision':1,**changes})
+                                self.assertEqual(422,response.status_code,response.text)
+                                self.assertIs(runtime,app.state.market_theme_shadow_runtime)
+                        self.assertEqual(0,writes.call_count)
+            finally:await helper.cleanup_app(app,store)
+
+    async def test_allocation_failure_preserves_internal_stage_and_cause_without_public_details(self):
+        from kiwoom_monitor.central_server import market_theme_shadow_inputs as module
+        runtime,_,_,source,_,_,packet=self.prepare(1)
+        original=ValueError('private allocation input must stay internal')
+        error=TypeError('private account source must stay internal');error.__cause__=original
+        source.side_effect=error
+        await runtime._refresh_position_inputs(runtime._snapshot())
+        stage,cause=runtime._allocation_input_failure
+        self.assertEqual('account_observation',stage);self.assertIs(error,cause);self.assertIs(original,cause.__cause__)
+        receipt=runtime.latest_results['position_allocation']
+        self.assertEqual(['native_allocation_input_error:TypeError'],runtime._allocation_receipt['quality']['reasons'])
+        self.assertIn('native_allocation_input_error:TypeError',receipt['quality']['reasons'])
+        self.assertNotIn('private',json.dumps(runtime.latest_results))
+        decoded,_=await runtime.prepare_allocation_models(packet,expected_selection_revision=1)
+        runtime.offer_allocation_models(packet,decoded)
+        self.assertIsNone(runtime._allocation_input_failure)
+        source.side_effect=None
+        with patch.object(module,'dynamic_allocation_inputs_from_ram',side_effect=error):
+            await runtime._refresh_position_inputs(runtime._snapshot())
+        self.assertEqual(('allocation_evaluation',error),runtime._allocation_input_failure)
+        await runtime._refresh_position_inputs(runtime._snapshot())
+        self.assertIsNone(runtime._allocation_input_failure)
+        source.side_effect=error
+        await runtime._refresh_position_inputs(runtime._snapshot())
+        await runtime.close()
+        self.assertIsNone(runtime._allocation_input_failure)
 
     async def test_duplicate_is_inert_and_expiry_never_renews_or_exposes_old_goal(self):
         from kiwoom_monitor.central_server.market_theme_shadow_inputs import decode_dynamic_allocation_model_publication
@@ -5571,7 +5946,7 @@ class AllocationModelPublicationTests(unittest.IsolatedAsyncioTestCase):
                             post=asyncio.create_task(client.post('/api/v1/research/ram-shadow/allocation-models',headers=headers,json=packet))
                             await self.wait_for(entered.is_set)
                             before=len(case.transport.calls);case.tick(case.stop_price())
-                            self.assertTrue(case.runner._protection_pending());self.assertEqual(before,len(case.transport.calls))
+                            self.assertTrue(case.runner.episode._protection_pending());self.assertEqual(before,len(case.transport.calls))
                             clear=asyncio.create_task(client.put('/api/v1/research/ram-shadow/selection',headers=headers,
                                 json={'expected_revision':1,'position_allocation':None}))
                             post.cancel();await asyncio.sleep(.01);self.assertFalse(post.done());self.assertFalse(clear.done())
@@ -5620,7 +5995,7 @@ class AllocationModelPublicationTests(unittest.IsolatedAsyncioTestCase):
                 selected={**document,'policy':json.loads(json.dumps(asdict(policy),default=_json_value))}
                 rows=prepare_dynamic_allocation_model_publication(selected,packet['rows'],expected_selection_revision=1)
                 runtime=MarketThemeShadowRuntime(parent._hub,collector,parent._bindings,
-                    position_account_source=source,position_allocation=compile_dynamic_allocation_ram_selection(selected))
+                    position_account_source=source,position_allocation=compile_dynamic_allocation_ram_selection(selected), now_provider=collector._now_provider)
                 self.addAsyncCleanup(runtime.close)
                 runtime.offer_allocation_models(rows,decode_dynamic_allocation_model_publication(rows,runtime._allocation,1))
                 cases.append((action,budget,runtime))

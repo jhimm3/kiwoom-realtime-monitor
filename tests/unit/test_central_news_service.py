@@ -170,7 +170,7 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
                 },
             }))
         provider = _NewsClient()
-        service = CentralNewsService(provider, store, jobs_enabled=False, read_only_search=True)
+        service = CentralNewsService(provider, store, read_only_search=True)
         first = await service.stored_page("005930", "삼성전자")
         second = await service.stored_page("005930", "삼성전자", offset=200)
         third = await service.stored_page("005930", "삼성전자", offset=400)
@@ -345,7 +345,7 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
             "link": "https://n/n3", "original_link": "https://o/n3",
             "published_at": datetime.now(UTC).isoformat(),
         }]
-        service = CentralNewsService(client, store, jobs_enabled=False)  # type: ignore[arg-type]
+        service = CentralNewsService(client, store)  # type: ignore[arg-type]
         service.set_ai_service(ai)
         visible = await service.search("005930", "삼성전자", None, automation={
             "auto_analyze": True, "auto_recent_limit": 10,
@@ -377,14 +377,15 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_recent_sequential_request_uses_central_cache(self) -> None:
         client, store = _NewsClient(), _Store()
-        service = CentralNewsService(client, store)  # type: ignore[arg-type]
+        priority = []
+        service = CentralNewsService(client, store, prioritize_stock=priority.append)  # type: ignore[arg-type]
 
         await service.search("005930", "삼성전자", None)
         cached = await service.search("005930", "삼성전자", None)
 
         self.assertEqual(1, client.calls)
         self.assertEqual("제목", cached[0]["title"])
-        self.assertEqual("005930", service._job_runner._priority_stock_code)
+        self.assertEqual(["005930", "005930"], priority)
 
     async def test_selected_stock_is_rechecked_after_one_minute(self) -> None:
         client, store = _NewsClient(), _Store()
@@ -431,7 +432,7 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
         store.ranking = [{"stk_cd": "A000660", "stk_nm": "SK하이닉스"}]
         site = _StockSiteClient()
         service = CentralNewsService(
-            None, store, jobs_enabled=False, query_set_enabled=False,
+            None, store, query_set_enabled=False,
             naver_api_enabled=False, naver_stock_enabled=True,
             stock_client=site, read_only_search=True,
         )  # type: ignore[arg-type]
@@ -503,9 +504,9 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], ai.calls)
 
-    async def test_job_flag_off_keeps_existing_request_driven_analysis(self) -> None:
+    async def test_no_persistent_enqueue_keeps_existing_request_driven_analysis(self) -> None:
         store, ai = _JobStore(), _AIService()
-        service = CentralNewsService(_NewsClient(), store, jobs_enabled=False)  # type: ignore[arg-type]
+        service = CentralNewsService(_NewsClient(), store)  # type: ignore[arg-type]
         service.set_ai_service(ai)
         values = await service.search("005930", "삼성전자", None, automation={
             "auto_analyze": True, "auto_recent_limit": 10,
@@ -519,6 +520,24 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], store.jobs)
         self.assertEqual(1, len(ai.calls))
+
+    async def test_injected_native_enqueue_keeps_jobs_out_of_request_driven_ai(self) -> None:
+        store, ai = _JobStore(), _AIService()
+        service = CentralNewsService(_NewsClient(), store, enqueue_ai_jobs=store.enqueue_news_ai_jobs)
+        service.set_ai_service(ai)
+        values = await service.search("005930", "삼성전자", None, automation={
+            "auto_analyze": True, "auto_recent_limit": 10,
+            "provider": "gemini", "model": "flash",
+        })
+        await service._auto_analyze("005930", "삼성전자", values, {
+            "auto_analyze": True, "auto_recent_limit": 10,
+            "provider": "gemini", "model": "flash",
+        })
+        self.assertEqual([], ai.calls)
+        self.assertEqual(1, len(store.jobs))
+        self.assertEqual("005930", store.jobs[0]["target_id"])
+        self.assertEqual("https://o/1", store.jobs[0]["identity"])
+        self.assertIs(store, service._enqueue_ai_jobs.__self__)
 
 
 class CentralNewsRefreshPersistenceTests(unittest.IsolatedAsyncioTestCase):
@@ -537,7 +556,7 @@ class CentralNewsRefreshPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
     def _service(self, client, dart_client=None):
         service = CentralNewsService(
-            client, self.store, dart_client, jobs_enabled=False, query_set_enabled=False,
+            client, self.store, dart_client, query_set_enabled=False,
             now_provider=lambda: self.now,
         )
         service.set_ai_service(self.ai)

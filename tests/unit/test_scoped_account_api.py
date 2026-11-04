@@ -147,10 +147,21 @@ class ScopedAccountAPITests(unittest.TestCase):
         wrong = {**self.a, "account_scope": self.b["account_scope"]}
         before = len(ScopedClient.calls)
         self.assertEqual(409, self.query(wrong).status_code)
+        # New identity evidence advances the binding separately from key rotation.
+        store = self.app.state.mock_credential_owner.store
+        binding = store.load_latest_account_binding(self.a["credential_profile_id"], "kiwoom", "mock")
+        refreshed = store.append_account_binding({**binding, "verified_at": NOW.isoformat()})
         current = self.activate("a2", self.a["credential_profile_id"], revision=1)
-        self.assertEqual(409, self.query(self.a).status_code)
-        self.assertEqual(409, self.query(current, batch_id=first["batch_id"], page_index=1, next_key="next").status_code)
+        self.assertEqual(refreshed["binding_revision"], current["expected_binding_revision"])
+        self.assertGreater(current["expected_binding_revision"], self.a["expected_binding_revision"])
+        rejected = self.query(self.a)
+        self.assertEqual(409, rejected.status_code)
+        self.assertEqual("ACCOUNT_CONTEXT_MISMATCH", rejected.json()["detail"])
+        expired = self.query(current, batch_id=first["batch_id"], page_index=1, next_key="next")
+        self.assertEqual(409, expired.status_code)
+        self.assertEqual("ACCOUNT_QUERY_CURSOR_EXPIRED", expired.json()["detail"])
         self.assertEqual(before, len(ScopedClient.calls))
+        self.assertEqual("a2", self.query(current).json()["payload"]["account_marker"])
 
     def test_order_ids_and_duplicates_are_separate_and_foreign_intents_rejected(self):
         self.enable_orders(self.a); self.enable_orders(self.b)

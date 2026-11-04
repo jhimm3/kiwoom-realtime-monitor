@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_news_sources import MarketFeedNewsCollector
-from kiwoom_monitor.infrastructure.naver_stock_market_news import parse_page
+from kiwoom_monitor.infrastructure.naver_stock_market_news_source import parse_page
 
 
 class MarketFeedNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
@@ -22,8 +22,9 @@ class MarketFeedNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], calls)
 
     async def test_flash_and_world_enter_existing_news_revision_path(self) -> None:
+        now = datetime(2026, 9, 22, 10, 5, tzinfo=ZoneInfo("Asia/Seoul"))
         with tempfile.TemporaryDirectory() as directory:
-            store = SQLiteQueryStore(Path(directory) / "central.sqlite3")
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3", now_provider=lambda: now)
             store.initialize()
             store.replace_documents("stock_catalog", [{
                 "owner": "krx", "key": "005930",
@@ -43,16 +44,21 @@ class MarketFeedNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
                         "dt": "20260922100200"}]
                 return parse_page(source, target_date, page, payload)
 
-            collector = MarketFeedNewsCollector(store, fetcher=fetch)
-            now = datetime(2026, 9, 22, 10, 5, tzinfo=ZoneInfo("Asia/Seoul"))
-            await collector.run_once(now=now)
-            await collector.run_once(now=now)
+            collector = MarketFeedNewsCollector(store, fetcher=fetch, now_provider=lambda: now)
+            await collector.run_once()
+            await collector.run_once()
             history = store.load_news_history("article", target="GLOBAL")
             diagnostics = store.load_news_source_diagnostics(limit=10)
             store.close()
 
         self.assertEqual([("flash", "2026-09-22", 1), ("world", "2026-09-22", 1)], calls)
         self.assertEqual(2, len(history))
+        self.assertEqual({now.timestamp()}, {run["checked_at"] for run in diagnostics["runs"]})
+        self.assertEqual({now.timestamp() + 300}, {
+            source["next_schedule_at"] for source in diagnostics["sources"]
+        })
+        self.assertEqual({"2026-09-22T01:01:00+00:00", "2026-09-22T01:02:00+00:00"},
+                         {row["published_at"] for row in history})
         self.assertEqual({"naver_stock_market"}, {row["collection_scope"] for row in history})
         self.assertEqual(
             {"naver-stock:flash:2026-09-22", "naver-stock:world:2026-09-22"},

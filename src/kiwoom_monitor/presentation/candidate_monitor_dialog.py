@@ -175,6 +175,7 @@ class CandidateMonitorDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self._startup_pending = True
         self.setWindowTitle("Shadow 후보")
         self.resize(820, 850)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -288,7 +289,6 @@ class CandidateMonitorDialog(QDialog):
         self._ram_timer = QTimer(self)
         self._ram_timer.setInterval(5000)
         self._ram_timer.timeout.connect(self._refresh_ram_if_visible)
-        self._ram_timer.start()
         geometry = self._settings.value("geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -296,9 +296,17 @@ class CandidateMonitorDialog(QDialog):
         self._worker = CandidatePollWorker(client, self)
         self._worker.pageReceived.connect(self._apply_page)
         self._worker.failed.connect(self._show_failure)
-        self._sync_polling_state()
         if self._operational_client is None:
             self._settings_status.setText("NAS 운영 설정 연결을 사용할 수 없습니다.")
+
+
+    def activate_startup(self) -> None:
+        """Admit this dialog's existing poller after its owner is published."""
+        if not self._startup_pending or self._ram_stopping:
+            return
+        self._startup_pending = False
+        self._ram_timer.start()
+        self._sync_polling_state()
 
     def _now(self) -> datetime:
         provider = getattr(self._content_client, "server_now", None)
@@ -307,6 +315,8 @@ class CandidateMonitorDialog(QDialog):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if self._startup_pending or self._ram_stopping:
+            return
         self._sync_polling_state()
         if not self._operational_settings_loaded and self._operational_client is not None:
             self._start_settings_request()
@@ -321,6 +331,8 @@ class CandidateMonitorDialog(QDialog):
 
     def _sync_polling_state(self) -> None:
         if not hasattr(self, "_worker"):
+            return
+        if self._startup_pending or self._ram_stopping:
             return
         enabled = (self.isVisible() and self._tabs.currentIndex() == 0) or self._alert_enabled.isChecked()
         self._worker.set_polling_enabled(enabled)

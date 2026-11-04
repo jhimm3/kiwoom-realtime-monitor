@@ -23,6 +23,18 @@ def _account_registry_scope(value: dict[str, Any]) -> tuple[str, str]:
     return broker, environment
 
 
+def _latest_account_binding_row(cursor, credential_profile_id, broker, environment, placeholder):
+    cursor.execute(
+        "SELECT binding_id,credential_profile_id,broker,environment,account_ref,"
+        "binding_revision,verified_at,verification_method "
+        "FROM central_account_binding_revisions "
+        f"WHERE credential_profile_id={placeholder} AND broker={placeholder} AND environment={placeholder} "
+        "ORDER BY binding_revision DESC LIMIT 1",
+        (credential_profile_id, broker, environment),
+    )
+    return cursor.fetchone()
+
+
 def _account_binding_document(value: dict[str, Any]) -> dict[str, Any]:
     broker, environment = _account_registry_scope(value)
     document = {
@@ -261,17 +273,14 @@ class SQLiteAccountIdentityStoreMixin:
         return [_account_binding_row(row) for row in rows]
 
     def load_latest_account_binding(
-        self, credential_profile_id: str, broker: str, environment: str,
+        self, credential_profile_id: str, broker: str, environment: str, *, _reader: Any = None,
     ) -> dict[str, Any] | None:
-        with self._lock, self._connection() as connection:
-            row = connection.execute(
-                "SELECT binding_id,credential_profile_id,broker,environment,account_ref,"
-                "binding_revision,verified_at,verification_method "
-                "FROM central_account_binding_revisions "
-                "WHERE credential_profile_id=? AND broker=? AND environment=? "
-                "ORDER BY binding_revision DESC LIMIT 1",
-                (credential_profile_id, broker, environment),
-            ).fetchone()
+        with self._lock:
+            if _reader is not None:
+                row = _latest_account_binding_row(_reader, credential_profile_id, broker, environment, "?")
+            else:
+                with self._connection() as connection:
+                    row = _latest_account_binding_row(connection.cursor(), credential_profile_id, broker, environment, "?")
         return _account_binding_row(row) if row is not None else None
 
     def register_account_scope_alias(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -412,24 +421,19 @@ class PostgresAccountIdentityStoreMixin:
         return [_account_binding_row(row) for row in rows]
 
     def load_latest_account_binding(
-        self, credential_profile_id: str, broker: str, environment: str,
+        self, credential_profile_id: str, broker: str, environment: str, *, _reader: Any = None,
     ) -> dict[str, Any] | None:
         from .postgres_access import DBWriterContext, open_observed_connection
 
-        reader = DBWriterContext(
-            writer_family="read.account", writer_kind="account_binding_latest",
-            operation="load_latest_account_binding", access_mode="read",
-        )
-        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT binding_id,credential_profile_id,broker,environment,account_ref,"
-                "binding_revision,verified_at,verification_method "
-                "FROM central_account_binding_revisions "
-                "WHERE credential_profile_id=%s AND broker=%s AND environment=%s "
-                "ORDER BY binding_revision DESC LIMIT 1",
-                (credential_profile_id, broker, environment),
+        if _reader is not None:
+            row = _latest_account_binding_row(_reader, credential_profile_id, broker, environment, "%s")
+        else:
+            reader = DBWriterContext(
+                writer_family="read.account", writer_kind="account_binding_latest",
+                operation="load_latest_account_binding", access_mode="read",
             )
-            row = cursor.fetchone()
+            with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+                row = _latest_account_binding_row(cursor, credential_profile_id, broker, environment, "%s")
         return _account_binding_row(row) if row is not None else None
 
     def register_account_scope_alias(self, value: dict[str, Any]) -> dict[str, Any]:

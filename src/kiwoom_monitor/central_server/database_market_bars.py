@@ -792,7 +792,7 @@ def _save_sqlite_metadata(
                 continue
             _execute_multirow_upsert(
                 connection,
-                "INSERT INTO central_market_data_observation_meta VALUES",
+                "INSERT INTO central_market_data_observation_meta(dataset_kind,subject,observation_key,effective_at,available_at,venue,unit,value_kind,completeness,origin,source,candidate_universe) VALUES",
                 selected,
                 _market_metadata_upsert_suffix(
                     "excluded", distinct_operator=distinct_operator,
@@ -823,7 +823,7 @@ def _save_postgres_metadata(
                 continue
             _execute_multirow_upsert(
                 cursor,
-                "INSERT INTO central_market_data_observation_meta VALUES",
+                "INSERT INTO central_market_data_observation_meta(dataset_kind,subject,observation_key,effective_at,available_at,venue,unit,value_kind,completeness,origin,source,candidate_universe) VALUES",
                 selected,
                 _market_metadata_upsert_suffix(
                     "EXCLUDED", distinct_operator=distinct_operator,
@@ -1216,15 +1216,17 @@ class PostgresMarketBarStoreMixin:
                     "INSERT INTO central_second_trade_bars VALUES("
                     "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) " + suffix, rows,
                 )
-        from .diagnostic_metrics import record_writer_transaction
-        record_writer_transaction("realtime_second_bar", len(values),
-                                  round((monotonic() - started_at) * 1000),
-                                  domain_counts={
-                                      "second_bar_batch_statements": batch_statements,
-                                      "second_bar_batched_rows": len(values) if batched else 0,
-                                      "second_bar_sequential_rows": 0 if batched else len(values),
-                                  },
-                                  db_call_id=writer.call_id)
+        from .postgres_access import database_observer
+        observer = database_observer()
+        if observer is not None:
+            observer.record_writer_transaction("realtime_second_bar", len(values),
+                                      round((monotonic() - started_at) * 1000),
+                                      domain_counts={
+                                          "second_bar_batch_statements": batch_statements,
+                                          "second_bar_batched_rows": len(values) if batched else 0,
+                                          "second_bar_sequential_rows": 0 if batched else len(values),
+                                      },
+                                      db_call_id=writer.call_id)
 
 
     def load_minute_bars(
@@ -1424,10 +1426,12 @@ class PostgresMarketBarStoreMixin:
                     operation_rows, "", placeholder="%s",
                     batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
                 )
-        from .diagnostic_metrics import record_writer_transaction
-        record_writer_transaction("realtime_minute_finalize", len(values),
-                                  round((monotonic() - started_at) * 1000),
-                                  db_call_id=writer.call_id)
+        from .postgres_access import database_observer
+        observer = database_observer()
+        if observer is not None:
+            observer.record_writer_transaction("realtime_minute_finalize", len(values),
+                                      round((monotonic() - started_at) * 1000),
+                                      db_call_id=writer.call_id)
 
 
     def replace_daily_bars(
@@ -1680,13 +1684,15 @@ class PostgresMarketBarStoreMixin:
                     )
                     domain_phase_ms["operation_insert"] = domain_phase_ms.get("operation_insert", 0) + (monotonic() - phase_started) * 1000
                     domain_counts["operation_inserts"] += 1
-        from .diagnostic_metrics import record_writer_transaction
-        record_writer_transaction("realtime_minute", len(values),
-                                  round((monotonic() - started_at) * 1000),
-                                  domain_phase_ms={key: round(value, 3)
-                                                   for key, value in domain_phase_ms.items()},
-                                  domain_counts=domain_counts,
-                                  db_call_id=writer.call_id)
+        from .postgres_access import database_observer
+        observer = database_observer()
+        if observer is not None:
+            observer.record_writer_transaction("realtime_minute", len(values),
+                                      round((monotonic() - started_at) * 1000),
+                                      domain_phase_ms={key: round(value, 3)
+                                                       for key, value in domain_phase_ms.items()},
+                                      domain_counts=domain_counts,
+                                      db_call_id=writer.call_id)
 
 
     def _replace_bars(
@@ -1706,15 +1712,15 @@ class PostgresMarketBarStoreMixin:
             " IS DISTINCT FROM (" + ",".join(f"EXCLUDED.{column}" for column in changed_columns) + ")"
             if changed_columns else ""
         )
-        from .postgres_access import DBWriterContext, open_observed_connection
-        from .diagnostic_metrics import CURRENT_API_ID, refresh_capture_state
+        from .postgres_access import DBWriterContext, database_observer, open_observed_connection
 
+        observer = database_observer()
         writer_kind = "query_minute" if minute else "query_daily"
         writer = DBWriterContext(
             writer_family="rest.market_bars.minute" if minute else "rest.market_bars.daily",
             writer_kind=writer_kind,
             operation="replace_minute_bars" if minute else "replace_daily_bars",
-            rows_attempted=len(values), api_id=CURRENT_API_ID.get(),
+            rows_attempted=len(values), api_id=observer.CURRENT_API_ID.get() if observer is not None else "",
         )
         total_started = monotonic()
         connect_started = monotonic()
@@ -1735,12 +1741,12 @@ class PostgresMarketBarStoreMixin:
         commit_probe_incomplete = False
         bar_statement_diagnostics: list[dict[str, object]] = []
         metadata_statement_diagnostics: list[dict[str, object]] = []
-        capture_enabled = bool(refresh_capture_state().get("enabled"))
+        capture_enabled = observer is not None and bool(observer.refresh_capture_state().get("enabled"))
         # The diagnostic lease is sampled once per call. Expiry/restart restores
         # the normal write for the next call without changing this transaction.
-        from .diagnostic_workloads import is_paused
         metadata_suppressed_rows = (
-            len(observations or ()) if minute and is_paused("minute_query_metadata") else 0
+            len(observations or ()) if minute and observer is not None
+            and observer.workloads.is_paused("minute_query_metadata") else 0
         )
         if capture_enabled:
             commit_probe_stop = Event()
@@ -1907,50 +1913,50 @@ class PostgresMarketBarStoreMixin:
             close_ms = round((monotonic() - phase_started) * 1000)
 
         total_ms = round((monotonic() - total_started) * 1000)
-        from .diagnostic_metrics import record_market_bar_save
-        record_market_bar_save(
-            kind="minute" if minute else "daily", rows=len(values),
-            db_call_id=writer.call_id,
-            observations=len(observations or ()), connect_ms=connect_ms,
-            metadata_suppressed_rows=metadata_suppressed_rows,
-            bars_ms=bar_write_ms, metadata_ms=metadata_ms,
-            revisions_ms=revision_ms, commit_ms=commit_ms,
-            close_ms=close_ms, total_ms=total_ms,
-            revision_lookup_statements=revision_lookup_statements,
-            revision_lookup_keys=revision_lookup_keys,
-            revision_insert_statements=revision_insert_statements,
-            revision_insert_rows=revision_insert_rows,
-            revision_sources_ms=revision_sources_ms,
-            revision_locks_ms=revision_locks_ms,
-            revision_lookup_ms=revision_lookup_ms,
-            revision_rows_ms=revision_rows_ms,
-            revision_insert_execute_ms=revision_insert_execute_ms,
-            commit_wait_samples=commit_wait_samples,
-            commit_probe_errors=commit_probe_errors,
-            commit_backend_pid=commit_backend_pid,
-            commit_started_at=commit_started_at,
-            commit_ended_at=commit_ended_at,
-            commit_probe_incomplete=commit_probe_incomplete,
-            wal_timing_for_commit=wal_timing_for_commit,
-            wal_timing_error=wal_timing_error,
-            bar_statement_diagnostics=bar_statement_diagnostics,
-            metadata_statement_diagnostics=metadata_statement_diagnostics,
-        )
-        from .diagnostic_metrics import record_writer_transaction
-        record_writer_transaction(writer_kind,
-                                  len(values), total_ms, commit_ms=commit_ms,
-                                  connect_ms=connect_ms,
-                                  execute_ms=bar_write_ms + metadata_ms + revision_ms,
-                                  db_call_id=writer.call_id,
-                                  domain_counts=({
-                                      "bar_shape_version": 1,
-                                      "bar_changed_rows": len(changed_bar_rows) if returning else -1,
-                                      "observations": len(observations or ()),
-                                      "metadata_suppressed_rows": metadata_suppressed_rows,
-                                      "revision_insert_rows": revision_insert_rows,
-                                      "revision_history_enabled": int(self._observation_history_enabled),
-                                      "duplicate_input_keys": len(earlier_rows),
-                                  } if minute else None))
+        if observer is not None:
+            observer.record_market_bar_save(
+                kind="minute" if minute else "daily", rows=len(values),
+                db_call_id=writer.call_id,
+                observations=len(observations or ()), connect_ms=connect_ms,
+                metadata_suppressed_rows=metadata_suppressed_rows,
+                bars_ms=bar_write_ms, metadata_ms=metadata_ms,
+                revisions_ms=revision_ms, commit_ms=commit_ms,
+                close_ms=close_ms, total_ms=total_ms,
+                revision_lookup_statements=revision_lookup_statements,
+                revision_lookup_keys=revision_lookup_keys,
+                revision_insert_statements=revision_insert_statements,
+                revision_insert_rows=revision_insert_rows,
+                revision_sources_ms=revision_sources_ms,
+                revision_locks_ms=revision_locks_ms,
+                revision_lookup_ms=revision_lookup_ms,
+                revision_rows_ms=revision_rows_ms,
+                revision_insert_execute_ms=revision_insert_execute_ms,
+                commit_wait_samples=commit_wait_samples,
+                commit_probe_errors=commit_probe_errors,
+                commit_backend_pid=commit_backend_pid,
+                commit_started_at=commit_started_at,
+                commit_ended_at=commit_ended_at,
+                commit_probe_incomplete=commit_probe_incomplete,
+                wal_timing_for_commit=wal_timing_for_commit,
+                wal_timing_error=wal_timing_error,
+                bar_statement_diagnostics=bar_statement_diagnostics,
+                metadata_statement_diagnostics=metadata_statement_diagnostics,
+            )
+        if observer is not None:
+            observer.record_writer_transaction(writer_kind,
+                                      len(values), total_ms, commit_ms=commit_ms,
+                                      connect_ms=connect_ms,
+                                      execute_ms=bar_write_ms + metadata_ms + revision_ms,
+                                      db_call_id=writer.call_id,
+                                      domain_counts=({
+                                          "bar_shape_version": 1,
+                                          "bar_changed_rows": len(changed_bar_rows) if returning else -1,
+                                          "observations": len(observations or ()),
+                                          "metadata_suppressed_rows": metadata_suppressed_rows,
+                                          "revision_insert_rows": revision_insert_rows,
+                                          "revision_history_enabled": int(self._observation_history_enabled),
+                                          "duplicate_input_keys": len(earlier_rows),
+                                      } if minute else None))
         if total_ms >= 1000:
             logger.warning(
                 "slow PostgreSQL market bar save kind=%s rows=%d observations=%d "

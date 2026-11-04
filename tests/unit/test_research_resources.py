@@ -108,6 +108,80 @@ class ResearchResourcesTests(unittest.TestCase):
                                          == datetime.fromisoformat(current.bar_start).date())
                 self.assertEqual(expected_history, history)
 
+    def test_checkpoint_due_probe_reuses_batch_cadence_without_rss_io(self):
+        wall, reads = [0.0], []
+        limits = ResearchResourceLimits()
+        guard = ResearchResourceGuard(limits, rss=lambda: reads.append("rss") or 1024,
+            monotonic=lambda: wall[0], process_clock=lambda: 0.0, sleeper=lambda _: None)
+        for _ in range(100):
+            self.assertFalse(guard.checkpoint_due())
+        self.assertEqual([], reads)
+        wall[0] = limits.batch_seconds * 2
+        self.assertTrue(guard.checkpoint_due())
+        self.assertEqual([], reads)
+        guard.checkpoint()
+        self.assertEqual(["rss"], reads)
+        self.assertFalse(guard.checkpoint_due())
+
+    def test_invalid_order_stays_before_native_run_start_and_leaves_no_footprint(self):
+        from contextlib import closing
+        from kiwoom_monitor import research_run as runner
+        from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
+        from tests.unit.test_research_execution import _strategy, _execution
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = rows_for(date(2026, 9, 14))
+            rows[0]['available_at'] = '2026-09-14T09:00:00'
+            raw = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+            dataset = FrozenResearchDataset({'dataset_id': 'invalid-order-boundary',
+                'revision_ids_hash': hashlib.sha256(raw).hexdigest()}, tuple(rows))
+            repository = ResearchRepository(root / 'research.sqlite3')
+            with patch.object(repository, 'start_run', wraps=repository.start_run) as start:
+                with self.assertRaisesRegex(ValueError, 'availability/order contract is invalid'):
+                    runner.execute_research(dataset, repository, root / 'runs', _strategy(), _execution(),
+                        session_profile=PROFILE)
+            self.assertEqual(0, start.call_count)
+            with closing(repository._connect()) as connection:
+                self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM research_runs').fetchone()[0])
+            self.assertEqual([], list((root / 'runs').rglob('manifest.json')))
+            self.assertEqual(raw, json.dumps(dataset.observations, sort_keys=True, separators=(",", ":")).encode())
+
+    def test_operational_hook_error_keeps_original_exception_and_failed_run_footprint(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor import research_run as runner
+        from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
+        from tests.unit.test_research_execution import _strategy, _execution
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = tuple(rows_for(date(2026, 9, 14)))
+            raw = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+            dataset = FrozenResearchDataset({'dataset_id': 'operational-hook-boundary',
+                'revision_ids_hash': hashlib.sha256(raw).hexdigest()}, rows)
+            repository = ResearchRepository(root / 'research.sqlite3')
+            failures = []
+            def cancelled():
+                with closing(sqlite3.connect(root / 'control.sqlite3')) as control:
+                    try:
+                        control.execute('SELECT generation FROM checkpoint_lease').fetchone()
+                    except sqlite3.OperationalError as exc:
+                        failures.append(exc)
+                        raise
+            with self.assertRaises(sqlite3.OperationalError) as caught:
+                runner.execute_research(dataset, repository, root / 'runs', _strategy(), _execution(),
+                    session_profile=PROFILE, cancel_requested=cancelled)
+            self.assertEqual(1, len(failures))
+            self.assertIs(failures[0], caught.exception)
+            with closing(repository._connect()) as connection:
+                connection.row_factory = sqlite3.Row
+                saved = connection.execute('SELECT status,finished_at,error FROM research_runs').fetchall()
+            self.assertEqual(1, len(saved))
+            self.assertEqual('failed', saved[0]['status'])
+            self.assertTrue(saved[0]['finished_at'])
+            self.assertEqual('OperationalError: ' + str(caught.exception), saved[0]['error'])
+            self.assertEqual([], list((root / 'runs').rglob('manifest.json')))
+            self.assertEqual(raw, json.dumps(dataset.observations, sort_keys=True, separators=(",", ":")).encode())
+
     def test_preflight_failure_never_creates_output_database(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -20,6 +20,81 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQuery
 
 
 class JournalDetachedFlowTests(unittest.TestCase):
+    def test_real_manual_combo_uses_episode_scope_clock_and_keeps_unassigned_same_key_on_reopen(self):
+        from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QTimer
+        from PySide6.QtWidgets import QApplication
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        type(self)._application = QApplication.instance() or QApplication([])
+        app = type(self)._application
+        origin = AccountScope("kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111")
+        canonical = AccountScope("kiwoom", AccountEnvironment.MOCK, "22222222-2222-4222-8222-222222222222")
+        other = AccountScope("kiwoom", AccountEnvironment.REAL, "33333333-3333-4333-8333-333333333333")
+        at = datetime(2026, 9, 9, 9, 10)
+        now = as_kst(datetime(2026, 10, 23, 10))
+        current = group_trade_episodes((
+            TradeFill("first", "000001", "fixture", "매수", at, 1, 1000, origin_scope=origin, canonical_scope=canonical),
+            TradeFill("last", "000001", "fixture", "매도", at.replace(minute=15), 1, 1010, origin_scope=origin, canonical_scope=canonical),
+        ))[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor, target = root / "monitor.sqlite3", root / "journal.sqlite3"
+            Database(monitor).initialize()
+            settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+            settings.setValue("auto_history_sync_enabled", False)
+            with patch("kiwoom_monitor.journal_process.QSettings", return_value=settings), \
+                    patch("kiwoom_monitor.journal_process.create_query_client", return_value=SimpleNamespace(server_now=lambda: now)), \
+                    patch.object(QTimer, "singleShot"):
+                window = JournalWindow(monitor, target, root / "api.json")
+            for timer in window.findChildren(QTimer): timer.stop()
+            try:
+                window._repo.save_trade_setup_cycle_override(current.group_id, 0, "상따", now=at)
+                with closing(sqlite3.connect(target)) as connection:
+                    original = tuple(connection.execute("SELECT * FROM trade_setup_cycle_overrides").fetchone())
+                window._active_episode = current
+                window._loaded_history_scope = canonical
+                window._account_filter.addItem("different pending selection", other)
+                window._account_filter.blockSignals(True)
+                window._account_filter.setCurrentIndex(window._account_filter.count() - 1)
+                with patch("kiwoom_monitor.infrastructure.persistence.journal_trade_repository.kst_wall_now", side_effect=AssertionError("host clock")):
+                    window._show_trade_analysis(current, ())
+                    first = window._repo.load_journal_analysis_revisions(current.group_id, canonical)[0]
+                    window._setup_cycles.cellWidget(0, 4).setCurrentText("눌림")
+                reopened = JournalRepository(target)
+                self.assertEqual({0: "눌림"}, reopened.load_trade_setup_cycle_overrides(current.group_id, canonical))
+                self.assertEqual({0: "상따"}, reopened.load_trade_setup_cycle_overrides(current.group_id, LEGACY_ACCOUNT_SCOPE))
+                self.assertEqual({}, reopened.load_trade_setup_cycle_overrides(current.group_id, other))
+                with closing(sqlite3.connect(target)) as connection:
+                    self.assertEqual(original, tuple(connection.execute("SELECT * FROM trade_setup_cycle_overrides WHERE origin_broker='legacy'").fetchone()))
+                    row = connection.execute("SELECT updated_at,origin_account_ref,canonical_account_ref FROM trade_setup_cycle_overrides WHERE origin_broker='kiwoom'").fetchone()
+                self.assertEqual((now.isoformat(), origin.account_ref, canonical.account_ref), row)
+                revisions = reopened.load_journal_analysis_revisions(current.group_id, canonical)
+                self.assertEqual(2, len(revisions))
+                self.assertIn(first, revisions)
+                self.assertIn(["눌림"], [item.content["selected_types"] for item in revisions])
+                window._episodes = (current,)
+                window._render_summaries()
+                self.assertEqual("눌림", window._summary_table.item(0, 14).text())
+                window._setup_cycles.cellWidget(0, 4).setCurrentText("자동 판정 사용")
+                self.assertEqual({}, reopened.load_trade_setup_cycle_overrides(current.group_id, canonical))
+                self.assertEqual({0: "상따"}, reopened.load_trade_setup_cycle_overrides(current.group_id, LEGACY_ACCOUNT_SCOPE))
+                def concurrent_edit(*_args, **_kwargs):
+                    reopened.save_trade_setup_cycle_override(current.group_id, 0, "돌파", now=now,
+                                                            account_scope=origin, canonical_scope=canonical)
+                    return ()
+                with patch.object(window._trade_analysis_preparer, "_snapshot_loader", side_effect=concurrent_edit):
+                    window._show_trade_analysis(current, ())
+                self.assertIn("과거 입력으로 보존", window._setup_label.toPlainText())
+                self.assertEqual("", window._analysis_label.toPlainText())
+                self.assertEqual(0, window._setup_cycles.rowCount())
+                self.assertEqual({0: "돌파"}, reopened.load_trade_setup_cycle_overrides(current.group_id, canonical))
+            finally:
+                window.shutdown()
+                window._live_page.close(); window._live_page.deleteLater()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                app.processEvents()
+
     def test_hidden_live_refresh_keeps_copy_retry_dates_and_visible_consumption(self):
         from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QTimer
         from PySide6.QtWidgets import QApplication
@@ -1062,29 +1137,43 @@ class JournalDetachedFlowTests(unittest.TestCase):
         self.assertEqual(["뉴스창에서 대표 기사를 선택해 매매일지에 추가할 수 있습니다."], messages)
 
     def test_market_index_result_uses_one_repository_write_then_refreshes_charts(self) -> None:
+        from kiwoom_monitor.presentation.journal_workers import MarketIndexBackfillWorker
         minute_rows = {("kospi", datetime(2026, 9, 8, 9, 1)): (1.0, 2.0, 0.5, 1.5, None)}
-        daily_rows = {"kospi": (("2026-09-08T00:00", 1, 2, 1, 2, 10, 20.0),)}
+        daily_rows = {"kospi": (("2026-09-08T00:00", 1, 2, 1, 2, 10, 20.0),), "kosdaq": ()}
         saved: list[tuple[object, object]] = []
         statuses: list[str] = []
         refreshed: list[bool] = []
         owner = SimpleNamespace(
             _monitor_db="monitor.sqlite3",
+            _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 9)),
+            _market_index_service=SimpleNamespace(
+                load=lambda market, _target: {key: value for key, value in minute_rows.items() if key[0] == market},
+                load_daily=lambda market, _target: daily_rows[market]),
+            _market_index_worker=None,
             _market_index_active_day=date(2026, 9, 8),
             _market_index_requested_days=set(),
+            _pending_market_index_day=None,
             _status=SimpleNamespace(setText=statuses.append),
             _sync_detached_charts=lambda: refreshed.append(True),
+            _market_index_backfill_failed=lambda _error: self.fail("unexpected fetch failure"),
+            _market_index_backfill_storage_failed=lambda _error: self.fail("unexpected storage failure"),
+            _market_index_backfill_finished=lambda: None,
         )
+        owner._market_index_backfill_completed = lambda rows: JournalWindow._market_index_backfill_completed(owner, rows)
 
-        with patch("kiwoom_monitor.journal_process.MinuteBarRepository") as repository_type:
+        with patch("kiwoom_monitor.journal_process.MinuteBarRepository") as repository_type, \
+                patch.object(MarketIndexBackfillWorker, "start", lambda worker: worker.run()):
             repository_type.return_value.replace_market_index_history.side_effect = (
                 lambda minutes, daily: saved.append((minutes, daily))
             )
-            JournalWindow._market_index_backfill_completed(owner, (minute_rows, daily_rows))
+            JournalWindow._start_market_index_backfill(owner, date(2026, 9, 8))
+            repository_type.assert_called_once_with("monitor.sqlite3", now_provider=owner._query_client.server_now)
 
         self.assertEqual([(minute_rows, daily_rows)], saved)
         self.assertEqual({date(2026, 9, 8)}, owner._market_index_requested_days)
         self.assertEqual(["코스피·코스닥 분봉·일봉 보완 · 1개"], statuses)
         self.assertEqual([True], refreshed)
+
 
     def test_running_market_index_worker_keeps_only_latest_other_day(self) -> None:
         class RunningWorker:
@@ -1124,22 +1213,38 @@ class JournalDetachedFlowTests(unittest.TestCase):
         self.assertEqual([pending], started)
 
     def test_market_index_save_failure_does_not_mark_day_as_completed(self) -> None:
+        from kiwoom_monitor.presentation.journal_workers import MarketIndexBackfillWorker
         target = date(2026, 9, 8)
-        statuses: list[str] = []
-        owner = SimpleNamespace(
-            _monitor_db="monitor.sqlite3",
-            _market_index_active_day=target,
-            _market_index_requested_days=set(),
-            _status=SimpleNamespace(setText=statuses.append),
-            _sync_detached_charts=lambda: self.fail("failed save must not refresh charts"),
-        )
+        for failure_at in ("constructor", "transaction"):
+            with self.subTest(failure_at=failure_at):
+                statuses: list[str] = []
+                owner = SimpleNamespace(
+                    _monitor_db="monitor.sqlite3",
+                    _query_client=SimpleNamespace(server_now=lambda: datetime(2026, 9, 9)),
+                    _market_index_service=SimpleNamespace(load=lambda *_args: {}, load_daily=lambda *_args: ()),
+                    _market_index_worker=None,
+                    _market_index_active_day=target,
+                    _market_index_requested_days=set(),
+                    _pending_market_index_day=None,
+                    _status=SimpleNamespace(setText=statuses.append),
+                    _sync_detached_charts=lambda: self.fail("failed save must not refresh charts"),
+                    _market_index_backfill_completed=lambda _rows: self.fail("failed save must not emit success"),
+                    _market_index_backfill_failed=lambda _error: self.fail("storage failure is not a fetch failure"),
+                    _market_index_backfill_finished=lambda: None,
+                )
+                owner._market_index_backfill_storage_failed = lambda error: JournalWindow._market_index_backfill_storage_failed(owner, error)
 
-        with patch("kiwoom_monitor.journal_process.MinuteBarRepository") as repository_type:
-            repository_type.return_value.replace_market_index_history.side_effect = sqlite3.Error("locked")
-            JournalWindow._market_index_backfill_completed(owner, ({}, {}))
+                with patch("kiwoom_monitor.journal_process.MinuteBarRepository") as repository_type, \
+                        patch.object(MarketIndexBackfillWorker, "start", lambda worker: worker.run()):
+                    if failure_at == "constructor":
+                        repository_type.side_effect = sqlite3.Error("locked")
+                    else:
+                        repository_type.return_value.replace_market_index_history.side_effect = sqlite3.Error("locked")
+                    JournalWindow._start_market_index_backfill(owner, target)
 
-        self.assertNotIn(target, owner._market_index_requested_days)
-        self.assertEqual(["시장지수 저장 실패 · locked"], statuses)
+                self.assertNotIn(target, owner._market_index_requested_days)
+                self.assertEqual(["시장지수 저장 실패 · locked"], statuses)
+
 
     def test_running_daily_worker_keeps_only_latest_pending_request(self) -> None:
         class RunningWorker:
@@ -1727,6 +1832,827 @@ class JournalReviewLifecycleTests(unittest.TestCase):
 
     def test_direct_exec_error_joins_native_sync_and_preserves_error_before_lease_release(self):
         self._assert_process_exit_joins_native_central_sync("exec-error")
+
+
+    def _assert_process_exit_joins_owned_native_worker(self, mode, kind):
+        import os
+        import threading
+        from PySide6.QtCore import QObject, QThread, QTimer, Qt, Slot
+        from PySide6.QtGui import QCloseEvent
+        from kiwoom_monitor import journal_process
+        from kiwoom_monitor.presentation.journal_workers import AnalysisEnrichmentWorker
+        from kiwoom_monitor.presentation.settings_request_worker import _running_requests
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease, StrictRestoreError
+
+        entered, release, native_closed, exiting, shutdown_returned, lease_released, observed_done = (
+            threading.Event() for _ in range(7))
+        observed, sync_entry, lease_entry, timers, late_results, failures = {}, [], [], [], [], []
+        worker = None
+        key = f"native-owner-{mode}-{kind}"
+        pid_path = self.root / "journal_process.pid"
+        sentinel = OSError("controlled owned-worker exec failure")
+        previous_hook, previous_last_window = sys.excepthook, self.app.quitOnLastWindowClosed()
+        previous_client = self.window._query_client
+        runner = self.window._central_journal_sync_runner
+        real_sync_close, real_lease_close = runner.close, AppDataLease.close
+
+        def write_native():
+            # The fixture replaces calculation/network input only. Its accepted
+            # worker owns a real SQLite transaction until the observer releases it.
+            try:
+                with closing(sqlite3.connect(self.window._journal_db)) as connection:
+                    with connection:
+                        connection.execute("INSERT INTO journal_settings VALUES(?,?,?)",
+                            (key, '"native-worker"', self.now.isoformat()))
+                        entered.set()
+                        if not release.wait(5):
+                            raise TimeoutError("controlled native worker gate")
+                return ()
+            finally:
+                native_closed.set()
+
+        class Receiver(QObject):
+            @Slot(str, object)
+            def analysis(self, group_id, _prepared):
+                late_results.append(("analysis", group_id))
+
+            @Slot(object)
+            def accounts(self, _contexts):
+                late_results.append(("accounts", key))
+
+        receiver = Receiver(self.window)
+
+        def prepare(*_args, **_kwargs):
+            write_native()
+            return SimpleNamespace(analysis_revision_id="native-worker-fixture")
+
+        def close_sync():
+            sync_entry.append((worker.isFinished(), native_closed.is_set(), worker not in _running_requests))
+            real_sync_close()
+
+        def close_lease(lease):
+            if not lease._exclusive:
+                lease_entry.append((worker.isFinished(), native_closed.is_set(), not pid_path.exists(),
+                                    worker not in _running_requests))
+            real_lease_close(lease)
+            if not lease._exclusive:
+                lease_released.set()
+
+        def command_timer():
+            timer = QTimer()
+            timers.append(timer)
+            return timer
+
+        def observe_then_release():
+            try:
+                observed["native_entered"] = entered.wait(2)
+                observed["exit_reached"] = exiting.wait(2)
+                observed["ui_shutdown_returned"] = shutdown_returned.wait(5) if mode == "window-close" else True
+                observed["lease_released"] = lease_released.wait(0.1)
+                observed["pid_removed"] = not pid_path.exists()
+                observed["running"] = worker is not None and worker.isRunning()
+                observed["finished"] = worker is not None and worker.isFinished()
+                observed["connection_closed"] = native_closed.is_set()
+                observed["sync_closed"] = bool(sync_entry)
+                try:
+                    with AppDataLease(self.root, exclusive=True, timeout=0.05):
+                        observed["exclusive_restore"] = True
+                except StrictRestoreError:
+                    observed["exclusive_restore"] = False
+            finally:
+                observed_done.set()
+                release.set()
+
+        ownership = {}
+
+        def execute():
+            nonlocal worker
+            if kind == "analysis":
+                worker = AnalysisEnrichmentWorker(SimpleNamespace(prepare=prepare),
+                    ((SimpleNamespace(group_id=key), ()),), active_pack=object(),
+                    strategy_packs=(), result_mode="together")
+                worker.setParent(self.window)
+                worker.item_completed.connect(receiver.analysis)
+                worker.item_failed.connect(lambda *_values: failures.append("analysis"), Qt.ConnectionType.DirectConnection)
+                worker.finished.connect(self.window._analysis_enrichment_finished)
+                self.window._analysis_enrichment_worker = worker
+                worker.start()
+            else:
+                self.window._query_client = SimpleNamespace(server_now=lambda: self.now,
+                    load_account_contexts=write_native)
+                self.window._load_api_account_choices()
+                worker = self.window._account_list_worker
+                worker.succeeded.connect(receiver.accounts)
+                worker.failed.connect(lambda *_values: failures.append("accounts"), Qt.ConnectionType.DirectConnection)
+            ownership["window_parent"] = worker.parent() is self.window
+            ownership["window_child"] = worker in self.window.findChildren(QThread)
+            self.assertTrue(entered.wait(2))
+            exiting.set()
+            if mode == "window-close":
+                event = QCloseEvent()
+                self.window.closeEvent(event)
+                ownership["accepted"] = event.isAccepted()
+                ownership["reference_cleared"] = self.window._analysis_enrichment_worker is None if kind == "analysis" else False
+                ownership["running_after_ui_wait"] = worker.isRunning()
+                shutdown_returned.set()
+                return 0
+            raise sentinel
+
+        observer = threading.Thread(target=observe_then_release)
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(AppDataLease, "close", close_lease))
+                stack.enter_context(patch.object(runner, "close", close_sync))
+                application = stack.enter_context(patch.object(journal_process, "QApplication", return_value=self.app))
+                application.instance.return_value = self.app
+                stack.enter_context(patch.object(journal_process, "JournalWindow", return_value=self.window))
+                stack.enter_context(patch.object(journal_process, "QTimer", side_effect=command_timer))
+                stack.enter_context(patch.object(journal_process, "_set_taskbar_app_id"))
+                shutdown = stack.enter_context(patch.object(self.window, "shutdown", wraps=self.window.shutdown))
+                stack.enter_context(patch.object(self.app, "exec", side_effect=execute))
+                observer.start()
+                arguments = ["--monitor-database", str(self.window._monitor_db),
+                    "--journal-database", str(self.window._journal_db), "--config", str(self.window._config),
+                    "--command-file", str(self.root / "commands.json"), "--parent-pid", str(os.getpid())]
+                if mode == "window-close":
+                    self.assertEqual(0, journal_process.main(arguments))
+                else:
+                    with self.assertRaises(OSError) as caught:
+                        journal_process.main(arguments)
+                    self.assertIs(sentinel, caught.exception)
+                self.assertEqual(int(mode == "window-close"), shutdown.call_count)
+        finally:
+            # The old implementation may already have returned with its native
+            # worker alive. Preserve that observation, then release/join it even
+            # when an assertion fails; no QThread is left running for teardown.
+            if observer.ident is not None:
+                observed_done.wait(2)
+            release.set()
+            if observer.ident is not None:
+                observer.join(3)
+            if worker is not None:
+                worker.requestInterruption()
+                self.assertTrue(worker.wait(3000))
+            for timer in timers:
+                timer.stop()
+                timer.deleteLater()
+            self.window._query_client = previous_client
+            sys.excepthook = previous_hook
+            self.app.setQuitOnLastWindowClosed(previous_last_window)
+        self.assertFalse(observer.is_alive())
+        self.assertEqual({"native_entered": True, "exit_reached": True, "ui_shutdown_returned": True,
+            "lease_released": False, "pid_removed": False, "running": True, "finished": False,
+            "connection_closed": False, "sync_closed": False, "exclusive_restore": False}, observed)
+        self.assertTrue(ownership["window_parent"])
+        self.assertTrue(ownership["window_child"])
+        if mode == "window-close":
+            self.assertTrue(ownership["accepted"])
+            self.assertEqual(kind == "analysis", ownership["reference_cleared"])
+            self.assertTrue(ownership["running_after_ui_wait"])
+        self.assertEqual([(True, True, True)], sync_entry)
+        self.assertEqual([(True, True, True, True)], lease_entry)
+        self.assertTrue(worker.isFinished())
+        self.assertFalse(worker.isRunning())
+        self.assertTrue(native_closed.is_set())
+        self.assertFalse(pid_path.exists())
+        self.assertTrue(self.window._shutting_down)
+        self.assertFalse(failures)
+        self.assertFalse(late_results)  # No queued workflow result was consumed after app.exec.
+        with closing(sqlite3.connect(self.window._journal_db)) as connection:
+            self.assertEqual(('"native-worker"', self.now.isoformat()), connection.execute(
+                "SELECT value_json,updated_at FROM journal_settings WHERE setting_key=?", (key,)).fetchone())
+        with AppDataLease(self.root, exclusive=True, timeout=0.05):
+            pass
+
+    def test_slow_owned_analysis_native_write_joins_after_ui_wait_before_sync_pid_and_lease_release(self):
+        self._assert_process_exit_joins_owned_native_worker("window-close", "analysis")
+
+    def test_exec_error_joins_owned_analysis_native_write_without_repeating_review_shutdown(self):
+        self._assert_process_exit_joins_owned_native_worker("exec-error", "analysis")
+
+    def test_account_request_native_write_remains_window_owned_until_process_final_join(self):
+        self._assert_process_exit_joins_owned_native_worker("window-close", "accounts")
+
+    def test_exec_error_joins_owned_account_request_before_source_lease_release(self):
+        self._assert_process_exit_joins_owned_native_worker("exec-error", "accounts")
+
+
+    def _assert_setup_failure_joins_constructor_owned_native_worker(self, stage):
+        import os
+        import threading
+        from PySide6.QtCore import QCoreApplication, QEvent, QThread, QTimer, Qt
+        from kiwoom_monitor import journal_process
+        from kiwoom_monitor.infrastructure.central_journal_sync import CentralJournalSyncRunner
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease, StrictRestoreError
+
+        # Reuse this class's real isolated DB, account scope, fixed clock and INI
+        # fixture. Keep explicit references only so an intentionally failing old
+        # source cannot destroy a live QThread while recording the failure.
+        # This test retention is not a normal application lifetime guarantee.
+        entered, release, native_closed, failing, lease_released, observed_done = (
+            threading.Event() for _ in range(6))
+        observed, owners, sync_entry, lease_entry, failures = {}, [], [], [], []
+        key = f"setup-boundary-{stage}"
+        pid_path = self.root / "journal_process.pid"
+        sentinel = OSError(f"controlled journal {stage} setup failure")
+        real_window = JournalWindow
+        real_previous = real_window._request_previous_chart_day
+        real_sync_close, real_lease_close = CentralJournalSyncRunner.close, AppDataLease.close
+        previous_hook, previous_last_window = sys.excepthook, self.app.quitOnLastWindowClosed()
+        expected_identity = journal_process.process_identity_document()
+        self.settings.setValue("selected_account_scope",
+            f"{self.scope.broker}|{self.scope.environment.value}|{self.scope.account_ref}")
+
+        def write_native(*_args):
+            try:
+                with closing(sqlite3.connect(self.window._journal_db)) as connection:
+                    with connection:
+                        connection.execute("INSERT INTO journal_settings VALUES(?,?,?)",
+                            (key, '"constructor-accepted-worker"', self.now.isoformat()))
+                        entered.set()
+                        if not release.wait(5):
+                            raise TimeoutError("controlled setup native worker gate")
+                return ()
+            finally:
+                native_closed.set()
+
+        def request_previous(owner, code, day):
+            if not owners:
+                owners.append(owner)
+            self.assertIs(owner, owners[0])
+            # Preserve the actual constructor -> history -> selection ->
+            # previous-day request -> ConfirmWorker parent/start path.
+            real_previous(owner, code, day)
+            worker = owner._worker
+            self.assertIsNotNone(worker)
+            self.assertIs(worker.parent(), owner)
+            self.assertIn(worker, owner.findChildren(QThread))
+            worker.failed.connect(lambda error: failures.append(error), Qt.ConnectionType.DirectConnection)
+            self.assertTrue(entered.wait(2))
+
+        def fail_statistics(owner, *_args):
+            self.assertIs(owner, owners[0])
+            self.assertTrue(owner._worker.isRunning())
+            failing.set()
+            raise sentinel
+
+        class EntryTimer:
+            singleShot = staticmethod(QTimer.singleShot)
+
+            def __new__(cls, *args, **kwargs):
+                if args or kwargs:
+                    return QTimer(*args, **kwargs)
+                # All constructor timers have the window parent. The existing
+                # no-parent command timer is created after the own PID write.
+                self.assertTrue(entered.is_set())
+                self.assertEqual(expected_identity, json.loads(pid_path.read_text(encoding="ascii")))
+                failing.set()
+                raise sentinel
+
+        def close_sync(runner):
+            owner = owners[0]
+            if runner is owner._central_journal_sync_runner:
+                sync_entry.append((owner._worker.isFinished(), native_closed.is_set()))
+            real_sync_close(runner)
+
+        def close_lease(lease):
+            if not lease._exclusive:
+                worker = owners[0]._worker
+                lease_entry.append((worker.isFinished(), native_closed.is_set(), not pid_path.exists()))
+            real_lease_close(lease)
+            if not lease._exclusive:
+                lease_released.set()
+
+        def observe_then_release():
+            try:
+                observed["native_entered"] = entered.wait(2)
+                observed["setup_failed"] = failing.wait(2)
+                observed["lease_released"] = lease_released.wait(0.1)
+                observed["pid_exists"] = pid_path.exists()
+                observed["running"] = owners[0]._worker.isRunning()
+                observed["finished"] = owners[0]._worker.isFinished()
+                observed["connection_closed"] = native_closed.is_set()
+                observed["sync_closed"] = bool(sync_entry)
+                try:
+                    with AppDataLease(self.root, exclusive=True, timeout=0.05):
+                        observed["exclusive_restore"] = True
+                except StrictRestoreError:
+                    observed["exclusive_restore"] = False
+            finally:
+                observed_done.set()
+                release.set()
+
+        observer = threading.Thread(target=observe_then_release)
+        production_sync_entry = production_lease_entry = None
+        try:
+            with ExitStack() as stack:
+                application = stack.enter_context(patch.object(journal_process, "QApplication", return_value=self.app))
+                application.instance.return_value = self.app
+                stack.enter_context(patch.object(journal_process, "_set_taskbar_app_id"))
+                stack.enter_context(patch.object(journal_process, "MinuteChartService",
+                    return_value=SimpleNamespace(load_two_trading_days=write_native)))
+                # Analysis and missing-day backfill are not the worker under
+                # test. The previous-day request and ConfirmWorker stay real.
+                for name in ("_show_trade_analysis", "_sync_detached_charts", "_request_incomplete_trade_days"):
+                    stack.enter_context(patch.object(real_window, name))
+                stack.enter_context(patch.object(real_window, "_request_previous_chart_day", request_previous))
+                stack.enter_context(patch.object(CentralJournalSyncRunner, "close", close_sync))
+                stack.enter_context(patch.object(AppDataLease, "close", close_lease))
+                shutdown = stack.enter_context(patch.object(real_window, "shutdown"))
+                execute = stack.enter_context(patch.object(self.app, "exec"))
+                if stage == "constructor":
+                    stack.enter_context(patch.object(real_window, "_refresh_statistics", fail_statistics))
+                else:
+                    stack.enter_context(patch.object(journal_process, "QTimer", EntryTimer))
+                observer.start()
+                arguments = ["--monitor-database", str(self.window._monitor_db),
+                    "--journal-database", str(self.window._journal_db), "--config", str(self.window._config),
+                    "--command-file", str(self.root / "commands.json"), "--parent-pid", str(os.getpid())]
+                with self.assertRaises(OSError) as caught:
+                    journal_process.main(arguments)
+                self.assertIs(sentinel, caught.exception)
+                self.assertEqual(0, shutdown.call_count)
+                self.assertEqual(0, execute.call_count)
+                production_sync_entry, production_lease_entry = tuple(sync_entry), tuple(lease_entry)
+        finally:
+            # Record old-source early release first, then always safely finish
+            # the exact retained partial window/native worker. No timeout or
+            # expected outcome is relaxed to make the candidate pass.
+            if observer.ident is not None:
+                observed_done.wait(2)
+            release.set()
+            if observer.ident is not None:
+                observer.join(3)
+            for owner in owners:
+                worker = owner._worker
+                if worker is not None:
+                    worker.requestInterruption()
+                    self.assertTrue(worker.wait(3000))
+                owner.finish_shutdown()
+                for timer in owner.findChildren(QTimer):
+                    timer.stop()
+                owner.deleteLater()
+                QCoreApplication.sendPostedEvents(owner, QEvent.Type.DeferredDelete)
+            sys.excepthook = previous_hook
+            self.app.setQuitOnLastWindowClosed(previous_last_window)
+        self.assertFalse(observer.is_alive())
+        self.assertEqual({"native_entered": True, "setup_failed": True, "lease_released": False,
+            "pid_exists": stage == "entry", "running": True, "finished": False,
+            "connection_closed": False, "sync_closed": False, "exclusive_restore": False}, observed)
+        self.assertEqual(((True, True),), production_sync_entry)
+        self.assertEqual(((True, True, True),), production_lease_entry)
+        self.assertFalse(pid_path.exists())
+        self.assertTrue(native_closed.is_set())
+        self.assertFalse(failures)
+        with closing(sqlite3.connect(self.window._journal_db)) as connection:
+            self.assertEqual(('"constructor-accepted-worker"', self.now.isoformat()), connection.execute(
+                "SELECT value_json,updated_at FROM journal_settings WHERE setting_key=?", (key,)).fetchone())
+        with AppDataLease(self.root, exclusive=True, timeout=0.05):
+            pass
+
+    def test_constructor_history_failure_joins_started_native_worker_before_source_lease_release(self):
+        self._assert_setup_failure_joins_constructor_owned_native_worker("constructor")
+
+    def test_entry_timer_setup_failure_joins_constructor_worker_before_own_pid_and_source_lease_release(self):
+        self._assert_setup_failure_joins_constructor_owned_native_worker("entry")
+
+
+
+    def _assert_confirm_result_saved_before_queued_ui_delivery(self, storage_fails, *, delayed_observation=False):
+        import threading
+        from PySide6.QtCore import Qt
+        from kiwoom_monitor.presentation import journal_workers
+        from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_schema import MARKET_DATA_METADATA_TABLE
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        code, day = "097991", date(2026, 10, 19)
+        request_at = self.now.replace(tzinfo=None)
+        checked_at = request_at + timedelta(seconds=65, microseconds=654321) if delayed_observation else request_at
+        receipt_clock = [self.now]
+        bars = (
+            MinuteOhlcv(datetime(2026, 10, 19, 10, 1), 100, 110, 90, 105, 10, 1.25),
+            MinuteOhlcv(datetime(2026, 10, 19, 10, 2), 200, 220, 180, 210, 20, 2.5),
+            MinuteOhlcv(request_at.replace(second=0, microsecond=0), 900, 990, 810, 945, 90, 9.0),
+        )
+        entered, release = threading.Event(), threading.Event()
+        requested, writes, completed, failures = [], [], [], []
+        previous_service = self.window._minute_service
+        original_save = self.window._repo.upsert_bars
+        worker = None
+
+        def snapshot():
+            with closing(sqlite3.connect(self.window._journal_db)) as connection:
+                return (
+                    tuple(connection.execute("SELECT * FROM journal_minute_bars WHERE stock_code=? ORDER BY minute", (code,))),
+                    tuple(connection.execute(f"SELECT * FROM {MARKET_DATA_METADATA_TABLE} WHERE subject=? ORDER BY observation_key", (code,))),
+                )
+
+        def load(code_value, target):
+            requested.append((code_value, target))
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("controlled confirmation input gate")
+            return bars
+
+        def save(*args, **kwargs):
+            writes.append((threading.get_ident(), args, kwargs))
+            return original_save(*args, **kwargs)
+
+        if storage_fails:
+            original_save(code, (MinuteOhlcv(bars[0].minute, 1, 2, 1, 2, 1, 0.01),),
+                "realtime_partial", checked_at - timedelta(minutes=1))
+            with closing(sqlite3.connect(self.window._journal_db)) as connection, connection:
+                connection.execute("CREATE TRIGGER deny_queued_confirm BEFORE INSERT ON journal_minute_bars "
+                    "WHEN NEW.stock_code='097991' AND NEW.minute='2026-10-19T10:02' "
+                    "BEGIN SELECT RAISE(ABORT, 'controlled confirmation rollback'); END")
+        before = snapshot()
+        self.window._minute_service = SimpleNamespace(load_today=load)
+        self.window._status.setText("confirmation UI has not received its queued result")
+        joined = before_ui = after_ui = before_ui_text = None
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(self.window._repo, "upsert_bars", side_effect=save))
+                stack.enter_context(patch.object(self.window._query_client, "server_now", side_effect=lambda: receipt_clock[0]))
+                # The same fixture freezes MAIN142's legacy wall clock only
+                # when that symbol exists. The candidate uses the already-fixed
+                # query client clock; no product result/expectation changes here.
+                if hasattr(journal_workers, "kst_wall_now"):
+                    stack.enter_context(patch.object(journal_workers, "kst_wall_now", return_value=checked_at))
+                with AppDataLease(self.root, exclusive=False, timeout=0.05):
+                    # Use the actual product composition on both sources. Do
+                    # not pass the candidate's new kwargs to the old class.
+                    self.window._start_bar_confirmation(code, day)
+                    worker = self.window._worker
+                    self.assertIs(worker.parent(), self.window)
+                    self.assertTrue(entered.wait(2))
+                    if delayed_observation:
+                        self.assertEqual(before, snapshot())  # No result while collection is blocked.
+                        receipt_clock[0] = as_kst(checked_at)
+                    worker.completed.connect(lambda *_args: completed.append(snapshot()), Qt.ConnectionType.DirectConnection)
+                    worker.failed.connect(lambda error: failures.append((error, snapshot())), Qt.ConnectionType.DirectConnection)
+                    release.set()
+                    self.window.finish_shutdown()
+                    joined = worker.isFinished() and not worker.isRunning()
+                    before_ui = snapshot()
+                    before_ui_text = self.window._status.text()
+                # Ordinary UI delivery is exercised only after recording the
+                # final native join/source-lease boundary. Product teardown does
+                # not pump events or depend on this fixture's delivery step.
+                self.app.processEvents()
+                after_ui = snapshot()
+        finally:
+            release.set()
+            if worker is not None:
+                try:
+                    self.assertTrue(worker.wait(3000))
+                except RuntimeError:
+                    # Ordinary finished/deferred deletion may already have
+                    # destroyed this wrapper after the real join above.
+                    pass
+            with closing(sqlite3.connect(self.window._journal_db)) as connection, connection:
+                connection.execute("DROP TRIGGER IF EXISTS deny_queued_confirm")
+            self.window._minute_service = previous_service
+        self.assertTrue(joined)
+        self.assertEqual([(code, datetime(2026, 10, 19))], requested)
+        self.assertEqual("confirmation UI has not received its queued result", before_ui_text)
+        if delayed_observation and not storage_fails:
+            # Check the stored receipt through the existing domain reader before
+            # inspecting writer arguments, so the baseline fails at the PIT oracle.
+            metadata = MarketDataMetadataRepository(self.window._journal_db)
+            for bar in bars[:2]:
+                saved = metadata.load(MarketDatasetKind.MINUTE_BAR, code, bar.minute.isoformat(timespec="minutes"))
+                self.assertIsNotNone(saved)
+                self.assertFalse(saved.was_available_by(as_kst(checked_at) - timedelta(microseconds=1)))
+                self.assertTrue(saved.was_available_by(as_kst(checked_at)))
+        self.assertEqual(1, len(writes))
+        self.assertNotEqual(threading.get_ident(), writes[0][0])
+        self.assertEqual((code, bars[:2], "after_close_confirmed", checked_at), writes[0][1])
+        self.assertEqual({}, writes[0][2])
+        self.assertEqual(before_ui, after_ui)  # UI delivery never writes again.
+        if storage_fails:
+            self.assertEqual([], completed)
+            self.assertEqual(1, len(failures))
+            self.assertIn("controlled confirmation rollback", failures[0][0])
+            self.assertEqual(before, failures[0][1])
+            self.assertEqual(before, before_ui)  # row plus metadata roll back.
+        else:
+            expected_rows = (
+                (day.isoformat(), code, "2026-10-19T10:01", 100, 110, 90, 105, 10, 1.25,
+                    "after_close_confirmed", checked_at.isoformat()),
+                (day.isoformat(), code, "2026-10-19T10:02", 200, 220, 180, 210, 20, 2.5,
+                    "after_close_confirmed", checked_at.isoformat()),
+            )
+            self.assertEqual(expected_rows, before_ui[0])
+            self.assertEqual([before_ui], completed)  # committed before success.
+            self.assertEqual([], failures)
+            metadata = MarketDataMetadataRepository(self.window._journal_db)
+            for bar in bars[:2]:
+                saved = metadata.load(MarketDatasetKind.MINUTE_BAR, code, bar.minute.isoformat(timespec="minutes"))
+                self.assertEqual(as_kst(checked_at), saved.available_at)
+                self.assertEqual("journal-after_close_confirmed", saved.source)
+                if delayed_observation:
+                    # Existing domain PIT contract is the independent reader oracle;
+                    # the journal chart itself remains retrospective.
+                    self.assertEqual(as_kst(bar.minute), saved.effective_at)
+            if delayed_observation:
+                # Same preserve_confirmed writer path as import_live_bars. A later
+                # overlay must not truncate/backdate the completed receipt.
+                self.window._repo.upsert_bars(code, bars[:2], "realtime_partial",
+                    preserve_confirmed=True, available_at=as_kst(checked_at) + timedelta(seconds=30))
+                self.assertEqual(before_ui, snapshot())
+                for bar in bars[:2]:
+                    saved = metadata.load(MarketDatasetKind.MINUTE_BAR, code, bar.minute.isoformat(timespec="minutes"))
+                    self.assertFalse(saved.was_available_by(as_kst(checked_at) - timedelta(microseconds=1)))
+                    self.assertTrue(saved.was_available_by(as_kst(checked_at)))
+        self.assertFalse(self.errors)
+        with AppDataLease(self.root, exclusive=True, timeout=0.05):
+            pass
+
+    def test_native_confirm_commits_before_final_join_without_queued_ui_and_ui_does_not_write_twice(self):
+        self._assert_confirm_result_saved_before_queued_ui_delivery(False)
+
+    def test_native_confirm_availability_is_result_observation_and_survives_preserved_overlay(self):
+        self._assert_confirm_result_saved_before_queued_ui_delivery(False, delayed_observation=True)
+
+    def test_native_confirm_storage_failure_rolls_back_and_never_emits_completed_before_queued_ui(self):
+        self._assert_confirm_result_saved_before_queued_ui_delivery(True)
+
+
+    def test_final_shutdown_joins_real_borrower_then_closes_exact_client_even_when_sync_fails(self):
+        import threading
+        from kiwoom_monitor import journal_process
+        entered, release, returned, finalizing, client_closed = (threading.Event() for _ in range(5))
+        observed, calls = {}, []
+        original_client = self.window._query_client
+        sentinel = OSError("fixture sync close failure")
+
+        def load():
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("fixture borrower release")
+            returned.set()
+            return ()
+
+        worker = journal_process.SettingsRequestWorker(load, self.window)
+
+        def close_client():
+            calls.append(("client", worker.isFinished(), returned.is_set()))
+            client_closed.set()
+
+        def close_sync():
+            calls.append(("sync", worker.isFinished(), returned.is_set()))
+            raise sentinel
+
+        def observe():
+            try:
+                observed["finalizing"] = finalizing.wait(2)
+                observed["premature_client_close"] = client_closed.wait(0.05)
+                observed["borrower_running"] = worker.isRunning()
+            finally:
+                release.set()
+
+        self.window._query_client = SimpleNamespace(server_now=lambda: self.now, close=close_client)
+        observer = threading.Thread(target=observe)
+        try:
+            worker.start()
+            self.assertTrue(entered.wait(2))
+            observer.start()
+            with patch.object(self.window._central_journal_sync_runner, "close", close_sync):
+                finalizing.set()
+                with self.assertRaises(OSError) as caught:
+                    self.window.finish_shutdown()
+            self.assertIs(sentinel, caught.exception)
+        finally:
+            release.set()
+            if observer.ident is not None:
+                observer.join(3)
+            worker.requestInterruption()
+            self.assertTrue(worker.wait(3000))
+            self.window._query_client = original_client
+        self.assertFalse(observer.is_alive())
+        self.assertEqual({"finalizing": True, "premature_client_close": False, "borrower_running": True}, observed)
+        self.assertEqual([("sync", True, True), ("client", True, True)], calls)
+
+    def test_final_shutdown_attempts_both_closes_and_preserves_first_original_failure(self):
+        original_client = self.window._query_client
+        try:
+            for sync_fails in (False, True):
+                with self.subTest(sync_fails=sync_fails):
+                    calls = []
+                    client_error = PermissionError("fixture comparison close failure")
+                    sync_error = OSError("fixture sync close failure") if sync_fails else None
+
+                    def close_sync():
+                        calls.append("sync")
+                        if sync_error is not None:
+                            raise sync_error
+
+                    def close_client():
+                        calls.append("client")
+                        raise client_error
+
+                    self.window._query_client = SimpleNamespace(server_now=lambda: self.now, close=close_client)
+                    with patch.object(self.window._central_journal_sync_runner, "close", close_sync):
+                        with self.assertRaises(OSError) as caught:
+                            self.window.finish_shutdown()
+                    self.assertIs(sync_error if sync_fails else client_error, caught.exception)
+                    if sync_fails:
+                        self.assertIs(client_error, caught.exception.__cause__)
+                    self.assertEqual(["sync", "client"], calls)
+        finally:
+            self.window._query_client = original_client
+
+    def test_early_constructor_failure_joins_real_comparison_thread_before_original_error_returns(self):
+        import threading
+        from kiwoom_monitor import journal_process
+        from kiwoom_monitor.infrastructure.central_journal_sync import CentralJournalSyncRunner
+        from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import ParallelValidationClient
+        sentinel = OSError("fixture first chart service construction failure")
+        report = self.root / "constructor-comparison.jsonl"
+
+        def query(api_id, *_args, **_kwargs):
+            # Only test teardown invokes this fake service operation on the old
+            # daemon. Thread alive assertions happen before this cleanup.
+            if api_id == "__test_cleanup__":
+                raise SystemExit()
+            return ({}, False, "")
+
+        previous = set(threading.enumerate())
+        client = ParallelValidationClient(SimpleNamespace(request_with_continuation=query),
+            SimpleNamespace(request_with_continuation=query, server_now=lambda: self.now), report)
+        created = [thread for thread in threading.enumerate()
+                   if thread not in previous and thread.name == "central-local-validation"]
+        self.assertEqual(1, len(created))
+        thread = created[0]
+        sync_closes = []
+        real_close = CentralJournalSyncRunner.close
+
+        def close_sync(runner):
+            sync_closes.append(runner)
+            real_close(runner)
+
+        try:
+            with patch.object(journal_process, "create_query_client", return_value=client), \
+                    patch.object(journal_process, "MinuteChartService", side_effect=sentinel), \
+                    patch.object(CentralJournalSyncRunner, "close", close_sync):
+                with self.assertRaises(OSError) as caught:
+                    JournalWindow(self.window._monitor_db, self.root / "early-journal.sqlite3", self.window._config)
+            self.assertIs(sentinel, caught.exception)
+            self.assertFalse(thread.is_alive(), "constructor error returned before its comparison thread ended")
+            self.assertEqual(1, len(sync_closes))
+            self.assertFalse(report.exists())
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+            elif thread.is_alive():
+                client._jobs.put(("__test_cleanup__", "/", {}, "N", "",
+                                  ({}, False, ""), "", 0.0, 0.0), timeout=2)
+            thread.join(2)
+            self.assertFalse(thread.is_alive(), "test-only cleanup did not end old comparison daemon")
+
+
+
+    def _assert_index_result_saved_before_queued_ui_delivery(self, storage_fails):
+        import threading
+        from PySide6.QtCore import Qt
+        from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
+        from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import MarketDataMetadataRepository
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease
+
+        day, minute = date(2026, 10, 19), datetime(2026, 10, 19, 9, 1)
+        minutes = {("kospi", minute): (2600.0, 2601.0, 2599.0, 2600.5, None),
+                   ("kosdaq", minute): (800.0, 801.0, 799.0, 800.5, None)}
+        daily = {"kospi": (("2026-10-19T00:00", 2590.0, 2610.0, 2580.0, 2600.0, 10, 20.0),),
+                 "kosdaq": (("2026-10-19T00:00", 790.0, 810.0, 780.0, 800.0, 20, 30.0),)}
+        entered, release = threading.Event(), threading.Event()
+        requested, writes, completed, fetch_failed, storage_failed = [], [], [], [], []
+        previous_service = self.window._market_index_service
+        real_save = MinuteBarRepository.replace_market_index_history
+        worker = None
+
+        def snapshot():
+            with closing(sqlite3.connect(self.window._monitor_db)) as connection:
+                return (
+                    tuple(connection.execute("SELECT * FROM market_index_minute_bars ORDER BY market,minute")),
+                    tuple(connection.execute("SELECT * FROM market_index_daily_bars ORDER BY market,trade_date")),
+                    tuple(connection.execute("SELECT * FROM market_data_observation_meta "
+                        "WHERE subject IN ('market:kospi','market:kosdaq') ORDER BY subject,observation_key")),
+                    tuple(connection.execute("SELECT * FROM top20_statistics_daily_cache ORDER BY trade_date")),
+                )
+
+        def load(market, target):
+            requested.append(("minute", market, target))
+            return {(market, minute): minutes[(market, minute)]}
+
+        def load_daily(market, target):
+            requested.append(("daily", market, target))
+            if market == "kosdaq":
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("controlled market-index input gate")
+            return daily[market]
+
+        def save(repository, minute_rows, daily_rows):
+            writes.append((threading.get_ident(), minute_rows, daily_rows))
+            return real_save(repository, minute_rows, daily_rows)
+
+        if storage_fails:
+            repository = MinuteBarRepository(self.window._monitor_db, now_provider=lambda: self.now)
+            repository.replace_market_index_history({("kospi", minute): (1.0, 2.0, 0.5, 1.5, 55.0)},
+                {"kospi": (("2026-10-19T00:00", 1.0, 2.0, 0.5, 1.5, 1, 2.0),)})
+            with closing(sqlite3.connect(self.window._monitor_db)) as connection, connection:
+                connection.execute("CREATE TRIGGER deny_index_result BEFORE INSERT ON market_index_daily_bars "
+                    "WHEN NEW.market='kosdaq' BEGIN SELECT RAISE(ABORT, 'controlled index rollback'); END")
+        before = snapshot()
+        clock = Mock(return_value=self.now)
+        self.window._market_index_service = SimpleNamespace(load=load, load_daily=load_daily)
+        self.window._status.setText("market index UI has not consumed its result")
+        joined = before_ui = after_ui = None
+        before_ui_writes = before_ui_text = None
+        try:
+            with patch.object(self.window._query_client, "server_now", clock), \
+                    patch.object(MinuteBarRepository, "replace_market_index_history", save):
+                with AppDataLease(self.root, exclusive=False, timeout=0.05):
+                    self.window._start_market_index_backfill(day)
+                    worker = self.window._market_index_worker
+                    self.assertIs(worker.parent(), self.window)
+                    self.assertTrue(entered.wait(2))
+                    worker.completed.connect(lambda _rows: completed.append(snapshot()), Qt.ConnectionType.DirectConnection)
+                    worker.failed.connect(lambda error: fetch_failed.append(error), Qt.ConnectionType.DirectConnection)
+                    # The same fixture can observe the old product's gap without
+                    # requiring its worker to already expose the candidate signal.
+                    if hasattr(worker, "storage_failed"):
+                        worker.storage_failed.connect(lambda error: storage_failed.append((error, snapshot())),
+                            Qt.ConnectionType.DirectConnection)
+                    release.set()
+                    self.window.finish_shutdown()
+                    joined = worker.isFinished() and not worker.isRunning()
+                    before_ui, before_ui_writes = snapshot(), len(writes)
+                    before_ui_text = self.window._status.text()
+                    self.assertNotIn(day, self.window._market_index_requested_days)
+                # Normal UI delivery is tested after recording native join and
+                # lease release. The product teardown never pumps events.
+                self.app.processEvents()
+                after_ui = snapshot()
+        finally:
+            release.set()
+            if worker is not None:
+                try:
+                    self.assertTrue(worker.wait(3000))
+                except RuntimeError:
+                    pass  # finished/deferred deletion after the actual join.
+            with closing(sqlite3.connect(self.window._monitor_db)) as connection, connection:
+                connection.execute("DROP TRIGGER IF EXISTS deny_index_result")
+            self.window._market_index_service = previous_service
+        self.assertTrue(joined)
+        self.assertEqual([("minute", "kospi", datetime(2026, 10, 19)),
+                          ("daily", "kospi", datetime(2026, 10, 19)),
+                          ("minute", "kosdaq", datetime(2026, 10, 19)),
+                          ("daily", "kosdaq", datetime(2026, 10, 19))], requested)
+        self.assertEqual("market index UI has not consumed its result", before_ui_text)
+        self.assertEqual([], fetch_failed)
+        if storage_fails:
+            self.assertEqual([], completed)
+            self.assertEqual(1, len(storage_failed))
+            self.assertIn("controlled index rollback", storage_failed[0][0])
+            self.assertEqual(before, storage_failed[0][1])
+            self.assertEqual(before, before_ui)
+            self.assertNotIn(day, self.window._market_index_requested_days)
+            self.assertEqual("시장지수 저장 실패 · controlled index rollback", self.window._status.text())
+        else:
+            expected_minutes = tuple((day.isoformat(), market, minute.isoformat(timespec="minutes"), *minutes[(market, minute)])
+                for market in ("kosdaq", "kospi"))
+            expected_daily = tuple((day.isoformat(), market, *daily[market][0][1:7]) for market in ("kosdaq", "kospi"))
+            self.assertEqual(expected_minutes, before_ui[0])
+            self.assertEqual(expected_daily, before_ui[1])
+            self.assertEqual([before_ui], completed)
+            self.assertEqual([], storage_failed)
+            self.assertIn(day, self.window._market_index_requested_days)
+            self.assertGreater(clock.call_count, 0)
+            metadata = MarketDataMetadataRepository(self.window._monitor_db)
+            for market in ("kospi", "kosdaq"):
+                stored = metadata.load(MarketDatasetKind.MINUTE_BAR, f"market:{market}", minute.isoformat(timespec="minutes"))
+                self.assertEqual(as_kst(self.now), stored.available_at)
+                self.assertEqual("kiwoom-ka20005", stored.source)
+        self.assertEqual(1, before_ui_writes)
+        self.assertEqual(1, len(writes))
+        self.assertNotEqual(threading.get_ident(), writes[0][0])
+        self.assertEqual((minutes, daily), writes[0][1:])
+        self.assertEqual(before_ui, after_ui)
+        self.assertFalse(self.errors)
+        with AppDataLease(self.root, exclusive=True, timeout=0.05):
+            pass
+
+    def test_native_market_index_history_is_saved_before_final_join_without_queued_ui_duplicate_write(self):
+        self._assert_index_result_saved_before_queued_ui_delivery(False)
+
+    def test_native_market_index_storage_failure_rolls_back_before_join_and_does_not_complete_day(self):
+        self._assert_index_result_saved_before_queued_ui_delivery(True)
 
 
 if __name__ == "__main__":

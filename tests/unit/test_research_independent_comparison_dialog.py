@@ -139,6 +139,7 @@ class IndependentComparisonDialogTests(unittest.TestCase):
         settings = MagicMock(); settings.value.side_effect = lambda key, default=None, **kwargs: default
         with patch('kiwoom_monitor.presentation.research_dialog.QSettings', return_value=settings):
             parent = ResearchDialog(self.root / 'parent-state')
+            parent.activate_startup()
         self.dialogs.append(parent)
         parent._compare_partitions.click()
         viewer = parent._comparison_dialog

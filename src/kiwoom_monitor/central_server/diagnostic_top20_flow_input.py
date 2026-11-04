@@ -9,7 +9,6 @@ import asyncio
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import date, datetime
-from functools import wraps
 import re
 import time
 from uuid import uuid4
@@ -37,36 +36,37 @@ def _emit(cycle, kind, value):
             pass
 
 
-def captured_candidate_flow(function):
-    @wraps(function)
-    async def run(self, code, day):
-        # Candidate-flow events are payload inputs owned by the existing store
-        # capture switch.  This keeps the feature usable on the deployed v6
-        # trace contract, which has no separate TOP20 capture flag.
-        token = trace.input_token("store_inputs")
-        if token is None:
-            return await function(self, code, day)
-        producer = f"autonomous_top20:{id(self):x}"
-        cycle = {"trace_id": token, "input_id": uuid4().hex,
-                 "parent_input_id": operation_identity()["cause_input_id"],
-                 "workload_id": "top20_candidate_flow", "producer_component": producer,
-                 "actor_id": f"{producer}:{id(asyncio.current_task()):x}", "stage": "marker_read"}
-        marker = _FLOW.set(cycle)
-        _emit(cycle, "cycle_start", {"code": code, "day": day, "source_time": self._now()})
-        outcome, error_type = "returned", ""
-        try:
-            with capture_owner(cycle["workload_id"], producer, cycle["actor_id"],
-                               cause_input_id=cycle["input_id"]):
-                return await function(self, code, day)
-        except BaseException as error:
-            outcome = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
-            error_type = type(error).__name__
-            raise
-        finally:
-            _emit(cycle, "cycle_end", {"outcome": outcome, "stage": cycle["stage"],
-                                       "error_type": error_type})
-            _FLOW.reset(marker)
-    return run
+@contextmanager
+def candidate_flow_scope(service, code, day):
+    # Candidate-flow events use the existing store capture switch, including v6.
+    # Replay observes stage transitions without recording a second source input.
+    if _REPLAY_STAGE.get() is not None:
+        yield
+        return
+    token = trace.input_token("store_inputs")
+    if token is None:
+        yield
+        return
+    producer = f"autonomous_top20:{id(service):x}"
+    cycle = {"trace_id": token, "input_id": uuid4().hex,
+             "parent_input_id": operation_identity()["cause_input_id"],
+             "workload_id": "top20_candidate_flow", "producer_component": producer,
+             "actor_id": f"{producer}:{id(asyncio.current_task()):x}", "stage": "marker_read"}
+    marker = _FLOW.set(cycle)
+    _emit(cycle, "cycle_start", {"code": code, "day": day, "source_time": service._now()})
+    outcome, error_type = "returned", ""
+    try:
+        with capture_owner(cycle["workload_id"], producer, cycle["actor_id"],
+                           cause_input_id=cycle["input_id"]):
+            yield
+    except BaseException as error:
+        outcome = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+        error_type = type(error).__name__
+        raise
+    finally:
+        _emit(cycle, "cycle_end", {"outcome": outcome, "stage": cycle["stage"],
+                                   "error_type": error_type})
+        _FLOW.reset(marker)
 
 
 def flow_marker_state(exists):
@@ -319,7 +319,10 @@ async def _execute_candidate_flow(store, events, input_id):
                                 value["cache_hit"], True)
 
     broker = Broker()
-    service = AutonomousTop20Service(broker, None, store, now_provider=lambda: marker_at or header["source_time"])
+    from . import diagnostic_top20_flow_input
+    service = AutonomousTop20Service(broker, None, store,
+        now_provider=lambda: marker_at or header["source_time"],
+        flow_input_observer=diagnostic_top20_flow_input)
     request_id = "flow-replay-" + uuid4().hex
     started = time.monotonic_ns()
     async def run():
@@ -329,7 +332,7 @@ async def _execute_candidate_flow(store, events, input_id):
         capture_marker = _FLOW.set(None)
         with db_call_request_id(request_id), db_call_source("replay.top20_candidate_flow"):
             try:
-                await AutonomousTop20Service._capture_candidate_investor_flow.__wrapped__(service, header["code"], header["day"])
+                await service._capture_candidate_investor_flow(header["code"], header["day"])
             except _RecordedFlowRequestError:
                 if ending["outcome"] != "error" or ending["stage"] != "request":
                     raise

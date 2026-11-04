@@ -10,12 +10,13 @@ import json
 import logging
 from datetime import datetime
 from threading import Event, Thread
-from time import monotonic, time
+from time import monotonic
 from typing import Any, Callable, Iterable, Mapping
 
 from kiwoom_monitor.domain.news_observation import (
     ARTICLE_BODY_EXTRACTOR_VERSION, SUPPLY_CONTRACT_RULE_VERSION, stable_document_hash,
 )
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from .database_codec import json_mapping
 from .database_news_jobs import _news_job_rows
 from .database_news_job_writes import _notify_news_job_wakeup
@@ -38,7 +39,7 @@ class SQLiteHistoricalNewsStoreMixin:
             raise ValueError("BODY 또는 RULE 작업만 외부 처리할 수 있습니다.")
         if scope not in {"all", "pc_market", "pc_search", "pc"}:
             raise ValueError("지원하지 않는 과거 뉴스 작업 범위입니다.")
-        claimed_at = time()
+        claimed_at = as_kst(self._now_provider()).timestamp()
         excluded = tuple(sorted(set(excluded_codes)))
         exclusion_sql = f" AND j.target_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
         with self._lock, self._connection() as connection:
@@ -71,7 +72,7 @@ class SQLiteHistoricalNewsStoreMixin:
 
     def complete_external_historical_news_job(self, value: dict[str, Any]) -> dict[str, str]:
         with self._lock, self._connection() as connection:
-            result = _complete_external_news_job(connection, value, postgres=False, candidate_grouper=self._candidate_grouper)
+            result = _complete_external_news_job(connection, value, postgres=False, candidate_grouper=self._candidate_grouper, now_provider=self._now_provider)
         if value.get("stage") == "BODY":
             _notify_news_job_wakeup(self)
         return result
@@ -84,8 +85,11 @@ class SQLiteHistoricalNewsStoreMixin:
                                        (batch_id,)).fetchone()
             if prior:
                 return {"state": "already_imported", "raw_count": len(items)}
-            result = _save_sqlite_news_source_page(connection,
-                _historical_market_source_page(source, target_date, batch_id, items, processing_owner))
+            result = _save_sqlite_news_source_page(
+                connection, _historical_market_source_page(
+                    source, target_date, batch_id, items, processing_owner, now_provider=self._now_provider,
+                ), now_provider=self._now_provider,
+            )
         if items:
             _notify_news_job_wakeup(self)
         return {"state": "imported", **result}
@@ -105,7 +109,7 @@ class PostgresHistoricalNewsStoreMixin:
             writer_family="news.external_claim", writer_kind="news_external_claim",
             operation="claim_external_historical_news_job", source=scope,
         )
-        claimed_at = time()
+        claimed_at = as_kst(self._now_provider()).timestamp()
         excluded = tuple(sorted(set(excluded_codes)))
         exclusion_sql = f" AND j.target_id NOT IN ({','.join('%s' for _ in excluded)})" if excluded else ""
         started_at = monotonic()
@@ -202,7 +206,7 @@ class PostgresHistoricalNewsStoreMixin:
             operation="complete_external_historical_news_job", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            result = _complete_external_news_job(cursor, value, postgres=True, candidate_grouper=self._candidate_grouper)
+            result = _complete_external_news_job(cursor, value, postgres=True, candidate_grouper=self._candidate_grouper, now_provider=self._now_provider)
         if stage == "BODY":
             _notify_news_job_wakeup(self)
         return result
@@ -223,19 +227,23 @@ class PostgresHistoricalNewsStoreMixin:
             cursor.execute("SELECT 1 FROM central_news_source_runs WHERE run_id=%s LIMIT 1", (batch_id,))
             if cursor.fetchone():
                 return {"state": "already_imported", "raw_count": len(items)}
-            result = _save_postgres_news_source_page(cursor,
-                _historical_market_source_page(source, target_date, batch_id, items, processing_owner))
+            result = _save_postgres_news_source_page(
+                cursor, _historical_market_source_page(
+                    source, target_date, batch_id, items, processing_owner, now_provider=self._now_provider,
+                ), now_provider=self._now_provider,
+            )
         if items:
             _notify_news_job_wakeup(self)
         return {"state": "imported", **result}
 
 
 def _historical_market_source_page(source: str, target_date: str, batch_id: str,
-                                   items: list[dict[str, Any]], processing_owner: str = "nas") -> dict[str, Any]:
+                                   items: list[dict[str, Any]], processing_owner: str = "nas", *,
+                                   now_provider: Callable[[], datetime] = kst_now) -> dict[str, Any]:
     if source not in {"flash", "world"} or len(target_date) != 10 or processing_owner not in {"nas", "pc"}:
         raise ValueError("과거 시황 원천 또는 날짜가 올바르지 않습니다.")
     datetime.fromisoformat(target_date)
-    now = time()
+    now = as_kst(now_provider()).timestamp()
     return {
         "source_id": f"naver-stock:{source}:historical:{target_date}",
         "scope": "historical_market_pc_backfill" if processing_owner == "pc" else "historical_market_backfill",
@@ -251,7 +259,8 @@ def _historical_market_source_page(source: str, target_date: str, batch_id: str,
 
 
 def _complete_external_news_job(db: Any, value: dict[str, Any], *, postgres: bool,
-                                candidate_grouper: Callable[[Mapping[str, Any], Iterable[Mapping[str, Any]]], tuple[str, ...]]) -> dict[str, str]:
+                                candidate_grouper: Callable[[Mapping[str, Any], Iterable[Mapping[str, Any]]], tuple[str, ...]],
+                                now_provider: Callable[[], datetime] = kst_now) -> dict[str, str]:
     """Commit a leased historical BODY/RULE result with its revision and job state."""
     marker = "%s" if postgres else "?"
 
@@ -286,7 +295,7 @@ def _complete_external_news_job(db: Any, value: dict[str, Any], *, postgres: boo
         new_state = "FAILED" if int(attempts) >= 3 else "PENDING"
         query(
             "UPDATE central_news_jobs SET state=?,error=?,next_retry_at=?,updated_at=? WHERE job_key=?",
-            (new_state, str(value["error"])[:1000], time() + min(60.0, 2 ** min(int(attempts), 5)), time(), job_key),
+            (new_state, str(value["error"])[:1000], as_kst(now_provider()).timestamp() + min(60.0, 2 ** min(int(attempts), 5)), as_kst(now_provider()).timestamp(), job_key),
         )
         return {"state": new_state.lower(), "output_ref": ""}
 
@@ -310,10 +319,11 @@ def _complete_external_news_job(db: Any, value: dict[str, Any], *, postgres: boo
         )
         output_ref = str(previous[0][0]) if previous else (
             _save_postgres_news_body(db, {"article_revision_id": article_id, "extractor_version": version,
-                "fetched_at": value.get("fetched_at"), "status": body_status, "body_text": body_text})
+                "fetched_at": value.get("fetched_at"), "status": body_status, "body_text": body_text},
+                now=as_kst(now_provider()).timestamp())["body_revision_id"]
             if postgres else _save_sqlite_news_body(db, {"article_revision_id": article_id,
                 "extractor_version": version, "fetched_at": value.get("fetched_at"),
-                "status": body_status, "body_text": body_text})
+                "status": body_status, "body_text": body_text}, now=as_kst(now_provider()).timestamp())["body_revision_id"]
         )
         publication = str(value.get("original_published_at") or "")
         if publication:
@@ -329,7 +339,7 @@ def _complete_external_news_job(db: Any, value: dict[str, Any], *, postgres: boo
                 "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
                 "updated_at=EXCLUDED.updated_at,document_json=EXCLUDED.document_json "
                 "WHERE central_documents.document_json IS DISTINCT FROM EXCLUDED.document_json",
-                ("news_original_publication", article_id, "published_at", time(),
+                ("news_original_publication", article_id, "published_at", as_kst(now_provider()).timestamp(),
                  json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
             )
     elif stage == "RULE":
@@ -364,7 +374,7 @@ def _complete_external_news_job(db: Any, value: dict[str, Any], *, postgres: boo
                "WHERE central_documents.document_json IS DISTINCT FROM EXCLUDED.document_json" if postgres else
                "updated_at=excluded.updated_at,document_json=excluded.document_json "
                "WHERE central_documents.document_json<>excluded.document_json"),
-            ("news_assessment", target_code, article_id, time(),
+            ("news_assessment", target_code, article_id, as_kst(now_provider()).timestamp(),
              json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
         )
         result = value.get("rule_result")
@@ -388,10 +398,10 @@ def _complete_external_news_job(db: Any, value: dict[str, Any], *, postgres: boo
             event_value = {"stock_code": target_code, "article_revision_id": article_id,
                            "body_revision_id": body_id, "rule_version": version,
                            "input_hash": rule_hash, "candidate_identities": candidates, "result": result}
-            output_ref = (_save_postgres_news_event(db, event_value) if postgres
-                          else _save_sqlite_news_event(db, event_value))
+            output_ref = (_save_postgres_news_event(db, event_value, now=as_kst(now_provider()).timestamp()) if postgres
+                          else _save_sqlite_news_event(db, event_value, now=as_kst(now_provider()).timestamp()))
     else:
         raise ValueError("지원하지 않는 외부 뉴스 작업 단계입니다.")
     query("UPDATE central_news_jobs SET state='COMPLETED',output_ref=?,error='',updated_at=? WHERE job_key=?",
-          (output_ref, time(), job_key))
+          (output_ref, as_kst(now_provider()).timestamp(), job_key))
     return {"state": "completed", "output_ref": output_ref}

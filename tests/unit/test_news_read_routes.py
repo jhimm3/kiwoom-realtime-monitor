@@ -133,6 +133,69 @@ class NewsReadRoutesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(422, invalid_query.status_code)
         self.assertEqual([], self.store.calls)
 
+    def test_native_page_keeps_body_refs_clock_and_legacy_collector_serialization(self):
+        import hashlib
+        import json
+        from kiwoom_monitor.central_server.news_read_routes import load_stored_news_page, _serialize, _stored_item
+        from kiwoom_monitor.infrastructure.central_news_client import _deserialize
+        from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteQueryStore(root / "native.sqlite3")
+            store.initialize()
+            try:
+                document = {"stock_code": "005930", "identity": "https://origin/1", "title": "title", "description": "summary",
+                            "link": "https://portal/1", "original_link": "https://origin/1",
+                            "published_at": "2026-10-28T08:00:00+09:00", "relevant": 1}
+                store.upsert_documents("news_article", [{"owner": "005930", "key": "https://origin/1", "collector_id": "oracle",
+                                                         "collection_scope": "watchlist", "document": document}])
+                article_id = store.load_news_history("article", target="005930")[0]["article_revision_id"]
+                body_id = store.save_news_body_revision({"article_revision_id": article_id, "status": "summary_only",
+                                                        "body_text": "actual raw summary", "extractor_version": "source-v7", "fetched_at": 101.5})
+                with closing(sqlite3.connect(root / "native.sqlite3")) as connection, connection:
+                    connection.execute("UPDATE central_news_article_revisions SET available_at=100.25")
+                    connection.execute("UPDATE central_news_body_revisions SET available_at=102.75")
+                item = load_stored_news_page(store, "005930", "company")["items"][0]
+                source = item["input_source"]
+                self.assertEqual(article_id, source["article_revision_id"])
+                self.assertEqual(body_id, source["body_revision_id"])
+                self.assertEqual((100.25, 101.5, 102.75), (source["article_available_at"], source["body_fetched_at"], source["body_available_at"]))
+                self.assertEqual("summary_only", source["body_status"])
+                self.assertEqual("source-v7", source["body_extractor_version"])
+                self.assertEqual(hashlib.sha256(b'{"body":"actual raw summary"}').hexdigest(), source["body_content_hash"])
+                local = root / "pc.sqlite3"
+                StockNewsRepository(local).upsert("005930", (_deserialize(item),))
+                reopened = StockNewsRepository(local).load("005930")[0]
+                self.assertEqual(source, reopened.input_source)
+                self.assertNotIn("input_source", _serialize(reopened), "legacy collector content/hash serializer stays explicit")
+                self.assertEqual(source, _serialize(reopened, include_input_source=True)["input_source"])
+                self.assertIsNone(_stored_item("company", document).input_source)
+                original_history = store.load_news_history("article", target="005930")
+                echoed = {**document, "input_source_contract": "v1", "input_source_json": json.dumps(source)}
+                store.upsert_documents("news_article", [{"owner": "005930", "key": "https://origin/1", "collector_id": "oracle",
+                                                         "collection_scope": "local_projection_sync", "document": echoed}])
+                repeated = load_stored_news_page(store, "005930", "company")["items"][0]["input_source"]
+                self.assertEqual(source, repeated, "native source echo must not add redundant reported metadata on every poll")
+                self.assertEqual(original_history, store.load_news_history("article", target="005930"))
+                reported = {"version": 1, "article_revision_id": "reported-foreign-article", "body_revision_id": "reported-foreign-body",
+                            "article_available_at": 12.5, "body_available_at": 13.75}
+                copied = {**document, "input_source_contract": "v1", "input_source_json": json.dumps(reported)}
+                store.upsert_documents("news_article", [{"owner": "005930", "key": "https://origin/1", "collector_id": "oracle",
+                                                         "collection_scope": "local_projection_sync", "document": copied}])
+                self.assertEqual(original_history, store.load_news_history("article", target="005930"))
+                same_content = load_stored_news_page(store, "005930", "company")["items"][0]["input_source"]
+                self.assertEqual(article_id, same_content["article_revision_id"])
+                self.assertEqual(body_id, same_content["body_revision_id"])
+                self.assertEqual(102.75, same_content["body_available_at"])
+                self.assertEqual("reported-foreign-body", same_content["reported_source"]["body_revision_id"])
+                store.upsert_documents("news_article", [{"owner": "005930", "key": "https://origin/1", "collector_id": "oracle",
+                                                         "collection_scope": "local_projection_sync", "document": {**copied, "title": "different actual content"}}])
+                mismatch = load_stored_news_page(store, "005930", "company")["items"][0]["input_source"]
+                self.assertEqual(article_id, mismatch["article_revision_id"])
+                self.assertNotIn("reported_source", mismatch, "a current copied claim must match the selected original content")
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

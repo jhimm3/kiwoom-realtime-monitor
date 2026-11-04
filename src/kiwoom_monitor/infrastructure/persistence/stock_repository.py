@@ -28,10 +28,16 @@ class StockRepository:
     def __init__(
         self, path: Path, *,
         catalog_connection_factory: Callable[[], sqlite3.Connection] | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self._path = path
+        # Standalone/startup callers may omit the application's corrected clock.
+        self._now = now_provider or kst_now
         # Catalog compatibility callers retain their existing native FK policy.
         self._catalog_connect = catalog_connection_factory or (lambda: sqlite3.connect(self._path))
+
+    def set_now_provider(self, provider: Callable[[], datetime] | None) -> None:
+        self._now = provider or kst_now
 
     def load_ranking_cache(
         self, codes: tuple[str, ...], market_codes: tuple[str, ...], trade_date: date,
@@ -74,7 +80,7 @@ class StockRepository:
         )
 
     @staticmethod
-    def _remember_renames(con: sqlite3.Connection, stocks: tuple[tuple[str, str, str], ...]) -> None:
+    def _remember_renames(con: sqlite3.Connection, stocks: tuple[tuple[str, str, str], ...], updated_at: str) -> None:
         """같은 종목코드의 이름 변경을 사용자 확인 대기 상태로 남긴다."""
         for code, new_name, _market in stocks:
             row = con.execute("SELECT name FROM stocks WHERE code=?", (code,)).fetchone()
@@ -89,33 +95,44 @@ class StockRepository:
             if owner is not None:
                 continue
             con.execute(
-                "INSERT INTO stock_name_history(stock_code,old_name,new_name,source,decision) VALUES(?,?,?,'KRX','pending') "
-                "ON CONFLICT(stock_code,old_name) DO UPDATE SET new_name=excluded.new_name, changed_at=CURRENT_TIMESTAMP, "
+                "INSERT INTO stock_name_history(stock_code,old_name,new_name,source,decision,changed_at) VALUES(?,?,?,'KRX','pending',?) "
+                "ON CONFLICT(stock_code,old_name) DO UPDATE SET new_name=excluded.new_name, changed_at=excluded.changed_at, "
                 "decision=CASE WHEN stock_name_history.new_name=excluded.new_name THEN stock_name_history.decision ELSE 'pending' END",
-                (code, old_name, new_name),
+                (code, old_name, new_name, updated_at),
             )
 
     def upsert(self, code: str, name: str, market: str = "") -> None:
+        observed_at = as_kst(self._now())
         con = sqlite3.connect(self._path)
         try:
-            self._remember_renames(con, ((code, name, market),))
-            con.execute("INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END", (code,name,market))
-            seed_known_stock_aliases(con)
+            self._remember_renames(con, ((code, name, market),), observed_at.isoformat())
+            con.execute("INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END", (code,name,market,observed_at.isoformat()))
+            seed_known_stock_aliases(con, observed_at=observed_at)
             con.commit()
         finally:
             con.close()
     def upsert_many(self, stocks: tuple[tuple[str, str, str], ...]) -> None:
+        self._upsert_stock_batch(stocks, seed_aliases=True)
+
+    def cache_ranking_stocks(self, stocks: tuple[tuple[str, str, str], ...]) -> None:
+        """Update current ranking names without reclassifying existing aliases."""
+        self._upsert_stock_batch(stocks, seed_aliases=False)
+
+    def _upsert_stock_batch(self, stocks: tuple[tuple[str, str, str], ...], *, seed_aliases: bool) -> None:
         if not stocks:
             return
+        observed_at = as_kst(self._now())
+        updated_at = observed_at.isoformat()
         con = sqlite3.connect(self._path)
         try:
-            self._remember_renames(con, stocks)
+            self._remember_renames(con, stocks, updated_at)
             con.executemany(
-                "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) "
-                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END, updated_at=CURRENT_TIMESTAMP",
-                stocks,
+                "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END, updated_at=excluded.updated_at",
+                ((*row, updated_at) for row in stocks),
             )
-            seed_known_stock_aliases(con)
+            if seed_aliases:
+                seed_known_stock_aliases(con, observed_at=observed_at)
             con.commit()
         finally:
             con.close()
@@ -287,6 +304,7 @@ class StockRepository:
         float_shares: int | None = None,
         upper_limit_price: int | None = None,
     ) -> None:
+        updated_at = as_kst(self._now()).isoformat()
         con = sqlite3.connect(self._path)
         try:
             row = con.execute(
@@ -302,27 +320,28 @@ class StockRepository:
             if changed:
                 con.execute(
                     "UPDATE stocks SET market_cap=?, float_ratio=?, float_shares=?, circulating_market_cap=?, "
-                    "high_250_price=?, upper_limit_price=?, fundamentals_updated_at=CURRENT_TIMESTAMP, "
-                    "updated_at=CURRENT_TIMESTAMP WHERE code=?",
+                    "high_250_price=?, upper_limit_price=?, fundamentals_updated_at=?, "
+                    "updated_at=? WHERE code=?",
                     (market_cap, float_ratio, float_shares, market_cap * float_ratio / 100,
-                     saved_high_250_price, upper_limit_price, code),
+                     saved_high_250_price, upper_limit_price, updated_at, updated_at, code),
                 )
             else:
                 # 값은 보존하고, 다음 날 재조회하지 않도록 확인 시각만 갱신한다.
-                con.execute("UPDATE stocks SET fundamentals_updated_at=CURRENT_TIMESTAMP WHERE code=?", (code,))
+                con.execute("UPDATE stocks SET fundamentals_updated_at=? WHERE code=?", (updated_at, code))
             con.commit()
         finally:
             con.close()
 
-    def update_adjusted_high_250_price(self, code: str, high_250_price: int | None) -> None:
+    def update_adjusted_high_250_price(self, code: str, high_250_price: int | None, *, observed_at: datetime | None = None) -> None:
         """ka10081 수정주가 기준 250일 최고가를 보관한다."""
         if not code or high_250_price is None or high_250_price <= 0:
             return
+        updated_at = as_kst(observed_at if observed_at is not None else self._now()).isoformat()
         con = sqlite3.connect(self._path)
         try:
             con.execute(
-                "UPDATE stocks SET high_250_price=?, updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                (high_250_price, code),
+                "UPDATE stocks SET high_250_price=?, updated_at=? WHERE code=?",
+                (high_250_price, updated_at, code),
             )
             con.commit()
         finally:
@@ -332,11 +351,12 @@ class StockRepository:
         """정밀 계산한 역사적 신고가와 계산 근거 봉을 함께 보관한다."""
         if not code or price is None or price <= 0:
             return
+        updated_at = as_kst(self._now()).isoformat()
         con = sqlite3.connect(self._path)
         try:
             con.execute(
-                "UPDATE stocks SET historical_high_price=?, historical_high_first_year=?, historical_high_last_year=?, historical_high_occurred_on=?, historical_high_checked_on=?, historical_high_updated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE code=?",
-                (price, first_year, last_year, occurred_on, checked_on, code),
+                "UPDATE stocks SET historical_high_price=?, historical_high_first_year=?, historical_high_last_year=?, historical_high_occurred_on=?, historical_high_checked_on=?, historical_high_updated_at=?, updated_at=? WHERE code=?",
+                (price, first_year, last_year, occurred_on, checked_on, updated_at, updated_at, code),
             )
             con.execute("DELETE FROM historical_high_evidence WHERE stock_code=?", (code,))
             con.executemany(
@@ -450,7 +470,7 @@ class StockRepository:
         try:
             row = con.execute("SELECT nxt_enabled FROM stocks WHERE code=?", (code,)).fetchone()
             if row is None or row[0] is None or bool(row[0]) != enabled:
-                con.execute("UPDATE stocks SET nxt_enabled=?, nxt_checked_at=?, updated_at=CURRENT_TIMESTAMP WHERE code=?", (int(enabled), today, code))
+                con.execute("UPDATE stocks SET nxt_enabled=?, nxt_checked_at=?, updated_at=? WHERE code=?", (int(enabled), today, as_kst(self._now()).isoformat(), code))
             else:
                 # NXT 가능 여부 값은 그대로 두고 오늘 확인했다는 정보만 남긴다.
                 con.execute("UPDATE stocks SET nxt_checked_at=? WHERE code=?", (today, code))

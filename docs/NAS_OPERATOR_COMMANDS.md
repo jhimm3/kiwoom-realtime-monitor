@@ -1,5 +1,7 @@
 # NAS 제한 운영 명령 구현 계약
 
+> **검사와 운영의 적용 범위.** 선택 검사는 기존 제한 operator와 허용된 격리 worker/DB를 사용한다. 실제 NAS·lease 수락, 임시 관리자 권한의 유효 범위, 운영 전환 승인은 각각 해당 영수증을 확인한다. [관련 계약](architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
+
 ## 2026-10-17 재부팅 후 DNS 빈 값 표현의 승인 비교 오탐 수정
 
 실제 NAS의 서버·DB에서 `HostConfig.Dns`/`DnsSearch`/`DnsOptions` 세 필드만 현재 빈 배열에서 과거 null 표현으로 대조했을 때 **기존 승인 해시와 정확히 일치**했다. Docker24.0.2의 `readHostConfig`→`InitDNSHostConfig`는 저장 설정을 다시 읽을 때 이 세 nil slice를 빈 slice로 바꾼다([해당 버전 원문](https://github.com/moby/moby/blob/v24.0.2/container/container.go#L197-L220), [세 필드 변환](https://github.com/moby/moby/blob/v24.0.2/container/container.go#L503-L523)). 한 필드씩만 바꿨던 앞선 진단은 동시에 바뀐 세 필드를 설명하지 못했다. `IPAMOperational`은 지문 입력이 아니며 원인이 아니다.

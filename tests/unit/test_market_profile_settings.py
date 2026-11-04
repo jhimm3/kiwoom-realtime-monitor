@@ -102,6 +102,30 @@ def contract_storage_hash(database_path, *, document_receipt_clock=None, observa
             body["received_at"] = received.astimezone(timezone.utc).isoformat()
             copy.execute("UPDATE central_execution_account_snapshots SET document_json=? WHERE snapshot_id=?",
                          (json.dumps(body, ensure_ascii=False, separators=(",", ":")), snapshot_id))
+        # Approved BODY authority adds only two internal columns and migration23.
+        # Independently check their exact schema/defaults before projecting the
+        # memory copy back to the frozen contract. Every original row/value and
+        # the native fixture itself remain covered by the original full hash.
+        columns = copy.execute("PRAGMA table_info(central_news_jobs)").fetchall()
+        expected_names = ["job_key", "article_revision_id", "stock_code", "target_id", "stage",
+                          "input_hash", "processing_version", "attempts", "next_retry_at", "state",
+                          "output_ref", "error", "payload_json", "updated_at",
+                          "body_processor_owner", "body_input_ref"]
+        if [row[1] for row in columns] != expected_names or columns[-2:] != [
+                (14, "body_processor_owner", "TEXT", 1, "''", 0),
+                (15, "body_input_ref", "TEXT", 0, None, 0)]:
+            raise AssertionError("expected exact BODY authority schema on existing news job columns")
+        if copy.execute("SELECT job_key FROM central_news_jobs WHERE body_processor_owner<>'' "
+                        "OR body_input_ref IS NOT NULL").fetchall():
+            raise AssertionError("existing contract fixture must not acquire a remote BODY authority")
+        migration = copy.execute("SELECT version,name FROM central_schema_migrations WHERE version=23").fetchall()
+        if migration != [(23, "news_body_processor_attempt_owner")]:
+            raise AssertionError(("expected exact BODY authority migration", migration))
+        # Its applied_at has already passed the same aware-KST assertion above.
+        copy.execute("ALTER TABLE central_news_jobs DROP COLUMN body_input_ref")
+        copy.execute("ALTER TABLE central_news_jobs DROP COLUMN body_processor_owner")
+        copy.execute("DELETE FROM central_schema_migrations WHERE version=23 AND name=?",
+                     ("news_body_processor_attempt_owner",))
         return hashlib.sha256("\n".join(copy.iterdump()).encode()).hexdigest()
 
 
@@ -199,7 +223,8 @@ def capture_account_settings_http_contract(client, store, request_store, real, m
         with patch.object(request_store, "load_market_profile_settings", wraps=request_store.load_market_profile_settings) as market, \
                 patch.object(request_store, "load_account_settings", wraps=request_store.load_account_settings) as account:
             response = client.request(method, path,
-                headers={"Authorization": "Bearer private-token"} if authenticated else {}, **kwargs)
+                headers={"X-Request-ID": f"account-contract-{name}",
+                         **({"Authorization": "Bearer private-token"} if authenticated else {})}, **kwargs)
         if response.status_code != status:
             raise AssertionError((name, response.status_code, response.text))
         after = stored_hash()
@@ -275,6 +300,23 @@ class MarketProfileSettingsTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         from kiwoom_monitor.central_server.app import create_app
         expected = json.loads(ACCOUNT_SETTINGS_BASELINE.read_text(encoding="utf-8"))["results"]
+        # Preserve the schema20 golden bytes. The exact hashes were replayed
+        # from the verified schema22 dumps with migration24. The shared
+        # helper still validates and projects the BODY23 addition.
+        schema24_hashes = {
+            "178f3d2c824f1657e0dd78d20143c041a2def2636dd010a67801d14d4041431f":
+                "3d7c65c53b8696a02cc1b13ce26e22574ad645a13cfd2db2c669221d4c1a3561",
+            "e97ed116cc97cc55680bea3afb441f0c525e64feed591dc2e4db48c152cf45fa":
+                "e693b057a211772324c8cf5a5e4de677994a562caa21e0fc587e480778b174c5",
+            "b8572a4ca9f3015ddc2669a0f0ed59309842e2064fe47f34eacf57668ee78015":
+                "9a21414de7558267d4ac545a31fe39fe8405d8ceae738191f00c932f11016808",
+            "0ebd9d8973c37e20d4bb72f6fe337c3a654cbc7d473f2d6f3cf393beb82e9995":
+                "0102c78fe292149fdf19125153bfabbe98633a9fb34e2b8f53eaa56ebda809cf",
+            "2b56a47314c9252a699e709078dababe8d3aa69e12122a78adbe9ce734c10276":
+                "bcc56162cdaa41093eb86271d33ada4c28417cdaa737808344006ce9741dbd6e",
+            "17e94d1a123f57fc4979294fd818439b153753f72124e543e5f1870940337a98":
+                "0f2414bd79dc7cecc5786f37c362ae4437457b4306288d0df4addf443116ee23",
+        }
         for mode, baseline in zip(("absent", "mock", "real"), expected, strict=True):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "settings.sqlite3"
@@ -284,7 +326,12 @@ class MarketProfileSettingsTests(unittest.TestCase):
             self.assertEqual([case["name"] for case in baseline], [case["name"] for case in actual])
             for original, observed in zip(baseline, actual, strict=True):
                 with self.subTest(mode=mode, case=original["name"]):
-                    self.assertEqual(original, observed)
+                    # Raw headers remain fully compared, including exact ID echo.
+                    expected_case = {**original,
+                        "headers": {**original["headers"],
+                                    "x-request-id": f"account-contract-{original['name']}"},
+                        "storage_hash": schema24_hashes[original["storage_hash"]]}
+                    self.assertEqual(expected_case, observed)
 
     def account(self, environment="real", profile=None):
         profile = profile or str(uuid.uuid4())
@@ -352,12 +399,24 @@ class MarketProfileSettingsTests(unittest.TestCase):
 
     def test_binding_rotation_rejects_stale_selection_without_changing_role_revision(self):
         account = self.account()
-        chosen = self.choose(account["profile_id"])
-        self.store.finalize_credential_activation({**account, "credential_revision": 2,
-            "operation_id": str(uuid.uuid4()), "request_id": str(uuid.uuid4())})
+        profile = account["profile_id"]
+        chosen = self.choose(profile)
+        binding = self.store.load_latest_account_binding(profile, "kiwoom", "real")
+        rotated = self.store.finalize_credential_activation({**account, "credential_revision": 2,
+            "operation_id": str(uuid.uuid4()), "request_id": str(uuid.uuid4()),
+            "request_digest": uuid.uuid4().hex * 2})
+        self.assertEqual(2, rotated["credential_revision"])
+        self.assertEqual(binding["binding_revision"], rotated["binding_revision"])
+        self.assertEqual(binding, self.store.load_latest_account_binding(profile, "kiwoom", "real"))
+
+        refreshed = self.store.append_account_binding({**binding, "verified_at": "2026-09-15T12:05:00+09:00"})
+        self.assertEqual((1, 2), (binding["binding_revision"], refreshed["binding_revision"]))
+        before = self.store.load_documents("server_market_profile_settings")
         with self.assertRaisesRegex(ValueError, "ACCOUNT_CONTEXT_MISMATCH"):
-            self.choose(account["profile_id"], revision=1)
-        self.assertEqual(chosen, self.choose(account["profile_id"], revision=1, binding=2))
+            self.choose(profile, revision=1, binding=binding["binding_revision"])
+        self.assertEqual(before, self.store.load_documents("server_market_profile_settings"))
+        self.assertEqual(chosen, self.choose(profile, revision=1, binding=refreshed["binding_revision"]))
+        self.assertEqual(before, self.store.load_documents("server_market_profile_settings"))
 
     def test_disabled_profile_cannot_be_selected_and_real_role_does_not_affect_mock(self):
         account = self.account()

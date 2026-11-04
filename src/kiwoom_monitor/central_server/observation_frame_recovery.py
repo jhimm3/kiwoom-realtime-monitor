@@ -9,36 +9,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
 from kiwoom_monitor.application.research_replay import (
     CandidateUniverseFrame, KrxMinuteBarFrame,
     replay_candidate_universe, replay_krx_minute_bars,
+    trim_bar_frames, trim_universe_frames,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def trim_bar_frames(bars, code: str, keep_count: int) -> dict:
-    rows = sorted(
-        (frame for frame in bars.values() if frame.code == code),
-        key=lambda frame: (frame.bar_start, frame.available_at, frame.revision_id),
-        reverse=True,
-    )
-    keep = {(frame.code, frame.observation_key) for frame in rows[:keep_count]}
-    return {key: frame for key, frame in bars.items() if frame.code != code or key in keep}
-
-
-def trim_universe_frames(universes, latest_at: str, horizon: int, *, use_maximum: bool) -> list:
-    latest = datetime.fromisoformat(latest_at).astimezone(timezone.utc)
-    if use_maximum and universes:
-        latest = max(datetime.fromisoformat(frame.available_at).astimezone(timezone.utc)
-                     for frame in universes)
-    return [frame for frame in universes
-            if (latest - datetime.fromisoformat(frame.available_at).astimezone(timezone.utc))
-            .total_seconds() <= horizon][-5000:]
 
 
 @dataclass
@@ -130,4 +110,18 @@ async def drain_thread_call(function, *args, **kwargs):
             error = task.exception()
             logger.error("cancelled observation operation failed while draining",
                          exc_info=(type(error), error, error.__traceback__))
+        raise
+
+
+async def join_owned_close(task):
+    """Join the existing async owner even if its close caller is repeatedly cancelled."""
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
         raise

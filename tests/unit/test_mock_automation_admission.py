@@ -12,6 +12,7 @@ from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationDesiredState,
     admit_mock_automation,
     execution_run_id_for_spec,
+    mock_automation_control_from_dict,
 )
 from kiwoom_monitor.application.mock_automation_candidate import CandidateEligibilityStatus
 from kiwoom_monitor.application.mock_automation_recovery import (
@@ -119,6 +120,9 @@ class _Transport:
     def submit(self, intent):
         self.calls += 1
         raise AssertionError(f"disabled admission sent order: {intent.intent_id}")
+
+    def cancel(self, intent, broker_order_id, quantity=0):
+        raise AssertionError("cancel was not requested")
 
 
 class _AcceptTransport:
@@ -528,6 +532,84 @@ class MockAutomationAdmissionTests(unittest.TestCase):
             execution.create(intent)
         self.assertIsNone(execution.load(intent.intent_id))
 
+    def test_entry_pause_fences_native_buy_creation_and_submission_but_preserves_reconciliation(self) -> None:
+        from kiwoom_monitor.domain.order_contract import order_event, BrokerSubmission
+        from unittest.mock import patch
+        runtime, execution, transport = self._admitted_runtime()
+        control = self.forward.load_mock_automation_control(ACCOUNT_REF)
+        queued_intent = OrderIntent(
+            "queued-before-key-rotation", runtime.run_id, "decision-before-key-rotation", ACCOUNT_REF,
+            "mock", "005930", "KRX", OrderSide.BUY, 1, OrderType.LIMIT, 70_000,
+            NOW, NOW + timedelta(minutes=1), "policy-v1",
+        )
+        paused = replace(control, control_revision=control.control_revision + 1, entry_resume_required=True)
+        queue = runtime._lifecycle.queue
+        def rotate_after_queue(intent):
+            queued = queue(intent)
+            self.assertTrue(self.forward.save_mock_automation_control(paused, expected_revision=control.control_revision))
+            return queued
+        with patch.object(runtime._lifecycle, "queue", side_effect=rotate_after_queue):
+            with self.assertRaisesRegex(RuntimeError, "EXPLICIT_ENTRY_RESUME"):
+                runtime.submit_automation_intent(queued_intent, AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW),
+                    spec_id=self.spec.spec_id, control_revision=control.control_revision)
+        queued = execution.load(queued_intent.intent_id)
+        self.assertEqual(OrderState.QUEUED, queued.state)
+        self.assertEqual(["QUEUED"], [event["event_type"] for event in execution.events(queued_intent.intent_id)])
+        self.assertEqual(0, transport.calls)
+        self.assertIsNone(execution._automation_control)
+        self.assertEqual(paused, mock_automation_control_from_dict(paused.to_dict()))
+        self.assertTrue(ForwardEvaluationRepository(self.store).load_mock_automation_control(ACCOUNT_REF).entry_resume_required)
+        execution.bind_automation_control(spec_id=self.spec.spec_id, control_revision=paused.control_revision)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "EXPLICIT_ENTRY_RESUME"):
+                execution.create(replace(queued_intent, intent_id="new-buy-after-key-rotation"))
+            with self.assertRaisesRegex(RuntimeError, "EXPLICIT_ENTRY_RESUME"):
+                execution.apply(queued, order_event(queued_intent.intent_id, "SUBMISSION_STARTED",
+                    OrderState.SUBMISSION_UNKNOWN, NOW, NOW))
+            self.assertEqual(OrderState.QUEUED, execution.load(queued_intent.intent_id).state)
+            confirmed = execution.apply(queued, order_event(queued_intent.intent_id, "ORDER_ACCEPTED",
+                OrderState.ACCEPTED, NOW, NOW, broker_order_id="confirmed-existing"),
+                broker_order_id="confirmed-existing")
+            self.assertEqual(OrderState.ACCEPTED, confirmed.state)
+            with patch.object(transport, "cancel", return_value=BrokerSubmission("cancel-existing", NOW)) as cancel:
+                cancelled = runtime.cancel(queued_intent.intent_id)
+            self.assertEqual(OrderState.CANCEL_PENDING, cancelled.state)
+            cancel.assert_called_once()
+        finally:
+            execution.clear_automation_control()
+
+    def test_actual_submission_keeps_stop_after_queue_and_response_after_entry_pause_contracts(self) -> None:
+        from unittest.mock import patch
+        runtime, execution, transport = self._admitted_runtime()
+        control = self.forward.load_mock_automation_control(ACCOUNT_REF)
+        stopped = replace(control, desired_state=MockAutomationDesiredState.STOPPED,
+            control_revision=control.control_revision + 1)
+        intent = OrderIntent("claimed-before-stop", runtime.run_id, "decision-before-stop", ACCOUNT_REF,
+            "mock", "005930", "KRX", OrderSide.BUY, 2, OrderType.LIMIT, 70_000,
+            NOW, NOW + timedelta(minutes=1), "policy-v1")
+        queue = runtime._lifecycle.queue
+        def stop_after_queue(value):
+            result = queue(value)
+            self.assertTrue(self.forward.save_mock_automation_control(stopped, expected_revision=control.control_revision))
+            return result
+        paused = replace(stopped, entry_resume_required=True, control_revision=stopped.control_revision + 1)
+        def response_after_pause(value):
+            self.assertEqual(OrderState.SUBMISSION_UNKNOWN, execution.load(value.intent_id).state)
+            self.assertTrue(self.forward.save_mock_automation_control(paused, expected_revision=stopped.control_revision))
+            return BrokerSubmission("accepted-after-pause", NOW)
+        with patch.object(runtime._lifecycle, "queue", side_effect=stop_after_queue), \
+             patch.object(transport, "submit", side_effect=response_after_pause) as submit:
+            record = runtime.submit_automation_intent(intent, AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW),
+                spec_id=self.spec.spec_id, control_revision=control.control_revision)
+        submit.assert_called_once_with(intent)
+        self.assertEqual(OrderState.ACCEPTED, record.state)
+        reconciled = runtime.reconcile(intent.intent_id, BrokerOrderSnapshot(
+            "accepted-after-pause", ACCOUNT_REF, "005930", OrderState.FILLED,
+            2, 2, NOW + timedelta(seconds=1)))
+        self.assertEqual(OrderState.FILLED, reconciled.state)
+        self.assertEqual(2, reconciled.filled_quantity)
+        self.assertEqual(paused, self.forward.load_mock_automation_control(ACCOUNT_REF))
+
     def test_failed_stop_persistence_closes_the_in_memory_order_gate(self) -> None:
         runtime, _, _ = self._admitted_runtime()
         runtime.set_new_orders_enabled(True)
@@ -789,6 +871,11 @@ class MockAutomationAdmissionTests(unittest.TestCase):
             account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id, requested_at=NOW,
         )
         self.addCleanup(runtime.stop)
+        control = self.forward.load_mock_automation_control(ACCOUNT_REF)
+        self.assertTrue(self.forward.save_mock_automation_control(
+            replace(control, control_revision=control.control_revision + 1, entry_resume_required=True),
+            expected_revision=control.control_revision,
+        ))
         recovery = MockAccountRecovery(
             AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {"005930": 1}, NOW), (),
         )
@@ -856,6 +943,291 @@ class MockAutomationAdmissionTests(unittest.TestCase):
         self.assertIn("RECONCILIATION_PENDING", gate.reasons)
         self.assertIsNone(record)
         self.assertIsNone(receipt)
+
+    def test_native_read_scope_observes_peer_stop_and_recovery_after_completed_statement(self) -> None:
+        import threading
+
+        runtime, execution, transport = self._admitted_runtime()
+        recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), ())
+        risk = build_mock_automation_risk_snapshot(
+            recovery, (), (), (), execution_run_id=runtime.run_id,
+            binding_revision=self.binding["binding_revision"], reconciliation_revision=1,
+            observed_at=NOW, broker_query_started_at=NOW, broker_query_completed_at=NOW,
+        )
+        self.forward.save_mock_automation_risk_snapshot(risk)
+        first = record_mock_automation_recovery_from_risk(
+            self.forward, runtime, recovery, risk, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        admission = self.forward.load_mock_automation_admission_for_spec(ACCOUNT_REF, self.spec.spec_id)
+        lease = self.forward.load_mock_automation_lease_for_admission(ACCOUNT_REF, admission.admission_id)
+        original_control = self.forward.load_mock_automation_control(ACCOUNT_REF)
+        done, written, errors = threading.Event(), {}, []
+
+        def write_new_cut_and_stop():
+            try:
+                later = NOW + timedelta(milliseconds=1)
+                next_risk = build_mock_automation_risk_snapshot(
+                    recovery, (), (), (), execution_run_id=runtime.run_id,
+                    binding_revision=self.binding["binding_revision"], reconciliation_revision=2,
+                    observed_at=later, broker_query_started_at=later, broker_query_completed_at=later,
+                )
+                self.forward.save_mock_automation_risk_snapshot(next_risk)
+                written["recovery"] = record_mock_automation_recovery_from_risk(
+                    self.forward, runtime, recovery, next_risk,
+                    account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+                )
+                written["risk"] = next_risk
+                written["stop"] = emergency_stop_mock_automation(
+                    self.forward, runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+                    stopped_at=later, reason="separate native writer during completed PK read",
+                    expected_control_revision=original_control.control_revision,
+                )
+                written["control"] = self.forward.load_mock_automation_control(ACCOUNT_REF)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                done.set()
+
+        writer = threading.Thread(target=write_new_cut_and_stop, daemon=True)
+        try:
+            with self.forward.mock_automation_read_scope() as reader:
+                self.assertIsNotNone(reader, "actual SQLite/PG factory must be selected")
+                self.assertEqual(self.spec, self.forward.load_mock_automation_spec(
+                    ACCOUNT_REF, self.spec.spec_id, _reader=reader))
+                # The first PK result has been fully consumed. The writer uses
+                # the normal store APIs and their separate native connections.
+                writer.start()
+                self.assertTrue(done.wait(3), "writer must finish before the read scope closes")
+                self.assertFalse(errors, repr(errors))
+                self.assertEqual(self.profile, self.forward.load_profile(
+                    self.spec.strategy_ref, self.spec.forward_profile_id, _reader=reader))
+                self.assertEqual(lease, self.forward.load_mock_automation_lease_for_admission(
+                    ACCOUNT_REF, admission.admission_id, _reader=reader))
+                observed = self.forward.load_latest_mock_automation_recovery(
+                    ACCOUNT_REF, admission.admission_id, _reader=reader)
+                self.assertEqual(written["recovery"], observed)
+                self.assertNotEqual(first.decision_id, observed.decision_id)
+                self.assertEqual(written["risk"].snapshot_id, observed.risk_snapshot_id)
+                self.assertEqual(2, observed.risk_reconciliation_revision)
+                self.assertEqual(written["stop"], self.forward.load_latest_mock_automation_stop(
+                    ACCOUNT_REF, admission.admission_id, _reader=reader))
+                control = self.forward.load_mock_automation_control(ACCOUNT_REF, _reader=reader)
+                self.assertEqual(written["control"], control)
+                self.assertEqual(MockAutomationDesiredState.STOPPED, control.desired_state)
+                self.assertEqual(original_control.control_revision + 1, control.control_revision)
+                self.assertEqual(admission.execution_run_id, control.execution_run_id)
+        finally:
+            if writer.ident is not None:
+                writer.join(3)
+            self.assertFalse(writer.is_alive())
+        self.assertEqual(written["recovery"], self.forward.load_latest_mock_automation_recovery(
+            ACCOUNT_REF, admission.admission_id))
+        self.assertEqual(written["control"], self.forward.load_mock_automation_control(ACCOUNT_REF))
+        self.assertEqual(admission, self.forward.load_mock_automation_admission_for_spec(
+            ACCOUNT_REF, self.spec.spec_id))
+        self.assertEqual(0, transport.calls)
+
+    def test_native_read_scope_closes_and_short_circuits_before_admission_on_stale_risk(self) -> None:
+        import sqlite3
+        from unittest.mock import patch
+        from kiwoom_monitor.application.mock_automation_execution import _native_gate_context
+
+        runtime, execution, transport = self._admitted_runtime()
+        recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), ())
+        first = build_mock_automation_risk_snapshot(
+            recovery, (), (), (), execution_run_id=runtime.run_id,
+            binding_revision=self.binding["binding_revision"], reconciliation_revision=1,
+            observed_at=NOW, broker_query_started_at=NOW, broker_query_completed_at=NOW,
+        )
+        self.forward.save_mock_automation_risk_snapshot(first)
+        record_mock_automation_recovery_from_risk(
+            self.forward, runtime, recovery, first, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+        later = NOW + timedelta(milliseconds=1)
+        current = build_mock_automation_risk_snapshot(
+            recovery, (), (), (), execution_run_id=runtime.run_id,
+            binding_revision=self.binding["binding_revision"], reconciliation_revision=2,
+            observed_at=later, broker_query_started_at=later, broker_query_completed_at=later,
+        )
+        self.forward.save_mock_automation_risk_snapshot(current)
+        connect, handles, statements = self.store._connect, [], []
+
+        class CursorPassthrough:
+            def __init__(self, raw): self.raw = raw
+            def __getattr__(self, name): return getattr(self.raw, name)
+            def __enter__(self): self.raw.__enter__(); return self
+            def __exit__(self, *args): return self.raw.__exit__(*args)
+            def execute(self, sql, parameters=()):
+                statements.append(str(sql))
+                self.raw.execute(sql, parameters)
+                return self
+
+        class HandlePassthrough:
+            def __init__(self, raw): self.raw, self.closes, self._closed = raw, 0, False
+            def __getattr__(self, name): return getattr(self.raw, name)
+            @property
+            def closed(self): return bool(getattr(self.raw, "closed", self._closed))
+            def cursor(self, *args, **kwargs): return CursorPassthrough(self.raw.cursor(*args, **kwargs))
+            def __enter__(self): self.raw.__enter__(); return self
+            def __exit__(self, *args):
+                was_open = not self.closed
+                try:
+                    return self.raw.__exit__(*args)
+                finally:
+                    if was_open and bool(getattr(self.raw, "closed", False)):
+                        self._record_native_exit()
+            def _record_native_exit(self):
+                self.closes += 1
+                self._closed = True
+            def close(self):
+                self.closes += 1
+                try:
+                    return self.raw.close()
+                finally:
+                    self._closed = True
+
+        def tracked_connect():
+            handle = HandlePassthrough(connect())
+            handles.append(handle)
+            return handle
+
+        with patch.object(self.forward, "mock_automation_read_scope",
+                          wraps=self.forward.mock_automation_read_scope) as scope, \
+                patch.object(self.store, "mock_automation_read_scope",
+                             wraps=self.store.mock_automation_read_scope) as native_scope, \
+                patch.object(self.store, "_connect", side_effect=tracked_connect), \
+                patch.object(self.forward, "load_mock_automation_admission_for_spec",
+                             wraps=self.forward.load_mock_automation_admission_for_spec) as admission, \
+                patch.object(self.forward, "load_latest_mock_automation_recovery",
+                             wraps=self.forward.load_latest_mock_automation_recovery) as recovered:
+            with self.assertRaisesRegex(RuntimeError, "^latest mock automation risk snapshot changed$"):
+                _native_gate_context(self.forward, runtime, recovery, first, ACCOUNT_REF, self.spec.spec_id)
+        scope.assert_called_once_with()
+        native_scope.assert_called_once_with()
+        admission.assert_not_called()
+        recovered.assert_not_called()
+        self.assertEqual(1, len(handles), "no default-reader fallback or second context after the failure")
+        self.assertEqual(1, len([sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]))
+        self.assertEqual(1, handles[0].closes)
+        self.assertTrue(handles[0].closed)
+        if isinstance(handles[0].raw, sqlite3.Connection):
+            with self.assertRaises(sqlite3.ProgrammingError):
+                handles[0].raw.execute("SELECT 1")
+        else:
+            self.assertTrue(handles[0].raw.closed)
+        self.assertEqual(0, transport.calls)
+
+    def test_native_gate_rejects_noncanonical_stored_spec_without_republishing(self) -> None:
+        from unittest.mock import patch
+        from kiwoom_monitor.application.mock_automation_execution import _native_gate_context
+
+        runtime, _, transport = self._admitted_runtime()
+        recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), ())
+        risk = build_mock_automation_risk_snapshot(
+            recovery, (), (), (), execution_run_id=runtime.run_id,
+            binding_revision=self.binding["binding_revision"], reconciliation_revision=1,
+            observed_at=NOW, broker_query_started_at=NOW, broker_query_completed_at=NOW,
+        )
+        self.forward.save_mock_automation_risk_snapshot(risk)
+        record_mock_automation_recovery_from_risk(
+            self.forward, runtime, recovery, risk, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+        )
+
+        collection = self.forward.MOCK_AUTOMATION_SPEC_COLLECTION
+        key = (collection, ACCOUNT_REF, self.spec.spec_id)
+        _native_gate_context(self.forward, runtime, recovery, risk, ACCOUNT_REF, self.spec.spec_id)
+        self.store.upsert_documents(collection, [{
+            "owner": ACCOUNT_REF, "key": self.spec.spec_id,
+            "document": {**self.spec.to_dict(), "unexpected_field": "stored"},
+        }])
+        self.assertEqual(self.spec, self.forward.load_mock_automation_spec(ACCOUNT_REF, self.spec.spec_id))
+        with self.assertRaisesRegex(ValueError, "^immutable document conflict:"):
+            self.forward.save_mock_automation_spec(self.spec)
+
+        with patch.object(self.store, "load_document", wraps=self.store.load_document) as load, \
+                patch.object(self.store, "insert_immutable_document", wraps=self.store.insert_immutable_document) as insert:
+            with self.assertRaisesRegex(ValueError, "^immutable document conflict:"):
+                _native_gate_context(self.forward, runtime, recovery, risk, ACCOUNT_REF, self.spec.spec_id)
+        self.assertEqual(1, sum(call.args == key for call in load.call_args_list))
+        insert.assert_not_called()
+        self.assertEqual(0, transport.calls)
+
+    def test_recovery_input_scope_closes_before_runtime_and_preserves_scalar_failures(self) -> None:
+        from contextlib import ExitStack, contextmanager, nullcontext
+        from unittest.mock import patch
+
+        runtime, execution, transport = self._admitted_runtime()
+        recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT_REF, 1_000_000, 0, {}, NOW), ())
+        metrics = MockAutomationRecoveryMetrics(
+            observed_at=NOW, recovery_complete=True, daily_net_pnl_won=0,
+            data_gap_seconds=0, submission_unknown_count=0, reconnect_count=0, balance_mismatch_count=0,
+        )
+        methods = {"spec": "load_mock_automation_spec", "admission": "load_mock_automation_admission_for_spec",
+                   "lease": "load_mock_automation_lease_for_admission"}
+        originals = {name: getattr(self.forward, attr) for name, attr in methods.items()}
+        original_scope = self.forward.mock_automation_read_scope
+        original_orders, original_save = runtime.set_new_orders_enabled, self.forward.save_mock_automation_recovery_decision
+        missing = {"spec": "mock automation operating spec is not stored",
+                   "admission": "mock automation admission is missing", "lease": "mock automation lease receipt is missing"}
+        for native_reader in (True, False):
+            for failure in ("", "spec", "admission", "lease", "decode"):
+                with self.subTest(native_reader=native_reader, failure=failure):
+                    events, active, current_reader = [], False, None
+                    malformed = ValueError("controlled recovery spec decode failure")
+
+                    @contextmanager
+                    def observed_scope():
+                        nonlocal active, current_reader
+                        active = True
+                        try:
+                            with (original_scope() if native_reader else nullcontext()) as current_reader:
+                                if native_reader:
+                                    self.assertIsNotNone(current_reader)
+                                yield current_reader
+                        finally:
+                            active = False
+                            events.append("closed")
+
+                    def observe_loader(name):
+                        def load(*args, **kwargs):
+                            self.assertTrue(active)
+                            self.assertEqual({"_reader": current_reader} if native_reader else {}, kwargs)
+                            events.append(name)
+                            if failure == "decode" and name == "spec":
+                                raise malformed
+                            return None if failure == name else originals[name](*args, **kwargs)
+                        return load
+
+                    def orders(enabled):
+                        self.assertFalse(active)
+                        events.append("orders")
+                        return original_orders(enabled)
+
+                    def save(value):
+                        self.assertFalse(active)
+                        events.append("save")
+                        return original_save(value)
+
+                    with ExitStack() as patches:
+                        patches.enter_context(patch.object(self.forward, "mock_automation_read_scope", observed_scope))
+                        for name, attr in methods.items():
+                            patches.enter_context(patch.object(self.forward, attr, side_effect=observe_loader(name)))
+                        patches.enter_context(patch.object(runtime, "set_new_orders_enabled", side_effect=orders))
+                        patches.enter_context(patch.object(self.forward, "save_mock_automation_recovery_decision", side_effect=save))
+                        if failure:
+                            with self.assertRaisesRegex(ValueError, missing.get(failure, "controlled recovery spec decode failure")) as raised:
+                                record_mock_automation_recovery(self.forward, runtime, recovery, metrics,
+                                    account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id)
+                            if failure == "decode":
+                                self.assertIs(malformed, raised.exception)
+                        else:
+                            decision = record_mock_automation_recovery(self.forward, runtime, recovery, metrics,
+                                account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id)
+                            self.assertEqual(MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED, decision.status)
+                    expected = ["spec"] if failure in {"spec", "decode"} else ["spec", "admission"] if failure == "admission" else ["spec", "admission", "lease"]
+                    self.assertEqual(expected + ["closed"] + ([] if failure else ["orders", "save"]), events)
+                    self.assertFalse(active)
+        self.assertEqual(0, transport.calls)
 
 
 if __name__ == "__main__":

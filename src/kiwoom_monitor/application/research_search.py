@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping
 
-from kiwoom_monitor.application.research_families import get_research_family
+from kiwoom_monitor.domain.strategy_contract import get_research_family
 from kiwoom_monitor.application.research_evaluation import build_development_evidence
 
 

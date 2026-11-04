@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from typing import Any, Iterable
+
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 COLLECTION = "daily_bar_history_coverage"
 PERIODS = (5, 20, 250)
 VALUE_FIELDS = ("trading_date", "open", "high", "low", "close", "volume", "trade_value_million_won")
 
 
-def daily_query_date() -> date:
-    return datetime.now(timezone(timedelta(hours=9))).date()
+def daily_query_date(now: datetime | None = None) -> date:
+    """Use the supplied corrected clock; unbound standalone calls use KST fallback."""
+    return as_kst(now if now is not None else kst_now()).date()
 
 
 def source_integer(value: object) -> int | None:

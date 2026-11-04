@@ -3,11 +3,20 @@ from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 from pathlib import Path
+import ast
 import os
 import shutil
 import stat
 
 datas = [('data/near_high_sounds', 'data/near_high_sounds'), ('data/ocr_models/PP-OCRv5_mobile_det', 'data/ocr_models/PP-OCRv5_mobile_det'), ('data/ocr_models/korean_PP-OCRv5_mobile_rec', 'data/ocr_models/korean_PP-OCRv5_mobile_rec'), ('resources/app_icon.png', 'resources'), ('resources/UpdateHelper.exe', 'update_helper'), ('THIRD_PARTY_LICENSES.txt', '.'), ('licenses', 'licenses')]
+# Exact raw-byte inputs used by the product scientific implementation hash.
+# Read the existing literal tuple without importing or executing product code.
+implementation_tree = ast.parse(Path("src/kiwoom_monitor/domain/research_contract.py").read_text(encoding="utf-8"))
+implementation_paths = ast.literal_eval(next(node.value for node in implementation_tree.body
+    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+        and target.id == "RESEARCH_IMPLEMENTATION_PATHS" for target in node.targets)))
+datas += [(source, str(Path(source).relative_to("src").parent)) for source in implementation_paths]
+# End scientific raw-byte resource inputs.
 binaries = []
 datas += collect_data_files('paddle')
 binaries += collect_dynamic_libs('paddle')
@@ -34,7 +43,7 @@ a = Analysis(
     pathex=['src', '.'],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['paddleocr', 'paddlex', 'googleapiclient.discovery', 'google_auth_oauthlib.flow', 'scripts.run_research', *server_hiddenimports],
+    hiddenimports=['paddleocr', 'paddlex', 'googleapiclient.discovery', 'google_auth_oauthlib.flow', *server_hiddenimports],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
