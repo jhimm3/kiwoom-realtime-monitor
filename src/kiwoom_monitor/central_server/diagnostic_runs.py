@@ -202,7 +202,7 @@ class DiagnosticRuns:
             return self.status(run_id)
 
     def _run(self, run: dict, run_lock, capture_was_enabled: bool) -> None:
-        from scripts import nas_workload_diagnostic as cli
+        from . import diagnostic_sampling as sampling
 
         run_id = run["run_id"]
         session_id = run["session_id"]
@@ -251,11 +251,11 @@ class DiagnosticRuns:
                 try:
                     if not ready.wait(timeout=15) or replay_outcome.get("error_type"):
                         raise RuntimeError("replay_preflight_failed")
-                    phase = cli._measure(seconds, "replay", session_id,
-                                         api=self.api, stop=self._stop,
-                                         checkpoint=checkpoint,
-                                         database_url=run["_replay_database_url"],
-                                         on_started=gate.set)
+                    phase = sampling.measure(seconds, "replay", session_id,
+                                             path=self.path, api=self.api, stop=self._stop,
+                                             checkpoint=checkpoint,
+                                             database_url=run["_replay_database_url"],
+                                             on_started=gate.set)
                 finally:
                     gate.set()
                     measurement_done.set()
@@ -421,9 +421,9 @@ class DiagnosticRuns:
             else:
                 args = SimpleNamespace(command="measure" if run["kind"] == "measure" else "compare",
                                        label=run["label"], workload=run["workload"])
-                result = cli._run_measurement(args, self.path, seconds, run_id,
-                                              session_id, api=self.api, stop=self._stop,
-                                              checkpoint=checkpoint)
+                result = sampling.run_measurement(args, self.path, seconds, run_id,
+                                                  session_id, api=self.api, stop=self._stop,
+                                                  checkpoint=checkpoint)
             run["state"] = "finalizing"
             if result.get("kind") in {"measure", "replay"}:
                 phases = [result.get("phase", {})]
@@ -467,6 +467,19 @@ class DiagnosticRuns:
                     run["state"] = "incomplete"
             finally:
                 run_lock.__exit__(None, None, None)
+
+    def maintenance_status(self) -> dict[str, object]:
+        """The real parent retains its replay child through the existing final join."""
+        with self._guard:
+            if self._current is None and self._worker is None:
+                return {"state": "not_created"}
+            if self._current is None or self._worker is None:
+                return {"state": "unknown"}
+            phase = self._current.get("state")
+            if phase not in {"starting", "running", "finalizing", "completed", "incomplete", "aborted", "failed"}:
+                return {"state": "unknown"}
+            return {"state": "owned", "worker": "running" if self._worker.is_alive() else "exited",
+                    "phase": phase}
 
     def status(self, run_id: str) -> dict:
         if not _REPORT_ID.fullmatch(run_id):

@@ -344,7 +344,7 @@ class RealAccountMonitorTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(replacement.task, 5)
         self.assertTrue(previous.done())
         self.assertFalse(target.monitor_task.done())
-        self.assertEqual(2, target.binding.binding_revision)
+        self.assertEqual(1, target.binding.binding_revision)
         self.assertEqual(1, self.owner.applied_settings_revision(target.binding.scope.to_dict()))
 
     async def test_real_only_https_owner_routes_settings_and_rejects_mock_or_plain_http(self):
@@ -393,7 +393,7 @@ class RealAccountMonitorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(replacement.task.done())
                 unblock.set()
                 await asyncio.wait_for(replacement.task, 5)
-            self.assertEqual(2, context.binding.binding_revision)
+            self.assertEqual(1, context.binding.binding_revision)
             self.assertTrue(any(value["document"]["binding_revision"] == 1 for value in self.documents(context)))
         finally:
             unblock.set()

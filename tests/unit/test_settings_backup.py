@@ -362,3 +362,109 @@ class SettingsBackupServiceTest(unittest.TestCase):
             self.assertFalse((root / "data" / "near_high_icons" / "interest.png").exists())
             self.assertFalse((root / "outside.txt").exists())
             self.assertFalse((root / "data" / "strength_icons" / "fire.png").exists())
+
+    def test_full_root_asset_roundtrip_preserves_logical_paths_and_source(self) -> None:
+        assets = {
+            "data/strength_icons/interest.png": b"strength icon",
+            "data/near_high_icons/caution.PNG": b"near high icon",
+            "data/near_high_sounds/fire.wav": b"notification sound",
+        }
+        for basename in ("data", "chosen-full-assets"):
+            with self.subTest(root=basename), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source_data = root / "source" / basename
+                target_data = root / "target" / basename
+                source_data.mkdir(parents=True)
+                target_data.mkdir(parents=True)
+                source = source_data / "monitor.sqlite3"
+                target = target_data / "monitor.sqlite3"
+                Database(source).initialize_full_role(role="full-local")
+                Database(target).initialize_full_role(role="full-local")
+                settings = {
+                    "strength_icon_interest_image": "data/strength_icons/interest.png",
+                    "near_high_icon_caution_image": "data/near_high_icons/caution.PNG",
+                    "near_high_sound_fire": "data/near_high_sounds/fire.wav",
+                    # These values remain settings, but have never been portable assets.
+                    "strength_icon_fire_image": str(source_data / "strength_icons" / "absolute.png"),
+                    "near_high_icon_interest_image": "near_high_icons/legacy.png",
+                }
+                with closing(sqlite3.connect(source)) as connection:
+                    with connection:
+                        connection.executemany("UPDATE settings SET value=? WHERE key=?",
+                                               [(value, key) for key, value in settings.items()])
+                protected = {}
+                for stored, content in assets.items():
+                    relative = Path(stored).relative_to("data")
+                    original = source_data / relative
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    original.write_bytes(content)
+                    protected[original] = content
+                    destination = target_data / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(b"before restore")
+                    if basename != "data":
+                        for data_dir in (source_data, target_data):
+                            decoy = data_dir.parent / "data" / relative
+                            decoy.parent.mkdir(parents=True, exist_ok=True)
+                            decoy.write_bytes(b"unrelated sibling data")
+                            protected[decoy] = decoy.read_bytes()
+                backup = root / "settings.json"
+                source_before = source.read_bytes()
+                SettingsBackupService(source).export_to(backup, include_themes=False)
+                protected[source] = source_before
+                protected[backup] = backup.read_bytes()
+                document = json.loads(protected[backup].decode("utf-8"))
+                self.assertEqual(settings, {key: document["settings"][key] for key in settings})
+                self.assertEqual(
+                    {stored: b64encode(content).decode("ascii") for stored, content in assets.items()},
+                    {item["path"]: item["content"] for item in document["assets"]},
+                )
+                service = SettingsBackupService(target)
+                service.validate_from(backup, include_themes=False)
+                self.assertEqual(
+                    [((target_data / Path(stored).relative_to("data")).resolve(), assets[stored])
+                     for stored in sorted(assets)],
+                    service._validate_assets(document["assets"]),
+                )
+                service.import_from(backup, include_themes=False)
+                with closing(sqlite3.connect(target)) as connection:
+                    restored = dict(connection.execute("SELECT key,value FROM settings"))
+                self.assertEqual(settings, {key: restored[key] for key in settings})
+                for stored, content in assets.items():
+                    self.assertEqual(content, (target_data / Path(stored).relative_to("data")).read_bytes())
+                self.assertEqual(protected, {path: path.read_bytes() for path in protected})
+
+    def test_asset_resolver_keeps_directory_extension_and_relative_path_contract(self) -> None:
+        allowed = {
+            "data/strength_icons/icon.png": 2 * 1024 * 1024,
+            "data/near_high_icons/nested/icon.PNG": 2 * 1024 * 1024,
+            "data/near_high_sounds/alert.wav": 5 * 1024 * 1024,
+            "data/near_high_sounds/alert.MP3": 5 * 1024 * 1024,
+            "data/near_high_sounds/alert.ogg": 5 * 1024 * 1024,
+            "data/near_high_sounds/alert.m4a": 5 * 1024 * 1024,
+            "data/strength_icons/nested/../icon.png": 2 * 1024 * 1024,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for basename in ("data", "chosen-full-assets"):
+                data_dir = Path(directory) / basename
+                for stored, maximum in allowed.items():
+                    with self.subTest(root=basename, stored=stored):
+                        self.assertEqual(
+                            ((data_dir / Path(stored).relative_to("data")).resolve(), maximum),
+                            SettingsBackupService._resolve_asset_path(data_dir, stored),
+                        )
+                rejected = (
+                    "", "strength_icons/icon.png", "data/other/icon.png",
+                    "data/strength_icons/icon.jpg", "data/near_high_icons/icon.wav",
+                    "data/near_high_sounds/alert.exe",
+                    "data/near_high_sounds/../../../outside.mp3",
+                    "data/strength_icons/../near_high_icons/icon.png",
+                    "../data/strength_icons/icon.png",
+                    str(data_dir / "strength_icons" / "absolute.png"),
+                )
+                service = SettingsBackupService(data_dir / "monitor.sqlite3")
+                for stored in rejected:
+                    with self.subTest(root=basename, stored=stored):
+                        self.assertIsNone(SettingsBackupService._resolve_asset_path(data_dir, stored))
+                        with self.assertRaises(SettingsBackupError):
+                            service._validate_assets([{"path": stored, "content": b64encode(b"asset").decode("ascii")}])

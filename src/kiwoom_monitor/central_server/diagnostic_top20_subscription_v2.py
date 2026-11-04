@@ -15,28 +15,18 @@ PUBLIC_TYPES = {'0B', '0w', '0g', '0J', '0U', '0s', '1h'}
 
 def observer_only(function):
     @wraps(function)
-    def run(collector, *args, **kwargs):
+    def run(observer, collector, *args, **kwargs):
         try:
             from . import diagnostic_trace as trace
             if trace.input_token('top20_inputs') is None or collector._input_replay_only:
                 return None
-            return function(collector, *args, **kwargs)
+            return function(observer, collector, *args, **kwargs)
         except Exception:
             from .diagnostic_top20_lifecycle_input import reject
             reject(collector, 'top20_v2_observer_invalid')
-            collector._recorded_v2_complete = False
+            observer.complete = False
             return None
     return run
-
-
-def _receipt(collector, receipt, *, complete=True):
-    from .realtime_hub import CapturedControlReceipt
-    collector._recorded_v2_complete = bool(
-        getattr(collector, '_recorded_v2_complete', True) and complete and receipt and receipt.complete)
-    if receipt and not collector._recorded_v2_complete:
-        return CapturedControlReceipt(receipt.trace_id,receipt.producer_component,
-            receipt.input_id,receipt.kind,False)
-    return receipt
 
 
 def public_groups(groups):
@@ -51,62 +41,78 @@ def public_command(command):
     return packet
 
 
-@observer_only
-def begin_batch(collector, request, plan, revision):
-    from .diagnostic_top20_lifecycle_input import _emit, contributions, hub_initial
-    from .realtime_collector import REALTIME_REG_INTERVAL_SECONDS, SUBSCRIPTION_ACK_TIMEOUT_SECONDS
-    hub_initial(collector._hub)
-    collector._recorded_v2_complete = True
-    return _receipt(collector, _emit(collector, 'subscription_start', {
-        **request, 'hub_component': f'realtime_hub:{id(collector._hub):x}',
-        'generation': collector._connection_generation, 'revision': revision,
-        'registration_interval_seconds': REALTIME_REG_INTERVAL_SECONDS,
-        'ack_timeout_seconds': SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
-        'subscriptions': contributions(collector._hub),
-        'previous_groups': public_groups(plan.previous), 'groups': public_groups(plan.groups),
-        'commands': [public_command(command) for command in plan.commands],
-    }))
+class SubscriptionRecorder:
+    """Own one collector's tool completeness; native REG/ACK stays outside."""
+
+    def __init__(self, *, hub_observer):
+        self.hub_observer = hub_observer
+        self.complete = True
+
+    def _receipt(self, receipt, *, complete=True):
+        from .realtime_hub import CapturedControlReceipt
+        self.complete = bool(
+            self.complete and complete and receipt and receipt.complete)
+        if receipt and not self.complete:
+            return CapturedControlReceipt(receipt.trace_id,receipt.producer_component,
+                receipt.input_id,receipt.kind,False)
+        return receipt
+
+    @observer_only
+    def begin_batch(self, collector, request, plan, revision):
+        from .diagnostic_top20_lifecycle_input import _emit, contributions
+        from .realtime_collector import REALTIME_REG_INTERVAL_SECONDS, SUBSCRIPTION_ACK_TIMEOUT_SECONDS
+        self.hub_observer.hub_initial(collector._hub)
+        self.complete = True
+        return self._receipt(_emit(collector, 'subscription_start', {
+            **request, 'hub_component': f'realtime_hub:{id(collector._hub):x}',
+            'generation': collector._connection_generation, 'revision': revision,
+            'registration_interval_seconds': REALTIME_REG_INTERVAL_SECONDS,
+            'ack_timeout_seconds': SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
+            'subscriptions': contributions(collector._hub),
+            'previous_groups': public_groups(plan.previous), 'groups': public_groups(plan.groups),
+            'commands': [public_command(command) for command in plan.commands],
+        }))
 
 
-@observer_only
-def command_event(collector, kind, batch, command, ordinal, *, parent=None, message=None, sent_mono_ns=None):
-    from .diagnostic_top20_lifecycle_input import _emit
-    if batch is None:
-        return None
-    value = {'subscription_input_id': batch.input_id, 'ordinal': ordinal,
-             'command': public_command(command),
-             'command_input_id': parent.input_id if parent else ''}
-    if kind == 'command_sent':
-        value['send_completed_mono_ns'] = sent_mono_ns
-    if message is not None:
-        code = message.get('return_code')
-        value.update({'trnm': str(message.get('trnm', '')).upper(),
-                      'return_code': code if type(code) in {int, str} else None,
-                      'group_no': str(message.get('grp_no', '')),
-                      'accepted': type(code) is int and code == 0 or type(code) is str and code == '0'})
-    return _receipt(collector, _emit(collector, kind, value),
-                    complete=batch.complete and (parent is None or parent.complete))
+    @observer_only
+    def command_event(self, collector, kind, batch, command, ordinal, *, parent=None, message=None, sent_mono_ns=None):
+        from .diagnostic_top20_lifecycle_input import _emit
+        if batch is None:
+            return None
+        value = {'subscription_input_id': batch.input_id, 'ordinal': ordinal,
+                 'command': public_command(command),
+                 'command_input_id': parent.input_id if parent else ''}
+        if kind == 'command_sent':
+            value['send_completed_mono_ns'] = sent_mono_ns
+        if message is not None:
+            code = message.get('return_code')
+            value.update({'trnm': str(message.get('trnm', '')).upper(),
+                          'return_code': code if type(code) in {int, str} else None,
+                          'group_no': str(message.get('grp_no', '')),
+                          'accepted': type(code) is int and code == 0 or type(code) is str and code == '0'})
+        return self._receipt(_emit(collector, kind, value),
+                        complete=batch.complete and (parent is None or parent.complete))
 
 
-@observer_only
-def end_batch(collector, batch, groups, *, outcome='returned', error_type=''):
-    from .diagnostic_top20_lifecycle_input import _emit
-    if batch is None:
-        return None
-    return _receipt(collector, _emit(collector, 'batch_end', {'subscription_input_id': batch.input_id,
-                 'outcome': outcome, 'groups': public_groups(groups), 'error_type': error_type}))
+    @observer_only
+    def end_batch(self, collector, batch, groups, *, outcome='returned', error_type=''):
+        from .diagnostic_top20_lifecycle_input import _emit
+        if batch is None:
+            return None
+        return self._receipt(_emit(collector, 'batch_end', {'subscription_input_id': batch.input_id,
+                     'outcome': outcome, 'groups': public_groups(groups), 'error_type': error_type}))
 
 
-@observer_only
-def projection(collector, batch, groups, codes, *, desired, previous=None):
-    from .diagnostic_top20_lifecycle_input import _emit, contributions
-    if batch is None:
-        return None
-    return _receipt(collector, _emit(collector, 'approval_projection', {
-        'subscription_input_id': batch.input_id, 'previous_approval_input_id': previous.input_id if previous else '',
-        'groups': public_groups(groups), 'codes': list(codes),
-        'desired_groups':public_groups(desired),'subscriptions':contributions(collector._hub)}),
-        complete=batch.complete and bool(previous and previous.complete))
+    @observer_only
+    def projection(self, collector, batch, groups, codes, *, desired, previous=None):
+        from .diagnostic_top20_lifecycle_input import _emit, contributions
+        if batch is None:
+            return None
+        return self._receipt(_emit(collector, 'approval_projection', {
+            'subscription_input_id': batch.input_id, 'previous_approval_input_id': previous.input_id if previous else '',
+            'groups': public_groups(groups), 'codes': list(codes),
+            'desired_groups':public_groups(desired),'subscriptions':contributions(collector._hub)}),
+            complete=batch.complete and bool(previous and previous.complete))
 
 
 def _validate_groups(groups):

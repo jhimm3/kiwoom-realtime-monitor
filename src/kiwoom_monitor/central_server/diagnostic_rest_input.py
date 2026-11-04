@@ -9,15 +9,16 @@ import asyncio
 import copy
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+
+from .async_lifetime import bind_task_context
 from dataclasses import dataclass, field
-from functools import wraps
 import json
 from threading import Lock
 import time
 from uuid import uuid4
 
 from . import diagnostic_trace as trace
-from .diagnostic_replay_contract import capture_owner, freeze_payload, operation_identity, thaw_payload
+from .diagnostic_replay_contract import capture_owner, captured_workload_scope, freeze_payload, operation_identity, thaw_payload
 
 VERSION = "market-request-tape/v1"
 EVENT = "rest_input"
@@ -66,15 +67,19 @@ def _emit(receipt, stage, value):
             pass
 
 
-def _new(owner, *, token, kind):
+def _new(owner, *, token, kind, state=None):
     identity = operation_identity()
     task = asyncio.current_task()
     producer = identity["producer_component"] or f"rest_broker:{id(owner):x}"
     actor = identity["actor_id"] or f"{producer}:{id(task):x}"
-    state = getattr(owner, "_market_input_sequences", None)
-    if state is None or state[0] != token:
-        state = [token, {}, 0]
-        owner._market_input_sequences = state
+    if state is None:
+        # The catalog adapter retains its existing owner until its own transfer.
+        state = getattr(owner, "_market_input_sequences", None)
+        if state is None or state[0] != token:
+            state = [token, {}, 0]
+            owner._market_input_sequences = state
+    elif state[0] != token:
+        state[:] = [token, {}, 0]
     lanes = state[1]
     # Retain the exact canonical signature compactly. str(kind) expands tuple
     # quoting/escapes and a four-byte character charge overstates ASCII request
@@ -114,82 +119,104 @@ def _signature(key):
     return json.dumps(key, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
-def captured_broker_request(function):
-    @wraps(function)
-    async def run(self, api_id, path, body, *, cont_yn, next_key, record_response):
-        token = trace.input_token("top20_inputs")
-        lane = _TAPE_LANE.get()
-        if self._namespace != "market" or api_id not in MARKET_APIS or (token is None and lane is None):
-            return await function(self, api_id, path, body, cont_yn=cont_yn,
-                                  next_key=next_key, record_response=record_response)
-        key = _request_key(self._namespace, api_id, path, body, cont_yn, next_key, record_response)
-        receipt = None
-        if token:
-            try:
-                receipt = _new(self, token=token, kind=("request", _signature(key)))
-            except Exception:
-                try:
-                    trace.reject_input(token, {"workload_id": "rest_market", "reason": "market_request_identity_rejected"})
-                except Exception:
-                    pass
-        if receipt is not None:
-            from .rest_broker import _persistent_cache_ttl
-            receipt["request"] = key
-            _emit(receipt, "logical_start", {**key, "lane": receipt["lane"],
-                "ordinal": receipt["ordinal"], "parent_input_id": receipt["parent_input_id"],
-                "handler_present": self._response_handler is not None,
-                "cache_lookup": bool(record_response and self._store is not None and _persistent_cache_ttl(api_id, cont_yn))})
-        elif lane is not None:
-            receipt = lane.begin(key)
-        marker = _REQUEST.set(receipt)
-        scope = (capture_owner(receipt["workload_id"], receipt["producer_component"],
-            receipt["actor_id"], cause_input_id=receipt["input_id"])
-            if receipt is not None and token else nullcontext())
-        outcome, error_type, result_state = "returned", "", {}
-        started = time.monotonic_ns()
+def new_broker_state():
+    """Opaque per-broker counters; no native work or constructor-time activation."""
+    return [None, {}, 0]
+
+
+def _flow_handle(api_id, path, body, handler_present):
+    if api_id != "ka10045":
+        return None
+    from .diagnostic_top20_flow_input import broker_flow_link
+    link = broker_flow_link(api_id, path, body)
+    return {"flow": link, "handler_present": handler_present} if link is not None else None
+
+
+@contextmanager
+def broker_request_scope(state, owner, *, namespace, api_id, path, body, cont_yn,
+                         next_key, record_response, handler_present, cache_lookup):
+    token = trace.input_token("top20_inputs")
+    lane = _TAPE_LANE.get()
+    if namespace != "market" or api_id not in MARKET_APIS or (token is None and lane is None):
+        # Do not shadow the inherited _REQUEST on the original bypass path.
+        yield _flow_handle(api_id, path, body, handler_present), None
+        return
+    key = _request_key(namespace, api_id, path, body, cont_yn, next_key, record_response)
+    receipt = None
+    if token:
         try:
-            with scope:
-                result = await function(self, api_id, path, body, cont_yn=cont_yn,
-                                        next_key=next_key, record_response=record_response)
-            result_state = {"cache_hit": result.cache_hit, "recording_succeeded": result.recording_succeeded}
-            return result
-        except BaseException as error:
-            outcome = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
-            error_type = type(error).__name__
-            raise
-        finally:
-            if receipt is not None:
-                _emit(receipt, "logical_end", {"origin": receipt["origin"],
-                    "group_id": receipt["group_id"], "outcome": outcome, "error_type": error_type,
-                    "elapsed_ns": time.monotonic_ns() - started, "result_state": result_state})
-            _REQUEST.reset(marker)
-    return run
+            receipt = _new(owner, token=token, kind=("request", _signature(key)), state=state)
+        except Exception:
+            try:
+                trace.reject_input(token, {"workload_id": "rest_market", "reason": "market_request_identity_rejected"})
+            except Exception:
+                pass
+    if receipt is not None:
+        receipt["request"] = key
+        _emit(receipt, "logical_start", {**key, "lane": receipt["lane"],
+            "ordinal": receipt["ordinal"], "parent_input_id": receipt["parent_input_id"],
+            "handler_present": handler_present, "cache_lookup": cache_lookup})
+    elif lane is not None:
+        receipt = lane.begin(key)
+    marker = _REQUEST.set(receipt)
+    scope = (capture_owner(receipt["workload_id"], receipt["producer_component"],
+        receipt["actor_id"], cause_input_id=receipt["input_id"])
+        if receipt is not None and token else nullcontext())
+    outcome, error_type, result_state = "returned", "", {}
+    def returned(result):
+        # Metadata notification cannot change a successful native result.
+        try:
+            result_state.update(cache_hit=result.cache_hit, recording_succeeded=result.recording_succeeded)
+        except Exception:
+            try:
+                trace.reject_input(token, {"workload_id": "rest_market", "reason": "market_request_observer_error"})
+            except Exception:
+                pass
+    started = time.monotonic_ns()
+    try:
+        with scope:
+            yield _flow_handle(api_id, path, body, handler_present), returned
+    except BaseException as error:
+        outcome = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+        error_type = type(error).__name__
+        raise
+    finally:
+        if receipt is not None:
+            _emit(receipt, "logical_end", {"origin": receipt["origin"],
+                "group_id": receipt["group_id"], "outcome": outcome, "error_type": error_type,
+                "elapsed_ns": time.monotonic_ns() - started, "result_state": result_state})
+        _REQUEST.reset(marker)
 
 
 @dataclass
 class RequestGroup:
-    primary: dict
+    primary: dict | None
     members: list = field(default_factory=list)
     lock: Lock = field(default_factory=Lock)
+    flow_link: dict | None = field(default=None, repr=False)
 
     def parents(self):
         with self.lock:
             return [row["input_id"] for row in self.members]
 
 
-def link_request(future, *, shared=False):
+def join_broker_request(request_handle, group, *, shared):
+    flow = request_handle["flow"] if request_handle is not None else None
+    if shared:
+        if group is not None and group.flow_link is not None:
+            group.flow_link["receipt"]["shared"] = True
+        if flow is not None:
+            flow["receipt"].update(origin="shared_inflight", shared=True)
     receipt = _REQUEST.get()
-    group = getattr(future, "_market_input_group", None)
     if receipt is None:
-        if group is not None:
+        if group is not None and group.primary is not None:
             _emit(group.primary, "unobserved_shared", {})
-        return group
-    if group is None:
+        return group if shared or flow is None else RequestGroup(None, flow_link=flow)
+    if group is None or group.primary is None:
         if shared:
             receipt["origin"] = "shared_unobserved"
-            return None
-        group = RequestGroup(receipt)
-        future._market_input_group = group
+            return group
+        group = RequestGroup(receipt, flow_link=flow)
     if receipt["trace_id"] != group.primary["trace_id"]:
         receipt["origin"] = "shared_other_epoch"
         return group
@@ -205,24 +232,34 @@ def link_request(future, *, shared=False):
     return group
 
 
+def broker_request_origin(request_handle, origin):
+    request_origin(origin)
+    if request_handle is not None and (origin == "ram_cache" or
+            origin == "persistent_cache" and request_handle["handler_present"]):
+        request_handle["flow"]["receipt"]["origin"] = origin
+
+
 def request_origin(value):
     receipt = _REQUEST.get()
     if receipt is not None:
         receipt["origin"] = value
 
 
-def transport_call(client, job):
-    group = job.input_group
-    if group is None:
-        return client.request_with_continuation(job.api_id, job.path, job.body,
-                                               cont_yn=job.cont_yn, next_key=job.next_key)
+@contextmanager
+def broker_transport_scope(group):
+    if group is None or group.primary is None:
+        yield None
+        return
     primary = group.primary
     _emit(primary, "transport_start", {"parent_request_ids": group.parents()})
     marker = _TRANSPORT.set(primary)
     started = time.monotonic_ns()
+    result = None
+    def returned(value):
+        nonlocal result
+        result = value
     try:
-        result = client.request_with_continuation(job.api_id, job.path, job.body,
-                                                  cont_yn=job.cont_yn, next_key=job.next_key)
+        yield returned
     except BaseException as error:
         _emit(primary, "transport_end", {"outcome": "error", "error_type": type(error).__name__,
             "elapsed_ns": time.monotonic_ns() - started, "parent_request_ids": group.parents()})
@@ -230,14 +267,13 @@ def transport_call(client, job):
     else:
         _emit(primary, "transport_end", {"outcome": "returned", "result": result,
             "elapsed_ns": time.monotonic_ns() - started, "parent_request_ids": group.parents()})
-        return result
     finally:
         _TRANSPORT.reset(marker)
 
 
 @contextmanager
 def recording_scope(group, phase):
-    if group is None:
+    if group is None or group.primary is None:
         yield
         return
     primary = group.primary
@@ -256,6 +292,31 @@ def recording_scope(group, phase):
     finally:
         _emit(primary, "effect_end", {"phase": phase, "outcome": outcome,
                                       "parent_request_ids": group.parents()})
+
+
+@contextmanager
+def broker_effect_scope(group, phase, *, response_handler=None):
+    with recording_scope(group, phase):
+        if phase == "ingest":
+            from .diagnostic_top20_flow_input import flow_recording_scope
+            with flow_recording_scope(group.flow_link if group is not None else None, response_handler):
+                yield
+        else:
+            yield
+
+
+@contextmanager
+def broker_persistence_scope(owner, *, api_id=None):
+    if api_id is None:
+        with captured_workload_scope(owner, "rest_market", "rest_broker"):
+            yield
+        return
+    from .diagnostic_metrics import CURRENT_API_ID
+    marker = CURRENT_API_ID.set(api_id)
+    try:
+        yield
+    finally:
+        CURRENT_API_ID.reset(marker)
 
 
 def captured_catalog_loader(service):
@@ -603,7 +664,8 @@ class TaskTapeBindings:
         # Root requests are not allowed to inherit a child's recorded lane.
         lane_token = _TAPE_LANE.set(_UnboundTapeLane(self.client))
         try:
-            yield self
+            with bind_task_context(replay_task_input_context):
+                yield self
         finally:
             _TAPE_LANE.reset(lane_token)
             _TASK_BINDINGS.reset(task_token)

@@ -1,15 +1,58 @@
 from __future__ import annotations
 
 import json
+import math
+from contextlib import contextmanager
+from uuid import uuid4
 from datetime import datetime, timedelta
 from time import monotonic
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, urlopen, build_opener, HTTPRedirectHandler, HTTPSHandler
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 from kiwoom_monitor.domain.time_basis import aware_iso_kst, kst_now
+from kiwoom_monitor.domain.operation_context import (
+    OperationContextSnapshot, operation_context_scope, snapshot_operation_context,
+    validated_request_id,
+)
+
+
+def validate_producer_connection(server_url: str, owner: str, access_token: str) -> str:
+    """Reuse the explicit C2 target validation for a plain producer connection."""
+    from kiwoom_monitor.domain.research_contract import encode_reported_result_owner
+    parts = urlsplit(server_url)
+    if (parts.scheme not in {"http", "https"} or not parts.netloc or not parts.hostname
+            or parts.username is not None or parts.password is not None or parts.query or parts.fragment):
+        raise ValueError("an explicit result server URL without credentials/query/fragment is required")
+    encode_reported_result_owner(owner)
+    if not access_token:
+        raise ValueError("a dedicated result credential is required")
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
+
+
+def _http_request_id(value: object, *known_secrets: str) -> str:
+    """Choose observation metadata at the wire boundary; never authorize work."""
+    request_id = validated_request_id(value)
+    try:
+        request_id.encode("latin-1")
+    except UnicodeEncodeError:
+        request_id = ""
+    if any(secret and secret in request_id for secret in known_secrets):
+        request_id = ""
+    return request_id or uuid4().hex
+
+
+@contextmanager
+def _http_operation_context(access_token: str):
+    """Temporarily bind the exact outbound ID to the existing product context."""
+    current = snapshot_operation_context()
+    request_id = _http_request_id(current.request_id, access_token)
+    with operation_context_scope(OperationContextSnapshot(
+        current.source or "pc.central_http", request_id,
+    )):
+        yield request_id
 
 
 class CentralContentHttpError(RuntimeError):
@@ -20,6 +63,10 @@ class CentralContentHttpError(RuntimeError):
         self.detail = detail
         suffix = f" · {detail}" if detail else ""
         super().__init__(f"중앙 자료 서버 오류: HTTP {self.status_code}{suffix}")
+
+
+class CentralThemeConflict(CentralContentHttpError):
+    """Theme CAS/divergence requires reconciliation; never a legacy fallback."""
 
 
 class CentralContentUnavailableError(RuntimeError):
@@ -33,6 +80,15 @@ def is_missing_collection_error(error: BaseException) -> bool:
     return type(error) is RuntimeError and "HTTP 404" in str(error)
 
 
+class _RejectResultRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+def _result_urlopen(request, *, timeout, context):
+    return build_opener(HTTPSHandler(context=context), _RejectResultRedirect()).open(request, timeout=timeout)
+
+
 class CentralContentClient:
     """뉴스·AI·테마 문서를 개인 중앙 서버와 교환한다."""
 
@@ -43,6 +99,7 @@ class CentralContentClient:
         self._server_url = server_url.rstrip("/")
         self._token = access_token
         self._opener = opener
+        self._result_opener = _result_urlopen if opener is urlopen else opener
         self._timeout = timeout_seconds
         self._server_clock: tuple[datetime, float] | None = None
 
@@ -62,6 +119,32 @@ class CentralContentClient:
 
     def load_health(self) -> dict[str, Any]:
         return self._request("GET", "/health")
+
+    def accept_research_result(self, document: dict[str, Any], *, expected_owner: str) -> dict[str, Any]:
+        """Submit reported bytes with a pinned result-only principal, never admin."""
+        from kiwoom_monitor.domain.research_contract import ReportedResearchResult
+        value = ReportedResearchResult.from_document(document)
+        return self._request("POST", "/api/v1/research/reported-results", value.document,
+                             compact_json=True, expected_result_owner=expected_owner)
+
+    def load_research_result(self, result_id: str, *, expected_owner: str) -> dict[str, Any]:
+        """Read only the pinned authenticated producer's result namespace."""
+        from urllib.parse import quote
+        return self._request("GET", "/api/v1/research/reported-results/" + quote(result_id, safe=""),
+                             expected_result_owner=expected_owner)
+
+    def claim_news_body_job(self, *, expected_owner: str) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/news/body-jobs/claim", {}, expected_result_owner=expected_owner)
+
+    def load_news_body_input(self, key: str, attempts: int, *, expected_owner: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/news/body-jobs/{quote(key, safe='')}/input?attempts={attempts}", expected_result_owner=expected_owner)
+
+    def accept_news_body_result(self, key: str, envelope: dict, *, expected_owner: str) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/news/body-jobs/{quote(key, safe='')}/result", envelope,
+                             compact_json=True, expected_result_owner=expected_owner)
+
+    def load_news_body_receipt(self, key: str, attempts: int, *, expected_owner: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/news/body-jobs/{quote(key, safe='')}/receipt?attempts={attempts}", expected_result_owner=expected_owner)
 
     def load(
         self, collection: str, owner: str = "", limit: int = 1000, *, offset: int = 0,
@@ -108,6 +191,56 @@ class CentralContentClient:
         if as_of is not None:
             query_values["as_of"] = max(0.0, float(as_of))
         return self._request("GET", f"/api/v1/themes/history?{urlencode(query_values)}")
+
+    def load_current_theme_snapshot(self) -> tuple[dict[str, list[dict[str, Any]]], float | None]:
+        """Read current collections from one server snapshot, without adopting history."""
+        result = self._request("GET", "/api/v1/themes/current-snapshot")
+        collections, completed_at = result.get("collections"), result.get("completed_at")
+        if (not isinstance(collections, dict)
+                or set(collections) != {"theme_profile", "theme_stock", "theme_metadata"}
+                or any(not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)
+                       for rows in collections.values())
+                or "completed_at" not in result
+                or completed_at is not None and (
+                    type(completed_at) not in (int, float) or not math.isfinite(completed_at))):
+            raise RuntimeError("중앙 테마 스냅샷 응답 형식이 올바르지 않습니다.")
+        return collections, completed_at
+
+    @property
+    def theme_sync_scope(self) -> str:
+        parts = urlsplit(self._server_url)
+        return urlunsplit((parts.scheme.lower(), parts.netloc.rsplit("@", 1)[-1].lower(),
+                           parts.path.rstrip("/"), "", ""))
+
+    def load_accepted_theme_snapshot(self, *, snapshot_id: str | None = None) -> dict[str, Any] | None:
+        query = "" if snapshot_id is None else "?" + urlencode({"snapshot_id": snapshot_id})
+        try:
+            result = self._request("GET", "/api/v1/themes/snapshot" + query)
+        except CentralContentHttpError as error:
+            if error.status_code == 409:
+                raise CentralThemeConflict(error.status_code, error.detail) from error
+            raise
+        snapshot = result.get("snapshot")
+        if (type(result.get("known")) is not bool
+                or result["known"] != isinstance(snapshot, dict)
+                or not result["known"] and snapshot is not None):
+            raise RuntimeError("중앙 테마 수락본 응답 형식이 올바르지 않습니다.")
+        return snapshot
+
+    def publish_theme_snapshot(
+        self, document: dict[str, Any], *, publication_id: str,
+        expected_snapshot_id: str | None, effective_at: str | None, origin_device: str,
+    ) -> dict[str, Any]:
+        try:
+            return self._request("PUT", "/api/v1/themes/snapshot", {
+                "document": document, "publication_id": publication_id,
+                "expected_snapshot_id": expected_snapshot_id,
+                "effective_at": effective_at, "origin_device": origin_device,
+            })
+        except CentralContentHttpError as error:
+            if error.status_code == 409:
+                raise CentralThemeConflict(error.status_code, error.detail) from error
+            raise
 
     def load_news_history(
         self, kind: str, *, target: str = "", identity: str = "",
@@ -347,29 +480,39 @@ class CentralContentClient:
         return {str(key): bool(value) for key, value in values.items()}
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None,
-                 *, timeout_seconds: float | None = None) -> dict[str, Any]:
-        request = Request(
-            f"{self._server_url}{path}", method=method,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None,
-            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json;charset=UTF-8",
-                     "X-Kiwoom-Clock": "1"},
-        )
-        try:
-            with self._opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds,
-                              context=system_ssl_context()) as response:
-                result = json.loads(response.read().decode("utf-8"))
-                self._capture_server_clock(response)
-        except HTTPError as error:
-            detail = ""
+                 *, timeout_seconds: float | None = None, compact_json: bool = False,
+                 expected_result_owner: str | None = None) -> dict[str, Any]:
+        with _http_operation_context(self._token) as request_id:
+            if body is None:
+                encoded = None
+            elif compact_json:
+                encoded = json.dumps(body, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False).encode("utf-8")
+            else:
+                encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json;charset=UTF-8",
+                       "X-Kiwoom-Clock": "1", "X-Request-ID": request_id}
+            if expected_result_owner is not None:
+                from kiwoom_monitor.domain.research_contract import encode_reported_result_owner
+                headers["X-Kiwoom-Expected-Result-Owner"] = encode_reported_result_owner(expected_result_owner)
+            request = Request(f"{self._server_url}{path}", method=method, data=encoded, headers=headers)
+            opener = self._opener if expected_result_owner is None else self._result_opener
             try:
-                document = json.loads(error.read().decode("utf-8", errors="replace"))
-                if isinstance(document, dict):
-                    detail = str(document.get("detail", "")).strip()
-            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-                pass
-            raise CentralContentHttpError(error.code, detail) from error
-        except (URLError, TimeoutError, ConnectionError, OSError) as error:
-            raise CentralContentUnavailableError("중앙 자료 서버에 연결할 수 없습니다.") from error
-        if not isinstance(result, dict):
-            raise RuntimeError("중앙 자료 서버 응답 형식이 올바르지 않습니다.")
-        return result
+                with opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds,
+                                  context=system_ssl_context()) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                    self._capture_server_clock(response)
+            except HTTPError as error:
+                detail = ""
+                try:
+                    document = json.loads(error.read().decode("utf-8", errors="replace"))
+                    if isinstance(document, dict):
+                        detail = str(document.get("detail", "")).strip()
+                except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                    pass
+                raise CentralContentHttpError(error.code, detail) from error
+            except (URLError, TimeoutError, ConnectionError, OSError) as error:
+                raise CentralContentUnavailableError("중앙 자료 서버에 연결할 수 없습니다.") from error
+            if not isinstance(result, dict):
+                raise RuntimeError("중앙 자료 서버 응답 형식이 올바르지 않습니다.")
+            return result

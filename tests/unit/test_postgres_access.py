@@ -13,17 +13,18 @@ from pathlib import Path
 from threading import Barrier
 from unittest.mock import Mock, patch
 
+from kiwoom_monitor.domain.time_basis import KST
 from kiwoom_monitor.central_server.database import (
     PostgresQueryStore, StoredQuery, _NEWS_JOB_CLAIM_SELECT_SQL,
     _NEWS_JOB_CLAIM_DIAGNOSTIC_CANDIDATE_SQL,
 )
 from kiwoom_monitor.central_server.diagnostic_metrics import (
-    refresh_capture_state, summarize_db_calls, summarize_market_bar_saves,
+    install_postgres_observation, refresh_capture_state, summarize_db_calls, summarize_market_bar_saves,
 )
 from kiwoom_monitor.central_server.diagnostic_workloads import instance_id
 from kiwoom_monitor.central_server.postgres_access import (
     DBWriterContext, db_call_request_id, db_call_source, observe_existing_transaction,
-    open_observed_connection,
+    open_observed_connection, owned_connection_scope,
 )
 
 
@@ -51,6 +52,34 @@ class FakeCursor:
 
     def fetchone(self) -> tuple[object, ...] | None:
         return self.connection.rows[0] if self.connection.rows else None
+
+
+class NewsAIRevisionInsertCursor(FakeCursor):
+    """Count controlled revision INSERTs; do not fabricate other SQL results."""
+
+    def __init__(self, connection: FakeConnection) -> None:
+        super().__init__(connection)
+        self._revision_ids: set[str] = set()
+        self._revision_rowcount: int | None = None
+
+    def execute(self, sql: str, parameters: object = ()) -> FakeCursor:
+        self._revision_rowcount = None
+        result = super().execute(sql, parameters)
+        if sql.startswith("INSERT INTO central_news_ai_revisions("):
+            if (not sql.endswith("ON CONFLICT(analysis_revision_id) DO NOTHING")
+                    or not isinstance(parameters, tuple) or len(parameters) != 13):
+                raise AssertionError("uncontrolled news AI revision INSERT")
+            # This fixture starts empty. Match the native unique-ID no-op count.
+            revision_id = parameters[0]
+            self._revision_rowcount = int(revision_id not in self._revision_ids)
+            self._revision_ids.add(revision_id)
+        return result
+
+    @property
+    def rowcount(self) -> int:
+        if self._revision_rowcount is None:
+            raise AssertionError("rowcount requested outside controlled revision INSERT")
+        return self._revision_rowcount
 
 
 class DocumentAvailabilityClockTests(unittest.TestCase):
@@ -347,6 +376,7 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual("replay-call-001", self._calls()[-1]["request_id"])
 
     def setUp(self) -> None:
+        install_postgres_observation()
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.control = Path(self.directory.name) / "controls.json"
@@ -851,6 +881,209 @@ class PostgresAccessTests(unittest.TestCase):
         self.assertEqual(("unknown", 0, 0),
                          (call["outcome"], call["commits"], call["rollbacks"]))
         self.assertIsNone(call["close_ms"])
+
+    def test_owned_scope_releases_unknown_ack_once_with_original_acquire_timing(self) -> None:
+        raw = self._native_context_connection()
+        ack_error = OSError("controlled committed ACK loss")
+        clock = [10.0]
+
+        def connect():
+            clock[0] += 0.125
+            return raw
+
+        def lost_ack_commit():
+            raw.commits += 1
+            raise ack_error
+
+        raw.commit = lost_ack_commit
+        factory = Mock(side_effect=connect)
+        with patch("kiwoom_monitor.central_server.postgres_access.monotonic",
+                   side_effect=lambda: clock[0]):
+            try:
+                with owned_connection_scope(factory, DBWriterContext(
+                    "test", "owned_native", "lost_ack",
+                )) as observed:
+                    self.assertEqual(125.0, observed._connect_ms)
+                    observed.execute("INSERT INTO fixture VALUES (1)")
+            except OSError as error:
+                self.assertIs(ack_error, error)
+                traceback_names = []
+                traceback = error.__traceback__
+                while traceback is not None:
+                    traceback_names.append(traceback.tb_frame.f_code.co_name)
+                    traceback = traceback.tb_next
+                self.assertIn("lost_ack_commit", traceback_names)
+                self.assertNotIn("close", traceback_names)
+            else:
+                self.fail("the original ACK error must propagate")
+        factory.assert_called_once_with()
+        self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
+        self.assertTrue(raw.closed)
+        self.assertTrue(observed.close_attempted)
+        with self.assertRaises(AttributeError):
+            observed.close_attempted = False
+        calls = self._calls()
+        self.assertEqual(1, len(calls))
+        self.assertEqual(("unknown", 0, 125.0),
+                         (calls[0]["outcome"], calls[0]["commits"],
+                          calls[0]["connection_acquire_ms"]))
+        # The already-published low-level record is not rewritten by its owner.
+        self.assertIsNone(calls[0]["close_ms"])
+
+    def test_owned_scope_releases_handle_if_proxy_construction_fails(self) -> None:
+        raw = self._native_context_connection()
+        error = ValueError("controlled proxy construction failure")
+        factory = Mock(return_value=raw)
+        with patch("kiwoom_monitor.central_server.postgres_access.ObservedDBConnection",
+                   side_effect=error):
+            with self.assertRaises(ValueError) as caught:
+                with owned_connection_scope(factory, None):
+                    self.fail("construction failed before scope entry")
+        self.assertIs(error, caught.exception)
+        factory.assert_called_once_with()
+        self.assertEqual((0, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
+        self.assertTrue(raw.closed)
+
+    def test_owned_scope_releases_handle_if_native_enter_fails(self) -> None:
+        raw = self._native_context_connection()
+        error = ValueError("controlled native enter failure")
+        factory = Mock(return_value=raw)
+        with patch.object(type(raw), "__enter__", side_effect=error):
+            with self.assertRaises(ValueError) as caught:
+                with owned_connection_scope(factory, None):
+                    self.fail("native enter failed before scope entry")
+        self.assertIs(error, caught.exception)
+        factory.assert_called_once_with()
+        self.assertEqual((0, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
+        self.assertTrue(raw.closed)
+
+    def test_owned_scope_preserves_factory_failure_without_an_acquired_handle(self) -> None:
+        error = OSError("controlled factory failure")
+        factory = Mock(side_effect=error)
+        with patch("kiwoom_monitor.central_server.postgres_access.ObservedDBConnection") as proxy, \
+                patch("kiwoom_monitor.central_server.postgres_access.logger") as logger:
+            with self.assertRaises(OSError) as caught:
+                with owned_connection_scope(factory, None):
+                    self.fail("no handle was returned")
+        self.assertIs(error, caught.exception)
+        factory.assert_called_once_with()
+        proxy.assert_not_called()
+        logger.warning.assert_not_called()
+        self.assertEqual("connect_error", self._calls()[0]["outcome"])
+
+    def test_owned_scope_secondary_cleanup_and_logger_failures_preserve_ack_error(self) -> None:
+        for released, broken_logger in ((False, False), (True, False), (False, True)):
+            with self.subTest(released=released, broken_logger=broken_logger):
+                raw = self._native_context_connection()
+                ack_error = OSError("primary ACK error")
+                cleanup_error = RuntimeError("postgresql://secret:credential@host/db")
+                attempts = []
+
+                def lost_ack_commit():
+                    raw.commits += 1
+                    raise ack_error
+
+                def failed_close():
+                    attempts.append("close")
+                    if released:
+                        raw.closes += 1
+                    raise cleanup_error
+
+                raw.commit, raw.close = lost_ack_commit, failed_close
+                factory = Mock(return_value=raw)
+                with patch("kiwoom_monitor.central_server.postgres_access.logger") as logger:
+                    if broken_logger:
+                        logger.warning.side_effect = RuntimeError("broken logging handler")
+                    try:
+                        with owned_connection_scope(factory, None) as observed:
+                            pass
+                    except OSError as error:
+                        self.assertIs(ack_error, error)
+                        traceback = error.__traceback__
+                        names = []
+                        while traceback is not None:
+                            names.append(traceback.tb_frame.f_code.co_name)
+                            traceback = traceback.tb_next
+                        self.assertIn("lost_ack_commit", names)
+                        self.assertNotIn("failed_close", names)
+                    else:
+                        self.fail("cleanup cannot replace or hide the original ACK error")
+                    logger.warning.assert_called_once_with(
+                        "owned PostgreSQL connection cleanup failed: %s", "RuntimeError",
+                    )
+                factory.assert_called_once_with()
+                self.assertEqual(["close"], attempts)
+                self.assertEqual((1, 0, int(released)),
+                                 (raw.commits, raw.rollbacks, raw.closes))
+                self.assertEqual(released, raw.closed)
+                self.assertTrue(observed.close_attempted)
+                self.assertEqual(("unknown", 0), (observed._outcome, observed._commits))
+
+    def test_owned_scope_does_not_retry_a_close_already_attempted_by_driver(self) -> None:
+        raw = self._native_context_connection()
+        error = OSError("controlled native close failure")
+        raw.close = Mock(side_effect=error)
+        with patch("kiwoom_monitor.central_server.postgres_access.logger") as logger:
+            with self.assertRaises(OSError) as caught:
+                with owned_connection_scope(lambda: raw, None) as observed:
+                    pass
+        self.assertIs(error, caught.exception)
+        self.assertTrue(observed.close_attempted)
+        self.assertFalse(raw.closed)
+        raw.close.assert_called_once_with()
+        logger.warning.assert_not_called()
+        self.assertEqual((1, 0), (raw.commits, raw.rollbacks))
+
+    def test_owned_scope_does_not_close_an_already_closed_handle_again(self) -> None:
+        raw = self._native_context_connection()
+        error = ValueError("body failure after explicit close")
+        with self.assertRaises(ValueError) as caught:
+            with owned_connection_scope(lambda: raw, None) as observed:
+                observed.close()
+                raise error
+        self.assertIs(error, caught.exception)
+        self.assertEqual((0, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
+
+    def test_owned_scope_preserves_pool_driver_ownership(self) -> None:
+        for lost_ack in (False, True):
+            with self.subTest(lost_ack=lost_ack):
+                raw = self._native_context_connection(fail_commit=lost_ack)
+                raw._pool = Mock(close_returns=True)
+                if lost_ack:
+                    with self.assertRaisesRegex(ConnectionError, "commit response lost"):
+                        with owned_connection_scope(lambda: raw, None) as observed:
+                            pass
+                else:
+                    with owned_connection_scope(lambda: raw, None) as observed:
+                        pass
+                self.assertEqual((1, 0, 0), (raw.commits, raw.rollbacks, raw.closes))
+                self.assertFalse(raw.closed)
+                self.assertFalse(observed.close_attempted)
+                raw._pool.putconn.assert_not_called()
+
+    def test_owned_scope_preserves_success_and_body_error_driver_order(self) -> None:
+        for body_error in (None, ValueError("controlled body failure")):
+            with self.subTest(body_error=body_error):
+                raw = self._native_context_connection()
+                events = []
+                for name in ("commit", "rollback", "close"):
+                    original = getattr(raw, name)
+
+                    def record(original=original, name=name):
+                        events.append(name)
+                        return original()
+
+                    setattr(raw, name, record)
+                try:
+                    with owned_connection_scope(lambda: raw, None):
+                        if body_error is not None:
+                            raise body_error
+                except ValueError as error:
+                    self.assertIs(body_error, error)
+                else:
+                    self.assertIsNone(body_error)
+                self.assertEqual(["rollback" if body_error else "commit", "close"], events)
+                self.assertEqual(1, raw.closes)
 
     def _claimed_news_fixture(self, attempts):
         raw = self._native_context_connection()
@@ -1415,12 +1648,18 @@ class PostgresAccessTests(unittest.TestCase):
                           self._calls()[0]["rollbacks"]))
 
     def test_external_news_finish_uses_one_native_transaction_per_stage(self) -> None:
-        store = PostgresQueryStore("unused")
+        accepted_at = datetime(2026, 10, 27, 9, 30, tzinfo=KST)
+        clock = Mock(return_value=accepted_at)
+        store = PostgresQueryStore("unused", now_provider=clock)
 
         def complete(cursor: FakeCursor, value: dict[str, object], *, postgres: bool,
-                     candidate_grouper: object) -> dict[str, str]:
+                     candidate_grouper: object, now_provider) -> dict[str, str]:
             self.assertTrue(postgres)
             self.assertIs(store._candidate_grouper, candidate_grouper)
+            self.assertIs(store._now_provider, now_provider)
+            clock.reset_mock()
+            self.assertEqual(accepted_at, now_provider())
+            clock.assert_called_once_with()
             cursor.execute("UPDATE central_news_jobs SET state='COMPLETED' WHERE job_key=%s",
                            (value["job_key"],))
             return {"state": "completed", "output_ref": "revision-1"}
@@ -1576,6 +1815,7 @@ class PostgresAccessTests(unittest.TestCase):
 
     def test_news_ai_projection_revision_and_usage_share_native_transaction(self) -> None:
         raw = self._native_context_connection()
+        raw.cursor = lambda: NewsAIRevisionInsertCursor(raw)
         store = PostgresQueryStore("unused")
         documents = [{"owner": "005930", "key": "article-1",
                       "document": {"summary": "요약"}}]
@@ -1587,11 +1827,14 @@ class PostgresAccessTests(unittest.TestCase):
         usage = [{"owner": "2026-09-27", "key": "request-1",
                   "document": {"total_tokens": 5}}]
         with patch.object(store, "_connect", return_value=raw):
-            store.save_news_ai_results(documents, revisions, usage)
+            references = store.save_news_ai_results(documents, revisions, usage)
+        self.assertEqual("UNKNOWN", references[0]["status"], "legacy usage has no actual inference proof")
+        self.assertEqual("analysis-1", references[0]["analysis_revision_id"])
+        self.assertEqual("article-1", references[0]["article_revision_id"])
         self.assertEqual(["INSERT", "INSERT", "INSERT"],
                          [item[0] for item in raw.statements])
-        self.assertEqual("news_ai", raw.statements[0][1][0][0])
-        self.assertEqual("analysis-1", raw.statements[1][1][0])
+        self.assertEqual("analysis-1", raw.statements[0][1][0])
+        self.assertEqual("news_ai", raw.statements[1][1][0][0])
         self.assertEqual("news_request_usage", raw.statements[2][1][0][0])
         self.assertEqual((1, 0, 1), (raw.commits, raw.rollbacks, raw.closes))
         call = self._calls()[0]
@@ -1601,6 +1844,7 @@ class PostgresAccessTests(unittest.TestCase):
 
     def test_news_ai_usage_insert_error_rolls_back_all_three_stages(self) -> None:
         raw = self._native_context_connection()
+        raw.cursor = lambda: NewsAIRevisionInsertCursor(raw)
         raw.fail_execute = 3
         store = PostgresQueryStore("unused")
         with patch.object(store, "_connect", return_value=raw):

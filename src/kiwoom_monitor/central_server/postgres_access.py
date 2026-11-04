@@ -7,47 +7,42 @@ without taking ownership of its connection or nested savepoints.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import monotonic, time
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterator, Protocol
 from uuid import uuid4
 
 from collections import Counter
 from threading import BoundedSemaphore, Event, Thread
 
-_DB_CALL_SOURCE: ContextVar[str] = ContextVar("db_call_source", default="")
-_DB_CALL_REQUEST_ID: ContextVar[str] = ContextVar("db_call_request_id", default="")
+from kiwoom_monitor.domain.operation_context import (
+    _DB_CALL_SOURCE, _DB_CALL_REQUEST_ID, current_db_call_tags,
+    db_call_source, db_call_request_id,
+)
+
+logger = logging.getLogger(__name__)
 
 
-def current_db_call_tags() -> dict[str, str]:
-    return {"source": _DB_CALL_SOURCE.get()[:100], "request_id": _DB_CALL_REQUEST_ID.get()[:100]}
+# Process composition installs the existing diagnostic owner explicitly. Native
+# access retains no capture/trace state and never imports a diagnostic module.
+_DATABASE_OBSERVER: Any = None
+
+
+def install_database_observer(observer: Any) -> None:
+    global _DATABASE_OBSERVER
+    _DATABASE_OBSERVER = observer
+
+
+def database_observer() -> Any:
+    """Return the installed observer, or None when detail observation is absent."""
+    return _DATABASE_OBSERVER
 
 
 def _recorded_identity() -> dict[str, str]:
-    from .diagnostic_replay_contract import operation_identity
-    return operation_identity()
-
-
-@contextmanager
-def db_call_source(source: str):
-    """Identify the owning operation across asyncio.to_thread DB reads."""
-    token = _DB_CALL_SOURCE.set(source)
-    try:
-        yield
-    finally:
-        _DB_CALL_SOURCE.reset(token)
-
-
-@contextmanager
-def db_call_request_id(request_id: str):
-    """Attach a bounded external operation ID to calls made in this scope."""
-    token = _DB_CALL_REQUEST_ID.set(request_id[:100])
-    try:
-        yield
-    finally:
-        _DB_CALL_REQUEST_ID.reset(token)
+    observer = database_observer()
+    return observer.replay.operation_identity() if observer is not None else {}
 
 
 @dataclass(frozen=True)
@@ -149,6 +144,7 @@ class ObservedDBConnection:
         self._connect_ms = connect_ms
         self._capture_token = capture_token
         self._trace_token = trace_token
+        self._observer = database_observer()
         self._hook = hook
         # None means the first statement failed before a transaction was confirmed.
         self._transaction_started: bool | None = False
@@ -165,6 +161,7 @@ class ObservedDBConnection:
         self._rollback_started_at: float | None = None
         self._rollback_finished_at: float | None = None
         self._close_ms: float | None = None
+        self._close_attempted = False
         self._commits = 0
         self._rollbacks = 0
         self._outcome = "not_started"
@@ -224,9 +221,7 @@ class ObservedDBConnection:
         if not self._capture_token[0]:
             return False
         try:
-            from .diagnostic_metrics import capture_session_token
-
-            return capture_session_token() == self._capture_token
+            return self._observer.capture_session_token() == self._capture_token
         except Exception:
             return False
 
@@ -266,15 +261,23 @@ class ObservedDBConnection:
             self._rollback_ms = _milliseconds(started)
             self._notify_finished("rollback", self._rollback_ms)
 
+    @property
+    def close_attempted(self) -> bool:
+        """Whether this proxy has attempted native close, including a failed close."""
+        return self._close_attempted
+
     def close(self) -> None:
         started = monotonic()
         try:
+            self._close_attempted = True
             self._raw.close()
             if self._outcome == "not_started":
                 if self._transaction_started is True:
                     self._outcome = "closed_uncommitted"
                 elif self._transaction_started is None:
                     self._outcome = "closed_transaction_unknown"
+                elif self._context is not None and self._context.access_mode == "connection":
+                    self._outcome = "closed"
         except BaseException as error:
             self._outcome = "unknown"
             self._failure("close", error)
@@ -293,10 +296,8 @@ class ObservedDBConnection:
         if self._hook is None or not self._capture_token[0]:
             return False
         try:
-            from .diagnostic_metrics import capture_session_token, refresh_capture_state
-
-            refresh_capture_state(force=True)
-            return capture_session_token() == self._capture_token
+            self._observer.refresh_capture_state(force=True)
+            return self._observer.capture_session_token() == self._capture_token
         except Exception as error:
             self._failure("observer", error)
             return False
@@ -359,8 +360,7 @@ class ObservedDBConnection:
             record["phase_diagnostics_truncated"] = self._phase_diagnostics_truncated
         if self._trace_token is not None:
             try:
-                from .diagnostic_trace import emit
-                emit(self._trace_token, "call_end", {
+                self._observer.trace.emit(self._trace_token, "call_end", {
                     "call_id": self.call_id, "backend_pid": self.backend_pid,
                     **(context.recorded_identity if context else {}),
                     "database_name": record["database_name"],
@@ -378,9 +378,7 @@ class ObservedDBConnection:
         if not self._capture_token[0]:
             return
         try:
-            from .diagnostic_metrics import record_db_call
-
-            record_db_call(record, capture_token=self._capture_token)
+            self._observer.record_db_call(record, capture_token=self._capture_token)
             if self._hook_active():
                 self._hook.call_finished(record)
         except Exception:
@@ -392,18 +390,18 @@ class ObservedExistingDBTransaction:
     """Observe one native transaction on a caller-owned connection."""
 
     def __init__(self, raw: Any, context: DBWriterContext,
-                 *, hook: DBSlowHook | None = None) -> None:
-        from .diagnostic_metrics import capture_session_token
-
+                 *, hook: DBSlowHook | None = None, require_idle: bool = False) -> None:
+        self._require_idle = require_idle
+        observer = database_observer()
         try:
-            capture_token = capture_session_token()
+            capture_token = observer.capture_session_token() if observer is not None else (False, None)
         except Exception:
             capture_token = (False, None)
         trace_token = None
         try:
-            from .diagnostic_trace import token, emit
-            trace_token = token()
-            emit(trace_token, "call_start", _trace_start(context))
+            if observer is not None:
+                trace_token = observer.trace.token()
+                observer.trace.emit(trace_token, "call_start", _trace_start(context))
         except Exception:
             pass
         self.connection = ObservedDBConnection(
@@ -415,6 +413,10 @@ class ObservedExistingDBTransaction:
 
     def __enter__(self) -> ObservedDBConnection:
         try:
+            if self._require_idle and self.connection._raw.info.transaction_status.name != "IDLE":
+                from psycopg import OperationalError
+
+                raise OperationalError("PostgreSQL connection is not idle before the transaction")
             self._native_transaction = self.connection._raw.transaction()
             self._native_transaction.__enter__()
             self.connection._transaction_started = True
@@ -438,7 +440,21 @@ class ObservedExistingDBTransaction:
         else:
             observed._rollback_started_at = time()
         try:
+            if self._require_idle and stage == "commit" and observed._raw.info.transaction_status.name != "INTRANS":
+                from psycopg import OperationalError
+
+                raise OperationalError("PostgreSQL transaction is not ready to commit")
             result = self._native_transaction.__exit__(exc_type, exc, traceback)
+            if self._require_idle and observed._raw.info.transaction_status.name != "IDLE":
+                from psycopg import OperationalError
+
+                # psycopg can return normally without confirming native completion.
+                error = OperationalError(f"PostgreSQL transaction did not confirm {stage}")
+                if exc is None:
+                    raise error
+                observed._outcome = "unknown"
+                observed._failure(stage, error)
+                return False
             if stage == "commit":
                 observed._commits += 1
                 observed._outcome = "committed"
@@ -464,29 +480,28 @@ class ObservedExistingDBTransaction:
 
 
 def observe_existing_transaction(connection: Any, context: DBWriterContext, *,
-                                 hook: DBSlowHook | None = None
+                                 hook: DBSlowHook | None = None, require_idle: bool = False
                                  ) -> ObservedExistingDBTransaction:
-    """Measure an outer transaction; leave connection lifetime and savepoints to its caller."""
-    return ObservedExistingDBTransaction(connection, context, hook=hook)
+    """Measure a transaction; require native IDLE boundaries for an owned top-level transaction."""
+    return ObservedExistingDBTransaction(connection, context, hook=hook, require_idle=require_idle)
 
 
 def open_observed_connection(connect: Callable[[], Any],
                              context: DBWriterContext | None, *,
                              hook: DBSlowHook | None = None) -> ObservedDBConnection:
     """Call the existing factory exactly once and preserve its failure behavior."""
-    from .diagnostic_metrics import capture_session_token, record_db_call
-
+    observer = database_observer()
     try:
-        capture_token = capture_session_token()
+        capture_token = observer.capture_session_token() if observer is not None else (False, None)
     except Exception:
         # A broken diagnostic control must not prevent the actual DB call.
         capture_token = (False, None)
     trace_token = None
     trace_call_id = context.call_id if context else uuid4().hex
     try:
-        from .diagnostic_trace import token, emit
-        trace_token = token()
-        emit(trace_token, "call_start", _trace_start(context, trace_call_id))
+        if observer is not None:
+            trace_token = observer.trace.token()
+            observer.trace.emit(trace_token, "call_start", _trace_start(context, trace_call_id))
     except Exception:
         pass
     started_at, started_mono = time(), monotonic()
@@ -520,8 +535,7 @@ def open_observed_connection(connect: Callable[[], Any],
             }
             try:
                 if trace_token is not None:
-                    from .diagnostic_trace import emit
-                    emit(trace_token, "call_end", {
+                    observer.trace.emit(trace_token, "call_end", {
                         "call_id": trace_call_id, "outcome": "connect_error",
                         "connection_acquire_ms": record["connection_acquire_ms"],
                         "total_ms": record["total_ms"], "commits": 0,
@@ -529,7 +543,7 @@ def open_observed_connection(connect: Callable[[], Any],
                         "exception_types": [type(error).__name__],
                     })
                 if capture_token[0]:
-                    record_db_call(record, capture_token=capture_token)
+                    observer.record_db_call(record, capture_token=capture_token)
             except Exception:
                 pass
         raise
@@ -538,6 +552,78 @@ def open_observed_connection(connect: Callable[[], Any],
         connect_ms=_milliseconds(started_mono), capture_token=capture_token,
         hook=hook, trace_token=trace_token, call_id=trace_call_id,
     )
+
+
+@contextmanager
+def owned_connection_scope(connect: Callable[[], Any],
+                           context: DBWriterContext | None, *,
+                           hook: DBSlowHook | None = None
+                           ) -> Iterator[ObservedDBConnection]:
+    """Release a fresh, non-pool handle when its native scope raises.
+
+    Only acquisition owners may opt in. Retained/borrowed handles continue to
+    use open_observed_connection or observe_existing_transaction unchanged.
+    """
+    raw: Any = None
+    observed: ObservedDBConnection | None = None
+
+    def acquire() -> Any:
+        nonlocal raw
+        # Keep the real acquisition inside open_observed_connection's timer.
+        raw = connect()
+        return raw
+
+    try:
+        observed = open_observed_connection(acquire, context, hook=hook)
+        with observed as connection:
+            yield connection
+    except BaseException:
+        try:
+            if (raw is not None and not raw.closed and not getattr(raw, "_pool", None)
+                    and (observed is None or not observed.close_attempted)):
+                if observed is None:
+                    # Construction can fail after the factory returned a handle.
+                    raw.close()
+                else:
+                    observed.close()
+        except BaseException as cleanup_error:
+            try:
+                # One bounded basic log; no DSN, exception message or traceback.
+                logger.warning("owned PostgreSQL connection cleanup failed: %s",
+                               type(cleanup_error).__name__[:100])
+            except BaseException:
+                pass
+        raise
+
+
+@contextmanager
+def owned_postgres_session(connect: Callable[[], Any], context: DBWriterContext) -> Iterator[Any]:
+    """Own a physical connection while its callers commit their own transactions."""
+    raw = owner = None
+
+    def acquire():
+        nonlocal raw
+        raw = connect()
+        return raw
+
+    try:
+        owner = open_observed_connection(acquire, context)
+        yield raw
+    except BaseException:
+        try:
+            if owner is not None:
+                owner.close()
+            elif raw is not None:
+                raw.close()
+        except BaseException as cleanup_error:
+            try:
+                logger.warning("owned PostgreSQL session cleanup failed: %s",
+                               type(cleanup_error).__name__)
+            except BaseException:
+                pass
+        raise
+    else:
+        owner.close()
 
 
 def _trace_start(context: DBWriterContext | None, call_id: str | None = None) -> dict[str, object]:

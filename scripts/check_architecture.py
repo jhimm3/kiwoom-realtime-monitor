@@ -63,7 +63,7 @@ def cycle_edges(graph):
 
 
 def inspect(root, rules):
-    dependencies, _, files = _dependency_graph(root)
+    dependencies, _, files = _dependency_graph(root, include_resources=False)
     modules = {module for module, file in files.items() if file.startswith('src/kiwoom_monitor/')}
     graph = {module: dependencies[module] & modules - {module} for module in modules}
     counts, evidence, watched = Counter(), {}, set()

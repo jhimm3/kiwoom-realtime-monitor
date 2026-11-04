@@ -26,6 +26,7 @@ def retained_bytes(value):
 class RestRequestLaneCapacityTests(unittest.IsolatedAsyncioTestCase):
     async def test_4000_distinct_probe_requests_fit_original_budget_and_bound_retention(self):
         owner = SimpleNamespace()
+        state = inputs.new_broker_state()
         legacy_charge = 0
         with capture_owner('top20', 'capacity-probe', 'capacity-mixed'), \
                 patch.object(inputs.trace, 'reject_input') as rejected:
@@ -36,11 +37,10 @@ class RestRequestLaneCapacityTests(unittest.IsolatedAsyncioTestCase):
                         {'stk_cd':'005930','probe_round':index*30}, 'N','',True))
                     kind = ('request', signature)
                     legacy_charge += 512 + 4*(len('capacity-mixed')+len(str(kind)))
-                    receipt = inputs._new(owner, token='fixture', kind=kind)
+                    receipt = inputs._new(owner, token='fixture', kind=kind,state=state)
                     self.assertIsNotNone(receipt)
                     self.assertEqual(1, receipt['ordinal'])
             rejected.assert_not_called()
-        state = owner._market_input_sequences
         self.assertGreater(legacy_charge, inputs.MAX_LANE_BYTES)
         self.assertEqual(4000, len(state[1]))
         self.assertLess(state[2], inputs.MAX_LANE_BYTES)
@@ -48,35 +48,36 @@ class RestRequestLaneCapacityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unicode_identity_repeats_keep_independent_exact_ordinals(self):
         owner = SimpleNamespace()
+        state = inputs.new_broker_state()
         bodies = ({'stk_cd':'005930','note':'한글 😀 "\\' * 200},
                   {'note':'한글 😀 "\\' * 200,'stk_cd':'005930'},
                   {'stk_cd':'005930','note':'한글 😀 다른 요청' * 200})
         signatures = [inputs._signature(inputs._request_key('market','ka10001',
             '/api/dostk/stkinfo', body, 'N','',True)) for body in bodies]
         with capture_owner('top20','fixture','lane:unicode'):
-            receipts = [inputs._new(owner, token='fixture',kind=('request',signature))
+            receipts = [inputs._new(owner, token='fixture',kind=('request',signature),state=state)
                         for signature in signatures]
-            again = inputs._new(owner, token='fixture',kind=('request',signatures[-1]))
+            again = inputs._new(owner, token='fixture',kind=('request',signatures[-1]),state=state)
         self.assertEqual([1,2,1], [row['ordinal'] for row in receipts])
         self.assertEqual(2, again['ordinal'])
-        state = owner._market_input_sequences
         self.assertEqual(set(signatures), {key[1][1].decode('utf-8') for key in state[1]})
         self.assertGreaterEqual(state[2], retained_bytes(state[1]))
 
     async def test_byte_and_entry_limits_still_reject_new_keys_and_reset_on_new_trace(self):
         owner = SimpleNamespace()
+        state = inputs.new_broker_state()
         with capture_owner('top20','fixture','lane:bounded'), \
                 patch.object(inputs.trace,'reject_input') as rejected:
-            first = inputs._new(owner, token='first',kind=('request','key-a'))
-            before = owner._market_input_sequences[2]
+            first = inputs._new(owner, token='first',kind=('request','key-a'),state=state)
+            before = state[2]
             with patch.object(inputs,'MAX_LANE_BYTES',before):
-                self.assertIsNone(inputs._new(owner,token='first',kind=('request','key-b')))
-                self.assertEqual(2, inputs._new(owner,token='first',kind=('request','key-a'))['ordinal'])
+                self.assertIsNone(inputs._new(owner,token='first',kind=('request','key-b'),state=state))
+                self.assertEqual(2, inputs._new(owner,token='first',kind=('request','key-a'),state=state)['ordinal'])
             with patch.object(inputs,'MAX_LANES',1):
-                self.assertIsNone(inputs._new(owner,token='first',kind=('request','key-b')))
-                fresh = inputs._new(owner,token='second',kind=('request','key-b'))
+                self.assertIsNone(inputs._new(owner,token='first',kind=('request','key-b'),state=state))
+                fresh = inputs._new(owner,token='second',kind=('request','key-b'),state=state)
             self.assertEqual(2, rejected.call_count)
             self.assertEqual(1, first['ordinal'])
             self.assertEqual(1, fresh['ordinal'])
-            self.assertEqual(1, len(owner._market_input_sequences[1]))
-            self.assertEqual(before, owner._market_input_sequences[2])
+            self.assertEqual(1, len(state[1]))
+            self.assertEqual(before, state[2])

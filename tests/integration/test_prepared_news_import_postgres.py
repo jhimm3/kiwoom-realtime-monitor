@@ -17,8 +17,11 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from kiwoom_monitor.central_server.database import PostgresQueryStore
-from kiwoom_monitor.central_server.diagnostic_metrics import refresh_capture_state, summarize_db_calls
+from kiwoom_monitor.central_server.diagnostic_metrics import (
+    install_postgres_observation, refresh_capture_state, summarize_db_calls,
+)
 from kiwoom_monitor.central_server.diagnostic_workloads import instance_id
+from kiwoom_monitor.central_server.postgres_access import database_observer, install_database_observer
 from scripts.import_prepared_historical_news_to_nas import _complete_batch, _prepare_articles
 
 
@@ -182,8 +185,10 @@ class PreparedNewsImportPostgresTests(unittest.TestCase):
                     "capture": {"expires_at": time.time() + 60},
                 }), encoding="utf-8")
                 with patch.dict(os.environ, {"KIWOOM_DIAGNOSTIC_WORKLOAD_PATH": str(control)}):
-                    refresh_capture_state(force=True)
+                    self.addCleanup(install_database_observer, database_observer())
+                    install_postgres_observation()
                     try:
+                        self.assertTrue(refresh_capture_state(force=True)["enabled"])
                         with self.store._connect() as connection:
                             pid = connection.info.backend_pid
                             self.assertEqual("IDLE", connection.info.transaction_status.name)

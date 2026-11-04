@@ -12,6 +12,8 @@ import hashlib
 import inspect
 import json
 import time
+from .diagnostic_top20_lifecycle_input import CollectorInputRecorder
+
 from contextlib import asynccontextmanager, nullcontext
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -654,8 +656,11 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
         def no_token():
             raise AssertionError('recorded collector replay attempted network credentials')
         measured = _RecordedCollectorStore(store, clock, component, window_start_seconds)
-        collector = CentralRealtimeCollector(no_token, 'real', RealtimeHub(), clock.now,
-                                             measured, snapshot_sleep=clock.sleep)
+        from . import diagnostic_top20_lifecycle_input as hub_capture
+        hub_observer = hub_capture.HubInputRecorder()
+        hub = RealtimeHub(now_provider=clock.now, observer=hub_observer)
+        collector = CentralRealtimeCollector(no_token, 'real', hub, clock.now,
+                                             measured, snapshot_sleep=clock.sleep, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
         report = {'component': component, 'input_count': 0, 'input_lag_ms_max': 0,
                   'collector_input_version': dict(plan.collector_input_versions)[component],
                   'event_type_counts': {}, 'excluded_type_counts': {},
@@ -675,7 +680,7 @@ async def _execute_recorded_operations(store, events, *, started_mono_ns,
                     measured.input_id, measured.input_seq = row['input_id'], row['seq']
                     kind = row['input_kind']
                     if kind == 'initial_state':
-                        await collector.start_input_replay()
+                        await collector.start_input_replay(message_validator=validate_collector_message)
                         started = True
                         collector.restore_replay_source_state(
                             _source_keys(value['approved_sources']),

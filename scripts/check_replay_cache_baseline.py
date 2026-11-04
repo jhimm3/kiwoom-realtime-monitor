@@ -62,7 +62,18 @@ def read_secrets(path):
     return value
 
 
-def run(path, *, top20_lifecycle=False):
+def run(path, *, top20_lifecycle=False, report=None):
+    execution = None
+    if report is not None:
+        mark_stage('fingerprint_source_before_v2_gates')
+        from scripts.run_regression import _code_tree_identity, _IdentityTestResult, _suite_test_ids
+
+        execution = {
+            'group': 'replay_cache_v2', 'source_start': _code_tree_identity(),
+            'discovered': {}, 'planned_test_ids': [], 'executed_test_ids': [], 'ran': 0,
+            'failures': 0, 'errors': 0, 'skipped': 0,
+            'expected_failures': 0, 'unexpected_successes': 0,
+        }
     mark_stage('load_fixture_and_test_modules')
     import psycopg
     from psycopg import sql
@@ -123,8 +134,12 @@ def run(path, *, top20_lifecycle=False):
                       KIWOOM_REPLAY_SOURCE_ORIGIN=source_origin, KIWOOM_REPLAY_TEMPORARY_FIXTURE='1')
     mark_stage('run_v1_and_v2_postgres_acceptance_suites')
     outcomes = []
+    v1_baseline_module = 'tests.integration.test_recorded_replay_baseline_postgres'
+    # The hosted receipt covers the complete module, including C07.
+    v1_baseline_suite = ((v1_baseline_module, 5) if execution is not None else
+                         (f'{v1_baseline_module}.RecordedReplayBaselinePostgresTests', 4))
     suites = [
-        ('tests.integration.test_recorded_replay_baseline_postgres.RecordedReplayBaselinePostgresTests', 4),
+        v1_baseline_suite,
         ('tests.integration.test_replay_cache_baseline_postgres.ReplayCacheBaselinePostgresTests', 3),
         ('tests.integration.test_replay_cache_execution_postgres.ReplayCacheExecutionPostgresTests', 3),
         ('tests.integration.test_top20_replay_runtime_postgres.Top20ReplayRuntimePostgresTests', 3),
@@ -132,11 +147,25 @@ def run(path, *, top20_lifecycle=False):
     if top20_lifecycle:
         suites.append(('tests.integration.test_top20_session_postgres.Top20SessionPostgresTests', 2))
     for name, expected in suites:
-        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromName(name))
+        suite = unittest.defaultTestLoader.loadTestsFromName(name)
+        if execution is not None:
+            module = name if name == v1_baseline_module else name.rsplit('.', 1)[0]
+            execution['discovered'][module] = suite.countTestCases()
+            execution['planned_test_ids'].extend(_suite_test_ids(suite))
+        result = unittest.TextTestRunner(verbosity=2, **(
+            {'resultclass': _IdentityTestResult} if execution is not None else {})).run(suite)
         outcomes.append({'suite': name, 'tests': result.testsRun, 'skipped': len(result.skipped),
                          'passed': (result.wasSuccessful() and result.testsRun == expected
                                     and not result.skipped and not result.expectedFailures
                                     and not result.unexpectedSuccesses)})
+        if execution is not None:
+            execution['executed_test_ids'].extend(result.executed_test_ids)
+            execution['ran'] += result.testsRun
+            for key, items in (
+                ('failures', result.failures), ('errors', result.errors), ('skipped', result.skipped),
+                ('expected_failures', result.expectedFailures), ('unexpected_successes', result.unexpectedSuccesses),
+            ):
+                execution[key] += len(items)
     mark_stage('verify_v1_snapshot_and_v2_baseline_after_suites')
     with baseline.ReplayDatabaseLease(url, value['owner_token'], baseline_version=2, cache_clock=clock) as lease:
         lease.restore(second['baseline_id'])
@@ -148,6 +177,19 @@ def run(path, *, top20_lifecycle=False):
         if not preserved:
             raise RuntimeError('original_v1_snapshot_changed')
     success = all(item['passed'] for item in outcomes)
+    if execution is not None:
+        mark_stage('fingerprint_source_after_v2_gates')
+        execution['source_end'] = _code_tree_identity()
+        execution['modules'] = list(execution['discovered'])
+        execution['planned'] = sum(execution['discovered'].values())
+        planned_ids = execution['planned_test_ids']
+        success = (success and execution['source_start'] == execution['source_end']
+                   and execution['planned'] == execution['ran'] == len(planned_ids) == len(set(planned_ids))
+                   and planned_ids == execution['executed_test_ids'])
+        if success:
+            mark_stage('stage_v2_execution_receipt')
+            execution['status'] = 'passed'
+            report.write_text(json.dumps(execution, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(json.dumps({'state': 'passed' if success else 'failed', 'source': str(ROOT),
                       'database': baseline.DATABASE_NAME, 'temporary_postgres': True,
                       'v1_baseline_id': first['baseline_id'], 'v2_baseline_id': second['baseline_id'],
@@ -163,12 +205,15 @@ def main(argv=None):
     group.add_argument('--make-secrets', type=Path)
     group.add_argument('--secrets-file', type=Path)
     parser.add_argument('--top20-lifecycle', action='store_true')
+    parser.add_argument('--report', type=Path, help='include C07 restore and stage hosted execution evidence without credentials')
     args = parser.parse_args(argv)
+    if args.report is not None and args.secrets_file is None:
+        parser.error('--report requires --secrets-file')
     try:
         if args.make_secrets:
             print(make_secrets(args.make_secrets), flush=True)
             return 0
-        return run(args.secrets_file, top20_lifecycle=args.top20_lifecycle)
+        return run(args.secrets_file, top20_lifecycle=args.top20_lifecycle, report=args.report)
     except Exception as error:
         # libpq/SQL errors can contain secrets; do not echo their text or DSN.
         message = str(error)

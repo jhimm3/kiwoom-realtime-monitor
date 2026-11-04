@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -158,7 +158,7 @@ class MockAutomationRecoveryRepository(Protocol):
         self, value: MockAutomationRecoveryDecision,
     ) -> bool: ...
     def load_latest_mock_automation_risk(
-        self, account_ref: str,
+        self, account_ref: str, *, _reader: Any = None,
     ) -> MockAutomationRiskSnapshot | None: ...
 
 
@@ -302,24 +302,45 @@ def record_mock_automation_recovery(
     repository: MockAutomationRecoveryRepository,
     runtime: DisabledOwnedRuntime,
     recovery: MockAccountRecovery,
-    metrics: MockAutomationRecoveryMetrics,
+    metrics: MockAutomationRecoveryMetrics | MockAutomationRiskSnapshot,
     *,
     account_ref: str,
     spec_id: str,
     risk_snapshot_id: str = "",
     risk_reconciliation_revision: int = 0,
 ) -> MockAutomationRecoveryDecision:
-    spec = repository.load_mock_automation_spec(account_ref, spec_id)
-    if spec is None:
-        raise ValueError("mock automation operating spec is not stored")
-    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
-    if admission is None:
-        raise ValueError("mock automation admission is missing")
-    receipt = repository.load_mock_automation_lease_for_admission(
-        account_ref, admission.admission_id,
-    )
-    if receipt is None:
-        raise ValueError("mock automation lease receipt is missing")
+    scope = getattr(repository, "mock_automation_read_scope", None)
+    with (scope() if callable(scope) else nullcontext()) as reader:
+        reader_args = {} if reader is None else {"_reader": reader}
+        if isinstance(metrics, MockAutomationRiskSnapshot):
+            risk = metrics
+            loader = getattr(repository, "load_latest_mock_automation_risk", None)
+            current = loader(account_ref, **reader_args) if callable(loader) else None
+            if current != risk:
+                raise RuntimeError("latest mock automation risk snapshot changed")
+            _validate_risk_snapshot(risk, recovery, account_ref, runtime.run_id)
+            risk_snapshot_id = risk.snapshot_id
+            risk_reconciliation_revision = risk.reconciliation_revision
+            metrics = MockAutomationRecoveryMetrics(
+                observed_at=risk.observed_at,
+                recovery_complete=risk.reconciliation_complete,
+                daily_net_pnl_won=risk.daily_net_pnl_won,
+                data_gap_seconds=risk.data_gap_seconds,
+                submission_unknown_count=risk.submission_unknown_count,
+                reconnect_count=risk.reconnect_count,
+                balance_mismatch_count=risk.balance_mismatch_count,
+            )
+        spec = repository.load_mock_automation_spec(account_ref, spec_id, **reader_args)
+        if spec is None:
+            raise ValueError("mock automation operating spec is not stored")
+        admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id, **reader_args)
+        if admission is None:
+            raise ValueError("mock automation admission is missing")
+        receipt = repository.load_mock_automation_lease_for_admission(
+            account_ref, admission.admission_id, **reader_args,
+        )
+        if receipt is None:
+            raise ValueError("mock automation lease receipt is missing")
     if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
         raise ValueError("mock automation runtime does not match its admission")
     runtime.set_new_orders_enabled(False)
@@ -353,27 +374,12 @@ def record_mock_automation_recovery_from_risk(
     spec_id: str,
 ) -> MockAutomationRecoveryDecision:
     """Record recovery only from the latest immutable NAS risk revision."""
-    loader = getattr(repository, "load_latest_mock_automation_risk", None)
-    current = loader(account_ref) if callable(loader) else None
-    if current != risk:
+    if not isinstance(risk, MockAutomationRiskSnapshot):
         raise RuntimeError("latest mock automation risk snapshot changed")
-    _validate_risk_snapshot(risk, recovery, account_ref, runtime.run_id)
-    metrics = MockAutomationRecoveryMetrics(
-        observed_at=risk.observed_at,
-        recovery_complete=risk.reconciliation_complete,
-        daily_net_pnl_won=risk.daily_net_pnl_won,
-        data_gap_seconds=risk.data_gap_seconds,
-        submission_unknown_count=risk.submission_unknown_count,
-        reconnect_count=risk.reconnect_count,
-        balance_mismatch_count=risk.balance_mismatch_count,
-    )
-    decision = record_mock_automation_recovery(
-        repository, runtime, recovery, metrics,
+    return record_mock_automation_recovery(
+        repository, runtime, recovery, risk,
         account_ref=account_ref, spec_id=spec_id,
-        risk_snapshot_id=risk.snapshot_id,
-        risk_reconciliation_revision=risk.reconciliation_revision,
     )
-    return decision
 
 
 def mock_automation_recovery_decision_from_dict(

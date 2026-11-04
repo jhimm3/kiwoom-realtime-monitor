@@ -12,7 +12,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -24,7 +25,8 @@
           "status": 422,
           "headers": {
             "content-length": "107",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -46,7 +48,8 @@
           "status": 422,
           "headers": {
             "content-length": "201",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -71,7 +74,8 @@
           "status": 200,
           "headers": {
             "content-length": "93",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "account_ref": "af64a3fa-197f-49df-8e8b-65b71bee02d9",
@@ -95,7 +99,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -107,7 +112,8 @@
           "status": 422,
           "headers": {
             "content-length": "451",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -165,7 +171,8 @@
           "status": 422,
           "headers": {
             "content-length": "119",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -187,7 +194,8 @@
           "status": 422,
           "headers": {
             "content-length": "129",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -209,7 +217,8 @@
           "status": 422,
           "headers": {
             "content-length": "128",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -231,7 +240,8 @@
           "status": 422,
           "headers": {
             "content-length": "159",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -256,7 +266,8 @@
           "status": 200,
           "headers": {
             "content-length": "100",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "operation": "activate",
@@ -282,7 +293,8 @@
           "status": 409,
           "headers": {
             "content-length": "35",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "STALE_CONTROL_REVISION"
@@ -306,7 +318,8 @@
           "status": 412,
           "headers": {
             "content-length": "31",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "ADMISSION_REQUIRED"
@@ -330,7 +343,8 @@
           "status": 403,
           "headers": {
             "content-length": "29",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "PROFILE_DISABLED"
@@ -354,7 +368,8 @@
           "status": 404,
           "headers": {
             "content-length": "30",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "PROFILE_NOT_FOUND"
@@ -378,7 +393,8 @@
           "status": 400,
           "headers": {
             "content-length": "25",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "INVALID_SPEC"
@@ -402,7 +418,8 @@
           "status": 409,
           "headers": {
             "content-length": "31",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "RUN_ALREADY_ACTIVE"
@@ -426,7 +443,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -438,7 +456,8 @@
           "status": 422,
           "headers": {
             "content-length": "437",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -496,7 +515,8 @@
           "status": 422,
           "headers": {
             "content-length": "119",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -518,7 +538,8 @@
           "status": 422,
           "headers": {
             "content-length": "128",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -540,7 +561,8 @@
           "status": 422,
           "headers": {
             "content-length": "127",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -562,7 +584,8 @@
           "status": 422,
           "headers": {
             "content-length": "159",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -587,7 +610,8 @@
           "status": 422,
           "headers": {
             "content-length": "146",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -612,7 +636,8 @@
           "status": 200,
           "headers": {
             "content-length": "96",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "operation": "stop",
@@ -638,7 +663,8 @@
           "status": 409,
           "headers": {
             "content-length": "35",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "STALE_CONTROL_REVISION"
@@ -662,7 +688,8 @@
           "status": 412,
           "headers": {
             "content-length": "31",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "ADMISSION_REQUIRED"
@@ -686,7 +713,8 @@
           "status": 403,
           "headers": {
             "content-length": "29",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "PROFILE_DISABLED"
@@ -710,7 +738,8 @@
           "status": 404,
           "headers": {
             "content-length": "30",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "PROFILE_NOT_FOUND"
@@ -734,7 +763,8 @@
           "status": 400,
           "headers": {
             "content-length": "25",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "INVALID_SPEC"
@@ -758,7 +788,8 @@
           "status": 409,
           "headers": {
             "content-length": "31",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "RUN_ALREADY_ACTIVE"
@@ -782,7 +813,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -794,7 +826,8 @@
           "status": 422,
           "headers": {
             "content-length": "624",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -870,7 +903,8 @@
           "status": 422,
           "headers": {
             "content-length": "119",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -892,7 +926,8 @@
           "status": 422,
           "headers": {
             "content-length": "128",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -914,7 +949,8 @@
           "status": 422,
           "headers": {
             "content-length": "127",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -936,7 +972,8 @@
           "status": 422,
           "headers": {
             "content-length": "159",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -961,7 +998,8 @@
           "status": 422,
           "headers": {
             "content-length": "146",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -986,7 +1024,8 @@
           "status": 200,
           "headers": {
             "content-length": "98",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "operation": "resume",
@@ -1014,7 +1053,8 @@
           "status": 409,
           "headers": {
             "content-length": "35",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "STALE_CONTROL_REVISION"
@@ -1040,7 +1080,8 @@
           "status": 412,
           "headers": {
             "content-length": "31",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "ADMISSION_REQUIRED"
@@ -1066,7 +1107,8 @@
           "status": 403,
           "headers": {
             "content-length": "29",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "PROFILE_DISABLED"
@@ -1092,7 +1134,8 @@
           "status": 404,
           "headers": {
             "content-length": "30",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "PROFILE_NOT_FOUND"
@@ -1118,7 +1161,8 @@
           "status": 400,
           "headers": {
             "content-length": "25",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "INVALID_SPEC"
@@ -1144,7 +1188,8 @@
           "status": 409,
           "headers": {
             "content-length": "31",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "RUN_ALREADY_ACTIVE"
@@ -1177,7 +1222,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -1189,7 +1235,8 @@
           "status": 422,
           "headers": {
             "content-length": "107",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1211,7 +1258,8 @@
           "status": 422,
           "headers": {
             "content-length": "201",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1236,7 +1284,8 @@
           "status": 503,
           "headers": {
             "content-length": "48",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"
@@ -1248,7 +1297,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -1260,7 +1310,8 @@
           "status": 422,
           "headers": {
             "content-length": "451",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1318,7 +1369,8 @@
           "status": 422,
           "headers": {
             "content-length": "119",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1340,7 +1392,8 @@
           "status": 422,
           "headers": {
             "content-length": "129",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1362,7 +1415,8 @@
           "status": 422,
           "headers": {
             "content-length": "128",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1384,7 +1438,8 @@
           "status": 422,
           "headers": {
             "content-length": "159",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1409,7 +1464,8 @@
           "status": 503,
           "headers": {
             "content-length": "48",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"
@@ -1421,7 +1477,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -1433,7 +1490,8 @@
           "status": 422,
           "headers": {
             "content-length": "437",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1491,7 +1549,8 @@
           "status": 422,
           "headers": {
             "content-length": "119",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1513,7 +1572,8 @@
           "status": 422,
           "headers": {
             "content-length": "128",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1535,7 +1595,8 @@
           "status": 422,
           "headers": {
             "content-length": "127",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1557,7 +1618,8 @@
           "status": 422,
           "headers": {
             "content-length": "159",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1582,7 +1644,8 @@
           "status": 422,
           "headers": {
             "content-length": "146",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1607,7 +1670,8 @@
           "status": 503,
           "headers": {
             "content-length": "48",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"
@@ -1619,7 +1683,8 @@
           "status": 401,
           "headers": {
             "content-length": "63",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "유효한 서버 접속 토큰이 필요합니다."
@@ -1631,7 +1696,8 @@
           "status": 422,
           "headers": {
             "content-length": "624",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1707,7 +1773,8 @@
           "status": 422,
           "headers": {
             "content-length": "119",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1729,7 +1796,8 @@
           "status": 422,
           "headers": {
             "content-length": "128",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1751,7 +1819,8 @@
           "status": 422,
           "headers": {
             "content-length": "127",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1773,7 +1842,8 @@
           "status": 422,
           "headers": {
             "content-length": "159",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1798,7 +1868,8 @@
           "status": 422,
           "headers": {
             "content-length": "146",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": [
@@ -1823,7 +1894,8 @@
           "status": 503,
           "headers": {
             "content-length": "48",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-request-id": "mock-automation-http-contract-v1"
           },
           "body": {
             "detail": "MOCK_AUTOMATION_RUNTIME_UNAVAILABLE"

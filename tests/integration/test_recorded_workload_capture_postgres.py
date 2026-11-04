@@ -20,7 +20,7 @@ from kiwoom_monitor.central_server import diagnostic_trace as trace
 from kiwoom_monitor.central_server.diagnostic_metrics import refresh_capture_state
 from kiwoom_monitor.central_server.diagnostic_replay import TEST_DATABASE_NAME, _ReplayStore
 from kiwoom_monitor.central_server.diagnostic_replay_contract import (
-    capture_owner, operation_identity, thaw_payload,
+    capture_owner, operation_identity, thaw_payload, install_store_capture,
 )
 from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_trace
 from kiwoom_monitor.domain.market_data_contract import (
@@ -57,6 +57,7 @@ class _TrackingStore(_ReplayStore):
         self.connections = []
         self.connection_lock = threading.Lock()
         super().__init__(url)
+        install_store_capture(self)
 
     def _remember(self, connection):
         with self.connection_lock:
@@ -132,7 +133,8 @@ class RecordedWorkloadCapturePostgresTests(unittest.TestCase):
         with psycopg.connect(self.url, connect_timeout=5,
                              options="-c statement_timeout=5000") as connection:
             with connection.cursor() as cursor:
-                for table in reversed(_TABLES):
+                # Current children precede their immutable parent; fingerprint order stays _TABLES.
+                for table in ("central_dataset_snapshots", "central_market_data_observation_meta", "central_observation_revisions"):
                     cursor.execute(f"DELETE FROM {table} WHERE subject=ANY(%s)", (subjects,))
                 for table in _TABLES:
                     cursor.execute(f"SELECT count(*) FROM {table} WHERE subject=ANY(%s)", (subjects,))

@@ -12,7 +12,7 @@ from kiwoom_monitor.infrastructure.research_data_source import (
     campaign_input_fingerprint, campaign_input_scope, load_research_input,
 )
 from kiwoom_monitor.research_process import execute_campaign_cycle
-from scripts.export_research_dataset import prepare_campaign_nas_input
+from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
 import test_research_campaign_nas as nas_fixture_module
 
 

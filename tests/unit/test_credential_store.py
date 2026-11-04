@@ -194,6 +194,22 @@ class CredentialStoreTests(unittest.TestCase):
         for secret in self.credentials.values():
             self.assertNotIn(secret, str(one))
 
+    def test_same_identity_rotation_preserves_binding_and_records_distinct_key_epoch(self):
+        value = self._activation()
+        first = self.database.finalize_credential_activation(value)
+        binding = self.database.load_latest_account_binding(value["profile_id"], "kiwoom", "mock")
+        rotated = {**value, "operation_id": uuid.uuid4().hex, "request_id": uuid.uuid4().hex,
+                   "credential_revision": 2, "committed_at": "2026-09-15T12:05:00+09:00"}
+        second = self.database.finalize_credential_activation(rotated)
+        self.assertEqual(first["binding_revision"], second["binding_revision"])
+        self.assertEqual(binding, self.database.load_latest_account_binding(value["profile_id"], "kiwoom", "mock"))
+        self.assertEqual((1, 2), (first["credential_revision"], second["credential_revision"]))
+        self.assertNotEqual(first["operation_id"], second["operation_id"])
+        self.assertNotEqual(first["committed_at"], second["committed_at"])
+        self.assertEqual(second, self.database.finalize_credential_activation(rotated))
+        self.assertEqual(2, len(self.database.load_credential_activations(value["profile_id"])))
+        self.assertEqual(1, len(self.database.load_account_bindings()))
+
     def test_postgres_activation_timestamp_is_normalized_to_iso_text(self):
         for text in ("2026-09-15T12:00:00+09:00", "2026-09-15T03:00:00+00:00"):
             for committed_at in (text, datetime.fromisoformat(text)):

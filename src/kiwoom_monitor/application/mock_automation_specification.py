@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping, Protocol
 
+from kiwoom_monitor.domain.time_basis import same_aware_instant
+
 from kiwoom_monitor.application.mock_automation_candidate import (
     CandidateEligibilityStatus,
     candidate_package_from_dict,
@@ -344,7 +346,7 @@ def publish_ready_mock_automation_spec(
         or str(current_binding.get("environment", "")) != "mock"
         or str(current_binding.get("account_ref", "")) != spec.account_scope.account_ref
         or int(current_binding.get("binding_revision", 0)) != spec.binding_revision
-        or str(current_binding.get("verified_at", "")) != spec.binding_verified_at.isoformat()
+        or not same_aware_instant(str(current_binding.get("verified_at", "")), spec.binding_verified_at)
         or str(current_binding.get("verification_method", "")) != "ka00001"
     ):
         raise ValueError("operating publication requires the current verified mock binding")

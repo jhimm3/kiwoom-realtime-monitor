@@ -20,9 +20,11 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from .database import PostgresQueryStore
+from kiwoom_monitor.infrastructure.persistence.postgres_test_target import (
+    TEST_DATABASE_NAME, resolve_target_url,
+)
 
 
-TEST_DATABASE_NAME = "kiwoom_monitor_diagnostic_test"
 MAX_REPLAY_SECONDS = 120
 MAX_REPLAY_CALLS = 500
 MAX_SHADOW_BYTES = 1_500_000
@@ -346,10 +348,8 @@ def compile_replay_profile(report: dict, seconds: int, *,
 
 
 def dedicated_database_url(live_url: str, explicit_url: str = "") -> str:
-    """Reuse the existing integration runner's strict URL validation."""
-    from scripts.run_postgres_access_integration import _resolve_target_url
-
-    target = _resolve_target_url(live_url, explicit_url)
+    """Resolve the dedicated target without depending on a CLI entry point."""
+    target = resolve_target_url(live_url, explicit_url)
     if urlsplit(target).path.lstrip("/") != TEST_DATABASE_NAME:
         raise ValueError("replay_requires_dedicated_database")
     return target

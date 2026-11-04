@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from threading import Thread
 
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication
 
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import RealtimeSourceRoute, RealtimeSourceTransition
 from kiwoom_monitor.presentation.realtime_worker_controller import (
     RealtimeWorkerController,
 )
@@ -17,6 +20,7 @@ class FakeRealtimeWorker(QObject):
     stock_reference_received = Signal(object)
     diagnostics_changed = Signal(object)
     status_changed = Signal(str)
+    source_changed = Signal(object)
     connection_failed = Signal(str)
     connection_opened = Signal(object)
     codes_added = Signal(object)
@@ -50,9 +54,11 @@ class RealtimeWorkerControllerTests(unittest.TestCase):
         trades: list[object] = []
         followups: list[object] = []
         references: list[object] = []
+        sources: list[object] = []
         controller.trade_received.connect(trades.append)
         controller.subscription_ready.connect(followups.append)
         controller.stock_reference_received.connect(references.append)
+        controller.source_changed.connect(sources.append)
 
         started = controller.start(
             ("005930", "000660"), ("005930",), followup_codes=("005930",),
@@ -60,6 +66,8 @@ class RealtimeWorkerControllerTests(unittest.TestCase):
         worker.trade_received.emit("tick")
         worker.subscription_ready.emit()
         worker.stock_reference_received.emit("reference")
+        transition = RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL, 2, True)
+        worker.source_changed.emit(transition)
 
         self.assertTrue(started)
         self.assertTrue(controller.is_running)
@@ -67,6 +75,29 @@ class RealtimeWorkerControllerTests(unittest.TestCase):
         self.assertEqual(["tick"], trades)
         self.assertEqual([("005930",)], followups)
         self.assertEqual(["reference"], references)
+        self.assertEqual([transition], sources)
+
+    def test_queued_source_from_replaced_worker_cannot_publish_into_current_runtime(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        old, current = FakeRealtimeWorker(), FakeRealtimeWorker()
+        controller = RealtimeWorkerController(worker_factory=lambda _: old)
+        sources = []
+        controller.source_changed.connect(sources.append)
+        self.assertTrue(controller.start(("A",), (), followup_codes=()))
+        queued = Thread(target=lambda: old.source_changed.emit(
+            RealtimeSourceTransition(RealtimeSourceRoute.LOCAL_FALLBACK, 1)))
+        queued.start()
+        queued.join(2)
+        self.assertFalse(queued.is_alive())
+        self.assertTrue(controller.stop())
+        controller.set_factory(lambda _: current)
+        self.assertTrue(controller.start(("A",), (), followup_codes=()))
+        app.processEvents()
+        self.assertEqual([], sources)
+        transition = RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL, 3, True)
+        current.source_changed.emit(transition)
+        self.assertEqual([transition], sources)
+        self.assertTrue(controller.stop())
 
     def test_update_and_stop_are_owned_by_controller(self) -> None:
         worker = FakeRealtimeWorker()

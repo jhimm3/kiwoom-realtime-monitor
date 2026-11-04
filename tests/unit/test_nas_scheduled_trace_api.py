@@ -3,6 +3,8 @@
 Postgres-configured API advertises its native capability, but its injected store is
 SQLite. This covers start wiring and durable arguments, not NAS/PG/resource acceptance.
 """
+
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder, HubInputRecorder
 import json
 import os
 from pathlib import Path
@@ -67,8 +69,10 @@ class ScheduledTraceApiTests(unittest.TestCase):
                     self.assertEqual(['PUT', 'POST'], [m for _, m, _ in calls if m != 'GET'])
                     self.assertTrue(all(trace.input_token(x) == started['trace_id'] for x in plan['capture_flags']))
                     fixture.batch(0)
-                    collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(),
-                                                          lambda: fixture.origin, store)
+                    hub_observer = HubInputRecorder()
+                    capture_hub = RealtimeHub(observer=hub_observer)
+                    collector = CentralRealtimeCollector(lambda: '', 'real', capture_hub,
+                                                          lambda: fixture.origin, store, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
                     collector._publish_parsed({'trnm': 'REAL', 'data': [
                         {'type': '0B', 'item': '005930_AL', 'values': {'10': '70000', '15': '1', '20': '090000'}}]})
                     response = request_api(app, 'POST', '/api/v1/diagnostics/trace/stop', headers=HEADERS)

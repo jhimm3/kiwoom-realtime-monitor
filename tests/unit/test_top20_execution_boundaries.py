@@ -18,7 +18,9 @@ class Top20ExecutionBoundaryTests(unittest.IsolatedAsyncioTestCase):
         _require_fresh_collector(collector)
         for owner, name in ((collector, "_latest_snapshots"), (collector, "_continuous_from"),
                 (collector, "_ram_trade_baselines"), (collector._minute_bars, "_cumulative"),
-                (collector._minute_bars, "_bars"), (collector, "_ram_stock_references")):
+                (collector._minute_bars, "_bars"), (collector, "_ram_stock_references"),
+                (collector, "_pending_snapshots"), (collector, "_pending_minute_retries"),
+                (collector, "_pending_minute_finalizations")):
             with self.subTest(field=name):
                 target = getattr(owner, name)
                 target["previous-run"] = 1
@@ -28,6 +30,42 @@ class Top20ExecutionBoundaryTests(unittest.IsolatedAsyncioTestCase):
         collector._credential_shutdown = True
         with self.assertRaisesRegex(ValueError, "credential_shutdown"):
             _require_fresh_collector(collector)
+
+    async def test_inflight_and_owned_tasks_remain_non_cold_after_pending_is_empty(self):
+        collector = CentralRealtimeCollector(lambda: self.fail("network forbidden"), "real",
+            RealtimeHub(), lambda: datetime.fromisoformat("2026-09-10T09:30:01+09:00"))
+        for owner, name, value in (
+                (collector, "_inflight_minute_bars", [{"code": "005930"}]),
+                (collector, "_approved_trade_sources", {("005930", "KRX")}),
+                (collector._minute_bars, "_dirty", {("005930", "KRX")}),
+                (collector, "_ram_trades", ["previous-trade"])):
+            with self.subTest(field=name):
+                target = getattr(owner, name)
+                if isinstance(target, set):
+                    target.update(value)
+                else:
+                    target.extend(value)
+                with self.assertRaisesRegex(ValueError, name):
+                    _require_fresh_collector(collector)
+                target.clear()
+        task = asyncio.create_task(asyncio.sleep(0))
+        try:
+            for finished in (False, True):
+                if finished:
+                    await task
+                for name in ("_token_tasks", "_flush_tasks", "_credential_drain_task",
+                             "_credential_resume_task", "_reconnect_expiry_task"):
+                    with self.subTest(field=name, finished=finished):
+                        previous = getattr(collector, name)
+                        setattr(collector, name, {task} if isinstance(previous, set) else task)
+                        try:
+                            with self.assertRaisesRegex(ValueError, name):
+                                _require_fresh_collector(collector)
+                        finally:
+                            setattr(collector, name, previous)
+        finally:
+            await task
+        _require_fresh_collector(collector)
 
     async def test_two_cancellations_wait_for_actual_subscription_stop_before_drain(self):
         runtime, entered, stopping, release = ReplayRuntimeScope(), asyncio.Event(), asyncio.Event(), asyncio.Event()

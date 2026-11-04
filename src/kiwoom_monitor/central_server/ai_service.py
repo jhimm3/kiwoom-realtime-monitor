@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable, Protocol
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
+from copy import deepcopy
 
 from kiwoom_monitor.infrastructure.naver_news import NewsAISettings
 from kiwoom_monitor.infrastructure.news_ai import (
@@ -14,13 +16,20 @@ from kiwoom_monitor.infrastructure.news_ai import (
     ANALYSIS_PROMPT_VERSION, analysis_body_hash, analyze_articles, NewsAIProviderError,
 )
 from kiwoom_monitor.domain.news_observation import (
-    ARTICLE_BODY_EXTRACTOR_VERSION,
-    NEWS_ANALYSIS_SCHEMA_VERSION,
+    ARTICLE_BODY_EXTRACTOR_VERSION, AIJobResultError,
+    NEWS_ANALYSIS_SCHEMA_VERSION, stable_document_hash,
 )
 from kiwoom_monitor.infrastructure.article_text import fetch_article_text
 from .market_observations import KST, as_kst
+from kiwoom_monitor.domain.news_ai_contract import (
+    decode_news_ai_provenance, news_ai_source_member, freeze_news_ai_input,
+    decode_news_input_source,
+)
 
 from .config import CentralServerSettings
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class CentralAIStore(Protocol):
@@ -42,12 +51,17 @@ class CentralAIStore(Protocol):
         available_at: float | None = None, limit: int = 100,
     ) -> list[dict[str, Any]]: ...
 
-    def save_news_body_revision(self, value: dict[str, Any]) -> str: ...
+    def save_news_body_revision_receipt(self, value: dict[str, Any]) -> dict[str, Any]: ...
 
     def save_news_ai_results(
         self, documents: list[dict[str, Any]], revisions: list[dict[str, Any]],
         usage_documents: list[dict[str, Any]] | None = None,
-    ) -> None: ...
+    ) -> list[dict[str, object]]: ...
+
+    def load_document(self, collection: str, owner: str, key: str) -> dict[str, Any] | None: ...
+
+    def accept_news_job_result(self, job_key: str, result: dict[str, Any], *,
+                               attempts: int) -> dict[str, Any]: ...
 
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
 
@@ -58,6 +72,16 @@ class _AIRequestCredential:
     model: str
     revision: int
     api_key: str = field(repr=False)
+
+
+
+
+
+@dataclass
+class _AIInFlight:
+    task: asyncio.Task | None = None
+    requests: dict[asyncio.Task, dict[str, Any] | None] = field(default_factory=dict)
+    publications: dict[tuple[object, ...], asyncio.Task] = field(default_factory=dict)
 
 
 class CentralAIService:
@@ -72,7 +96,7 @@ class CentralAIService:
         self._daily_limit = settings.ai_daily_limit
         self._lock = asyncio.Lock()
         self._execution_lock = asyncio.Lock()
-        self._running: dict[tuple[object, ...], asyncio.Task[dict[str, Any]]] = {}
+        self._running: dict[tuple[object, ...], _AIInFlight] = {}
         self._keys = {provider: settings.ai_key(provider) for provider in DEFAULT_MODELS}
         self._credential_revisions = {provider: 0 for provider in DEFAULT_MODELS}
         self._credential_validation = {provider: "UNVERIFIED" for provider in DEFAULT_MODELS}
@@ -128,6 +152,7 @@ class CentralAIService:
     async def analyze(
         self, stock_code: str, stock_name: str, provider: str, model: str,
         events: list[dict[str, Any]], article_count: int, *, job_timeout: float | None = None,
+        _job: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # NAS 운영 설정을 실제 호출 기준으로 사용한다. 공급자를 '사용 안 함'으로
         # 둔 경우에만 기존 앱별 설정을 보조값으로 받아 이전 동작을 유지한다.
@@ -161,19 +186,31 @@ class CentralAIService:
             credential = _AIRequestCredential(selected, selected_model,
                 self._credential_revisions[selected], self._keys.get(selected, ""))
             request = asyncio.create_task(self._prepare_and_run(
-                stock_code, stock_name, events, article_count, credential,
+                stock_code, stock_name, events, article_count, credential, _job,
             ))
             self._accepted[selected].add(request)
             request.add_done_callback(lambda finished: self._request_finished(selected, finished))
         if job_timeout is not None and selected != "chatgpt_plan":
-            return await asyncio.wait_for(asyncio.shield(request), timeout=job_timeout)
+            try:
+                return await asyncio.wait_for(asyncio.shield(request), timeout=job_timeout)
+            except TimeoutError:
+                if _job is not None:
+                    if request.done():
+                        return request.result()
+                    # This is the waiter's deadline. The existing accepted task
+                    # still owns RUNNING and will publish or apply real failure.
+                    return {"job_receipt": {"state": "in_progress", "output_ref": ""}}
+                raise
         # Subscription transport already bounds network/stream lifetime. A job
         # timeout must not enqueue a second POST while the shielded first lives.
         return await asyncio.shield(request)
 
-    async def analyze_job(self, stock_code, stock_name, provider, model, events, article_count, *, timeout_seconds):
+    async def analyze_job(self, stock_code, stock_name, provider, model, events, article_count, *,
+                          job_key: str, attempts: int, output_ref_fallback: str, timeout_seconds: float):
         return await self.analyze(stock_code, stock_name, provider, model, events, article_count,
-                                  job_timeout=timeout_seconds)
+                                  job_timeout=timeout_seconds,
+                                  _job={"job_key": job_key, "attempts": attempts,
+                                        "output_ref_fallback": output_ref_fallback})
 
     async def research_market(self, prompt: str, provider: str, model: str, effort: str):
         """Own a grounded request through credential drain and shared usage limits."""
@@ -247,55 +284,289 @@ class CentralAIService:
         if not task.cancelled():
             task.exception()
 
-    def _run_finished(self, key, task):
-        if self._running.get(key) is task:
-            self._running.pop(key, None)
-        if not task.cancelled():
+    def _run_finished(self, key, entry):
+        task = entry.task
+        if task is not None and not task.cancelled():
             task.exception()
+        if not entry.requests and self._running.get(key) is entry:
+            self._running.pop(key, None)
 
-    async def _prepare_and_run(self, stock_code, stock_name, events, article_count, credential):
-        prepared = await asyncio.to_thread(_prepare_events, events, stock_name)
-        key = (stock_code, credential.provider, credential.model, credential.revision,
-               *((str(value["identity"]), str(value["body_hash"])) for value in prepared))
-        async with self._lock:
-            task = self._running.get(key)
-            if task is None:
-                task = asyncio.create_task(self._run(
-                    stock_code, stock_name, credential.provider, credential.model, prepared, article_count,
-                    credential,
-                ))
-                self._running[key] = task
-                task.add_done_callback(lambda finished: self._run_finished(key, finished))
-        return await asyncio.shield(task)
+    async def _prepare_and_run(self, stock_code, stock_name, events, article_count, credential, job=None):
+        # This existing accepted owner drains the complete requester lifetime,
+        # including native acceptance, even if its own waiter is cancelled.
+        task = asyncio.create_task(self._execute_request(
+            stock_code, stock_name, events, article_count, credential, job,
+        ))
+        return await self._join_owned(task)
+
+    async def _execute_request(self, stock_code, stock_name, events, article_count, credential, job):
+        entry, key = None, None
+        request = asyncio.current_task()
+        failure_stage = "prepare"
+        try:
+            prepared = await asyncio.to_thread(_prepare_events, events, stock_name, now_provider=self._now)
+            key = (stock_code, credential.provider, credential.model, credential.revision,
+                   *((str(value["identity"]), str(value["body_hash"])) for value in prepared))
+            # Capture caller authority before a legacy direct producer resolves
+            # its own real refs. Unpinned direct waiters share that publication;
+            # queued requests always retain their own exact pinned refs.
+            binding_key = ("direct", *((str(event["identity"]), str(event.get("article_revision_id") or ""),
+                                        str(event.get("body_revision_id") or "")) for event in prepared))
+            if job is not None:
+                binding_key = ("job", str(job["job_key"]), int(job["attempts"]))
+            async with self._lock:
+                entry = self._running.get(key)
+                if (entry is not None and entry.task.done() and not entry.task.cancelled()
+                        and entry.task.exception() is None and "results" not in entry.task.result()):
+                    entry = None  # A later explicit request must not inherit a no-result completion.
+                if entry is None:
+                    entry = _AIInFlight()
+                    entry.task = asyncio.create_task(self._run(
+                        stock_code, stock_name, credential.provider, credential.model,
+                        prepared, article_count, credential, entry,
+                    ))
+                    self._running[key] = entry
+                    entry.task.add_done_callback(lambda finished: self._run_finished(key, entry))
+                entry.requests[request] = job
+            failure_stage = "inference"
+            outcome = await self._join_owned(entry.task)
+            if "results" not in outcome:
+                # A requester can attach while the shared no-result admission
+                # is settling. Re-enter the same owner rather than fabricate an
+                # inference response; a completed no-result entry is not reused.
+                if job is None or (str(job["job_key"]), int(job["attempts"])) not in outcome["unexecuted_jobs"]:
+                    return await self._execute_request(stock_code, stock_name, events, article_count, credential, job)
+            if job is not None:
+                receipt = outcome.get("unexecuted_jobs", {}).get((str(job["job_key"]), int(job["attempts"])))
+                if receipt is not None:
+                    return {"job_receipt": receipt}
+            failure_stage = "publication"
+            async with self._lock:
+                publication = entry.publications.get(binding_key)
+                if publication is None:
+                    publication = asyncio.create_task(
+                        self._publish_job(stock_code, prepared, outcome, job) if job is not None
+                        else self._publish_direct(stock_code, prepared, outcome)
+                    )
+                    entry.publications[binding_key] = publication
+            return await self._join_owned(publication)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if job is None:
+                raise
+            try:
+                receipt = await self._native_call(self._store.accept_news_job_result, job["job_key"], {
+                    "stage": "AI", "error": str(error),
+                }, attempts=int(job["attempts"]))
+            except Exception as settlement_error:
+                # A failed ACK/read leaves authority unknown. Preserve both
+                # errors and leave restart recovery to the existing stale claim.
+                # The accepted owner records this before any waiter/callback can
+                # discard the exception. Messages and provider payloads are never logged.
+                key_id = str(job["job_key"])
+                key_id = key_id if len(key_id) <= 64 and key_id.isalnum() else "unavailable"
+                LOGGER.error("AI accepted settlement unknown stage=%s job=%s attempt=%d source_type=%s settlement_type=%s",
+                             failure_stage, key_id, int(job["attempts"]),
+                             type(error).__name__[:80], type(settlement_error).__name__[:80])
+                raise AIJobResultError(error, None, settlement_error=settlement_error) from settlement_error
+            raise AIJobResultError(error, receipt) from error
+        finally:
+            if entry is not None:
+                async with self._lock:
+                    entry.requests.pop(request, None)
+                    if not entry.requests and entry.task.done() and self._running.get(key) is entry:
+                        self._running.pop(key, None)
+
+    async def _join_owned(self, task):
+        """An accepted owner cannot leave a native/provider task detached."""
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _native_call(self, function, *args, **kwargs):
+        return await self._join_owned(asyncio.create_task(asyncio.to_thread(function, *args, **kwargs)))
+
+    async def _persist_results(self, documents, revisions, usage_documents=None):
+        if hasattr(self._store, "save_news_ai_results"):
+            return await self._native_call(self._store.save_news_ai_results, documents, revisions, usage_documents)
+        # Preserve existing small test/legacy stores; production has the native command.
+        if documents:
+            await self._native_call(self._store.upsert_documents, "news_ai", documents)
+        if usage_documents:
+            await self._native_call(self._store.upsert_documents, "news_request_usage", usage_documents)
+
+    async def _save_usage(self, usage_document):
+        try:
+            await self._persist_results([], [], [usage_document])
+        except Exception as original_error:
+            try:
+                stored = await self._native_call(self._store.load_document, "news_request_usage",
+                                                 usage_document["owner"], usage_document["key"])
+            except Exception as read_error:
+                raise original_error from read_error
+            if not stored or stable_document_hash(stored["document"]) != stable_document_hash(usage_document["document"]):
+                raise
+            inference = usage_document.get("inference")
+            if inference is not None:
+                rows = await self._native_call(self._store.load_news_history, "inference",
+                                               identity=inference["inference_id"], limit=1)
+                if not rows or rows[0]["content_hash"] != stable_document_hash(inference):
+                    raise original_error
+
+    def _binding(self, stock_code, event, outcome):
+        return {
+            "target_id": stock_code, "article_revision_id": str(event.get("article_revision_id") or ""),
+            "body_revision_id": str(event.get("body_revision_id") or ""),
+            "provider": outcome["provider"], "model": outcome["model"],
+            "prompt_version": ANALYSIS_PROMPT_VERSION, "schema_version": NEWS_ANALYSIS_SCHEMA_VERSION,
+            "input_hash": str(event["body_hash"]),
+        }
+
+    def _fresh_revision(self, binding, value, outcome, *, inference_ref, requester=None):
+        authority = requester or {"kind": "direct", "binding": dict(binding)}
+        revision_id = uuid5(NAMESPACE_URL, stable_document_hash({
+            "request": outcome["request_token"], **binding, "requester": authority,
+        })).hex
+        return {"analysis_revision_id": revision_id, **binding, "computed_at": outcome["computed_at"],
+                "output": deepcopy(value), "usage": {
+                    **outcome["usage"], "inference_ref": deepcopy(inference_ref),
+                    "input_binding": deepcopy(outcome["produced_bindings_by_ref"][(inference_ref["inference_id"], inference_ref["input_index"])]),
+                    "requester": authority,
+                }}
+
+    def _response(self, outcome, revisions, provenance=None):
+        return {
+            "provider": outcome["provider"], "model": outcome["model"],
+            "results": deepcopy(outcome["results"]), "credential_revision": outcome["credential_revision"],
+            "body_hashes": list(outcome["body_hashes"]), "usage": dict(outcome["usage"]),
+            "cache_hit": outcome["cache_hit"], "analysis_revision_ids": [ref for ref in revisions if ref],
+            "analysis_provenance": [decode_news_ai_provenance(value) for value in
+                                    (provenance or [None] * len(outcome["results"]))],
+        }
+
+    async def _publish_direct(self, stock_code, prepared, outcome):
+        documents, revisions, refs, provenance = [], [], [], []
+        for index, event in enumerate(prepared):
+            binding = self._binding(stock_code, event, outcome)
+            ref, reference = None, None
+            if index in outcome["fresh_indices"]:
+                produced_ref = outcome["inference_refs"][index]
+                reference = {"status": "UNKNOWN", "origin": "native_input_observed",
+                             "target_id": stock_code, "provider": outcome["provider"], "model": outcome["model"],
+                             "computed_at": outcome["computed_at"], "input_hash": str(event["body_hash"]),
+                             "output_hash": stable_document_hash(outcome["results"][index]),
+                             "inference_ref": deepcopy(produced_ref),
+                             "input_binding": deepcopy(outcome["produced_bindings_by_ref"][(produced_ref["inference_id"], produced_ref["input_index"])])}
+                documents.append({"owner": stock_code, "key": str(event["identity"]),
+                                  "input_provenance": reference, "document": deepcopy(outcome["results"][index])})
+                if binding["article_revision_id"] and binding["body_revision_id"]:
+                    revision = self._fresh_revision(binding, outcome["results"][index], outcome,
+                                                    inference_ref=outcome["inference_refs"][index])
+                    revisions.append(revision)
+                    ref = revision["analysis_revision_id"]
+            elif hasattr(self._store, "find_news_ai_revision"):
+                prior = outcome["cached_provenance"].get(index, {})
+                pinned = bool(binding["article_revision_id"] and binding["body_revision_id"])
+                reference = (dict(prior, status="UNKNOWN", reported_status="ACCEPTED")
+                             if prior.get("status") == "ACCEPTED" else prior)
+                if (prior.get("status") == "ACCEPTED" and prior.get("analysis_revision_id")
+                        and prior.get("output_hash") == stable_document_hash(outcome["results"][index])
+                        and all(prior.get(name) for name in binding)
+                        and all(str(prior[name]) == str(binding[name]) for name in
+                                ("target_id", "provider", "model", "prompt_version", "schema_version", "input_hash"))
+                        and (not pinned or all(str(prior[name]) == str(binding[name]) for name in
+                                               ("article_revision_id", "body_revision_id")))):
+                    # This exact envelope was read with its result. Metadata is
+                    # a source reference copy, never a new trading/read authority.
+                    ref = str(prior["analysis_revision_id"])
+                    reference = prior
+                elif pinned:
+                    # Keep the older flat-ID response, but do not turn a latest
+                    # matching row into the missing original source relationship.
+                    ref = await self._native_call(self._store.find_news_ai_revision, **binding)
+            refs.append(ref)
+            provenance.append(reference)
+        if documents:
+            accepted = await self._persist_results(documents, revisions)
+            by_id = {str(value["analysis_revision_id"]): value for value in (accepted or ())}
+            provenance = [by_id.get(str(ref), reference) for ref, reference in zip(refs, provenance, strict=True)]
+        return self._response(outcome, refs, provenance)
+
+    async def _publish_job(self, stock_code, prepared, outcome, job):
+        if len(prepared) != 1:
+            raise ValueError("AI 영속 작업은 pinned 기사 한 건을 소유합니다.")
+        event = prepared[0]
+        binding = self._binding(stock_code, event, outcome)
+        fresh = 0 in outcome["fresh_indices"]
+        result = {"stage": "AI", "binding": binding, "cached": not fresh,
+                  "fallback_ref": str(job["output_ref_fallback"])}
+        if fresh:
+            revision = self._fresh_revision(binding, outcome["results"][0], outcome,
+                                            inference_ref=outcome["inference_refs"][0], requester={
+                "kind": "job", "job_key": str(job["job_key"]), "attempts": int(job["attempts"]),
+                "binding": dict(binding),
+            })
+            result.update({"usage_ref": outcome["usage_ref"], "revisions": [revision],
+                           "documents": [{"owner": stock_code, "key": str(event["identity"]),
+                                          "document": deepcopy(outcome["results"][0])}]})
+        receipt = await self._native_call(self._store.accept_news_job_result, job["job_key"], result,
+                                          attempts=int(job["attempts"]))
+        ref = receipt["output_ref"]
+        linked = ref and (fresh or ref != str(job["output_ref_fallback"]))
+        reference = receipt.get("analysis_provenance")
+        if (not isinstance(reference, dict)
+                or reference.get("output_hash") != stable_document_hash(outcome["results"][0])):
+            reference = None
+        response = self._response(outcome, [ref] if linked else [], [reference])
+        response["job_receipt"] = {name: value for name, value in receipt.items() if name != "analysis_provenance"}
+        return response
 
     async def _run(self, stock_code: str, stock_name: str, provider: str, model: str,
-                   events: list[dict[str, Any]], article_count: int, credential: _AIRequestCredential) -> dict[str, Any]:
+                   events: list[dict[str, Any]], article_count: int, credential: _AIRequestCredential,
+                   entry: _AIInFlight | None = None) -> dict[str, Any]:
         cached_rows = await asyncio.to_thread(self._store.load_documents, "news_ai", stock_code, 10_000)
         cached = {str(row["key"]): row["document"] for row in cached_rows}
+        cached_provenance: dict[int, dict[str, object]] = {}
         results: list[dict[str, Any] | None] = [None] * len(events)
-        analysis_revision_ids: list[str | None] = [None] * len(events)
         missing: list[tuple[int, dict[str, Any]]] = []
         for index, event in enumerate(events):
             value = cached.get(str(event["identity"]))
             if isinstance(value, dict) and value.get("body_hash") == event.get("body_hash") \
                     and value.get("provider") == provider and value.get("model") == model \
                     and (provider != "chatgpt_plan" or value.get("credential_revision") == credential.revision):
+                value = dict(value)
+                reference = decode_news_ai_provenance(value.pop("provenance_json", None))
+                cached_provenance[index] = reference
                 results[index] = value
-                article_revision_id = str(event.get("article_revision_id") or "")
-                body_revision_id = str(event.get("body_revision_id") or "")
-                if article_revision_id and body_revision_id \
-                        and hasattr(self._store, "find_news_ai_revision"):
-                    analysis_revision_ids[index] = await asyncio.to_thread(
-                        self._store.find_news_ai_revision,
-                        target_id=stock_code, article_revision_id=article_revision_id,
-                        body_revision_id=body_revision_id, provider=provider, model=model,
-                        prompt_version=ANALYSIS_PROMPT_VERSION,
-                        schema_version=NEWS_ANALYSIS_SCHEMA_VERSION,
-                        input_hash=str(event.get("body_hash") or ""),
-                    )
             else:
                 missing.append((index, event))
         usage = AIRequestUsage()
+        inference_refs, produced_bindings_by_ref = {}, {}
+        usage_document, request_token, computed_at = None, "", None
+        unexecuted_jobs = {}
+        def outcome_value():
+            return {
+                "provider": provider, "model": model, "results": results,
+                "credential_revision": credential.revision,
+                "body_hashes": [str(value.get("body_hash", "")) for value in events],
+                "usage": usage.__dict__, "cache_hit": not missing,
+                "fresh_indices": tuple(index for index, event in missing),
+                "inference_refs": inference_refs,
+                "produced_bindings_by_ref": produced_bindings_by_ref,
+                "cached_provenance": cached_provenance,
+                "usage_ref": usage_document, "request_token": request_token, "computed_at": computed_at,
+                **({"unexecuted_jobs": unexecuted_jobs} if unexecuted_jobs else {}),
+            }
         if missing:
             # 공급자 RPM과 일일 상한은 모든 PC를 합친 중앙 기준으로 적용한다.
             async with self._execution_lock:
@@ -312,31 +583,67 @@ class CentralAIService:
                 if hasattr(self._store, "load_news_history"):
                     for _index, event in missing:
                         article_revision_id = str(event.get("article_revision_id") or "")
-                        if not article_revision_id:
+                        member = next((value for value in event["_source_members"]
+                                       if value["used"] and value["identity"] == str(event["identity"])), None)
+                        if not article_revision_id and member is not None:
                             article_rows = await asyncio.to_thread(
                                 self._store.load_news_history, "article", target=stock_code,
                                 identity=str(event["identity"]), limit=1,
                             )
                             if article_rows:
-                                article_revision_id = str(article_rows[0]["article_revision_id"])
-                                event["article_revision_id"] = article_revision_id
-                        if article_revision_id and not event.get("body_revision_id") \
-                                and hasattr(self._store, "save_news_body_revision"):
-                            event["body_revision_id"] = await asyncio.to_thread(
-                                self._store.save_news_body_revision, {
+                                row, source = article_rows[0], member["article"]
+                                reference = decode_news_input_source(member.get("source_ref")) or {}
+                                document = row["document"]
+                                if (all(str(source.get(name) or "") == str(document.get(name) or "")
+                                        for name in ("title", "description", "link", "original_link"))
+                                        and (not reference.get("article_revision_id") or reference["article_revision_id"] == row["article_revision_id"])
+                                        and (not reference.get("article_content_hash") or reference["article_content_hash"] == row["content_hash"])):
+                                    article_revision_id = str(row["article_revision_id"])
+                                    event["article_revision_id"] = article_revision_id
+                        if (event["_input_kind"] == "bundle" and article_revision_id
+                                and not event.get("body_revision_id") and member is not None
+                                and hasattr(self._store, "save_news_body_revision_receipt")):
+                            receipt = await asyncio.to_thread(
+                                self._store.save_news_body_revision_receipt, {
                                     "article_revision_id": article_revision_id,
                                     "extractor_version": ARTICLE_BODY_EXTRACTOR_VERSION,
-                                    "fetched_at": self._now().timestamp(),
-                                    "status": str(event.get("body_status") or "fulltext"),
-                                    "body_text": str(event["body"]), "error": "",
+                                    "fetched_at": member.get("observed_at") or self._now().timestamp(),
+                                    "status": str(member["body_status"]),
+                                    "body_text": str(member["raw_body"]), "error": "",
                                 },
                             )
+                            event["body_revision_id"] = str(receipt["body_revision_id"])
+                            member["native_body"] = deepcopy(receipt)
+                frozen_inputs = [freeze_news_ai_input(
+                    str(event["identity"]), str(event["title"]), str(event["body"]), str(event["body_hash"]),
+                    event["_source_members"], kind=str(event["_input_kind"]),
+                    article_revision_id=str(event.get("article_revision_id") or ""),
+                    body_revision_id=str(event.get("body_revision_id") or ""),
+                ) for _, event in missing]
                 ai_settings = NewsAISettings(provider, credential.api_key, model,
                     chatgpt_storage_path=self.chatgpt_auth.store.path if provider == "chatgpt_plan" else None)
+                # All prior async input/limit work is done, and this request has
+                # acquired the existing provider lock. This native check is the
+                # admission cut immediately before scheduling paid work.
+                eligible = entry is None
+                for attached_job in list(entry.requests.values()) if entry is not None else ():
+                    if attached_job is None:
+                        eligible = True  # An explicit request owns its own paid authority.
+                        continue
+                    receipt = await self._native_call(self._store.accept_news_job_result, attached_job["job_key"], {
+                        "stage": "AI", "check_unexecuted_reanalysis": True,
+                    }, attempts=int(attached_job["attempts"]))
+                    if receipt["state"] == "continue":
+                        eligible = True
+                    else:
+                        unexecuted_jobs[(str(attached_job["job_key"]), int(attached_job["attempts"]))] = receipt
+                if not eligible:
+                    return {"unexecuted_jobs": unexecuted_jobs}
+                request_token = str(uuid4())
                 try:
                     analyses, usage = await asyncio.to_thread(
                         analyze_articles, ai_settings, stock_name,
-                        tuple((str(event["title"]), str(event["body"])) for _, event in missing),
+                        tuple((str(value["title"]), str(value["body"])) for value in frozen_inputs),
                         **({"chatgpt_auth": self.chatgpt_auth} if provider == "chatgpt_plan" else {}),
                     )
                 except Exception as error:
@@ -347,8 +654,8 @@ class CentralAIService:
                         self._plan_failure = error.code if isinstance(error, ChatGPTPlanError) else "response_invalid"
                         await asyncio.to_thread(self.chatgpt_auth.pause_analysis, self._plan_failure)
                         if (isinstance(error, ChatGPTPlanError) and error.inference_attempted) or isinstance(error, ValueError):
-                            await asyncio.to_thread(self._store.upsert_documents, "news_request_usage", [{
-                                "owner": usage_owner, "key": str(uuid4()), "document": {
+                            await self._save_usage({
+                                "owner": usage_owner, "key": request_token, "document": {
                                     "requested_at": self._now().astimezone().isoformat(), "provider": provider,
                                     "model": model, "credential_revision": credential.revision,
                                     "request_mode": "batch" if len(missing) > 1 else "single",
@@ -356,7 +663,7 @@ class CentralAIService:
                                     "status": "failed", "error_code": self._plan_failure,
                                     "usage_measured": False,
                                 },
-                            }])
+                            })
                         raise ChatGPTPlanError(self._plan_failure) from None
                     if isinstance(error, NewsAIProviderError):
                         if self._credential_revisions[provider] == credential.revision:
@@ -370,7 +677,8 @@ class CentralAIService:
                     raise
                 if self._credential_revisions[provider] == credential.revision:
                     self._credential_validation[provider] = "VERIFIED"
-                now = self._now().isoformat()
+                computed = self._now()
+                computed_at, now = computed.timestamp(), computed.isoformat()
                 documents = []
                 for (index, event), analysis in zip(missing, analyses, strict=True):
                     value = _analysis_document(
@@ -381,7 +689,7 @@ class CentralAIService:
                     value["credential_revision"] = credential.revision
                     documents.append({"owner": stock_code, "key": str(event["identity"]), "document": value})
                 usage_documents = [{
-                    "owner": usage_owner, "key": str(uuid4()),
+                    "owner": usage_owner, "key": request_token,
                     "document": {
                         "requested_at": self._now().astimezone().isoformat(), "provider": provider,
                         "model": model, "request_mode": "batch" if len(missing) > 1 else "single",
@@ -391,42 +699,31 @@ class CentralAIService:
                         "total_tokens": usage.total_tokens,
                     },
                 }]
-                if hasattr(self._store, "save_news_ai_results"):
-                    revisions = []
-                    for (index, event), document in zip(missing, documents, strict=True):
-                        article_revision_id = str(event.get("article_revision_id") or "")
-                        body_revision_id = str(event.get("body_revision_id") or "")
-                        if not article_revision_id or not body_revision_id:
-                            continue
-                        revision_id = uuid4().hex
-                        analysis_revision_ids[index] = revision_id
-                        revisions.append({
-                            "analysis_revision_id": revision_id,
-                            "target_id": stock_code,
-                            "article_revision_id": article_revision_id,
-                            "body_revision_id": body_revision_id,
-                            "provider": provider, "model": model,
-                            "prompt_version": ANALYSIS_PROMPT_VERSION,
-                            "schema_version": NEWS_ANALYSIS_SCHEMA_VERSION,
-                            "input_hash": str(event.get("body_hash", "")),
-                            "computed_at": self._now().timestamp(),
-                            "output": document["document"], "usage": usage.__dict__,
-                        })
-                    await asyncio.to_thread(
-                        self._store.save_news_ai_results, documents, revisions, usage_documents,
-                    )
-                else:
-                    await asyncio.to_thread(self._store.upsert_documents, "news_ai", documents)
-                    await asyncio.to_thread(
-                        self._store.upsert_documents, "news_request_usage", usage_documents,
-                    )
-        return {
-            "provider": provider, "model": model, "results": results,
-            "credential_revision": credential.revision,
-            "body_hashes": [str(value.get("body_hash", "")) for value in events],
-            "usage": usage.__dict__, "cache_hit": not missing,
-            "analysis_revision_ids": [value for value in analysis_revision_ids if value],
-        }
+                # Freeze exactly what the first provider call saw. Requester pins
+                # remain on each publication and may differ under the existing key.
+                inference = {
+                    "inference_id": request_token, "usage_owner": usage_owner, "usage_key": request_token,
+                    "target_id": stock_code, "stock_name": stock_name,
+                    "provider": provider, "model": model, "credential_revision": credential.revision,
+                    "prompt_version": ANALYSIS_PROMPT_VERSION, "schema_version": NEWS_ANALYSIS_SCHEMA_VERSION,
+                    "computed_at": computed_at,
+                    "input_envelope_version": 1, "result_schema_version": "news-ai-document-v1",
+                    "inputs": deepcopy(frozen_inputs),
+                    "outputs": [deepcopy(results[index]) for index, _ in missing],
+                }
+                inference_hash = stable_document_hash(inference)
+                for input_index, (index, _event) in enumerate(missing):
+                    produced_bindings_by_ref[(request_token, input_index)] = deepcopy(frozen_inputs[input_index]["input_binding"])
+                    inference_refs[index] = {
+                        "inference_id": request_token, "content_hash": inference_hash, "input_index": input_index,
+                    }
+                usage_document = {**usage_documents[0], "inference": inference}
+                usage_document["document"]["inference_ref"] = {
+                    "inference_id": request_token, "content_hash": inference_hash,
+                }
+                await self._save_usage(usage_document)
+        return outcome_value()
+
 
 
 def _analysis_document(stock_code: str, identity: str, provider: str, model: str,
@@ -443,42 +740,95 @@ def _analysis_document(stock_code: str, identity: str, provider: str, model: str
     }
 
 
-def _prepare_events(events: list[dict[str, Any]], stock_name: str = "") -> list[dict[str, Any]]:
+def _prepare_events(events: list[dict[str, Any]], stock_name: str = "", *, now_provider=None) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     for event in events:
         body = str(event.get("body", "")).strip()
-        body_status = "fulltext"
-        if not body:
+        articles = event.get("articles", ())
+        sources: list[dict[str, object]] = []
+        if body:
+            native = event.get("_native_body")
+            if isinstance(native, dict):
+                # Reuse the job path's narrow receipt before freezing its binding.
+                # Raw BODY text is retained separately in the source snapshot.
+                native = {name: deepcopy(native[name]) for name in
+                          ("body_revision_id", "article_revision_id", "content_hash", "extractor_version",
+                           "fetched_at", "available_at", "status") if name in native}
+            status = str(event.get("body_status") or (native.get("status") if isinstance(native, dict) else "") or "UNKNOWN")
+            observed = now_provider().timestamp() if now_provider is not None else None
+            receiver_clock = "input_receiver_now_provider" if now_provider is not None else "UNKNOWN"
+            selected = None
+            if isinstance(articles, list):
+                for index, article in enumerate(articles):
+                    value = deepcopy(article) if isinstance(article, dict) else {"reported_type": type(article).__name__}
+                    used = str(value.get("identity") or "") == str(event["identity"])
+                    if used and selected is None:
+                        selected = index
+                        raw = str(event.get("_raw_body", event.get("body", "")))
+                        sources.append(news_ai_source_member(index, value, raw, status,
+                            input_text=body, span=(0, len(body)),
+                            observed_at=observed, clock_source=receiver_clock,
+                            native_body=native if isinstance(native, dict) else None))
+                    else:
+                        sources.append(news_ai_source_member(index, value, "", "not_used"))
+            if selected is None:
+                article = {name: deepcopy(event[name]) for name in
+                           ("identity", "title", "description", "link", "original_link", "published_at", "input_source")
+                           if name in event}
+                sources.append(news_ai_source_member(len(sources), article,
+                    str(event.get("_raw_body", event.get("body", ""))), status,
+                    input_text=body, span=(0, len(body)),
+                    observed_at=observed, clock_source=receiver_clock,
+                    native_body=native if isinstance(native, dict) else None))
+            kind, body_status = "article", status
+        else:
             sections: list[str] = []
             saw_fulltext = False
-            articles = event.get("articles", ())
+            length = 0
             if isinstance(articles, list):
-                for index, article in enumerate(articles, start=1):
+                for index, article in enumerate(articles):
                     if not isinstance(article, dict):
+                        sources.append(news_ai_source_member(index, {"reported_type": type(article).__name__}, "", "unavailable"))
                         continue
                     title = str(article.get("title", ""))
                     article_body = ""
+                    source_status = "unavailable"
                     for url in dict.fromkeys((str(article.get("link", "")), str(article.get("original_link", "")))):
                         if not url:
                             continue
                         try:
                             article_body = fetch_article_text(url)
                             if article_body:
-                                saw_fulltext = True
+                                saw_fulltext, source_status = True, "fulltext"
                                 break
                         except Exception:
                             continue
                     if not article_body:
-                        article_body = str(article.get("description", "")).strip()
+                        raw_summary = str(article.get("description", ""))
+                        article_body = raw_summary.strip()
+                        if article_body:
+                            source_status = "summary_only"
+                    observed = now_provider().timestamp() if now_provider is not None else None
+                    raw_source = article_body if source_status == "fulltext" else raw_summary
                     if article_body:
-                        sections.append(f"[관련 기사 {index}/{len(articles)}: {title}]\n{article_body}")
+                        section = f"[관련 기사 {index + 1}/{len(articles)}: {title}]\n{article_body}"
+                        start = length + (2 if sections else 0)
+                        length = start + len(section)
+                        sections.append(section)
+                        sources.append(news_ai_source_member(index, article, raw_source, source_status,
+                            input_text=section, span=(start, length), observed_at=observed,
+                            clock_source="injected_business_clock" if now_provider is not None else "UNKNOWN"))
+                    else:
+                        sources.append(news_ai_source_member(index, article, raw_source, source_status,
+                            observed_at=observed,
+                            clock_source="injected_business_clock" if now_provider is not None else "UNKNOWN"))
             body = "\n\n".join(sections)
+            kind = "bundle"
             body_status = "fulltext" if saw_fulltext else "summary_only"
         if not body:
             raise ValueError("기사 본문과 검색 요약을 가져오지 못했습니다.")
         value = dict(event)
-        value["body"] = body
-        value["body_hash"] = analysis_body_hash(stock_name, body)
-        value["body_status"] = body_status
+        value.update(body=body, body_hash=analysis_body_hash(stock_name, body), body_status=body_status,
+                     _source_members=sources, _input_kind=kind)
         prepared.append(value)
     return prepared

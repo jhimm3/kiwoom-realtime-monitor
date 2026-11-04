@@ -149,6 +149,40 @@ class BundleExecutionTests(unittest.TestCase):
         later = {'kind': 'top20_membership', 'revision_id': 'later',
                  'available_at': '2026-09-14T00:01:00+00:00', 'payload': {'codes': ['000660']}}
         self.assertEqual(['early', 'later'], [frame.revision_id for frame in replay_candidate_universe([later, earlier], chronological=True)])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = rows_for(date(2026, 9, 14), count=8)
+            rows[0]['payload']['codes'] = ['000660']
+            rows.insert(1, dict(rows[0], revision_id='later-membership',
+                                available_at='2026-09-14T00:00:30+00:00',
+                                payload={'codes': ['005930']}))
+            for ordinal, row in enumerate(rows, start=1):
+                row['ordinal'] = ordinal
+                row['accepted_sequence'] = ordinal
+            uniform = [dict(row, available_at=datetime.fromisoformat(
+                row['available_at']).astimezone(timezone.utc).isoformat()) for row in rows]
+            results, decisions = {}, {}
+            frozen = {}
+            for label, observations in (('uniform', uniform), ('mixed', rows)):
+                input_root = root / (label + '-input')
+                relative = child(input_root, date(2026, 9, 14), observations)
+                for name in ('manifest.json', 'observations.jsonl', 'theme_snapshots.jsonl'):
+                    path = input_root / relative / name
+                    frozen[path] = path.read_bytes()
+                dataset = load_frozen_research_export(input_root / relative)
+                results[label], _ = run(dataset, root, label)
+                native = ResearchRepository(root / f'{label}.sqlite3', read_only=True)
+                decisions[label] = native.load_evaluations(results[label].run_id)
+            self.assertEqual(8, sum(row['kind'] == 'minute_bar' for row in rows))
+            self.assertEqual(8, results['uniform'].decision_count)
+            self.assertEqual(8, len(decisions['uniform']))
+            self.assertEqual(8, results['mixed'].decision_count)
+            self.assertEqual(8, len(decisions['mixed']))
+            self.assertEqual([datetime.fromisoformat(row['decided_at']).astimezone(timezone.utc)
+                              for row in decisions['uniform']],
+                             [datetime.fromisoformat(row['decided_at']).astimezone(timezone.utc)
+                              for row in decisions['mixed']])
+            self.assertEqual(frozen, {path: path.read_bytes() for path in frozen})
 
     def test_app_process_request_accepts_bundle_and_rejects_wrong_profile_before_db_creation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,6 +232,11 @@ class BundleExecutionTests(unittest.TestCase):
             first = child(root, date(2026, 9, 14), rows + [correction])
             second = child(root, date(2026, 9, 15), rows_for(date(2026, 9, 15), count=0))
             write_frozen_research_bundle(root, (first, second))
+            frozen = {root / 'manifest.json': (root / 'manifest.json').read_bytes()}
+            for relative in (first, second):
+                for name in ('manifest.json', 'observations.jsonl', 'theme_snapshots.jsonl'):
+                    path = root / relative / name
+                    frozen[path] = path.read_bytes()
             seen = []
             advance = ResearchReplayCursor.advance_for_observation
             def record(cursor, observation):
@@ -206,11 +245,83 @@ class BundleExecutionTests(unittest.TestCase):
                             + [frame.revision_id for frame in universe])
                 return current, bars, universe
             with patch.object(ResearchReplayCursor, 'advance_for_observation', new=record):
-                run(load_research_input(root, session_profile=PROFILE), root, 'correction')
+                multi_result, _ = run(load_research_input(root, session_profile=PROFILE), root, 'correction')
             self.assertNotIn('correction', seen[2])
             self.assertIn(original['revision_id'], seen[2])
             self.assertIn('correction', seen[3])
             self.assertTrue(all('rank-2026-09-15' not in ids for ids in seen))
+            self.assertEqual(4, multi_result.decision_count)
+            multi_native = ResearchRepository(root / 'correction.sqlite3', read_only=True)
+            self.assertEqual(4, len(multi_native.load_evaluations(multi_result.run_id)))
+            expected_seen = list(seen)
+            daily = load_frozen_research_export(root / first)
+            one_root = root / 'one-day-input'
+            one_child = child(one_root, date(2026, 9, 14), rows + [correction])
+            write_frozen_research_bundle(one_root, (one_child,))
+            one_day = load_research_input(one_root, session_profile=PROFILE)
+            self.assertEqual(daily, one_day)
+            for path in (one_root / 'manifest.json', *(one_root / one_child / name for name in
+                         ('manifest.json', 'observations.jsonl', 'theme_snapshots.jsonl'))):
+                frozen[path] = path.read_bytes()
+            results = {}
+            for label, dataset in (('daily', daily), ('one-day-bundle', one_day)):
+                seen.clear()
+                with patch.object(ResearchReplayCursor, 'advance_for_observation', new=record):
+                    results[label], _ = run(dataset, root, label)
+                self.assertEqual(expected_seen, seen)
+                self.assertEqual(4, results[label].decision_count)
+                native = ResearchRepository(root / f'{label}.sqlite3', read_only=True)
+                self.assertEqual(4, len(native.load_evaluations(results[label].run_id)))
+            self.assertEqual(results['daily'].run_id, results['one-day-bundle'].run_id)
+            self.assertEqual(results['daily'].logical_result_hash,
+                             results['one-day-bundle'].logical_result_hash)
+            self.assertEqual(frozen, {path: path.read_bytes() for path in frozen})
+
+    def test_final_market_regime_uses_latest_actual_rank_and_native_mature_outcomes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stamps = ('2026-09-14T09:05:20+09:00', '2026-09-14T00:06:20+00:00',
+                      '2026-09-14T00:07:20+00:00')
+            rankings = [{'kind': 'ranking', 'subject': '5', 'revision_id': f'rank-market-{index}',
+                'observation_key': stamp, 'available_at': stamp, 'effective_at': stamp,
+                'accepted_sequence': index + 10, 'venue': 'COMBINED', 'completeness': 'complete',
+                'payload': {'query_type': '5', 'items': [{'stk_cd': '005930', 'trde_prica': '100', 'flu_rt': '+1.00'}]}}
+                for index, stamp in enumerate(stamps)]
+            cutoff = max(datetime.fromisoformat(stamp).astimezone(timezone.utc) for stamp in stamps)
+            uniform = [dict(row, available_at=datetime.fromisoformat(row['available_at']).astimezone(timezone.utc).isoformat())
+                       for row in rankings]
+            counts = {}
+            for label, ranks in (('uniform', uniform), ('mixed', rankings)):
+                rows = rows_for(date(2026, 9, 14), count=8) + ranks
+                for ordinal, row in enumerate(rows, start=1):
+                    row['ordinal'] = ordinal
+                input_root = root / (label + '-input')
+                relative = child(input_root, date(2026, 9, 14), rows)
+                frozen = {path: path.read_bytes() for path in (input_root / relative).iterdir() if path.is_file()}
+                dataset = load_frozen_research_export(input_root / relative)
+                result, _ = run(dataset, root, label)
+                native = ResearchRepository(root / f'{label}.sqlite3', read_only=True)
+                labels = native.load_outcome_labels(result.run_id)
+                completed = [row for row in labels if row['horizon_seconds'] == 180 and row['status'] == 'COMPLETE'
+                    and isinstance(row['values'], dict)
+                    and datetime.fromisoformat(row['available_at']).astimezone(timezone.utc) <= cutoff]
+                pending = sum(row['horizon_seconds'] == 180 and row['status'] == 'PENDING'
+                    and datetime.fromisoformat(row['available_at']).astimezone(timezone.utc) <= cutoff for row in labels)
+                self.assertTrue(completed)
+                self.assertEqual(8, result.decision_count)
+                self.assertEqual(8, len(native.load_evaluations(result.run_id)))
+                self.assertIsNotNone(result.market_regime)
+                self.assertEqual(cutoff, datetime.fromisoformat(result.market_regime['as_of']).astimezone(timezone.utc))
+                features = result.market_regime['value']['features']
+                self.assertEqual(cutoff, datetime.fromisoformat(features['as_of']).astimezone(timezone.utc))
+                self.assertEqual(len(completed), features['mature_breakout_denominator'])
+                self.assertEqual(pending, features['pending_breakout_count'])
+                success = sum(row['values']['return_bps'] > 0 for row in completed)
+                self.assertEqual(success * 1_000_000 // len(completed), features['mature_breakout_success_ppm'])
+                self.assertEqual((len(completed) - success) * 1_000_000 // len(completed), features['mature_breakout_failure_ppm'])
+                self.assertEqual(frozen, {path: path.read_bytes() for path in frozen})
+                counts[label] = (len(completed), pending)
+            self.assertEqual(counts['uniform'], counts['mixed'])
 
 
 if __name__ == '__main__':

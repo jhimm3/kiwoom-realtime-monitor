@@ -5,6 +5,15 @@ Never provision/reseal implicitly; each run restores the operator's fixed baseli
 """
 from __future__ import annotations
 
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder, HubInputRecorder
+
 from contextlib import contextmanager
 import asyncio
 from datetime import datetime, timezone
@@ -94,6 +103,7 @@ class RecordedExecutionPostgresTests(unittest.TestCase):
     def _candidate_flow_fixture(self):
         from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
         from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+        from kiwoom_monitor.central_server import diagnostic_rest_input as rest_inputs
         from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
         from kiwoom_monitor.central_server.diagnostic_top20_flow_input import VERSION
 
@@ -112,12 +122,14 @@ class RecordedExecutionPostgresTests(unittest.TestCase):
                         lease.restore(self.baseline_id)
                         store = lease.store()
                         self.assertFalse(store.load_documents('candidate_flow_capture', '2026-10-07:099997', 1))
-                        broker = CentralRestBroker(Client(), store, MarketDataIngestor(store).ingest)
+                        broker = CentralRestBroker(Client(), store, MarketDataIngestor(store).ingest, input_observer=rest_inputs)
                         async def collect():
                             try:
                                 await AutonomousTop20Service(broker, None, store,
                                     now_provider=lambda: datetime.fromisoformat('2026-10-07T09:01:02+09:00')
-                                )._capture_candidate_investor_flow('099997', '2026-10-07')
+                                ,
+                                    capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+                                    flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)._capture_candidate_investor_flow('099997', '2026-10-07')
                             finally:
                                 await broker.close()
                         asyncio.run(collect())
@@ -186,7 +198,9 @@ class RecordedExecutionPostgresTests(unittest.TestCase):
                         lease.restore(self.baseline_id)
                         store = lease.store()
                         now = datetime(2026, 10, 7, 1, tzinfo=timezone.utc)
-                        collector = CentralRealtimeCollector(lambda: '', 'real', RealtimeHub(), lambda: now, store)
+                        hub_observer = HubInputRecorder()
+                        capture_hub = RealtimeHub(observer=hub_observer)
+                        collector = CentralRealtimeCollector(lambda: '', 'real', capture_hub, lambda: now, store, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
                         component = f'realtime_collector:{id(collector):x}'
                         collector._publish_parsed({'trnm': 'REAL', 'data': [
                             {'type': '0w', 'item': '005930_NX', 'values': {'20': '100000', '210': '-5', '212': '7'}},

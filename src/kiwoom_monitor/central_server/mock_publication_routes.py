@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any, Protocol, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from .async_lifetime import await_native_call
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ class MockAutomationSpecPublicationRequest(BaseModel):
 def create_mock_publication_router(
     store: MockPublicationEvidenceStore, repository: ForwardEvaluationRepository,
     authorize: Callable[..., None],
+    *, expected_implementation_hash: Callable[[str], str | None] = lambda _profile: None,
 ) -> APIRouter:
     """Repository holds only the same store reference; no execution/lifecycle owner is added."""
     router = APIRouter()
@@ -60,7 +62,6 @@ def create_mock_publication_router(
             eligibility_receipt_from_dict,
             validate_publication_size,
         )
-        from kiwoom_monitor.application.research_implementation import research_implementation_hash
         try:
             validate_publication_size(
                 request.package, request.eligibility_policy, request.eligibility_receipt,
@@ -72,13 +73,13 @@ def create_mock_publication_router(
                 raise ValueError("candidate publication account_ref conflict")
             session = package.candidate_spec.get("session_profile", {})
             profile = str(session.get("profile", "")) if isinstance(session, dict) else ""
-            if package.scientific_implementation_hash != research_implementation_hash(profile):
-                raise ValueError("candidate scientific implementation hash does not match this server")
-            saved = await asyncio.to_thread(
+            expected_hash = expected_implementation_hash(profile)
+            saved = await await_native_call(
                 repository.publish_mock_automation_candidate,
                 package, policy, receipt,
                 credential_profile_id=request.credential_profile_id,
                 expected_binding_revision=request.expected_binding_revision,
+                confirm_only=(expected_hash is None or package.scientific_implementation_hash != expected_hash),
             )
         except (KeyError, TypeError, ValueError) as error:
             detail = str(error)
@@ -191,7 +192,7 @@ def create_mock_publication_router(
             )
             if shadow_event is None:
                 raise ValueError("stored shadow evidence event is missing")
-            readiness, changed = await asyncio.to_thread(
+            readiness, changed = await await_native_call(
                 publish_ready_mock_automation_spec,
                 repository,
                 profile=profile,

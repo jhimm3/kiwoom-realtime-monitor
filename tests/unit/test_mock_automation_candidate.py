@@ -284,7 +284,13 @@ class MockAutomationCandidateTests(unittest.IsolatedAsyncioTestCase):
                 "verified_at": NOW.isoformat(), "verification_method": "ka00001",
             })
             store.close()
-            package = _package(); policy = _policy(package)
+            from tests.unit.test_nas_source_runtime import selected_research_artifact_fixture
+            selected_file, selected = selected_research_artifact_fixture(Path(directory))
+            package = _package()
+            candidate_spec = {**package.candidate_spec, "implementation_hash": selected["implementation_hash"]}
+            package = replace(package, candidate_spec=candidate_spec, candidate_spec_hash=_hash(candidate_spec),
+                              scientific_implementation_hash=selected["implementation_hash"])
+            policy = _policy(package)
             receipt = evaluate_candidate_eligibility(package, policy, account_ref=ACCOUNT_REF)
             body = {
                 "account_ref": ACCOUNT_REF,
@@ -294,8 +300,10 @@ class MockAutomationCandidateTests(unittest.IsolatedAsyncioTestCase):
                 "eligibility_policy": policy.to_dict(),
                 "eligibility_receipt": receipt.to_dict(),
             }
-            app = create_app(CentralServerSettings(f"sqlite:///{path}", "private-token"))
-            with patch("kiwoom_monitor.application.research_implementation.research_implementation_hash", return_value="a" * 64):
+            app = create_app(CentralServerSettings(f"sqlite:///{path}", "private-token",
+                             selected_research_artifact_file=str(selected_file)))
+            with patch("kiwoom_monitor.application.research_implementation.research_implementation_hash",
+                       side_effect=AssertionError("receiver scanned producer source")):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://offline") as client:
                     self.assertEqual(401, (await client.post(
                         "/api/v1/research/mock-automation-candidates", json=body,

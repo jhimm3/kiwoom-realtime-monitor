@@ -5,13 +5,14 @@ from kiwoom_monitor.domain.time_basis import as_kst, kst_wall_now
 import logging
 import time
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QThread, QTimer, Qt, Signal, Slot
 
 from kiwoom_monitor.application.ranking_execution import RankingExecutionCoordinator
 from kiwoom_monitor.application.ranking_schedule import RankingChangeSummary, RankingResponseAction
@@ -25,8 +26,9 @@ from kiwoom_monitor.application.secondary_data_schedule import (
     SecondaryDataFollowupCoordinator, SecondaryStartPhase,
 )
 
-from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter
+from kiwoom_monitor.infrastructure.persistence.entry_snapshot_writer import EntrySnapshotWriter, SourceRelease
 from kiwoom_monitor.infrastructure.persistence.market_cache_writer import MarketCacheWriter
+from kiwoom_monitor.application.top20_trade_value_collector import Top20MinuteRecord
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
 from kiwoom_monitor.presentation.daily_high_worker_controller import DailyHighWorkerController
 from kiwoom_monitor.presentation.fundamentals_worker_controller import FundamentalsWorkerController
@@ -38,6 +40,7 @@ from kiwoom_monitor.presentation.minute_history_worker_controller import MinuteH
 from kiwoom_monitor.presentation.nxt_eligibility_worker_controller import NxtEligibilityWorkerController
 from kiwoom_monitor.presentation.ranking_worker_controller import RankingWorkerController
 from kiwoom_monitor.presentation.realtime_worker_controller import RealtimeWorkerController
+from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 from kiwoom_monitor.presentation.top20_market_repair_worker_controller import Top20MarketRepairWorkerController
 from kiwoom_monitor.presentation.update_worker_controller import UpdateWorkerController
 
@@ -65,11 +68,38 @@ class AppShutdownActions:
     start_exit_backup_if_needed: Callable[[], None]
     flush_partial_top20: Callable[[], None]
     stop_auxiliaries: Callable[[], None]
+    producer_workers: Callable[[], tuple[QThread, ...]] | None = None
+
+
+@dataclass(frozen=True)
+class _ApiClientRetirementResult:
+    error: BaseException | None
+    error_stage: str | None
+    lifecycle: object | None
+    observation_error: BaseException | None
+    completion: object | None = None
+    completion_error: BaseException | None = None
+
+
+@dataclass
+class _ApiClientRetirement:
+    """One unfinished observer lifetime, without copying the runtime bundle."""
+
+    client: object
+    source_release: SourceRelease | None
+    runtime_detached: bool
+    error: BaseException | None = None
+    worker: SettingsRequestWorker | None = None
+    result: _ApiClientRetirementResult | str | None = None
+    native_result: bool | None = None
+    native_error: BaseException | None = None
+    start_error: BaseException | None = None
+    inline_cleanup: bool = False
 
 
 @dataclass(frozen=True)
 class AppRuntimeActions:
-    """Apply the UI-owned caches and aggregator after the runtime is replaced."""
+    """Apply UI effects and the session-owned aggregator after runtime replacement."""
 
     apply_runtime: Callable[[dict[str, object]], None]
     capture_state: Callable[[], Callable[[], None]] | None = None
@@ -112,6 +142,7 @@ class AppController(QObject):
     """Own application workers and stop producers before draining persistence."""
 
     shutdown_progress = Signal(str)
+    shutdown_save_retry_needed = Signal()
     shutdown_ready = Signal()
     minute_cache_saved = Signal()
     ranking_requested = Signal()
@@ -147,6 +178,8 @@ class AppController(QObject):
         ranking_loader: RankingLoader | None = None,
         api_runtime_factory: Callable[[], dict[str, object]] | None = None,
         market_data_client: object | None = None,
+        owned_observers: tuple[object, ...] = (),
+        unpublished_observer_error: BaseException | None = None,
     ) -> None:
         super().__init__(parent)
         self.ranking = RankingWorkerController(self)
@@ -206,6 +239,8 @@ class AppController(QObject):
         self._started_writers: set[str] = set()
         self._closing = False
         self._shutdown_stage = "running"
+        self._shutdown_start_error: BaseException | None = None
+        self._shutdown_native_wait_error: tuple[QThread, str, BaseException] | None = None
         self._shutdown_cache_failed = False
         self._shutdown_cache_batch: dict[str, dict[object, object]] = {}
         self._shutdown_actions: AppShutdownActions | None = None
@@ -214,6 +249,10 @@ class AppController(QObject):
         self._shutdown_timer.timeout.connect(self._advance_shutdown)
         self.ranking_loader = ranking_loader
         self.market_data_client = market_data_client
+        # Own only the explicitly supplied optional observers. The data port is borrowed.
+        self._owned_observers = self._normalize_owned_observers(owned_observers)
+        self._api_client_retirements: list[_ApiClientRetirement] = []
+        self._shutdown_api_client_retired = False
         self.initial_ranking_waits_for_google_drive = False
         self._api_runtime_factory = api_runtime_factory
         self._api_reloading = False
@@ -263,6 +302,7 @@ class AppController(QObject):
         self.nxt_eligibility.finished.connect(lambda: self.start_realtime_subscription(self.ranked_codes))
         self.nxt_eligibility.finished.connect(lambda: self.start_realtime_followups(self.ranked_codes))
         self.minute_history.finished.connect(self._on_minute_history_finished)
+        self._adopt_unpublished_observer_error(unpublished_observer_error)
 
     @property
     def closing(self) -> bool:
@@ -603,16 +643,281 @@ class AppController(QObject):
             runtime = self._api_runtime_factory()
             self._apply_api_runtime(runtime, actions)
         except Exception as error:
+            self._adopt_unpublished_observer_error(error)
+            self._start_api_client_retirements()
             self._api_reloading = False
             self._api_reload_stage = "idle"
             self.ranking_execution.end_priority_preparation()
             self.api_reload_failed.emit(str(error))
             return
+        self._start_api_client_retirements()
         self._api_reloading = False
         self._api_reload_stage = "idle"
         self.ranking_execution.end_priority_preparation()
         self.api_reload_completed.emit()
         self.start_initial_ranking()
+
+    @staticmethod
+    def _normalize_owned_observers(
+        observers: tuple[object, ...],
+    ) -> tuple[object, ...]:
+        unique = []
+        for observer in observers:
+            if all(observer is not previous for previous in unique):
+                unique.append(observer)
+        return tuple(unique)
+
+    def _is_current_observer(self, observer: object) -> bool:
+        return any(observer is current for current in self._owned_observers)
+
+    def _retain_api_client_retirement(
+        self, client: object | None, source_release: SourceRelease | None, *,
+        runtime_detached: bool, error: BaseException | None = None,
+    ) -> _ApiClientRetirement | None:
+        # A source receipt never grants authority over an installed client.
+        if client is None or self._is_current_observer(client):
+            return None
+        existing = next((item for item in self._api_client_retirements if item.client is client), None)
+        if existing is not None:
+            return existing
+        retirement = _ApiClientRetirement(client, source_release, runtime_detached, error)
+        self._api_client_retirements.append(retirement)
+        return retirement
+
+    def _retain_runtime_observers(
+        self, observers: tuple[object, ...], client: object | None,
+        source_release: SourceRelease | None, *, runtime_detached: bool,
+        error: BaseException | None = None,
+    ) -> None:
+        for observer in observers:
+            self._retain_api_client_retirement(
+                observer, source_release if observer is client else None,
+                runtime_detached=runtime_detached, error=error,
+            )
+
+    def _adopt_unpublished_observer_error(self, error: BaseException | None) -> None:
+        if error is None:
+            return
+        completions = getattr(error, "api_runtime_observer_completion", ())
+        for observer, close_error, lifecycle, observation_error in getattr(error, "api_runtime_observer_cleanup", ()):
+            existing = next((item for item in self._api_client_retirements if item.client is observer), None)
+            if existing is not None:
+                continue
+            completion, completion_error = next((
+                (receipt, failure) for owned, receipt, failure in completions if owned is observer
+            ), (None, None))
+            retirement = _ApiClientRetirement(
+                observer, None, not self._is_current_observer(observer), error=error,
+                result=_ApiClientRetirementResult(
+                    close_error, "close" if close_error is not None else None, lifecycle, observation_error,
+                    completion, completion_error,
+                ),
+                inline_cleanup=True,
+            )
+            self._api_client_retirements.append(retirement)
+            self._settle_api_client_retirement(retirement)
+
+    @staticmethod
+    def _api_retirement_execution_complete(retirement: _ApiClientRetirement) -> bool:
+        return retirement.inline_cleanup or retirement.native_result is True
+
+    @staticmethod
+    def _run_api_client_retirement(retirement: _ApiClientRetirement) -> _ApiClientRetirementResult:
+        error = None
+        error_stage = None
+        lifecycle = None
+        observation_error = None
+        completion = None
+        completion_error = None
+        stage = "source_release"
+        try:
+            if retirement.source_release is not None:
+                retirement.source_release.wait()
+            stage = "close"
+            retirement.client.close()
+        except BaseException as caught:
+            error = caught
+            error_stage = stage
+        if stage == "close":
+            try:
+                finish = getattr(retirement.client, "finish_comparison_shutdown", None)
+                if callable(finish):
+                    # The exact owner returns its terminal result, so close and
+                    # this call cannot run a second independent native drain.
+                    completion = finish()
+            except BaseException as caught:
+                completion_error = caught
+                if error is None:
+                    error = caught
+                    error_stage = "completion"
+        try:
+            lifecycle = retirement.client.comparison_lifecycle_state()
+        except BaseException as caught:
+            observation_error = caught
+        return _ApiClientRetirementResult(
+            error, error_stage, lifecycle, observation_error, completion, completion_error,
+        )
+
+    def _start_api_client_retirements(self) -> None:
+        # Called only after the existing reload worker/signal fence. Published
+        # state and source ownership stay with this controller and the writer.
+        for retirement in tuple(self._api_client_retirements):
+            if retirement.inline_cleanup:
+                self._settle_api_client_retirement(retirement)
+                continue
+            self._join_api_client_retirement(retirement)
+            if (not retirement.runtime_detached or self._is_current_observer(retirement.client)
+                    or retirement.worker is not None or retirement.result is not None):
+                continue
+            try:
+                worker = SettingsRequestWorker(
+                    lambda owned=retirement: self._run_api_client_retirement(owned), self,
+                    retain_until_joined=True,
+                )
+                retirement.worker = worker
+                worker.setObjectName("api-client-retirement")
+                worker.succeeded.connect(self._on_api_client_retirement_result)
+                worker.failed.connect(self._on_api_client_retirement_failed)
+                worker.finished.connect(self._on_api_client_retirement_finished)
+                worker.start()
+            except BaseException as error:
+                # Start failure is not observer shutdown; preserve its real error.
+                retirement.start_error = error
+                worker = retirement.worker
+                try:
+                    may_have_run = worker is not None and (worker.isRunning() or worker.isFinished())
+                except BaseException as observation_error:
+                    retirement.native_error = observation_error
+                    may_have_run = True
+                if not may_have_run:
+                    retirement.result = _ApiClientRetirementResult(error, "start", None, None)
+                # If start raised after launching the real thread, its queued
+                # task outcome must still arrive before explicit Qt release.
+                self._join_api_client_retirement(retirement)
+
+    def _api_client_retirement_for(self, worker: object) -> _ApiClientRetirement | None:
+        return next((item for item in self._api_client_retirements if item.worker is worker), None)
+
+    @Slot(object)
+    def _on_api_client_retirement_result(self, result: object) -> None:
+        retirement = self._api_client_retirement_for(self.sender())
+        if retirement is not None:
+            retirement.result = result
+            self._join_api_client_retirement(retirement)
+            self._wake_api_retirement_shutdown()
+
+    @Slot(str)
+    def _on_api_client_retirement_failed(self, message: str) -> None:
+        retirement = self._api_client_retirement_for(self.sender())
+        if retirement is not None:
+            # Expected source/close/fact errors use the object result above. An
+            # unexpected worker-level string cannot establish actual stop.
+            retirement.result = message
+            self._join_api_client_retirement(retirement)
+            self._wake_api_retirement_shutdown()
+
+    @Slot()
+    def _on_api_client_retirement_finished(self) -> None:
+        worker = self.sender()
+        retirement = self._api_client_retirement_for(worker)
+        if retirement is not None:
+            self._join_api_client_retirement(retirement)
+            self._wake_api_retirement_shutdown()
+
+    def _join_api_client_retirement(self, retirement: _ApiClientRetirement) -> None:
+        worker = retirement.worker
+        if worker is None:
+            return
+        try:
+            # Preserve an outcome not yet delivered to this owner. Explicit
+            # retention also covers a native tail after the finished signal.
+            retirement.native_result = (
+                worker.wait(0) if retirement.result is None else worker.release_after_join()
+            )
+        except BaseException as error:
+            retirement.native_result = False
+            if retirement.native_error is None:
+                retirement.native_error = error
+        if retirement.native_result is True and retirement.result is not None:
+            self._settle_api_client_retirement(retirement)
+
+    @staticmethod
+    def _api_client_stop_confirmed(retirement: _ApiClientRetirement) -> bool:
+        result = retirement.result
+        if not isinstance(result, _ApiClientRetirementResult):
+            return False
+        completion = result.completion
+        try:
+            if (result.completion_error is None and completion is not None
+                    and completion.owner is retirement.client and completion.native_completed is True
+                    and (completion.wait_error is None or isinstance(completion.wait_error, BaseException))):
+                # This actual owner cut admission, drained and joined. Preserve
+                # the independent legacy error/getter UNKNOWN, without turning
+                # either into a fake lifecycle fact or a permanent core gate.
+                return True
+        except BaseException as error:
+            retirement.result = replace(result, completion_error=error)
+            return False
+        if result.observation_error is not None:
+            return False
+        state = result.lifecycle
+        try:
+            stopped = (state.admission_closed is True and type(state.active_requests) is int
+                       and state.active_requests == 0 and state.worker_stopped is True)
+            if not stopped:
+                return False
+            if result.error is None:
+                return state.failure_stage is None
+            if retirement.inline_cleanup and result.error_stage == "close" and state.failure_stage is None:
+                # This factory-local synchronous attempt has returned and the
+                # exact producer is stopped. Preserve its post-close error;
+                # there was no Qt task/native join to invent or repeat.
+                return True
+            return result.error_stage == "close" and state.failure_stage in {"report", "local_query"}
+        except BaseException as error:
+            retirement.result = replace(result, observation_error=error)
+            return False
+
+    def _settle_api_client_retirement(self, retirement: _ApiClientRetirement) -> None:
+        # A queued result can arrive before the native tail. Preserve the handle
+        # and the client until both have actually completed on this Qt owner.
+        if not self._api_retirement_execution_complete(retirement) or retirement.result is None:
+            return
+        retirement.worker = None
+        if self._is_current_observer(retirement.client):
+            return
+        if self._api_client_stop_confirmed(retirement):
+            result = retirement.result
+            if (result.error is None and result.observation_error is None and result.completion_error is None
+                    and retirement.start_error is None and retirement.native_error is None):
+                for index, owned in enumerate(self._api_client_retirements):
+                    if owned is retirement:
+                        del self._api_client_retirements[index]
+                        break
+            # Terminal observer errors retain the original client/job/result/RAM.
+            # They are not mandatory writer failures or a permanent close gate.
+
+    def _wake_api_retirement_shutdown(self) -> None:
+        if self.closing and self._shutdown_stage == "api_retirements":
+            self._shutdown_timer.start(0)
+
+    def _retire_shutdown_api_clients(self) -> None:
+        # Reached only after producer/signal and actual writer/pending closure.
+        # No normal API replacement may detach the current identity this way.
+        if not self._shutdown_api_client_retired:
+            observers = self._owned_observers
+            self._owned_observers = ()
+            for observer in observers:
+                if observer is self.market_data_client:
+                    self.market_data_client = None
+                self._retain_api_client_retirement(observer, None, runtime_detached=True)
+            # Closing admission and actual native drains now also end the use
+            # of any factory/view references left by an incomplete rollback.
+            for retirement in self._api_client_retirements:
+                if not self._is_current_observer(retirement.client):
+                    retirement.runtime_detached = True
+            self._shutdown_api_client_retired = True
+        self._start_api_client_retirements()
 
     def _apply_api_runtime(self, runtime: dict[str, object], actions: AppRuntimeActions) -> None:
         controllers = (
@@ -625,28 +930,43 @@ class AppController(QObject):
         )
         previous = {
             "ranking_loader": self.ranking_loader, "market_data_client": self.market_data_client,
+            "owned_observers": self._owned_observers,
             **{name: controller._worker_factory for controller, name in controllers},
         }
+        candidate_observers = self._normalize_owned_observers(
+            runtime.get("owned_observers", ()),
+        )
         writer = self.entry_snapshot_writer
-        investor_cache = None
-        if writer is not None:
-            previous.update(entry_investor_loader=writer._investor_loader, program_trade_loader=writer._program_loader)
-            investor_cache = dict(writer._investor_cache)
         old_fallback = self.ranking_uses_local_fallback
-        restore_view = actions.capture_state() if actions.capture_state is not None else None
+        source_release = None
+        source_attempted = False
+        try:
+            restore_view = actions.capture_state() if actions.capture_state is not None else None
+        except Exception as error:
+            # No factory/source/client has been published by this attempt yet.
+            self._retain_runtime_observers(
+                candidate_observers, runtime.get("market_data_client"), None,
+                runtime_detached=True, error=error,
+            )
+            raise
         try:
             self.ranking_loader = runtime.get("ranking_loader")
             for controller, name in controllers:
                 controller.set_factory(runtime.get(name))
-            if writer is not None:
-                writer.set_investor_loader(runtime.get("entry_investor_loader"))
-                writer.set_program_loader(runtime.get("program_trade_loader"))
-            self.market_data_client = runtime.get("market_data_client")
-            self.ranking_uses_local_fallback = False
-            actions.apply_runtime(runtime)
+            source_attempted = writer is not None
+            source_change = writer.replace_sources(
+                investor_loader=runtime.get("entry_investor_loader"),
+                program_loader=runtime.get("program_trade_loader"),
+            ) if writer is not None else nullcontext()
+            with source_change as source_release:
+                self.market_data_client = runtime.get("market_data_client")
+                self._owned_observers = candidate_observers
+                self.ranking_uses_local_fallback = False
+                actions.apply_runtime(runtime)
         except Exception as error:
             self.ranking_loader = previous["ranking_loader"]
             self.market_data_client = previous["market_data_client"]
+            self._owned_observers = previous["owned_observers"]
             self.ranking_uses_local_fallback = old_fallback
             failures = []
             for controller, name in controllers:
@@ -654,22 +974,89 @@ class AppController(QObject):
                     controller.set_factory(previous[name])
                 except Exception as restore_error:
                     failures.append(f"{name}: {restore_error}")
-            if writer is not None:
-                try:
-                    writer.set_investor_loader(previous["entry_investor_loader"])
-                    writer.set_program_loader(previous["program_trade_loader"])
-                    writer._investor_cache.update(investor_cache or {})
-                except Exception as restore_error:
-                    failures.append(f"entry_snapshot_writer: {restore_error}")
             if restore_view is not None:
                 try:
                     restore_view()
                 except Exception as restore_error:
                     failures.append(f"view: {restore_error}")
             if failures:
-                raise RuntimeError(f"{error}; runtime restore failed: {'; '.join(failures)}") from error
+                restore_error = RuntimeError(f"{error}; runtime restore failed: {'; '.join(failures)}")
+                # A remaining factory/view may still publish or use this client.
+                self._retain_runtime_observers(
+                    candidate_observers, runtime.get("market_data_client"), source_release,
+                    runtime_detached=False, error=restore_error,
+                )
+                raise restore_error from error
+            self._retain_runtime_observers(
+                candidate_observers, runtime.get("market_data_client"), source_release,
+                runtime_detached=not source_attempted or source_release is not None, error=error,
+            )
             raise
-        self.realtime_subscription.reset()
+        try:
+            self.realtime_subscription.reset()
+        except Exception as error:
+            # The source transaction has committed. This error is not rollback.
+            self._retain_runtime_observers(
+                previous["owned_observers"], previous["market_data_client"], source_release,
+                runtime_detached=True, error=error,
+            )
+            raise
+        self._retain_runtime_observers(
+            previous["owned_observers"], previous["market_data_client"], source_release, runtime_detached=True,
+        )
+
+    def store_top20_record(self, record: Top20MinuteRecord) -> None:
+        if record.minute is None or not record.codes or self.minute_bar_repository is None:
+            return
+        try:
+            self.minute_bar_repository.upsert_top20_trade_value_index(
+                record.minute, record.total, record.codes, record.capture_state,
+                kospi_trade_value_eok=record.market_values[0],
+                kosdaq_trade_value_eok=record.market_values[1],
+                unknown_trade_value_eok=record.market_values[2],
+                kospi_stock_count=record.market_counts[0],
+                kosdaq_stock_count=record.market_counts[1],
+                unknown_stock_count=record.market_counts[2],
+                cohort_segments=record.cohort_segments,
+            )
+        except Exception as error:
+            logger.warning("TOP20 거래대금 지수 저장 실패: %s", error)
+
+    def load_minute_gaps(self, codes: tuple[str, ...], day: date) -> dict:
+        loader = getattr(self.minute_bar_repository, "load_gap_minutes", None)
+        return loader(codes, day) if callable(loader) else {}
+
+    def store_minute_history(self, code: str, bars: tuple, now: datetime, generation: int | None, *, on_committed: Callable) -> bool:
+        if self.minute_bar_repository is None:
+            on_committed(tuple(bar.minute for bar in bars))
+            return True
+        if self.market_cache_writer is not None:
+            self.market_cache_writer.enqueue_history_bars(code, bars, now.date(), now, recovery_generation=generation)
+            return False
+        stored = False
+        try:
+            self.minute_bar_repository.upsert_bars(code, bars)
+            self.minute_bar_repository.record_history_sync(code, now.date(), now, len(bars))
+            stored = True
+            on_committed(None)
+        except Exception as error:
+            logger.warning("분봉 보완 DB 저장 실패 (%s): %s", code, error)
+        self.enforce_minute_retention(bar.minute for bar in bars)
+        return stored
+
+    def store_empty_minute_coverage(self, code: str, minutes: tuple[datetime, ...], generation: int, *, on_committed: Callable, on_failed: Callable) -> None:
+        if self.market_cache_writer is not None:
+            self.market_cache_writer.enqueue_empty_coverage(code, minutes, generation)
+        elif self.minute_bar_repository is not None:
+            try:
+                committed = self.minute_bar_repository.confirm_empty_minutes(code, minutes)
+            except Exception as error:
+                on_failed(str(error))
+            else:
+                on_committed(committed)
+            self.enforce_minute_retention(minutes)
+        else:
+            on_committed(minutes)
 
     def flush_minute_cache(self) -> None:
         """실시간 체결을 1초 단위로 묶어 SQLite에 저장한다."""
@@ -995,11 +1382,16 @@ class AppController(QObject):
         )
         referenced = {worker for worker, _ in workers}
         writers = {self.market_cache_writer, self.entry_snapshot_writer}
+        retirements = {item.worker for item in self._api_client_retirements if item.worker is not None}
         # Drive may clear its public worker reference while its thread is still
         # returning from run(). Qt ownership keeps that thread visible until finished.
+        actions = self._shutdown_actions
+        children = tuple(self.findChildren(QThread))
+        if actions is not None and actions.producer_workers is not None:
+            children = tuple(dict.fromkeys((*children, *actions.producer_workers())))
         return workers + tuple(
-            (worker, "백그라운드 작업") for worker in self.findChildren(QThread)
-            if worker not in referenced and worker not in writers
+            (worker, "백그라운드 작업") for worker in children
+            if worker not in referenced and worker not in writers and worker not in retirements
         )
 
     def request_close(self) -> bool:
@@ -1031,14 +1423,29 @@ class AppController(QObject):
         self._initial_ranking_timer.stop()
         self._stop_ranking_timers()
         self._shutdown_stage = "producers"
-        actions.save_view_state()
-        self._stop_timers()
-        actions.stop_visual_work()
-        self.shutdown_progress.emit("종료 중: 실행 중인 작업을 일시 중지하고 있습니다…")
-        actions.start_exit_backup_if_needed()
-        self._interrupt_producers()
-        if not self.image_ocr.stop_for_shutdown():
-            logger.warning("OCR 보조 스레드가 강제 종료 제한시간 안에 끝나지 않았습니다.")
+        errors = []
+        for stage, action in (
+            ("save_view_state", actions.save_view_state),
+            ("stop_timers", self._stop_timers),
+            ("stop_visual_work", actions.stop_visual_work),
+            ("shutdown_progress", lambda: self.shutdown_progress.emit("종료 중: 실행 중인 작업을 일시 중지하고 있습니다…")),
+            ("start_exit_backup", actions.start_exit_backup_if_needed),
+            ("interrupt_producers", self._interrupt_producers),
+            ("stop_ocr", self.image_ocr.stop_for_shutdown),
+        ):
+            try:
+                result = action()
+                if stage == "stop_ocr" and not result:
+                    logger.warning("OCR 보조 스레드가 강제 종료 제한시간 안에 끝나지 않았습니다.")
+            except BaseException as error:
+                errors.append((stage, error))
+        if errors:
+            self._shutdown_timer.start(0)
+            first = errors[0][1]
+            setattr(first, "app_shutdown_start_cleanup", tuple(errors))
+            if self._shutdown_start_error is None:
+                self._shutdown_start_error = first
+            raise first
         # Even a finished thread may still have queued result/finished signals.
         if any(worker is not None for worker, _ in self._producer_workers()):
             self._shutdown_timer.start(100)
@@ -1054,6 +1461,72 @@ class AppController(QObject):
         self._complete_shutdown(notify=False)
         return self._shutdown_stage == "ready"
 
+    def finish_settings_size_request(self, worker: SettingsRequestWorker) -> None:
+        """Own this explicit geometry request's native completion and release."""
+        if self.closing:
+            return
+        try:
+            if worker.release_after_join(wait=True) is not True:
+                raise RuntimeError("settings size request native completion is unconfirmed")
+        except BaseException as error:
+            # The public release has kept both its Qt parent and existing
+            # request ownership. Shutdown retries that exact public completion.
+            if self._shutdown_native_wait_error is None:
+                self._shutdown_native_wait_error = (worker, "settings_size", error)
+
+    def finish_shutdown(self) -> None:
+        """Retain the published owner after exec, including queued save ACKs.
+
+        The existing timer advances shutdown. A failed save still requires the
+        existing explicit close retry; returning from exec grants no release.
+        """
+        if self._shutdown_actions is None:
+            raise RuntimeError("application shutdown is not configured")
+        first_error = self._shutdown_start_error
+        first_error_stage = "request_close" if first_error is not None else None
+
+        def remember_native_wait_error() -> None:
+            nonlocal first_error, first_error_stage
+            failure = self._shutdown_native_wait_error
+            if first_error is None and failure is not None:
+                first_error, first_error_stage = failure[2], "native_join"
+
+        remember_native_wait_error()
+        if not self.closing:
+            try:
+                self.request_close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error, first_error_stage = error, "request_close"
+        flags = QEventLoop.ProcessEventsFlag.AllEvents | QEventLoop.ProcessEventsFlag.WaitForMoreEvents
+        if self._shutdown_stage != "ready":
+            dispatcher = QCoreApplication.eventDispatcher()
+            # Wake this dispatcher only while this call awaits completion.
+            ready_connection = self.shutdown_ready.connect(
+                dispatcher.interrupt, Qt.ConnectionType.DirectConnection
+            )
+            try:
+                while self._shutdown_stage != "ready":
+                    remember_native_wait_error()
+                    try:
+                        # Wait for this same dispatcher's existing timer, queued native
+                        # results, or an explicit user retry. No native polling task.
+                        QCoreApplication.processEvents(flags)
+                    except BaseException as error:
+                        # Keep the first interruption; repeated native wait cancels
+                        # neither grow an error history nor grant completion.
+                        remember_native_wait_error()
+                        if first_error is None:
+                            first_error, first_error_stage = error, "event_dispatch"
+            finally:
+                QObject.disconnect(ready_connection)
+        remember_native_wait_error()
+        if first_error is not None:
+            setattr(first_error, "app_shutdown_cleanup", ((first_error_stage, first_error),))
+            if self._shutdown_native_wait_error is not None:
+                setattr(first_error, "app_shutdown_native_wait_error", self._shutdown_native_wait_error)
+            raise first_error
+
     def _stop_timers(self) -> None:
         self._stop_storage_timers()
         actions = self._shutdown_actions
@@ -1067,14 +1540,36 @@ class AppController(QObject):
     def _interrupt_producers(self) -> list[str]:
         labels = []
         for worker, label in self._producer_workers():
-            if worker is not None and worker.isRunning():
+            if worker is None:
+                continue
+            if worker.isRunning():
                 worker.requestInterruption()
+                labels.append(label)
+            elif isinstance(worker, QThread) and not self._shutdown_thread_joined(worker, "producer"):
+                # finished/isRunning are not a native TLS-destructor join ACK.
                 labels.append(label)
         return labels
 
+    def _shutdown_thread_joined(self, worker: QThread, phase: str) -> bool:
+        try:
+            if isinstance(worker, SettingsRequestWorker):
+                # Complete/release only requests in this Controller/Window
+                # QObject tree, including a geometry callback's failed wait.
+                return worker.release_after_join() is True
+            return worker.wait(0) is True
+        except BaseException as error:
+            # A finite native-wait interruption is not a join receipt. Preserve
+            # its first exact owner/phase/error; the existing shutdown stage
+            # still sees pending work and rearms its existing single-shot timer.
+            if self._shutdown_native_wait_error is None:
+                self._shutdown_native_wait_error = (worker, phase, error)
+            return False
+
     def _running_writers(self) -> tuple[QThread, ...]:
         return tuple(writer for writer in (self.market_cache_writer, self.entry_snapshot_writer)
-                     if writer is not None and writer.isRunning())
+                     if writer is not None and (writer.isRunning() or (
+                         isinstance(writer, QThread) and not self._shutdown_thread_joined(writer, "writer")
+                     )))
 
     def _drain_writers(self) -> None:
         actions = self._shutdown_actions
@@ -1123,7 +1618,7 @@ class AppController(QObject):
             self._shutdown_stage = "writer_signals"
             self._shutdown_timer.start(0)
             return
-        if self._shutdown_stage == "writer_signals":
+        if self._shutdown_stage in {"writer_signals", "api_retirements"}:
             self._complete_shutdown(notify=True)
 
     def _complete_shutdown(self, *, notify: bool) -> None:
@@ -1140,6 +1635,17 @@ class AppController(QObject):
                 "마지막 자료 저장에 실패했습니다. 자료를 유지하고 있습니다. "
                 "문제를 해결한 뒤 닫기를 다시 시도해 주세요."
             )
+            self.shutdown_save_retry_needed.emit()
+            return
+        self._retire_shutdown_api_clients()
+        if any(not self._api_retirement_execution_complete(item) or not item.runtime_detached
+               or self._is_current_observer(item.client) or not self._api_client_stop_confirmed(item)
+               for item in self._api_client_retirements):
+            self._shutdown_stage = "api_retirements"
+            self.shutdown_progress.emit("선택 비교 작업의 종료 상태를 확인 중입니다…")
+            # Reuse the existing shutdown native-drain timer. No source, clock,
+            # HTTP or comparison polling task is introduced.
+            self._shutdown_timer.start(250)
             return
         actions.stop_auxiliaries()
         self._shutdown_stage = "ready"

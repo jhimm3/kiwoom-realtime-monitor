@@ -198,7 +198,8 @@ class CredentialStore:
             if validation not in {"VERIFIED", "UNVERIFIED"}:
                 raise CredentialStoreError("INVALID_CREDENTIAL_VALIDATION")
             allowed_activation = {"operation_id", "request_id", "request_digest", "account_ref", "run_id",
-                                  "environment", "committed_at", "verification_method", "label", "disabled"}
+                                  "environment", "committed_at", "verification_method", "label", "disabled",
+                                  "execution_run_id"}
             if activation is not None and (not isinstance(activation, dict) or set(activation) - allowed_activation):
                 raise CredentialStoreError("INVALID_ACTIVATION_FIELDS")
             self._validate_credentials(provider, credentials, disabled)

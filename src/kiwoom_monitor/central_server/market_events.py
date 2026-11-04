@@ -7,14 +7,14 @@ import json
 import logging
 import uuid
 from dataclasses import asdict
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, Callable, Protocol
 
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import ViEvent, parse_vi_events
 
-from .diagnostic_replay_contract import captured_workload
-from .diagnostic_replay_runtime import owned_create_task
+from .async_lifetime import owned_create_task
 from .rest_broker import CentralRestBroker
 
 logger = logging.getLogger(__name__)
@@ -28,9 +28,11 @@ class MarketEventService:
     """Own VI facts and their existing native save/drain lifetime."""
 
     def __init__(self, broker: CentralRestBroker, store: MarketEventStore, *,
-                 now_provider: Callable[[], datetime] = kst_now) -> None:
+                 now_provider: Callable[[], datetime] = kst_now,
+                 capture_scope: Callable[..., Any] | None = None) -> None:
         self._broker = broker
         self._store = store
+        self._capture_scope = capture_scope
         self._now = lambda: as_kst(now_provider())
         self._background: set[asyncio.Task[None]] = set()
         self._vi_inflight: dict[str, asyncio.Future[bool]] = {}
@@ -73,72 +75,74 @@ class MarketEventService:
                         "vi-live-store")
         return bool(events)
 
-    @captured_workload('market_events', 'vi_backfill', actor_per_invocation=True)
     async def _backfill_vi(self) -> None:
-        body = {
-            "mrkt_tp": "000", "bf_mkrt_tp": "0", "stk_cd": "", "motn_tp": "0",
-            "skip_stk": "000000000", "trde_qty_tp": "0", "min_trde_qty": "0", "max_trde_qty": "0",
-            "trde_prica_tp": "0", "min_trde_prica": "0", "max_trde_prica": "0",
-            "motn_drc": "0", "stex_tp": "3",
-        }
-        try:
-            cont_yn, next_key = "N", ""
-            for _ in range(10):
-                result = await self._broker.request(
-                    "ka10054", "/api/dostk/stkinfo", body, cont_yn=cont_yn, next_key=next_key,
-                )
-                rows = result.payload.get("motn_stk", [])
-                values = ([self._backfill_vi_value(row) for row in rows if isinstance(row, dict)]
-                          if isinstance(rows, list) else [])
-                if values:
-                    await asyncio.to_thread(self._store.append_vi_events, values)
-                if not result.has_next or not result.next_key:
-                    break
-                cont_yn, next_key = "Y", result.next_key
-        except Exception as error:
-            logger.warning("VI 누락 보완 실패(실시간 수집 계속): %s", error)
+        with (self._capture_scope(self, "market_events", "vi_backfill", actor_per_invocation=True)
+              if self._capture_scope is not None else nullcontext()):
+            body = {
+                "mrkt_tp": "000", "bf_mkrt_tp": "0", "stk_cd": "", "motn_tp": "0",
+                "skip_stk": "000000000", "trde_qty_tp": "0", "min_trde_qty": "0", "max_trde_qty": "0",
+                "trde_prica_tp": "0", "min_trde_prica": "0", "max_trde_prica": "0",
+                "motn_drc": "0", "stex_tp": "3",
+            }
+            try:
+                cont_yn, next_key = "N", ""
+                for _ in range(10):
+                    result = await self._broker.request(
+                        "ka10054", "/api/dostk/stkinfo", body, cont_yn=cont_yn, next_key=next_key,
+                    )
+                    rows = result.payload.get("motn_stk", [])
+                    values = ([self._backfill_vi_value(row) for row in rows if isinstance(row, dict)]
+                              if isinstance(rows, list) else [])
+                    if values:
+                        await asyncio.to_thread(self._store.append_vi_events, values)
+                    if not result.has_next or not result.next_key:
+                        break
+                    cont_yn, next_key = "Y", result.next_key
+            except Exception as error:
+                logger.warning("VI 누락 보완 실패(실시간 수집 계속): %s", error)
 
-    @captured_workload('market_events', 'vi_live_save', actor_per_invocation=True)
     async def _save_live_vi_events(self, values: list[dict[str, Any]]) -> None:
-        # DB와 같은 불변 event_key만 합친다. 완료된 키는 캐시하지 않는다.
-        remaining = {}
-        for value in values:
-            remaining.setdefault(value["event_key"], value)
-        while remaining:
-            waiting = {key: self._vi_inflight[key] for key in remaining if key in self._vi_inflight}
-            if not waiting:
-                break
-            outcomes = await asyncio.gather(*(asyncio.shield(future) for future in waiting.values()))
-            for key, committed in zip(waiting, outcomes):
-                if committed:
-                    remaining.pop(key)
-            # 실패한 선행 저장의 중복은 버리지 않고 기존처럼 다시 저장한다.
-        if not remaining:
-            return
-        completion = asyncio.get_running_loop().create_future()
-        for key in remaining:
-            self._vi_inflight[key] = completion
-        save = asyncio.create_task(asyncio.to_thread(self._store.append_vi_events, list(remaining.values())))
-        cancelled = False
-        try:
-            while True:
-                try:
-                    await asyncio.shield(save)
+        with (self._capture_scope(self, "market_events", "vi_live_save", actor_per_invocation=True)
+              if self._capture_scope is not None else nullcontext()):
+            # DB와 같은 불변 event_key만 합친다. 완료된 키는 캐시하지 않는다.
+            remaining = {}
+            for value in values:
+                remaining.setdefault(value["event_key"], value)
+            while remaining:
+                waiting = {key: self._vi_inflight[key] for key in remaining if key in self._vi_inflight}
+                if not waiting:
                     break
-                except asyncio.CancelledError:
-                    if save.cancelled():
-                        raise
-                    # to_thread의 취소는 실제 COMMIT을 멈추지 않는다.
-                    # thread가 끝날 때까지 소유권과 종료 대기를 유지한다.
-                    cancelled = True
-        finally:
-            committed = save.done() and not save.cancelled() and save.exception() is None
+                outcomes = await asyncio.gather(*(asyncio.shield(future) for future in waiting.values()))
+                for key, committed in zip(waiting, outcomes):
+                    if committed:
+                        remaining.pop(key)
+                # 실패한 선행 저장의 중복은 버리지 않고 기존처럼 다시 저장한다.
+            if not remaining:
+                return
+            completion = asyncio.get_running_loop().create_future()
             for key in remaining:
-                if self._vi_inflight.get(key) is completion:
-                    self._vi_inflight.pop(key)
-            completion.set_result(committed)
-        if cancelled:
-            raise asyncio.CancelledError
+                self._vi_inflight[key] = completion
+            save = asyncio.create_task(asyncio.to_thread(self._store.append_vi_events, list(remaining.values())))
+            cancelled = False
+            try:
+                while True:
+                    try:
+                        await asyncio.shield(save)
+                        break
+                    except asyncio.CancelledError:
+                        if save.cancelled():
+                            raise
+                        # to_thread의 취소는 실제 COMMIT을 멈추지 않는다.
+                        # thread가 끝날 때까지 소유권과 종료 대기를 유지한다.
+                        cancelled = True
+            finally:
+                committed = save.done() and not save.cancelled() and save.exception() is None
+                for key in remaining:
+                    if self._vi_inflight.get(key) is completion:
+                        self._vi_inflight.pop(key)
+                completion.set_result(committed)
+            if cancelled:
+                raise asyncio.CancelledError
 
     def _spawn(self, coroutine: Any, name: str) -> None:
         task = asyncio.create_task(coroutine, name=name)

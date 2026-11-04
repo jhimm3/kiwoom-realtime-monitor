@@ -67,6 +67,25 @@ class NewsWindowCoordinatorTests(unittest.TestCase):
         self.coordinator.stop()
         self.assertEqual(["shutdown"], requests)
 
+    def test_inactive_geometry_never_reads_native_settings(self) -> None:
+        for running in (False, True):
+            self.coordinator._process = SimpleNamespace(is_running=running)
+            with self.subTest(running=running), patch.object(self.coordinator, "window_mode", return_value="docked_right") as mode:
+                self.coordinator.schedule_geometry_sync()
+                self.assertEqual(running, self.coordinator._dock_timer.isActive())
+                self.assertEqual(int(running), mode.call_count)
+                self.coordinator._dock_timer.stop()
+
+    def test_unavailable_query_news_geometry_never_constructs_qsettings(self) -> None:
+        coordinator = NewsWindowCoordinator(None, None, lambda: QRect(), lambda _message: None, self.app)
+        with patch("kiwoom_monitor.presentation.news_window_coordinator.QSettings", side_effect=AssertionError("inactive Native settings")):
+            coordinator.schedule_geometry_sync()
+            coordinator.sync_window()
+            coordinator.on_window_state_change(False)
+            coordinator.on_activation()
+        self.assertFalse(coordinator.available)
+        self.assertFalse(coordinator._dock_timer.isActive())
+
 
 if __name__ == "__main__":
     unittest.main()

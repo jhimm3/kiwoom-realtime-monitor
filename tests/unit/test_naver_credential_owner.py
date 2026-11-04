@@ -34,7 +34,7 @@ class NaverCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.profile = NaverCredentialOwner.PROFILE
         self.vault.import_initial("naver", self.profile, {"client_id": "old", "client_secret": "fake-old"})
         self.old = FakeNaver(NaverNewsCredentials("old", "fake-old"))
-        self.service = CentralNewsService(self.old, self.store, jobs_enabled=False,
+        self.service = CentralNewsService(self.old, self.store,
             query_set_enabled=True, query_set=("증권",), query_set_refresh_seconds=120)
         self.owner = NaverCredentialOwner(self.service, self.vault)
         self.runtime = CredentialRuntime(self.vault, self.store)

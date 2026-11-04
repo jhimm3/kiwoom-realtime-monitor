@@ -48,6 +48,7 @@ from kiwoom_monitor.infrastructure.naver_news import (
 )
 from kiwoom_monitor.application.news_grouping import NewsEventGroup, group_similar_news
 from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
+from kiwoom_monitor.domain.news_ai_contract import decode_news_ai_provenance, news_ai_version_status, NewsAIResultEnvelope
 from kiwoom_monitor.application.news_auto_analysis import (
     auto_candidate_identities,
     next_auto_groups,
@@ -562,6 +563,8 @@ class StockNewsWindow(QDialog):
             self._start_news_search(None, page_offset=self._news_next_offset)
 
     def _configure_auto_candidates(self, new_identities: set[str]) -> None:
+        if self._manual_ai_queue:
+            return  # A background refresh must not become an explicit queue action.
         try:
             ai = self._config.load_ai()
         except (OSError, ValueError):
@@ -570,19 +573,32 @@ class StockNewsWindow(QDialog):
             return
         self._auto_ai_identities = set(auto_candidate_identities(
             self._visible_groups,
-            self._current_ai_result_identities(),
+            self._automatic_ai_result_identities(),
             ai.auto_recent_limit,
             new_identities=new_identities,
         ))
 
     def _current_ai_result_identities(self) -> set[str]:
-        """표에는 레거시 결과를 보이되 자동분석 완료로는 세지 않는다."""
+        """Keep the existing prompt selection for an explicit unanalyzed queue."""
         return {
             identity for identity, stored in self._ai_result_cache.items()
             if getattr(stored, "uses_current_prompt", True)
         }
 
+    def _automatic_ai_result_identities(self) -> set[str]:
+        # Exact same-BODY old-prompt handling is unchanged. A prior/unknown BODY
+        # result is retained until an explicit user action asks for reanalysis.
+        identities = self._current_ai_result_identities()
+        for group in self._visible_groups:
+            identity = news_identity(group.representative)
+            stored = self._ai_result_cache.get(identity)
+            if stored is not None and news_ai_version_status(group.items, getattr(stored, "provenance", None)) != "CURRENT":
+                identities.add(identity)
+        return identities
+
     def _configure_recent_auto_candidates(self) -> None:
+        if self._manual_ai_queue:
+            return
         try:
             ai = self._config.load_ai()
         except (OSError, ValueError):
@@ -797,7 +813,7 @@ class StockNewsWindow(QDialog):
         item = self._visible_items[index]
         group = self._visible_groups[index]
         assessment = item.assessment
-        category, outlook, reason, judgment_source = self._effective_judgment(item)
+        category, outlook, reason, judgment_source = self._effective_judgment(item, group)
         evidence_key = self._evidence_key(item)
         cached = self._cached_evidence(evidence_key)
         evidence_loading = (
@@ -805,7 +821,7 @@ class StockNewsWindow(QDialog):
             and self._selected_evidence_key == evidence_key
             and cached is None
         )
-        ai_html = self._ai_html(item)
+        ai_html = self._ai_html(item, group)
         core_sentences_html = stored_news_core_sentences_html(cached)
         show_search_summary = (
             self._central_evidence_client is None
@@ -956,11 +972,11 @@ class StockNewsWindow(QDialog):
     def _related_articles_html(group: NewsEventGroup) -> str:
         return related_articles_html(group)
 
-    def _effective_judgment(self, item: StockNewsItem) -> tuple[str, str, str, str]:
-        return effective_judgment(item, self._ai_result_cache.get(news_identity(item)))
+    def _effective_judgment(self, item: StockNewsItem, group: NewsEventGroup | None = None) -> tuple[str, str, str, str]:
+        return effective_judgment(item, self._ai_result_cache.get(news_identity(item)), group)
 
-    def _ai_html(self, item: StockNewsItem) -> str:
-        return ai_detail_html(item, self._ai_result_cache.get(news_identity(item)))
+    def _ai_html(self, item: StockNewsItem, group: NewsEventGroup | None = None) -> str:
+        return ai_detail_html(item, self._ai_result_cache.get(news_identity(item)), group)
 
     def _analyze_selected(self, *, automatic: bool = False) -> None:
         row = self._table.currentRow()
@@ -975,6 +991,11 @@ class StockNewsWindow(QDialog):
     def _start_ai_groups(self, groups: tuple[NewsEventGroup, ...], *, automatic: bool) -> None:
         if self._ai_worker is not None:
             return
+        if automatic and not self._manual_ai_queue:
+            analyzed = self._automatic_ai_result_identities()
+            groups = tuple(group for group in groups if news_identity(group.representative) not in analyzed)
+            if not groups:
+                return
         try:
             settings = self._config.load_ai()
         except (OSError, ValueError) as error:
@@ -1000,7 +1021,7 @@ class StockNewsWindow(QDialog):
         self._ai_request_provider = settings.provider
         self._ai_worker = AINewsWorker(
             groups, self._stock_name, settings, self,
-            stock_code=self._stock_code, central_client=self._central_ai_client,
+            stock_code=self._stock_code, central_client=self._central_ai_client, now_provider=self._now,
         )
         self._ai_worker.completed.connect(self._on_ai_completed)
         self._ai_worker.failed.connect(self._on_ai_failed)
@@ -1036,10 +1057,10 @@ class StockNewsWindow(QDialog):
             return
         self._manual_ai_queue = True
         if settings.request_mode == "single":
-            self._auto_ai_identities.update(news_identity(group.representative) for group in candidates[1:])
+            self._auto_ai_identities = {news_identity(group.representative) for group in candidates[1:]}
             self._start_ai_groups((candidates[0],), automatic=True)
         else:
-            self._auto_ai_identities.update(news_identity(group.representative) for group in candidates[settings.batch_size:])
+            self._auto_ai_identities = {news_identity(group.representative) for group in candidates[settings.batch_size:]}
             self._start_ai_groups(candidates[:settings.batch_size], automatic=True)
 
     def _auto_analyze_next(self) -> None:
@@ -1063,7 +1084,7 @@ class StockNewsWindow(QDialog):
             self._visible_items,
             self._visible_groups,
             self._auto_ai_identities,
-            self._current_ai_result_identities(),
+            self._current_ai_result_identities() if self._manual_ai_queue else self._automatic_ai_result_identities(),
             settings.request_mode,
             settings.batch_size,
         )
@@ -1080,24 +1101,35 @@ class StockNewsWindow(QDialog):
         if self._auto_ai_identities:
             QTimer.singleShot(0, self._auto_analyze_next)
 
-    def _on_ai_completed(self, results: object, body_hashes: object, provider: str, model: str,
-                         usage: object, article_count: int) -> None:
-        if not isinstance(results, tuple) or not isinstance(body_hashes, tuple) or len(results) != len(self._ai_groups):
+    def _on_ai_completed(self, envelope: object) -> None:
+        if (not isinstance(envelope, NewsAIResultEnvelope)
+                or len(envelope.results) != len(self._ai_groups)
+                or len(envelope.body_hashes) != len(envelope.results)):
             return
-        request_usage = usage if isinstance(usage, AIRequestUsage) else AIRequestUsage()
+        request_usage = envelope.usage
+        provider, model = envelope.provider, envelope.model
         request_mode = "batch" if len(self._ai_groups) > 1 else "single"
-        central_cache_hit = bool(getattr(self._ai_worker, "central_cache_hit", False))
-        if not central_cache_hit:
-            self._ai_repository.log_request(provider, model, request_mode, len(self._ai_groups), article_count, request_usage)
-        for group, body_hash, result in zip(self._ai_groups, body_hashes, results, strict=True):
-            if not isinstance(result, AINewsAnalysis):
-                continue
-            item = group.representative
-            self._ai_repository.save(self._ai_stock_code, item, provider, model, str(body_hash), result)
-            if self._ai_stock_code == self._stock_code:
+        if not envelope.cache_hit:
+            # Provider usage remains durable even when local result acceptance
+            # fails; a save_batch retry never repeats this provider/usage step.
+            self._ai_repository.log_request(provider, model, request_mode, len(self._ai_groups), envelope.article_count, request_usage)
+        receipt = self._ai_repository.save_batch(
+            self._ai_stock_code, tuple(group.representative for group in self._ai_groups), envelope,
+        )
+        if receipt.published and self._ai_stock_code == self._stock_code:
+            for index, (group, body_hash, result, reference) in enumerate(zip(self._ai_groups, envelope.body_hashes,
+                                                         envelope.results, receipt.provenance, strict=True)):
+                if receipt.published_indices is not None and index not in receipt.published_indices:
+                    continue
+                item = group.representative
                 self._ai_result_cache[news_identity(item)] = StoredAINewsAnalysis(
-                    result, provider, model, self._now(), str(body_hash),
+                    result, provider, model, self._now(), str(body_hash), decode_news_ai_provenance(reference),
                 )
+            if receipt.published_indices is not None and len(receipt.published_indices) != len(self._ai_groups):
+                self._schedule_prepare()
+        elif not receipt.published and self._ai_stock_code == self._stock_code:
+            # An exact old ACK replay must not replace a newer accepted view.
+            self._schedule_prepare()
         requests, input_tokens, output_tokens, total_tokens = self._ai_repository.daily_usage()
         self._status_label.setText(
             f"AI 요청 1회로 사건 {len(self._ai_groups)}개 저장 · 오늘 요청 {requests}회 · "
@@ -1112,14 +1144,15 @@ class StockNewsWindow(QDialog):
                 index = self._item_index(row)
                 if index is None:
                     continue
-                category, outlook, _reason, source = self._effective_judgment(self._visible_items[index])
+                display = build_display_row(self._visible_items[index], self._visible_groups[index],
+                                            self._ai_result_cache.get(analyzed_identity))
                 category_cell = self._table.item(row, 2)
                 if category_cell is not None:
-                    category_cell.setText(category)
+                    category_cell.setText(display.category)
                 cell = self._table.item(row, 3)
                 if cell is not None:
-                    cell.setText(f"{outlook}  ᴬᴵ" if source.startswith("AI 원문 분석") else outlook)
-                    cell.setForeground(_outlook_color(outlook, self._news_filter))
+                    cell.setText(display.outlook)
+                    cell.setForeground(_outlook_color(display.outlook, self._news_filter))
                 if row == self._table.currentRow():
                     self._show_detail(row)
                     self._detail.verticalScrollBar().setValue(0)
@@ -1168,6 +1201,8 @@ class StockNewsWindow(QDialog):
             and ai_execution_available(settings, central_client_available=self._central_ai_client is not None))
         self._ai_automatic_run = False
         self._ai_groups = ()
+        if not self._auto_ai_identities:
+            self._manual_ai_queue = False
         # 이전 작업이 끝나기 직전 또는 끝난 직후 마지막 종목의 후보가
         # 만들어지는 두 경우 모두 여기서 다시 확인한다.
         self._resume_auto_analysis()
@@ -1329,24 +1364,58 @@ class StockNewsWindow(QDialog):
 
     def shutdown(self) -> None:
         """메인 앱 종료 시 독립 뉴스창도 함께 닫는다."""
-        self._save_window_geometry()
+        errors: list[tuple[str, BaseException]] = []
+
+        def cleanup(stage: str, action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                errors.append((stage, error))
+
         self._allow_close = True
-        self._auto_refresh.stop()
+        cleanup("geometry", self._save_window_geometry)
+        cleanup("refresh.stop", self._auto_refresh.stop)
         if self._historical_archive_dialog is not None:
-            self._historical_archive_dialog.shutdown()
+            cleanup("archive.shutdown", self._historical_archive_dialog.shutdown)
+        if self._settings_dialog is not None:
+            cleanup("settings.shutdown", self._settings_dialog.shutdown)
         self._prepare_request_id += 1
         self._pending_prepare = None
         self._evidence_request_id += 1
         self._pending_evidence = None
         self._selected_evidence_key = None
         worker = self._prepare_worker
-        if worker is not None and worker.isRunning():
-            worker.wait(3000)
+
+        def drain_prepare() -> None:
+            if worker is not None and worker.isRunning():
+                completed = False
+                try:
+                    completed = worker.wait(3000)
+                finally:
+                    if not completed:
+                        worker.wait()
+
+        cleanup("prepare.wait", drain_prepare)
         for active_worker in (self._worker, self._ai_worker, self._evidence_worker):
-            if active_worker is not None and active_worker.isRunning():
-                active_worker.requestInterruption()
-                active_worker.wait(10_000)
-        self.close()
+            def drain_active() -> None:
+                if active_worker is not None and active_worker.isRunning():
+                    cleanup("worker.interrupt", active_worker.requestInterruption)
+                    completed = False
+                    try:
+                        completed = active_worker.wait(10_000)
+                    finally:
+                        if not completed:
+                            active_worker.wait()
+
+            cleanup("worker.wait", drain_active)
+        cleanup("close", self.close)
+        if errors:
+            failure = errors[0][1]
+            for stage, error in errors[1:]:
+                failure.add_note(f"NEWS_WINDOW_CLEANUP_FAILED:{stage}:{type(error).__name__}:{error}")
+                for note in getattr(error, "__notes__", ()):
+                    failure.add_note(note)
+            raise failure
 
     def _open_historical_archive(self) -> None:
         if self._central_news_client is None or not self._stock_code:

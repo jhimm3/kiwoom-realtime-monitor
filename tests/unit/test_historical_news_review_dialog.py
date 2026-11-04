@@ -74,6 +74,7 @@ class HistoricalNewsReviewDialogTests(unittest.TestCase):
                 research_dir, theme_repository=_Themes(),
                 now_provider=lambda: datetime(2026, 9, 24, 0, 30, tzinfo=KST),
             )
+            research.activate_startup()
             research._show_historical_news_review()
             dialog = research._historical_news_review_dialog
             self.assertEqual(1, dialog._table.rowCount())

@@ -19,7 +19,8 @@ from .realtime_registration import (
 )
 
 from .realtime import (
-    OrderExecution, TradeTick, parse_market_index_ticks, parse_order_executions,
+    OrderExecution, RealtimeSourceRoute, RealtimeSourceTransition, TradeTick,
+    parse_market_index_ticks, parse_order_executions,
     parse_program_trade_ticks, parse_stock_price_references, parse_trade_ticks,
 )
 
@@ -61,6 +62,7 @@ class RealtimeTradeWorker(QThread):
     program_trade_received = Signal(object)
     stock_reference_received = Signal(object)
     status_changed = Signal(str)
+    source_changed = Signal(object)
     connection_failed = Signal(str)
     subscription_ready = Signal()
     connection_opened = Signal(object)
@@ -81,6 +83,7 @@ class RealtimeTradeWorker(QThread):
         self._connected_once = False
         self._reconnect_pending = False
         self._last_disconnect_reason = ""
+        self._source_state: RealtimeSourceTransition | None = None
 
     def update_codes(self, codes: tuple[str, ...], nxt_codes: tuple[str, ...] = ()) -> None:
         """소켓을 끊지 않고 다음 수신 반복에서 구독 목록만 교체한다."""
@@ -92,6 +95,7 @@ class RealtimeTradeWorker(QThread):
         while not self.isInterruptionRequested():
             session = market_session(self._now_provider(), self._environment)
             if session is None:
+                self._publish_source(acknowledged=False)
                 self.status_changed.emit("실시간 체결 대기: 현재는 KRX/NXT 거래 시간이 아닙니다")
                 self._wait_or_stop(15)
                 continue
@@ -233,6 +237,7 @@ class RealtimeTradeWorker(QThread):
                         if resets:
                             self.sources_activated.emit(tuple(sorted(resets)))
                         subscribed = batch_codes
+                        self._publish_source(acknowledged=True)
                         self.status_changed.emit(f"실시간 체결 구독 중 · {session} · {len(subscribed)}종목")
                         if initial:
                             self.subscription_ready.emit()
@@ -246,7 +251,16 @@ class RealtimeTradeWorker(QThread):
         self._abnormal_disconnects += 1
         self._reconnect_pending = True
         self._last_disconnect_reason = reason
+        self._publish_source(acknowledged=False)
         self._emit_diagnostics()
+
+    def _publish_source(self, *, acknowledged: bool) -> None:
+        transition = RealtimeSourceTransition(
+            RealtimeSourceRoute.LOCAL, self._reconnects, acknowledged,
+        )
+        if transition != self._source_state:
+            self._source_state = transition
+            self.source_changed.emit(transition)
 
     def _emit_diagnostics(self) -> None:
         self.diagnostics_changed.emit({

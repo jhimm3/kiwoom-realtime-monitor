@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 from kiwoom_monitor.application.morning_market_brief import DEFAULT_PROMPT, DEFAULT_SETTINGS
 from kiwoom_monitor.infrastructure.chatgpt_plan import reasoning_choices
-from kiwoom_monitor.infrastructure.news_ai import MODEL_OPTIONS
+from kiwoom_monitor.domain.news_ai_contract import MODEL_OPTIONS
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
 

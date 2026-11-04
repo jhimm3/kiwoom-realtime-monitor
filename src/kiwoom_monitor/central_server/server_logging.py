@@ -9,11 +9,16 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from kiwoom_monitor.infrastructure.logging_config import format_safe_record, record_sink_failure
+
 
 class KSTFormatter(logging.Formatter):
     """Render timestamps in Korea Standard Time independently of the host timezone."""
 
     _timezone = ZoneInfo("Asia/Seoul")
+
+    def format(self, record: logging.LogRecord) -> str:
+        return format_safe_record(self, record)
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         timestamp = datetime.fromtimestamp(record.created, timezone.utc).astimezone(self._timezone)
@@ -23,6 +28,11 @@ class KSTFormatter(logging.Formatter):
 
 class KSTDailyFileHandler(TimedRotatingFileHandler):
     """Name midnight archives by KST date and preserve pre-existing archives."""
+
+    sink_failure: tuple[str, str] | None = None
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        record_sink_failure(self)
 
     def rotation_filename(self, default_name: str) -> str:
         completed_day = datetime.fromtimestamp(
@@ -84,7 +94,7 @@ def _logging_config(log_path: Path, *, retention_days: int) -> dict[str, Any]:
                 "level": "INFO",
             },
             "console": {
-                "class": "logging.StreamHandler",
+                "class": "kiwoom_monitor.infrastructure.logging_config.SafeStreamHandler",
                 "stream": "ext://sys.stderr",
                 "formatter": "standard",
                 "level": "INFO",

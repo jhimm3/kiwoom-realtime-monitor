@@ -1,4 +1,12 @@
 """Small native source recording for offline correctness gates only."""
+
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder
 import asyncio
 import copy
 from collections import Counter
@@ -10,8 +18,9 @@ import time
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server import diagnostic_trace as trace
+from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
-from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner, freeze_payload
+from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner, freeze_payload, install_store_capture
 from kiwoom_monitor.central_server.diagnostic_replay_runtime import (
     ReplayRuntimeScope, close_top20_replay_resources, owned_create_task, owned_to_thread,
 )
@@ -20,6 +29,7 @@ from kiwoom_monitor.central_server.diagnostic_top20_seed import Top20FixtureCloc
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
 from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector, _registered_trade_sources
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+from kiwoom_monitor.central_server import diagnostic_rest_input as rest_inputs
 from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
 
 
@@ -50,6 +60,8 @@ class FixtureClient:
 async def capture_native_top20_fixture(store, origin, *, capture_store=False, capture_seconds=0,
                                        include_peer=False, preparation_timeout=25):
     """Caller owns initialized source store; never uses a network transport."""
+    if capture_store:
+        install_store_capture(store)
     events, roles, lock = [], {}, Lock()
     def scalar(token, kind, fields):
         with lock:
@@ -63,16 +75,20 @@ async def capture_native_top20_fixture(store, origin, *, capture_store=False, ca
                 raise AssertionError('fixture task role claimed multiple lanes')
             roles[role] = lane
         return scalar(token, kind, {**fields, 'payload': freeze_payload(value).value})
-    clock, hub = Top20FixtureClock(origin), RealtimeHub()
+    clock = Top20FixtureClock(origin)
+    hub_observer = hub_capture.HubInputRecorder()
+    hub = RealtimeHub(now_provider=clock.now, observer=hub_observer)
     store._query_cache_wall_time = clock.wall_time
     ingestor = MarketDataIngestor(store, now_provider=clock.now)
     broker = CentralRestBroker(FixtureClient(origin), store, ingestor.ingest,
-                              wall_time=clock.wall_time, ranking_reservation=True)
+                              wall_time=clock.wall_time, ranking_reservation=True, input_observer=rest_inputs)
     service = AutonomousTop20Service(broker, hub, store, now_provider=clock.now,
         catalog_loader=lambda: tuple((f'{100000+i:06d}', f'fixture-{i}', 'KOSPI') for i in range(1, 21)),
-        minute_backfill_enabled=False)
-    ingestor._on_daily_change = service.notify_daily_bars_changed
-    collector = CentralRealtimeCollector(lambda: '', 'real', hub, clock.now, store=store)
+        minute_backfill_enabled=False,
+        capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+        flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
+    ingestor._on_daily_change = service.daily_reference.invalidate
+    collector = CentralRealtimeCollector(lambda: '', 'real', hub, clock.now, store=store, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
     collector._realtime_tape_version = collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
     runtime = ReplayRuntimeScope()
     enabled = {'top20_inputs', 'collector_inputs'} | ({'store_inputs'} if capture_store else set())

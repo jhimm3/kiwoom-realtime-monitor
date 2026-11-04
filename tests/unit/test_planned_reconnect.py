@@ -1,3 +1,13 @@
+
+
+from kiwoom_monitor.application.pc_market_session import PcMarketSession
+
+
+def market_session_with_source(route):
+    from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import RealtimeSourceTransition, RealtimeSourceRoute
+    session = PcMarketSession()
+    session.source_changed(RealtimeSourceTransition(RealtimeSourceRoute(route), 0, True))
+    return session
 import asyncio
 import io
 import json
@@ -22,6 +32,7 @@ from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
 from kiwoom_monitor.infrastructure.kiwoom_rest.central_realtime_worker import CentralRealtimeWorker
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import RealtimeSourceRoute, RealtimeSourceTransition
 from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomApiError
 from kiwoom_monitor.infrastructure.kiwoom_rest.failover_client import FailoverKiwoomRestClient
 from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import (
@@ -202,6 +213,8 @@ class PlannedReconnectWorkerTests(unittest.TestCase):
 
     def test_stale_generation_and_late_active_after_ready_cannot_restart_grace(self):
         worker = self.worker()
+        sources = []
+        worker.source_changed.connect(sources.append)
         worker._dispatch({"type": "connection_status", "payload": status(generation=2)})
         deadline = worker._planned_deadline
         worker._dispatch({"type": "connection_opened", "codes": ["005930"], "connection_status": status(generation=1)})
@@ -209,6 +222,10 @@ class PlannedReconnectWorkerTests(unittest.TestCase):
         worker._dispatch({"type": "connection_opened", "codes": ["005930"]})
         worker._dispatch({"type": "connection_status", "payload": status(generation=2)})
         self.assertEqual(0, worker._planned_deadline)
+        self.assertEqual([
+            RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL_WAITING, 2),
+            RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL, 2, True),
+        ], sources)
 
     def test_invalid_deadlines_are_not_used_to_hide_failure(self):
         for remaining in (True, -1, 0, 31, float("nan"), float("inf"), 10**1000):
@@ -315,26 +332,38 @@ class PlannedReconnectTableTests(unittest.TestCase):
     def test_main_status_preserves_existing_ranking_cells(self):
         table = QTableWidget(1, 1)
         table.setItem(0, 0, QTableWidgetItem("기존 최신 순위"))
-        owner = SimpleNamespace(_table=table, _active_api_route="central", _set_connected_api_status=Mock(),
+        owner = SimpleNamespace(_table=table, _pc_market_session=market_session_with_source("central"), _set_connected_api_status=Mock(),
                                 statusBar=lambda: SimpleNamespace(showMessage=Mock()))
         MainWindow._on_realtime_status_changed(owner, "나스 실시간 연결 변경 중 · 기존 순위 유지")
-        self.assertEqual("central_waiting", owner._active_api_route)
+        self.assertEqual("central", owner._pc_market_session.source_route)
+        MainWindow._on_realtime_source_changed(
+            owner, RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL_WAITING, 2),
+        )
+        self.assertEqual("central_waiting", owner._pc_market_session.source_route)
         self.assertEqual(1, table.rowCount())
         self.assertEqual("기존 최신 순위", table.item(0, 0).text())
         MainWindow._on_realtime_status_changed(owner, "나스 실시간 체결 재개 · 교체 전후 체결 관측 간격 3.50초")
-        self.assertEqual("central", owner._active_api_route)
+        self.assertEqual("central_waiting", owner._pc_market_session.source_route)
+        MainWindow._on_realtime_source_changed(
+            owner, RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL, 2, True),
+        )
+        self.assertEqual("central", owner._pc_market_session.source_route)
         self.assertEqual("기존 최신 순위", table.item(0, 0).text())
         table.deleteLater()
 
     def test_direct_realtime_status_is_labeled_as_this_pc(self):
         owner = SimpleNamespace(
-            _active_api_route="central", _set_connected_api_status=Mock(),
+            _pc_market_session=market_session_with_source("central"), _set_connected_api_status=Mock(),
             statusBar=lambda: SimpleNamespace(showMessage=Mock()),
         )
 
         MainWindow._on_realtime_status_changed(
             owner, "실시간 체결 구독 중 · KRX · 20종목",
         )
+        self.assertEqual("central", owner._pc_market_session.source_route)
+        MainWindow._on_realtime_source_changed(
+            owner, RealtimeSourceTransition(RealtimeSourceRoute.LOCAL, 0, True),
+        )
 
-        self.assertEqual("local", owner._active_api_route)
+        self.assertEqual("local", owner._pc_market_session.source_route)
         owner._set_connected_api_status.assert_called_once_with()

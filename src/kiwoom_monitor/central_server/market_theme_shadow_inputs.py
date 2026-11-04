@@ -34,8 +34,8 @@ def compile_dynamic_allocation_ram_selection(document):
             or len(json.dumps(document,allow_nan=False).encode())>64*1024):
         raise ValueError('invalid dynamic allocation RAM selection')
     symbols=document['symbols']
-    if (not isinstance(symbols,list) or not 1<=len(symbols)<=200 or len(set(symbols))!=len(symbols)
-            or any(not isinstance(s,str) for s in symbols)):
+    if (not isinstance(symbols,list) or not 1<=len(symbols)<=200
+            or any(not isinstance(s,str) for s in symbols) or len(set(symbols))!=len(symbols)):
         raise ValueError('allocation requires 1..200 distinct symbols')
     for symbol in symbols:_symbol(symbol)
     if (type(document['expected_binding_revision']) is not int or document['expected_binding_revision']<=0
@@ -43,11 +43,18 @@ def compile_dynamic_allocation_ram_selection(document):
             or type(document['expected_execution_run_id']) is not str or not 0<len(document['expected_execution_run_id'])<=256
             or document['data_path'] not in {'nas','direct'}):
         raise ValueError('explicit native account/Risk binding and research loss limit required')
+    if (not isinstance(document['policy'],dict)
+            or not isinstance(document['policy'].get('context_weights'),(list,tuple))
+            or (document['cost_model'] is not None and not isinstance(document['cost_model'],dict))):
+        raise ValueError('allocation policy/cost requires objects and an explicit weight array')
     raw=dict(document['policy']);raw['context_weights']=tuple(raw['context_weights'])
-    for field in ('available_at','valid_until'):raw[field]=datetime.fromisoformat(raw[field])
-    policy=DynamicPositionAllocationPolicy(**raw)
+    try:
+        for field in ('available_at','valid_until'):raw[field]=datetime.fromisoformat(raw[field])
+        policy=DynamicPositionAllocationPolicy(**raw)
+        cost=SimulationCostModel(**document['cost_model']) if document['cost_model'] is not None else None
+    except (KeyError,TypeError,ValueError,OverflowError) as error:
+        raise ValueError('invalid dynamic allocation policy/cost inputs') from error
     if policy.capacity_window_seconds>60:raise ValueError('native RAM capacity window exceeds retained 60-second contract')
-    cost=SimulationCostModel(**document['cost_model']) if document['cost_model'] is not None else None
     return {**document,'symbols':tuple(sorted(symbols)),'policy':policy,'cost_model':cost}
 
 
@@ -136,6 +143,16 @@ def decode_dynamic_allocation_model_publication(document, selection, expected_re
         return cls(**raw)
     for row in rows:
         if set(row)!={'symbol','ev_receipt','exit_receipt'}:raise ValueError('unsupported allocation model row')
+        if (not isinstance(row['ev_receipt'],dict) or not isinstance(row['exit_receipt'],dict)
+                or not isinstance(row['ev_receipt'].get('comparison'),dict)
+                or not isinstance(row['ev_receipt']['comparison'].get('targets'),dict)):
+            raise ValueError('allocation model receipts/comparison/targets require objects')
+        if (any(not isinstance(row[key].get('evidence'),dict) for key in ('ev_receipt','exit_receipt'))
+                or not isinstance(row['ev_receipt'].get('outcomes'),list)
+                or any(not isinstance(outcome,dict) for outcome in row['ev_receipt']['outcomes'])
+                or not isinstance(row['exit_receipt'].get('replay_inputs'),dict)
+                or not isinstance(row['exit_receipt']['replay_inputs'].get('policy'),dict)):
+            raise ValueError('allocation model evidence/outcome/replay inputs require objects')
         er,xr=row['ev_receipt'],row['exit_receipt'];ev=evidence(er['evidence'],DynamicAllocationEvEvidence);ex=evidence(xr['evidence'],FullExitStressEvidence)
         if any(type(v) is not int or v<1 for v in (er['max_evidence_age_seconds'],xr['replay_inputs']['max_evidence_age_seconds'])):
             raise ValueError('native model age budget must be explicit integer')

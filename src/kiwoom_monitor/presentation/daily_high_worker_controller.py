@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.daily_high_worker import DailyHighWorker
 
@@ -22,6 +22,7 @@ class DailyHighWorkerController(QObject):
         super().__init__(parent)
         self._worker_factory = worker_factory
         self._worker: DailyHighWorker | None = None
+        self._followup_codes: dict[DailyHighWorker, tuple[str, ...]] = {}
 
     @property
     def worker(self) -> DailyHighWorker | None:
@@ -58,11 +59,20 @@ class DailyHighWorkerController(QObject):
             return False
         worker.received.connect(self.received.emit)
         worker.failed.connect(self.failed.emit)
-        worker.finished.connect(lambda: self.finished.emit(followup_codes))
+        # A child signal must not keep its parent alive through a lambda while
+        # DeferredDelete destroys the child and disconnects that last reference.
+        self._followup_codes[worker] = followup_codes
+        worker.finished.connect(self._forward_finished)
         worker.finished.connect(self._release_finished_worker)
         self._worker = worker
         worker.start()
         return True
+
+    @Slot()
+    def _forward_finished(self) -> None:
+        codes = self._followup_codes.get(self.sender())
+        if codes is not None:
+            self.finished.emit(codes)
 
     def _release_finished_worker(self) -> None:
         worker = self.sender()
@@ -70,4 +80,5 @@ class DailyHighWorkerController(QObject):
             return
         if self._worker is worker:
             self._worker = None
+        self._followup_codes.pop(worker, None)
         worker.deleteLater()

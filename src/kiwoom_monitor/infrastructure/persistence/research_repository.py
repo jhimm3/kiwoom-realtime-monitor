@@ -11,9 +11,12 @@ from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, TYPE_CHECKING
 
-from kiwoom_monitor.application.breakout_strategy import StrategyEvaluation
+if TYPE_CHECKING:
+    from kiwoom_monitor.application.breakout_strategy import StrategyEvaluation
+    from kiwoom_monitor.application.research_execution import ExecutionEvent
+
 from kiwoom_monitor.application.research_queue import (ResearchCampaignPolicy, build_research_job_identity,
     LeaderDecisionCampaignSpec, decode_campaign_spec, campaign_trial_count)
 from kiwoom_monitor.application.research_search import ExperimentSpec, generate_trials
@@ -27,7 +30,6 @@ from kiwoom_monitor.application.research_evaluation import (
     IndependentDevelopmentComparison,
     build_independent_development_comparison,
 )
-from kiwoom_monitor.application.research_execution import ExecutionEvent
 from kiwoom_monitor.application.research_hypotheses import (
     DevelopmentEvidenceSnapshot,
     ResearchHypothesis,

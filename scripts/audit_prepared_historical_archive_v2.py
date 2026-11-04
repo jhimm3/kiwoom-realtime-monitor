@@ -25,7 +25,7 @@ from scripts.materialize_historical_news_seed import _sqlite_value
 from scripts.export_historical_news_seed import TABLE_KEYS
 from scripts.stage_prepared_historical_news_archive import _sha256
 from kiwoom_monitor.central_server.database import stable_document_hash
-from kiwoom_monitor.central_server.database_news_sources import _news_article_content_hash
+from kiwoom_monitor.domain.news_observation import news_article_content_hash as _news_article_content_hash
 
 
 def _target_sets(db):

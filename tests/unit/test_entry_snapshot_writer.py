@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from kiwoom_monitor.application.investor_flow_service import InvestorFlowService
+
 import tempfile
 import sqlite3
 import threading
@@ -31,6 +34,9 @@ class EntrySnapshotWriterTests(unittest.TestCase):
         for transition in ("replacement", "disabled", "same", "roundtrip"):
             with self.subTest(transition=transition), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "journal.sqlite3"
+                # Schema setup precedes the blocked-provider race; run() still
+                # constructs the real repository on this same database.
+                JournalRepository(path)
                 scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
                 at = datetime(2026, 10, 20, 10, 30)
                 snapshot = TradeEntrySnapshot(scoped_snapshot_execution_key("old-030", scope), "order-030",
@@ -119,6 +125,76 @@ class EntrySnapshotWriterTests(unittest.TestCase):
             self.assertEqual({}, writer._investor_cache)
             writer.set_investor_loader(None)
             self.assertEqual({}, writer._investor_at_execution(snapshot))
+
+    def test_source_rollback_keeps_observed_job_and_fences_new_generation_result(self):
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "journal.sqlite3"
+                # Keep cold migration setup outside the provider-entry barrier.
+                JournalRepository(path)
+                scope = AccountScope("kiwoom", AccountEnvironment.MOCK, str(uuid.uuid4()))
+                at = datetime(2026, 10, 20, 10, 30)
+                snapshot = TradeEntrySnapshot(scoped_snapshot_execution_key("new-generation", scope), "order",
+                    "005930", "삼성전자", "매수", at, 70000, 1, "KRX", origin_scope=scope)
+                entered, release = threading.Event(), threading.Event()
+                calls = {"old": [], "new": []}
+                def old(code, observed):
+                    calls["old"].append(code)
+                    return {"available": True, "source": "old"}
+                def new(code, observed):
+                    calls["new"].append(code)
+                    if len(calls["new"]) == 1:
+                        entered.set()
+                        if not release.wait(3):
+                            raise TimeoutError("new provider was not released")
+                    return {"available": True, "source": "new"}
+                def old_program(code, trade_date):
+                    return ({"trade_time": "102900", "source": "old-program"},)
+                def new_program(code, trade_date):
+                    return ({"trade_time": "102900", "source": "new-program"},)
+                writer = EntrySnapshotWriter(path, investor_loader=old, program_loader=old_program)
+                writer._investor_at_execution(replace(snapshot, stock_code="000660"))
+                failures = []
+                writer.failed.connect(failures.append)
+                try:
+                    def apply_sources():
+                        with writer.replace_sources(investor_loader=new, program_loader=new_program):
+                            writer.enqueue(snapshot)
+                            writer.start()
+                            self.assertTrue(entered.wait(2))
+                            self.assertFalse(release.is_set())
+                            if rollback:
+                                raise RuntimeError("apply failed")
+                    if rollback:
+                        with self.assertRaisesRegex(RuntimeError, "apply failed"):
+                            apply_sources()
+                    else:
+                        apply_sources()
+                    release.set()
+                    writer.enqueue(replace(snapshot, execution_key=scoped_snapshot_execution_key("after-transition", scope),
+                                           executed_at=at + timedelta(seconds=1)))
+                    writer.enqueue_program_backfill(at.date(), ("005930",))
+                    writer.requestInterruption()
+                    self.assertTrue(writer.wait(5000))
+                    self.app.processEvents()
+                    stored = JournalRepository(path).load_entry_snapshots("005930", at, at + timedelta(seconds=2), scope)
+                    self.assertEqual([], failures)
+                    self.assertEqual(2, len(stored))
+                    self.assertEqual("new", stored[0].investor_flow["source"])
+                    self.assertEqual("old" if rollback else "new", stored[1].investor_flow["source"])
+                    self.assertEqual(not rollback, bool(stored[1].investor_flow.get("cached")))
+                    self.assertTrue(all(item.investor_flow["program_trade"]["source"] ==
+                                        ("old-program" if rollback else "new-program") for item in stored))
+                    cached = writer._investor_at_execution(replace(snapshot, stock_code="000660"))
+                    self.assertEqual({"available": True, "source": "old", "cached": True} if rollback else
+                                     {"available": True, "source": "new"}, cached)
+                    self.assertEqual((["000660", "005930"], ["005930"]) if rollback else
+                                     (["000660"], ["005930", "000660"]), (calls["old"], calls["new"]))
+                    self.assertFalse(writer.has_pending_work())
+                finally:
+                    release.set()
+                    writer.requestInterruption()
+                    self.assertTrue(writer.wait(5000))
 
     def test_failed_base_and_enriched_writes_keep_exact_payload_until_explicit_retry(self) -> None:
         for stage in ("base", "enriched"):
@@ -285,6 +361,226 @@ class EntrySnapshotWriterTests(unittest.TestCase):
             self.assertEqual("realtime_enriched", stored[0].capture_state)
             self.assertEqual(scope, stored[0].origin_scope)
 
+
+
+
+class EntrySourceReleaseTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_whole_investor_service_releases_after_stored_miss_and_fallback_tr(self):
+        entered, resume = threading.Event(), threading.Event()
+        al_entered, al_resume = threading.Event(), threading.Event()
+        krx_entered, krx_resume, krx_returned = threading.Event(), threading.Event(), threading.Event()
+        wait_entered, wait_returned = threading.Event(), threading.Event()
+        calls, results = [], []
+        wait_results, wait_errors = [], []
+        at = datetime(2026, 10, 20, 20, 5)
+
+        class Client:
+            def load_stored_investor_flow(self, code, day):
+                calls.append(("stored", code))
+                entered.set()
+                if not resume.wait(3):
+                    raise TimeoutError("fixture stored release")
+                return None
+
+            def request(self, api_id, path, body):
+                calls.append((api_id, body["stk_cd"]))
+                if body["stk_cd"].endswith("_AL"):
+                    al_entered.set()
+                    if not al_resume.wait(3):
+                        raise TimeoutError("fixture SOR TR release")
+                    return {"stk_orgn_trde_trnsn": []}
+                krx_entered.set()
+                if not krx_resume.wait(3):
+                    raise TimeoutError("fixture KRX TR release")
+                krx_returned.set()
+                return {"stk_orgn_trde_trnsn": [{"dt": "20261020", "for_daly_nettrde_qty": "7"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            old = InvestorFlowService(Client()).load
+            new_calls = []
+            def new(code, observed):
+                new_calls.append(code)
+                return {"available": True, "source": "new"}
+            writer = EntrySnapshotWriter(Path(directory) / "unused.sqlite3", investor_loader=old)
+            snapshot = SimpleNamespace(stock_code="005930", executed_at=at)
+            caller = threading.Thread(target=lambda: results.append(writer._investor_at_execution(snapshot)))
+            waiter = None
+            caller.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                with writer.replace_sources(investor_loader=new, program_loader=None) as released:
+                    pass
+                self.assertIsNotNone(released)
+                self.assertFalse(released.released)
+                self.assertTrue(caller.is_alive())
+                self.assertEqual({"available": True, "source": "new"}, writer._investor_at_execution(snapshot))
+                self.assertEqual([("stored", "005930")], calls)
+                def wait_for_source():
+                    try:
+                        wait_entered.set()
+                        released.wait()
+                        wait_results.append((krx_returned.is_set(), tuple(calls)))
+                    except BaseException as error:
+                        wait_errors.append(error)
+                    finally:
+                        wait_returned.set()
+                waiter = threading.Thread(target=wait_for_source)
+                waiter.start()
+                self.assertTrue(wait_entered.wait(2))
+                resume.set()
+                self.assertTrue(al_entered.wait(2))
+                self.assertFalse(released.released, "source released during the SOR follow-up TR")
+                self.assertFalse(wait_returned.is_set(), "public wait returned during the SOR follow-up TR")
+                self.assertTrue(waiter.is_alive())
+                al_resume.set()
+                self.assertTrue(krx_entered.wait(2))
+                self.assertFalse(released.released, "source released during the KRX fallback TR")
+                self.assertFalse(wait_returned.is_set(), "public wait returned during the KRX fallback TR")
+                self.assertTrue(waiter.is_alive())
+                krx_resume.set()
+                self.assertTrue(wait_returned.wait(2))
+            finally:
+                resume.set()
+                al_resume.set()
+                krx_resume.set()
+                caller.join(3)
+                if waiter is not None:
+                    waiter.join(3)
+            self.assertFalse(caller.is_alive())
+            self.assertIsNotNone(waiter)
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual([], wait_errors)
+            self.assertEqual([(True, (("stored", "005930"), ("ka10045", "005930_AL"), ("ka10045", "005930")))], wait_results)
+            self.assertTrue(released.released)
+            self.assertEqual([("stored", "005930"), ("ka10045", "005930_AL"), ("ka10045", "005930")], calls)
+            self.assertEqual(7, results[0]["foreign_net_buy_quantity"])
+            self.assertEqual("KRX", results[0]["market_basis"])
+            self.assertEqual({"available": True, "source": "new", "cached": True}, writer._investor_at_execution(snapshot))
+            self.assertEqual(["005930"], new_calls)
+
+    def test_rollback_restores_old_borrow_cohort_for_the_next_successful_replacement(self):
+        # Cache restoration needs a fresh dict, while borrow restoration must
+        # retain the original cohort until this pre-rollback old call returns.
+        entered, resume = threading.Event(), threading.Event()
+        results = []
+        original = ValueError("fixture view rollback")
+        at = datetime(2026, 10, 20, 10, 30)
+        def old(code, observed):
+            entered.set()
+            if not resume.wait(3):
+                raise TimeoutError("fixture old release")
+            return {"available": True, "source": "old"}
+        def candidate(code, observed):
+            return {"available": True, "source": "candidate"}
+        def final(code, observed):
+            return {"available": True, "source": "final"}
+        with tempfile.TemporaryDirectory() as directory:
+            writer = EntrySnapshotWriter(Path(directory) / "unused.sqlite3", investor_loader=old)
+            snapshot = SimpleNamespace(stock_code="005930", executed_at=at)
+            caller = threading.Thread(target=lambda: results.append(writer._investor_at_execution(snapshot)))
+            caller.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                with self.assertRaises(ValueError) as caught:
+                    with writer.replace_sources(investor_loader=candidate, program_loader=None) as candidate_release:
+                        raise original
+                self.assertIs(original, caught.exception)
+                self.assertIsNotNone(candidate_release)
+                self.assertTrue(candidate_release.released)
+                self.assertTrue(caller.is_alive())
+                with writer.replace_sources(investor_loader=final, program_loader=None) as old_release:
+                    pass
+                self.assertIsNotNone(old_release)
+                self.assertFalse(old_release.released, "rollback must not replace the still-borrowed old cohort")
+                self.assertEqual({"available": True, "source": "final"}, writer._investor_at_execution(snapshot))
+            finally:
+                resume.set()
+                caller.join(3)
+            self.assertFalse(caller.is_alive())
+            self.assertTrue(old_release.released)
+            self.assertEqual([{"available": True, "source": "old"}], results)
+            self.assertEqual({"available": True, "source": "final", "cached": True}, writer._investor_at_execution(snapshot))
+
+    def test_rollback_returns_immediately_but_candidate_release_waits_for_its_whole_call(self):
+        entered, resume = threading.Event(), threading.Event()
+        results = []
+        at = datetime(2026, 10, 20, 10, 30)
+        def old(code, observed):
+            return {"available": True, "source": "old"}
+        def candidate(code, observed):
+            entered.set()
+            if not resume.wait(3):
+                raise TimeoutError("fixture candidate release")
+            return {"available": True, "source": "candidate"}
+        with tempfile.TemporaryDirectory() as directory:
+            writer = EntrySnapshotWriter(Path(directory) / "unused.sqlite3", investor_loader=old)
+            snapshot = SimpleNamespace(stock_code="005930", executed_at=at)
+            caller = threading.Thread(target=lambda: results.append(writer._investor_at_execution(snapshot)))
+            try:
+                with self.assertRaisesRegex(ValueError, "fixture rollback"):
+                    with writer.replace_sources(investor_loader=candidate, program_loader=None) as released:
+                        caller.start()
+                        self.assertTrue(entered.wait(2))
+                        raise ValueError("fixture rollback")
+                self.assertIsNotNone(released)
+                self.assertFalse(released.released)
+                self.assertTrue(caller.is_alive())
+                self.assertEqual({"available": True, "source": "old"}, writer._investor_at_execution(snapshot))
+            finally:
+                resume.set()
+                caller.join(3)
+            self.assertFalse(caller.is_alive())
+            self.assertTrue(released.released)
+            self.assertEqual([{"available": True, "source": "candidate"}], results)
+            self.assertEqual({"available": True, "source": "old", "cached": True}, writer._investor_at_execution(snapshot))
+
+    def test_both_backfill_paths_cover_the_whole_loader_without_waiting_in_replace(self):
+        for kind in ("program", "investor"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                entered, resume = threading.Event(), threading.Event()
+                saved, errors = [], []
+                at = datetime(2026, 10, 20, 20, 5)
+                snapshot = SimpleNamespace(stock_code="005930", execution_key="fixture", executed_at=at)
+                def old(code, observed):
+                    entered.set()
+                    if not resume.wait(3):
+                        raise TimeoutError("fixture backfill release")
+                    return ({"trade_time": "200000", "source": "old"},) if kind == "program" else {"available": True, "source": "old"}
+                writer = EntrySnapshotWriter(Path(directory) / "unused.sqlite3", investor_loader=old, program_loader=old)
+                repository = SimpleNamespace(
+                    program_backfill_candidates=lambda day, codes: (snapshot,),
+                    entry_snapshot_codes=lambda day: (),
+                    investor_backfill_candidates=lambda day, codes: (snapshot,),
+                    save_program_trade_backfill=lambda key, value: saved.append((key, value)),
+                    save_investor_flow_backfill=lambda key, value: saved.append((key, value)),
+                )
+                def run():
+                    try:
+                        operation = writer._backfill_program if kind == "program" else writer._backfill_investor
+                        operation(repository, at.date(), ("005930",))
+                    except BaseException as error:
+                        errors.append(error)
+                caller = threading.Thread(target=run)
+                caller.start()
+                try:
+                    self.assertTrue(entered.wait(2))
+                    with writer.replace_sources(investor_loader=None, program_loader=None) as released:
+                        pass
+                    self.assertIsNotNone(released)
+                    self.assertFalse(released.released)
+                    self.assertTrue(caller.is_alive())
+                finally:
+                    resume.set()
+                    caller.join(3)
+                self.assertFalse(caller.is_alive())
+                self.assertEqual([], errors)
+                self.assertTrue(released.released)
+                self.assertEqual([("fixture", {"trade_time": "200000", "source": "old", "backfilled": True})] if kind == "program" else
+                                 [("fixture", {"available": True, "source": "old", "backfilled": True})], saved)
 
 if __name__ == "__main__":
     unittest.main()

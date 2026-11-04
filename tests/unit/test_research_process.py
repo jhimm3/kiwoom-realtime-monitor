@@ -21,6 +21,155 @@ from research_test_support import (
 
 
 class ResearchProcessTests(unittest.TestCase):
+    def test_headless_cli_executes_without_desktop_news_sources_or_site_packages(self) -> None:
+        import importlib.resources
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        from contextlib import closing
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            package = source / "kiwoom_monitor"
+            omitted = {
+                "presentation", "__pycache__", "news_ai.py", "naver_news.py",
+                "news_ai_backup.py", "news_ai_repository.py", "news_schema.py",
+                "settings_backup.py", "kiwoom_rest",
+            }
+            shutil.copytree(
+                Path(__file__).resolve().parents[2] / "src" / "kiwoom_monitor",
+                package,
+                ignore=lambda _, names: [name for name in names if name in omitted],
+            )
+            # Keep real KST timezone data while excluding every installed package.
+            timezone_data = root / "timezone-data"
+            shutil.copytree(importlib.resources.files("tzdata") / "zoneinfo", timezone_data)
+            environment = {
+                **os.environ, "PYTHONPATH": str(source), "PYTHONIOENCODING": "utf-8",
+                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONTZPATH": str(timezone_data),
+            }
+            environment.pop("KIWOOM_DESKTOP_DATA_DIR", None)
+            children = []
+            def run_child(command, *, timeout):
+                process = subprocess.Popen(
+                    command, cwd=root, env=environment, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                )
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                    children.append({"pid": process.pid, "exit_code": process.returncode})
+                    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate(timeout=5)
+            proof = run_child(
+                [sys.executable, "-S", "-c", "\n".join((
+                    "import importlib.util,json,sys",
+                    "from kiwoom_monitor import research_process",
+                    "from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv",
+                    "print(json.dumps({'file':research_process.__file__,",
+                    "'qt':importlib.util.find_spec('PySide6') is not None,",
+                    "'news':importlib.util.find_spec('kiwoom_monitor.infrastructure.news_ai') is not None,",
+                    "'loaded_restore':'kiwoom_monitor.infrastructure.persistence.strict_restore' in sys.modules,",
+                    "'loaded_delivery':'kiwoom_monitor.research_result_delivery' in sys.modules,",
+                    "'loaded_kiwoom_rest':[name for name in sys.modules if name == 'kiwoom_monitor.infrastructure.kiwoom_rest'",
+                    "or name.startswith('kiwoom_monitor.infrastructure.kiwoom_rest.')],",
+                    "'site_paths':[p for p in sys.path if 'site-packages' in p]}))",
+                ))], timeout=15,
+            )
+            self.assertEqual(0, proof.returncode, proof.stderr)
+            provenance = json.loads(proof.stdout)
+            self.assertEqual(package / "research_process.py", Path(provenance["file"]))
+            self.assertEqual((False, False, False, []), (
+                provenance["qt"], provenance["news"], provenance["loaded_restore"], provenance["site_paths"],
+            ))
+            self.assertFalse(provenance["loaded_delivery"])
+            self.assertEqual([], provenance["loaded_kiwoom_rest"])
+            self.assertFalse((package / "infrastructure/kiwoom_rest").exists())
+            self.assertFalse((package / "presentation").exists())
+            self.assertFalse((package / "infrastructure/persistence/news_ai_backup.py").exists())
+            for mode in ("success", "invalid", "cancel"):
+                with self.subTest(mode=mode):
+                    case = root / mode
+                    case.mkdir()
+                    _write_empty_dataset(case)
+                    document = _request_document()
+                    document["mode"] = "single_run"
+                    request = case / "request.json"
+                    request.write_text("{" if mode == "invalid" else json.dumps(document), encoding="utf-8")
+                    result_path = case / "result.json"
+                    cancel_path = case / "cancel.request"
+                    if mode == "cancel":
+                        cancel_path.write_text("cancel\n", encoding="ascii")
+                    protected = {path: path.read_bytes() for path in (request, *sorted((case / "dataset").iterdir()))}
+                    child = run_child(
+                        [sys.executable, "-S", "-m", "kiwoom_monitor.research_process",
+                         "--request", str(request), "--result", str(result_path), "--cancel", str(cancel_path)],
+                        timeout=15,
+                    )
+                    self.assertEqual({"success": 0, "invalid": 1, "cancel": 2}[mode], child.returncode, child.stderr)
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                    self.assertEqual(result, json.loads(child.stdout))
+                    self.assertEqual(protected, {path: path.read_bytes() for path in protected})
+                    self.assertEqual([], list(case.rglob("*.tmp")))
+                    database = case / "output/research.sqlite3"
+                    if mode == "success":
+                        self.assertEqual(("ok", "single_run"), (result["status"], result["kind"]))
+                        manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+                        self.assertEqual((result["run_id"], "empty", hashlib.sha256(b"").hexdigest()), (
+                            manifest["run_id"], manifest["input_dataset_id"], manifest["input_revision_ids_hash"],
+                        ))
+                        with closing(sqlite3.connect(database)) as connection:
+                            self.assertEqual(("completed", manifest["logical_result_hash"]), connection.execute(
+                                "SELECT status,logical_result_hash FROM research_runs WHERE run_id=?", (result["run_id"],),
+                            ).fetchone())
+                            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM research_reports").fetchone()[0])
+                    else:
+                        self.assertEqual("failed" if mode == "invalid" else "cancelled", result["status"])
+                        if mode == "invalid":
+                            self.assertEqual("ValueError: research request cannot be read", result["reason"])
+                        self.assertFalse(database.exists())
+            print(json.dumps({"headless_absence_provenance": provenance, "children": children}))
+
+    def test_desktop_main_keeps_native_child_restore_lease_until_cli_returns(self) -> None:
+        import os
+        import subprocess
+        import sys
+        from kiwoom_monitor import research_process
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe = "\n".join((
+                "import sys",
+                "from pathlib import Path",
+                "from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease,StrictRestoreError",
+                "try:",
+                "    with AppDataLease(Path(sys.argv[1]),exclusive=True,timeout=0.1): pass",
+                "except StrictRestoreError:",
+                "    sys.exit(17)",
+            ))
+            def exclusive_probe():
+                return subprocess.run(
+                    [sys.executable, "-c", probe, str(root)], capture_output=True,
+                    text=True, encoding="utf-8", timeout=10,
+                )
+            def cli(argv):
+                self.assertEqual(["unchanged"], argv)
+                result = exclusive_probe()
+                self.assertEqual(17, result.returncode, result.stderr)
+                return 23
+            with patch.dict(os.environ, {"KIWOOM_DESKTOP_DATA_DIR": str(root)}), \
+                    patch.object(research_process, "_run_research_process", side_effect=cli):
+                self.assertEqual(23, research_process.main(["unchanged"]))
+            result = exclusive_probe()
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse((root / "monitor.sqlite3").exists())
+            self.assertFalse((root / "news.sqlite3").exists())
+
     def test_generic_cli_rejects_request_aliases_before_parsing_or_execution(self) -> None:
         from io import StringIO
         from kiwoom_monitor.research_process import _run_research_process

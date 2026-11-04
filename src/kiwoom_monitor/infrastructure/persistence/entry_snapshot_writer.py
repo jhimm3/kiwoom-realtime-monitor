@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Lock
+from threading import Event, Lock
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time as datetime_time
 from typing import Any, Callable
 
@@ -16,6 +18,34 @@ from .journal_database import JournalRepository
 from .journal_snapshot_repository import TradeEntrySnapshot
 from .journal_snapshot_service import news_at_execution
 from .stock_news_repository import StockNewsRepository
+
+
+class SourceRelease:
+    """Read-only completion of the retired source's actual loader invocations.
+
+    This is not a writer/native-save completion receipt or permission to close
+    any client still installed elsewhere. Only the source owner releases it.
+    """
+
+    def __init__(self) -> None:
+        self._released = Event()
+
+    @property
+    def released(self) -> bool:
+        return self._released.is_set()
+
+    def wait(self) -> None:
+        """Wait in an owning background task, never in the UI/writer loop."""
+        self._released.wait()
+
+    def _release(self) -> None:
+        self._released.set()
+
+
+@dataclass
+class _SourceBorrow:
+    active: int = 0
+    retired: SourceRelease | None = None
 
 
 class EntrySnapshotWriter(QThread):
@@ -38,6 +68,7 @@ class EntrySnapshotWriter(QThread):
         self._pending_backfill_values: dict[str, Any] = {}
         self._investor_cache_lock = Lock()
         self._investor_cache: dict[str, tuple[float, dict[str, object]]] = {}
+        self._source_borrow = _SourceBorrow()
 
     def enqueue(self, snapshot: TradeEntrySnapshot) -> None:
         self._queue.put(snapshot)
@@ -55,7 +86,73 @@ class EntrySnapshotWriter(QThread):
             self._investor_cache = {}
 
     def set_program_loader(self, loader: Callable[[str, date], tuple[dict[str, object], ...]] | None) -> None:
-        self._program_loader = loader
+        with self._investor_cache_lock:
+            self._program_loader = loader
+
+    @contextmanager
+    def _borrow_source(self, *, program: bool = False) -> Iterator[tuple[Any, dict]]:
+        # Capture and admission share the exact lock used by replace/rollback.
+        with self._investor_cache_lock:
+            loader = self._program_loader if program else self._investor_loader
+            cache = self._investor_cache
+            source = self._source_borrow
+            if loader is not None:
+                source.active += 1
+        try:
+            yield loader, cache
+        finally:
+            if loader is not None:
+                with self._investor_cache_lock:
+                    source.active -= 1
+                    if source.active == 0 and source.retired is not None:
+                        source.retired._release()
+
+    @staticmethod
+    def _retire_source(source: _SourceBorrow, release: SourceRelease) -> None:
+        # Called only while the existing source/cache lock is held. Setting an
+        # Event performs no user callback, close, provider query or report I/O.
+        source.retired = release
+        if source.active == 0:
+            release._release()
+
+    @contextmanager
+    def replace_sources(
+        self, *, investor_loader: Callable[[str, datetime], dict[str, object]] | None,
+        program_loader: Callable[[str, date], tuple[dict[str, object], ...]] | None,
+    ) -> Iterator[SourceRelease]:
+        """Apply one source generation, restoring its values if runtime apply fails.
+
+        The detached cache is the old generation. Rollback copies its values into
+        a fresh generation so a late result from either source cannot republish.
+        Pending jobs and their already observed enrichment stay with the writer.
+        Success retires the previous source; rollback retires the candidate.
+        The yielded receipt observes its actual calls without waiting here.
+        """
+        release = SourceRelease()
+        with self._investor_cache_lock:
+            previous_investor, previous_program = self._investor_loader, self._program_loader
+            previous_cache = self._investor_cache
+            previous_source = self._source_borrow
+            candidate_source = _SourceBorrow()
+            self._investor_loader = investor_loader
+            self._program_loader = program_loader
+            self._investor_cache = {}
+            self._source_borrow = candidate_source
+        try:
+            yield release
+        except Exception:
+            with self._investor_cache_lock:
+                self._investor_loader = previous_investor
+                self._program_loader = previous_program
+                self._investor_cache = dict(previous_cache)
+                # Restore the old borrow cohort, but keep the cache fresh. A
+                # pre-rollback old call must also delay any later retirement.
+                self._source_borrow = previous_source
+                self._retire_source(candidate_source, release)
+            raise
+        else:
+            with self._investor_cache_lock:
+                self._retire_source(previous_source, release)
 
     def has_pending_work(self) -> bool:
         """The owner checks this after the thread stops, before accepting close."""
@@ -123,9 +220,10 @@ class EntrySnapshotWriter(QThread):
         for code, snapshots in by_code.items():
             try:
                 if code not in self._pending_backfill_values:
-                    if self._program_loader is None:
-                        continue
-                    self._pending_backfill_values[code] = self._program_loader(code, trade_date)
+                    with self._borrow_source(program=True) as (loader, _cache):
+                        if loader is None:
+                            continue
+                        self._pending_backfill_values[code] = loader(code, trade_date)
                 rows = self._pending_backfill_values[code]
             except Exception as error:
                 self.failed.emit(f"{code} 장 마감 프로그램매매 보완 실패: {error}")
@@ -151,9 +249,10 @@ class EntrySnapshotWriter(QThread):
         for code, snapshots in by_code.items():
             try:
                 if code not in self._pending_backfill_values:
-                    if self._investor_loader is None:
-                        continue
-                    self._pending_backfill_values[code] = self._investor_loader(code, observed_at)
+                    with self._borrow_source() as (loader, _cache):
+                        if loader is None:
+                            continue
+                        self._pending_backfill_values[code] = loader(code, observed_at)
                 value = self._pending_backfill_values[code]
             except Exception as error:
                 self.failed.emit(f"{code} 장 마감 외국인·기관 수급 보완 실패: {error}")
@@ -169,19 +268,18 @@ class EntrySnapshotWriter(QThread):
         return news_at_execution(repository, snapshot)
 
     def _investor_at_execution(self, snapshot: TradeEntrySnapshot) -> dict[str, object]:
-        with self._investor_cache_lock:
-            loader = self._investor_loader
-            cache = self._investor_cache
+        with self._borrow_source() as (loader, cache):
             if loader is None:
                 return {}
-            cached = cache.get(snapshot.stock_code)
-            if cached and time.monotonic() - cached[0] < 60:
-                return {**cached[1], "cached": True}
-        try:
-            value = loader(snapshot.stock_code, snapshot.executed_at)
-        except Exception as error:
-            return {"available": False, "error": str(error)}
-        with self._investor_cache_lock:
-            if cache is self._investor_cache and loader is self._investor_loader:
-                cache[snapshot.stock_code] = (time.monotonic(), value)
-        return value
+            with self._investor_cache_lock:
+                cached = cache.get(snapshot.stock_code)
+                if cached and time.monotonic() - cached[0] < 60:
+                    return {**cached[1], "cached": True}
+            try:
+                value = loader(snapshot.stock_code, snapshot.executed_at)
+            except Exception as error:
+                return {"available": False, "error": str(error)}
+            with self._investor_cache_lock:
+                if cache is self._investor_cache and loader is self._investor_loader:
+                    cache[snapshot.stock_code] = (time.monotonic(), value)
+            return value

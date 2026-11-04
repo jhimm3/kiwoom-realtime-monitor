@@ -10,9 +10,9 @@ from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from kiwoom_monitor.infrastructure.owned_server_shutdown import WindowsShutdownEvent
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import LocalApiConfig
-from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
 
 
 class LocalCentralServerProcess:
@@ -31,6 +31,7 @@ class LocalCentralServerProcess:
         self._executable = executable or sys.executable
         self._frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
         self._process: subprocess.Popen[bytes] | None = None
+        self._shutdown_event: WindowsShutdownEvent | None = None
         parsed = urlsplit(source.server_url)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("로컬 중앙 서버 주소는 이 PC의 http 주소여야 합니다.")
@@ -41,6 +42,14 @@ class LocalCentralServerProcess:
 
     def start(self, timeout_seconds: float = 10.0) -> bool:
         """이미 같은 토큰의 서버가 있으면 재사용하고, 없으면 하나만 시작한다."""
+        if self._process is not None:
+            if self._process.poll() is None:
+                if self._is_ready():
+                    return False
+                raise RuntimeError("기존 로컬 중앙 서버의 종료가 아직 확인되지 않았습니다.")
+            self.stop()
+        elif self._shutdown_event is not None:
+            self.stop()  # Retry a terminal/Popen-failure handle close, never lose it.
         if self._is_ready():
             return False
         profiles = LocalApiConfig(self._api_config_path).load_profiles()
@@ -61,6 +70,7 @@ class LocalCentralServerProcess:
             "KIWOOM_SECRET_KEY": secret_key,
         })
         try:
+            from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
             news = LocalNaverNewsConfig(self._api_config_path.with_name("naver_news.dat")).load()
             if news.client_id and news.client_secret:
                 environment.update({
@@ -94,31 +104,90 @@ class LocalCentralServerProcess:
                 self._executable, "-m", "kiwoom_monitor.central_server",
                 "--parent-pid", str(os.getpid()),
             ]
-        self._process = subprocess.Popen(
-            command, env=environment, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            if self._process.poll() is not None:
-                raise RuntimeError("로컬 중앙 서버가 시작 중 종료되었습니다.")
-            if self._is_ready():
-                return True
-            time.sleep(0.1)
-        self.stop()
-        raise TimeoutError("로컬 중앙 서버가 제한 시간 안에 준비되지 않았습니다.")
+        self._shutdown_event = WindowsShutdownEvent.create() if os.name == "nt" else None
+        if self._shutdown_event is not None:
+            command.extend(["--shutdown-event", self._shutdown_event.name])
+        try:
+            self._process = subprocess.Popen(
+                command, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except BaseException as error:
+            try:
+                self.stop()  # No child exists; release only this start's event.
+            except BaseException as cleanup_error:
+                error.add_note("local server spawn cleanup failed: " + type(cleanup_error).__name__)
+            raise
+        try:
+            deadline = time.monotonic() + timeout_seconds
+            while time.monotonic() < deadline:
+                if self._process.poll() is not None:
+                    raise RuntimeError("로컬 중앙 서버가 시작 중 종료되었습니다.")
+                if self._is_ready():
+                    if self._process.poll() is not None:
+                        raise RuntimeError("로컬 중앙 서버가 준비 응답 뒤 종료되었습니다.")
+                    return True
+                time.sleep(0.1)
+            raise TimeoutError("로컬 중앙 서버가 제한 시간 안에 준비되지 않았습니다.")
+        except BaseException as error:
+            try:
+                self.stop()
+            except BaseException as cleanup_error:
+                error.add_note("local server start cleanup failed: " + type(cleanup_error).__name__)
+            raise
 
     def stop(self) -> None:
-        process, self._process = self._process, None
-        if process is None or process.poll() is not None:
+        process = self._process
+        if process is None:
+            if self._shutdown_event is not None:
+                self._shutdown_event.close()
+                self._shutdown_event = None
             return
-        process.terminate()
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
+            code = process.poll()
+            if code is None:
+                try:
+                    if os.name == "nt":
+                        if self._shutdown_event is None:
+                            raise RuntimeError("소유한 중앙 서버의 정상 종료 신호가 없습니다.")
+                        self._shutdown_event.signal()
+                    else:
+                        process.terminate()  # Owned POSIX child handles SIGTERM gracefully.
+                except BaseException as signal_error:
+                    # A failed signal cannot strand bootstrap's retained native owner.
+                    try:
+                        process.kill()
+                        process.wait(timeout=2)
+                    except BaseException as cleanup_error:
+                        signal_error.add_note("forced cleanup failed: " + type(cleanup_error).__name__)
+                    if isinstance(signal_error, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    raise RuntimeError("로컬 중앙 서버에 정상 종료를 요청하지 못했습니다.") from signal_error
+                try:
+                    code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired as timeout:
+                    process.kill()
+                    process.wait(timeout=2)
+                    raise RuntimeError("로컬 중앙 서버를 강제 종료했습니다. 마지막 저장 수락은 미확인입니다.") from timeout
+                except BaseException as wait_error:
+                    # Do not strand bootstrap's retained owner in a bare wait
+                    # after an interruption prevented the timeout/kill branch.
+                    try:
+                        process.kill()
+                        process.wait(timeout=2)
+                    except BaseException as cleanup_error:
+                        wait_error.add_note("forced cleanup failed: " + type(cleanup_error).__name__)
+                    raise
+            if code != 0:
+                raise RuntimeError(f"로컬 중앙 서버의 정상 종료/마지막 저장 수락 실패: exit={code}")
+        finally:
+            # Interrupted/failed native waits retain both references for retry.
+            if process.poll() is not None:
+                if self._shutdown_event is not None:
+                    self._shutdown_event.close()
+                    self._shutdown_event = None
+                self._process = None
 
     def _is_ready(self) -> bool:
         request = Request(

@@ -16,20 +16,24 @@ import sys
 import time
 from contextlib import closing
 from pathlib import Path
+from datetime import datetime
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.central_server.database import (
-    PostgresQueryStore, _complete_external_news_job, _news_article_content_hash,
+    PostgresQueryStore, _complete_external_news_job,
 )
 from kiwoom_monitor.central_server.postgres_access import (
     DBWriterContext, observe_existing_transaction,
 )
 from kiwoom_monitor.application.news_rules import SUPPLY_CONTRACT_RULE_VERSION
 from kiwoom_monitor.domain.news_observation import (
+    news_article_content_hash as _news_article_content_hash,
     ARTICLE_BODY_EXTRACTOR_VERSION, stable_document_hash,
 )
 
@@ -74,9 +78,10 @@ def _article_revision(connection: psycopg.Connection, article: dict, scope: str)
 
 def _complete_prepared_job(connection: psycopg.Connection, article_id: str,
                            stage: str, target_id: str,
-                           result: dict) -> str:
+                           result: dict, *,
+                           now_provider: Callable[[], datetime] = kst_now) -> str:
     version = ARTICLE_BODY_EXTRACTOR_VERSION if stage == "BODY" else SUPPLY_CONTRACT_RULE_VERSION
-    now = time.time()
+    now = as_kst(now_provider()).timestamp()
     with connection.cursor() as cursor:
         cursor.execute(
             "SELECT job_key,state FROM central_news_jobs "
@@ -101,7 +106,7 @@ def _complete_prepared_job(connection: psycopg.Connection, article_id: str,
             if claimed is None:
                 return "deferred"
             payload = {**result, "job_key": key, "attempts": int(claimed[0]), "stage": stage}
-            saved = _complete_external_news_job(cursor, payload, postgres=True)
+            saved = _complete_external_news_job(cursor, payload, postgres=True, now_provider=now_provider)
             return saved["state"]
     return "already_completed"
 
@@ -196,14 +201,15 @@ def _prepare_articles(store: PostgresQueryStore, connection: psycopg.Connection,
 
 
 def _complete_prepared(connection: psycopg.Connection, article_id: str,
-                       article: dict, body: dict, rules: list[dict]) -> None:
+                       article: dict, body: dict, rules: list[dict], *,
+                       now_provider: Callable[[], datetime] = kst_now) -> None:
     body_state = _complete_prepared_job(
         connection, article_id, "BODY", article["stock_code"], {
         "body_text": body["body_text"], "body_status": body["body_status"],
         "fetched_at": body.get("fetched_at"),
         "original_published_at": body.get("original_published_at") or "",
         "source_url": body.get("source_url") or "",
-    })
+    }, now_provider=now_provider)
     if body_state == "deferred":
         raise PreparedImportDeferred("BODY 작업이 다른 실행기에 선점되어 적재를 미뤘습니다.")
     for rule in rules:
@@ -213,7 +219,7 @@ def _complete_prepared(connection: psycopg.Connection, article_id: str,
                 "assessment": rule["assessment"],
                 "core_sentences": rule["core_sentences"],
                 "rule_result": rule.get("rule_result"),
-            },
+            }, now_provider=now_provider,
         )
         if rule_state == "deferred":
             raise PreparedImportDeferred(
@@ -221,7 +227,8 @@ def _complete_prepared(connection: psycopg.Connection, article_id: str,
             )
 
 
-def _complete_batch(connection: psycopg.Connection, records: list[dict]
+def _complete_batch(connection: psycopg.Connection, records: list[dict], *,
+                    now_provider: Callable[[], datetime] = kst_now
                     ) -> tuple[list[dict], list[tuple[dict, str]], list[tuple[dict, str]]]:
     completed: list[dict] = []
     deferred: list[tuple[dict, str]] = []
@@ -237,7 +244,7 @@ def _complete_batch(connection: psycopg.Connection, records: list[dict]
                 # A savepoint keeps one unavailable job from rolling back peers.
                 with observed_connection.transaction():
                     _complete_prepared(observed_connection, record["article_id"], record["article"],
-                                       record["body"], record["rules"])
+                                       record["body"], record["rules"], now_provider=now_provider)
                 completed.append(record)
             except PreparedImportDeferred as error:
                 deferred.append((record, str(error)))
@@ -271,7 +278,8 @@ def main() -> int:
         raise SystemExit("KIWOOM_SERVER_DATABASE_URL is not configured")
     import psycopg
 
-    store = PostgresQueryStore(database_url)
+    # Standalone immutable import has no broker; use one explicit common KST fallback for writer/claim/finish.
+    store = PostgresQueryStore(database_url, now_provider=kst_now)
     imported = skipped = failed = deferred = batches_committed = 0
     article_stage_ms = completion_stage_ms = 0
     with closing(sqlite3.connect(f"file:{prepared.as_posix()}?mode=ro",
@@ -316,7 +324,7 @@ def main() -> int:
                 # Per-article savepoints isolate worker ownership races and bad rows,
                 # while one outer commit amortizes WAL flushes across the batch.
                 completion_started = time.perf_counter()
-                completed, deferred_rows, failed_rows = _complete_batch(connection, ready)
+                completed, deferred_rows, failed_rows = _complete_batch(connection, ready, now_provider=kst_now)
                 completion_stage_ms += round((time.perf_counter() - completion_started) * 1000)
                 deferred += len(deferred_rows)
                 failed += len(failed_rows)

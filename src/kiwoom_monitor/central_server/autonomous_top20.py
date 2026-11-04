@@ -2,22 +2,16 @@
 
 from __future__ import annotations
 
-from .diagnostic_replay_contract import captured_workload
-from .diagnostic_rest_input import captured_catalog_loader, catalog_recording_scope
-from .diagnostic_top20_input import captured_ranking_refresh, ranking_request, consumed_delivery
-from .diagnostic_top20_flow_input import (
-    captured_candidate_flow, candidate_flow_request, flow_marker_state, flow_marker_time,
-)
-
 import asyncio
-from .diagnostic_replay_runtime import owned_create_task, owned_to_thread
+from .async_lifetime import await_owned_task, owned_create_task, owned_to_thread
 import logging
 import time
 from dataclasses import asdict
+from contextlib import asynccontextmanager, nullcontext
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol, Sequence
 
 from kiwoom_monitor.application.minute_trade_value import MinuteTradeValueAggregator
 from kiwoom_monitor.application.market_session_schedule import (
@@ -44,7 +38,6 @@ from kiwoom_monitor.domain.top20_reconciliation import (
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_document
 from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive_due
 
-from .diagnostic_workloads import is_paused
 from .market_ingest import (
     fundamentals_document_is_current, fundamentals_refresh_key, nxt_eligibility_document_is_current,
     parse_minute_response,
@@ -107,6 +100,306 @@ class AutonomousTop20Store(Protocol):
     ) -> None: ...
 
 
+class DailyReferenceState:
+    """Own daily input revisions, accepted reference cuts and history borrowers."""
+
+    def __init__(self) -> None:
+        # Native ingestion only invalidates versions; asyncio leases stay on the loop.
+        self._daily_input_lock = Lock()
+        self._daily_input_versions: dict[tuple[str, str], int] = {}
+        self._daily_verified_versions: dict[tuple[str, str], int] = {}
+        self._daily_stage_versions: dict[tuple[str, str], tuple[int, int]] = {}
+        self._daily_history_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
+
+    def _versions(self, code: str) -> tuple[int, int]:
+        """Read a cut while the caller holds the input lock."""
+        return tuple(self._daily_input_versions.get((code, market), 0) for market in ("KRX", "NXT"))
+
+    def invalidate(self, code: str, market: str) -> None:
+        """Mark committed changes or uncertain saves without scheduling work."""
+        with self._daily_input_lock:
+            key = (code, market)
+            self._daily_input_versions[key] = self._daily_input_versions.get(key, 0) + 1
+
+    def source_versions(self, code: str) -> tuple[int, int]:
+        with self._daily_input_lock:
+            return self._versions(code)
+
+    def market_is_current(self, code: str, market: str) -> bool:
+        with self._daily_input_lock:
+            key = (code, market)
+            return self._daily_verified_versions.get(key, 0) == self._daily_input_versions.get(key, 0)
+
+    def accept_market(self, code: str, market: str, expected_version: int) -> None:
+        with self._daily_input_lock:
+            key = (code, market)
+            if self._daily_input_versions.get(key, 0) != expected_version:
+                raise RuntimeError(f"{market} 일봉 검증 중 입력이 변경되었습니다.")
+            self._daily_verified_versions[key] = expected_version
+
+    def accept_daily(self, code: str, markets: Sequence[str]) -> None:
+        with self._daily_input_lock:
+            for market in markets:
+                key = (code, market)
+                if self._daily_verified_versions.get(key, 0) != self._daily_input_versions.get(key, 0):
+                    raise RuntimeError(f"{market} 일봉 검증 중 입력이 변경되었습니다.")
+            self._daily_stage_versions[(code, "daily")] = self._versions(code)
+
+    def accept_high(self, code: str, expected_versions: tuple[int, int]) -> None:
+        with self._daily_input_lock:
+            if expected_versions != self._versions(code):
+                raise RuntimeError("신고가 계산 중 일봉 입력이 변경되었습니다.")
+            self._daily_stage_versions[(code, "high")] = expected_versions
+
+    def stage_is_current(self, code: str, stage: str) -> bool:
+        with self._daily_input_lock:
+            return self._daily_stage_versions.get((code, stage), (0, 0)) == self._versions(code)
+
+    @asynccontextmanager
+    async def history_lease(self, code: str, market: str) -> AsyncIterator[None]:
+        # Waiters own a reference too: cancellation cannot replace another owner's lock.
+        key = (code, market)
+        lock, users = self._daily_history_locks.get(key, (asyncio.Lock(), 0))
+        self._daily_history_locks[key] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            _, users = self._daily_history_locks[key]
+            if users == 1:
+                del self._daily_history_locks[key]
+            else:
+                self._daily_history_locks[key] = (lock, users - 1)
+
+
+class Top20AfterCloseWorkflow:
+    """Own the after-close day, retry progress, entrants and actual task lifetime."""
+
+    def __init__(
+        self, store: AutonomousTop20Store, *, now_provider: Callable[[], datetime],
+        minute_backfill_enabled: bool, capture_identity: str,
+        backfill_market_indexes: Callable[[str], Awaitable[None]],
+        nxt_enabled: Callable[[str], Awaitable[bool]],
+        backfill_daily: Callable[[str, str, str], Awaitable[None]],
+        backfill_minutes: Callable[[str, str, str], Awaitable[None]],
+        backfill_candidate_flows: Callable[[str, str], Awaitable[None]],
+        load_daily_entrant_state: Callable[..., Awaitable[tuple[dict[str, str], set[str]]]],
+        persist_missing_daily_entrants: Callable[[str, dict[str, str], set[str]], Awaitable[None]],
+        is_observed_krx_trading_day: Callable[[str], Awaitable[bool]],
+        previous_observed_krx_trading_day: Callable[[datetime], Awaitable[str]],
+        capture_scope: Callable[..., Any] | None = None,
+        workload_paused: Callable[[str], bool] | None = None,
+    ) -> None:
+        self._store = store
+        self._now = now_provider
+        self._capture_identity = capture_identity
+        self._capture_scope = capture_scope
+        self._workload_paused = workload_paused or (lambda _workload: False)
+        self._minute_backfill_enabled = minute_backfill_enabled
+        self._backfill_market_indexes = backfill_market_indexes
+        self._nxt_enabled = nxt_enabled
+        self._backfill_daily = backfill_daily
+        self._backfill_minutes = backfill_minutes
+        self._backfill_candidate_flows = backfill_candidate_flows
+        self._load_daily_entrant_state = load_daily_entrant_state
+        self._persist_missing_daily_entrants = persist_missing_daily_entrants
+        self._is_observed_krx_trading_day = is_observed_krx_trading_day
+        self._previous_observed_krx_trading_day = previous_observed_krx_trading_day
+        self._last_backfill_day = ""
+        self._backfill_task: asyncio.Task[bool] | None = None
+        self._backfill_retry_day = ""
+        self._backfill_retry_at = 0.0
+        self._backfill_attempts = 0
+        self._backfill_progress_day = ""
+        self._backfill_completed_steps: dict[str, set[str]] = {}
+        self._backfill_entrant_first_seen: dict[str, str] | None = None
+        self._backfill_entrant_persisted_codes: set[str] = set()
+        self._calendar_unknown_logged_days: set[str] = set()
+
+    def request_stop(self) -> None:
+        if self._backfill_task is not None:
+            self._backfill_task.cancel()
+
+    async def join(self) -> None:
+        task = self._backfill_task
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def consider(self, now: datetime) -> None:
+        if now.weekday() < 5 and now.time().replace(tzinfo=None) >= clock_time(20, 5):
+            day = now.date().isoformat()
+            if await self._is_observed_krx_trading_day(day):
+                if self._last_backfill_day != day:
+                    self.schedule(day)
+            elif day not in self._calendar_unknown_logged_days:
+                self._calendar_unknown_logged_days.add(day)
+                logger.info(
+                    "KRX 장후 보완 대기: %s의 0s 거래일 증거가 없어 종목별 TR을 시작하지 않습니다",
+                    day,
+                )
+        elif now.weekday() < 5 and now.time().replace(tzinfo=None) < clock_time(7, 40):
+            day = await self._previous_observed_krx_trading_day(now)
+            if day and self._last_backfill_day != day:
+                self.schedule(day)
+
+    async def run_day(self, day: str) -> bool:
+        with (self._capture_scope(self, "top20", "autonomous_top20",
+                producer_identity=lambda workflow: workflow._capture_identity)
+              if self._capture_scope is not None else nullcontext()):
+            target_day = datetime.fromisoformat(day).date()
+            now = self._now()
+            close_at = full_day_close_at(target_day, venue="KRX")
+            if (
+                target_day >= KRX_AFTER_MARKET_EFFECTIVE_DATE
+                and target_day == now.date()
+                and (close_at is None or now.time().replace(tzinfo=None) < close_at.time().replace(tzinfo=None))
+            ):
+                logger.info("KRX 전체일 차트 보완 대기: %s (20:00 종료 전)", day)
+                return False
+            if self._backfill_progress_day != day:
+                self._backfill_progress_day = day
+                self._backfill_completed_steps.clear()
+                self._backfill_entrant_first_seen = None
+                self._backfill_entrant_persisted_codes = set()
+            succeeded = True
+            try:
+                await self._backfill_market_indexes(day)
+            except Exception as error:
+                succeeded = False
+                logger.warning("시장지수 장후 보완 실패: %s %s", day, error)
+            documents = await owned_to_thread(self._store.load_documents, "top20_daily_entrants", day, 5000)
+            if len(documents) >= 5000:
+                raise RuntimeError(f"TOP20 daily entrant recovery limit reached: {day}")
+            if self._backfill_entrant_first_seen is None:
+                first_seen, persisted = await self._load_daily_entrant_state(day, documents)
+                self._backfill_entrant_first_seen = first_seen
+                self._backfill_entrant_persisted_codes = persisted
+            first_seen = self._backfill_entrant_first_seen
+            persisted = self._backfill_entrant_persisted_codes
+            # Re-read documents on every retry so newly admitted symbols join the backfill.
+            persisted.update(str(row["key"]).strip() for row in documents if row.get("key"))
+            await self._persist_missing_daily_entrants(day, first_seen, persisted)
+            account_entries = await owned_to_thread(
+                self._store.load_documents, "account_entry_symbols_daily", day, 5000,
+            )
+            codes = tuple(dict.fromkeys([
+                *first_seen,
+                *(str(value.get("key", "")) for value in documents if value.get("key")),
+                *(str(value.get("key", "")) for value in account_entries if value.get("key")),
+            ]))
+            for code in codes:
+                if self._now().time().replace(tzinfo=None) >= clock_time(7, 40) and self._now().date().isoformat() != day:
+                    succeeded = False
+                    break
+                completed = self._backfill_completed_steps.setdefault(code, set())
+                if "bars" not in completed:
+                    try:
+                        eligible = await self._nxt_enabled(code)
+                        await self._backfill_daily(code, day, "KRX")
+                        from .postgres_access import db_call_source
+                        with db_call_source("top20.after_close_minutes"):
+                            await self._backfill_minutes(code, day, "KRX")
+                        if eligible:
+                            await self._backfill_daily(code, day, "NXT")
+                            with db_call_source("top20.after_close_minutes"):
+                                await self._backfill_minutes(code, day, "NXT")
+                        if self._minute_backfill_enabled and not self._workload_paused("minute_backfill"):
+                            completed.add("bars")
+                        else:
+                            succeeded = False
+                    except Exception as error:
+                        succeeded = False
+                        logger.warning("TOP20 편입종목 장후 보완 실패: %s %s", code, error)
+                if "flows" not in completed:
+                    try:
+                        await self._backfill_candidate_flows(code, day)
+                        completed.add("flows")
+                    except Exception as error:
+                        succeeded = False
+                        logger.warning("TOP20 편입종목 장후 수급 보완 실패: %s %s", code, error)
+            if not self._workload_paused("minute_backfill") and not self._workload_paused("top20_after_close"):
+                try:
+                    await self.reconcile(day)
+                except Exception as error:
+                    succeeded = False
+                    logger.warning("TOP20 장후 재계산 실패(재시도): %s %s", day, error)
+            completed_day = succeeded and not self._workload_paused("minute_backfill") and not self._workload_paused("top20_after_close")
+            if completed_day:
+                self._backfill_progress_day = ""
+                self._backfill_completed_steps.clear()
+            return completed_day
+
+
+    async def reconcile(self, day: str) -> dict[str, Any] | None:
+        """Publish one derived day only after the full-day collection window closes."""
+        if self._workload_paused("top20_after_close") or self._workload_paused("minute_backfill"):
+            return None
+        now = self._now()
+        if day > now.date().isoformat() or (day == now.date().isoformat() and now.hour < 20):
+            raise RuntimeError("TOP20 전체일 재계산은 20:00 종료 뒤에만 가능합니다.")
+        inputs = await owned_to_thread(self._store.load_top20_reconciliation_inputs, day)
+        payload = await owned_to_thread(build_top20_reconciliation, inputs, available_at=self._now().isoformat())
+        previous = await owned_to_thread(self._store.load_dataset_snapshots, RECONCILED_KIND, day, 1)
+        if previous and previous[0].get("payload", {}).get("generation") == payload["generation"]:
+            return previous[0]["payload"]
+        if self._workload_paused("top20_after_close") or self._workload_paused("minute_backfill"):
+            return None
+        # The generic native writer owns the single commit and cache invalidation.
+        publication = owned_create_task(
+            owned_to_thread(self._store.save_dataset_snapshot, RECONCILED_KIND, day, day, payload),
+            name=f"nas-top20-reconciliation-publish-{day}",
+        )
+        try:
+            await asyncio.shield(publication)
+        except asyncio.CancelledError:
+            # The existing backfill owner remains alive until its native write finishes;
+            # close() joins that owner before the app closes the selected store.
+            await publication
+            raise
+        logger.info("TOP20 장후 재계산 게시: %s complete=%s/720 generation=%s", day,
+                    payload["coverage"]["full_day"]["complete"], payload["generation"])
+        return payload
+
+
+    def schedule(self, day: str) -> None:
+        if self._workload_paused("top20_after_close"):
+            return
+        task = self._backfill_task
+        if task is not None and not task.done():
+            return
+        if self._backfill_retry_day == day and time.monotonic() < self._backfill_retry_at:
+            return
+        task = owned_create_task(
+            self.run_day(day), name=f"nas-top20-backfill-{day}",
+        )
+        self._backfill_task = task
+        task.add_done_callback(self._done)
+
+
+    def _done(self, task: asyncio.Task[bool]) -> None:
+        if self._backfill_task is task:
+            self._backfill_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        day = task.get_name().removeprefix("nas-top20-backfill-")
+        if error is None and task.result():
+            self._last_backfill_day = day
+            self._backfill_retry_day = ""
+            self._backfill_attempts = 0
+            return
+        attempts = self._backfill_attempts + 1 if self._backfill_retry_day == day else 1
+        self._backfill_retry_day = day
+        self._backfill_attempts = attempts
+        delay = min(300, 30 * 2 ** (attempts - 1))
+        self._backfill_retry_at = time.monotonic() + delay
+        logger.warning("TOP20 장후 보완 미완료: %s; %d초 후 재시도; error=%s", day, delay, error)
+
+
+
 class AutonomousTop20Service:
     """24시간 순위와 08:00~20:00 0B 수집, 장후 차트 보완을 담당한다."""
 
@@ -119,12 +412,22 @@ class AutonomousTop20Service:
         outbox_path: Path | None = None,
         minute_backfill_enabled: bool = True,
         on_membership_changed: Callable[[], None] | None = None,
+        capture_scope: Callable[..., Any] | None = None,
+        ranking_input_observer: Any = None,
+        flow_input_observer: Any = None,
+        catalog_input_observer: Any = None,
+        workload_paused: Callable[[str], bool] | None = None,
     ) -> None:
         self._broker = broker
         self._hub = hub
         self._store = store
         self._now = now_provider or (lambda: datetime.now(KST))
         self._catalog_loader = catalog_loader
+        self._capture_scope = capture_scope
+        self._ranking_input_observer = ranking_input_observer
+        self._flow_input_observer = flow_input_observer
+        self._catalog_input_observer = catalog_input_observer
+        self._workload_paused = workload_paused or (lambda _workload: False)
         self._minute_backfill_enabled = minute_backfill_enabled
         self._on_membership_changed = on_membership_changed
         if not minute_backfill_enabled:
@@ -146,34 +449,17 @@ class AutonomousTop20Service:
         self._entry_data_ready: dict[str, str] = {}
         self._fundamentals_pending: set[str] = set()
         self._fundamentals_tasks: set[asyncio.Task[None]] = set()
-        self._daily_history_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
-        # Ingestion runs in a broker thread. Only versions cross that boundary;
-        # asyncio tasks and stage markers remain owned by the event loop.
-        self._daily_input_lock = Lock()
-        self._daily_input_versions: dict[tuple[str, str], int] = {}
-        self._daily_verified_versions: dict[tuple[str, str], int] = {}
-        self._daily_stage_versions: dict[tuple[str, str], tuple[int, int]] = {}
+        self.daily_reference = DailyReferenceState()
         self._market_catalog_task: asyncio.Task[None] | None = None
         self._subscription_task: asyncio.Task[None] | None = None
         self._subscription_revision = 0
         self._subscription_day = ""
         self._last_ranking_slot = ""
         self._last_aux_ranking_slots: dict[str, str] = {}
-        self._last_backfill_day = ""
         self._krx_trading_day_cache: dict[str, tuple[float, bool]] = {}
-        self._calendar_unknown_logged_days: set[str] = set()
-        self._backfill_task: asyncio.Task[bool] | None = None
-        self._backfill_retry_day = ""
-        self._backfill_retry_at = 0.0
-        self._backfill_attempts = 0
-        self._backfill_progress_day = ""
-        self._backfill_completed_steps: dict[str, set[str]] = {}
         self._entrants_day = ""
         self._entrant_first_seen: dict[str, str] = {}
         self._entrant_persisted_codes: set[str] = set()
-        # The previous-day backfill task must never replace the ranking day's state.
-        self._backfill_entrant_first_seen: dict[str, str] | None = None
-        self._backfill_entrant_persisted_codes: set[str] = set()
         self._account_entry_codes: tuple[str, ...] = ()
         self._pending_index_records: dict[str, dict[str, Any]] = {}
         self._index_outbox_lock = asyncio.Lock()
@@ -182,6 +468,20 @@ class AutonomousTop20Service:
         self._program_snapshots = ProgramSnapshotWriter(store)
         self._close_task: asyncio.Task[None] | None = None
         self._latest_membership_snapshot: dict[str, Any] | None = None
+        self.after_close = Top20AfterCloseWorkflow(
+            store, now_provider=self._now, minute_backfill_enabled=minute_backfill_enabled,
+            capture_identity=f"autonomous_top20:{id(self):x}",
+            backfill_market_indexes=self._backfill_market_indexes,
+            nxt_enabled=self._nxt_enabled, backfill_daily=self._backfill_daily,
+            backfill_minutes=self._backfill_minutes,
+            backfill_candidate_flows=self._backfill_candidate_flows,
+            load_daily_entrant_state=self._load_daily_entrant_state,
+            persist_missing_daily_entrants=self._persist_missing_daily_entrants,
+            is_observed_krx_trading_day=self._is_observed_krx_trading_day,
+            previous_observed_krx_trading_day=self._previous_observed_krx_trading_day,
+            capture_scope=capture_scope,
+            workload_paused=workload_paused,
+        )
 
     def latest_membership_snapshot(self, subject: str = "") -> dict[str, Any] | None:
         """Return the latest validated 20-slot projection without waiting for persistence."""
@@ -217,6 +517,7 @@ class AutonomousTop20Service:
             owned_create_task(self._schedule_loop(), name="nas-top20-schedule"),
             owned_create_task(self._event_loop(), name="nas-top20-events"),
             owned_create_task(self._index_loop(), name="nas-top20-index"),
+            owned_create_task(self._persistence_loop(), name="nas-top20-persistence"),
         ]
 
     async def close(self) -> None:
@@ -231,6 +532,7 @@ class AutonomousTop20Service:
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
+        self.after_close.request_stop()
         for task in self._fundamentals_tasks:
             task.cancel()
         for task in self._tasks:
@@ -240,6 +542,7 @@ class AutonomousTop20Service:
                 await task
             except asyncio.CancelledError:
                 pass
+        await self.after_close.join()
         self._fundamentals_tasks.clear()
         self._fundamentals_pending.clear()
         for task in self._tasks:
@@ -251,7 +554,7 @@ class AutonomousTop20Service:
         if self._subscriber is not None:
             self._hub.disconnect(self._subscriber)
             self._subscriber = None
-        # A cancelled index-loop waiter must not outlive its actual save owner.
+        # A cancelled persistence waiter must not outlive its actual save owner.
         # Failed/newer index input stays in the outbox for the existing start recovery.
         if self._index_save_task is not None:
             try:
@@ -272,7 +575,10 @@ class AutonomousTop20Service:
             # Freshness/20-slot validation comes before persistence. Persisting every
             # stale or partial candidate here used to block the next retry on the
             # PostgreSQL ingest path and made the desktop ranking appear seconds late.
-            result = await ranking_request(request, retry_index)
+            if self._ranking_input_observer is None:
+                result = await request("ka00198", "/api/dostk/stkinfo", {"qry_tp": "5"})
+            else:
+                result = await self._ranking_input_observer.ranking_request(request, retry_index)
             raw_items = result.payload.get("item_inq_rank", result.payload.get("result_list", []))
             items = [row for row in raw_items if isinstance(row, dict)] if isinstance(raw_items, list) else []
             snapshot_at = _ranking_snapshot_at(items, result.payload)
@@ -303,108 +609,113 @@ class AutonomousTop20Service:
         assert result is not None
         return result, items, stale_response, partial_response
 
-    @captured_ranking_refresh
     async def refresh_ranking_once(self, observed_at: datetime | None = None) -> tuple[str, ...]:
         now = observed_at or self._now()
-        refresh_started_at = time.monotonic()
-        self._schedule_market_catalog(now.date().isoformat())
-        result, items, stale_response, partial_response = await self._select_ranking_response(now)
-        if stale_response or partial_response:
-            logger.warning(
-                "recording_gap: NAS TOP20 최신 완성 순위를 제한 시간 안에 받지 못해 이번 회차를 저장하지 않습니다."
-            )
-            return tuple(self._collector.active_codes)
-        codes = tuple(dict.fromkeys(filter(None, (_stock_code(row) for row in items))))[:20]
-        snapshot_key = _ranking_snapshot_key(items, now, result.payload)
-        day = snapshot_key[:10]
-        membership = {
-            "observed_at": snapshot_key, "codes": list(codes), "items": items,
-        }
-        # Only a fresh, complete 20-slot response reaches this point. Publish
-        # that validated projection before PostgreSQL persistence so the
-        # desktop's live limit=1 read is not delayed by storage latency.
-        projection_time = self._now()
-        if projection_time.tzinfo is None:
-            projection_time = projection_time.replace(tzinfo=KST)
-        projection_saved_at = projection_time.timestamp()
-        self._latest_membership_snapshot = {
-            "subject": day,
-            "snapshot_key": snapshot_key,
-            "saved_at": projection_saved_at,
-            "payload": membership,
-            "persistence_state": "pending",
-        }
-        if self._on_membership_changed is not None:
-            try:
-                self._on_membership_changed()
-            except Exception:
-                logger.exception("validated TOP20 projection notification failed")
-        # The validated live projection and its KRX 0B subscription use the
-        # same in-memory codes. Neither waits for membership/entrant/index DB
-        # writes; the websocket still reports readiness only after REG ACK.
-        async with self._collector_lock:
-            # REST retries and lock waits can outlive the request's ranking slot.
-            # Sampling at that old time rewinds the collector and fabricates a
-            # >2s gap on its next advance despite uninterrupted index sampling.
-            collection_now = self._now()
-            update = self._advance(collection_now)
-            self._collector.prepare(
-                codes, collection_now, enabled=True, collection_open=_collection_open(collection_now),
-            )
-        self._schedule_subscription_update(day)
-        # The collector has already moved to the next minute. Preserve its
-        # completed record before any unrelated membership/entrant DB write.
-        if update.completed is not None:
-            await self._queue_index(update.completed)
-        persistence_started_at = time.monotonic()
-        await owned_to_thread(
-            self._store.save_dataset_snapshot,
-            "top20_membership",
-            day,
-            snapshot_key,
-            membership,
-            observation=ranking_observation(
-                day,
-                snapshot_key,
-                membership,
-                self._now(),
-                source="nas-autonomous-ka00198",
-            ),
-        )
-        if (
-            self._latest_membership_snapshot is not None
-            and self._latest_membership_snapshot["snapshot_key"] == snapshot_key
-        ):
-            self._latest_membership_snapshot = {
-                **self._latest_membership_snapshot,
-                "persistence_state": "persisted",
+        observer = self._ranking_input_observer
+        with observer.ranking_refresh_scope(self, now) if observer is not None else nullcontext():
+            refresh_started_at = time.monotonic()
+            self._schedule_market_catalog(now.date().isoformat())
+            result, items, stale_response, partial_response = await self._select_ranking_response(now)
+            if stale_response or partial_response:
+                logger.warning(
+                    "recording_gap: NAS TOP20 최신 완성 순위를 제한 시간 안에 받지 못해 이번 회차를 저장하지 않습니다."
+                )
+                return tuple(self._collector.active_codes)
+            codes = tuple(dict.fromkeys(filter(None, (_stock_code(row) for row in items))))[:20]
+            snapshot_key = _ranking_snapshot_key(items, now, result.payload)
+            day = snapshot_key[:10]
+            membership = {
+                "observed_at": snapshot_key, "codes": list(codes), "items": items,
             }
-        logger.info(
-            "NAS TOP20 최신 순위 저장 완료: 회차=%s 종목=%d 조회후_ms=%d 저장_ms=%d",
-            snapshot_key, len(codes),
-            round((persistence_started_at - refresh_started_at) * 1000),
-            round((time.monotonic() - persistence_started_at) * 1000),
-        )
-        if codes:
-            if self._entrants_day != day:
-                first_seen, persisted = await self._load_daily_entrant_state(day)
-                self._entrant_first_seen = first_seen
-                self._entrant_persisted_codes = persisted
-                self._entrants_day = day
-            for code in codes:
-                self._entrant_first_seen.setdefault(code, snapshot_key)
-            await self._persist_missing_daily_entrants(
-                day, self._entrant_first_seen, self._entrant_persisted_codes,
+            # Only a fresh, complete 20-slot response reaches this point. Publish
+            # that validated projection before PostgreSQL persistence so the
+            # desktop's live limit=1 read is not delayed by storage latency.
+            projection_time = self._now()
+            if projection_time.tzinfo is None:
+                projection_time = projection_time.replace(tzinfo=KST)
+            projection_saved_at = projection_time.timestamp()
+            self._latest_membership_snapshot = {
+                "subject": day,
+                "snapshot_key": snapshot_key,
+                "saved_at": projection_saved_at,
+                "payload": membership,
+                "persistence_state": "pending",
+            }
+            if self._on_membership_changed is not None:
+                try:
+                    self._on_membership_changed()
+                except Exception:
+                    logger.exception("validated TOP20 projection notification failed")
+            # The validated live projection and its KRX 0B subscription use the
+            # same in-memory codes. Neither waits for membership/entrant/index DB
+            # writes; the websocket still reports readiness only after REG ACK.
+            async with self._collector_lock:
+                # REST retries and lock waits can outlive the request's ranking slot.
+                # Sampling at that old time rewinds the collector and fabricates a
+                # >2s gap on its next advance despite uninterrupted index sampling.
+                collection_now = self._now()
+                update = self._advance(collection_now)
+                self._collector.prepare(
+                    codes, collection_now, enabled=True, collection_open=_collection_open(collection_now),
+                )
+            self._schedule_subscription_update(day)
+            # The collector has already moved to the next minute. Preserve its
+            # completed record before any unrelated membership/entrant DB write.
+            if update.completed is not None:
+                await self._queue_index(update.completed)
+            persistence_started_at = time.monotonic()
+            # Keep the schedule owner alive until its accepted native write finishes.
+            await await_owned_task(owned_create_task(
+                owned_to_thread(
+                    self._store.save_dataset_snapshot,
+                    "top20_membership",
+                    day,
+                    snapshot_key,
+                    membership,
+                    observation=ranking_observation(
+                        day,
+                        snapshot_key,
+                        membership,
+                        self._now(),
+                        source="nas-autonomous-ka00198",
+                    ),
+                ),
+                name="nas-top20-membership-save",
+            ))
+            if (
+                self._latest_membership_snapshot is not None
+                and self._latest_membership_snapshot["snapshot_key"] == snapshot_key
+            ):
+                self._latest_membership_snapshot = {
+                    **self._latest_membership_snapshot,
+                    "persistence_state": "persisted",
+                }
+            logger.info(
+                "NAS TOP20 최신 순위 저장 완료: 회차=%s 종목=%d 조회후_ms=%d 저장_ms=%d",
+                snapshot_key, len(codes),
+                round((persistence_started_at - refresh_started_at) * 1000),
+                round((time.monotonic() - persistence_started_at) * 1000),
             )
-        if update.completed is not None:
-            try:
-                await self._flush_pending_indexes()
-            except Exception as error:
-                logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
-        if self._tasks:
-            self._schedule_fundamentals(codes, day)
-            self._schedule_aux_rankings(now)
-        return codes
+            if codes:
+                if self._entrants_day != day:
+                    first_seen, persisted = await self._load_daily_entrant_state(day)
+                    self._entrant_first_seen = first_seen
+                    self._entrant_persisted_codes = persisted
+                    self._entrants_day = day
+                for code in codes:
+                    self._entrant_first_seen.setdefault(code, snapshot_key)
+                await self._persist_missing_daily_entrants(
+                    day, self._entrant_first_seen, self._entrant_persisted_codes,
+                )
+            if update.completed is not None:
+                try:
+                    await self._flush_pending_indexes()
+                except Exception as error:
+                    logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
+            if self._tasks:
+                self._schedule_fundamentals(codes, day)
+                self._schedule_aux_rankings(now)
+            return codes
 
     async def _load_daily_entrant_state(
         self, day: str, documents: list[dict[str, Any]] | None = None,
@@ -576,7 +887,8 @@ class AutonomousTop20Service:
         if meta_day == day and markets:
             self._market_catalog_day = day
             return
-        loader = captured_catalog_loader(self)
+        observer = self._catalog_input_observer
+        loader = observer.captured_catalog_loader(self) if observer is not None else self._catalog_loader
         try:
             rows = await owned_to_thread(loader)
         except Exception as error:
@@ -599,157 +911,31 @@ class AutonomousTop20Service:
             "owner": "krx", "key": "_meta",
             "document": {"as_of": day, "rows": len(unique_rows)},
         })
-        with catalog_recording_scope(loader):
+        with observer.catalog_recording_scope(loader) if observer is not None else nullcontext():
             await owned_to_thread(self._store.replace_documents, "stock_catalog", documents)
         self._markets = {
             code: market for code, (_name, market) in unique_rows.items() if market
         }
         self._market_catalog_day = day
 
-    @captured_workload("top20", "autonomous_top20")
-    async def backfill_day(self, day: str) -> bool:
-        target_day = datetime.fromisoformat(day).date()
-        now = self._now()
-        close_at = full_day_close_at(target_day, venue="KRX")
-        if (
-            target_day >= KRX_AFTER_MARKET_EFFECTIVE_DATE
-            and target_day == now.date()
-            and (close_at is None or now.time().replace(tzinfo=None) < close_at.time().replace(tzinfo=None))
-        ):
-            logger.info("KRX 전체일 차트 보완 대기: %s (20:00 종료 전)", day)
-            return False
-        if self._backfill_progress_day != day:
-            self._backfill_progress_day = day
-            self._backfill_completed_steps.clear()
-            self._backfill_entrant_first_seen = None
-            self._backfill_entrant_persisted_codes = set()
-        succeeded = True
-        try:
-            await self._backfill_market_indexes(day)
-        except Exception as error:
-            succeeded = False
-            logger.warning("시장지수 장후 보완 실패: %s %s", day, error)
-        documents = await owned_to_thread(self._store.load_documents, "top20_daily_entrants", day, 5000)
-        if len(documents) >= 5000:
-            raise RuntimeError(f"TOP20 daily entrant recovery limit reached: {day}")
-        if self._backfill_entrant_first_seen is None:
-            first_seen, persisted = await self._load_daily_entrant_state(day, documents)
-            self._backfill_entrant_first_seen = first_seen
-            self._backfill_entrant_persisted_codes = persisted
-        first_seen = self._backfill_entrant_first_seen
-        persisted = self._backfill_entrant_persisted_codes
-        # Re-read documents on every retry so newly admitted symbols join the backfill.
-        persisted.update(str(row["key"]).strip() for row in documents if row.get("key"))
-        await self._persist_missing_daily_entrants(day, first_seen, persisted)
-        account_entries = await owned_to_thread(
-            self._store.load_documents, "account_entry_symbols_daily", day, 5000,
-        )
-        codes = tuple(dict.fromkeys([
-            *first_seen,
-            *(str(value.get("key", "")) for value in documents if value.get("key")),
-            *(str(value.get("key", "")) for value in account_entries if value.get("key")),
-        ]))
-        for code in codes:
-            if self._now().time().replace(tzinfo=None) >= clock_time(7, 40) and self._now().date().isoformat() != day:
-                succeeded = False
-                break
-            completed = self._backfill_completed_steps.setdefault(code, set())
-            if "bars" not in completed:
-                try:
-                    eligible = await self._nxt_enabled(code)
-                    await self._backfill_daily(code, day, "KRX")
-                    from .postgres_access import db_call_source
-                    with db_call_source("top20.after_close_minutes"):
-                        await self._backfill_minutes(code, day, "KRX")
-                    if eligible:
-                        await self._backfill_daily(code, day, "NXT")
-                        with db_call_source("top20.after_close_minutes"):
-                            await self._backfill_minutes(code, day, "NXT")
-                    if self._minute_backfill_enabled and not is_paused("minute_backfill"):
-                        completed.add("bars")
-                    else:
-                        succeeded = False
-                except Exception as error:
-                    succeeded = False
-                    logger.warning("TOP20 편입종목 장후 보완 실패: %s %s", code, error)
-            if "flows" not in completed:
-                try:
-                    await self._backfill_candidate_flows(code, day)
-                    completed.add("flows")
-                except Exception as error:
-                    succeeded = False
-                    logger.warning("TOP20 편입종목 장후 수급 보완 실패: %s %s", code, error)
-        if not is_paused("minute_backfill") and not is_paused("top20_after_close"):
-            try:
-                await self.reconcile_top20_day(day)
-            except Exception as error:
-                succeeded = False
-                logger.warning("TOP20 장후 재계산 실패(재시도): %s %s", day, error)
-        completed_day = succeeded and not is_paused("minute_backfill") and not is_paused("top20_after_close")
-        if completed_day:
-            self._backfill_progress_day = ""
-            self._backfill_completed_steps.clear()
-        return completed_day
 
-    async def reconcile_top20_day(self, day: str) -> dict[str, Any] | None:
-        """Publish one derived day only after the full-day collection window closes."""
-        if is_paused("top20_after_close") or is_paused("minute_backfill"):
-            return None
-        now = self._now()
-        if day > now.date().isoformat() or (day == now.date().isoformat() and now.hour < 20):
-            raise RuntimeError("TOP20 전체일 재계산은 20:00 종료 뒤에만 가능합니다.")
-        inputs = await owned_to_thread(self._store.load_top20_reconciliation_inputs, day)
-        payload = await owned_to_thread(build_top20_reconciliation, inputs, available_at=self._now().isoformat())
-        previous = await owned_to_thread(self._store.load_dataset_snapshots, RECONCILED_KIND, day, 1)
-        if previous and previous[0].get("payload", {}).get("generation") == payload["generation"]:
-            return previous[0]["payload"]
-        if is_paused("top20_after_close") or is_paused("minute_backfill"):
-            return None
-        # The generic native writer owns the single commit and cache invalidation.
-        publication = owned_create_task(
-            owned_to_thread(self._store.save_dataset_snapshot, RECONCILED_KIND, day, day, payload),
-            name=f"nas-top20-reconciliation-publish-{day}",
-        )
-        try:
-            await asyncio.shield(publication)
-        except asyncio.CancelledError:
-            # The existing backfill owner remains alive until its native write finishes;
-            # close() joins that owner before the app closes the selected store.
-            await publication
-            raise
-        logger.info("TOP20 장후 재계산 게시: %s complete=%s/720 generation=%s", day,
-                    payload["coverage"]["full_day"]["complete"], payload["generation"])
-        return payload
 
-    @captured_workload("top20", "autonomous_top20")
     async def _schedule_loop(self) -> None:
-        first_iteration = True
-        while True:
-            now = self._now()
-            slot = _ranking_expected_at(now).strftime("%Y-%m-%dT%H:%M:%S")
-            if first_iteration or slot != self._last_ranking_slot:
-                self._last_ranking_slot = slot
-                try:
-                    await self.refresh_ranking_once(now)
-                except Exception as error:
-                    logger.warning("recording_gap: NAS TOP20 순위 조회/저장 실패: %s", error)
-            first_iteration = False
-            if now.weekday() < 5 and now.time().replace(tzinfo=None) >= clock_time(20, 5):
-                day = now.date().isoformat()
-                if await self._is_observed_krx_trading_day(day):
-                    if self._last_backfill_day != day:
-                        self._schedule_backfill(day)
-                elif day not in self._calendar_unknown_logged_days:
-                    self._calendar_unknown_logged_days.add(day)
-                    logger.info(
-                        "KRX 장후 보완 대기: %s의 0s 거래일 증거가 없어 종목별 TR을 시작하지 않습니다",
-                        day,
-                    )
-            elif now.weekday() < 5 and now.time().replace(tzinfo=None) < clock_time(7, 40):
-                day = await self._previous_observed_krx_trading_day(now)
-                if day and self._last_backfill_day != day:
-                    self._schedule_backfill(day)
-            await asyncio.sleep(0.25)
+        with (self._capture_scope(self, "top20", "autonomous_top20")
+              if self._capture_scope is not None else nullcontext()):
+            first_iteration = True
+            while True:
+                now = self._now()
+                slot = _ranking_expected_at(now).strftime("%Y-%m-%dT%H:%M:%S")
+                if first_iteration or slot != self._last_ranking_slot:
+                    self._last_ranking_slot = slot
+                    try:
+                        await self.refresh_ranking_once(now)
+                    except Exception as error:
+                        logger.warning("recording_gap: NAS TOP20 순위 조회/저장 실패: %s", error)
+                first_iteration = False
+                await self.after_close.consider(now)
+                await asyncio.sleep(0.25)
 
     async def _is_observed_krx_trading_day(self, day: str) -> bool:
         cached = self._krx_trading_day_cache.get(day)
@@ -802,124 +988,111 @@ class AutonomousTop20Service:
         if error is not None:
             logger.warning("키움 0s 거래일 증거 저장 실패: %s", error)
 
-    def _schedule_backfill(self, day: str) -> None:
-        if is_paused("top20_after_close"):
-            return
-        task = self._backfill_task
-        if task is not None and not task.done():
-            return
-        if self._backfill_retry_day == day and time.monotonic() < self._backfill_retry_at:
-            return
-        task = owned_create_task(
-            self.backfill_day(day), name=f"nas-top20-backfill-{day}",
-        )
-        self._backfill_task = task
-        self._fundamentals_tasks.add(task)
-        task.add_done_callback(self._backfill_done)
 
-    def _backfill_done(self, task: asyncio.Task[bool]) -> None:
-        self._fundamentals_tasks.discard(task)
-        if self._backfill_task is task:
-            self._backfill_task = None
-        if task.cancelled():
-            return
-        error = task.exception()
-        day = task.get_name().removeprefix("nas-top20-backfill-")
-        if error is None and task.result():
-            self._last_backfill_day = day
-            self._backfill_retry_day = ""
-            self._backfill_attempts = 0
-            return
-        attempts = self._backfill_attempts + 1 if self._backfill_retry_day == day else 1
-        self._backfill_retry_day = day
-        self._backfill_attempts = attempts
-        delay = min(300, 30 * 2 ** (attempts - 1))
-        self._backfill_retry_at = time.monotonic() + delay
-        logger.warning("TOP20 장후 보완 미완료: %s; %d초 후 재시도; error=%s", day, delay, error)
 
-    @captured_workload("top20", "autonomous_top20")
     async def _event_loop(self) -> None:
-        while True:
-            subscriber = self._subscriber
-            if subscriber is None:
-                await asyncio.sleep(0.1)
-                continue
-            event = await subscriber.queue.get()
-            with consumed_delivery(subscriber, event):
-                if not isinstance(event.get("payload"), dict):
+        with (self._capture_scope(self, "top20", "autonomous_top20")
+              if self._capture_scope is not None else nullcontext()):
+            while True:
+                subscriber = self._subscriber
+                if subscriber is None:
+                    await asyncio.sleep(0.1)
                     continue
-                payload = event["payload"]
-                if event.get("type") == "market_operation":
-                    allowed = {name for name in MarketOperationTick.__dataclass_fields__}
-                    try:
-                        tick = MarketOperationTick(**{
-                            key: value for key, value in payload.items() if key in allowed
+                event = await subscriber.queue.get()
+                observer = self._ranking_input_observer
+                with observer.consumed_delivery(subscriber, event) if observer is not None else nullcontext():
+                    if not isinstance(event.get("payload"), dict):
+                        continue
+                    payload = event["payload"]
+                    if event.get("type") == "market_operation":
+                        allowed = {name for name in MarketOperationTick.__dataclass_fields__}
+                        try:
+                            tick = MarketOperationTick(**{
+                                key: value for key, value in payload.items() if key in allowed
+                            })
+                        except TypeError:
+                            continue
+                        # Only KRX phase notifications confirm a KRX trading date.
+                        # No frame or stale state is treated as a holiday/calendar row.
+                        if tick.status_code in {"0", "2", "3", "4", "8", "9", "a", "b", "c", "d"}:
+                            day = self._now().date().isoformat()
+                            self._krx_trading_day_cache[day] = (time.monotonic() + 60.0, True)
+                            task = owned_create_task(
+                                owned_to_thread(self._save_market_operation_day, day, tick),
+                                name=f"krx-trading-day-observation-{day}",
+                            )
+                            self._fundamentals_tasks.add(task)
+                            task.add_done_callback(self._market_operation_observation_saved)
+                        continue
+                    if event.get("type") == "program_trade":
+                        allowed = {name for name in ProgramTradeTick.__dataclass_fields__}
+                        try:
+                            tick = ProgramTradeTick(**{
+                                key: value for key, value in payload.items() if key in allowed
+                            })
+                        except TypeError:
+                            continue
+                        observed_at = self._now()
+                        self._program_snapshots.enqueue({
+                            "subject": tick.code,
+                            "snapshot_key": (
+                                f"{observed_at:%Y%m%d}:REALTIME:"
+                                f"{(tick.trade_time or observed_at.strftime('%H%M%S')).replace(':', '')}"
+                            ),
+                            "payload": {"market": tick.market, "rows": [{
+                                "available": True, "source": "kiwoom_realtime_0w",
+                                "trade_time": tick.trade_time or "", "market": tick.market,
+                                "net_buy_quantity": tick.net_buy_quantity,
+                                "net_buy_quantity_change": tick.net_buy_quantity_change,
+                                "net_buy_amount_million_won": tick.net_buy_amount_million_won,
+                                "net_buy_amount_change_million_won": tick.net_buy_amount_change_million_won,
+                            }]},
                         })
+                        continue
+                    if event.get("type") != "trade":
+                        continue
+                    allowed = {name for name in TradeTick.__dataclass_fields__}
+                    try:
+                        tick = TradeTick(**{key: value for key, value in payload.items() if key in allowed})
                     except TypeError:
                         continue
-                    # Only KRX phase notifications confirm a KRX trading date.
-                    # No frame or stale state is treated as a holiday/calendar row.
-                    if tick.status_code in {"0", "2", "3", "4", "8", "9", "a", "b", "c", "d"}:
-                        day = self._now().date().isoformat()
-                        self._krx_trading_day_cache[day] = (time.monotonic() + 60.0, True)
-                        task = owned_create_task(
-                            owned_to_thread(self._save_market_operation_day, day, tick),
-                            name=f"krx-trading-day-observation-{day}",
-                        )
-                        self._fundamentals_tasks.add(task)
-                        task.add_done_callback(self._market_operation_observation_saved)
-                    continue
-                if event.get("type") == "program_trade":
-                    allowed = {name for name in ProgramTradeTick.__dataclass_fields__}
-                    try:
-                        tick = ProgramTradeTick(**{
-                            key: value for key, value in payload.items() if key in allowed
-                        })
-                    except TypeError:
-                        continue
-                    observed_at = self._now()
-                    self._program_snapshots.enqueue({
-                        "subject": tick.code,
-                        "snapshot_key": (
-                            f"{observed_at:%Y%m%d}:REALTIME:"
-                            f"{(tick.trade_time or observed_at.strftime('%H%M%S')).replace(':', '')}"
-                        ),
-                        "payload": {"market": tick.market, "rows": [{
-                            "available": True, "source": "kiwoom_realtime_0w",
-                            "trade_time": tick.trade_time or "", "market": tick.market,
-                            "net_buy_quantity": tick.net_buy_quantity,
-                            "net_buy_quantity_change": tick.net_buy_quantity_change,
-                            "net_buy_amount_million_won": tick.net_buy_amount_million_won,
-                            "net_buy_amount_change_million_won": tick.net_buy_amount_change_million_won,
-                        }]},
-                    })
-                    continue
-                if event.get("type") != "trade":
-                    continue
-                allowed = {name for name in TradeTick.__dataclass_fields__}
-                try:
-                    tick = TradeTick(**{key: value for key, value in payload.items() if key in allowed})
-                except TypeError:
-                    continue
-                self._trade_values.ingest(tick, self._now())
+                    self._trade_values.ingest(tick, self._now())
 
-    @captured_workload("top20", "autonomous_top20")
     async def _index_loop(self) -> None:
-        while True:
-            try:
-                await self._flush_pending_indexes()
-                await self._program_snapshots.flush()
-                now = self._now()
-                async with self._collector_lock:
-                    update = self._advance(now)
-                # The completed record is immutable; storage does not own collector RAM.
-                if update.completed is not None:
-                    await self._save_index(update.completed)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning("NAS TOP20 지수 수집 실패(계속 실행): %s", error)
-            await asyncio.sleep(0.25)
+        with (self._capture_scope(self, "top20", "autonomous_top20")
+              if self._capture_scope is not None else nullcontext()):
+            while True:
+                try:
+                    now = self._now()
+                    async with self._collector_lock:
+                        update = self._advance(now)
+                    # Register the immutable result durably; native save latency belongs
+                    # to the separate persistence driver, not the sampling clock.
+                    if update.completed is not None:
+                        await self._queue_index(update.completed)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning("NAS TOP20 지수 수집 실패(계속 실행): %s", error)
+                await asyncio.sleep(0.25)
+
+    async def _persistence_loop(self) -> None:
+        with (self._capture_scope(self, "top20", "autonomous_top20")
+              if self._capture_scope is not None else nullcontext()):
+            while True:
+                try:
+                    await self._flush_pending_indexes()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
+                try:
+                    await self._program_snapshots.flush()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning("NAS TOP20 프로그램수급 저장 실패(재시도 예정): %s", error)
+                await asyncio.sleep(0.25)
 
     def _advance(self, now: datetime):
         subscriber = self._subscriber
@@ -960,10 +1133,13 @@ class AutonomousTop20Service:
             if task is not None and not task.done():
                 # A cancelled waiter can release the lock while native I/O still owns it.
                 await asyncio.shield(task)
-            batch = tuple(
-                (key, self._pending_index_records[key])
-                for key in keys if key in self._pending_index_records
-            )
+            # The independent driver can see pending RAM while its producer is
+            # still registering the durable outbox. Detach only after that handoff.
+            async with self._index_outbox_lock:
+                batch = tuple(
+                    (key, self._pending_index_records[key])
+                    for key in keys if key in self._pending_index_records
+                )
             if not batch:
                 return
             task = owned_create_task(self._write_pending_indexes(batch), name="nas-top20-index-save")
@@ -1076,7 +1252,7 @@ class AutonomousTop20Service:
         return enabled
 
     def _schedule_fundamentals(self, codes: tuple[str, ...], day: str) -> None:
-        minutes_due = (self._minute_backfill_enabled and not is_paused("minute_backfill")
+        minutes_due = (self._minute_backfill_enabled and not self._workload_paused("minute_backfill")
                        and _entry_minute_query_due(day, self._now()))
         missing = tuple(
             code for code in codes
@@ -1094,71 +1270,70 @@ class AutonomousTop20Service:
         self._fundamentals_tasks.add(task)
         task.add_done_callback(self._fundamentals_tasks.discard)
 
-    @captured_workload("top20", "autonomous_top20")
     async def _ensure_fundamentals(self, codes: tuple[str, ...], day: str = "") -> None:
         """Retry failed stages without repeating successful stock/day preparation."""
-        current = self._now()
-        current_day = (
-            current.date() if current.tzinfo is None
-            else current.astimezone(KST).date()
-        )
-        target_day = day or current_day.isoformat()
-        try:
-            for code in codes:
-                self._entry_data_ready.pop(code, None)
-                self._fundamentals_ready.pop(code, None)
-                for stage, prepare in (
-                    ("basic", self._ensure_entry_basic),
-                    ("minutes", self._backfill_entry_minutes),
-                    ("daily", self._ensure_entry_daily_history),
-                    ("flow", self._capture_candidate_investor_flow),
-                    ("high", self._ensure_historical_high),
-                ):
-                    if stage != "basic" and not day:
-                        continue
-                    token = self._entry_stage_token(stage, target_day)
-                    if self._entry_stage_is_ready(code, stage, target_day):
-                        continue
-                    if stage == "minutes" and (
-                        not self._minute_backfill_enabled or is_paused("minute_backfill")
-                        or not _entry_minute_query_due(target_day, self._now())
+        with (self._capture_scope(self, "top20", "autonomous_top20")
+              if self._capture_scope is not None else nullcontext()):
+            current = self._now()
+            current_day = (
+                current.date() if current.tzinfo is None
+                else current.astimezone(KST).date()
+            )
+            target_day = day or current_day.isoformat()
+            try:
+                for code in codes:
+                    self._entry_data_ready.pop(code, None)
+                    self._fundamentals_ready.pop(code, None)
+                    for stage, prepare in (
+                        ("basic", self._ensure_entry_basic),
+                        ("minutes", self._backfill_entry_minutes),
+                        ("daily", self._ensure_entry_daily_history),
+                        ("flow", self._capture_candidate_investor_flow),
+                        ("high", self._ensure_historical_high),
                     ):
-                        continue
-                    if stage == "flow" and not _candidate_investor_flow_due(target_day, self._now()):
-                        continue
-                    if stage == "high" and not self._entry_stage_is_ready(code, "daily", target_day):
-                        # Historical-high calculation depends on verified daily history.
-                        continue
-                    try:
-                        input_versions = self._daily_versions(code) if stage == "high" else None
-                        if stage == "minutes":
-                            from .postgres_access import db_call_source
-                            with db_call_source("top20.entry_minutes"):
-                                if not await prepare(code, target_day):
+                        if stage != "basic" and not day:
+                            continue
+                        token = self._entry_stage_token(stage, target_day)
+                        if self._entry_stage_is_ready(code, stage, target_day):
+                            continue
+                        if stage == "minutes" and (
+                            not self._minute_backfill_enabled or self._workload_paused("minute_backfill")
+                            or not _entry_minute_query_due(target_day, self._now())
+                        ):
+                            continue
+                        if stage == "flow" and not _candidate_investor_flow_due(target_day, self._now()):
+                            continue
+                        if stage == "high" and not self._entry_stage_is_ready(code, "daily", target_day):
+                            # Historical-high calculation depends on verified daily history.
+                            continue
+                        try:
+                            input_versions = self.daily_reference.source_versions(code) if stage == "high" else None
+                            if stage == "minutes":
+                                from .postgres_access import db_call_source
+                                with db_call_source("top20.entry_minutes"):
+                                    if not await prepare(code, target_day):
+                                        continue
+                            else:
+                                result = await prepare(code, target_day)
+                                if stage == "flow" and result is False:
                                     continue
-                        else:
-                            result = await prepare(code, target_day)
-                            if stage == "flow" and result is False:
-                                continue
-                        if stage == "daily":
-                            if self._daily_stage_versions.get((code, stage), (0, 0)) != self._daily_versions(code):
-                                raise RuntimeError("일봉 검증 중 입력이 변경되어 재검증이 필요합니다.")
-                        elif stage == "high":
-                            if input_versions != self._daily_versions(code):
-                                raise RuntimeError("신고가 계산 중 일봉 입력이 변경되었습니다.")
-                            self._daily_stage_versions[(code, stage)] = input_versions
-                        self._entry_stage_ready[(code, stage)] = token
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as error:
-                        logger.warning("TOP20 편입종목 자료 준비 실패: %s stage=%s %s", code, stage, error)
-                if self._entry_data_complete(code, target_day, basics_only=not day):
-                    self._entry_data_ready[code] = target_day
-                    if (not day or not self._minute_backfill_enabled
-                            or self._entry_stage_ready.get((code, "minutes")) == target_day):
-                        self._fundamentals_ready[code] = target_day
-        finally:
-            self._fundamentals_pending.difference_update(codes)
+                            if stage == "daily":
+                                if not self.daily_reference.stage_is_current(code, stage):
+                                    raise RuntimeError("일봉 검증 중 입력이 변경되어 재검증이 필요합니다.")
+                            elif stage == "high":
+                                self.daily_reference.accept_high(code, input_versions)
+                            self._entry_stage_ready[(code, stage)] = token
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            logger.warning("TOP20 편입종목 자료 준비 실패: %s stage=%s %s", code, stage, error)
+                    if self._entry_data_complete(code, target_day, basics_only=not day):
+                        self._entry_data_ready[code] = target_day
+                        if (not day or not self._minute_backfill_enabled
+                                or self._entry_stage_ready.get((code, "minutes")) == target_day):
+                            self._fundamentals_ready[code] = target_day
+            finally:
+                self._fundamentals_pending.difference_update(codes)
 
     def _entry_stage_token(self, stage: str, day: str) -> str:
         return (fundamentals_refresh_key(date.fromisoformat(day), self._now())
@@ -1170,35 +1345,13 @@ class AutonomousTop20Service:
             stages = tuple(stage for stage in stages if stage != "flow")
         return all(self._entry_stage_is_ready(code, stage, day) for stage in stages)
 
-    def notify_daily_bars_changed(self, code: str, market: str) -> None:
-        """Mark committed changes (or uncertain saves) without scheduling from a DB thread."""
-        with self._daily_input_lock:
-            key = (code, market)
-            self._daily_input_versions[key] = self._daily_input_versions.get(key, 0) + 1
-
-    def _daily_versions(self, code: str) -> tuple[int, int]:
-        with self._daily_input_lock:
-            return tuple(self._daily_input_versions.get((code, market), 0) for market in ("KRX", "NXT"))
-
-    def _daily_market_is_current(self, code: str, market: str) -> bool:
-        with self._daily_input_lock:
-            key = (code, market)
-            return self._daily_verified_versions.get(key, 0) == self._daily_input_versions.get(key, 0)
-
-    def _accept_daily_version(self, code: str, market: str, version: int) -> None:
-        with self._daily_input_lock:
-            key = (code, market)
-            if self._daily_input_versions.get(key, 0) != version:
-                raise RuntimeError(f"{market} 일봉 검증 중 입력이 변경되었습니다.")
-            self._daily_verified_versions[key] = version
-
     def _entry_stage_is_ready(self, code: str, stage: str, day: str) -> bool:
         if self._entry_stage_ready.get((code, stage)) != self._entry_stage_token(stage, day):
             return False
         if stage.startswith("daily:"):
-            return self._daily_market_is_current(code, stage.split(":", 1)[1])
+            return self.daily_reference.market_is_current(code, stage.split(":", 1)[1])
         if stage in {"daily", "high"}:
-            return self._daily_stage_versions.get((code, stage), (0, 0)) == self._daily_versions(code)
+            return self.daily_reference.stage_is_current(code, stage)
         return True
 
     async def _ensure_entry_basic(self, code: str, day: str) -> None:
@@ -1231,29 +1384,11 @@ class AutonomousTop20Service:
                 failure = error
         if failure is not None:
             raise failure
-        with self._daily_input_lock:
-            for market in markets:
-                key = (code, market)
-                if self._daily_verified_versions.get(key, 0) != self._daily_input_versions.get(key, 0):
-                    raise RuntimeError(f"{market} 일봉 검증 중 입력이 변경되었습니다.")
-            self._daily_stage_versions[(code, "daily")] = tuple(
-                self._daily_input_versions.get((code, market), 0) for market in ("KRX", "NXT")
-            )
+        self.daily_reference.accept_daily(code, markets)
 
     async def _ensure_daily_history(self, code: str, day: str, market: str, *, scope: str) -> dict[str, Any]:
-        # Refcounts include waiters: cancellation cannot remove a lock another caller owns.
-        key = (code, market)
-        lock, users = self._daily_history_locks.get(key, (asyncio.Lock(), 0))
-        self._daily_history_locks[key] = (lock, users + 1)
-        try:
-            async with lock:
-                return await self._collect_daily_history(code, day, market, scope=scope)
-        finally:
-            _, users = self._daily_history_locks[key]
-            if users == 1:
-                del self._daily_history_locks[key]
-            else:
-                self._daily_history_locks[key] = (lock, users - 1)
+        async with self.daily_reference.history_lease(code, market):
+            return await self._collect_daily_history(code, day, market, scope=scope)
 
     async def _collect_daily_history(self, code: str, day: str, market: str, *, scope: str) -> dict[str, Any]:
         from .postgres_access import db_call_source
@@ -1263,7 +1398,7 @@ class AutonomousTop20Service:
         owner = f"{code}:{market}"
         source = "top20.after_close_daily" if scope == "final" else "top20.entry_daily_history"
         read_limit = 250 if day == basis else 5000
-        version = self._daily_versions(code)[market == "NXT"]
+        version = self.daily_reference.source_versions(code)[market == "NXT"]
         # A historical target may have newer canonical rows preceding it.
         with db_call_source(source):
             stored = await owned_to_thread(self._store.load_daily_bars, code, market, read_limit)
@@ -1274,7 +1409,7 @@ class AutonomousTop20Service:
                 continue
             coverage = assess_daily_coverage(stored, evidence, code=code, market=market, query_basis_date=basis)
             if coverage["collection_verified"]:
-                self._accept_daily_version(code, market, version)
+                self.daily_reference.accept_market(code, market, version)
                 return coverage
         window = DailySourceWindow(basis, day)
         body = {"stk_cd": f"{code}_NX" if market == "NXT" else code,
@@ -1302,7 +1437,7 @@ class AutonomousTop20Service:
                     or not any(row["trading_date"] == day for row in window.rows)):
                 raise RuntimeError(f"{market} 일봉 장후 확정 근거가 없습니다.")
         evidence = window.evidence(code=code, market=market, scope=scope, checked_at=self._now().isoformat())
-        version = self._daily_versions(code)[market == "NXT"]
+        version = self.daily_reference.source_versions(code)[market == "NXT"]
         with db_call_source(source):
             stored = await owned_to_thread(self._store.load_daily_bars, code, market, read_limit)
         coverage = assess_daily_coverage(stored, evidence, code=code, market=market, query_basis_date=basis)
@@ -1310,12 +1445,12 @@ class AutonomousTop20Service:
             raise RuntimeError(f"{market} 일봉 응답과 저장값이 일치하지 않습니다.")
         await owned_to_thread(self._store.upsert_documents, DAILY_HISTORY_COLLECTION,
                                 [{"owner": owner, "key": scope, "document": evidence}])
-        self._accept_daily_version(code, market, version)
+        self.daily_reference.accept_market(code, market, version)
         return coverage
 
     async def _backfill_entry_minutes(self, code: str, day: str) -> bool:
         """새 편입 종목의 등장 전 당일 분봉을 NAS가 한 번 준비한다."""
-        if (not self._minute_backfill_enabled or is_paused("minute_backfill")
+        if (not self._minute_backfill_enabled or self._workload_paused("minute_backfill")
                 or not _entry_minute_query_due(day, self._now())):
             return False
         markets = ["KRX"]
@@ -1335,7 +1470,7 @@ class AutonomousTop20Service:
             cont_yn, next_key, pages = "N", "", 0
             expected_minutes: set[str] = set()
             while pages < 8:
-                if is_paused("minute_backfill"):
+                if self._workload_paused("minute_backfill"):
                     raise RuntimeError("diagnostic minute backfill pause")
                 result = await self._request_with_retries(
                     "ka10080", "/api/dostk/chart", body, cont_yn, next_key,
@@ -1363,44 +1498,55 @@ class AutonomousTop20Service:
             }])
         return True
 
-    @captured_candidate_flow
     async def _capture_candidate_investor_flow(self, code: str, day: str) -> bool:
         """프리·정규·애프터장 후보 최초 편입 때 외국인·기관 수급을 확보한다."""
-        if not _candidate_investor_flow_due(day, self._now()):
-            return False
-        owner = f"{day}:{code}"
-        existing = await owned_to_thread(
-            self._store.load_documents, "candidate_flow_capture", owner, 1,
-        )
-        flow_marker_state(bool(existing))
-        if existing:
-            return True
-        if not _candidate_investor_flow_due(day, self._now()):
-            return False
-        raw_day = day.replace("-", "")
-        body = {
-            "stk_cd": f"{code}_AL", "strt_dt": raw_day, "end_dt": raw_day,
-            "orgn_prsm_unp_tp": "1", "for_prsm_unp_tp": "1",
-        }
-        try:
-            result = await candidate_flow_request(self._broker, body, 0)
-        except Exception:
-            body["stk_cd"] = code
+        observer = self._flow_input_observer
+        with observer.candidate_flow_scope(self, code, day) if observer is not None else nullcontext():
             if not _candidate_investor_flow_due(day, self._now()):
                 return False
-            result = await candidate_flow_request(self._broker, body, 1)
-        self._verify_flow_result(result, "ka10045", "stk_orgn_trde_trnsn", raw_day)
-        await owned_to_thread(self._store.upsert_documents, "candidate_flow_capture", [{
-            "owner": owner, "key": "initial", "document": {
-                "as_of": day, "captured_at": flow_marker_time(self._now()).isoformat(),
-                "scope": "candidate_first_seen",
-            },
-        }])
-        return True
+            owner = f"{day}:{code}"
+            existing = await owned_to_thread(
+                self._store.load_documents, "candidate_flow_capture", owner, 1,
+            )
+            if observer is not None:
+                observer.flow_marker_state(bool(existing))
+            if existing:
+                return True
+            if not _candidate_investor_flow_due(day, self._now()):
+                return False
+            raw_day = day.replace("-", "")
+            body = {
+                "stk_cd": f"{code}_AL", "strt_dt": raw_day, "end_dt": raw_day,
+                "orgn_prsm_unp_tp": "1", "for_prsm_unp_tp": "1",
+            }
+            try:
+                if observer is None:
+                    result = await self._broker.request("ka10045", "/api/dostk/mrkcond", body)
+                else:
+                    result = await observer.candidate_flow_request(self._broker, body, 0)
+            except Exception:
+                body["stk_cd"] = code
+                if not _candidate_investor_flow_due(day, self._now()):
+                    return False
+                if observer is None:
+                    result = await self._broker.request("ka10045", "/api/dostk/mrkcond", body)
+                else:
+                    result = await observer.candidate_flow_request(self._broker, body, 1)
+            self._verify_flow_result(result, "ka10045", "stk_orgn_trde_trnsn", raw_day)
+            marker_at = self._now()
+            if observer is not None:
+                observer.flow_marker_time(marker_at)
+            await owned_to_thread(self._store.upsert_documents, "candidate_flow_capture", [{
+                "owner": owner, "key": "initial", "document": {
+                    "as_of": day, "captured_at": marker_at.isoformat(),
+                    "scope": "candidate_first_seen",
+                },
+            }])
+            return True
 
     async def _ensure_historical_high(self, code: str, day: str) -> None:
         """TOP20 후보의 수정주가 기준 역사적 고가를 NAS가 하루 한 번 계산한다."""
-        input_versions = self._daily_versions(code)
+        input_versions = self.daily_reference.source_versions(code)
         stored = await owned_to_thread(
             self._store.load_documents, "historical_highs", code, 1,
         )
@@ -1429,7 +1575,7 @@ class AutonomousTop20Service:
                 nxt_docs = await owned_to_thread(self._store.load_documents, DAILY_HISTORY_COLLECTION, f"{code}:NXT", 2)
             nxt_coverage = choose_daily_coverage(nxt_bars, nxt_docs, code=code, market="NXT", query_basis_date=basis)
             daily_inputs["markets"]["NXT"] = self._historical_daily_identity(nxt_bars, nxt_coverage)
-        if input_versions != self._daily_versions(code):
+        if input_versions != self.daily_reference.source_versions(code):
             raise RuntimeError("신고가 입력 확인 중 일봉이 변경되었습니다.")
         document = stored[0].get("document", {}) if stored else {}
         if str(document.get("checked_on", "")) >= day and document.get("daily_inputs") == daily_inputs:
@@ -1442,14 +1588,14 @@ class AutonomousTop20Service:
             code,
             as_of=date.fromisoformat(basis),
         )
-        if input_versions != self._daily_versions(code):
+        if input_versions != self.daily_reference.source_versions(code):
             raise RuntimeError("신고가 계산 중 일봉이 변경되어 재검증이 필요합니다.")
         await owned_to_thread(self._store.upsert_documents, "historical_highs", [{
             "owner": code, "key": "latest", "document": {
                 "checked_on": day, "target": asdict(target), "daily_inputs": daily_inputs,
             },
         }])
-        if input_versions != self._daily_versions(code):
+        if input_versions != self.daily_reference.source_versions(code):
             raise RuntimeError("신고가 저장 중 일봉이 변경되어 재검증이 필요합니다.")
 
     @staticmethod
@@ -1555,7 +1701,7 @@ class AutonomousTop20Service:
         }])
 
     async def _backfill_minutes(self, code: str, day: str, market: str) -> None:
-        if not self._minute_backfill_enabled or is_paused("minute_backfill"):
+        if not self._minute_backfill_enabled or self._workload_paused("minute_backfill"):
             return
         owner = f"{day}:{code}:{market}"
         coverage = await owned_to_thread(
@@ -1581,7 +1727,7 @@ class AutonomousTop20Service:
         expected_bars: dict[str, dict[str, Any]] = {}
         continuations: set[str] = set()
         while pages < 8:
-            if is_paused("minute_backfill"):
+            if self._workload_paused("minute_backfill"):
                 raise RuntimeError("diagnostic minute backfill pause")
             result = await self._request_with_retries("ka10080", "/api/dostk/chart", body, cont_yn, next_key)
             pages += 1

@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder
+from kiwoom_monitor.central_server.diagnostic_top20_subscription_v2 import SubscriptionRecorder
+
 import asyncio
 import copy
 import json
@@ -7,6 +17,7 @@ from contextlib import ExitStack
 from datetime import datetime
 from threading import Event, Lock
 import unittest
+from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server import diagnostic_trace as trace
@@ -54,11 +65,14 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
             self.scalar(token, "input_rejected", fields)))
         self.stack.enter_context(patch("kiwoom_monitor.central_server.realtime_collector.REALTIME_REG_INTERVAL_SECONDS", 0))
         self.addCleanup(self.stack.close)
-        self.hub = RealtimeHub()
-        self.collector = CentralRealtimeCollector(lambda: "", "real", self.hub, lambda: NOW)
+        self.hub_observer = hub_capture.HubInputRecorder()
+        self.hub = RealtimeHub(now_provider=lambda: NOW, observer=self.hub_observer)
+        self.collector = CentralRealtimeCollector(lambda: "", "real", self.hub, lambda: NOW, input_observer=CollectorInputRecorder(hub_observer=self.hub_observer), subscription_observer=SubscriptionRecorder(hub_observer=self.hub_observer))
         self.collector._realtime_tape_version = self.collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
         self.store = Store()
-        self.service = AutonomousTop20Service(None, self.hub, self.store, now_provider=lambda: NOW)
+        self.service = AutonomousTop20Service(None, self.hub, self.store, now_provider=lambda: NOW,
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         self.component = f"autonomous_top20:{id(self.service):x}"
         self.subscriber = self.hub.connect(capture_component=self.component)
         self.service._subscriber = self.subscriber
@@ -221,7 +235,7 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
         # This test exercises today's live policy; the other fixtures remain v1.
         collector._realtime_tape_version = self.hub._realtime_tape_version = "top20-realtime-tape/v2"
         self.events.clear()
-        self.hub._recorded_lifecycle_epoch = None
+        self.hub._observer.lifecycle_epoch = None
         class ReceivingSocket(Socket):
             def __init__(self):
                 super().__init__()
@@ -261,6 +275,7 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_native_broker_effect_cannot_be_split_between_top20_and_peer(self):
         await self.register()
         self.drain()
+        from kiwoom_monitor.central_server import diagnostic_rest_input as rest_inputs
         from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
         entered, release = Event(), Event()
         class Client:
@@ -269,7 +284,7 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
                 if not release.wait(3):
                     raise TimeoutError("fixture transport timed out")
                 return {"return_code": 0}, False, ""
-        broker = CentralRestBroker(Client())
+        broker = CentralRestBroker(Client(), input_observer=rest_inputs)
         async def request(component, actor):
             with capture_owner("top20", component, actor):
                 return await broker.request("ka10001", "/api/dostk/stkinfo", {"stk_cd": "005930"})
@@ -295,7 +310,7 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_subscription_tape_matches_new_intent_without_applying_old_ready(self):
         await self.register()
         tape = read_realtime_tape(self.events)
-        fresh = RealtimeHub()
+        fresh = RealtimeHub(now_provider=lambda: NOW, observer=hub_capture.HubInputRecorder())
         subscriber = fresh.connect(capture_component="fresh-service")
         fresh.update_subscription(subscriber, ["005930"], [], program_codes=["005930"])
         adapter = SubscriptionTape(tape)
@@ -315,7 +330,7 @@ class Top20LifecycleInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_exclusion_cannot_recreate_old_subscription_or_supply_missing_codes(self):
         await self.register()
         tape = read_realtime_tape(self.events)
-        fresh = RealtimeHub()
+        fresh = RealtimeHub(now_provider=lambda: NOW, observer=hub_capture.HubInputRecorder())
         source = next(iter(tape["subscriptions"].values()))["start"]["hub_component"]
         request = {"session": "KRX", "codes": ["005930"], "nxt_codes": [],
                    "program_codes": ["005930"], "priority_codes": []}

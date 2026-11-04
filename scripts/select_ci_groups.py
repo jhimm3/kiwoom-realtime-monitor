@@ -18,8 +18,13 @@ def _module_name(path: str) -> str:
     return name.removesuffix(".__init__")
 
 
-def _dependency_graph(root: Path, previous: dict[str, str] | None = None) -> tuple[dict, dict, dict]:
-    """Current and changed-before imports, literal lookups and unresolved dynamic imports."""
+def _dependency_graph(root: Path, previous: dict[str, str] | None = None, *,
+                      include_resources: bool = True) -> tuple[dict, dict, dict]:
+    """Imports/loaders and unresolved dynamic imports, plus optional file resources.
+
+    Impact selection includes resource consumers by default. Structural import
+    checks exclude plain file references, which do not execute Python modules.
+    """
     dependencies, dynamic, files = {}, {}, {}
     sources = [(file.relative_to(root).as_posix(), file.read_text(encoding="utf-8-sig"))
                for directory in ("src", "scripts", "tests") for file in (root / directory).rglob("*.py")]
@@ -46,7 +51,7 @@ def _dependency_graph(root: Path, previous: dict[str, str] | None = None) -> tup
                         imports.add(node.args[0].value)
                     else:
                         dynamic.setdefault(module, set()).add(f"{relative}:{node.lineno}:{name}")
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            elif include_resources and isinstance(node, ast.Constant) and isinstance(node.value, str):
                 # Literal file fixtures/contracts are dependencies; arbitrary dotted
                 # strings in registration/selection tables are not Python imports.
                 value = node.value.replace("\\", "/")

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_today
+from kiwoom_monitor.domain.time_basis import kst_now, kst_today
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Callable, Protocol
 
 from .daily_bar_coverage import DailySourceWindow, PERIODS, assess_daily_coverage, daily_query_date
@@ -80,7 +80,7 @@ class DailyHighTargets:
         prices = [bar.high_price for bar in ordered]
         # 장중에는 오늘 일봉 다음의 전일 봉을, 장전·주말·장 종료 뒤에는
         # 가장 최신 완료 일봉을 직전 1일로 사용한다.
-        today = (as_of or kst_today()).strftime("%Y%m%d")
+        today = today_date.strftime("%Y%m%d")
         previous_index = 1 if ordered and ordered[0].trade_date == today else 0
         previous_bar = ordered[previous_index] if len(ordered) > previous_index else None
         previous_value = previous_bar.trade_value_eok if previous_bar is not None else None
@@ -111,26 +111,31 @@ class DailyHighService:
         include_nxt: bool = False,
         cached_high_250_loader: Callable[[str], int | None] | None = None,
         nxt_enabled_loader: Callable[[str], bool | None] | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self._client = client
         self._include_nxt = include_nxt
         self._cached_high_250_loader = cached_high_250_loader
         self._nxt_enabled_loader = nxt_enabled_loader
+        # The runtime supplies its corrected client clock; standalone callers
+        # retain the explicit common KST fallback.
+        self._now = now_provider or kst_now
 
     def load(self, code: str) -> DailyHighTargets:
         # 영웅문의 KRXNXT 표기와 맞추기 위해 신고가·최고가와 직전 거래대금에
         # NXT 일봉을 함께 반영한다.
-        krx_bars, krx_coverage = self._load_bars_with_coverage(code)
+        as_of = daily_query_date(self._now())
+        krx_bars, krx_coverage = self._load_bars_with_coverage(code, as_of)
         bars, coverages = krx_bars, [krx_coverage]
         if not self._include_nxt or self._nxt_enabled(code) is False:
-            return self._targets(bars, coverages)
+            return self._targets(bars, coverages, as_of=as_of)
         try:
-            nxt_bars, nxt_coverage = self._load_bars_with_coverage(f"{code}_NX")
+            nxt_bars, nxt_coverage = self._load_bars_with_coverage(f"{code}_NX", as_of)
             bars = _combine_krx_nxt_bars(krx_bars, nxt_bars)
             coverages.append(nxt_coverage)
         except Exception:
             coverages.append({})
-        return self._targets(bars, coverages, code=code)
+        return self._targets(bars, coverages, as_of=as_of, code=code)
 
     def _nxt_enabled(self, code: str) -> bool | None:
         if self._nxt_enabled_loader is not None:
@@ -149,7 +154,7 @@ class DailyHighService:
         value = str(document.get("nxtEnable", "")).strip().upper()
         return True if value == "Y" else False if value == "N" else None
 
-    def _targets(self, bars: tuple[DailyBar, ...], coverages: list[dict[str, Any]], *, code: str = "") -> DailyHighTargets:
+    def _targets(self, bars: tuple[DailyBar, ...], coverages: list[dict[str, Any]], *, as_of: date, code: str = "") -> DailyHighTargets:
         same_window = len({(coverage.get("query_basis_date"), coverage.get("window_end")) for coverage in coverages}) == 1
         exhausted = all(coverage.get("source_exhausted") is True for coverage in coverages)
         states = []
@@ -164,18 +169,18 @@ class DailyHighService:
         complete = same_window and all(coverage.get("collection_verified") is True for coverage in coverages)
         scope = "final" if complete and all(coverage.get("scope") == "final" for coverage in coverages) else "initial"
         cached = self._cached_high_250_loader(code) if code and self._cached_high_250_loader else None
-        return DailyHighTargets.from_daily_bars(bars, as_of=daily_query_date(), period_statuses=tuple(states), collection_verified=complete,
+        return DailyHighTargets.from_daily_bars(bars, as_of=as_of, period_statuses=tuple(states), collection_verified=complete,
                    scope=scope, query_basis_date=coverages[0].get("query_basis_date", ""),
                    window_end=min((coverage.get("window_end", "") for coverage in coverages), default=""),
                    cached_high_250_price=cached, source_exhausted=exhausted)
 
-    def _load_bars_with_coverage(self, code: str) -> tuple[tuple[DailyBar, ...], dict[str, Any]]:
+    def _load_bars_with_coverage(self, code: str, as_of: date) -> tuple[tuple[DailyBar, ...], dict[str, Any]]:
         market = "NXT" if code.endswith("_NX") else "KRX"
         plain_code = code.removesuffix("_NX")
         loader = getattr(self._client, "load_stored_daily_bars_with_coverage", None)
         if callable(loader):
             rows, coverage = loader(plain_code, market, 250)
-            if coverage.get("query_basis_date") != daily_query_date().isoformat():
+            if coverage.get("query_basis_date") != as_of.isoformat():
                 coverage = {}
             # Preserve the old bars API while excluding rows outside its verified source window.
             if coverage:
@@ -186,7 +191,7 @@ class DailyHighService:
         if callable(stored_loader):
             # Older NAS responses cannot certify coverage and must never trigger PC TR fallback.
             return self._stored_bars(stored_loader(plain_code, market, 250) or ()), {}
-        basis = daily_query_date().isoformat()
+        basis = as_of.isoformat()
         window = DailySourceWindow(basis, basis)
         continuation = getattr(self._client, "request_with_continuation", None)
         cont_yn, next_key = "N", ""

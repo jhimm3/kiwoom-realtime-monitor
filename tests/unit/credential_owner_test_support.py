@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock, patch
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
 from kiwoom_monitor.central_server.credential_runtime import CredentialRuntime
 from kiwoom_monitor.central_server.credential_store import CredentialStore
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -194,7 +195,7 @@ class RealCredentialOwnerTestSupport(unittest.IsolatedAsyncioTestCase):
         self.collector = AsyncMock()
         self.owner = RealCredentialOwner(self.store, self.vault, hmac_key=b"x" * 32,
             market_client=self.market_client, market_broker=self.market_broker,
-            market_collector=self.collector)
+            market_collector=self.collector, capture_scope=captured_workload_scope)
         self.runtime = CredentialRuntime(self.vault, self.store)
         self.runtime.register("kiwoom_real", self.owner.hooks())
         self.profile = (await self.runtime.create_profile(

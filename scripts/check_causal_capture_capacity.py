@@ -424,25 +424,34 @@ def memory_summary(before, after, samples):
 
 
 async def run(args):
+    from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+    from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+    from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+    from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope, install_store_capture
+    from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
     from kiwoom_monitor.central_server import diagnostic_trace as trace
     from kiwoom_monitor.central_server.diagnostic_replay_contract import freeze_payload
     from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, _set_trace
     from kiwoom_monitor.central_server.diagnostic_top20_input import consumed_delivery, _DELIVERY_TYPES
+    from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder
     from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
     from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+    from kiwoom_monitor.central_server import diagnostic_rest_input as rest_inputs
     from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
     from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
     from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner
     from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import record_ack
+    from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_inputs
 
     origin = datetime(2026, 10, 8, 9, tzinfo=timezone(timedelta(hours=9)))
     now = [origin]
-    hub = RealtimeHub()
+    hub_observer = hub_inputs.HubInputRecorder()
+    hub = RealtimeHub(now_provider=lambda: now[0], observer=hub_observer)
     subscriber = hub.connect(capture_component='autonomous_top20:capacity-probe')
     codes = tuple(f'{5930+i:06d}' for i in range(args.rows))
     subscriber.codes = set(codes)
     subscriber.program_codes = set(codes)
-    collector = CentralRealtimeCollector(lambda: '', 'real', hub, lambda: now[0])
+    collector = CentralRealtimeCollector(lambda: '', 'real', hub, lambda: now[0], input_observer=CollectorInputRecorder(hub_observer=hub_observer))
     counts = Counter()
     def message(index):
         return {'trnm': 'REAL', 'data': [{'type': '0B', 'item': code+'_AL',
@@ -492,6 +501,7 @@ async def run(args):
             from kiwoom_monitor.central_server.database import SQLiteQueryStore
             from scripts.compare_recorded_capture_overhead import AccountLargeFixture
             store = SQLiteQueryStore(Path(':memory:'))
+            install_store_capture(store)
             store.initialize()
             stack.callback(store.close)
             account = AccountLargeFixture(store, origin, distinct_large_inputs=True)
@@ -538,8 +548,10 @@ async def run(args):
                     await native
                     raise
         account_task = asyncio.create_task(account_producer())
-        broker = CentralRestBroker(client, store)
-        service = AutonomousTop20Service(broker, hub, store, catalog_loader=lambda: catalog, now_provider=lambda: now[0])
+        broker = CentralRestBroker(client, store, input_observer=rest_inputs)
+        service = AutonomousTop20Service(broker, hub, store, catalog_loader=lambda: catalog, now_provider=lambda: now[0],
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         async def mixed(index):
             with capture_owner('top20', subscriber.capture_component, 'capacity-mixed'):
                 if index == 0:

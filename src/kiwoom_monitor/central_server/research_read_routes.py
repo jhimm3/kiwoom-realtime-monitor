@@ -4,17 +4,25 @@ from __future__ import annotations
 from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
 import asyncio
+import json
 from collections.abc import Callable, Awaitable
 from datetime import datetime, timezone
 from typing import Any, Protocol, TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from .async_lifetime import await_native_call
+from kiwoom_monitor.domain.research_contract import (
+    ReportedResearchResult, ResearchResultConflict,
+    REPORTED_RESEARCH_RESULT_COLLECTION, MAX_REPORTED_RESEARCH_RESULT_BYTES,
+)
 
 if TYPE_CHECKING:
     from .candidate_monitor import CandidateMonitor
 
 
 class ResearchReadStore(Protocol):
+    def accept_research_result(self, owner: str, document: dict[str, Any]) -> dict[str, Any]: ...
+
     def create_observation_export(
         self, start: datetime, end: datetime, kinds: tuple[str, ...], subject: str = "",
     ) -> dict[str, Any]: ...
@@ -32,12 +40,40 @@ def create_research_read_router(
     store: ResearchReadStore, authorize: Callable[..., None],
     get_candidate_monitor: Callable[[], CandidateMonitor | None],
     *, get_market_theme_shadow_runtime: Callable[[], Any] = lambda: None,
+    input_authorize: Callable[..., None] | None = None,
+    result_authorize: Callable[..., str] | None = None,
     check_stock_thesis_sources: Callable[[int, int], Awaitable[dict[str, Any]]] | None = None,
     now_provider=None,
 ) -> APIRouter:
     """Read the app-owned current monitor after the DB await, including runtime replacement."""
     router = APIRouter()
     now_kst = (lambda: as_kst(now_provider())) if now_provider else kst_now
+
+    if result_authorize is not None:
+        @router.post("/api/v1/research/reported-results")
+        async def accept_reported_research_result(request: Request, owner: str = Depends(result_authorize)) -> dict[str, Any]:
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > MAX_REPORTED_RESEARCH_RESULT_BYTES:
+                    raise HTTPException(status_code=413, detail="reported research result exceeds 256 KiB")
+            try:
+                document = ReportedResearchResult.from_document(json.loads(body)).document
+            except (UnicodeError, ValueError, TypeError, RecursionError) as error:
+                raise HTTPException(status_code=400, detail="invalid reported research result") from error
+            # A cancelled request still joins its one native transaction before
+            # releasing the request lifetime. Retries read its original receipt.
+            try:
+                return await await_native_call(store.accept_research_result, owner, document)
+            except ResearchResultConflict as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+
+        @router.get("/api/v1/research/reported-results/{result_id}")
+        async def load_reported_research_result(result_id: str, owner: str = Depends(result_authorize)) -> dict[str, Any]:
+            value = await asyncio.to_thread(store.load_document, REPORTED_RESEARCH_RESULT_COLLECTION, owner, result_id)
+            if value is None:
+                raise HTTPException(status_code=404, detail="reported research result not found")
+            return value["document"]
 
     @router.get("/api/v1/research/ram-shadow/source-check", dependencies=[Depends(authorize)])
     async def research_stock_thesis_source_check(
@@ -67,7 +103,7 @@ def create_research_read_router(
 
     @router.get("/api/v1/research/ram-shadow", dependencies=[Depends(authorize)])
     async def research_ram_shadow(include_recorded: bool = Query(default=False)) -> dict[str, object]:
-        from .market_theme_shadow_monitor import SHADOW_RESULT_COLLECTION, SHADOW_RESULT_OWNER
+        from .ram_shadow_selection_config import SHADOW_RESULT_COLLECTION, SHADOW_RESULT_OWNER
         recorded = None
         if include_recorded:
             recorded = await asyncio.to_thread(store.load_document,
@@ -87,7 +123,7 @@ def create_research_read_router(
                 "recorded": recorded, "recorded_is_live": False,
                 "replay_eligible": False, "order_authorized": False}
 
-    @router.get("/api/v1/research/observations", dependencies=[Depends(authorize)])
+    @router.get("/api/v1/research/observations", dependencies=[Depends(input_authorize or authorize)])
     async def research_observations(
         start: datetime = Query(),
         end: datetime = Query(),

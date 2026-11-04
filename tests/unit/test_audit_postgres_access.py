@@ -112,6 +112,26 @@ class PostgresDirectConnectionAuditTests(unittest.TestCase):
                 selected_files,
             )
 
+    def test_legacy_unbound_same_owner_receipt_retains_native_writer_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            central = root / "src/kiwoom_monitor/central_server"
+            central.mkdir(parents=True)
+            (central / "database.py").write_text(
+                "class QueryStore: pass\n"
+                "class SQLiteQueryStore: pass\n"
+                "class PostgresQueryStore:\n"
+                "    def save_news_body_revision(self, cursor):\n"
+                "        return PostgresQueryStore.save_news_body_revision_receipt(self, cursor)['body_revision_id']\n"
+                "    def save_news_body_revision_receipt(self, cursor):\n"
+                "        cursor.execute('INSERT INTO central_news_body_revisions VALUES(1)')\n"
+                "        return {'body_revision_id':'source'}\n", encoding="utf-8")
+            (central / "postgres_access.py").write_text("", encoding="utf-8")
+            rows = {row["function"]: row for row in inventory(root, root / "missing-approvals.json")["postgres_store_methods"]}
+            legacy = rows["PostgresQueryStore.save_news_body_revision"]
+            self.assertIn("save_news_body_revision_receipt", legacy["reachable_local_helpers"])
+            self.assertIn("central_news_body_revisions", legacy["reachable_literal_tables_candidates"])
+
 
 if __name__ == "__main__":
     unittest.main()

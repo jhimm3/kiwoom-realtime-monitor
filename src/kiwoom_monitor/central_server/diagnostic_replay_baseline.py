@@ -131,6 +131,8 @@ class _OwnedConnection(psycopg.Connection):
 class _ReplayStore(PostgresQueryStore):
     def __init__(self, lease):
         super().__init__(lease.database_url, **lease.config)
+        from .diagnostic_replay_contract import install_store_capture
+        install_store_capture(self)
         self._lease = lease
         self._generation = lease._generation
         if lease.baseline_version >= 2:
@@ -508,7 +510,10 @@ class ReplayDatabaseLease:
                 raise RuntimeError('replay_baseline_sequence_definition_changed')
             cursor.execute(sql.SQL('TRUNCATE {}').format(sql.SQL(',').join(
                 sql.Identifier('public', name) for name in self.tables)))
-            for name in self.tables:
+            # Keep TABLES/seal/digest order immutable; only FK parent INSERT executes first.
+            restore_tables = ('central_observation_revisions', *(
+                name for name in self.tables if name != 'central_observation_revisions'))
+            for name in restore_tables:
                 cursor.execute(sql.SQL('INSERT INTO {} SELECT * FROM {}').format(
                     sql.Identifier('public', name), sql.Identifier(self._snapshot_schema, name)))
             for name in self._sequences_scope:

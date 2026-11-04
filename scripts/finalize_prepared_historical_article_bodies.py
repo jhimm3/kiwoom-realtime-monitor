@@ -81,7 +81,7 @@ class _CompletionBatch:
         self.updates = []
         wanted = []
         body_keys = []
-        from kiwoom_monitor.central_server.database_news_sources import _news_article_content_hash
+        from kiwoom_monitor.domain.news_observation import news_article_content_hash as _news_article_content_hash
         for stock, identity, hashed in pending:
             row = prepared_rows.get((stock, identity))
             if row is None:
@@ -243,7 +243,7 @@ def _complete_one(archive: sqlite3.Connection, prepared: sqlite3.Connection,
                         str(document.get("identity")) != identity))):
         raise ValueError("prepared article identity does not match its source key")
     if market:
-        from kiwoom_monitor.central_server.database_news_sources import _news_article_content_hash
+        from kiwoom_monitor.domain.news_observation import news_article_content_hash as _news_article_content_hash
         document = {**document, "stock_code": stock, "identity": identity}
     body_text = body.get("body_text")
     if not isinstance(body_text, str) or not body_text.strip() or len(body_text) > 2_000_000:

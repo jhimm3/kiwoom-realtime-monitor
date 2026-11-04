@@ -26,7 +26,7 @@ from kiwoom_monitor.central_server import diagnostic_trace as trace
 from kiwoom_monitor.central_server.database import PostgresQueryStore
 from kiwoom_monitor.central_server.diagnostic_account_input import source_execution_owner
 from kiwoom_monitor.central_server import diagnostic_replay_database_cli as cli
-from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner
+from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner, install_store_capture
 from kiwoom_monitor.central_server.diagnostic_top20_seed import Top20FixtureClock
 from kiwoom_monitor.domain.order_contract import AccountBinding, AccountEnvironment, AccountScope, AccountSnapshot
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import AccountRecovery
@@ -87,6 +87,7 @@ class RecordedAccountPostgresTests(unittest.TestCase):
                 cursor.execute('INSERT INTO central_documents VALUES(%s,%s,%s,%s,%s::jsonb)',
                     ('server_account_settings', 'kiwoom:real:' + ref, 'settings', now.timestamp(), json.dumps(settings)))
         store = PostgresQueryStore(url, **baseline.DEFAULT_CONFIG)
+        install_store_capture(store)
         binding = AccountBinding('profile-1', AccountScope('kiwoom', AccountEnvironment.REAL, ref), 3, now)
         recovery = AccountRecovery(AccountSnapshot(ref, 10000, 0, {'005930': 3}, now), ())
         ownership = {'owner_key': 'mock:' + ref, 'owner_token': authority, 'run_id': run}

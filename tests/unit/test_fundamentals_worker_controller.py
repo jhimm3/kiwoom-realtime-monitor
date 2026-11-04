@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import weakref
+from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, QThread
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThread
+from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.fundamentals_worker import FundamentalsWorker
 from kiwoom_monitor.presentation.fundamentals_worker_controller import (
@@ -27,6 +31,48 @@ class InvalidWorker(QObject):
 
 
 class FundamentalsWorkerControllerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_real_finished_worker_releases_controller_before_deferred_delete(self) -> None:
+        worker = FundamentalsWorker(SimpleNamespace(load=lambda _code: "fundamentals"), ("005930",))
+        controller = FundamentalsWorkerController(worker_factory=lambda _codes: worker)
+        completed: list[tuple[object, bool]] = []
+        controller.completed.connect(
+            lambda codes: completed.append((codes, QThread.currentThread() == self.app.thread()))
+        )
+        reference = weakref.ref(controller)
+        self.assertTrue(controller.start(("005930",), followup_codes=("000660",)))
+        self.assertTrue(worker.wait(5_000))
+        self.app.processEvents()
+        self.assertEqual([(("000660",), True)], completed)
+        self.assertIsNone(controller.worker)
+        del controller
+        self.assertIsNone(reference())
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertFalse(isValid(worker))
+
+    def test_delayed_old_completion_keeps_its_own_followup_context(self) -> None:
+        first, second = FakeFundamentalsWorker(), FakeFundamentalsWorker()
+        workers = iter((first, second))
+        controller = FundamentalsWorkerController(worker_factory=lambda _codes: next(workers))
+        completed: list[object] = []
+        controller.completed.connect(completed.append)
+        controller.start(("005930",), followup_codes=("005930",))
+        first.running = False
+        controller.start(("000660",), followup_codes=("000660",))
+        first.completed.emit()
+        first.finished.emit()
+        self.assertEqual([("005930",)], completed)
+        self.assertIs(second, controller.worker)
+        second.completed.emit()
+        second.running = False
+        second.finished.emit()
+        self.assertEqual([("005930",), ("000660",)], completed)
+        self.assertIsNone(controller.worker)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     def test_start_forwards_result_failure_and_completion_context(self) -> None:
         worker = FakeFundamentalsWorker()
         controller = FundamentalsWorkerController(worker_factory=lambda _codes: worker)

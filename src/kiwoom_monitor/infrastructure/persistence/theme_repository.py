@@ -9,20 +9,36 @@ from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion, ThemeSuggestion
 from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsNativeWriteError, SettingsRepository
+
+
+class _ProfileUnavailable(ValueError):
+    """Existing-only profile disappeared or was never provided."""
 
 
 class ThemeRepository:
     """Profile-scoped themes stored alongside the shared stock catalog."""
 
-    def __init__(self, path: Path, profile_name: str = "기본 테마", *, now_provider=None) -> None:
+    def __init__(self, path: Path, profile_name: str = "기본 테마", *, now_provider=None, _existing_only: bool = False) -> None:
         self._path = path
         self._stock_catalog = StockRepository(path, catalog_connection_factory=lambda: self._connect())
         self.set_now_provider(now_provider or kst_now)
-        self._profile_name = profile_name.strip() or "기본 테마"
+        self._existing_only = _existing_only
+        self._profile_name = profile_name if _existing_only else profile_name.strip() or "기본 테마"
         self._change_callback: Callable[[], None] | None = None
         self._stock_color_cache: dict[tuple[str, str], str] | None = None
         self._ensure_active_profile()
         self._merge_case_insensitive_themes()
+
+    @classmethod
+    def open_existing(cls, path: Path, profile_name: str, *, now_provider=None):
+        """Open only existing local state; no read/merge path may create it."""
+        if type(profile_name) is not str or not profile_name:
+            return None
+        try:
+            return cls(path, profile_name, now_provider=now_provider, _existing_only=True)
+        except _ProfileUnavailable:
+            return None
 
     def set_now_provider(self, now_provider) -> None:
         self._now = lambda: as_kst(now_provider())
@@ -34,7 +50,7 @@ class ThemeRepository:
     def set_change_callback(self, callback: Callable[[], None] | None) -> None:
         self._change_callback = callback
 
-    def _changed(self) -> None:
+    def notify_changed(self) -> None:
         self._stock_color_cache = None
         if self._change_callback is not None:
             self._change_callback()
@@ -47,6 +63,8 @@ class ThemeRepository:
     def _profile_id(self, connection: sqlite3.Connection) -> int:
         row = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (self._profile_name,)).fetchone()
         if row is None:
+            if self._existing_only:
+                raise _ProfileUnavailable("테마 원자료 미준비: 저장된 선택을 보존하며 빈 프로필을 생성하지 않습니다.")
             connection.execute("INSERT INTO theme_profiles(profile_name) VALUES (?)", (self._profile_name,))
             connection.commit()
             row = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name=?", (self._profile_name,)).fetchone()
@@ -106,66 +124,136 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
         return clean
 
-    def delete_profile(self, name: str) -> None:
-        connection = self._connect()
-        try:
+    def delete_profile(self, name: str, *, settings: SettingsRepository) -> str:
+        """Delete the confirmed target and persist its surviving selection together."""
+        selected = None
+
+        def write(connection):
+            nonlocal selected
             if int(connection.execute("SELECT COUNT(*) FROM theme_profiles").fetchone()[0]) <= 1:
                 raise ValueError("마지막 테마 프로필은 삭제할 수 없습니다.")
+            # The confirmation names its target before entering a nested event
+            # loop. A later current selection survives unless it is that target.
+            current = connection.execute(
+                "SELECT p.profile_id,p.profile_name FROM theme_profiles p JOIN settings s "
+                "ON p.profile_name=s.value COLLATE NOCASE "
+                "WHERE s.key='theme_active_profile' AND p.profile_name=? COLLATE NOCASE",
+                (self._profile_name,),
+            ).fetchone()
+            if current is None:
+                raise ValueError("현재 테마 선택을 확인할 수 없습니다. 현재 선택을 확인하세요.")
             row = connection.execute("SELECT profile_id FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (name,)).fetchone()
             if row is not None:
                 connection.execute("DELETE FROM theme_profiles WHERE profile_id=?", (row[0],))
-                connection.commit()
-        finally:
-            connection.close()
-        self._changed()
+            if row is not None and row[0] == current[0]:
+                # Same fallback as the former post-delete combo refresh.
+                current = connection.execute(
+                    "SELECT profile_id,profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE LIMIT 1"
+                ).fetchone()
+            profile_id, selected = current
+            self._merge_profile_themes(connection, profile_id)
+            settings.write_many_in_transaction(connection, {"theme_active_profile": selected},
+                                               updated_at=self._now().isoformat())
 
-    def rename_profile(self, before: str, after: str) -> str:
+        settings.commit_native_write(self._path, write)
+        try:
+            self._profile_name = selected
+            self.notify_changed()
+        except Exception as error:
+            raise SettingsNativeWriteError(
+                "테마 삭제와 현재 선택은 DB에 저장됐지만 현재 화면 적용에 실패했습니다. 다시 열어 확인하세요.",
+                native_committed=True, cache_invalidated=True) from error
+        return selected
+
+    def rename_profile(self, before: str, after: str, *, settings: SettingsRepository) -> str:
+        """Rename the current saved selection and profile in one native write."""
         clean = after.strip()
         if not clean:
             raise ValueError("새 프로필 이름을 입력하세요.")
-        connection = self._connect()
-        try:
+
+        def write(connection):
             source = connection.execute(
                 "SELECT profile_id FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (before,)
             ).fetchone()
             if source is None:
                 raise ValueError("변경할 테마 프로필을 찾을 수 없습니다.")
+            # QInputDialog runs a nested event loop. Both the view and the saved
+            # active selection must still identify this same native profile.
+            current = connection.execute(
+                "SELECT p.profile_id FROM theme_profiles p JOIN settings s "
+                "ON p.profile_name=s.value COLLATE NOCASE "
+                "WHERE s.key='theme_active_profile' AND p.profile_name=? COLLATE NOCASE",
+                (self._profile_name,),
+            ).fetchone()
+            if current is None or current[0] != source[0]:
+                raise ValueError("이름 입력 중 현재 테마 선택이 변경되었습니다. 현재 선택을 확인하세요.")
             duplicate = connection.execute(
                 "SELECT profile_id FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (clean,)
             ).fetchone()
             if duplicate is not None and int(duplicate[0]) != int(source[0]):
                 raise ValueError("같은 이름의 테마 프로필이 이미 있습니다.")
             connection.execute("UPDATE theme_profiles SET profile_name=? WHERE profile_id=?", (clean, source[0]))
-            connection.commit()
-        finally:
-            connection.close()
-        if self._profile_name.casefold() == before.strip().casefold():
+            settings.write_many_in_transaction(connection, {"theme_active_profile": clean},
+                                               updated_at=self._now().isoformat())
+
+        settings.commit_native_write(self._path, write)
+        try:
             self._profile_name = clean
-        self._changed()
+            self.notify_changed()
+        except Exception as error:
+            raise SettingsNativeWriteError(
+                "테마 이름은 DB에 저장됐지만 현재 화면 적용에 실패했습니다. 다시 열어 확인하세요.",
+                native_committed=True, cache_invalidated=True) from error
         return clean
 
     def _merge_case_insensitive_themes(self) -> None:
         connection = self._connect()
         try:
-            profile_id = self._profile_id(connection)
-            rows = connection.execute("SELECT theme_name FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,)).fetchall()
-            canonical: dict[str, str] = {}
-            for (raw_name,) in rows:
-                name = str(raw_name)
-                key = name.casefold()
-                if key not in canonical:
-                    canonical[key] = name
-                    continue
-                target = canonical[key]
-                connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) SELECT ?, stock_code, ?, custom_color FROM profile_stock_themes WHERE profile_id=? AND theme_name=?", (profile_id, target, profile_id, name))
-                connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=?", (profile_id, name))
-                connection.execute("DELETE FROM profile_themes WHERE profile_id=? AND theme_name=?", (profile_id, name))
+            self._merge_profile_themes(connection, self._profile_id(connection))
             connection.commit()
         finally:
             connection.close()
+
+    def _merge_profile_themes(self, connection: sqlite3.Connection, profile_id: int) -> None:
+        rows = connection.execute("SELECT theme_name FROM profile_themes WHERE profile_id=? ORDER BY theme_name", (profile_id,)).fetchall()
+        canonical: dict[str, str] = {}
+        for (raw_name,) in rows:
+            name = str(raw_name)
+            key = name.casefold()
+            if key not in canonical:
+                canonical[key] = name
+                continue
+            target = canonical[key]
+            connection.execute("INSERT OR IGNORE INTO profile_stock_themes(profile_id, stock_code, theme_name, custom_color) SELECT ?, stock_code, ?, custom_color FROM profile_stock_themes WHERE profile_id=? AND theme_name=?", (profile_id, target, profile_id, name))
+            connection.execute("DELETE FROM profile_stock_themes WHERE profile_id=? AND theme_name=?", (profile_id, name))
+            connection.execute("DELETE FROM profile_themes WHERE profile_id=? AND theme_name=?", (profile_id, name))
+
+    def select_current_profile(self, name: str, *, settings: SettingsRepository) -> str:
+        """Persist an existing UI selection; generic view selection stays separate."""
+        selected = None
+        def write(connection):
+            nonlocal selected
+            row = connection.execute(
+                "SELECT profile_id,profile_name FROM theme_profiles WHERE profile_name=? COLLATE NOCASE", (name,)
+            ).fetchone()
+            if row is None:
+                raise _ProfileUnavailable("선택할 테마 프로필을 찾을 수 없습니다.")
+            profile_id, selected = row
+            self._merge_profile_themes(connection, profile_id)
+            settings.write_many_in_transaction(connection, {"theme_active_profile": selected},
+                                               updated_at=self._now().isoformat())
+        settings.commit_native_write(self._path, write)
+        try:
+            self._profile_name = selected
+            self.notify_changed()
+        except Exception as error:
+            raise SettingsNativeWriteError(
+                "테마 선택은 DB에 저장됐지만 현재 화면 적용에 실패했습니다. 다시 열어 확인하세요.",
+                native_committed=True, cache_invalidated=True) from error
+        return selected
 
     def themes_for_stock(self, code: str) -> tuple[str, ...]:
         connection = self._connect()
@@ -247,7 +335,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def all_by_name(self) -> dict[str, str]:
         # External theme snapshot restores can update this database without using
@@ -460,7 +548,7 @@ class ThemeRepository:
                 )
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def keep_themes_separate(
         self, first: str, second: str, *, decision_source: str = "user",
@@ -483,7 +571,7 @@ class ThemeRepository:
                 )
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def set_theme_alias(
         self, alias: str, canonical: str, *, decision_source: str = "user",
@@ -509,7 +597,7 @@ class ThemeRepository:
                 self._merge_theme_rows(connection, profile_id, alias, canonical)
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def set_color(self, name: str, color: str) -> None:
         connection = self._connect()
@@ -518,7 +606,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def set_stock_theme_color(self, code: str, name: str, color: str) -> None:
         connection = self._connect()
@@ -527,7 +615,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def delete_themes(self, names: tuple[str, ...]) -> None:
         connection = self._connect()
@@ -544,7 +632,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def rename_theme(self, before: str, after: str) -> None:
         after = after.strip()
@@ -572,7 +660,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def split_theme(self, before: str, targets: tuple[str, ...]) -> None:
         clean_targets: list[str] = []
@@ -637,7 +725,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     def clear_all_themes(self) -> None:
         connection = self._connect()
@@ -649,7 +737,7 @@ class ThemeRepository:
             connection.commit()
         finally:
             connection.close()
-        self._changed()
+        self.notify_changed()
 
     @staticmethod
     def _ordered_pair(first: str, second: str) -> tuple[str, str]:

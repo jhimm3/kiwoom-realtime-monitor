@@ -33,6 +33,27 @@ _FIELDS = ("connect_ms", "bars_ms", "metadata_ms", "revisions_ms",
            "commit_ms", "close_ms", "total_ms")
 
 
+def install_postgres_observation() -> None:
+    """Compose detail observation without making native DB access import tools.
+
+    This is process configuration, not capture activation. Existing controls,
+    session fences, counters and trace workers retain their original owners.
+    Loading an installed but broken tool fails here before a native write.
+    """
+    import sys
+    from . import diagnostic_trace, diagnostic_replay_contract
+    from . import diagnostic_workloads, diagnostic_top20_display_input, diagnostic_account_input
+    from .postgres_access import install_database_observer
+
+    global trace, replay, workloads, display, account
+    trace = diagnostic_trace
+    replay = diagnostic_replay_contract
+    workloads = diagnostic_workloads
+    display = diagnostic_top20_display_input
+    account = diagnostic_account_input
+    install_database_observer(sys.modules[__name__])
+
+
 def refresh_capture_state(*, force: bool = False) -> dict[str, object]:
     """Refresh the short-lived capture lease cache and discard data when off."""
     global _CAPTURE_ENABLED, _CAPTURE_REFRESH_AT, _CAPTURE_EXPIRES_MONOTONIC

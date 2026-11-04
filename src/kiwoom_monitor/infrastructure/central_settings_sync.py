@@ -9,7 +9,9 @@ from kiwoom_monitor.infrastructure.central_content_client import CentralContentC
 from kiwoom_monitor.domain.time_basis import aware_iso_kst, as_kst, kst_now
 
 
+# Active profile remains shared through its accepted theme generation, not app_settings.
 _LOCAL_EXACT = {
+    "central_theme_sync_v1", "theme_active_profile",
     "ui_mode", "ui_font_size", "ui_row_height", "theme_badge_font_size", "show_server_clock",
     "google_drive_auto_download", "google_drive_auto_upload", "google_drive_auto_upload_on_exit",
     "google_drive_sync_target", "google_drive_unsynced_changes", "google_drive_local_changed_at",

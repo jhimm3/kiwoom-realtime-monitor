@@ -1,3 +1,5 @@
+
+from tests.unit.test_mock_automation_runner import _prepared_runner
 """Consumer acceptance for safe bootstrap; frozen red reproductions stay separate."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -94,7 +96,7 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
 
         def open_actor():
             if mock:
-                actor = MockAutomationRunner(reader, bundle, spec)
+                actor = _prepared_runner(reader, bundle, spec).episode
                 actor._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
                     active_spec_id=spec.spec_id, desired_state=SimpleNamespace(value='RUNNING'))
             else:
@@ -103,7 +105,7 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
             return actor
 
         def poll(actor):
-            return asyncio.run(actor.run_once(limit=1 if legacy else 1000)) if mock else actor.run_once(limit=1 if legacy else 1000)
+            return asyncio.run(actor.advance_once(limit=1 if legacy else 1000)) if mock else actor.run_once(limit=1 if legacy else 1000)
 
         def checkpoint(actor):
             if mock:
@@ -134,26 +136,26 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
                         # Reproduce a pre-protocol checkpoint that advanced past an invisible low COMMIT.
                         high = max(row['accepted_sequence'] for row in
                                    self.store.load_observation_revisions('minute_bar', subjects[1]))
-                        actor._cursor = high
-                        actor._delivery_protocol = None
-                        actor._state = StrategyState(emitted_candidate_keys=('original-emitted',))
+                        (actor._input_progress if mock else actor)._cursor = high
+                        (actor._input_progress if mock else actor)._delivery_protocol = None
+                        (actor._episode_position if mock else actor)._state = StrategyState(emitted_candidate_keys=('original-emitted',))
                         if mock:
                             actor._status = {'state': 'WAITING_ORDER', 'orders_enabled': False,
                                              'pending_intent_id': 'original-pending'}
-                            actor._fill_cursor = 73
-                            actor._seen_fill_ids = {'original-fill'}
+                            actor._episode_position._fill_cursor = 73
+                            actor._episode_position._seen_fill_ids = {'original-fill'}
                         actor._save_checkpoint()
                         before = checkpoint(actor)
                         actor = open_actor()
-                        self.assertIsNotNone(actor._frame_recovery)
+                        self.assertIsNotNone((actor._input_progress if mock else actor)._frame_recovery)
                     if bootstrap_during_gap:
                         actor = open_actor()
-                        self.assertTrue(actor._bootstrap_pending)
+                        self.assertTrue((actor._input_progress if mock else actor)._bootstrap_pending)
                         self.assertIsNone(checkpoint(actor))
                         self.assertEqual(0, poll(actor))
                         self.assertIsNone(checkpoint(actor))
                         actor = open_actor()  # Restart while pending cannot restore fake-ready state.
-                        self.assertTrue(actor._bootstrap_pending)
+                        self.assertTrue((actor._input_progress if mock else actor)._bootstrap_pending)
                     else:
                         self.assertEqual(0, poll(actor))
                         self.assertEqual(before, checkpoint(actor))
@@ -163,7 +165,7 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
 
             if legacy:
                 for _ in range(100):
-                    if actor._frame_recovery is None:
+                    if (actor._input_progress if mock else actor)._frame_recovery is None:
                         break
                     if recovery_ack_loss:
                         method = 'upsert_documents' if mock else 'save_shadow_monitor_state'
@@ -177,15 +179,15 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
                                 self.assertEqual(0, poll(actor))
                             except OSError as error:
                                 self.assertIn('acknowledgement loss', str(error))
-                                self.assertIsNone(actor._delivery_protocol)
+                                self.assertIsNone((actor._input_progress if mock else actor)._delivery_protocol)
                                 actor = open_actor()  # Native COMMIT was real; restart uses repaired frames.
-                                self.assertIsNone(actor._frame_recovery)
+                                self.assertIsNone((actor._input_progress if mock else actor)._frame_recovery)
                                 break
                     else:
                         self.assertEqual(0, poll(actor))
-                    if actor._frame_recovery is not None:
+                    if (actor._input_progress if mock else actor)._frame_recovery is not None:
                         self.assertEqual(before, checkpoint(actor))
-                self.assertIsNone(actor._frame_recovery)
+                self.assertIsNone((actor._input_progress if mock else actor)._frame_recovery)
                 saved = checkpoint(actor)
                 self.assertEqual(before['input_cursor' if mock else 'cursor'],
                                  saved['input_cursor' if mock else 'cursor'])

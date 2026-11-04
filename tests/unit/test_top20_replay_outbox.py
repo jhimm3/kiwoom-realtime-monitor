@@ -135,7 +135,7 @@ class Top20ReplayOutboxTests(unittest.IsolatedAsyncioTestCase):
         def service():
             value = AutonomousTop20Service(MagicMock(), RealtimeHub(), Store(),
                 outbox_path=fixture.path, now_provider=lambda: datetime.fromisoformat(next(iter(record()))))
-            for name in ('_schedule_loop', '_event_loop', '_index_loop'):
+            for name in ('_schedule_loop', '_event_loop', '_index_loop', '_persistence_loop'):
                 setattr(value, name, waiting)
             return value
         with runtime.activate():

@@ -30,7 +30,9 @@ from kiwoom_monitor.application.research_families import BREAKOUT_FAMILY_ID
 from kiwoom_monitor.application.research_replay import KrxMinuteBarFrame
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec, ResearchFoldSpec
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
-from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner, _checkpoint_bar_document
+from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+from kiwoom_monitor.central_server.mock_automation_episode import MockAutomationEpisode
+from kiwoom_monitor.central_server.mock_automation_episode import _checkpoint_bar_document
 from kiwoom_monitor.central_server.database_observation_readers import (
     OBSERVATION_DELIVERY_PROTOCOL, ObservationRevisionPage,
 )
@@ -121,6 +123,34 @@ class _Events:
 CHECKPOINT_COLLECTION = "execution_mock_automation_runner_current"
 
 
+def _make_runner(*args, **kwargs):
+    """Construct the real Episode and its concrete lifecycle handle, without I/O."""
+    poll_seconds = kwargs.pop("poll_seconds", 1.0)
+    bundle = args[1] if len(args) > 1 else kwargs["bundle"]
+    episode = MockAutomationEpisode(*args, **kwargs)
+    return MockAutomationRunner(episode, monitor=getattr(bundle, "monitor", None), poll_seconds=poll_seconds)
+
+
+def _prepared_runner(*args, **kwargs):
+    """Use the explicit native preparation and input-attachment fixture contract."""
+    runner = _make_runner(*args, **kwargs)
+    runner.episode.prepare_restore()
+    runner.attach_inputs()
+    return runner
+
+
+def _apply_runner_fills(runner):
+    """Exercise the actual position owner with the existing native fixture inputs."""
+    return runner.episode._episode_position.apply_new_fills(
+        runner.episode._bundle.repository, leader=runner.episode._leader, config=runner.episode._config,
+        position_time=runner.episode._position_state_time,
+    )
+
+
+def _replace_runner_strategy_state(runner, state):
+    return runner.episode._episode_position.replace_strategy_state(state, position_time=runner.episode._position_state_time)
+
+
 def inspect_unfilled_preflight_checkpoint(database_path, spec_path):
     """Offline child-process restore: no gateway, transport or credentials."""
     from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
@@ -134,8 +164,8 @@ def inspect_unfilled_preflight_checkpoint(database_path, spec_path):
                                  repository=ExecutionRepository(store),
                                  runtime=SimpleNamespace(server_now=lambda: NOW),
                                  automation_context=SimpleNamespace(spec_id=spec.spec_id, execution_run_id=run_id))
-        runner = MockAutomationRunner(store, bundle, spec)
-        receipt = runner.status['unfilled_management_preflight']
+        runner = _prepared_runner(store, bundle, spec)
+        receipt = runner.episode.status['unfilled_management_preflight']
         return {'pid': os.getpid(), **receipt,
                 'child_exists': bundle.repository.load(receipt['receipt']['reserved_child_intent_id']) is not None}
     finally:
@@ -170,8 +200,8 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
         self.runner = self.restart()
 
     def restart(self):
-        runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        runner._repository.load_mock_automation_control = lambda _: self.control
+        runner = _prepared_runner(self.store, self.bundle, self.spec)
+        runner.episode._repository.load_mock_automation_control = lambda _, **_reader_args: self.control
         return runner
 
     def preview(self, **changes):
@@ -179,7 +209,7 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
                      ('policy', 'target', 'observation', 'assessment')}
         arguments['broker_snapshot'] = self.order.snapshot
         arguments.update(changes)
-        return self.runner.preview_unfilled_management(**arguments)
+        return self.runner.episode.preview_unfilled_management(**arguments)
 
     def test_confirmed_cancel_partial_fill_checkpoint_restart_keeps_one_preview_slot(self):
         first = self.preview()
@@ -191,7 +221,7 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
         self.assertEqual((0, 1, False), (second['native_reprices_used'], second['reserved_preview_slots'], second['order_authorized']))
         self.assertIsNone(self.order.repository.load(second['reserved_child_intent_id']))
         self.runner = self.restart()
-        self.assertTrue(self.runner.status['unfilled_management_preflight']['requires_revalidation'])
+        self.assertTrue(self.runner.episode.status['unfilled_management_preflight']['requires_revalidation'])
         self.assertEqual(second, self.preview())
         with patch.object(self.store, 'upsert_documents', wraps=self.store.upsert_documents) as write:
             self.preview()
@@ -207,11 +237,11 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
         with patch.object(self.store, 'upsert_documents', side_effect=lost_ack):
             with self.assertRaisesRegex(OSError, 'ACK lost'):
                 self.preview()
-        pending = self.runner._unfilled_preflight
-        self.assertTrue(self.runner._checkpoint_pending)
+        pending = self.runner.episode._unfilled_preflight
+        self.assertTrue(self.runner.episode._checkpoint.pending)
         self.runner = self.restart()
         self.assertEqual(pending, self.preview())
-        self.assertEqual(1, self.runner._unfilled_preflight['reserved_preview_slots'])
+        self.assertEqual(1, self.runner.episode._unfilled_preflight['reserved_preview_slots'])
 
     def test_native_commit_failure_returns_no_plan_and_retries_same_identity(self):
         self.order.cancel_and_reconcile(filled=3)
@@ -219,7 +249,7 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
         with patch.object(self.store, 'upsert_documents', side_effect=write):
             with self.assertRaisesRegex(OSError, 'COMMIT failure'):
                 self.preview()
-            pending = self.runner._unfilled_preflight
+            pending = self.runner.episode._unfilled_preflight
             self.assertEqual(pending, self.preview())
         self.assertEqual(2, evidence['attempts'])
 
@@ -313,7 +343,7 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'receipt_budget_exceeded'):
             self.preview(assessment=replace(self.order.assessment, thesis_input_ref='x' * (1024 * 1024)))
         self.runner = self.restart()
-        self.assertEqual(first, self.runner._unfilled_preflight)
+        self.assertEqual(first, self.runner.episode._unfilled_preflight)
 
     def test_protection_clock_hint_is_independent_of_prices_and_never_synthetic_exit(self):
         self.order.setup_order(side='SELL', purpose='PROTECTIVE_EXIT', account_ref=ACCOUNT_REF, run_id=self.run_id)
@@ -326,8 +356,8 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
         self.runner = self.restart()
         self.preview(assessment=replace(self.order.assessment, reprice_evidence=None))
         self.order.now[0] = self.order.policy.protection_deadline
-        self.runner._bars = {}
-        clock = self.runner.status['unfilled_management_clock']
+        self.runner.episode._strategy_inputs.install_frames(bars={})
+        clock = self.runner.episode.status['unfilled_management_clock']
         self.assertTrue(clock['unfilled_management_due'])
         self.assertTrue(clock['unfilled_risk_path_required'])
         self.assertFalse(clock['exit_required'])
@@ -339,12 +369,12 @@ class UnfilledManagementPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'idle_ready_runner'):
             self.preview()
         self.runner._task = None
-        self.runner._unfilled_preflight_lock.acquire()
+        self.runner.episode._unfilled_preflight_lock.acquire()
         try:
             with self.assertRaisesRegex(RuntimeError, 'already_in_progress'):
                 self.preview()
         finally:
-            self.runner._unfilled_preflight_lock.release()
+            self.runner.episode._unfilled_preflight_lock.release()
         self.order.now[0] += timedelta(seconds=21)
         with self.assertRaisesRegex(ValueError, 'cut_stale_or_future'):
             self.preview()
@@ -434,51 +464,52 @@ class CheckpointBarDocumentTests(unittest.TestCase):
 
 class MockAutomationRunnerTests(unittest.TestCase):
     def test_each_prefix_ack_preserves_bar_fields_and_detaches_restored_mutable_values(self):
-        runner = MockAutomationRunner(self.store, self.bundle, self.spec, now_provider=lambda: NOW)
+        runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: NOW)
         normal_fields = _checkpoint_bar_fields()
         normal = KrxMinuteBarFrame(**normal_fields)
         object.__setattr__(normal, "diagnostic_extra", {"ignored": []})
         restored_fields = {**normal_fields, "revision_id": "restored-revision", "observation_key": "restored-key",
                            "capture_quality": ["restored-value"]}
         restored = KrxMinuteBarFrame(**json.loads(json.dumps(restored_fields)))
-        runner._bars = {(normal.code, normal.observation_key): normal,
-                        (restored.code, restored.observation_key): restored}
-        initial_cursor = runner._cursor
+        runner.episode._strategy_inputs.install_frames(bars={
+            (normal.code, normal.observation_key): normal,
+            (restored.code, restored.observation_key): restored})
+        initial_cursor = runner.episode._input_progress._cursor
         with patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write:
             for prefix in range(1, 21):
-                runner._cursor = initial_cursor + prefix
-                runner._save_checkpoint()
-                self.assertFalse(runner._checkpoint_pending)
+                runner.episode._input_progress._cursor = initial_cursor + prefix
+                runner.episode._save_checkpoint()
+                self.assertFalse(runner.episode._checkpoint.pending)
             self.assertEqual(20, write.call_count)
             saved = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
             self.assertEqual([normal_fields, restored_fields], saved["bars"])
             self.assertEqual(initial_cursor + 20, saved["input_cursor"])
-            runner._save_checkpoint()
+            runner.episode._save_checkpoint()
             self.assertEqual(20, write.call_count)
-            acknowledged = runner._last_checkpoint_content
+            acknowledged = runner.episode._checkpoint._acknowledged_content
             restored.capture_quality.append("changed-after-ack")
             self.assertEqual(["restored-value"], acknowledged["bars"][1]["capture_quality"])
-            runner._save_checkpoint()
+            runner.episode._save_checkpoint()
             self.assertEqual(21, write.call_count)
-            runner._save_checkpoint(force=True)
+            runner.episode._save_checkpoint(force=True)
             self.assertEqual(22, write.call_count)
         saved = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
         self.assertEqual(["restored-value", "changed-after-ack"], saved["bars"][1]["capture_quality"])
 
     def test_checkpoint_noop_preserves_document_and_forced_close_boundary_can_write(self):
-        runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+        runner = _prepared_runner(self.store, self.bundle, self.spec)
         before = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")
-        revision = runner._checkpoint_revision
+        revision = runner.episode._checkpoint.revision
         with patch.object(self.store, "upsert_documents", wraps=self.store.upsert_documents) as write:
-            runner._save_checkpoint()
+            runner.episode._save_checkpoint()
             write.assert_not_called()
             self.assertEqual(before, self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current"))
-            self.assertEqual(revision, runner._checkpoint_revision)
-            runner._save_checkpoint(force=True)
+            self.assertEqual(revision, runner.episode._checkpoint.revision)
+            runner.episode._save_checkpoint(force=True)
             self.assertEqual(1, write.call_count)
-            self.assertEqual(revision + 1, runner._checkpoint_revision)
-            runner._status["reason"] = "changed_same_owner_status"
-            runner._save_checkpoint()
+            self.assertEqual(revision + 1, runner.episode._checkpoint.revision)
+            runner.episode._status["reason"] = "changed_same_owner_status"
+            runner.episode._save_checkpoint()
             self.assertEqual(2, write.call_count)
         saved = self.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
         self.assertEqual("changed_same_owner_status", saved["status"]["reason"])
@@ -488,9 +519,9 @@ class MockAutomationRunnerTests(unittest.TestCase):
         from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
 
         async def exercise():
-            runner = MockAutomationRunner(self.store, self.bundle, self.spec)
+            runner = _prepared_runner(self.store, self.bundle, self.spec)
             before = self.store.load_documents("execution_mock_automation_runner_current")
-            runner._bootstrap_pending = False  # Exercise the existing ready-runner final checkpoint.
+            runner.episode._input_progress._bootstrap_pending = False  # Exercise the existing ready-runner final checkpoint.
             runner._task = asyncio.create_task(asyncio.Event().wait())
             supervisor = MockAutomationSupervisor(self.store, SimpleNamespace())
             supervisor._runners[ACCOUNT_REF] = runner
@@ -513,8 +544,8 @@ class MockAutomationRunnerTests(unittest.TestCase):
         from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
 
         async def exercise():
-            runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-            runner._bootstrap_pending = False
+            runner = _prepared_runner(self.store, self.bundle, self.spec)
+            runner.episode._input_progress._bootstrap_pending = False
             runner._task = asyncio.create_task(asyncio.Event().wait())
             supervisor = MockAutomationSupervisor(self.store, SimpleNamespace())
             supervisor._runners[ACCOUNT_REF] = runner
@@ -606,33 +637,33 @@ class MockAutomationRunnerTests(unittest.TestCase):
         )
 
     def test_checkpoint_restores_fill_state_and_duplicate_fill_is_not_reapplied(self):
-        runner = MockAutomationRunner(self.store, self.bundle, self.spec)
-        runner._state = StrategyState(
+        runner = _prepared_runner(self.store, self.bundle, self.spec)
+        runner.episode._episode_position._state = StrategyState(
             status="candidate", symbol="005930", candidate_key="candidate-1",
             candidate_expires_at=(NOW + timedelta(minutes=1)).isoformat(),
             emitted_candidate_keys=("candidate-1",),
         )
         self.events.values.append(self.event(1, "fill-1", "BUY", 2, 10_000))
-        runner._apply_new_fills()
-        self.assertEqual("open", runner._state.status)
-        self.assertEqual(2, runner._state.position_quantity)
-        runner._save_checkpoint()
+        _apply_runner_fills(runner)
+        self.assertEqual("open", runner.episode._episode_position._state.status)
+        self.assertEqual(2, runner.episode._episode_position._state.position_quantity)
+        runner.episode._save_checkpoint()
 
-        restarted = MockAutomationRunner(self.store, self.bundle, self.spec)
-        self.assertEqual("open", restarted._state.status)
-        self.assertEqual(1, restarted._fill_cursor)
+        restarted = _prepared_runner(self.store, self.bundle, self.spec)
+        self.assertEqual("open", restarted.episode._episode_position._state.status)
+        self.assertEqual(1, restarted.episode._episode_position._fill_cursor)
         self.events.values.append(self.event(2, "fill-1", "BUY", 2, 10_000))
-        restarted._apply_new_fills()
-        self.assertEqual(2, restarted._state.position_quantity)
+        _apply_runner_fills(restarted)
+        self.assertEqual(2, restarted.episode._episode_position._state.position_quantity)
         self.events.values.append(self.event(3, "fill-2", "SELL", 2, 10_500))
-        restarted._apply_new_fills()
-        self.assertEqual("cooldown", restarted._state.status)
-        self.assertEqual(3, restarted._fill_cursor)
+        _apply_runner_fills(restarted)
+        self.assertEqual("cooldown", restarted.episode._episode_position._state.status)
+        self.assertEqual(3, restarted.episode._episode_position._fill_cursor)
 
     def test_checkpoint_from_other_spec_is_never_reused(self):
-        first = MockAutomationRunner(self.store, self.bundle, self.spec)
-        first._cursor = 99
-        first._save_checkpoint()
+        first = _prepared_runner(self.store, self.bundle, self.spec)
+        first.episode._input_progress._cursor = 99
+        first.episode._save_checkpoint()
         changed = SimpleNamespace(**{
             **self.bundle.__dict__,
             "automation_context": SimpleNamespace(
@@ -640,27 +671,27 @@ class MockAutomationRunnerTests(unittest.TestCase):
             ),
         })
         with self.assertRaisesRegex(ValueError, "CONTEXT_MISMATCH"):
-            MockAutomationRunner(self.store, changed, self.spec)
+            _prepared_runner(self.store, changed, self.spec)
 
 
 class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_iteration_excludes_preflight_until_native_work_is_drained(self):
         case, runner = self.checkpoint_case()
         entered, release = threading.Event(), threading.Event()
-        native = runner._apply_new_fills
-        def blocked_fill_read():
+        native = runner.episode._episode_position.apply_new_fills
+        def blocked_fill_read(*args, **kwargs):
             entered.set()
             if not release.wait(3):
                 raise TimeoutError('controlled native read not drained')
-            return native()
-        runner._repository.load_mock_automation_control = lambda _: None
+            return native(*args, **kwargs)
+        runner.episode._repository.load_mock_automation_control = lambda _: None
         pending = None
         try:
-            with patch.object(runner, '_apply_new_fills', side_effect=blocked_fill_read):
-                pending = asyncio.create_task(runner.run_once())
+            with patch.object(runner.episode._episode_position, 'apply_new_fills', side_effect=blocked_fill_read):
+                pending = asyncio.create_task(runner.episode.advance_once())
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
                 with self.assertRaisesRegex(RuntimeError, 'already_in_progress'):
-                    runner.preview_unfilled_management(policy=None, broker_snapshot=None, target=None,
+                    runner.episode.preview_unfilled_management(policy=None, broker_snapshot=None, target=None,
                                                        observation=None, assessment=None)
                 release.set()
                 self.assertEqual(0, await asyncio.wait_for(pending, 2))
@@ -668,14 +699,14 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             if pending is not None:
                 await asyncio.gather(pending, return_exceptions=True)
-        self.assertFalse(runner._unfilled_preflight_lock.locked())
+        self.assertFalse(runner.episode._unfilled_preflight_lock.locked())
 
     def checkpoint_case(self):
         case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
         case.setUp()
         self.addCleanup(case.doCleanups)
-        runner = MockAutomationRunner(case.store, case.bundle, case.spec)
-        runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+        runner = _prepared_runner(case.store, case.bundle, case.spec)
+        runner.episode._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
             active_spec_id=case.spec.spec_id, execution_run_id=case.run_id,
             desired_state=SimpleNamespace(value="RUNNING"),
         )
@@ -688,7 +719,7 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         rows = [_rank(1)]
         case.store.load_observation_revisions_after = lambda cursor, *_args: [
             row for row in rows if row["accepted_sequence"] > cursor]
-        native_poll, completed, polls = runner.run_once, asyncio.Event(), []
+        native_poll, completed, polls = runner.episode.advance_once, asyncio.Event(), []
 
         async def poll():
             try:
@@ -698,7 +729,7 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
                 if len(polls) >= 3:
                     completed.set()
 
-        runner.run_once, runner._poll_seconds = poll, 0.01
+        runner.episode.advance_once, runner._poll_seconds = poll, 0.01
         write, evidence = _checkpoint_commit_failures(case.store, 2)
         with patch.object(case.store, "upsert_documents", side_effect=write):
             runner._task = asyncio.create_task(runner._run())
@@ -706,8 +737,8 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(completed.wait(), 2)
                 document = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
                 self.assertEqual(1, document["input_cursor"], evidence)
-                self.assertEqual(1, runner._cursor)
-                self.assertFalse(runner._checkpoint_pending)
+                self.assertEqual(1, runner.episode._input_progress._cursor)
+                self.assertFalse(runner.episode._checkpoint.pending)
                 self.assertEqual([], case.events.values)
             finally:
                 await runner.close()
@@ -720,18 +751,18 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
                     active_spec_id=case.spec.spec_id, execution_run_id=case.run_id,
                     desired_state=SimpleNamespace(value="STOPPED"),
                 )
-                runner._repository.load_mock_automation_control = lambda _account: control
+                runner.episode._repository.load_mock_automation_control = lambda _account: control
                 before = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")
                 write, evidence = _checkpoint_commit_failures(case.store, 1)
                 with patch.object(case.store, "upsert_documents", side_effect=write):
                     with self.assertRaisesRegex(OSError, "checkpoint COMMIT failure"):
-                        await runner.run_once()
+                        await runner.episode.advance_once()
                     self.assertEqual(before, case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current"))
-                    self.assertEqual(0, await runner.run_once())
+                    self.assertEqual(0, await runner.episode.advance_once())
                 document = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
                 self.assertEqual(state, document["status"]["state"], evidence)
-                self.assertFalse(runner._checkpoint_pending)
-                self.assertEqual(0, runner._cursor)
+                self.assertFalse(runner.episode._checkpoint.pending)
+                self.assertEqual(0, runner.episode._input_progress._cursor)
 
     async def test_commit_ack_loss_retries_prefix_without_consuming_the_input_again(self):
         from tests.unit.test_candidate_monitor import _rank
@@ -748,24 +779,24 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
                     raise OSError("controlled checkpoint ACK loss after COMMIT")
 
         with patch.object(case.store, "upsert_documents", side_effect=lose_first_ack), patch.object(
-            runner, "_consume", wraps=runner._consume,
+            runner.episode, "_consume", wraps=runner.episode._consume,
         ) as consume:
             with self.assertRaisesRegex(OSError, "ACK loss after COMMIT"):
-                await runner.run_once()
+                await runner.episode.advance_once()
             committed = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
             self.assertEqual(1, committed["input_cursor"])
-            self.assertTrue(runner._checkpoint_pending)
-            self.assertEqual(0, await runner.run_once())
+            self.assertTrue(runner.episode._checkpoint.pending)
+            self.assertEqual(0, await runner.episode.advance_once())
             self.assertEqual(1, consume.await_count)
             self.assertEqual(2, len(attempts))
         acknowledged = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
         self.assertGreater(acknowledged["checkpoint_revision"], committed["checkpoint_revision"])
         self.assertEqual({k: v for k, v in committed.items() if k not in {"checkpoint_revision", "saved_at"}},
                          {k: v for k, v in acknowledged.items() if k not in {"checkpoint_revision", "saved_at"}})
-        self.assertFalse(runner._checkpoint_pending)
-        restarted = MockAutomationRunner(case.store, case.bundle, case.spec)
-        self.assertEqual(1, restarted._cursor)
-        self.assertEqual(runner._state, restarted._state)
+        self.assertFalse(runner.episode._checkpoint.pending)
+        restarted = _prepared_runner(case.store, case.bundle, case.spec)
+        self.assertEqual(1, restarted.episode._input_progress._cursor)
+        self.assertEqual(runner.episode._episode_position._state, restarted.episode._episode_position._state)
 
     async def test_failed_prefix_retry_blocks_later_observations_until_ack(self):
         from tests.unit.test_candidate_monitor import _rank
@@ -780,17 +811,17 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         case.store.load_observation_revisions_after = load
         write, evidence = _checkpoint_commit_failures(case.store, 2)
         with patch.object(case.store, "upsert_documents", side_effect=write), patch.object(
-            runner, "_consume", wraps=runner._consume,
+            runner.episode, "_consume", wraps=runner.episode._consume,
         ) as consume:
             with self.assertRaises(OSError):
-                await runner.run_once()
+                await runner.episode.advance_once()
             rows.append(_rank(2))
             with self.assertRaises(OSError):
-                await runner.run_once()
+                await runner.episode.advance_once()
             self.assertEqual([0], loaded_after, evidence)
             self.assertEqual(1, consume.await_count)
-            self.assertEqual(1, runner._cursor)
-            self.assertEqual(1, await runner.run_once())
+            self.assertEqual(1, runner.episode._input_progress._cursor)
+            self.assertEqual(1, await runner.episode.advance_once())
             self.assertEqual([0, 1], loaded_after)
             self.assertEqual(2, consume.await_count)
         self.assertEqual(2, case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]["input_cursor"])
@@ -841,7 +872,7 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         case, runner = self.checkpoint_case()
         if bootstrap:
-            runner._bootstrap_pending = True
+            runner.episode._input_progress._bootstrap_pending = True
             case.store.load_observation_bootstrap = lambda *_args, **_kwargs: ObservationRevisionPage(
                 rows=(_rank(1),), safe_through=1,
             )
@@ -878,7 +909,7 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(first_ack.is_set())
                 self.assertTrue(second_started.is_set())
                 document = case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")["document"]
-                self.assertEqual(runner._checkpoint_revision, document["checkpoint_revision"])
+                self.assertEqual(runner.episode._checkpoint.revision, document["checkpoint_revision"])
                 self.assertEqual(1, document["input_cursor"])
         finally:
             release.set()
@@ -894,29 +925,29 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(case.store.close)
         pending = ObservationRevisionPage(ready=False, reason="pending_sequence_commit")
         with patch.object(case.store, "load_observation_bootstrap", return_value=pending) as loader:
-            runner = MockAutomationRunner(case.store, case.bundle, case.spec)
-            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+            runner = _prepared_runner(case.store, case.bundle, case.spec)
+            runner.episode._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
                 active_spec_id=case.spec.spec_id, desired_state=SimpleNamespace(value="RUNNING"))
             case.events.values.append(case.event(1, "fill-1", "BUY", 2, 10000))
-            self.assertEqual(0, await runner.run_once())
-            self.assertEqual(1, runner._fill_cursor)
-            self.assertEqual(2, runner._state.position_quantity)
-            runner._save_checkpoint()
+            self.assertEqual(0, await runner.episode.advance_once())
+            self.assertEqual(1, runner.episode._episode_position._fill_cursor)
+            self.assertEqual(2, runner.episode._episode_position._state.position_quantity)
+            runner.episode._save_checkpoint()
             self.assertEqual([], case.store.load_documents(
                 "execution_mock_automation_runner_current", ACCOUNT_REF, 1))
             loader.return_value = ObservationRevisionPage(
                 rows=(_rank(1), _bar(2, 0, 1000, 1010)), safe_through=999)
-            with patch.object(runner, "_consume", side_effect=AssertionError("historical dispatch")):
-                self.assertEqual(0, await runner.run_once())
+            with patch.object(runner.episode, "_consume", side_effect=AssertionError("historical dispatch")):
+                self.assertEqual(0, await runner.episode.advance_once())
             saved = case.store.load_documents(
                 "execution_mock_automation_runner_current", ACCOUNT_REF, 1)[0]["document"]
             self.assertEqual(2, saved["input_cursor"])
             self.assertEqual(1, saved["fill_cursor"])
             self.assertEqual(OBSERVATION_DELIVERY_PROTOCOL, saved["delivery_protocol"])
-            restarted = MockAutomationRunner(case.store, case.bundle, case.spec)
-            self.assertEqual(1, restarted._fill_cursor)
-            self.assertEqual(2, restarted._state.position_quantity)
-            self.assertEqual(2, restarted._cursor)
+            restarted = _prepared_runner(case.store, case.bundle, case.spec)
+            self.assertEqual(1, restarted.episode._episode_position._fill_cursor)
+            self.assertEqual(2, restarted.episode._episode_position._state.position_quantity)
+            self.assertEqual(2, restarted.episode._input_progress._cursor)
             self.assertEqual(3, loader.call_count)
 
     async def test_stopped_pending_runner_does_not_bootstrap_or_write_ready_checkpoint(self):
@@ -925,13 +956,13 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(case.store.close)
         with patch.object(case.store, "load_observation_bootstrap",
                           return_value=ObservationRevisionPage(ready=False)) as loader:
-            runner = MockAutomationRunner(case.store, case.bundle, case.spec)
-            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+            runner = _prepared_runner(case.store, case.bundle, case.spec)
+            runner.episode._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
                 active_spec_id=case.spec.spec_id, desired_state=SimpleNamespace(value="STOPPED"))
-            self.assertEqual(0, await runner.run_once())
+            self.assertEqual(0, await runner.episode.advance_once())
             self.assertEqual(1, loader.call_count)
-            self.assertEqual("STOPPED", runner.status["state"])
-            self.assertEqual(0, runner._checkpoint_revision)
+            self.assertEqual("STOPPED", runner.episode.status["state"])
+            self.assertEqual(0, runner.episode._checkpoint.revision)
             self.assertEqual([], case.store.load_documents(
                 "execution_mock_automation_runner_current", ACCOUNT_REF, 1))
 
@@ -941,16 +972,16 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(case.store.close)
         with patch.object(case.store, "load_observation_bootstrap",
                           return_value=ObservationRevisionPage(ready=False)) as loader:
-            runner = MockAutomationRunner(case.store, case.bundle, case.spec)
-            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+            runner = _prepared_runner(case.store, case.bundle, case.spec)
+            runner.episode._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
                 active_spec_id=case.spec.spec_id, desired_state=SimpleNamespace(value="RUNNING"))
             loader.return_value = ObservationRevisionPage()
             with patch.object(case.store, "upsert_documents", side_effect=OSError("seed save failed")):
                 with self.assertRaisesRegex(OSError, "seed save failed"):
-                    await runner.run_once()
-            self.assertTrue(runner._bootstrap_pending)
-            self.assertEqual(0, await runner.run_once())
-            self.assertFalse(runner._bootstrap_pending)
+                    await runner.episode.advance_once()
+            self.assertTrue(runner.episode._input_progress._bootstrap_pending)
+            self.assertEqual(0, await runner.episode.advance_once())
+            self.assertFalse(runner.episode._input_progress._bootstrap_pending)
             saved = case.store.load_documents(
                 "execution_mock_automation_runner_current", ACCOUNT_REF, 1)[0]["document"]
             self.assertEqual(0, saved["input_cursor"])
@@ -969,7 +1000,7 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         consumed = []
 
         def configure(runner):
-            runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+            runner.episode._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
                 active_spec_id=case.spec.spec_id,
                 desired_state=SimpleNamespace(value=control_state["value"]),
             )
@@ -977,58 +1008,58 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
             async def consume(observation):
                 consumed.append(observation["accepted_sequence"])
 
-            runner._consume = consume
+            runner.episode._consume = consume
 
         def load_after(cursor, _kinds, _limit):
             loaded_after.append(cursor)
             return [value for value in observations if value["accepted_sequence"] > cursor]
 
         case.store.load_observation_revisions_after = load_after
-        runner = MockAutomationRunner(case.store, case.bundle, case.spec)
+        runner = _prepared_runner(case.store, case.bundle, case.spec)
         configure(runner)
         observations[:] = observations[:2]
-        self.assertEqual(2, await runner.run_once())
+        self.assertEqual(2, await runner.episode.advance_once())
         self.assertEqual([1, 2], consumed)
-        self.assertEqual(2, runner.status["input_cursor"])
+        self.assertEqual(2, runner.episode.status["input_cursor"])
 
         control_state["value"] = "STOPPED"
         observations.append({"kind": "top20_membership", "accepted_sequence": 3})
         reads_before_stop = len(loaded_after)
-        self.assertEqual(0, await runner.run_once())
+        self.assertEqual(0, await runner.episode.advance_once())
         self.assertEqual(reads_before_stop, len(loaded_after))
         self.assertEqual([1, 2], consumed)
 
-        restarted = MockAutomationRunner(case.store, case.bundle, case.spec)
+        restarted = _prepared_runner(case.store, case.bundle, case.spec)
         configure(restarted)
-        self.assertEqual("STOPPED", restarted.status["state"])
-        self.assertEqual(2, restarted.status["input_cursor"])
-        self.assertEqual(0, await restarted.run_once())
+        self.assertEqual("STOPPED", restarted.episode.status["state"])
+        self.assertEqual(2, restarted.episode.status["input_cursor"])
+        self.assertEqual(0, await restarted.episode.advance_once())
         self.assertEqual(reads_before_stop, len(loaded_after))
 
         control_state["value"] = "RUNNING"
-        self.assertEqual(1, await restarted.run_once())
+        self.assertEqual(1, await restarted.episode.advance_once())
         self.assertEqual(2, loaded_after[-1])
         self.assertEqual([1, 2, 3], consumed)
-        self.assertEqual(3, restarted.status["input_cursor"])
-        self.assertEqual(0, await restarted.run_once())
+        self.assertEqual(3, restarted.episode.status["input_cursor"])
+        self.assertEqual(0, await restarted.episode.advance_once())
         self.assertEqual([1, 2, 3], consumed)
 
     async def test_idle_blocked_runner_does_not_rewrite_checkpoint_each_poll(self):
         case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
         case.setUp()
         self.addCleanup(case.store.close)
-        runner = MockAutomationRunner(case.store, case.bundle, case.spec)
-        await runner.run_once()
-        revision = runner._checkpoint_revision
-        await runner.run_once()
-        self.assertEqual(revision, runner._checkpoint_revision)
+        runner = _prepared_runner(case.store, case.bundle, case.spec)
+        await runner.episode.advance_once()
+        revision = runner.episode._checkpoint.revision
+        await runner.episode.advance_once()
+        self.assertEqual(revision, runner.episode._checkpoint.revision)
 
     async def test_status_measures_observation_age_without_idle_checkpoint_writes(self):
         case = MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
         case.setUp()
         self.addCleanup(case.store.close)
-        runner = MockAutomationRunner(case.store, case.bundle, case.spec)
-        runner._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
+        runner = _prepared_runner(case.store, case.bundle, case.spec)
+        runner.episode._repository.load_mock_automation_control = lambda _account: SimpleNamespace(
             active_spec_id=case.spec.spec_id,
             desired_state=SimpleNamespace(value="RUNNING"),
         )
@@ -1041,19 +1072,294 @@ class MockAutomationRunnerAsyncTests(unittest.IsolatedAsyncioTestCase):
         async def consume(_observation):
             return None
 
-        runner._consume = consume
-        self.assertEqual(1, await runner.run_once())
-        latency = runner.status["latency"]
+        runner.episode._consume = consume
+        self.assertEqual(1, await runner.episode.advance_once())
+        latency = runner.episode.status["latency"]
         self.assertEqual(1, latency["observation_count"])
         self.assertEqual(1, latency["minute_bar_count"])
         self.assertGreaterEqual(latency["last_bar_age_ms"], 2000)
         self.assertEqual(0, latency["future_or_invalid_bar_time_count"])
         self.assertGreaterEqual(latency["last_poll_duration_ms"], latency["load_duration_ms"])
-        revision = runner._checkpoint_revision
+        revision = runner.episode._checkpoint.revision
         case.store.load_observation_revisions_after = lambda *_args: []
-        self.assertEqual(0, await runner.run_once())
-        self.assertEqual(revision, runner._checkpoint_revision)
-        self.assertEqual(latency["last_bar_processed_at"], runner.status["latency"]["last_bar_processed_at"])
+        self.assertEqual(0, await runner.episode.advance_once())
+        self.assertEqual(revision, runner.episode._checkpoint.revision)
+        self.assertEqual(latency["last_bar_processed_at"], runner.episode.status["latency"]["last_bar_processed_at"])
+
+
+class RunnerPreparationLifetimeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from kiwoom_monitor.domain.execution_activation import MockUnfilledExecutionPolicy
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+
+        self.case = MockAutomationRunnerTests()
+        self.case.setUp()
+        self.addCleanup(self.case.doCleanups)
+        self.spec = replace(self.case.spec, unfilled_execution_policy=MockUnfilledExecutionPolicy(
+            1, 1000, 2000, 600, 5, 0, 1, 2, 60))
+        self.bundle = self.case.bundle
+        self.bundle.credential_profile_id = "profile-a"
+        self.bundle.automation_context.spec_id = self.spec.spec_id
+        self.bundle.runtime = SimpleNamespace(server_now=lambda: NOW)
+        self.events = []
+        self.listener = None
+        self.enabled = False
+        self.bundle.monitor = SimpleNamespace(
+            set_automation_risk_listener=self.attach,
+            clear_automation_risk_listener=self.detach,
+            set_automation_execution_inputs_enabled=self.enable,
+        )
+        self.current = self.bundle
+        self.supervisor = MockAutomationSupervisor(self.case.store,
+            SimpleNamespace(bundle=lambda _profile: self.current), now_provider=lambda: NOW)
+
+    def attach(self, listener):
+        if self.listener is not None and self.listener != listener:
+            raise RuntimeError("already owned")
+        self.listener = listener
+        self.events.append(("listener", threading.get_ident()))
+
+    def detach(self, listener):
+        if self.listener == listener:
+            self.listener = None
+        self.events.append(("detach", threading.get_ident()))
+
+    def enable(self, enabled):
+        self.enabled = enabled
+        self.events.append(("source", enabled, threading.get_ident()))
+
+    async def asyncTearDown(self):
+        await self.supervisor.close()
+
+    async def test_constructor_and_repeated_prepare_leave_native_and_attachment_ownership_explicit(self):
+        with patch.object(self.case.store, "_connect", wraps=self.case.store._connect) as connect:
+            runner = _make_runner(self.case.store, self.bundle, self.spec, now_provider=lambda: NOW)
+            connect.assert_not_called()
+            self.assertFalse(runner.episode._prepared)
+            self.assertIsNone(self.listener)
+            self.assertFalse(self.enabled)
+            with self.assertRaisesRegex(RuntimeError, "NOT_PREPARED"):
+                await runner.start()
+            await asyncio.to_thread(runner.episode.prepare_restore)
+            calls = connect.call_count
+            self.assertGreater(calls, 0)
+            await asyncio.to_thread(runner.episode.prepare_restore)
+            self.assertEqual(calls, connect.call_count)
+            self.assertEqual([], self.events)
+            runner.attach_inputs()
+            runner.attach_inputs()
+            self.assertEqual([("listener", threading.get_ident()),
+                              ("source", True, threading.get_ident())], self.events)
+            self.assertEqual(calls, connect.call_count)
+            stale_callback = self.listener
+            await runner.close()
+            stale_callback({})
+            self.assertEqual(calls, connect.call_count)
+        self.assertIsNone(self.listener)
+        self.assertFalse(self.enabled)
+        self.assertIsNone(runner._task)
+        self.assertIsNone(runner.episode._protection_review)
+        import gc, weakref
+        retained_episode = runner.episode
+        retired = weakref.ref(runner)
+        del runner
+        gc.collect()
+        self.assertIsNone(retired())
+        self.assertTrue(retained_episode.closing)
+
+    async def test_failed_native_prepare_closes_without_persisting_partial_restored_notice(self):
+        runner = _make_runner(self.case.store, self.bundle, self.spec, now_provider=lambda: NOW)
+        original = runner.episode._restore_or_bootstrap
+        def fail_after_restore(document):
+            original(document)
+            runner.episode.request_protection_review(reason="partial_restore", input_ref="native-restore",
+                requested_at=NOW)
+            raise OSError("native preparation failed")
+        with patch.object(runner.episode, "_restore_or_bootstrap", side_effect=fail_after_restore), \
+             patch.object(self.case.store, "upsert_documents", wraps=self.case.store.upsert_documents) as write:
+            with self.assertRaisesRegex(OSError, "native preparation failed"):
+                await asyncio.to_thread(runner.episode.prepare_restore)
+            self.assertFalse(runner.episode._prepared)
+            before = self.case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current")
+            calls = write.call_count
+            await runner.close()
+            self.assertEqual(calls, write.call_count)
+            self.assertEqual(before, self.case.store.load_document(CHECKPOINT_COLLECTION, ACCOUNT_REF, "current"))
+        self.assertEqual([], self.events)
+        self.assertIsNone(self.listener)
+        self.assertFalse(self.enabled)
+
+    async def test_native_prepare_failure_retains_one_unpublished_close_owner_and_original_error(self):
+        original = MockAutomationEpisode.prepare_restore
+        seen = []
+        def prepare(runner):
+            seen.append(runner)
+            return original(runner)
+        failure = OSError("candidate native read failed")
+        with patch.object(MockAutomationEpisode, "prepare_restore", new=prepare), \
+             patch.object(self.case.store, "_connect", side_effect=failure):
+            with self.assertRaises(OSError) as caught:
+                await self.supervisor._assemble_runner(self.bundle, self.spec, "profile-a")
+        self.assertIs(failure, caught.exception)
+        self.assertEqual(1, len(seen))
+        prepared_episode = seen[0]
+        runner = next(iter(self.supervisor._runner_close_tasks))
+        self.assertIs(prepared_episode, runner.episode)
+        self.assertFalse(runner.episode._prepared)
+        self.assertTrue(runner.episode._closing)
+        self.assertEqual({runner}, set(self.supervisor._runner_close_tasks))
+        self.assertTrue(self.supervisor._runner_close_tasks[runner].done())
+        self.assertEqual(set(), self.supervisor._preparing_runners)
+        self.assertEqual({}, self.supervisor._runners)
+        self.assertIsNone(self.listener)
+        self.assertFalse(self.enabled)
+
+    async def test_source_enable_failure_rolls_back_own_listener_and_preserves_original_error(self):
+        runner = _make_runner(self.case.store, self.bundle, self.spec, now_provider=lambda: NOW)
+        await asyncio.to_thread(runner.episode.prepare_restore)
+        original = self.enable
+        failure = OSError("source enable failed after mutation")
+        def enable(enabled):
+            original(enabled)
+            if enabled:
+                raise failure
+        self.bundle.monitor.set_automation_execution_inputs_enabled = enable
+        with self.assertRaises(OSError) as caught:
+            runner.attach_inputs()
+        self.assertIs(failure, caught.exception)
+        self.assertIsNone(self.listener)
+        self.assertFalse(self.enabled)
+        self.assertFalse(runner._inputs_attached)
+        self.assertFalse(runner._execution_inputs_attached)
+        await runner.close()
+        self.assertEqual(1, sum(event[0] == "source" and event[1] is False for event in self.events))
+
+    async def test_initial_ack_cut_callback_runs_after_prepare_on_the_owning_loop_without_io(self):
+        runner = _make_runner(self.case.store, self.bundle, self.spec, now_provider=lambda: NOW)
+        await asyncio.to_thread(runner.episode.prepare_restore)
+        cut = object()
+        delivered = []
+        def on_risk(owner, value):
+            self.assertIs(owner, runner.episode)
+            self.assertTrue(owner._prepared)
+            self.assertIs(asyncio.get_running_loop(), loop)
+            self.assertFalse(self.enabled)
+            delivered.append(value)
+        original = self.attach
+        def attach(listener):
+            original(listener)
+            listener(cut)
+        loop = asyncio.get_running_loop()
+        self.bundle.monitor.set_automation_risk_listener = attach
+        with patch.object(MockAutomationEpisode, 'observe_native_risk', new=on_risk), \
+             patch.object(self.case.store, "_connect", wraps=self.case.store._connect) as connect:
+            runner.attach_inputs()
+            self.assertEqual([cut], delivered)
+            self.assertTrue(self.enabled)
+            connect.assert_not_called()
+            await runner.close()
+            connect.assert_not_called()
+
+    async def test_failed_listener_claim_does_not_disable_another_owner_source(self):
+        other = lambda _cut: None
+        self.listener, self.enabled = other, True
+        runner = _make_runner(self.case.store, self.bundle, self.spec, now_provider=lambda: NOW)
+        await asyncio.to_thread(runner.episode.prepare_restore)
+        with self.assertRaisesRegex(RuntimeError, "already owned"):
+            runner.attach_inputs()
+        await runner.close()
+        self.assertIs(other, self.listener)
+        self.assertTrue(self.enabled)
+        self.assertFalse(any(event[0] == "source" for event in self.events))
+        self.listener, self.enabled = None, False
+
+    async def _prepare_barrier(self, *, cancel):
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisorError
+        entered, release = threading.Event(), threading.Event()
+        original = MockAutomationEpisode._prepare_restore_locked
+        prepared, tasks = [], []
+        def prepare(runner):
+            prepared.append(runner)
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("prepare test barrier not released")
+            original(runner)
+        try:
+            with patch.object(MockAutomationEpisode, "_prepare_restore_locked", new=prepare):
+                operation = asyncio.create_task(self.supervisor._assemble_runner(self.bundle, self.spec, "profile-a"))
+                tasks.append(operation)
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                prepared_episode = prepared[0]
+                runner = next(iter(self.supervisor._preparing_runners))
+                self.assertIs(prepared_episode, runner.episode)
+                self.assertEqual({runner}, self.supervisor._preparing_runners)
+                self.assertEqual({}, self.supervisor._runners)
+                self.assertIsNone(self.listener)
+                self.assertFalse(self.enabled)
+                if cancel:
+                    for _ in range(3):
+                        operation.cancel()
+                        await asyncio.sleep(0)
+                    joined = asyncio.create_task(self.supervisor.close())
+                else:
+                    self.current = None
+                    joined = asyncio.create_task(self.supervisor.bundle_changed("profile-a", None))
+                tasks.append(joined)
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                self.assertFalse(operation.done())
+                self.assertFalse(joined.done())
+                self.assertFalse(runner.episode._prepared)
+                self.assertEqual(1, len(self.supervisor._runner_close_tasks))
+                self.assertIsNone(self.listener)
+                release.set()
+                if cancel:
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(operation, 2)
+                else:
+                    with self.assertRaisesRegex(MockAutomationSupervisorError, "PROFILE_RUNTIME_NOT_READY"):
+                        await asyncio.wait_for(operation, 2)
+                await asyncio.wait_for(joined, 2)
+                self.assertTrue(runner.episode._closing)
+                self.assertIsNone(runner._task)
+                self.assertEqual(set(), self.supervisor._preparing_runners)
+                self.assertEqual({}, self.supervisor._runners)
+                self.assertIsNone(self.listener)
+                self.assertFalse(self.enabled)
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_repeated_cancel_and_close_join_the_same_unpublished_native_prepare_owner(self):
+        await self._prepare_barrier(cancel=True)
+
+    async def test_bundle_withdrawal_joins_native_prepare_and_rejects_late_publication(self):
+        await self._prepare_barrier(cancel=False)
+
+    async def test_start_exception_after_attachment_retains_one_actual_close_and_clears_handles(self):
+        original = MockAutomationRunner.start
+        seen = []
+        async def start(runner):
+            self.assertTrue(runner.episode._prepared)
+            self.assertIs(self.listener.__self__, runner.episode)
+            self.assertTrue(self.enabled)
+            self.assertEqual({}, self.supervisor._runners)
+            seen.append(runner)
+            await original(runner)
+            raise OSError("start failed after task creation")
+        with patch.object(MockAutomationRunner, "start", new=start):
+            with self.assertRaisesRegex(OSError, "start failed after task creation"):
+                await self.supervisor._assemble_runner(self.bundle, self.spec, "profile-a")
+        self.assertEqual(1, len(seen))
+        runner = seen[0]
+        self.assertEqual(1, len(self.supervisor._runner_close_tasks))
+        self.assertTrue(self.supervisor._runner_close_tasks[runner].done())
+        self.assertEqual(set(), self.supervisor._preparing_runners)
+        self.assertEqual({}, self.supervisor._runners)
+        self.assertIsNone(self.listener)
+        self.assertFalse(self.enabled)
+        self.assertIsNone(runner._task)
+        self.assertIsNone(runner._wake_loop)
 
 
 if __name__ == "__main__":

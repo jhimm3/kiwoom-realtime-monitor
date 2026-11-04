@@ -441,7 +441,8 @@ def manifest():
     files['src/kiwoom_monitor/central_server/app.py'] = 'a' * 64
     files['scripts/test_runner.py'] = 'b' * 64
     content = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
-    result = {'format': 1, 'release_id': 'build-' + content[:16], 'server_build': 'build',
+    result = {'format': 1, 'contract_version': op.CONTRACT_VERSION,
+              'release_id': 'build-' + content[:16], 'server_build': 'build',
               'files': files, 'contract': contract,
               'src_hash': hashlib.sha256(json.dumps({k: v for k, v in files.items()
                                                     if k.startswith('src/')}, sort_keys=True).encode()).hexdigest()}
@@ -458,7 +459,106 @@ def idle_snapshot(state='off'):
             'paused_workloads': [], 'active_runs': [], 'trace': trace}
 
 
+def isolated_policy(contract=None):
+    return {'format': 1, 'contract': dict(manifest()[1] if contract is None else contract),
+            'runtime_image_id': 'sha256:' + 'e' * 64}
+
+
 class NasOperatorTests(unittest.TestCase):
+    def test_isolated_test_policy_is_a_copy_and_invalid_selection_never_admits(self):
+        policy = isolated_policy()
+        accepted = op.validate_isolated_test_runtime(policy)
+        policy['contract']['pyproject.toml'] = 'f' * 64
+        self.assertNotEqual(policy['contract'], accepted['contract'])
+        invalid = [None, [], {}, dict(accepted, format=True), dict(accepted, env={}),
+                   dict(accepted, runtime_image_id='image:tag'),
+                   dict(accepted, contract={}), dict(accepted, contract=dict(accepted['contract'],
+                   **{'requirements.lock.txt': 'invalid'}))]
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(op.Rejected, 'invalid_isolated_test_runtime'):
+                    op.validate_isolated_test_runtime(value)
+                with patch.object(op, 'load_config', return_value={'private': '/private',
+                        'profiles': ['selected'], 'isolated_test_runtime': value}), \
+                        patch.object(op, 'Tree') as tree, contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(1, op.main(['test', 'candidate', '--profile', 'selected',
+                        '--test', 'tests.unit.test_nas_operator', '--isolated-test-runtime']))
+                tree.assert_not_called()
+        with patch.object(op, 'validate_isolated_test_runtime', side_effect=AssertionError('not selected')):
+            for command in ('status', 'revoke', 'recover'):
+                with self.subTest(command=command), patch.object(op, 'load_config', return_value={
+                        'private': '/private', 'isolated_test_runtime': None}), \
+                        patch.object(op, 'Tree', return_value=MemoryTree()), \
+                        patch.object(op, 'Operator') as operator, contextlib.redirect_stdout(io.StringIO()):
+                    operator.return_value.status.return_value = {'installed': True}
+                    operator.return_value.revoke_access.return_value = {}
+                    operator.return_value.recover.return_value = {}
+                    self.assertEqual(0, op.main([command]))
+
+    def test_isolated_selected_flag_cannot_select_replay_pause_capacity_or_image(self):
+        config = {'profiles': ['selected', 'storage']}
+        for tail in (['--profile', 'storage'], ['--profile', 'recorder-capacity', '--pause-operational'],
+                     ['--profile', 'selected', '--pause-operational']):
+            args = op.parser().parse_args(['test', 'candidate', '--test',
+                'tests.unit.test_nas_operator', '--isolated-test-runtime'] + tail)
+            with self.subTest(tail=tail), self.assertRaises(op.Rejected):
+                op.validate_args(args, config)
+        for arguments in (['deploy', 'candidate', '--isolated-test-runtime'],
+                          ['recover', '--isolated-test-runtime'], ['rollback', '--isolated-test-runtime'],
+                          ['replay', 'candidate', 'trace', '--baseline-profile', 'empty-v1',
+                           '--window-start', '0', '--window-end', '1', '--isolated-test-runtime'],
+                          ['test', 'candidate', '--isolated-test-runtime', '--image', 'arbitrary']):
+            with self.subTest(arguments=arguments), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                op.parser().parse_args(arguments)
+
+    def test_isolated_source_cache_never_authorizes_production_or_changed_policy(self):
+        value, contract, _ = manifest()
+        source = {name: name.encode() for name in contract if name != op.CONTRACT[1]}
+        source['src/kiwoom_monitor/central_server/app.py'] = b'SERVER_BUILD = "build"\n'
+        files = {name: hashlib.sha256(raw).hexdigest() for name, raw in source.items()}
+        contract = {name: files.get(name, 'a' * 64) for name in op.CONTRACT}
+        content = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+        value.update(files=files, contract=contract, release_id='build-' + content[:16],
+                     src_hash=hashlib.sha256(json.dumps({k: v for k, v in files.items()
+                         if k.startswith('src/')}, sort_keys=True).encode()).hexdigest())
+        incoming, private = MemoryTree(), MemoryTree()
+        incoming.documents['manifest.json'] = json.dumps(value).encode()
+        private.documents['releases/' + value['release_id'] + '/manifest.json'] = incoming.read('manifest.json')
+        for name, raw in source.items():
+            private.documents['releases/' + value['release_id'] + '/' + name] = raw
+        original_cache = copy.deepcopy(private.documents)
+        prod = {name: contract[name] for name in op.LEGACY_CONTRACT}
+        config = {'store': '/store', 'allowed_uid': 1000, 'contract': prod,
+                  'isolated_test_runtime': isolated_policy(contract)}
+        operator = op.Operator(config, private)
+        pin = op.validate_isolated_test_runtime(config['isolated_test_runtime'])
+        with patch.object(op, 'Tree', return_value=incoming):
+            self.assertEqual((value, content), operator.source(value['release_id'], isolated_test_runtime=pin))
+            with self.assertRaisesRegex(op.Rejected, 'contract_requires_admin_update'):
+                operator.source(value['release_id'])
+            changed = copy.deepcopy(pin)
+            changed['contract']['requirements.lock.txt'] = 'f' * 64
+            with self.assertRaises(op.Rejected):
+                operator.source(value['release_id'], isolated_test_runtime=changed)
+            del config['isolated_test_runtime']
+            with self.assertRaises(op.Rejected):
+                operator.source(value['release_id'])
+            for corruption in ('lock', 'hash'):
+                damaged = copy.deepcopy(value)
+                if corruption == 'lock':
+                    del damaged['files']['requirements.lock.txt']
+                else:
+                    damaged['src_hash'] = 'f' * 64
+                incoming.documents['manifest.json'] = json.dumps(damaged).encode()
+                with self.subTest(corruption=corruption), self.assertRaises(op.Rejected):
+                    operator.source(value['release_id'], isolated_test_runtime=pin)
+            incoming.documents['manifest.json'] = json.dumps(value).encode()
+            config['contract'] = dict(contract)
+            config['isolated_test_runtime'] = None
+            self.assertEqual((value, content), operator.source(value['release_id']))
+        self.assertEqual(original_cache, private.documents)
+
     def test_source_admission_preserves_lf_crlf_bytes_and_rejects_invalid_markers(self):
         class AdmissionTree(MemoryTree):
             def read(self, name, limit=None):
@@ -484,7 +584,8 @@ class NasOperatorTests(unittest.TestCase):
                 contract = {name: files.get(name, 'a' * 64) for name in op.CONTRACT}
                 content = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
                 release = 'build-' + content[:16]
-                value = dict(format=1, release_id=release, server_build='build', files=files,
+                value = dict(format=1, contract_version=op.CONTRACT_VERSION,
+                    release_id=release, server_build='build', files=files,
                     contract=contract, src_hash=hashlib.sha256(json.dumps(
                         {k: v for k, v in files.items() if k.startswith('src/')}, sort_keys=True).encode()).hexdigest())
                 incoming.documents.update(source, **{'manifest.json': json.dumps(value).encode()})
@@ -695,8 +796,10 @@ class NasOperatorTests(unittest.TestCase):
         for value in ('src/../../etc/passwd', 'src//app.py', 'src\\app.py', '/src/app.py', 'src/./app.py'):
             with self.subTest(value=value), self.assertRaises(op.Rejected):
                 op.source_name(value)
-        with self.assertRaises(op.Rejected):
-            op.source_name('.env')
+        op.source_name('requirements.lock.txt')
+        for value in ('.env', 'requirements.txt', 'requirements.lock.txt.extra'):
+            with self.subTest(value=value), self.assertRaises(op.Rejected):
+                op.source_name(value)
         self.assertEqual('2026.10.08-example-a1b2', op.identifier('2026.10.08-example-a1b2'))
 
     def test_manifest_binds_contract_build_src_and_all_file_hashes(self):
@@ -731,7 +834,7 @@ class NasOperatorTests(unittest.TestCase):
             changed['src_hash'] = hashlib.sha256(json.dumps(
                 {k: v for k, v in files.items() if k.startswith('src/')}, sort_keys=True).encode()).hexdigest()
             with self.subTest(name=name):
-                if name in ('pyproject.toml', 'src/kiwoom_monitor/central_server/central_schema.py'):
+                if name in ('pyproject.toml', 'requirements.lock.txt', 'src/kiwoom_monitor/central_server/central_schema.py'):
                     with self.assertRaisesRegex(op.Rejected, 'contract_requires_admin_update'):
                         op.validate_manifest(changed, changed['release_id'], installed)
                 else:
@@ -740,6 +843,29 @@ class NasOperatorTests(unittest.TestCase):
                         changed['contract'][name] = 'c' * 64
                         with self.assertRaisesRegex(op.Rejected, 'contract_file_hash_mismatch'):
                             op.validate_manifest(changed, changed['release_id'], installed)
+
+    def test_contract_versions_preserve_legacy_and_require_reviewed_operator_update(self):
+        current, installed, _ = manifest()
+        legacy = copy.deepcopy(current)
+        legacy.pop('contract_version')
+        legacy['contract'].pop('requirements.lock.txt')
+        legacy['files'].pop('requirements.lock.txt')
+        content = hashlib.sha256(json.dumps(legacy['files'], sort_keys=True).encode()).hexdigest()
+        legacy['release_id'] = legacy['server_build'] + '-' + content[:16]
+        before = copy.deepcopy(legacy)
+        self.assertEqual(content, op.validate_manifest(legacy, legacy['release_id'], legacy['contract']))
+        self.assertEqual(before, legacy)
+        for value, runtime in ((current, legacy['contract']), (legacy, installed)):
+            with self.subTest(version=value.get('contract_version')), self.assertRaisesRegex(
+                    op.Rejected, 'contract_requires_admin_update'):
+                op.validate_manifest(value, value['release_id'], runtime)
+        for version in (None, True, 3):
+            invalid = {**current, 'contract_version': version}
+            with self.subTest(version=version), self.assertRaisesRegex(op.Rejected, 'invalid_release_contract_version'):
+                op.validate_manifest(invalid, invalid['release_id'], installed)
+        legacy['files']['requirements.lock.txt'] = installed['requirements.lock.txt']
+        with self.assertRaisesRegex(op.Rejected, 'dependency_contract_version_mismatch'):
+            op.validate_manifest(legacy, legacy['release_id'], legacy['contract'])
 
     def test_parser_exposes_no_arbitrary_command_mount_dsn_or_env(self):
         with contextlib.redirect_stderr(__import__('io').StringIO()):
@@ -1054,37 +1180,60 @@ class NasOperatorTests(unittest.TestCase):
 
 
     def test_final_fence_failure_marks_report_failed_and_never_publishes_gate(self):
-        for failure in (False, True):
-            with self.subTest(failure=failure):
+        for isolated, failure in itertools.product((False, True), (None, 'fence', 'worker')):
+            with self.subTest(isolated=isolated, failure=failure):
                 private = MemoryTree()
+                existing_gate = b'previous production gate bytes'
+                if isolated:
+                    private.documents['gates/candidate.json'] = existing_gate
                 operator = unittest.mock.Mock()
                 job = 'e' * 32
                 operator.source.return_value = ({}, 'c' * 64)
                 operator.run_job.return_value = {'job_id': job, 'source_hash': 'c' * 64,
                                                 'state': 'passed', 'cleanup_complete': True,
                                                 'active_release_and_containers_unchanged': True}
+                if failure == 'worker':
+                    operator.run_job.side_effect = op.Rejected('worker_failed')
                 operator.identity_mismatch = {'kind': 'server'}
                 @contextlib.contextmanager
                 def fence(**unused):
                     yield MemoryTree()
-                    if failure:
+                    if failure == 'fence':
                         raise op.Rejected('approved_container_changed')
                 operator.fence = fence
-                with patch.object(op, 'load_config', return_value={'private': '/private',
-                                     'profiles': ['selected']}), \
+                config = {'private': '/private', 'profiles': ['selected'],
+                          'isolated_test_runtime': isolated_policy() if isolated else None}
+                with patch.object(op, 'load_config', return_value=config), \
                         patch.object(op, 'Tree', return_value=private), \
                         patch.object(op, 'Operator', return_value=operator), \
+                        patch.object(op, 'validate_isolated_test_runtime',
+                                     wraps=op.validate_isolated_test_runtime) as validator, \
                         contextlib.redirect_stdout(io.StringIO()):
                     code = op.main(['test', 'candidate', '--profile', 'selected',
-                                    '--test', 'tests.unit.test_nas_operator'])
+                                    '--test', 'tests.unit.test_nas_operator'] +
+                                   (['--isolated-test-runtime'] if isolated else []))
                 self.assertEqual(1 if failure else 0, code)
+                if isolated:
+                    validator.assert_called_once_with(config['isolated_test_runtime'])
+                    policy = operator.source.call_args.kwargs['isolated_test_runtime']
+                    self.assertIs(policy, operator.run_job.call_args.kwargs['isolated_test_runtime'])
+                    self.assertIsNot(policy, config['isolated_test_runtime'])
+                    self.assertEqual(existing_gate, private.documents['gates/candidate.json'])
+                else:
+                    validator.assert_not_called()
+                    operator.source.assert_called_once_with('candidate')
+                if failure == 'worker':
+                    if not isolated:
+                        self.assertNotIn('gates/candidate.json', private.documents)
+                    continue
                 report = private.json('reports/' + job + '.json')
                 self.assertEqual(not failure, report['post_job_fence_verified'])
                 self.assertEqual('failed' if failure else 'passed', report['state'])
                 if failure:
-                    self.assertNotIn('gates/candidate.json', private.documents)
+                    if not isolated:
+                        self.assertNotIn('gates/candidate.json', private.documents)
                     self.assertEqual({'kind': 'server'}, report['identity_mismatch'])
-                else:
+                elif not isolated:
                     self.assertTrue(private.json('gates/candidate.json')['post_job_fence_verified'])
 
     def test_capture_fence_distinguishes_durable_idle_from_retained_ram(self):
@@ -1193,6 +1342,28 @@ class NasOperatorTests(unittest.TestCase):
             'memory_limit_bytes': 268435456, 'cpu_affinity': '0,1'},
             report['worker_result_summary'])
         self.assertNotIn('secret', repr(report))
+
+        identities = ['tests.integration.fixture.Cases.test_case_' + str(index) for index in range(25)]
+        fields = ('discovered_test_ids', 'executed_test_ids', 'passed_test_ids')
+        receipt = dict(zip(fields, (identities, identities, identities[:-1])))
+        for invalid in (None, 'string', ['TOKEN=secret'], [{}],
+                        ['tests.integration.fixture.Cases.' + 'x' * 256]):
+            with self.subTest(identity_value=type(invalid).__name__):
+                document = dict(output.json('result.json'), **receipt)
+                if invalid is not None:
+                    document['passed_test_ids'] = invalid
+                output.put_json('result.json', document)
+                observed = {}
+                with patch.object(op, 'Tree', return_value=output):
+                    operator.worker_failure_diagnostics(observed, 'a' * 32, '/worker')
+                summary = observed['worker_result_summary']
+                self.assertEqual(invalid is None, summary['test_identity_receipt_available'])
+                for field in fields:
+                    if invalid is None:
+                        self.assertEqual(receipt[field], summary[field])
+                    else:
+                        self.assertNotIn(field, summary)
+                self.assertNotIn('secret', repr(observed))
 
     def test_worker_failure_reason_preserves_only_controlled_bounded_codes(self):
         for reason in ('private_persistence_timeout', 'capacity_native_workload_incomplete',
@@ -1351,7 +1522,8 @@ class NasOperatorTests(unittest.TestCase):
             'psycopg.OperationalError: TOKEN=secret')]
         runner = unittest.mock.Mock()
         runner.run.return_value = result
-        with patch.object(worker.unittest, 'TestSuite'), \
+        with patch.object(worker.unittest.defaultTestLoader, 'loadTestsFromName',
+                          return_value=unittest.TestSuite()), \
                 patch.object(worker.unittest, 'TextTestRunner', return_value=runner):
             summary = worker.run_tests(['tests.integration.example.ExampleTests'])
         self.assertEqual('failed', summary['state'])
@@ -1364,6 +1536,64 @@ class NasOperatorTests(unittest.TestCase):
              'traceback_locations': [{'file': 'database.py', 'line': 44, 'function': 'save'}]},
         ], summary['failed_tests'])
         self.assertNotIn('secret', repr(summary))
+
+    def test_worker_actual_id_receipt_tracks_nested_suite_and_outcomes(self):
+        class Cases(unittest.TestCase):
+            def id(self):
+                return 'tests.integration.receipt_fixture.' + type(self).__name__ + '.' + self._testMethodName
+
+            def test_ok(self):
+                pass
+
+            def test_other_ok(self):
+                pass
+
+            def test_assertion(self):
+                self.fail('TOKEN=secret')
+
+            def test_error(self):
+                raise ValueError('TOKEN=secret')
+
+            @unittest.skip('controlled fixture')
+            def test_skip(self):
+                pass
+
+            @unittest.expectedFailure
+            def test_expected(self):
+                self.fail('TOKEN=secret')
+
+        class SetupFailure(Cases):
+            @classmethod
+            def setUpClass(cls):
+                raise RuntimeError('TOKEN=secret')
+
+        good = [Cases('test_ok'), Cases('test_other_ok')]
+        suite = unittest.TestSuite([good[0], unittest.TestSuite([good[1]])])
+        with patch.object(unittest.defaultTestLoader, 'loadTestsFromName', return_value=suite), \
+                contextlib.redirect_stderr(io.StringIO()) as verbose:
+            normal = worker.run_tests(['fixture-request-is-not-an-actual-ID'])
+        self.assertEqual('passed', normal['state'])
+        self.assertEqual(2, normal['tests'])
+        for field in ('discovered_test_ids', 'executed_test_ids', 'passed_test_ids'):
+            self.assertEqual([case.id() for case in good], normal[field])
+        self.assertIn('test_ok', verbose.getvalue())
+        self.assertNotIn('fixture-request-is-not-an-actual-ID', repr(normal))
+
+        cases = [Cases(name) for name in ('test_ok', 'test_assertion', 'test_error',
+                                          'test_skip', 'test_expected')]
+        never_started = SetupFailure('test_other_ok')
+        suite = unittest.TestSuite([cases[0], unittest.TestSuite([
+            unittest.TestSuite(cases[1:]), unittest.TestSuite([never_started])])])
+        with patch.object(unittest.defaultTestLoader, 'loadTestsFromName', return_value=suite), \
+                contextlib.redirect_stderr(io.StringIO()):
+            failed = worker.run_tests(['fixture-request-is-not-an-actual-ID'])
+        self.assertEqual('failed', failed['state'])
+        self.assertEqual((5, 1, 2, 1, 1), tuple(failed[field] for field in
+            ('tests', 'failures', 'errors', 'skipped', 'expected_failures')))
+        self.assertEqual([case.id() for case in cases] + [never_started.id()], failed['discovered_test_ids'])
+        self.assertEqual([case.id() for case in cases], failed['executed_test_ids'])
+        self.assertEqual([cases[0].id()], failed['passed_test_ids'])
+        self.assertNotIn('secret', repr(failed))
 
     def test_worker_has_no_live_mount_socket_secrets_or_host_network(self):
         config = {'worker_memory': 4 * 1024 ** 3, 'worker_cpuset': '0,1', 'helper_dir': '/root/helper',
@@ -1387,6 +1617,81 @@ class NasOperatorTests(unittest.TestCase):
         self.assertEqual(4 * 1024**3, config['worker_memory'])
         with self.assertRaisesRegex(op.Rejected, 'invalid_worker_resource_profile'):
             operator.worker_argv('c' * 32, 'pg', 'release', worker_memory=64 * 1024**3)
+
+    def test_isolated_worker_image_and_parent_binding_leave_production_owners_unchanged(self):
+        from types import SimpleNamespace
+        for failure in (None, 'isolation', 'result'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                operator = ReplayMaintenanceOperator()
+                operator.private.path = directory
+                operator.config.update(helper_dir='/fixed/helper', worker_memory=256 * 1024**2,
+                    pg_memory=128 * 1024**2, minimum_disk_free=1, pg_cpuset='0', worker_cpuset='0,1',
+                    pg_image_id='fixed-pg', runtime_image_id='fixed-production', job_timeout=10)
+                production = copy.deepcopy(operator.config)
+                policy = op.validate_isolated_test_runtime(isolated_policy())
+                args = op.parser().parse_args(['test', 'candidate', '--profile', 'selected', '--test',
+                    'tests.unit.test_nas_operator', '--isolated-test-runtime'])
+                output = MemoryTree()
+                output.put_json('result.json', {'state': 'passed', 'memory_limit_bytes': 1024,
+                    'cpu_affinity': '0,1', 'admission_scope': 'production',
+                    'runtime_image_id': 'worker-cannot-choose', 'isolated_test_runtime_sha256': 'forged'})
+                worker_inspections = []
+
+                def docker(argv, timeout=30, log=None, capture_stderr=False):
+                    operator.actions.append(tuple(argv))
+                    if argv[0] == 'exec' and argv[-1].startswith('if ['):
+                        return str(operator.config['pg_memory']).encode()
+                    if argv[0] == 'exec' and argv[-1].startswith('while IFS'):
+                        return b'0'
+                    return b'true' if argv[0] == 'info' else b''
+
+                def inspect(name):
+                    job = name.rsplit('-', 1)[-1]
+                    is_worker = 'worker' in name
+                    image = policy['runtime_image_id'] if is_worker else operator.config['pg_image_id']
+                    if is_worker:
+                        worker_inspections.append(name)
+                        if (failure == 'isolation' and len(worker_inspections) == 1 or
+                                failure == 'result' and len(worker_inspections) == 2):
+                            image = 'sha256:' + 'f' * 64
+                    return {'Image': image, 'State': {'ExitCode': 0, 'OOMKilled': False},
+                        'HostConfig': {'Memory': 1024, 'Privileged': False,
+                                       'CpusetCpus': '0,1' if is_worker else '0'},
+                        'Config': {'Labels': {op.LABEL: job}}}
+
+                operator.docker, operator.inspect = docker, inspect
+                operator.cleanup_job = lambda job: operator.actions.append(('cleanup', job))
+                real_path = Path
+                meminfo = SimpleNamespace(read_text=lambda: 'MemAvailable: 20000000 kB\n')
+                with patch.object(op.os, 'sched_getaffinity', return_value={0, 1}, create=True), \
+                        patch.object(op.shutil, 'disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)), \
+                        patch.object(op.os, 'chown', create=True), \
+                        patch.object(op, 'Path', side_effect=lambda p: meminfo if p == '/proc/meminfo' else real_path(p)), \
+                        patch.object(op, 'Tree', side_effect=lambda p, **unused:
+                                     operator.store if p == '/store' else output):
+                    if failure:
+                        with self.assertRaisesRegex(op.Rejected, 'isolated_test_runtime_image_changed'):
+                            operator.run_job(args, {}, 'c' * 64, isolated_test_runtime=policy)
+                        report = next(value for key, value in operator.private.documents.items()
+                                      if key.startswith('reports/'))
+                    else:
+                        report = operator.run_job(args, {}, 'c' * 64, isolated_test_runtime=policy)
+                worker_create = next(action for action in operator.actions
+                                     if action[0] == 'create' and 'kiwoom-op-worker-' in action[2])
+                self.assertIn(policy['runtime_image_id'], worker_create)
+                self.assertIn('--pull=never', worker_create)
+                self.assertNotIn('fixed-production', worker_create)
+                self.assertEqual('isolated-test', report['admission_scope'])
+                self.assertEqual(policy['runtime_image_id'], report['runtime_image_id'])
+                binding = hashlib.sha256(json.dumps(policy, sort_keys=True,
+                    separators=(',', ':')).encode()).hexdigest()
+                self.assertEqual(binding, report['isolated_test_runtime_sha256'])
+                self.assertEqual('failed' if failure else 'passed', report['state'])
+                self.assertTrue(report['cleanup_complete'])
+                self.assertEqual(production, operator.config)
+                self.assertTrue(operator.running)
+                self.assertTrue(operator.database_running)
+                self.assertFalse(any(action[0] == 'stop' for action in operator.actions))
 
     def test_cpu_lists_are_bounded_and_invalid_or_duplicate_ranges_fail(self):
         self.assertEqual({0, 1, 4}, op.cpu_set('0-1,4'))
@@ -1499,6 +1804,9 @@ class NasOperatorTests(unittest.TestCase):
             outcome = worker.run_tests(['fixture'])
         self.assertEqual('failed', outcome['state'])
         self.assertEqual(1, outcome['skipped'])
+        self.assertEqual([OnlySkipped('test_missing').id()], outcome['discovered_test_ids'])
+        self.assertEqual(outcome['discovered_test_ids'], outcome['executed_test_ids'])
+        self.assertEqual([], outcome['passed_test_ids'])
         class ExpectedFailure(unittest.TestCase):
             @unittest.expectedFailure
             def test_expected(self):
@@ -1517,6 +1825,273 @@ class NasOperatorTests(unittest.TestCase):
                 outcome = worker.run_tests(['fixture'])
             self.assertEqual('failed', outcome['state'])
             self.assertEqual(1, outcome[field])
+            self.assertEqual([case.id()], outcome['discovered_test_ids'])
+            self.assertEqual([case.id()], outcome['executed_test_ids'])
+            self.assertEqual([], outcome['passed_test_ids'])
+
+    def test_status_snapshot_preserves_enabled_shape_and_only_optional_404_is_unavailable(self):
+        from urllib.error import HTTPError, URLError
+
+        health = '/health'
+        tools = ('/api/v1/diagnostics/workloads', '/api/v1/diagnostics/trace',
+                 '/api/v1/diagnostics/reports?limit=20')
+        documents = {
+            health: {'status': 'ok', 'server_build': 'build-a'},
+            tools[0]: {'diagnostic_tool': {'enabled': False}, 'trace_capture': {'enabled': False},
+                       'workloads': {'news': {'paused_by_diagnostic': False}}},
+            tools[1]: {'state': 'off'}, tools[2]: {'items': []},
+        }
+        expected = dict(idle_snapshot(), health='ok', server_build='build-a',
+                        source_path='/app/source-runtime/releases/release-a/src')
+        calls = []
+
+        def generated(observation_only=False, replacements=None):
+            responses = dict(documents, **(replacements or {}))
+            calls.clear()
+            def opened(request, timeout):
+                self.assertEqual(5, timeout)
+                self.assertEqual('Bearer fixture-token', request.get_header('Authorization'))
+                path = request.full_url[len('http://127.0.0.1:8787'):]
+                calls.append(path)
+                value = responses[path]
+                if isinstance(value, BaseException):
+                    raise value
+                return io.BytesIO(value if type(value) is bytes else json.dumps(value).encode())
+            with patch('urllib.request.urlopen', side_effect=opened), \
+                    patch.dict('os.environ', {'MONITOR_SERVER_ACCESS_TOKEN': 'fixture-token',
+                                             'KIWOOM_SERVER_PORT': '8787'}), \
+                    patch('sys.argv', ['-c'] + (['status'] if observation_only else [])), \
+                    patch.object(Path, 'read_bytes', return_value=(
+                        b'PYTHONPATH=/app/source-runtime/releases/release-a/src\0')), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                exec(compile(op.SNAPSHOT_CODE, '<operator-snapshot>', 'exec'), {})
+            return json.loads(output.getvalue())
+
+        for observation_only in (False, True):
+            with self.subTest(normal=observation_only):
+                self.assertEqual(expected, generated(observation_only))
+                self.assertEqual([health, *tools], calls)
+        busy_documents = {
+            tools[0]: dict(documents[tools[0]], workloads={'news': {'paused_by_diagnostic': True}}),
+            tools[2]: {'items': [{'report_id': 'run-a', 'state': 'running'},
+                                 {'report_id': 'done', 'state': 'complete'}]},
+        }
+        busy = generated(True, busy_documents)
+        self.assertEqual(dict(expected, paused_workloads=['news'], active_runs=['run-a']), busy)
+        with self.assertRaises(op.Rejected):
+            op.idle(busy)
+
+        for mask in range(1, 8):
+            missing = [path for index, path in enumerate(tools) if mask & (1 << index)]
+            replacements = {path: HTTPError(path, 404, 'fixture', {}, None) for path in missing}
+            with self.subTest(missing=missing):
+                observed = generated(True, replacements)
+                self.assertEqual('ok', observed['health'])
+                self.assertEqual('build-a', observed['server_build'])
+                self.assertEqual(expected['source_path'], observed['source_path'])
+                self.assertEqual({'version': 1, 'state': 'UNAVAILABLE', 'idle': 'UNKNOWN',
+                                  'missing_endpoints': missing}, observed['diagnostic_observation'])
+                self.assertEqual([health, *tools], calls)
+                for field, endpoint in (('diagnostic_tool', tools[0]), ('trace_capture', tools[0]),
+                                        ('paused_workloads', tools[0]), ('trace', tools[1]),
+                                        ('active_runs', tools[2])):
+                    self.assertEqual(None if endpoint in missing else expected[field], observed[field])
+                with self.assertRaises(op.Rejected):
+                    op.idle(observed)
+        for path in (health, *tools):
+            for code in (401, 403, 500, 503):
+                for observation_only in (False, True):
+                    with self.subTest(path=path, code=code, observation=observation_only), \
+                            self.assertRaises(HTTPError) as raised:
+                        generated(observation_only, {path: HTTPError(path, code, 'fixture', {}, None)})
+                    self.assertEqual(code, raised.exception.code)
+            for failure in (TimeoutError('fixture'), URLError('fixture')):
+                for observation_only in (False, True):
+                    with self.subTest(path=path, failure=type(failure).__name__, observation=observation_only), \
+                            self.assertRaises(type(failure)):
+                        generated(observation_only, {path: failure})
+            for observation_only in (False, True):
+                with self.subTest(path=path, invalid_json=True, observation=observation_only), \
+                        self.assertRaises(json.JSONDecodeError):
+                    generated(observation_only, {path: b'not-json'})
+                with self.subTest(path=path, json_null=True, observation=observation_only), \
+                        self.assertRaises((AttributeError, TypeError)):
+                    generated(observation_only, {path: b'null'})
+            for observation_only in ((False, True) if path == health else (False,)):
+                with self.subTest(path=path, strict404=True, observation=observation_only), \
+                        self.assertRaises(HTTPError):
+                    generated(observation_only, {path: HTTPError(path, 404, 'fixture', {}, None)})
+        for path, failure in ((tools[1], HTTPError(tools[1], 401, 'fixture', {}, None)),
+                              (tools[2], TimeoutError('fixture'))):
+            with self.subTest(earlier404=True, later_failure=path), self.assertRaises(type(failure)):
+                generated(True, {tools[0]: HTTPError(tools[0], 404, 'fixture', {}, None), path: failure})
+
+    def test_snapshot_status_marker_is_explicit_and_default_call_stays_strict(self):
+        operator = op.Operator({'server_id': 'server-id'}, None)
+        with patch.object(operator, 'docker', return_value=b'{}') as docker:
+            self.assertEqual({}, operator.snapshot())
+            self.assertEqual(['exec', 'server-id', 'python', '-I', '-c', op.SNAPSHOT_CODE],
+                             docker.call_args.args[0])
+            self.assertEqual({}, operator.snapshot(observation_only=True))
+            self.assertEqual(['exec', 'server-id', 'python', '-I', '-c', op.SNAPSHOT_CODE, 'status'],
+                             docker.call_args.args[0])
+
+    def test_status_unavailable_diagnostics_is_unknown_and_never_idle(self):
+        tree = MemoryTree()
+        tree.put_json('active.json', {'release_id': 'release-a'})
+        operator = op.Operator({'store': '/store', 'allowed_uid': 1000, 'server_id': 'server-id'}, tree)
+        marker = {'version': 1, 'state': 'UNAVAILABLE', 'idle': 'UNKNOWN',
+                  'missing_endpoints': ['/api/v1/diagnostics/trace']}
+        snapshot = dict(idle_snapshot(), health='ok', server_build='build-a', trace=None,
+                        diagnostic_observation=marker)
+        for running, observed in ((True, snapshot), (True, idle_snapshot()), (False, None)):
+            with self.subTest(running=running, missing=observed is snapshot), \
+                    patch.object(op, 'Tree', return_value=tree), \
+                    patch.object(operator, 'identities') as identities, \
+                    patch.object(operator, 'access_state', return_value={'state': 'enabled'}), \
+                    patch.object(operator, 'helper_update_journal', return_value={'state': 'idle'}), \
+                    patch.object(operator, 'inspect', return_value={'State': {'Running': running}}), \
+                    patch.object(operator, 'snapshot', return_value=observed) as captured:
+                result = operator.status()
+                identities.assert_called_once_with(running=False)
+                self.assertEqual('release-a', result['active_release'])
+                self.assertTrue(result['installed'])
+                if running:
+                    captured.assert_called_once_with(observation_only=True)
+                    self.assertEqual(observed, result['snapshot'])
+                    self.assertEqual(observed is not snapshot, result['diagnostics_idle'])
+                    if observed is snapshot:
+                        self.assertEqual('diagnostic_state_unknown', result['blocker'])
+                        self.assertEqual(marker, result['snapshot']['diagnostic_observation'])
+                        with self.assertRaises(op.Rejected):
+                            op.idle(observed)
+                    else:
+                        self.assertNotIn('blocker', result)
+                else:
+                    captured.assert_not_called()
+                    self.assertFalse(result['diagnostics_idle'])
+                    self.assertEqual('server_stopped', result['blocker'])
+
+    def test_versioned_snapshot_uses_authenticated_owner_read_and_preserves_legacy_gets(self):
+        from urllib.error import HTTPError, URLError
+        health, endpoint = '/health', '/api/v1/operator/state'
+        owned = {'contract':'operator-state', 'version':1, 'scope':'diagnostic_exclusion',
+                 'checked_at':'2026-10-27T10:15:40+09:00', 'composition':'not_installed',
+                 'control':{'state':'not_created'}, 'trace':{'state':'not_created'}, 'runs':{'state':'not_created'}}
+        paths = []
+        def generated(advertised=1, value=None, observation_only=False, failure=None):
+            paths.clear()
+            def opened(request, timeout):
+                self.assertEqual(5, timeout)
+                self.assertEqual('Bearer fixture-token', request.get_header('Authorization'))
+                path = request.full_url[len('http://127.0.0.1:8787'):]
+                paths.append(path)
+                if path == health:
+                    result = {'status':'ok', 'server_build':'build-a', 'operator_state_version':advertised}
+                else:
+                    self.assertEqual(endpoint, path, 'version1 must never request legacy diagnostic APIs')
+                    if failure is not None:
+                        raise failure
+                    result = owned if value is None else value
+                return io.BytesIO(result if type(result) is bytes else json.dumps(result).encode())
+            with patch('urllib.request.urlopen', side_effect=opened), \
+                    patch.dict('os.environ', {'MONITOR_SERVER_ACCESS_TOKEN':'fixture-token', 'KIWOOM_SERVER_PORT':'8787'}), \
+                    patch('sys.argv', ['-c'] + (['status'] if observation_only else [])), \
+                    patch.object(Path, 'read_bytes', return_value=b'PYTHONPATH=/app/source-runtime/releases/release-a/src\0'), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                exec(compile(op.SNAPSHOT_CODE, '<operator-snapshot>', 'exec'), {})
+            return output.getvalue().encode()
+        operator = op.Operator({'server_id':'server-id', 'ready_timeout':1}, None)
+        for observation_only in (False, True):
+            raw = generated(observation_only=observation_only)
+            self.assertEqual([health, endpoint], paths)
+            with patch.object(operator, 'docker', return_value=raw):
+                snapshot = operator.snapshot(observation_only=observation_only)
+            self.assertEqual(owned, snapshot['operator_state'])
+            self.assertFalse({'trace', 'active_runs', 'paused_workloads', 'diagnostic_tool'} & set(snapshot))
+            op.idle(snapshot)
+        for advertisement in (None, True, False, 0, 2, '1', {}):
+            with self.subTest(advertisement=advertisement), self.assertRaises(ValueError):
+                generated(advertised=advertisement, observation_only=True)
+            self.assertEqual([health], paths)
+        for observation_only in (False, True):
+            for code in (404, 401, 403, 500, 503):
+                with self.subTest(code=code, observation=observation_only), self.assertRaises(HTTPError):
+                    generated(observation_only=observation_only, failure=HTTPError(endpoint, code, 'fixture', {}, None))
+                self.assertEqual([health, endpoint], paths)
+            for failure in (TimeoutError('fixture'), URLError('fixture')):
+                with self.assertRaises(type(failure)):
+                    generated(observation_only=observation_only, failure=failure)
+            with self.assertRaises(json.JSONDecodeError):
+                generated(value=b'not-json', observation_only=observation_only)
+        for value in ({}, b'null', dict(owned, version=True), dict(owned, scope='business_idle')):
+            raw = generated(value=value)
+            with patch.object(operator, 'docker', return_value=raw), self.assertRaises(op.Rejected):
+                operator.snapshot()
+        unknown = dict(owned, composition='installed', control={'source':'unknown'},
+                       trace={'state':'unknown'}, runs={'state':'unknown'})
+        raw = generated(value=unknown)
+        with patch.object(operator, 'docker', return_value=raw), patch.object(operator, 'identities') as identities:
+            # Structurally valid UNKNOWN is not a new semantic readiness gate.
+            snapshot = operator.wait_ready('release-a', {'server_build':'build-a'})
+            self.assertEqual(unknown, snapshot['operator_state'])
+            identities.assert_called_once_with()
+        with self.assertRaises(op.Rejected):
+            op.idle(snapshot)
+        # Exact legacy4GET/output/strict404 cases remain in the unchanged MAIN135 generated-code test.
+
+    def test_versioned_owner_state_never_downgrades_and_accepts_only_complete_owned_facts(self):
+        absent = {'contract':'operator-state', 'version':1, 'scope':'diagnostic_exclusion',
+                  'checked_at':'2026-10-27T10:15:40+09:00', 'composition':'not_installed',
+                  'control':{'state':'not_created'}, 'trace':{'state':'not_created'}, 'runs':{'state':'not_created'}}
+        op.idle({'operator_state':absent})
+        installed = dict(absent, composition='installed', control={'source':'unconfigured'})
+        op.idle({'operator_state':installed})
+        installed['control'] = {'source':'known', 'master_enabled':False, 'trace_enabled':False, 'paused_count':0}
+        op.idle({'operator_state':installed})
+        drained = {key:0 for key in ('queued', 'pending_events', 'copy_reserved_bytes',
+                                     'charged_bytes', 'packing_events', 'packed_events')}
+        drained.update(state='complete', worker='exited', accepted=10, written=10)
+        for state in ('complete', 'incomplete'):
+            for phase in ('completed', 'incomplete', 'aborted', 'failed'):
+                value = dict(installed, trace=dict(drained, state=state),
+                             runs={'state':'owned', 'worker':'exited', 'phase':phase})
+                op.idle({'operator_state':value})
+        invalid = []
+        for key in absent:
+            value = copy.deepcopy(absent)
+            del value[key]
+            invalid.append(value)
+        invalid.extend((dict(absent, version=True), dict(absent, version=2), dict(absent, checked_at='2026-10-27T10:15:40'),
+                        dict(absent, checked_at='2026-10-27T01:15:40+00:00'), dict(absent, scope='global_idle'),
+                        dict(absent, trace={}), dict(absent, runs={'state':'not_created', 'worker':'exited'})))
+        for field in ('master_enabled', 'trace_enabled', 'paused_count'):
+            value = copy.deepcopy(installed)
+            del value['control'][field]
+            invalid.append(value)
+        for key in drained:
+            value = dict(installed, trace=dict(drained))
+            del value['trace'][key]
+            invalid.append(value)
+        for key in ('queued', 'accepted'):
+            invalid.append(dict(installed, trace=dict(drained, **{key:True})))
+        for value in invalid:
+            with self.subTest(invalid=value), self.assertRaises(op.Rejected):
+                op.validate_operator_state(value)
+        blocked = [dict(installed, control={'source':'unknown'}), dict(installed, trace={'state':'unknown'}),
+                   dict(installed, runs={'state':'unknown'}), dict(installed, trace=dict(drained, worker='running')),
+                   dict(installed, trace=dict(drained, worker='unknown')), dict(installed, trace=dict(drained, written=9)),
+                   dict(installed, runs={'state':'owned', 'worker':'running', 'phase':'completed'}),
+                   dict(installed, runs={'state':'owned', 'worker':'exited', 'phase':'running'})]
+        for key in ('queued', 'pending_events', 'copy_reserved_bytes', 'charged_bytes', 'packing_events', 'packed_events'):
+            blocked.append(dict(installed, trace=dict(drained, **{key:1})))
+        for key in ('master_enabled', 'trace_enabled'):
+            blocked.append(dict(installed, control=dict(installed['control'], **{key:True})))
+        blocked.append(dict(installed, control=dict(installed['control'], paused_count=1)))
+        for value in blocked:
+            op.validate_operator_state(value)
+            with self.subTest(blocked=value), self.assertRaises(op.Rejected):
+                op.idle({'operator_state':value, **idle_snapshot()})
 
     def test_host_files_are_python38_compatible(self):
         root = Path(__file__).resolve().parents[2]

@@ -322,11 +322,18 @@ class AccountWideObservationMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.monitor = MockAccountMonitor(self.reader,self.runtime,self.repository,now_provider=lambda:NOW,
             automation_risk_repository=risk_repository,automation_binding_revision=1,automation_account_scope=SCOPE)
         self.monitor.set_account_order_observation_enabled(True)
-        with patch.object(risk_repository,'save_mock_automation_risk_snapshot',wraps=risk_repository.save_mock_automation_risk_snapshot) as saves:
+        with (patch.object(risk_repository,'save_mock_automation_risk_snapshot',wraps=risk_repository.save_mock_automation_risk_snapshot) as saves,
+              patch.object(self.repository, "account_active_intents", wraps=self.repository.account_active_intents) as active_reads,
+              patch.object(self.repository, "account_events", wraps=self.repository.account_events) as event_reads):
             await self.monitor.refresh_recovery()
             snapshot = saves.call_args.args[0]
             self.assertEqual(1,saves.call_count)
             self.assertEqual(1,self.reader.read_trade_cost_pages.call_count)
+            before, after = active_reads.call_args_list
+            self.assertNotIn("_reader", before.kwargs)
+            self.assertIsNotNone(after.kwargs.get("_reader"))
+            self.assertEqual(1, event_reads.call_count)
+            self.assertIs(after.kwargs["_reader"], event_reads.call_args.kwargs["_reader"])
         self.assertEqual(snapshot,risk_repository.load_latest_mock_automation_risk(ACCOUNT))
         self.assertEqual(snapshot,self.monitor.latest_position_observation.risk_snapshot)
         with patch.object(self.store,'_connect',side_effect=AssertionError('native risk RAM getter queried DB')):
@@ -337,6 +344,27 @@ class AccountWideObservationMonitorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1,self.reader.calls)
         self.monitor.handle_realtime('disconnected',None)
         self.assertIsNone(self.monitor.latest_position_observation)
+
+        load_active = self.repository.account_active_intents
+
+        def fail_scoped_active(account_ref, *, _reader=None):
+            if _reader is not None:
+                raise OSError("active ledger unavailable")
+            return load_active(account_ref)
+
+        with (patch.object(self.repository, "account_active_intents", side_effect=fail_scoped_active),
+              patch.object(self.repository, "account_events", wraps=self.repository.account_events) as event_reads):
+            await self.monitor.refresh_recovery()
+            self.assertFalse(self.monitor.latest_position_observation.open_orders_complete)
+            event_reads.assert_called_once()
+            self.assertNotIn("_reader", event_reads.call_args.kwargs)
+        before_failure = risk_repository.load_latest_mock_automation_risk(ACCOUNT)
+        with patch.object(self.repository, "account_events", side_effect=OSError("event ledger unavailable")) as event_reads:
+            with self.assertRaisesRegex(OSError, "event ledger unavailable"):
+                await self.monitor.refresh_recovery()
+            event_reads.assert_called_once()
+            self.assertIsNotNone(event_reads.call_args.kwargs.get("_reader"))
+        self.assertEqual(before_failure, risk_repository.load_latest_mock_automation_risk(ACCOUNT))
 
     async def test_opt_in_full_recovery_has_two_shared_reads_and_ram_getter_has_none(self):
         with patch.object(self.repository, "account_active_intents", wraps=self.repository.account_active_intents) as reads:

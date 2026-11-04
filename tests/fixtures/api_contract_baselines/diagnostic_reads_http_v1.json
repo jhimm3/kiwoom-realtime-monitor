@@ -15,7 +15,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-workloads",
@@ -27,7 +27,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-market-bar-saves",
@@ -39,7 +39,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-writers",
@@ -51,7 +51,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-db-calls",
@@ -63,7 +63,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-news-job-claim-plan",
@@ -75,7 +75,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-news-job-claim-readonly-analyze",
@@ -87,7 +87,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "resources",
@@ -98,14 +98,14 @@
         },
         "body": {
           "host_input": "controlled-host",
-          "database_size_bytes": 557056,
+          "database_size_bytes": 581632,
           "storage_categories": [
             {
               "category": "news",
               "label": "뉴스",
               "estimated_bytes": 0,
               "rows": 0,
-              "tables": 11
+              "tables": 12
             },
             {
               "category": "market",
@@ -132,7 +132,7 @@
               "category": "other",
               "label": "설정·기타",
               "estimated_bytes": 0,
-              "rows": 20,
+              "rows": 24,
               "tables": 5
             }
           ],
@@ -142,7 +142,7 @@
             "automatic_deletion_enabled": false
           }
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "writers",
@@ -868,7 +868,7 @@
             "per-backend wait attribution"
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "workloads-disabled",
@@ -984,7 +984,7 @@
           "expires_at": null,
           "control_revision": 0
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "missing-market-bar-saves",
@@ -1015,7 +1015,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-market-bar-saves10",
@@ -1027,7 +1027,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-market-bar-saves9",
@@ -1039,7 +1039,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-market-bar-saves1801",
@@ -1051,7 +1051,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "valid-market-bar-saves",
@@ -1299,7 +1299,7 @@
             "scope_note": "successful instrumented PostgreSQL writers only"
           }
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "missing-db-calls",
@@ -1330,7 +1330,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-db-calls10",
@@ -1342,7 +1342,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-db-calls9",
@@ -1354,7 +1354,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-db-calls1801",
@@ -1366,7 +1366,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "valid-db-calls",
@@ -1396,7 +1396,7 @@
           "unregistered_calls": 0,
           "scope_note": "capture-only pilot; unobserved/raw PostgreSQL calls are not counted"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'mode': 'bad'}",
@@ -1408,7 +1408,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'limit': 0}",
@@ -1420,7 +1420,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'limit': 501}",
@@ -1432,7 +1432,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'slow_ms': 0}",
@@ -1444,7 +1444,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'slow_ms': 30001}",
@@ -1456,7 +1456,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-mode-verbose",
@@ -1486,7 +1486,7 @@
           "unregistered_calls": 0,
           "scope_note": "capture-only pilot; unobserved/raw PostgreSQL calls are not counted"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-mode-raw",
@@ -1518,7 +1518,7 @@
           "calls": [],
           "raw_truncated": false
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "sqlite-plan-unavailable",
@@ -1530,7 +1530,7 @@
         "body": {
           "detail": "POSTGRES_DIAGNOSTIC_UNAVAILABLE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "sqlite-analyze-unavailable-first",
@@ -1542,7 +1542,7 @@
         "body": {
           "detail": "POSTGRES_DIAGNOSTIC_UNAVAILABLE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "postgres-plan-seam",
@@ -1556,7 +1556,7 @@
             "controlled-plan"
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "plan-too-large",
@@ -1568,7 +1568,7 @@
         "body": {
           "detail": "DIAGNOSTIC_PLAN_TOO_LARGE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "analyze-BODY",
@@ -1581,7 +1581,7 @@
           "mode": "controlled-readonly",
           "nodes": []
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "analyze-RULE",
@@ -1594,7 +1594,7 @@
           "mode": "controlled-readonly",
           "nodes": []
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "analyze-invalid",
@@ -1606,7 +1606,7 @@
         "body": {
           "detail": "NEWS_JOB_STAGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "workloads-paused",
@@ -1722,7 +1722,7 @@
           "expires_at": 4102444800.0,
           "control_revision": 7
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       }
     ],
     [
@@ -1736,7 +1736,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-workloads",
@@ -1748,7 +1748,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-market-bar-saves",
@@ -1760,7 +1760,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-writers",
@@ -1772,7 +1772,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-db-calls",
@@ -1784,7 +1784,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-news-job-claim-plan",
@@ -1796,7 +1796,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-news-job-claim-readonly-analyze",
@@ -1808,7 +1808,7 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "resources",
@@ -1819,14 +1819,14 @@
         },
         "body": {
           "host_input": "controlled-host",
-          "database_size_bytes": 557056,
+          "database_size_bytes": 581632,
           "storage_categories": [
             {
               "category": "news",
               "label": "뉴스",
               "estimated_bytes": 0,
               "rows": 0,
-              "tables": 11
+              "tables": 12
             },
             {
               "category": "market",
@@ -1853,7 +1853,7 @@
               "category": "other",
               "label": "설정·기타",
               "estimated_bytes": 0,
-              "rows": 20,
+              "rows": 24,
               "tables": 5
             }
           ],
@@ -1863,7 +1863,7 @@
             "automatic_deletion_enabled": false
           }
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "writers",
@@ -2589,7 +2589,7 @@
             "per-backend wait attribution"
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "workloads-disabled",
@@ -2705,7 +2705,7 @@
           "expires_at": null,
           "control_revision": 0
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "missing-market-bar-saves",
@@ -2736,7 +2736,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-market-bar-saves10",
@@ -2748,7 +2748,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-market-bar-saves9",
@@ -2760,7 +2760,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-market-bar-saves1801",
@@ -2772,7 +2772,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "valid-market-bar-saves",
@@ -3020,7 +3020,7 @@
             "scope_note": "successful instrumented PostgreSQL writers only"
           }
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "missing-db-calls",
@@ -3051,7 +3051,7 @@
             }
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-db-calls10",
@@ -3063,7 +3063,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-db-calls9",
@@ -3075,7 +3075,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "range-db-calls1801",
@@ -3087,7 +3087,7 @@
         "body": {
           "detail": "DIAGNOSTIC_TIME_RANGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "valid-db-calls",
@@ -3117,7 +3117,7 @@
           "unregistered_calls": 0,
           "scope_note": "capture-only pilot; unobserved/raw PostgreSQL calls are not counted"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'mode': 'bad'}",
@@ -3129,7 +3129,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'limit': 0}",
@@ -3141,7 +3141,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'limit': 501}",
@@ -3153,7 +3153,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'slow_ms': 0}",
@@ -3165,7 +3165,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-bounded-{'slow_ms': 30001}",
@@ -3177,7 +3177,7 @@
         "body": {
           "detail": "DIAGNOSTIC_DB_MODE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-mode-verbose",
@@ -3207,7 +3207,7 @@
           "unregistered_calls": 0,
           "scope_note": "capture-only pilot; unobserved/raw PostgreSQL calls are not counted"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "db-mode-raw",
@@ -3239,7 +3239,7 @@
           "calls": [],
           "raw_truncated": false
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "sqlite-plan-unavailable",
@@ -3251,7 +3251,7 @@
         "body": {
           "detail": "POSTGRES_DIAGNOSTIC_UNAVAILABLE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "sqlite-analyze-unavailable-first",
@@ -3263,7 +3263,7 @@
         "body": {
           "detail": "POSTGRES_DIAGNOSTIC_UNAVAILABLE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "postgres-plan-seam",
@@ -3277,7 +3277,7 @@
             "controlled-plan"
           ]
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "plan-too-large",
@@ -3289,7 +3289,7 @@
         "body": {
           "detail": "DIAGNOSTIC_PLAN_TOO_LARGE"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "analyze-BODY",
@@ -3302,7 +3302,7 @@
           "mode": "controlled-readonly",
           "nodes": []
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "analyze-RULE",
@@ -3315,7 +3315,7 @@
           "mode": "controlled-readonly",
           "nodes": []
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "analyze-invalid",
@@ -3327,7 +3327,7 @@
         "body": {
           "detail": "NEWS_JOB_STAGE_INVALID"
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "workloads-paused",
@@ -3443,7 +3443,7 @@
           "expires_at": 4102444800.0,
           "control_revision": 7
         },
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "workloads-after-candidate-publication",
@@ -3559,7 +3559,7 @@
           "expires_at": 4102444800.0,
           "control_revision": 7
         },
-        "storage_hash": "af537275e99507688118542ea961564bc10ea55039b3ee76a04056a310128f48"
+        "storage_hash": "9023dabcfdf5c52baf023d7245c8dd3cf2c792700e3fd0e039c804cda4401bad"
       }
     ]
   ]

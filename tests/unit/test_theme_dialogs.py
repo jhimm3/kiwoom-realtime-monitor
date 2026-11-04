@@ -23,10 +23,191 @@ from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog, ThemeP
 from qt_settings_test_support import wait_until
 
 
+def _preserve_delete_observations(path, label, observations, *, before=None):
+    """Keep independent native evidence inside this worker's owned TEMP."""
+    from contextlib import closing
+    import hashlib
+    import json
+    artifact = Path(tempfile.gettempdir()) / label
+    artifact.mkdir(exist_ok=False)
+    if before is not None:
+        (artifact / "before.sqlite3").write_bytes(before)
+    with closing(sqlite3.connect(path)) as connection:
+        native = {
+            "profiles": connection.execute("SELECT profile_id,profile_name FROM theme_profiles ORDER BY profile_id").fetchall(),
+            "active": connection.execute("SELECT value FROM settings WHERE key='theme_active_profile'").fetchone(),
+            "version": connection.execute("SELECT updated_at FROM central_setting_versions WHERE setting_key='theme_active_profile'").fetchone(),
+            "memberships": connection.execute("SELECT * FROM profile_stock_themes ORDER BY profile_id,stock_code,theme_name").fetchall(),
+        }
+        with closing(sqlite3.connect(artifact / "observed.sqlite3")) as backup:
+            connection.backup(backup)
+    (artifact / "observations.json").write_text(json.dumps({
+        "source_database": str(path), "post_body_database_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "before_database_sha256": hashlib.sha256(before).hexdigest() if before is not None else None,
+        "native": native, "observations": observations,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 class ThemePreviewDialogTests(unittest.TestCase):
+    def test_current_profile_delete_has_one_native_commit_and_notifies_coherent_selection(self):
+        from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "delete.sqlite3"
+            stamp = datetime.fromisoformat("2031-01-02T03:04:05+09:00")
+            database = Database(path, now_provider=lambda: stamp)
+            database.initialize_query_role(role="delete-fixture")
+            store = ThemeRepository(path, now_provider=lambda: stamp)
+            source = store.active_profile
+            store.create_profile("B")
+            observed, statements = [], []
+            store.set_change_callback(lambda: observed.append(ThemeBackupService(path).export_document()["active_profile"]))
+            dialog = ThemeManagerDialog(store, database.settings)
+            native = sqlite3.connect
+            def connect(*args, **kwargs):
+                connection = native(*args, **kwargs)
+                connection.set_trace_callback(statements.append)
+                return connection
+            try:
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, "warning") as warning, patch("kiwoom_monitor.infrastructure.persistence.settings_repository.sqlite3.connect", side_effect=connect):
+                    dialog._delete_current_theme_profile()
+                _preserve_delete_observations(path, "profile-delete-desired-coherence", {
+                    "source": source, "notifications": observed, "COMMITs": statements.count("COMMIT"),
+                    "statements": statements, "repository_active": store.active_profile,
+                    "cached_active": database.settings.get("theme_active_profile"),
+                    "combo_active": dialog._theme_profile.currentText(),
+                })
+                # Same real UI body is a desired regression on the frozen old
+                # source: it reports [source, B] and two writing COMMITs there.
+                self.assertEqual({"notifications": ["B"], "commits": 1, "active": "B", "profiles": ("B",)},
+                                 {"notifications": observed, "commits": statements.count("COMMIT"), "active": database.settings.get("theme_active_profile"), "profiles": store.list_profiles()})
+                self.assertNotIn(source, store.list_profiles())
+                self.assertEqual("B", store.active_profile)
+                self.assertEqual("B", dialog._theme_profile.currentText())
+                warning.assert_not_called()
+            finally:
+                dialog.close()
+
+    def test_current_profile_delete_rolls_back_source_when_replacement_active_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "delete.sqlite3"
+            stamp = datetime.fromisoformat("2031-01-02T03:04:05+09:00")
+            database = Database(path, now_provider=lambda: stamp)
+            database.initialize_query_role(role="delete-fixture")
+            store = ThemeRepository(path, now_provider=lambda: stamp)
+            source = store.active_profile
+            store.create_profile("B")
+            unapplied = []
+            dialog = ThemeManagerDialog(store, database.settings, on_theme_unapplied=lambda: unapplied.append(True))
+            before = path.read_bytes()
+            fault = sqlite3.OperationalError("controlled delete replacement active/version failure")
+            try:
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, "warning") as warning, patch.object(database.settings, "write_many_in_transaction", side_effect=fault):
+                    dialog._delete_current_theme_profile()
+                _preserve_delete_observations(path, "profile-delete-desired-rollback", {
+                    "source": source, "repository_active": store.active_profile,
+                    "cached_active": database.settings.get("theme_active_profile"),
+                    "combo_active": dialog._theme_profile.currentText(), "unapplied": unapplied,
+                    "enabled": dialog.isEnabled(), "warning": warning.call_args.args[2],
+                }, before=before)
+                # Desired before/after oracle: a failed replacement write must
+                # retain the source and its original current selection together.
+                self.assertEqual(before, path.read_bytes())
+                self.assertEqual(("B", source), store.list_profiles())
+                self.assertEqual(source, database.settings.get("theme_active_profile"))
+                self.assertEqual(source, store.active_profile)
+                self.assertEqual(source, dialog._theme_profile.currentText())
+                self.assertEqual([], unapplied)
+                self.assertTrue(dialog.isEnabled())
+                warning.assert_called_once()
+                self.assertIn("COMMIT 전 변경은 되돌렸습니다", warning.call_args.args[2])
+            finally:
+                dialog.close()
+
+    def test_current_profile_delete_keeps_confirmed_target_when_nested_loop_selects_another_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "delete.sqlite3"
+            stamp = datetime.fromisoformat("2031-01-02T03:04:05+09:00")
+            database = Database(path, now_provider=lambda: stamp)
+            database.initialize_query_role(role="delete-fixture")
+            store = ThemeRepository(path, now_provider=lambda: stamp)
+            source = store.active_profile
+            store.create_profile("B first")
+            store.create_profile("Z selected")
+            dialog = ThemeManagerDialog(store, database.settings)
+            prompts = []
+            def confirm(_parent, _title, prompt):
+                prompts.append(prompt)
+                dialog._theme_profile.setCurrentText("Z selected")
+                return QMessageBox.StandardButton.Yes
+            try:
+                with patch.object(QMessageBox, "question", side_effect=confirm), patch.object(QMessageBox, "warning") as warning:
+                    dialog._delete_current_theme_profile()
+                self.assertIn("'" + source + "'", prompts[0])
+                self.assertEqual(("B first", "Z selected"), store.list_profiles())
+                self.assertEqual("Z selected", store.active_profile)
+                self.assertEqual("Z selected", database.settings.get("theme_active_profile"))
+                self.assertEqual("Z selected", dialog._theme_profile.currentText())
+                warning.assert_not_called()
+            finally:
+                dialog.close()
+
+    def test_current_profile_rename_uses_same_port_and_blocked_refresh_without_reselect_or_second_write(self):
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize_query_role(role="rename-fixture")
+            store = ThemeRepository(path)
+            observed = []
+            store.set_change_callback(lambda: observed.append(ThemeBackupService(path).export_document()["active_profile"]))
+            dialog = ThemeManagerDialog(store, database.settings)
+            statements = []
+            native = sqlite3.connect
+            def connect(*args, **kwargs):
+                connection = native(*args, **kwargs)
+                connection.set_trace_callback(statements.append)
+                return connection
+            try:
+                with patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", return_value=("User", True)), patch.object(database.settings, "set", wraps=database.settings.set) as separate_save, patch.object(store, "select_profile", wraps=store.select_profile) as select, patch("kiwoom_monitor.infrastructure.persistence.settings_repository.sqlite3.connect", side_effect=connect):
+                    dialog._rename_current_theme_profile()
+                separate_save.assert_not_called()
+                select.assert_not_called()
+                self.assertEqual(["User"], observed)
+                self.assertEqual("User", dialog._theme_profile.currentText())
+                self.assertEqual("User", database.settings.get("theme_active_profile"))
+                self.assertEqual(1, sum(sql == "COMMIT" for sql in statements))
+            finally:
+                dialog.close()
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_active_profile_selection_notifies_generation_owner_after_actual_setting_save(self) -> None:
+        from types import SimpleNamespace
+        from kiwoom_monitor.presentation.main_window import MainWindow
+        from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+        from kiwoom_monitor.infrastructure.central_settings_sync import is_shared_setting
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path); database.initialize()
+            repository = ThemeRepository(path)
+            repository.create_profile("shared selection")
+            accepted_inputs = []
+            repository.set_change_callback(lambda: accepted_inputs.append(ThemeBackupService(path).export_document()))
+            owner = SimpleNamespace(_theme_store=repository, _refresh_theme_badges=lambda: None,
+                                    _refresh_rankings=lambda: None, _schedule_google_drive_upload=lambda _target: None)
+            dialog = ThemeManagerDialog(repository, database.settings,
+                                        on_profile_selected=lambda: MainWindow._on_themes_changed(owner, notify_repository=False))
+            try:
+                dialog._select_theme_profile("shared selection")
+                self.assertEqual("shared selection", database.settings.get("theme_active_profile"))
+                self.assertEqual("shared selection", repository.active_profile)
+                self.assertEqual(["shared selection"], [d["active_profile"] for d in accepted_inputs])
+                self.assertFalse(is_shared_setting("theme_active_profile"))
+            finally:
+                dialog.close(); dialog.deleteLater(); self.app.processEvents()
 
     def test_manual_import_batches_preview_and_only_saves_approved_changed_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

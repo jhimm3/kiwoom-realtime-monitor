@@ -70,10 +70,12 @@ class PostgresRealtimeSnapshotStoreMixin:
                 [(str(v["event_type"]), str(v["item_key"]), float(v["received_at"]),
                   json.dumps(v["event"], ensure_ascii=False)) for v in values],
             )
-        from .diagnostic_metrics import record_writer_transaction
-        record_writer_transaction("realtime_latest", len(values),
-                                  round((monotonic() - started_at) * 1000),
-                                  db_call_id=writer.call_id)
+        from .postgres_access import database_observer
+        observer = database_observer()
+        if observer is not None:
+            observer.record_writer_transaction("realtime_latest", len(values),
+                                      round((monotonic() - started_at) * 1000),
+                                      db_call_id=writer.call_id)
 
     def load_realtime_snapshots(self, codes: list[str]) -> list[dict[str, Any]]:
         from .postgres_access import DBWriterContext, open_observed_connection

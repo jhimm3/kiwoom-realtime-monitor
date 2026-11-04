@@ -4,24 +4,21 @@ from __future__ import annotations
 
 from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
-from .diagnostic_replay_contract import captured_workload
-
-from .diagnostic_workloads import is_paused
 from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL, ObservationRevisionPage
 from .observation_frame_recovery import (
-    ObservationFrameRecovery, drain_thread_call, trim_bar_frames, trim_universe_frames,
+    ObservationFrameRecovery, drain_thread_call,
 )
 
 import asyncio
 from collections import deque, OrderedDict
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 import json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_REGULAR_RESEARCH_PROFILE,
@@ -47,6 +44,7 @@ from kiwoom_monitor.application.research_replay import (
     KrxMinuteBarFrame,
     replay_candidate_universe,
     replay_krx_minute_bars,
+    trim_bar_frames, trim_universe_frames,
 )
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_from_document
 
@@ -68,11 +66,15 @@ class CandidateMonitor:
         universe_max_age_seconds: int,
         session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
         now_provider=None,
+        workload_paused: Callable[[str], bool] | None = None,
+        capture_scope=None,
     ) -> None:
         if universe_max_age_seconds <= 0:
             raise ValueError("universe_max_age_seconds must be positive")
         self._store = store
         self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
+        self._workload_paused = workload_paused or (lambda _workload: False)
+        self._capture_scope = capture_scope
         self._config = config
         self._leader_policy = config if isinstance(config, LeaderBreakoutPolicy) else None
         if self._leader_policy is not None:
@@ -129,6 +131,8 @@ class CandidateMonitor:
         session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
         family_id: str = BREAKOUT_FAMILY_ID,
         now_provider=None,
+        workload_paused: Callable[[str], bool] | None = None,
+        capture_scope=None,
     ) -> "CandidateMonitor":
         try:
             document = json.loads(config_json)
@@ -143,6 +147,8 @@ class CandidateMonitor:
             universe_max_age_seconds=universe_max_age_seconds,
             session_profile=session_profile,
             now_provider=now_provider,
+            workload_paused=workload_paused,
+            capture_scope=capture_scope,
         )
 
     @property
@@ -315,7 +321,7 @@ class CandidateMonitor:
         if len(symbol) != 6 or not symbol.isdigit():
             return
         with self._iteration_lock:
-            if not approved or is_paused("candidate_monitor"):
+            if not approved or self._workload_paused("candidate_monitor"):
                 self._leader_states.pop(symbol, None)
                 self._document_inputs.pop(symbol,None)
                 self._document_observations.pop(symbol,None)
@@ -391,24 +397,26 @@ class CandidateMonitor:
             self._leader_pending.append((decision, candidate, decision["valid_until"] if candidate else ""))
             self._leader_signatures[symbol] = signature
 
-    @captured_workload("shadow", "candidate_monitor")
     async def _run(self) -> None:
-        while True:
-            try:
-                if not is_paused("candidate_monitor"):
-                    await drain_thread_call(self.run_once)
-            except Exception as error:  # keep the NAS collector alive; quality exposes the failure
-                logger.exception("shadow candidate monitor iteration failed")
-                self._quality = {
-                    **self._quality, "status": "ERROR", "reason": str(error),
-                    "last_error_at": self._now().isoformat(),
-                }
-                if not self._leader_policy:
-                    try:
-                        await drain_thread_call(self._save_checkpoint, reason="error")
-                    except Exception:
-                        logger.exception("shadow candidate monitor checkpoint failed")
-            await asyncio.sleep(self._poll_seconds)
+        capture_scope = self._capture_scope
+        with (capture_scope(self, "shadow", "candidate_monitor")
+              if capture_scope is not None else nullcontext()):
+            while True:
+                try:
+                    if not self._workload_paused("candidate_monitor"):
+                        await drain_thread_call(self.run_once)
+                except Exception as error:  # keep the NAS collector alive; quality exposes the failure
+                    logger.exception("shadow candidate monitor iteration failed")
+                    self._quality = {
+                        **self._quality, "status": "ERROR", "reason": str(error),
+                        "last_error_at": self._now().isoformat(),
+                    }
+                    if not self._leader_policy:
+                        try:
+                            await drain_thread_call(self._save_checkpoint, reason="error")
+                        except Exception:
+                            logger.exception("shadow candidate monitor checkpoint failed")
+                await asyncio.sleep(self._poll_seconds)
 
     def run_once(self, *, limit: int = 1000) -> int:
         if self._leader_policy:

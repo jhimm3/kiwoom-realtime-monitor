@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.unit.test_mock_automation_runner import _prepared_runner
+
 import unittest
 import asyncio
 import json
@@ -124,7 +126,7 @@ class MockAutomationHTTPContractTests(unittest.TestCase):
                 path = Path(directory) / str(configured) / "automation.sqlite3"
                 path.parent.mkdir()
                 with automation_http_contract_app(create_app, path, configured) as (app, supervisor):
-                    with TestClient(app) as client:
+                    with TestClient(app, headers={"X-Request-ID": "mock-automation-http-contract-v1"}) as client:
                         actual.append(capture_automation_http_contract(client, supervisor))
         self.assertEqual(len(expected), len(actual))
         for original, observed in zip(expected, actual, strict=True):
@@ -196,6 +198,14 @@ class _Bundle:
         self.runtime = _Runtime()
         self.monitor = SimpleNamespace(refresh_recovery=AsyncMock(return_value=object()))
 
+    def refresh_automation_control(self, control):
+        if hasattr(self.automation_context, "__dataclass_fields__"):
+            self.automation_context = replace(self.automation_context, control_revision=control.control_revision)
+        else:
+            self.automation_context = SimpleNamespace(**{
+                **vars(self.automation_context), "control_revision": control.control_revision,
+            })
+
 
 class _Owner:
     def __init__(self):
@@ -218,18 +228,13 @@ class _Owner:
         return 3
 
 
-class _Runner:
-    def __init__(self, store, bundle, spec, *, poll_seconds, price_source=None, now_provider=None, leader_context_source=None):
+class _Episode:
+    def __init__(self, store, bundle, spec, *, price_source=None, now_provider=None, leader_context_source=None):
         self._bound_bundle = bundle
         self.now_provider = now_provider
         self.leader_context_source = leader_context_source
-        self.started = False
-        self.closed = False
-        self.status = {
-            "account_ref": bundle.account_ref,
-            "spec_id": spec.spec_id,
-            "state": "WARMUP",
-        }
+        self.prepared = False
+        self.status = {"account_ref": bundle.account_ref, "spec_id": spec.spec_id, "state": "WARMUP"}
 
     @property
     def account_ref(self):
@@ -242,7 +247,25 @@ class _Runner:
     def is_bound_to(self, bundle):
         return self._bound_bundle is bundle
 
+    def prepare_restore(self):
+        self.prepared = True
+
+
+class _Runner:
+    def __init__(self, episode, *, monitor=None, poll_seconds):
+        self.episode = episode
+        self.started = False
+        self.attached = False
+        self.closed = False
+
+    def attach_inputs(self):
+        if not self.episode.prepared:
+            raise AssertionError("runner attached before native preparation")
+        self.attached = True
+
     async def start(self):
+        if not self.attached:
+            raise AssertionError("runner started before input attachment")
         self.started = True
 
     async def close(self):
@@ -258,9 +281,14 @@ class MockAutomationSupervisorTests(unittest.IsolatedAsyncioTestCase):
             return_value=self.repository,
         )
         runner_patch = patch(
-            "kiwoom_monitor.central_server.mock_automation_supervisor.MockAutomationRunner",
+            "kiwoom_monitor.central_server.mock_automation_runner.MockAutomationRunner",
             _Runner,
         )
+        episode_patch = patch(
+            "kiwoom_monitor.central_server.mock_automation_episode.MockAutomationEpisode", _Episode,
+        )
+        self.addCleanup(episode_patch.stop)
+        episode_patch.start()
         self.addCleanup(repository_patch.stop)
         self.addCleanup(runner_patch.stop)
         repository_patch.start()
@@ -269,6 +297,22 @@ class MockAutomationSupervisorTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.supervisor.close()
+
+    async def _retain_real_closed_runner(self):
+        from tests.unit import test_mock_automation_runner as native
+        case = native.MockAutomationRunnerTests("test_checkpoint_from_other_spec_is_never_reused")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        history = native._prepared_runner(case.store, case.bundle, case.spec, now_provider=lambda: native.NOW)
+        self.assertIs(type(history), native.MockAutomationRunner)
+        self.assertFalse(hasattr(history, "account_ref"))
+        self.assertIsNot(history, history.episode)
+        self.assertEqual(ACCOUNT_REF, history.episode.account_ref)
+        closed = asyncio.create_task(history.close())
+        await closed
+        self.assertTrue(closed.done())
+        self.supervisor._runner_close_tasks[history] = closed
+        return history
 
     async def test_activate_switches_one_bundle_and_starts_one_runner_fail_closed(self):
         with patch(
@@ -349,11 +393,15 @@ class MockAutomationSupervisorTests(unittest.IsolatedAsyncioTestCase):
         ) as recover, patch(
             "kiwoom_monitor.central_server.mock_automation_supervisor.resume_mock_automation",
         ) as resume:
+            resume.return_value = _Control(MockAutomationDesiredState.RUNNING, 6)
+            history = await self._retain_real_closed_runner()
+            self.assertIn(history, self.supervisor._runner_close_tasks)
             await self.supervisor.resume(
                 credential_profile_id=PROFILE_ID, account_ref=ACCOUNT_REF,
                 spec_id=SPEC_ID, expected_control_revision=5, reason="operator resume",
                 expected_settings_revision=2, credential_revision=3,
             )
+            self.assertNotIn(history, self.supervisor._runner_close_tasks)
         self.owner.current.monitor.refresh_recovery.assert_awaited_once()
         recover.assert_called_once()
         resume.assert_called_once()
@@ -362,18 +410,21 @@ class MockAutomationSupervisorTests(unittest.IsolatedAsyncioTestCase):
         )["runner"])
 
     async def test_stale_cached_runner_is_closed_before_same_spec_is_reactivated(self):
+        history = await self._retain_real_closed_runner()
+        self.assertIn(history, self.supervisor._runner_close_tasks)
         with patch("kiwoom_monitor.central_server.mock_automation_supervisor.admit_mock_automation"), \
              patch("kiwoom_monitor.central_server.mock_automation_supervisor.record_mock_automation_recovery_from_risk"):
             arguments = dict(credential_profile_id=PROFILE_ID, account_ref=ACCOUNT_REF, spec_id=SPEC_ID,
                              expected_settings_revision=2, credential_revision=3)
             await self.supervisor.activate(**arguments)
+            self.assertNotIn(history, self.supervisor._runner_close_tasks)
             old = self.supervisor._runners[ACCOUNT_REF]
             self.owner.current = _Bundle()
             await self.supervisor.activate(**arguments)
         current = self.supervisor._runners[ACCOUNT_REF]
         self.assertTrue(old.closed)
         self.assertIsNot(old, current)
-        self.assertTrue(current.is_bound_to(self.owner.current))
+        self.assertTrue(current.episode.is_bound_to(self.owner.current))
         self.assertEqual(2, len(self.owner.switch_calls))
         self.assertEqual({}, self.supervisor._runner_close_tasks)
 
@@ -382,7 +433,7 @@ class MockAutomationSupervisorTests(unittest.IsolatedAsyncioTestCase):
         async def blocked_close():
             entered.set()
             await asyncio.Event().wait()
-        runner = _Runner(object(), self.owner.current, self.repository.spec, poll_seconds=1)
+        runner = _Runner(_Episode(object(), self.owner.current, self.repository.spec), poll_seconds=1)
         runner.close = AsyncMock(side_effect=blocked_close)
         self.supervisor._runners[ACCOUNT_REF] = runner
         withdrawal = asyncio.create_task(self.supervisor.bundle_changed(PROFILE_ID, None))
@@ -487,8 +538,9 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         await credentials.apply(operation.operation_id, revision, operation.candidate.account_ref)
         await asyncio.wait_for(asyncio.shield(operation.task), 5)
         self.assertEqual("ACTIVE", operation.state)
+        return operation
 
-    async def start_admitted_runner(self):
+    async def start_admitted_runner(self, *, unfilled_execution_policy=None):
         from tests.unit.test_mock_automation_runner import MockAutomationRunnerTests
         from tests.unit.test_mock_automation_admission import _criteria
         from kiwoom_monitor.domain.execution_activation import ForwardEvaluationSpec
@@ -513,7 +565,8 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         repository.save_profile(profile)
         self.spec = replace(fixture.spec, account_scope=binding.scope, credential_profile_id=self.profile,
                             binding_revision=binding.binding_revision, binding_verified_at=binding.verified_at,
-                            frozen_at=now, forward_profile_id=profile.profile_id)
+                            frozen_at=now, forward_profile_id=profile.profile_id,
+                            unfilled_execution_policy=unfilled_execution_policy)
         repository.save_mock_automation_spec(self.spec)
         self.store.upsert_documents(ForwardEvaluationRepository.MOCK_AUTOMATION_CANDIDATE_COLLECTION, [{
             "owner": fixture.package.strategy_ref, "key": fixture.package.package_hash,
@@ -530,7 +583,7 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
             self.admission.execution_run_id, self.spec.spec_id, self.admission.admission_id, 1, 1)
         self.bundle = await self.owner.switch_execution_mode(self.profile, MockAccountRuntimeMode.AUTOMATIC,
             expected_settings_revision=self.settings["revision"], credential_revision=1, automation_context=context)
-        self.runner = MockAutomationRunner(self.store, self.bundle, self.spec, poll_seconds=60,
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, poll_seconds=60,
                                            now_provider=self.bundle.client.server_now)
         await self.runner.start()
         self.supervisor._runners[self.account_ref] = self.runner
@@ -544,14 +597,15 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_app_settings_replacement_drains_runner_and_preserves_native_control(self):
         response = await self.put_settings()
         self.assertEqual(200, response.status_code)
-        self.assertTrue(self.runner._closing)
+        self.assertTrue(self.runner.episode._closing)
         self.assertIsNone(self.runner._task)
         self.assertNotIn(self.account_ref, self.supervisor._runners)
         current = self.owner.bundle(self.profile)
         self.assertIsNot(self.bundle, current)
         self.assertTrue(self.bundle.runtime._retired)
-        self.assertEqual(MockAccountRuntimeMode.MANUAL, current.runtime_mode)
-        self.assertIsNone(current.automation_context)
+        self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, current.runtime_mode)
+        self.assertEqual(self.bundle.automation_context, current.automation_context)
+        self.assertFalse(current.runtime._new_orders_enabled)
         self.assertEqual(self.control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
         self.assertEqual((current.binding,), self.app.state.verified_account_bindings)
         self.assertIsNone(self.supervisor.status(self.account_ref, credential_profile_id=self.profile)["runner"])
@@ -571,7 +625,7 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(200, response.status_code)
         self.assertIs(self.bundle, self.owner.bundle(self.profile))
         self.assertIs(self.runner, self.supervisor._runners[self.account_ref])
-        self.assertFalse(self.runner._closing)
+        self.assertFalse(self.runner.episode._closing)
         close.assert_not_called()
         save.assert_not_called()
         self.assertEqual({}, self.supervisor._runner_close_tasks)
@@ -582,7 +636,7 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_settings_and_shutdown_waiters_join_one_native_checkpoint_before_lease_release(self):
         entered, release, committed = threading.Event(), threading.Event(), threading.Event()
         self.addCleanup(release.set)
-        original = self.runner._save_checkpoint
+        original = self.runner.episode._save_checkpoint
         def checkpoint(*, force=False):
             if force:
                 entered.set()
@@ -595,7 +649,7 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         def release_lease():
             self.assertTrue(committed.is_set(), "old native lease released before final checkpoint")
             return stop()
-        with patch.object(self.runner, "_save_checkpoint", side_effect=checkpoint), \
+        with patch.object(self.runner.episode, "_save_checkpoint", side_effect=checkpoint), \
              patch.object(self.runner, "close", wraps=self.runner.close) as close, \
              patch.object(self.bundle.runtime, "stop", side_effect=release_lease):
             request = asyncio.create_task(self.put_settings())
@@ -630,19 +684,20 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({}, self.supervisor._runner_close_tasks)
         self.assertEqual(self.control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
 
-    async def test_existing_auto_run_credential_validation_rejection_keeps_current_owner_and_runner(self):
-        # Existing credential activation requires UUID run IDs, while automatic
-        # execution has a content run ID. Do not silently relax that policy here.
+    async def test_existing_auto_run_key_validation_preserves_current_owner_until_explicit_apply(self):
+        # Activation UUID validation stays strict; AUTO order identity travels
+        # separately and never replaces the current owner during prepare.
         credentials = self.app.state.credential_runtime
         prepared = await credentials.prepare("kiwoom_mock", self.profile, str(uuid.uuid4()), 1,
                                               {"app_key": "a2", "secret_key": "fake-secret"})
         operation = credentials._operations[prepared["operation_id"]]
         await asyncio.wait_for(asyncio.shield(operation.task), 5)
-        self.assertEqual("FAILED", operation.state)
-        self.assertEqual("CREDENTIAL_VALIDATION_FAILED", operation.error_code)
+        self.assertEqual("READY", operation.state, operation.error_code)
+        uuid.UUID(operation.candidate.run_id)
+        self.assertEqual(self.bundle.run_id, operation.candidate.execution_run_id)
         self.assertIs(self.bundle, self.owner.bundle(self.profile))
         self.assertIs(self.runner, self.supervisor._runners[self.account_ref])
-        self.assertFalse(self.runner._closing)
+        self.assertFalse(self.runner.episode._closing)
         self.assertFalse(self.bundle.runtime._retired)
         self.assertEqual(1, self.owner.active_revision(self.profile))
         self.assertEqual(self.control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
@@ -660,11 +715,280 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(self.bundle, current)
         self.assertIs(self.bundle.client, current.client)
         self.assertTrue(current.runtime._active)
-        self.assertTrue(self.runner._closing)
+        self.assertTrue(self.runner.episode._closing)
         self.assertIsNone(self.runner._task)
         self.assertNotIn(self.account_ref, self.supervisor._runners)
         self.assertEqual((current.binding,), self.app.state.verified_account_bindings)
         self.assertEqual(self.control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+
+    async def test_auto_key_rotation_reconciles_partial_fill_and_keeps_unknown_in_original_run(self):
+        from datetime import timedelta
+        from kiwoom_monitor.domain.order_contract import (
+            OrderIntent, OrderSide, OrderState, OrderType, BrokerSubmission, order_event,
+        )
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+        repository = ExecutionRepository(self.store)
+        now = self.bundle.runtime.server_now()
+        for suffix, symbol, broker_id in (("accepted", "005930", "order-a"), ("partial", "000660", "order-p"),
+                                          ("unknown", "035420", "")):
+            intent = OrderIntent("rotation-" + suffix, self.bundle.run_id, "decision-" + suffix,
+                self.account_ref, "mock", symbol, "KRX", OrderSide.BUY, 2, OrderType.LIMIT, 70_000,
+                now, now + timedelta(minutes=5), "existing-order/v1")
+            record = repository.create(intent)
+            state = OrderState.ACCEPTED if broker_id else OrderState.SUBMISSION_UNKNOWN
+            repository.apply(record, order_event(intent.intent_id,
+                "ORDER_ACCEPTED" if broker_id else "SUBMISSION_STARTED", state, now, now,
+                broker_order_id=broker_id), broker_order_id=broker_id)
+        client = self.bundle.client
+        request = client.request_with_continuation
+        def new_key_snapshot(api_id, path, body, **kwargs):
+            if client._settings.app_key == "a2":
+                if api_id == "ka10075":
+                    return {"oso": [
+                        {"ord_no": "order-a", "stk_cd": "005930", "ord_qty": "2", "oso_qty": "2",
+                         "ord_pric": "70000", "io_tp_nm": "매수"},
+                        {"ord_no": "order-p", "stk_cd": "000660", "ord_qty": "2", "oso_qty": "1",
+                         "ord_pric": "70000", "io_tp_nm": "매수", "cntr_no": "partial-fill-1",
+                         "unit_cntr_qty": "1", "unit_cntr_pric": "70000"},
+                    ]}, False, ""
+                if api_id == "kt00018":
+                    return {"acnt_evlt_remn_indv_tot": [{"stk_cd": "000660", "rmnd_qty": "1"}]}, False, ""
+            return request(api_id, path, body, **kwargs)
+        with patch.object(client, "request_with_continuation", side_effect=new_key_snapshot):
+            await self.rotate("a2", 1)
+            current = self.owner.bundle(self.profile)
+            self.assertEqual(self.bundle.run_id, current.run_id)
+            self.assertEqual(self.bundle.binding, current.binding)
+            self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, current.runtime_mode)
+            self.assertTrue(self.bundle.runtime._retired)
+            self.assertIsNone(self.runner._task)
+            self.assertEqual(1, current.gateway.load("rotation-partial").filled_quantity)
+            self.assertEqual(1, current.gateway.load("rotation-partial").detailed_filled_quantity)
+            unknown = current.gateway.load("rotation-unknown")
+            self.assertEqual(OrderState.SUBMISSION_UNKNOWN, unknown.state)
+            self.assertEqual("", unknown.broker_order_id)
+            with self.assertRaisesRegex(ValueError, "reconciled and accepted"):
+                await current.gateway.cancel("rotation-unknown")
+            self.transport.cancel.side_effect = None
+            self.transport.cancel.return_value = BrokerSubmission("cancel-a", current.runtime.server_now())
+            cancelled = await current.gateway.cancel("rotation-accepted")
+            self.assertEqual(OrderState.CANCEL_PENDING, cancelled.state)
+            self.assertEqual(1, self.transport.cancel.call_count)
+            self.assertEqual(OrderState.SUBMISSION_UNKNOWN, current.gateway.load("rotation-unknown").state)
+            with self.assertRaisesRegex(RuntimeError, "CREDENTIAL_CHANGE_IN_PROGRESS"):
+                await self.bundle.gateway.cancel("rotation-accepted")
+        self.assertTrue(self.supervisor._repository.load_mock_automation_control(self.account_ref).entry_resume_required)
+        self.transport.submit.assert_not_called()
+
+    async def test_auto_key_rotation_restores_management_and_requires_explicit_entry_resume(self):
+        from kiwoom_monitor.application.mock_automation_admission import build_mock_automation_lease_receipt
+        from kiwoom_monitor.domain.order_contract import OrderSide
+        # This scenario starts from an already admitted run. Preserve the
+        # native receipt that actual admission issues; do not mock restoration.
+        self.assertTrue(self.supervisor._repository.save_mock_automation_lease_receipt(
+            build_mock_automation_lease_receipt(self.admission, admitted_at=self.admission.requested_at)))
+        operation = await self.rotate("a2", 1)
+        current = self.owner.bundle(self.profile)
+        control = self.supervisor._repository.load_mock_automation_control(self.account_ref)
+        self.assertEqual(MockAutomationDesiredState.RUNNING, control.desired_state)
+        self.assertTrue(control.entry_resume_required)
+        self.assertFalse(current.runtime._new_orders_enabled)
+        for monitor, orders in ((True, False), (True, True), (False, False), (True, True)):
+            response = await self.put_settings(monitor=monitor, orders=orders,
+                revision=self.store.load_account_settings(self.scope)["revision"])
+            self.assertEqual(200, response.status_code, response.text)
+            current = self.owner.bundle(self.profile)
+            self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, current.runtime_mode)
+            self.assertEqual(self.bundle.run_id, current.run_id)
+            self.assertEqual(control.control_revision, current.automation_context.control_revision)
+            self.assertFalse(current.runtime._new_orders_enabled)
+            self.assertEqual(control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+            if orders:
+                with self.assertRaisesRegex(RuntimeError, "MOCK_ACCOUNT_AUTOMATIC_MODE"):
+                    await current.gateway.submit_limit(request_id=str(uuid.uuid4()), symbol="005930",
+                        side=OrderSide.BUY, quantity=1, limit_price=70_000, expires_seconds=30, scoped=True)
+        await self.supervisor._restore_once()
+        self.assertIn(self.account_ref, self.supervisor._runners, self.supervisor._restore_errors)
+        self.assertTrue(self.supervisor._repository.load_mock_automation_control(self.account_ref).entry_resume_required)
+        response = await self.http.post("/api/v1/mock-automation/resume", json={
+            "credential_profile_id": self.profile, "account_ref": self.account_ref, "spec_id": self.spec.spec_id,
+            "expected_control_revision": control.control_revision,
+            "expected_settings_revision": self.store.load_account_settings(self.scope)["revision"],
+            "credential_revision": 2, "reason": "operator explicitly resumes entries",
+        })
+        self.assertEqual(200, response.status_code, response.text)
+        resumed = self.supervisor._repository.load_mock_automation_control(self.account_ref)
+        self.assertFalse(resumed.entry_resume_required)
+        self.assertEqual(control.control_revision + 1, resumed.control_revision)
+        await self.app.state.credential_runtime.apply(operation.operation_id, 1, self.account_ref)
+        self.assertEqual(resumed, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def test_disabled_transport_auto_resume_preserves_pause_and_stopped_control(self):
+        await self.rotate("a2", 1)
+        stale_settings_revision = self.store.load_account_settings(self.scope)["revision"]
+        response = await self.put_settings(orders=False, revision=stale_settings_revision)
+        self.assertEqual(200, response.status_code, response.text)
+        response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
+        self.assertEqual(200, response.status_code, response.text)
+        control = self.supervisor._repository.load_mock_automation_control(self.account_ref)
+        for route in ("start", "resume"):
+            request = {"credential_profile_id": self.profile, "account_ref": self.account_ref,
+                "spec_id": self.spec.spec_id, "expected_settings_revision": stale_settings_revision, "credential_revision": 2}
+            if route == "resume":
+                request.update(expected_control_revision=control.control_revision, reason="stale settings request")
+            response = await self.http.post("/api/v1/mock-automation/"+route, json=request)
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertEqual("ACCOUNT_SETTINGS_REVISION_CONFLICT", response.json()["detail"])
+            self.assertEqual(control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+            self.assertNotIn(self.account_ref, self.supervisor._runners)
+        for stopped in (False, True):
+            control = self.supervisor._repository.load_mock_automation_control(self.account_ref)
+            if stopped:
+                response = await self.http.post("/api/v1/mock-automation/stop", json={
+                    "credential_profile_id": self.profile, "account_ref": self.account_ref,
+                    "spec_id": self.spec.spec_id, "expected_control_revision": control.control_revision,
+                    "reason": "operator stop while credential entry pause remains",
+                })
+                self.assertEqual(200, response.status_code, response.text)
+                control = self.supervisor._repository.load_mock_automation_control(self.account_ref)
+            self.assertTrue(control.entry_resume_required)
+            for monitor in (True, False):
+                response = await self.put_settings(monitor=monitor, orders=False,
+                    revision=self.store.load_account_settings(self.scope)["revision"])
+                self.assertEqual(200, response.status_code, response.text)
+                response = await self.http.post("/api/v1/mock-automation/resume", json={
+                    "credential_profile_id": self.profile, "account_ref": self.account_ref, "spec_id": self.spec.spec_id,
+                    "expected_control_revision": control.control_revision,
+                    "expected_settings_revision": self.store.load_account_settings(self.scope)["revision"],
+                    "credential_revision": 2, "reason": "transport remains explicitly disabled",
+                })
+                self.assertEqual(409, response.status_code, response.text)
+                self.assertEqual("MOCK_ORDER_TRANSPORT_DISABLED", response.json()["detail"])
+                self.assertEqual(control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+                self.assertNotIn(self.account_ref, self.supervisor._runners)
+                self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, self.owner.bundle(self.profile).runtime_mode)
+                self.assertFalse(self.owner.bundle(self.profile).runtime._new_orders_enabled)
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def test_auto_disable_restart_new_key_preserves_original_run_without_reviving_disabled_owner(self):
+        import httpx
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.config import CentralServerSettings
+        from kiwoom_monitor.domain.order_contract import OrderIntent, OrderSide, OrderState, OrderType, order_event
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+        from datetime import timedelta
+        now = self.bundle.runtime.server_now()
+        execution = ExecutionRepository(self.store)
+        intent = OrderIntent("disabled-unknown", self.bundle.run_id, "decision-disabled", self.account_ref,
+            "mock", "005930", "KRX", OrderSide.BUY, 2, OrderType.LIMIT, 70_000,
+            now, now + timedelta(minutes=5), "existing-order/v1")
+        record = execution.create(intent)
+        execution.apply(record, order_event(intent.intent_id, "SUBMISSION_STARTED",
+            OrderState.SUBMISSION_UNKNOWN, now, now))
+        credentials = self.app.state.credential_runtime
+        prepared = await credentials.prepare("kiwoom_mock", self.profile, str(uuid.uuid4()), 1, {}, disabled=True)
+        operation = credentials._operations[prepared["operation_id"]]
+        await asyncio.wait_for(asyncio.shield(operation.task), 5)
+        self.assertEqual("READY", operation.state, operation.error_code)
+        await credentials.apply(operation.operation_id, 1, self.account_ref)
+        await asyncio.wait_for(asyncio.shield(operation.task), 5)
+        self.assertEqual("ACTIVE", operation.state, operation.error_code)
+        disabled = credentials.vault.load("kiwoom_mock", self.profile)
+        self.assertTrue(disabled.disabled)
+        self.assertEqual(self.bundle.run_id, disabled.payload["activation"].get("execution_run_id"))
+        self.assertEqual(self.control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+        await self.close_app()
+        root = Path(self.temp.name)
+        self.app = create_app(CentralServerSettings(
+            f"sqlite:///{root / 'app.sqlite'}", "private-token", credential_directory=str(root / "vault"),
+            account_identity_registry_enabled=True, account_identity_hmac_key="x" * 32,
+            autonomous_top20_enabled=False, market_event_collection_enabled=False,
+            news_naver_market_enabled=False, news_history_jobs_enabled=False,
+        ))
+        self.lifespan = self.app.router.lifespan_context(self.app)
+        await self.lifespan.__aenter__()
+        self.app_closed = False
+        self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="https://nas.test",
+            headers={"Authorization": "Bearer private-token"})
+        self.addAsyncCleanup(self.http.aclose)
+        self.owner = self.app.state.mock_credential_owner
+        self.supervisor = self.app.state.mock_automation_supervisor
+        self.store = self.owner.store
+        self.supervisor._restore_stop.set()
+        await self.supervisor._restore_task
+        self.supervisor._restore_task = None
+        self.assertEqual([], self.owner._boot_tasks)
+        self.assertIsNone(self.owner.bundle(self.profile))
+        self.assertIsNone(self.store.load_account_settings(self.scope)["active_profile_id"])
+        await self.rotate("a2", 2)
+        response = await self.put_settings(orders=True, revision=self.store.load_account_settings(self.scope)["revision"])
+        self.assertEqual(200, response.status_code, response.text)
+        current = self.owner.bundle(self.profile)
+        self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, current.runtime_mode)
+        self.assertEqual(self.bundle.run_id, current.run_id)
+        self.assertEqual(self.bundle.binding, current.binding)
+        self.assertEqual(OrderState.SUBMISSION_UNKNOWN, current.runtime.load_intent(intent.intent_id).state)
+        self.assertTrue(self.supervisor._repository.load_mock_automation_control(self.account_ref).entry_resume_required)
+        self.assertFalse(current.runtime._new_orders_enabled)
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
+
+    async def test_auto_key_precommit_failure_restores_old_key_run_and_entry_authority(self):
+        credentials = self.app.state.credential_runtime
+        document = await credentials.prepare("kiwoom_mock", self.profile, str(uuid.uuid4()), 1,
+            {"app_key": "a2", "secret_key": "fake-secret"})
+        operation = credentials._operations[document["operation_id"]]
+        await asyncio.wait_for(asyncio.shield(operation.task), 5)
+        self.assertEqual("READY", operation.state, operation.error_code)
+        with patch.object(self.store, "load_account_settings", side_effect=OSError("controlled drain precommit failure")), \
+             patch.object(credentials.vault, "save", wraps=credentials.vault.save) as save:
+            await credentials.apply(operation.operation_id, 1, self.account_ref)
+            await asyncio.wait_for(asyncio.shield(operation.task), 5)
+        save.assert_not_called()
+        self.assertEqual("FAILED", operation.state)
+        current = self.owner.bundle(self.profile)
+        self.assertEqual(self.bundle.run_id, current.run_id)
+        self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, current.runtime_mode)
+        self.assertEqual("token:a1", current.client._token)
+        self.assertEqual(self.control, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+        self.assertEqual(1, self.owner.active_revision(self.profile))
+        self.transport.submit.assert_not_called()
+
+    async def test_auto_key_commit_ack_loss_restores_latest_key_without_repausing_control(self):
+        credentials = self.app.state.credential_runtime
+        document = await credentials.prepare("kiwoom_mock", self.profile, str(uuid.uuid4()), 1,
+            {"app_key": "a2", "secret_key": "fake-secret"})
+        operation = credentials._operations[document["operation_id"]]
+        await asyncio.wait_for(asyncio.shield(operation.task), 5)
+        finalize = self.store.finalize_credential_activation
+        lost = False
+        def lose_ack(value):
+            nonlocal lost
+            result = finalize(value)
+            if value["operation_id"] == operation.operation_id and not lost:
+                lost = True
+                raise OSError("controlled acknowledgement loss after native commit")
+            return result
+        with patch.object(self.store, "finalize_credential_activation", side_effect=lose_ack):
+            await credentials.apply(operation.operation_id, 1, self.account_ref)
+            await asyncio.wait_for(asyncio.shield(operation.task), 5)
+        self.assertEqual("RECOVERY_REQUIRED", operation.state)
+        paused = self.supervisor._repository.load_mock_automation_control(self.account_ref)
+        self.assertTrue(paused.entry_resume_required)
+        record = credentials.vault.load("kiwoom_mock", self.profile)
+        self.assertEqual(2, record.revision)
+        await self.owner._boot_record(self.profile, record)
+        current = self.owner.bundle(self.profile)
+        self.assertIsNotNone(current, self.owner.errors)
+        self.assertEqual("token:a2", current.client._token)
+        self.assertEqual(self.bundle.run_id, current.run_id)
+        self.assertEqual(self.bundle.binding, current.binding)
+        self.assertEqual(paused, self.supervisor._repository.load_mock_automation_control(self.account_ref))
+        self.transport.submit.assert_not_called()
+        self.transport.cancel.assert_not_called()
 
     async def test_failed_owned_drain_blocks_activation_and_shutdown_without_releasing_old_lease(self):
         original = self.runner.close
@@ -720,10 +1044,10 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(MockAutomationSupervisorError, "PROFILE_RUNTIME_NOT_READY"):
                 await activation
         self.assertEqual(1, len(started))
-        self.assertTrue(started[0]._closing)
+        self.assertTrue(started[0].episode._closing)
         self.assertIsNone(started[0]._task)
         self.assertNotIn(self.account_ref, self.supervisor._runners)
-        self.assertEqual(MockAccountRuntimeMode.MANUAL, self.owner.bundle(self.profile).runtime_mode)
+        self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, self.owner.bundle(self.profile).runtime_mode)
         self.transport.submit.assert_not_called()
 
     async def test_actual_app_shutdown_joins_inflight_activation_before_closing_owner_and_store(self):
@@ -1202,14 +1526,15 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         receipts_before = repository.load_mock_automation_stop_revisions(self.account_ref)
         self.assertEqual(MockAutomationDesiredState.STOPPED, control_before.desired_state)
         self.assertEqual(1, len(receipts_before))
-        # Existing HTTP settings replacement drains AUTO and constructs MANUAL.
-        # Re-enable transport through that same caller before the real resume.
+        # Settings replacement retains AUTO. Select the existing flat MANUAL
+        # mode explicitly to exercise the real resume mode-switch boundary.
         response = await self.put_settings()
         self.assertEqual(200, response.status_code)
         response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
         self.assertEqual(200, response.status_code)
         settings_revision = response.json()["applied_revision"]
-        manual = self.owner.bundle(self.profile)
+        manual = await self.owner.switch_execution_mode(self.profile, MockAccountRuntimeMode.MANUAL,
+            expected_settings_revision=settings_revision, credential_revision=1)
         self.assertEqual(MockAccountRuntimeMode.MANUAL, manual.runtime_mode)
         self.assertIsNone(manual.automation_context)
         self.assertTrue(self.bundle.runtime._retired)
@@ -1349,7 +1674,8 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
         self.assertEqual(200, response.status_code)
         settings_revision = response.json()["applied_revision"]
-        manual = self.owner.bundle(self.profile)
+        manual = await self.owner.switch_execution_mode(self.profile, MockAccountRuntimeMode.MANUAL,
+            expected_settings_revision=settings_revision, credential_revision=1)
         self.assertEqual(MockAccountRuntimeMode.MANUAL, manual.runtime_mode)
         self.assertIsNone(manual.automation_context)
         refresh_recovery = type(manual.monitor).refresh_recovery
@@ -1500,7 +1826,8 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
         self.assertEqual(200, response.status_code)
         settings_revision = response.json()["applied_revision"]
-        manual = self.owner.bundle(self.profile)
+        manual = await self.owner.switch_execution_mode(self.profile, MockAccountRuntimeMode.MANUAL,
+            expected_settings_revision=settings_revision, credential_revision=1)
         self.assertEqual(MockAccountRuntimeMode.MANUAL, manual.runtime_mode)
         self.assertNotIn(self.account_ref, self.supervisor._runners)
         repository = self.supervisor._repository
@@ -1600,7 +1927,8 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
         self.assertEqual(200, response.status_code)
         settings_revision = response.json()["applied_revision"]
-        manual = self.owner.bundle(self.profile)
+        manual = await self.owner.switch_execution_mode(self.profile, MockAccountRuntimeMode.MANUAL,
+            expected_settings_revision=settings_revision, credential_revision=1)
         self.assertEqual(MockAccountRuntimeMode.MANUAL, manual.runtime_mode)
         self.assertIs(manual, self.owner._contexts[self.profile])
         self.assertNotIn(self.account_ref, self.supervisor._runners)
@@ -1823,7 +2151,7 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(200, settings_response.status_code)
                 current = self.owner.bundle(self.profile)
                 self.assertIsNot(self.bundle, current)
-                self.assertTrue(self.runner._closing)
+                self.assertTrue(self.runner.episode._closing)
                 self.assertIsNone(self.runner._task)
                 self.assertNotIn(self.account_ref, self.supervisor._runners)
                 self.assertTrue(self.bundle.runtime._retired)
@@ -1844,7 +2172,7 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stopped.control_revision + 1, latest.control_revision)
         self.assertEqual(final_queries[0][0].to_dict(), response.json()["control"])
         self.assertEqual(latest.to_dict(), response.json()["control"])
-        self.assertEqual("MANUAL", response.json()["runtime_mode"])
+        self.assertEqual("AUTOMATIC", response.json()["runtime_mode"])
         self.assertIsNone(response.json()["runner"])
         self.assertEqual([(loop_thread, current, None)], projections)
         self.assertEqual(2, len(repository.load_mock_automation_stop_revisions(self.account_ref)))
@@ -1944,7 +2272,8 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(200, response.status_code)
             response = await self.put_settings(orders=True, revision=response.json()["applied_revision"])
             self.assertEqual(200, response.status_code)
-            before = self.owner.bundle(self.profile)
+            before = await self.owner.switch_execution_mode(self.profile, MockAccountRuntimeMode.MANUAL,
+                expected_settings_revision=response.json()["applied_revision"], credential_revision=1)
             with patch("kiwoom_monitor.central_server.mock_automation_supervisor.admit_mock_automation", side_effect=failure):
                 await self.supervisor._restore_once()
             current = self.owner.bundle(self.profile)
@@ -1960,6 +2289,777 @@ class MockAutomationOwnerReplacementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, close.await_count)
             self.assertEqual({}, self.supervisor._runner_close_tasks)
         self.transport.submit.assert_not_called()
+
+
+class MockCredentialProtectionContinuityTests(unittest.IsolatedAsyncioTestCase):
+    close_app = MockAutomationOwnerReplacementTests.close_app
+    rotate = MockAutomationOwnerReplacementTests.rotate
+    put_settings = MockAutomationOwnerReplacementTests.put_settings
+
+    async def start_admitted_runner(self):
+        from tests.unit.test_mock_automation_specification import MockProtectiveCancelRecoveryTests
+        await MockAutomationOwnerReplacementTests.start_admitted_runner(self,
+            unfilled_execution_policy=MockProtectiveCancelRecoveryTests.unfilled_execution_policy)
+
+    async def asyncSetUp(self):
+        from datetime import timedelta
+        case = self
+        self.clock = datetime(2026, 9, 21, 10, tzinfo=timezone(timedelta(hours=9)))
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return case.clock.astimezone(tz) if tz else case.clock.replace(tzinfo=None)
+        for target, value in (("kiwoom_monitor.central_server.app.datetime", FixedDateTime),
+                ("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now", lambda client: case.clock)):
+            clock_patch = patch(target, value)
+            clock_patch.start()
+            self.addCleanup(clock_patch.stop)
+        def supervised_owner(*args, **kwargs):
+            kwargs['price_source'] = lambda symbol: {
+                "price_won": getattr(self, "rotation_market_price", 990), "available_at": self.clock, "input_ref": "rotation-protection-price",
+                "durable": False, "market_status": "TRADABLE"}
+            return MockAutomationSupervisor(*args, **kwargs)
+        source_patch = patch("kiwoom_monitor.central_server.mock_automation_supervisor.MockAutomationSupervisor",
+            side_effect=supervised_owner)
+        source_patch.start()
+        self.addCleanup(source_patch.stop)
+        await MockAutomationOwnerReplacementTests.asyncSetUp(self)
+
+    async def test_actual_key_rotation_preserves_registered_protective_sell_and_native_cancel_retry(self):
+        await self._exercise_rotation_protection()
+
+    async def test_actual_key_rotation_preserves_no_minute_incomplete_management_checkpoint(self):
+        await self._exercise_rotation_protection(incomplete_before_rotation=True)
+
+    async def _exercise_rotation_protection(self, *, mutation=None, retry_mutation=False, incomplete_before_rotation=False):
+        from datetime import timedelta
+        from kiwoom_monitor.application.breakout_strategy import StrategyDecision
+        from kiwoom_monitor.application.mock_automation_admission import build_mock_automation_lease_receipt
+        from kiwoom_monitor.application.mock_automation_recovery import record_mock_automation_recovery_from_risk
+        from kiwoom_monitor.domain.order_contract import (
+            AccountSnapshot, BrokerFill, BrokerOrderSnapshot, BrokerSubmission, OrderIntent, OrderSide, OrderState, OrderType,
+        )
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionRejected
+        from tests.unit.test_mock_automation_specification import _automation_decision, _hash
+        repository = self.supervisor._repository
+        self.assertTrue(repository.save_mock_automation_lease_receipt(
+            build_mock_automation_lease_receipt(self.admission, admitted_at=self.admission.requested_at)))
+        await self.supervisor.bundle_changed(self.profile, None)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec,
+            now_provider=lambda: self.clock, price_source=lambda symbol: {
+                "price_won": 990, "available_at": self.clock, "input_ref": "rotation-protection-price",
+                "durable": False, "market_status": "TRADABLE"})
+        self.supervisor._runners[self.account_ref] = self.runner
+        self.transport.submit.side_effect = lambda intent: BrokerSubmission("broker-"+intent.intent_id, self.clock)
+        buy = OrderIntent("rotation-protection-buy", self.bundle.run_id, "rotation-protection-owned-position",
+            self.account_ref, "mock", "005930", "KRX", OrderSide.BUY, 3, OrderType.LIMIT, 1_000,
+            self.clock, self.clock+timedelta(seconds=60), "existing-owned-position/v1")
+        self.bundle.runtime.submit_automation_intent(buy,
+            AccountSnapshot(self.account_ref, 1_000_000, 0, {}, self.clock),
+            spec_id=self.spec.spec_id, control_revision=self.control.control_revision)
+        open_sell = None
+        request = self.bundle.client.request_with_continuation
+        def account_state(api_id, path, body, **kwargs):
+            if api_id == "kt00018":
+                return {"acnt_evlt_remn_indv_tot": [{"stk_cd": "005930", "rmnd_qty": "3"}]}, False, ""
+            if api_id == "ka10075":
+                return {"oso": [{"ord_no": "broker-"+buy.intent_id, "stk_cd": "005930", "ord_qty": "3",
+                    "oso_qty": "0", "ord_pric": "1000", "io_tp_nm": "매수", "cntr_no": "rotation-protection-buy-fill",
+                    "unit_cntr_qty": "3", "unit_cntr_pric": "1000"}] if open_sell is None else [{"ord_no": open_sell.broker_order_id,
+                    "stk_cd": "005930", "ord_qty": "3", "oso_qty": "3", "ord_pric": "1000", "io_tp_nm": "매도"}]}, False, ""
+            return request(api_id, path, body, **kwargs)
+        with patch.object(self.bundle.client, "request_with_continuation", side_effect=account_state):
+            recovery = await self.bundle.monitor.refresh_recovery()
+            self.assertEqual(OrderState.FILLED, self.bundle.runtime.load_intent(buy.intent_id).state)
+            risk = repository.load_latest_mock_automation_risk(self.account_ref)
+            record_mock_automation_recovery_from_risk(repository, self.bundle.runtime, recovery, risk,
+                account_ref=self.account_ref, spec_id=self.spec.spec_id)
+            body = _automation_decision(self.bundle.run_id, "EXIT", self.clock).to_dict()
+            body.pop("decision_id")
+            body.update(quantity=3, signal_reference_price=1_000, required_capital_won=0, reasons=("stop_loss_reached",))
+            decision = StrategyDecision(decision_id="decision_"+_hash(body), **body)
+            gate, open_sell, _ = self.runner.episode._dispatch_original_and_register(decision, recovery, risk)
+            self.assertIsNotNone(open_sell, gate.reasons)
+            registration = self.runner.episode._unfilled_registration
+            self.assertEqual("PROTECTIVE_EXIT", registration["purpose"])
+            await self.bundle.monitor.refresh_recovery()
+            if incomplete_before_rotation:
+                # Supported legacy checkpoint shape starts real frame recovery;
+                # enrollment/approval/order/anchor data are left byte-equivalent.
+                checkpoint = self.store.load_document('execution_mock_automation_runner_current', self.account_ref, 'current')['document']
+                self.assertEqual(registration, checkpoint['unfilled_registration'])
+                self.assertNotIn('unfilled_execution_preflight', checkpoint)
+                await self.runner.close()
+                legacy = deepcopy(checkpoint)
+                legacy.pop('delivery_protocol', None)
+                legacy.pop('input_recovery', None)
+                self.store.upsert_documents('execution_mock_automation_runner_current', [{
+                    'owner': self.account_ref, 'key': 'current', 'document': legacy}])
+                self.runner = _prepared_runner(self.store, self.bundle, self.spec,
+                    now_provider=lambda: self.clock, price_source=lambda symbol: {
+                        'price_won': 990, 'available_at': self.clock, 'input_ref': 'rotation-protection-price',
+                        'durable': False, 'market_status': 'TRADABLE'})
+                self.supervisor._runners[self.account_ref] = self.runner
+                episode = self.runner.episode
+                self.assertTrue(episode._input_progress.checkpoint_incomplete(), episode.status)
+                self.assertTrue(episode._input_progress.recovering)
+                await self.bundle.monitor.refresh_recovery()
+                await asyncio.wait_for(self.bundle.monitor._queue.join(), 3)
+                await episode._produce_native_unfilled_inputs(self.control)
+                self.assertIsNotNone(episode._unfilled_input, episode.status)
+                inputs = episode._unfilled_input[1]
+                await asyncio.to_thread(episode._preview_unfilled_management_locked,
+                    **{key: value for key, value in inputs.items() if key not in {'recovery', 'risk'}})
+                plan = await asyncio.to_thread(episode._assess_unfilled_action_locked, inputs)
+                self.assertIsNotNone(plan)
+                self.assertEqual('CANCEL', plan['result']['action'])
+                checkpoint = self.store.load_document('execution_mock_automation_runner_current', self.account_ref, 'current')['document']
+                self.assertEqual(registration, checkpoint['unfilled_registration'])
+                self.assertNotIn('unfilled_execution_preflight', checkpoint)
+                self.assertTrue(episode._input_progress.recovering)
+                self.transport.cancel.assert_not_called()
+            cancel_calls = []
+            def cancel(*args):
+                cancel_calls.append(args)
+                if len(cancel_calls) == 1:
+                    raise SubmissionRejected("confirmed first cancel rejection")
+            self.transport.cancel.side_effect = cancel
+            await self.rotate("a2", 1)
+            current = self.owner.bundle(self.profile)
+            native_reached = threading.Event()
+            native_errors = []
+            if mutation is not None:
+                append = self.store.append_execution_event
+                injected = False
+                def before_native(value, event, **options):
+                    nonlocal injected
+                    if (event['event_type'] == 'CANCEL_STARTED' and not injected
+                            and bool((options.get('ownership') or {}).get('cancel_retry_claim')) == retry_mutation):
+                        injected = True
+                        try:
+                            self._mutate_management_proof(mutation, current, open_sell)
+                            return append(value, event, **options)
+                        except Exception as error:
+                            native_errors.append(str(error))
+                            raise
+                        finally:
+                            native_reached.set()
+                    return append(value, event, **options)
+                native_patch = patch.object(self.store, 'append_execution_event', side_effect=before_native)
+                native_patch.start()
+                self.addCleanup(native_patch.stop)
+            await self.supervisor._restore_once()
+            self.assertIn(self.account_ref, self.supervisor._runners, self.supervisor._restore_errors)
+            restored = self.supervisor._runners[self.account_ref]
+            self.assertTrue(restored.episode.is_bound_to(current))
+            self.assertIsNotNone(restored._task)
+            self.assertEqual(restored._native_risk_listener, current.monitor._automation_risk_listener)
+            self.assertTrue(current.monitor.automation_execution_inputs_enabled)
+            self.assertEqual(registration, restored.episode._unfilled_registration)
+            paused = repository.load_mock_automation_control(self.account_ref)
+            self.assertTrue(paused.entry_resume_required)
+            self.assertEqual(self.control.control_revision+1, paused.control_revision)
+            self.assertEqual(self.bundle.run_id, current.run_id)
+            if mutation is not None and not retry_mutation:
+                self.assertTrue(await asyncio.to_thread(native_reached.wait, 3), restored.episode.status)
+                await self.supervisor.close()
+                self.assertTrue(native_errors)
+                self.assertIn(self._mutation_rejection(mutation), native_errors[0])
+                self.assertEqual([], cancel_calls)
+                self.assertFalse(any(event['event_type'] == 'CANCEL_STARTED'
+                    for event in current.repository.events(open_sell.intent.intent_id)))
+                self.assertEqual(2, self.transport.submit.call_count)
+                return
+            async def accepted_cancel_phase(attempts, response):
+                while True:
+                    if len(cancel_calls) < attempts:
+                        await asyncio.sleep(.01)
+                        continue
+                    events = await asyncio.to_thread(current.repository.events, open_sell.intent.intent_id)
+                    settled = (response != 'CANCEL_REJECTED' or
+                        restored.episode.status.get('protective_cancel_recovery', {}).get('state') == 'WATCH'
+                        and not restored.episode._checkpoint.pending)
+                    if (sum(event['event_type'] == 'CANCEL_STARTED' for event in events) == attempts
+                            and any(event['event_type'] == response for event in events) and settled):
+                        return events
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(accepted_cancel_phase(1, 'CANCEL_REJECTED'), 3)
+            self.assertEqual(1, len(cancel_calls), restored.episode.status)
+            self.clock += timedelta(seconds=1.1)
+            await current.monitor.refresh_recovery()
+            await asyncio.wait_for(current.monitor._queue.join(), 3)
+            if mutation is not None:
+                self.assertTrue(await asyncio.to_thread(native_reached.wait, 3), restored.episode.status)
+                await self.supervisor.close()
+                self.assertTrue(native_errors)
+                self.assertIn(self._mutation_rejection(mutation), native_errors[0])
+                self.assertEqual(1, len(cancel_calls))
+                self.assertEqual(1, sum(event['event_type'] == 'CANCEL_STARTED'
+                    for event in current.repository.events(open_sell.intent.intent_id)))
+                self.assertEqual(2, self.transport.submit.call_count)
+                return
+            try:
+                events = await asyncio.wait_for(accepted_cancel_phase(2, 'CANCEL_ACCEPTED'), 3)
+            except TimeoutError:
+                status = restored.episode.status
+                self.fail(repr({key: status.get(key) for key in (
+                    'state', 'reason', 'unfilled_native_source', 'unfilled_input_delivery',
+                    'protective_cancel_recovery', 'requires_operator_attention')}) +
+                    repr(current.repository.events(open_sell.intent.intent_id)))
+            self.assertEqual(2, len(cancel_calls), restored.episode.status)
+            starts = [event for event in events if event["event_type"] == "CANCEL_STARTED"]
+            self.assertEqual(2, len(starts))
+            self.assertEqual(2, starts[-1]["mock_cancel_retry_claim"]["attempt"])
+            self.assertEqual(OrderState.CANCEL_PENDING, current.runtime.load_intent(open_sell.intent.intent_id).state)
+            self.assertEqual(paused, repository.load_mock_automation_control(self.account_ref))
+            self.assertEqual(2, self.transport.submit.call_count)
+            self.assertEqual(registration, restored.episode._unfilled_registration)
+            self.assertEqual(registration['control_revision'], restored.episode._unfilled_attempt_plan['anchor']['scope']['control_revision'])
+            self.assertEqual(registration['policy'], restored.episode._unfilled_attempt_plan['anchor']['policy'])
+            if incomplete_before_rotation:
+                saved = self.store.load_document('execution_mock_automation_runner_current', self.account_ref, 'current')['document']
+                self.assertEqual(registration, saved['unfilled_registration'])
+                self.assertEqual(registration['control_revision'],
+                    saved['unfilled_execution_preflight']['anchor']['scope']['control_revision'])
+
+    @staticmethod
+    def _mutation_rejection(mutation):
+        return {'approval_absent': 'MOCK_UNFILLED_MANAGEMENT_PROOF_MISSING',
+            'checkpoint_absent': 'MOCK_UNFILLED_MANAGEMENT_PROOF_MISSING',
+            'registration_absent': 'invalid_unfilled_native_registration',
+            'root_account': 'MOCK_UNFILLED_MANAGEMENT_ROOT_CHANGED',
+            'scope_rebase': 'unfilled_original_approval_lineage_changed',
+            'deadline_extension': 'unfilled_native_registration_frozen_policy_mismatch',
+            'stop': 'MOCK_AUTOMATION_CONTROL_CHANGED',
+            'risk_revision': 'MOCK_PROTECTIVE_CANCEL_RETRY_NATIVE_CUT_CHANGED'}[mutation]
+
+    def _mutate_management_proof(self, mutation, current, root):
+        from copy import deepcopy
+        from kiwoom_monitor.application.mock_automation_session_clock import content_id
+        from kiwoom_monitor.application.order_lifecycle import seal_unfilled_attempt_plan
+        from tests.unit.test_mock_automation_specification import _hash
+        repository = self.supervisor._repository
+        if mutation in {'approval_absent', 'checkpoint_absent'}:
+            collection, key = (('execution_mock_automation_approved_gates', root.intent.intent_id)
+                if mutation == 'approval_absent' else ('execution_mock_automation_runner_current', 'current'))
+            with self.store._lock, self.store._connection() as connection:
+                connection.execute('DELETE FROM central_documents WHERE collection=? AND owner=? AND document_key=?',
+                    (collection, self.account_ref, key))
+            return
+        if mutation == 'root_account':
+            with self.store._lock, self.store._connection() as connection:
+                row = connection.execute('SELECT document_json FROM central_execution_intents WHERE intent_id=?',
+                    (root.intent.intent_id,)).fetchone()
+                value = json.loads(row[0]); value['account_ref'] = str(uuid.uuid4())
+                connection.execute('UPDATE central_execution_intents SET document_json=? WHERE intent_id=?',
+                    (json.dumps(value), root.intent.intent_id))
+            return
+        if mutation == 'stop':
+            control = repository.load_mock_automation_control(self.account_ref)
+            self.assertTrue(repository.save_mock_automation_control(replace(control,
+                desired_state=MockAutomationDesiredState.STOPPED, control_revision=control.control_revision+1,
+                reason='native claim race operator STOP'), expected_revision=control.control_revision))
+            return
+        if mutation == 'risk_revision':
+            from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+            value = repository.load_latest_mock_automation_risk(self.account_ref).to_dict()
+            value.pop('snapshot_id'); value['reconciliation_revision'] += 1; value['snapshot_id'] = _hash(value)
+            repository.save_mock_automation_risk_snapshot(mock_automation_risk_snapshot_from_dict(value))
+            return
+        value = deepcopy(self.store.load_document('execution_mock_automation_runner_current', self.account_ref, 'current')['document'])
+        if mutation == 'registration_absent':
+            value['unfilled_registration'] = None
+        elif mutation == 'scope_rebase':
+            value['unfilled_execution_preflight']['anchor']['scope']['control_revision'] = \
+                repository.load_mock_automation_control(self.account_ref).control_revision
+            value['unfilled_execution_preflight'] = seal_unfilled_attempt_plan(value['unfilled_execution_preflight'])
+        elif mutation == 'deadline_extension':
+            from datetime import timedelta
+            policy = value['unfilled_execution_preflight']['anchor']['policy']
+            policy['protection_deadline'] = (datetime.fromisoformat(policy['protection_deadline']) + timedelta(seconds=1)).isoformat()
+            value['unfilled_registration']['policy'] = deepcopy(policy)
+            registration = value['unfilled_registration']
+            registration['registration_id'] = content_id('unfilled_registration',
+                {key: item for key, item in registration.items() if key != 'registration_id'})
+            value['unfilled_execution_preflight'] = seal_unfilled_attempt_plan(value['unfilled_execution_preflight'])
+        else:
+            raise AssertionError(mutation)
+        self.store.upsert_documents('execution_mock_automation_runner_current',
+            [{'owner': self.account_ref, 'key': 'current', 'document': value}])
+
+    async def test_rotation_native_cancel_rejects_deleted_original_approval(self):
+        await self._exercise_rotation_protection(mutation='approval_absent')
+
+    async def test_rotation_native_cancel_rejects_deleted_checkpoint(self):
+        await self._exercise_rotation_protection(mutation='checkpoint_absent')
+
+    async def test_rotation_native_cancel_rejects_deleted_registration(self):
+        await self._exercise_rotation_protection(mutation='registration_absent')
+
+    async def test_rotation_native_cancel_rejects_foreign_account_root(self):
+        await self._exercise_rotation_protection(mutation='root_account')
+
+    async def test_rotation_native_cancel_rejects_resigned_scope_rebase(self):
+        await self._exercise_rotation_protection(mutation='scope_rebase')
+
+    async def test_rotation_native_cancel_rejects_resigned_deadline_extension(self):
+        await self._exercise_rotation_protection(mutation='deadline_extension')
+
+    async def test_rotation_native_cancel_rejects_stop_race(self):
+        await self._exercise_rotation_protection(mutation='stop')
+
+    async def test_rotation_native_retry_rejects_fresh_risk_change(self):
+        await self._exercise_rotation_protection(mutation='risk_revision', retry_mutation=True)
+
+
+from copy import deepcopy
+from datetime import timedelta
+from kiwoom_monitor.application.breakout_strategy import StrategyDecision
+from kiwoom_monitor.application.mock_automation_admission import build_mock_automation_lease_receipt
+from kiwoom_monitor.application.mock_automation_recovery import record_mock_automation_recovery_from_risk
+from kiwoom_monitor.domain.order_contract import AccountSnapshot, BrokerSubmission, OrderIntent, OrderSide, OrderState, OrderType
+from tests.unit import test_mock_automation_specification as specification_cases
+from tests.unit import test_order_lifecycle as lifecycle_cases
+
+
+class MockCredentialPurposeContinuityTests(unittest.IsolatedAsyncioTestCase):
+    # Alias methods rather than inherit the other TestCase's protection test.
+    asyncSetUp = MockCredentialProtectionContinuityTests.asyncSetUp
+    close_app = MockCredentialProtectionContinuityTests.close_app
+    rotate = MockCredentialProtectionContinuityTests.rotate
+    put_settings = MockCredentialProtectionContinuityTests.put_settings
+    _bar = specification_cases.MockAutomationWorkflowTests._bar
+
+    async def start_admitted_runner(self):
+        await MockAutomationOwnerReplacementTests.start_admitted_runner(
+            self, unfilled_execution_policy=specification_cases.MockUnfilledPairedInputTests.unfilled_execution_policy)
+
+    async def _prepare_original_registration(self):
+        repository = self.supervisor._repository
+        self.assertTrue(repository.save_mock_automation_lease_receipt(
+            build_mock_automation_lease_receipt(self.admission, admitted_at=self.admission.requested_at)))
+        await self.supervisor.bundle_changed(self.profile, None)
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec,
+            now_provider=lambda: self.clock, price_source=lambda symbol: {
+                "price_won": 990, "available_at": self.clock, "input_ref": "rotation-purpose-price",
+                "durable": False, "market_status": "TRADABLE"})
+        self.supervisor._runners[self.account_ref] = self.runner
+        self.transport.submit.side_effect = lambda intent: BrokerSubmission("broker-" + intent.intent_id, self.clock)
+        self.transport.cancel.side_effect = lambda *_args: None
+        self.broker_positions = {}
+        self.broker_orders = []
+        self.broker_closed_orders = []
+        self.broker_costs = []
+        return repository
+
+    @contextmanager
+    def _broker_replies(self):
+        # Patch the fixture client class so actual a2 reassembly uses the same
+        # external broker state; never replace Monitor/native Risk/acceptance.
+        client_type = type(self.bundle.client)
+        original = client_type.request_with_continuation
+        case = self
+
+        def request(client, api_id, path, body, **kwargs):
+            if api_id == "kt00018":
+                return {"acnt_evlt_remn_indv_tot": [
+                    {"stk_cd": symbol, "rmnd_qty": str(quantity)}
+                    for symbol, quantity in case.broker_positions.items()]}, False, ""
+            if api_id == "ka10075":
+                return {"oso": deepcopy(case.broker_orders)}, False, ""
+            if api_id == "ka10076":
+                return {"cntr": deepcopy(case.broker_closed_orders)}, False, ""
+            if api_id == "kt00015":
+                return {"trst_ovrl_trde_prps_array": deepcopy(case.broker_costs)}, False, ""
+            return original(client, api_id, path, body, **kwargs)
+
+        with patch.object(client_type, "request_with_continuation", new=request):
+            yield
+
+    def _order_reply(self, record, *, remaining, fill_id=None):
+        row = {"ord_no": record.broker_order_id, "stk_cd": "005930",
+            "ord_qty": str(record.intent.quantity), "oso_qty": str(remaining),
+            "ord_pric": str(record.intent.limit_price),
+            "io_tp_nm": "매수" if record.intent.side is OrderSide.BUY else "매도"}
+        if fill_id is not None:
+            row.update(cntr_no=fill_id, unit_cntr_qty=str(record.intent.quantity - remaining),
+                unit_cntr_pric=str(record.intent.limit_price))
+        return row
+
+    def _decision(self, action, quantity, price, *, reasons=()):
+        body = specification_cases._automation_decision(self.bundle.run_id, action, self.clock).to_dict()
+        body.pop("decision_id")
+        body.update(quantity=quantity, signal_reference_price=price,
+            required_capital_won=quantity * price if action == "ENTER" else 0, reasons=reasons)
+        return StrategyDecision(decision_id="decision_" + specification_cases._hash(body), **body)
+
+    async def _wait_until(self, predicate):
+        async def wait():
+            while True:
+                value = predicate()
+                if value:
+                    return value
+                await asyncio.sleep(.01)
+        try:
+            return await asyncio.wait_for(wait(), 3)
+        except TimeoutError as error:
+            from dataclasses import asdict
+            current = self.owner.bundle(self.profile)
+            runner = self.supervisor._runners.get(self.account_ref)
+            episode = runner.episode if runner is not None else None
+            repository = self.supervisor._repository
+            risk = repository.load_latest_mock_automation_risk(self.account_ref)
+            control = repository.load_mock_automation_control(self.account_ref)
+            cut = current.monitor.latest_automation_execution_cut if current is not None else None
+            registration = episode._unfilled_registration if episode is not None else None
+            root_id = registration['root_intent']['intent_id'] if registration else None
+            native = current.runtime.load_intent(root_id) if current is not None and root_id else None
+            state = {'clock': self.clock.isoformat(), 'control': control.to_dict() if control else None,
+                'status': episode.status if episode else None,
+                'checkpoint_pending': episode._checkpoint.pending if episode else None,
+                'source_pending': episode._unfilled_source_pending if episode else None,
+                'source_generation': episode._unfilled_source_generation if episode else None,
+                'source_facts': episode._unfilled_source_facts if episode else None,
+                'input_identity': episode._unfilled_input_identity if episode else None,
+                'ordinary_ready': episode._unfilled_ordinary_ready if episode else None,
+                'population_available_at': (episode._unfilled_population or {}).get('available_at') if episode else None,
+                'native_latest_risk': risk.to_dict() if risk else None,
+                'cut_orders': [asdict(row) for row in cut['recovery'].orders] if cut else None,
+                'cut_account_as_of': cut['recovery'].account.as_of if cut else None,
+                'native_root': asdict(native) if native else None,
+                'native_root_events': list(current.repository.events(root_id)) if current and root_id else None,
+                'plan_result': (episode._unfilled_attempt_plan or {}).get('result') if episode else None}
+            raise TimeoutError('C20 purpose timeout state: ' + json.dumps(state, ensure_ascii=True, default=str)) from error
+
+    async def _rotate_and_restore(self, registration):
+        await self.rotate("a2", 1)
+        current = self.owner.bundle(self.profile)
+        await self.supervisor._restore_once()
+        self.assertIn(self.account_ref, self.supervisor._runners, self.supervisor._restore_errors)
+        restored = self.supervisor._runners[self.account_ref]
+        self.assertTrue(restored.episode.is_bound_to(current))
+        self.assertIsNotNone(restored._task)
+        self.assertEqual(restored._native_risk_listener, current.monitor._automation_risk_listener)
+        self.assertTrue(current.monitor.automation_execution_inputs_enabled)
+        self.assertEqual(registration, restored.episode._unfilled_registration)
+        paused = self.supervisor._repository.load_mock_automation_control(self.account_ref)
+        self.assertTrue(paused.entry_resume_required)
+        self.assertEqual(self.control.control_revision + 1, paused.control_revision)
+        self.assertEqual(self.bundle.run_id, current.run_id)
+        return current, restored, paused
+
+    def _publish_pair(self, current, restored, record, *, price=990):
+        # Reuse the existing empirical fixture generator and real RAM admission.
+        episode = restored.episode
+        registration = episode._unfilled_registration
+        policy = episode._validate_unfilled_registration(registration)
+        observation = current.monitor.latest_position_observation
+        held = observation.account.positions.get("005930", 0)
+        rows = lifecycle_cases.UnfilledPairedEvidenceTests.outcomes_for(record, policy, episode._unfilled_cost_model,
+            self.clock, record.intent.quantity - record.filled_quantity, held,
+            registration["target_quantity"], price)
+        return episode.offer_unfilled_reprice_outcomes(
+            root_intent_id=registration["root_intent"]["intent_id"], managed_intent_id=record.intent.intent_id,
+            population_ref="cohort:unfilled", available_at=self.clock, outcomes=rows)
+
+    async def test_actual_key_rotation_preserves_known_flat_buy_cancel_without_entry_resume(self):
+        repository = await self._prepare_original_registration()
+        with self._broker_replies():
+            recovery = await self.bundle.monitor.refresh_recovery()
+            risk = repository.load_latest_mock_automation_risk(self.account_ref)
+            record_mock_automation_recovery_from_risk(repository, self.bundle.runtime, recovery, risk,
+                account_ref=self.account_ref, spec_id=self.spec.spec_id)
+            gate, original, _ = self.runner.episode._dispatch_original_and_register(
+                self._decision("ENTER", 3, 980), recovery, risk)
+            self.assertIsNotNone(original, gate.reasons)
+            registration = deepcopy(self.runner.episode._unfilled_registration)
+            self.assertEqual("BUY_OPPORTUNITY", registration["purpose"])
+            approved = repository.load_mock_automation_approved_gate(self.account_ref, original.intent.intent_id)
+            self.broker_orders = [self._order_reply(original, remaining=3)]
+            await self.bundle.monitor.refresh_recovery()
+            current, restored, paused = await self._rotate_and_restore(registration)
+            await self._wait_until(lambda:
+                restored.episode.status.get("unfilled_input_delivery", {}).get("state") == "CANCEL_REQUESTED"
+                and not restored.episode._checkpoint.pending)
+            events = current.repository.events(original.intent.intent_id)
+            self.assertEqual(1, sum(row["event_type"] == "CANCEL_STARTED" for row in events))
+            self.assertEqual(1, sum(row["event_type"] == "CANCEL_ACCEPTED" for row in events))
+            self.assertEqual(1, self.transport.cancel.call_count)
+            self.assertEqual(1, self.transport.submit.call_count)
+            self.assertEqual("ABANDON", restored.episode.status["after_cancel"])
+            self.assertEqual(OrderState.CANCEL_PENDING, current.runtime.load_intent(original.intent.intent_id).state)
+            self.assertFalse(repository.load_latest_mock_automation_risk(self.account_ref).reconciliation_complete)
+            self.assertEqual("UNAVAILABLE", restored.episode.status["unfilled_native_source"]["paired_ev"])
+            plan = restored.episode._unfilled_attempt_plan
+            self.assertEqual(registration["control_revision"], plan["anchor"]["scope"]["control_revision"])
+            self.assertFalse(plan["children"])
+            recovery = await current.monitor.refresh_recovery()
+            risk = repository.load_latest_mock_automation_risk(self.account_ref)
+            linked = record_mock_automation_recovery_from_risk(repository, current.runtime, recovery, risk,
+                account_ref=self.account_ref, spec_id=self.spec.spec_id)
+            self.assertEqual("BLOCKED", linked.status.value)
+            self.assertEqual((risk.snapshot_id, risk.reconciliation_revision),
+                (linked.risk_snapshot_id, linked.risk_reconciliation_revision))
+            self.assertFalse(risk.reconciliation_complete)
+            denied, record, receipt = restored.episode._dispatch_original_and_register(
+                self._decision("ENTER", 1, 990), recovery, risk)
+            self.assertIn("CREDENTIAL_CHANGE_REQUIRES_EXPLICIT_ENTRY_RESUME", denied.reasons)
+            self.assertIsNone(record)
+            self.assertIsNone(receipt)
+            self.assertEqual(registration, restored.episode._unfilled_registration)
+            self.assertEqual(approved, repository.load_mock_automation_approved_gate(self.account_ref, original.intent.intent_id))
+            self.assertEqual(paused, repository.load_mock_automation_control(self.account_ref))
+            self.assertEqual(1, self.transport.submit.call_count)
+
+    async def test_actual_key_rotation_preserves_take_profit_cost_pair_and_new_pair_after_cancel(self):
+        await self._exercise_rotation_profit()
+
+    async def test_current_native_take_profit_child_preserves_registered_management(self):
+        await self._exercise_rotation_profit(rotate_child=False)
+
+    async def test_rotation_native_take_profit_child_rejects_missing_claim(self):
+        await self._exercise_rotation_profit(child_mutation="claim_absent")
+
+    async def test_rotation_native_take_profit_child_rejects_missing_fixed_approval(self):
+        await self._exercise_rotation_profit(child_mutation="fixed_approval_absent")
+
+    async def _exercise_rotation_profit(self, *, child_mutation=None, rotate_child=True):
+        repository = await self._prepare_original_registration()
+        with self._broker_replies():
+            buy = OrderIntent("rotation-profit-buy", self.bundle.run_id, "rotation-profit-owned-position",
+                self.account_ref, "mock", "005930", "KRX", OrderSide.BUY, 3, OrderType.LIMIT, 1_000,
+                self.clock, self.clock + timedelta(seconds=60), "existing-owned-position/v1")
+            self.bundle.runtime.submit_automation_intent(buy,
+                AccountSnapshot(self.account_ref, 1_000_000, 0, {}, self.clock),
+                spec_id=self.spec.spec_id, control_revision=self.control.control_revision)
+            buy_record = self.bundle.runtime.load_intent(buy.intent_id)
+            self.broker_positions = {"005930": 3}
+            self.broker_orders = [self._order_reply(buy_record, remaining=0, fill_id="rotation-profit-buy-fill")]
+            recovery = await self.bundle.monitor.refresh_recovery()
+            self.assertEqual(OrderState.FILLED, self.bundle.runtime.load_intent(buy.intent_id).state)
+            risk = repository.load_latest_mock_automation_risk(self.account_ref)
+            record_mock_automation_recovery_from_risk(repository, self.bundle.runtime, recovery, risk,
+                account_ref=self.account_ref, spec_id=self.spec.spec_id)
+            gate, original, _ = self.runner.episode._dispatch_original_and_register(
+                self._decision("EXIT", 3, 1_000, reasons=("target_reached",)), recovery, risk)
+            self.assertIsNotNone(original, gate.reasons)
+            registration = deepcopy(self.runner.episode._unfilled_registration)
+            self.assertEqual("TAKE_PROFIT", registration["purpose"])
+            approved = repository.load_mock_automation_approved_gate(self.account_ref, original.intent.intent_id)
+            self.broker_orders = [self._order_reply(original, remaining=3)]
+            await self.bundle.monitor.refresh_recovery()
+            current, restored, paused = await self._rotate_and_restore(registration)
+            self.assertIsNone(restored.episode._unfilled_population)
+            self.assertIsNone(restored.episode._unfilled_judgment)
+            await self._wait_until(lambda:
+                restored.episode.status.get("unfilled_native_source", {}).get("paired_ev") == "UNAVAILABLE"
+                and restored.episode.status.get("unfilled_input_delivery", {}).get("state") == "BLOCKED"
+                and not restored.episode._checkpoint.pending)
+            self.transport.cancel.assert_not_called()
+
+            # Supply a fresh actual family input through the existing consumer;
+            # never copy/reseal an old private judgment across a2 restoration.
+            await asyncio.wait_for(current.monitor._queue.join(), 3)
+            self.clock += timedelta(seconds=3.1)
+            self.observations = []
+            self._bar(self.clock - timedelta(seconds=62), 1_050, 1_060)
+            await restored.episode._consume(self.observations[-1])
+            judgment = restored.episode._unfilled_judgment
+            self.assertIsNotNone(judgment)
+            self.assertEqual(("EXIT", ("target_reached",)), (judgment["final_action"], tuple(judgment["reasons"])))
+            self.assertTrue(self._publish_pair(current, restored, current.runtime.load_intent(original.intent.intent_id)))
+            await current.monitor.refresh_recovery()
+            await asyncio.wait_for(current.monitor._queue.join(), 3)
+            await self._wait_until(lambda:
+                "unfilled_cancel_current_cost_evidence_unavailable" in
+                restored.episode.status.get("unfilled_input_delivery", {}).get("reason", "")
+                and not restored.episode._checkpoint.pending)
+            self.transport.cancel.assert_not_called()
+            self.assertFalse(repository.load_latest_mock_automation_risk(self.account_ref).cost_complete)
+            self.assertEqual(2, self.transport.submit.call_count)
+
+            # Native Risk learns actual settlement rows from the existing reader.
+            day = self.clock.strftime("%Y%m%d")
+            self.broker_costs = [{"cntr_dt": day, "trde_dt": day, "stk_cd": "005930", "io_tp_nm": "매수",
+                "trde_amt": "3000", "exct_amt": "3000", "cmsn": "0", "trde_agri_tax": "0", "tax_sum_cmsn": "0"}]
+            await current.monitor.refresh_recovery()
+            await asyncio.wait_for(current.monitor._queue.join(), 3)
+            await self._wait_until(lambda:
+                restored.episode.status.get("unfilled_input_delivery", {}).get("state") == "CANCEL_REQUESTED"
+                and not restored.episode._checkpoint.pending)
+            self.assertTrue(repository.load_latest_mock_automation_risk(self.account_ref).cost_complete)
+            events = current.repository.events(original.intent.intent_id)
+            self.assertEqual(1, sum(row["event_type"] == "CANCEL_STARTED" for row in events))
+            self.assertEqual(1, sum(row["event_type"] == "CANCEL_ACCEPTED" for row in events))
+            self.assertEqual(1, self.transport.cancel.call_count)
+            self.assertEqual("REPRICE", restored.episode.status["after_cancel"])
+            self.assertEqual("TAKE_PROFIT", restored.episode._unfilled_attempt_plan["result"]["purpose"])
+            self.assertEqual(2, self.transport.submit.call_count)
+
+            # ka10076's explicit cancelled zero-fill snapshot is the broker
+            # confirmation. oso_qty=0 alone would incorrectly imply a full fill.
+            before_confirmation = current.runtime.load_intent(original.intent.intent_id)
+            self.assertEqual(self.clock, before_confirmation.last_broker_as_of)
+            # The accepted cancel ACK precedes this new broker confirmation.
+            # Keep the original deadline and old pair's publication time fixed.
+            self.clock += timedelta(milliseconds=1)
+            self.broker_orders = []
+            self.broker_closed_orders = [{**self._order_reply(original, remaining=0), "ord_stt": "취소", "cntr_qty": "0"}]
+            confirmation = await current.monitor.refresh_recovery()
+            broker_confirmation = next(row for row in confirmation.orders if row.broker_order_id == original.broker_order_id)
+            self.assertEqual((OrderState.CANCELLED, 0), (broker_confirmation.state, broker_confirmation.filled_quantity))
+            self.assertGreater(broker_confirmation.as_of, before_confirmation.last_broker_as_of)
+            await asyncio.wait_for(current.monitor._queue.join(), 3)
+            await self._wait_until(lambda:
+                current.runtime.load_intent(original.intent.intent_id).state is OrderState.CANCELLED
+                and restored.episode.status.get("unfilled_native_source", {}).get("paired_ev") == "UNAVAILABLE"
+                and not restored.episode._checkpoint.pending)
+            self.assertFalse(restored.episode._unfilled_attempt_plan["children"])
+            self.assertEqual(2, self.transport.submit.call_count)
+            self.clock += timedelta(milliseconds=1)
+            self.assertTrue(self._publish_pair(current, restored, current.runtime.load_intent(original.intent.intent_id)))
+            await current.monitor.refresh_recovery()
+            await asyncio.wait_for(current.monitor._queue.join(), 3)
+            await self._wait_until(lambda: restored.episode._unfilled_attempt_plan["children"]
+                and self.transport.submit.call_count == 3 and not restored.episode._checkpoint.pending)
+            plan = restored.episode._unfilled_attempt_plan
+            child_id = plan["children"][-1]["intent"]["intent_id"]
+            child = current.runtime.load_intent(child_id)
+            self.assertEqual((3, 990, OrderSide.SELL, OrderState.ACCEPTED),
+                (child.intent.quantity, child.intent.limit_price, child.intent.side, child.state))
+            # The native enrollment preserves the original full EXIT target=0;
+            # partial REDUCE remains a separate existing explicit-target path.
+            self.assertEqual(0, registration["target_quantity"])
+            self.assertEqual(("TAKE_PROFIT", "EXIT"),
+                (plan["replacement_gate"]["purpose"], plan["replacement_gate"]["action"]))
+            self.assertEqual(registration["control_revision"], plan["anchor"]["scope"]["control_revision"])
+            self.assertEqual(registration, restored.episode._unfilled_registration)
+            self.assertEqual(approved, repository.load_mock_automation_approved_gate(self.account_ref, original.intent.intent_id))
+            self.assertEqual(paused, repository.load_mock_automation_control(self.account_ref))
+            self.assertEqual(1, self.transport.cancel.call_count)
+
+            # Keep the actual submitted v3 claim/fixed approval and original anchor.
+            child_slot, child_anchor = deepcopy(plan["children"][-1]), deepcopy(plan["anchor"])
+            child_claim = current.repository.claim_approval(child_id)
+            self.assertIsNotNone(child_claim)
+            child_fixed = repository.load_mock_automation_approved_gate(self.account_ref, child_id)
+            child_submitted = repository.load_mock_automation_decision_gate(self.account_ref, child_claim["gate_id"])
+            self.assertIsNotNone(child_fixed)
+            self.assertIsNotNone(child_submitted)
+            self.assertEqual("mock_automation_replacement_gate/v3", child_fixed.version)
+            self.assertEqual(paused.control_revision, child_submitted.control_revision)
+            self.assertEqual((child_claim["risk_snapshot_id"], child_claim["risk_reconciliation_revision"]),
+                (child_submitted.risk_snapshot_id, child_submitted.risk_reconciliation_revision))
+            await asyncio.wait_for(current.monitor._queue.join(), 3)
+            native_reached, native_errors = threading.Event(), []
+            append, injected = self.store.append_execution_event, False
+
+            def before_child_native(value, event, **options):
+                nonlocal injected
+                if event["event_type"] == "CANCEL_STARTED" and value["intent_id"] == child_id and not injected:
+                    injected = True
+                    try:
+                        self.assertEqual(managing_control.control_revision, options["ownership"]["control_revision"])
+                        if child_mutation == "claim_absent":
+                            with self.store._lock, self.store._connection() as connection:
+                                row = connection.execute("SELECT document_json FROM central_execution_intents WHERE intent_id=?",
+                                    (child_id,)).fetchone()
+                                stored = json.loads(row[0])
+                                self.assertEqual(child_claim, stored.pop("mock_replacement_claim"))
+                                connection.execute("UPDATE central_execution_intents SET document_json=? WHERE intent_id=?",
+                                    (json.dumps(stored), child_id))
+                        elif child_mutation == "fixed_approval_absent":
+                            with self.store._lock, self.store._connection() as connection:
+                                connection.execute("DELETE FROM central_documents WHERE collection=? AND owner=? AND document_key=?",
+                                    ("execution_mock_automation_approved_gates", self.account_ref, child_id))
+                        elif child_mutation is not None:
+                            raise AssertionError(child_mutation)
+                        return append(value, event, **options)
+                    except Exception as error:
+                        native_errors.append(str(error))
+                        raise
+                    finally:
+                        native_reached.set()
+                return append(value, event, **options)
+
+            # Keep the root CANCELLED row; report this accepted child as open.
+            with patch.object(self.store, "append_execution_event", side_effect=before_child_native):
+                self.broker_orders = [self._order_reply(child, remaining=3)]
+                self.clock += timedelta(milliseconds=1)
+                if rotate_child:
+                    await self.rotate("a3", 2)
+                    managed = self.owner.bundle(self.profile)
+                    await self.supervisor._restore_once()
+                    self.assertIn(self.account_ref, self.supervisor._runners, self.supervisor._restore_errors)
+                    manager = self.supervisor._runners[self.account_ref]
+                    self.assertTrue(manager.episode.is_bound_to(managed))
+                    self.assertIsNotNone(manager._task)
+                    self.assertEqual(manager._native_risk_listener, managed.monitor._automation_risk_listener)
+                    self.assertTrue(managed.monitor.automation_execution_inputs_enabled)
+                    self.assertTrue(restored.episode._closing)
+                    self.assertIsNone(restored._task)
+                    self.assertTrue(current.runtime._retired)
+                    self.assertIsNone(manager.episode._unfilled_population)
+                    self.assertIsNone(manager.episode._unfilled_judgment)
+                else:
+                    managed, manager = current, restored
+                    await managed.monitor.refresh_recovery()
+                managing_control = repository.load_mock_automation_control(self.account_ref)
+                self.assertTrue(managing_control.entry_resume_required)
+                self.assertEqual(paused.control_revision + int(rotate_child), managing_control.control_revision)
+                self.assertEqual(self.bundle.run_id, managed.run_id)
+                self.assertEqual(registration, manager.episode._unfilled_registration)
+                self.assertEqual(child_slot, manager.episode._unfilled_attempt_plan["children"][-1])
+                self.assertEqual(child_anchor, manager.episode._unfilled_attempt_plan["anchor"])
+                self.assertEqual(child.intent, managed.runtime.load_intent(child_id).intent)
+                self.assertEqual(child_claim, managed.repository.claim_approval(child_id))
+                self.assertEqual(child_fixed, repository.load_mock_automation_approved_gate(self.account_ref, child_id))
+                self.assertEqual(child_submitted, repository.load_mock_automation_decision_gate(self.account_ref, child_claim["gate_id"]))
+                await asyncio.wait_for(managed.monitor._queue.join(), 3)
+                await self._wait_until(lambda: not manager.episode._checkpoint.pending)
+                # Same-price 990 is a legitimate WAIT. Fresh 991 differs from
+                # this child while respecting the original 1000/100bps bound.
+                self.rotation_market_price = 991
+                self.clock += timedelta(milliseconds=1)
+                self._bar(self.clock - timedelta(seconds=62), 1_050, 1_060)
+                await manager.episode._consume(self.observations[-1])
+                judgment = manager.episode._unfilled_judgment
+                self.assertEqual(("EXIT", ("target_reached",)),
+                    (judgment["final_action"], tuple(judgment["reasons"])))
+                self.assertTrue(self._publish_pair(managed, manager, managed.runtime.load_intent(child_id), price=991))
+                await managed.monitor.refresh_recovery()
+                await asyncio.wait_for(managed.monitor._queue.join(), 3)
+                self.assertTrue(repository.load_latest_mock_automation_risk(self.account_ref).cost_complete)
+                self.assertEqual("TAKE_PROFIT", manager.episode._unfilled_registration["purpose"])
+                if child_mutation is not None:
+                    self.assertTrue(await asyncio.to_thread(native_reached.wait, 3), manager.episode.status)
+                    await self.supervisor.close()
+                    self.assertTrue(native_errors)
+                    expected = ("MOCK_UNFILLED_MANAGEMENT_CHILD_APPROVAL_CHANGED" if child_mutation == "claim_absent"
+                        else "MOCK_UNFILLED_MANAGEMENT_PROOF_MISSING")
+                    self.assertIn(expected, native_errors[0])
+                    self.assertFalse(any(row["event_type"] == "CANCEL_STARTED" for row in managed.repository.events(child_id)))
+                    self.assertEqual(OrderState.ACCEPTED, managed.runtime.load_intent(child_id).state)
+                    self.assertEqual(1, self.transport.cancel.call_count)
+                else:
+                    await self._wait_until(lambda:
+                        manager.episode.status.get("unfilled_input_delivery", {}).get("state") == "CANCEL_REQUESTED"
+                        and not manager.episode._checkpoint.pending)
+                    events = managed.repository.events(child_id)
+                    self.assertEqual(1, sum(row["event_type"] == "CANCEL_STARTED" for row in events))
+                    self.assertEqual(1, sum(row["event_type"] == "CANCEL_ACCEPTED" for row in events))
+                    self.assertEqual(OrderState.CANCEL_PENDING, managed.runtime.load_intent(child_id).state)
+                    self.assertEqual(2, self.transport.cancel.call_count)
+                    self.assertEqual(child_claim, managed.repository.claim_approval(child_id))
+                    self.assertEqual(child_fixed, repository.load_mock_automation_approved_gate(self.account_ref, child_id))
+                self.assertTrue(injected)
+                self.assertEqual(3, self.transport.submit.call_count)
+                self.assertEqual([child_slot], manager.episode._unfilled_attempt_plan["children"])
+                self.assertEqual(child_anchor, manager.episode._unfilled_attempt_plan["anchor"])
+                self.assertEqual(registration, manager.episode._unfilled_registration)
+                self.assertEqual(approved, repository.load_mock_automation_approved_gate(self.account_ref, original.intent.intent_id))
+                self.assertEqual(managing_control, repository.load_mock_automation_control(self.account_ref))
+
 
 
 if __name__ == "__main__":

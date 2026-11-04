@@ -15,8 +15,8 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "stored-minute-bars",
@@ -103,8 +103,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "unauthorized-recent-minute-bars",
@@ -116,8 +116,8 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "stored-recent-minute-bars",
@@ -215,8 +215,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "unauthorized-latest-market-caps",
@@ -228,8 +228,8 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "stored-latest-market-caps",
@@ -247,8 +247,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "unauthorized-trade-value-comparisons",
@@ -260,8 +260,8 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "stored-trade-value-comparisons",
@@ -328,8 +328,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "unauthorized-daily-bars",
@@ -341,8 +341,8 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "stored-daily-bars",
@@ -399,8 +399,8 @@
             }
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "unauthorized-coverage",
@@ -412,8 +412,8 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "stored-coverage",
@@ -441,8 +441,8 @@
           "missing_intervals": [],
           "absence_meaning": "no_trade_with_complete_coverage"
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "unauthorized-external-bars",
@@ -454,8 +454,8 @@
         "body": {
           "detail": "유효한 서버 접속 토큰이 필요합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "stored-external-bars",
@@ -483,8 +483,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-all",
@@ -571,8 +571,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-KRX",
@@ -620,8 +620,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-NXT",
@@ -669,8 +669,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-SOR",
@@ -705,8 +705,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-COMBINED",
@@ -756,8 +756,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-empty",
@@ -778,8 +778,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-invalid-market",
@@ -804,8 +804,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "minute-invalid-code",
@@ -830,8 +830,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "recent-limited",
@@ -878,8 +878,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "recent-empty",
@@ -895,8 +895,8 @@
           "trading_days": [],
           "bars": []
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "recent-invalid-days",
@@ -921,8 +921,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "caps-0-[]",
@@ -934,8 +934,8 @@
         "body": {
           "detail": "종목코드는 1~200개의 6자리 값이어야 합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "caps-1-['bad']",
@@ -947,8 +947,8 @@
         "body": {
           "detail": "종목코드는 1~200개의 6자리 값이어야 합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "caps-201-['005930']",
@@ -966,8 +966,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "caps-201-['000000']",
@@ -979,8 +979,8 @@
         "body": {
           "detail": "종목코드는 1~200개의 6자리 값이어야 합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "caps-3-['005930']",
@@ -998,8 +998,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "comparison-limit",
@@ -1041,8 +1041,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "comparison-empty",
@@ -1069,8 +1069,8 @@
           },
           "comparisons": []
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "daily-filter-limit",
@@ -1115,8 +1115,8 @@
             }
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "daily-empty",
@@ -1148,8 +1148,8 @@
             }
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "daily-invalid-limit",
@@ -1174,8 +1174,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-unknown",
@@ -1187,8 +1187,8 @@
         "body": {
           "detail": "지원하지 않는 관측 자료 종류입니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-unrecognized",
@@ -1200,8 +1200,8 @@
         "body": {
           "detail": "지원하지 않는 관측 자료 종류입니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-reversed",
@@ -1213,8 +1213,8 @@
         "body": {
           "detail": "end는 start보다 뒤여야 합니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-cadence-rejected",
@@ -1226,8 +1226,8 @@
         "body": {
           "detail": "이 자료 종류는 예상 주기로 결측을 단정할 수 없습니다."
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-early-cutoff",
@@ -1255,8 +1255,8 @@
           "missing_intervals": [],
           "absence_meaning": "no_trade_or_no_observation"
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-late-cutoff",
@@ -1284,8 +1284,8 @@
           "missing_intervals": [],
           "absence_meaning": "no_trade_or_no_observation"
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-invalid-time",
@@ -1310,8 +1310,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "coverage-candidate-cadence",
@@ -1348,8 +1348,8 @@
           ],
           "absence_meaning": "no_observation"
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "external-whitespace",
@@ -1377,8 +1377,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "external-empty",
@@ -1392,8 +1392,8 @@
           "timeframe": "1d",
           "bars": []
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "external-invalid-timeframe",
@@ -1418,8 +1418,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "live-minute-1",
@@ -1483,8 +1483,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "live-recent-1",
@@ -1545,8 +1545,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "live-minute-2",
@@ -1610,8 +1610,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "live-recent-2",
@@ -1672,8 +1672,8 @@
             }
           ]
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       },
       {
         "name": "collector-removed-fallback",
@@ -1723,8 +1723,8 @@
             ]
           }
         },
-        "stored_before": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d",
-        "stored_after": "bb5bd84a7e4b5c5d814f37592f1362bfd5dbcd227c508e8218dc5e9e3cbaf25d"
+        "stored_before": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f",
+        "stored_after": "cf28fae303ee865c9f1706c5439c789a7856a44394d64249306f2a111006466f"
       }
     ],
     "pending": [

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_now
+from kiwoom_monitor.domain.time_basis import aware_iso_kst, kst_now
 
 import base64
 import hashlib
@@ -24,6 +24,9 @@ from .news_ai_backup import NewsAIBackupService
 from .strict_restore import StrictRestoreCoordinator
 
 
+CURRENT_BACKUP_SET = "architecture-v1"
+
+
 class GoogleDriveSyncError(RuntimeError):
     def __init__(self, message: str, *, local_changes_applied: bool = False) -> None:
         super().__init__(message)
@@ -38,11 +41,27 @@ class GoogleDriveSyncResult:
     local_changes_applied: bool = False
 
 
+def has_pending_google_drive_changes(
+    local_changed_at: str | None, last_upload_at: str | None, *, unsynced: bool = False,
+) -> bool:
+    """Use one pending-state rule at startup and when resuming the same backup."""
+    if unsynced:
+        return True
+    local_changed_at = local_changed_at or ""
+    last_upload_at = last_upload_at or ""
+    try:
+        return aware_iso_kst(local_changed_at) > aware_iso_kst(last_upload_at)
+    except ValueError:
+        # Preserve the existing missing/invalid/offset-free legacy marker rule.
+        return bool(local_changed_at) and (not last_upload_at or local_changed_at > last_upload_at)
+
+
 class GoogleDriveSyncService:
     """개인 Drive에 legacy 파일과 manifest가 가리키는 백업 세대를 저장한다."""
 
     SCOPES = ("https://www.googleapis.com/auth/drive.file",)
     FOLDER_NAME = "키움 실시간 모니터"
+    CURRENT_FOLDER_NAME = "키움 실시간 모니터 - 새 구조"
     LEGACY_REMOTE_NAME = "kiwoom-monitor-sync-v1.json"
     SETTINGS_REMOTE_NAME = "kiwoom-monitor-settings-v1.json"
     THEMES_REMOTE_NAME = "kiwoom-monitor-themes-v1.json"
@@ -58,7 +77,12 @@ class GoogleDriveSyncService:
         key for key in DEFAULT_SETTINGS if not is_shared_setting(key)
     )
 
-    def __init__(self, database_path: Path, news_database_path: Path | None = None, *, now_provider=None) -> None:
+    def __init__(self, database_path: Path, news_database_path: Path | None = None, *,
+                 now_provider=None, backup_set: str = "legacy") -> None:
+        if backup_set not in ("legacy", CURRENT_BACKUP_SET):
+            raise ValueError("지원하지 않는 Google Drive 백업 묶음입니다.")
+        self._backup_set = backup_set
+        self._folder_name = self.FOLDER_NAME if backup_set == "legacy" else self.CURRENT_FOLDER_NAME
         self._database_path = database_path
         self._data_dir = database_path.parent
         self._news_database_path = news_database_path or database_path.parent / "news.sqlite3"
@@ -103,6 +127,8 @@ class GoogleDriveSyncService:
             manifest = self._find_remote_file_info(service, folder_id, self.MANIFEST_REMOTE_NAME)
             if manifest is not None:
                 return str(manifest.get("modifiedTime", ""))
+            if self._backup_set != "legacy":
+                return ""
             modified_times = [
                 str(info.get("modifiedTime", ""))
                 for name, _, _ in self._selected_files(target)
@@ -161,32 +187,34 @@ class GoogleDriveSyncService:
                         "file_id": str(created["id"]), "name": name,
                         "sha256": hashlib.sha256(content).hexdigest(), "size": len(content),
                     }
-                # Keep older desktop builds working. New builds select v2 by its
-                # manifest; these mutable aliases are never used once that exists.
-                for role, source in sources.items():
-                    legacy_name = {
-                        "settings": self.SETTINGS_REMOTE_NAME,
-                        "themes": self.THEMES_REMOTE_NAME,
-                        "news_ai": self.NEWS_AI_REMOTE_NAME,
-                    }[role]
-                    existing_legacy = self._find_remote_file(service, folder_id, legacy_name)
-                    media = self._media_upload(source.read_bytes())
-                    if existing_legacy:
-                        service.files().update(
-                            fileId=existing_legacy, media_body=media,
-                            fields="id,modifiedTime",
-                        ).execute(num_retries=3)
-                    else:
-                        service.files().create(
-                            body={"name": legacy_name, "parents": [folder_id]},
-                            media_body=media, fields="id,modifiedTime",
-                        ).execute(num_retries=3)
+                # Only the legacy set has older desktop consumers of these aliases.
+                if self._backup_set == "legacy":
+                    for role, source in sources.items():
+                        legacy_name = {
+                            "settings": self.SETTINGS_REMOTE_NAME,
+                            "themes": self.THEMES_REMOTE_NAME,
+                            "news_ai": self.NEWS_AI_REMOTE_NAME,
+                        }[role]
+                        existing_legacy = self._find_remote_file(service, folder_id, legacy_name)
+                        media = self._media_upload(source.read_bytes())
+                        if existing_legacy:
+                            service.files().update(
+                                fileId=existing_legacy, media_body=media,
+                                fields="id,modifiedTime",
+                            ).execute(num_retries=3)
+                        else:
+                            service.files().create(
+                                body={"name": legacy_name, "parents": [folder_id]},
+                                media_body=media, fields="id,modifiedTime",
+                            ).execute(num_retries=3)
                 manifest = {
                     "format": self.BUNDLE_FORMAT, "version": 2,
                     "generation": generation,
                     "created_at": kst_now().isoformat(timespec="seconds"),
                     "target": target, "components": components,
                 }
+                if self._backup_set != "legacy":
+                    manifest["backup_set"] = self._backup_set
                 manifest_bytes = (json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
                 existing_manifest = self._find_remote_file(service, folder_id, self.MANIFEST_REMOTE_NAME)
                 media = self._media_upload(manifest_bytes)
@@ -220,6 +248,11 @@ class GoogleDriveSyncService:
                     service, manifest_id, target=target,
                     stage_only=stage_only,
                 )
+        if self._backup_set != "legacy":
+            return GoogleDriveSyncResult(
+                "restore" if stage_only else "download", "empty",
+                "Google Drive에 아직 동기화된 설정이 없습니다.",
+            )
         files = self._selected_files(target)
         remote_files = [(name, self._find_remote_file(service, folder_id, name) if folder_id else None, include_settings, include_themes) for name, include_settings, include_themes in files]
         ai_file_id = self._find_remote_file(service, folder_id, self.NEWS_AI_REMOTE_NAME) if folder_id else None
@@ -346,7 +379,7 @@ class GoogleDriveSyncService:
         try:
             response = service.files().list(
                 spaces="drive",
-                q=f"name = '{self.FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+                q=f"name = '{self._folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
                 fields="files(id,modifiedTime)",
                 pageSize=10,
             ).execute()
@@ -363,7 +396,7 @@ class GoogleDriveSyncService:
             return folder_id
         try:
             created = service.files().create(
-                body={"name": self.FOLDER_NAME, "mimeType": "application/vnd.google-apps.folder"},
+                body={"name": self._folder_name, "mimeType": "application/vnd.google-apps.folder"},
                 fields="id",
             ).execute(num_retries=3)
             return str(created["id"])
@@ -394,6 +427,9 @@ class GoogleDriveSyncService:
                     raise GoogleDriveSyncError(f"기존 Drive v2 {role} 자료 검증에 실패해 새 묶음을 게시하지 않았습니다.")
                 components[role] = dict(item)
             return components
+
+        if self._backup_set != "legacy":
+            return {}
 
         # Upgrade an existing v1 folder by freezing any untouched v1 component
         # into the first immutable generation before publishing the new pointer.
@@ -445,6 +481,8 @@ class GoogleDriveSyncService:
             or not isinstance(manifest.get("components"), dict)
         ):
             raise GoogleDriveSyncError("Google Drive v2 manifest 형식이 올바르지 않습니다.")
+        if self._backup_set != "legacy" and manifest.get("backup_set") != self._backup_set:
+            raise GoogleDriveSyncError("Google Drive 백업 묶음이 현재 구조와 다릅니다.")
         components = manifest["components"]
         if any(role not in {"settings", "themes", "news_ai"} for role in components):
             raise GoogleDriveSyncError("Google Drive v2 manifest 구성요소가 올바르지 않습니다.")
@@ -511,9 +549,11 @@ class GoogleDriveSyncService:
                         return GoogleDriveSyncResult("restore", "empty", "Google Drive에 복원할 자료가 없습니다.")
                     operation_id = StrictRestoreCoordinator(
                         self._database_path, self._news_database_path,
+                        expected_backup_set=(self._backup_set if self._backup_set != "legacy" else None),
                     ).stage(
                         settings=settings_path, themes=themes_path, news_ai=news_ai_path,
                         excluded_setting_keys=self.LOCAL_ONLY_SETTINGS,
+                        provenance={"format": "google-drive-v2-manifest/v1", "manifest": manifest},
                     )
                     return GoogleDriveSyncResult(
                         "restore", "staged",

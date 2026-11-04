@@ -56,6 +56,7 @@ class CandidateAlertTests(unittest.TestCase):
             return_value=settings,
         ), patch.object(QApplication, "beep") as beep:
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             dialog._alert_enabled.setChecked(True)
             dialog._apply_page({
                 "initial_sync": True, "high_watermark": 1,
@@ -148,6 +149,7 @@ class CandidateAlertTests(unittest.TestCase):
                 return_value=settings,
             ):
                 dialog = CandidateMonitorDialog(FakeClient())
+                dialog.activate_startup()
                 self.assertFalse(dialog._worker._polling_enabled)
                 start.assert_not_called()
 
@@ -185,6 +187,7 @@ class RamShadowDialogTests(unittest.TestCase):
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start'), \
              patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog=CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._apply_ram_page({'live':page,'runtime':{'state':'RUNNING'}})
                 item=dialog._ram_table.item(0,2)
@@ -214,6 +217,7 @@ class RamShadowDialogTests(unittest.TestCase):
              patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()), \
              patch.object(QApplication, "beep") as beep:
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._apply_ram_page({"live": page, "runtime": {"state": "RUNNING"}})
                 self.assertIn("조회순위 변화: 첫 순위 교체", dialog._ram_table.item(0, 2).text())
@@ -246,6 +250,7 @@ class RamShadowDialogTests(unittest.TestCase):
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start'), \
              patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog=CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._apply_ram_page({'live':page,'runtime':{'state':'RUNNING'}})
                 text=dialog._ram_table.item(0,2).text()
@@ -278,6 +283,7 @@ class RamShadowDialogTests(unittest.TestCase):
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start'), \
              patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog=CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._apply_ram_page({'live':page,'runtime':{'state':'RUNNING'}})
                 item=dialog._ram_table.item(0,2)
@@ -327,6 +333,7 @@ class RamShadowDialogTests(unittest.TestCase):
     def test_live_and_recorded_independent_policy_rows_expiry_and_no_alert(self):
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()), patch.object(QApplication, "beep") as beep:
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 page = self.page()
                 dialog._apply_ram_selection(self.selection(apply_status="RECOVERY_REQUIRED", last_error="apply pending"))
@@ -363,6 +370,7 @@ class RamShadowDialogTests(unittest.TestCase):
              patch("kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start"), \
              patch.object(CandidateMonitorDialog, "_start_settings_request"):
             dialog = CandidateMonitorDialog(Client(), Settings())
+            dialog.activate_startup()
             try:
                 dialog._refresh_ram_if_visible()
                 self.assertEqual([], calls)
@@ -387,6 +395,7 @@ class RamShadowDialogTests(unittest.TestCase):
     def test_save_requires_loaded_supported_selection_and_preserves_revision(self):
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 with patch.object(dialog, "_start_ram_request") as request:
                     dialog._save_ram_selection(); request.assert_not_called()
@@ -415,6 +424,7 @@ class RamShadowDialogTests(unittest.TestCase):
                 return {"live": None, "recorded": None, "runtime": {"state": "DISABLED"}}
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(Client())
+            dialog.activate_startup()
             try:
                 self.assertTrue(dialog._start_ram_request("live"))
                 self.assertTrue(entered.wait(1))
@@ -453,6 +463,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
         result=fixture.evaluate(policy=policy,thesis=None)
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog=CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._render_position_comparison({'position_comparison':{'input_mode':'owner_ram_snapshot',
                     'is_live_account':True,'result':result,'valid_until':'2099-01-01T00:00:00+00:00',
@@ -467,6 +478,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
         fixture=NativePositionSelectionInputsTests();fixture.setUp()
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog=CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 for caps,label,missing in ((('sampled_price',),'현재 가격','없음'),(('news_context',),'뉴스 맥락','뉴스 맥락')):
                     result=fixture.evaluate(policy=fixture.capability_policy(caps),thesis=None)
@@ -486,6 +498,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
         result = fixture.evaluate()
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._render_position_comparison({'position_comparison':{'input_mode':'owner_ram_snapshot',
                     'is_live_account':True,'result':result,'valid_until':'2099-01-01T00:00:00+00:00',
@@ -503,6 +516,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
         fixture = PositionActionSelectionTests(); fixture.setUp()
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 for constraint, expected in (('ALLOW','축소 제안'),('EXIT_REQUIRED','청산 제안')):
                     result = fixture.run_comparison(parameters=replace(fixture.parameters,
@@ -535,6 +549,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
         result=fixture.run_comparison(requests=requests)
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog=CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._render_position_comparison({'position_comparison':{'input_mode':'supplied_fixed_snapshot',
                     'is_live_account':False,'result':result}},recorded=False)
@@ -555,6 +570,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
                  "account_as_of": result["decision_time"], "valid_until": "2099-01-01T00:00:00+00:00"}
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._render_position_comparison({"position_comparison": value}, recorded=False)
                 self.assertIn("계좌 전체 미체결 확인", dialog._ram_position_status.text())
@@ -574,6 +590,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
             envelope["position_comparison"] = {"input_mode": "supplied_fixed_snapshot", "is_live_account": False, "result": deepcopy(result)}
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()), patch.object(QApplication, "beep") as beep:
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._apply_ram_page(page)
                 self.assertEqual(4, dialog._ram_table.rowCount())
@@ -601,6 +618,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
         document, result = self.comparison()
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._apply_ram_selection(self.selection(position_comparison=document))
                 with patch.object(dialog, "_start_ram_request") as request:
@@ -636,6 +654,7 @@ class PositionComparisonDialogTests(unittest.TestCase):
                  "account_as_of": result["decision_time"], "valid_until": result["decision_time"]}
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
+            dialog.activate_startup()
             try:
                 dialog._apply_ram_selection(self.selection(position_comparison=document, position_account_live=True))
                 self.assertIn("계좌 수량·기준가격은 기존 RAM", dialog._ram_position_input_status.text())
@@ -669,6 +688,7 @@ class ResearchThesisDialogTests(unittest.TestCase):
     def dialog(self, client):
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient(), client)
+            dialog.activate_startup()
         self.addCleanup(dialog.deleteLater)
         self.addCleanup(dialog.stop)
         dialog._apply_ram_selection(self.selection())
@@ -836,6 +856,7 @@ class StockThesisSourceCheckDialogTests(unittest.TestCase):
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()), \
              patch("kiwoom_monitor.presentation.candidate_monitor_dialog.CandidatePollWorker.start"):
             dialog = CandidateMonitorDialog(client)
+            dialog.activate_startup()
         self.addCleanup(dialog.deleteLater)
         self.addCleanup(dialog.stop)
         return dialog
@@ -1017,6 +1038,7 @@ class NativePositionOutcomeDialogTests(unittest.TestCase):
         client = Client()
         with patch('kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings',return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient(),client)
+            dialog.activate_startup()
         self.addCleanup(dialog.deleteLater); self.addCleanup(dialog.stop)
         dialog._apply_ram_selection(client.saved)
         dialog._ram_position_db.setText(str(reader.path))

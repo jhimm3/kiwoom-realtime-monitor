@@ -16,11 +16,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from scripts.prepare_mock_automation_candidate import (
+from kiwoom_monitor.research_candidate import (
     freeze_policy, load_publication, prepare_publication,
     inspect_final_preparation, final_preparation_text,
-)
-from scripts.summarize_historical_baseline_results import (
     development_review_text, inspect_development_baselines,
     daily_input_review_text, inspect_daily_development_inputs,
 )
@@ -68,13 +66,14 @@ class MockCandidateFileWorker(QThread):
                 request_path=Path(values["request"]) if values.get("request") else None,
                 cost_reference=Path(values["cost_reference"]) if values.get("cost_reference") else None,
                 gap_provenance=Path(values["gap_provenance"]) if values.get("gap_provenance") else None,
-                checkpoint=self._check_interruption, **values["criteria"],
+                checkpoint=self._check_interruption, now_provider=self._content.server_now, **values["criteria"],
             )}
         account_ref = self._profile["account_ref"]
         if self._operation == "freeze":
             policy = freeze_policy(
                 Path(values["request"]), Path(values["policy"]),
-                strategy_ref=values["strategy_ref"], **values["criteria"],
+                strategy_ref=values["strategy_ref"], now_provider=self._content.server_now,
+                **values["criteria"],
             )
             return {"policy": policy.to_dict(), "tbd_fields": list(policy.tbd_fields)}
         if self._operation == "prepare":

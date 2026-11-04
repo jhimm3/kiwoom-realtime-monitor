@@ -160,7 +160,7 @@ class NewsWindowCoordinator(QObject):
             self.send_command(action="sync", activate=False)
 
     def schedule_geometry_sync(self) -> None:
-        if self.window_mode().startswith("docked_"):
+        if self.is_running and self.window_mode().startswith("docked_"):
             self._dock_timer.start()
 
     def on_window_state_change(self, minimized: bool) -> None:

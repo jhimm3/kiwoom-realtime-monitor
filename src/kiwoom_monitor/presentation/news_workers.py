@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_now
+from kiwoom_monitor.domain.news_ai_contract import (
+    news_ai_article_input, news_ai_source_member, freeze_news_ai_input,
+    news_ai_analysis_payload, NewsAIResultEnvelope, ANALYSIS_PROMPT_VERSION,
+)
+from kiwoom_monitor.domain.news_observation import NEWS_ANALYSIS_SCHEMA_VERSION
+from uuid import uuid4
+
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 import sqlite3
 import logging
@@ -450,16 +457,17 @@ def _matching_article_rows(
 
 
 class AINewsWorker(QThread):
-    completed = Signal(object, object, str, str, object, int)
+    completed = Signal(object)
     failed = Signal(str, bool, int)
 
     def __init__(self, groups: tuple[NewsEventGroup, ...], stock_name: str, settings: NewsAISettings,
                  parent: QWidget | None = None, *, stock_code: str = "",
-                 central_client: CentralAIClient | None = None) -> None:
+                 central_client: CentralAIClient | None = None, now_provider=None) -> None:
         super().__init__(parent)
         self._groups, self._stock_name, self._settings = groups, stock_name, settings
         self._stock_code, self._central_client = stock_code, central_client
-        self.central_cache_hit = False
+        self._now = (lambda: as_kst(now_provider())) if now_provider is not None else kst_now
+        self._clock_source = "owner_now_provider" if now_provider is not None else "common_kst_fallback"
         self._plan_cancel = Event()
 
     def requestInterruption(self) -> None:
@@ -471,30 +479,27 @@ class AINewsWorker(QThread):
         article_count = 0
         try:
             if self._central_client is not None:
-                events = []
-                for group in self._groups:
-                    events.append({
-                        "identity": news_identity(group.representative),
-                        "title": group.representative.title,
-                        "articles": [{
-                            "title": item.title, "description": item.description,
-                            "link": item.link, "original_link": item.original_link,
-                        } for item in group.items],
-                    })
-                    article_count += len(group.items)
+                events = [{"identity": news_identity(group.representative),
+                           "title": group.representative.title,
+                           "articles": [news_ai_article_input(item) for item in group.items]}
+                          for group in self._groups]
+                article_count = sum(len(group.items) for group in self._groups)
                 api_attempted = True
-                results, body_hashes, provider, model, usage, self.central_cache_hit = self._central_client.analyze(
+                envelope = self._central_client.analyze(
                     self._stock_code, self._stock_name, self._settings.provider,
                     self._settings.model, events, article_count,
                 )
-                self.completed.emit(results, body_hashes, provider, model, usage, article_count)
+                self.completed.emit(envelope)
                 return
             event_inputs: list[tuple[str, str]] = []
             body_hashes: list[str] = []
+            frozen_inputs: list[dict[str, object]] = []
             for group in self._groups:
                 article_sections: list[str] = []
+                sources: list[dict[str, object]] = []
                 last_error: Exception | None = None
-                for index, item in enumerate(group.items, start=1):
+                length = 0
+                for index, item in enumerate(group.items):
                     body = ""
                     for url in dict.fromkeys((item.link, item.original_link)):
                         if not url:
@@ -504,15 +509,33 @@ class AINewsWorker(QThread):
                             break
                         except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
                             last_error = error
+                    raw_body = body or item.description
                     if body:
-                        article_sections.append(f"[관련 기사 {index}/{len(group.items)}: {item.title}]\n{body}")
+                        section = f"[관련 기사 {index + 1}/{len(group.items)}: {item.title}]\n{body}"
+                        status = "fulltext"
                     elif item.description:
-                        article_sections.append(f"[관련 기사 {index}/{len(group.items)}: {item.title} · 검색 요약]\n{item.description}")
+                        section = f"[관련 기사 {index + 1}/{len(group.items)}: {item.title} · 검색 요약]\n{item.description}"
+                        status = "summary_only"
+                    else:
+                        section, status = "", "unavailable"
+                    observed = self._now().timestamp()
+                    if section:
+                        start = length + (2 if article_sections else 0)
+                        length = start + len(section)
+                        article_sections.append(section)
+                        sources.append(news_ai_source_member(index, news_ai_article_input(item), raw_body, status,
+                            input_text=section, span=(start, length), observed_at=observed, clock_source=self._clock_source))
+                    else:
+                        sources.append(news_ai_source_member(index, news_ai_article_input(item), "", status,
+                            observed_at=observed, clock_source=self._clock_source))
                 if not article_sections:
                     raise ValueError(str(last_error or "기사 본문을 가져오지 못했습니다."))
                 combined_body = "\n\n".join(article_sections)
+                body_hash = analysis_body_hash(self._stock_name, combined_body)
                 event_inputs.append((group.representative.title, combined_body))
-                body_hashes.append(analysis_body_hash(self._stock_name, combined_body))
+                body_hashes.append(body_hash)
+                frozen_inputs.append(freeze_news_ai_input(news_identity(group.representative),
+                    group.representative.title, combined_body, body_hash, sources, kind="bundle"))
                 article_count += len(group.items)
             api_attempted = True
             model = self._settings.model.strip() or DEFAULT_MODELS.get(self._settings.provider, "")
@@ -520,8 +543,18 @@ class AINewsWorker(QThread):
                 results, usage = analyze_articles(self._settings, self._stock_name, tuple(event_inputs), cancel=self._plan_cancel)
             else:
                 results, usage = analyze_articles(self._settings, self._stock_name, tuple(event_inputs))
-            provider = self._settings.provider
-            self.completed.emit(results, tuple(body_hashes), provider, model, usage, article_count)
+            computed = self._now()
+            inference_id = uuid4().hex
+            inference = {
+                "input_envelope_version": 1, "result_schema_version": "news-ai-value-v1",
+                "inference_id": inference_id, "target_id": self._stock_code, "stock_name": self._stock_name,
+                "provider": self._settings.provider, "model": model,
+                "prompt_version": ANALYSIS_PROMPT_VERSION, "schema_version": NEWS_ANALYSIS_SCHEMA_VERSION,
+                "computed_at": computed.timestamp(), "usage_owner": computed.date().isoformat(), "usage_key": inference_id,
+                "inputs": frozen_inputs, "outputs": [news_ai_analysis_payload(result) for result in results],
+            }
+            self.completed.emit(NewsAIResultEnvelope(tuple(results), tuple(body_hashes), self._settings.provider,
+                                model, usage, article_count, inference=inference, stock_name=self._stock_name))
         except Exception as error:  # worker boundary: show a recoverable message in the UI
             if self._settings.provider == "chatgpt_plan":
                 from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError

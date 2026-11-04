@@ -14,8 +14,10 @@ from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScop
 from kiwoom_monitor.application.strategy_pack import StrategyPackManifest, default_strategy_pack
 from kiwoom_monitor.application.strategy_pack_extraction import ExtractedStrategyDraft, StrategyRuleDraft
 from kiwoom_monitor.application.strategy_review_context import strategy_review_reference
-from kiwoom_monitor.application.journal_enrichment import journal_research_link
-from kiwoom_monitor.application.trade_analysis_preparation_service import TradeAnalysisPreparationService
+from kiwoom_monitor.application.journal_enrichment import journal_research_link, TradeAnalysisPublication, TradeSetupManualInput
+from kiwoom_monitor.application.trade_analysis_preparation_service import (
+    TradeAnalysisPreparationService,
+)
 from kiwoom_monitor.application.trade_history_service import TradeFill
 from kiwoom_monitor.application.trade_journal_summary import group_trade_episodes
 from kiwoom_monitor.application.trade_setup_classification import TradeSetupClassification
@@ -70,6 +72,15 @@ class FakeRepository:
     def save_journal_analysis_revision(self, revision):
         self.analysis_revisions.append(revision)
         return revision
+
+    def load_trade_setup_manual_input(self, group_id, *, account_scope, canonical_scope=None):
+        manual = self.stored_setup[1] if self.stored_setup else ""
+        return TradeSetupManualInput(group_id, manual, tuple(sorted(self.overrides.items())), account_scope, canonical_scope)
+
+    def publish_trade_analysis(self, revision, classification, *, expected_manual_revision,
+                               legacy_override=None, now):
+        self.save_trade_analysis_setup(revision.group_id, classification, legacy_override, now)
+        return TradeAnalysisPublication(self.save_journal_analysis_revision(revision), True, expected_manual_revision)
 
     def load_journal_research_links(self, execution_refs):
         self.execution_refs = execution_refs
@@ -139,6 +150,117 @@ class DraftReadTrace:
 
 
 class TradeAnalysisPreparationServiceTests(unittest.TestCase):
+    def test_native_manual_changes_create_v3_inputs_without_rewriting_v2_or_first_receipt(self):
+        from kiwoom_monitor.application.journal_enrichment import journal_analysis_revision
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = JournalRepository(root / "journal.db")
+            current = episode()
+            clock = [as_kst(datetime(2026, 10, 23, 10))]
+            old = journal_analysis_revision(current.group_id, "trade_setup", {"original": 1},
+                "trade-analysis/v2", {"selected_types": ["기타"]}, now=clock[0])
+            repository.save_journal_analysis_revision(old)
+            service = TradeAnalysisPreparationService(repository, root / "absent.db", lambda *_: (), lambda *_: (), now_provider=lambda: clock[0])
+            args = dict(active_pack=default_strategy_pack(), strategy_packs=(), result_mode="together")
+            repository.save_trade_setup(current.group_id, TradeSetupClassification("기타", 1, ()), "추격매수", now=clock[0])
+            first = service.prepare(current, (), **args)
+            self.assertEqual(("주도주 돌파",), first.type_selection.selected_types)
+            self.assertEqual("", repository.load_trade_setup(current.group_id)[1])
+            self.assertEqual({0: "주도주 돌파"}, repository.load_trade_setup_cycle_overrides(current.group_id))
+            clock[0] += timedelta(hours=1)
+            repeated = service.prepare(current, (), **args)
+            self.assertEqual(first.analysis_revision_id, repeated.analysis_revision_id)
+            saved = {revision.revision_id: revision for revision in repository.load_journal_analysis_revisions(current.group_id)}
+            self.assertEqual(clock[0] - timedelta(hours=1), saved[first.analysis_revision_id].created_at)
+            repository.save_trade_setup_cycle_override(current.group_id, 0, "눌림", now=clock[0])
+            changed = service.prepare(current, (), **args)
+            self.assertEqual(("눌림",), changed.type_selection.selected_types)
+            self.assertNotEqual(first.analysis_revision_id, changed.analysis_revision_id)
+            repository.save_trade_setup_cycle_override(current.group_id, 0, "", now=clock[0])
+            automatic = service.prepare(current, (), **args)
+            self.assertEqual({}, repository.load_trade_setup_cycle_overrides(current.group_id))
+            self.assertNotEqual(changed.analysis_revision_id, automatic.analysis_revision_id)
+            self.assertIn(old, JournalRepository(repository._path).load_journal_analysis_revisions(current.group_id))
+
+    def test_native_edit_or_delete_during_prepare_keeps_frozen_result_without_publishing_current(self):
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        for value in ("눌림", ""):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository = JournalRepository(root / "journal.db")
+                current = episode()
+                now = as_kst(datetime(2026, 10, 23, 10))
+                original = TradeSetupClassification("기타", 1, ("saved current",))
+                repository.save_trade_setup(current.group_id, original, now=now)
+                repository.save_trade_setup_cycle_override(current.group_id, 0, "돌파", now=now)
+                def edit_from_another_connection(*_):
+                    JournalRepository(repository._path).save_trade_setup_cycle_override(current.group_id, 0, value, now=now)
+                    return ()
+                service = TradeAnalysisPreparationService(repository, root / "absent.db", edit_from_another_connection, lambda *_: (), now_provider=lambda: now)
+                prepared = service.prepare(current, (), active_pack=default_strategy_pack(), strategy_packs=(), result_mode="together")
+                self.assertFalse(prepared.current_published)
+                self.assertEqual(("돌파",), prepared.type_selection.selected_types)
+                self.assertEqual((original, ""), repository.load_trade_setup(current.group_id))
+                self.assertEqual({0: value} if value else {}, repository.load_trade_setup_cycle_overrides(current.group_id))
+                revisions = JournalRepository(repository._path).load_journal_analysis_revisions(current.group_id)
+                self.assertEqual(1, len(revisions))
+                self.assertEqual(prepared.analysis_revision_id, revisions[0].revision_id)
+                self.assertEqual(["돌파"], revisions[0].content["selected_types"])
+
+    def test_native_final_write_failure_rolls_back_immutable_and_current_but_committed_ack_loss_is_idempotent(self):
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = JournalRepository(root / "journal.db")
+            current = episode()
+            now = as_kst(datetime(2026, 10, 23, 10))
+            original = TradeSetupClassification("기타", 1, ("original",))
+            repository.save_trade_setup(current.group_id, original, "원문 보존", now=now)
+            service = TradeAnalysisPreparationService(repository, root / "absent.db", lambda *_: (), lambda *_: (), now_provider=lambda: now)
+            args = dict(active_pack=default_strategy_pack(), strategy_packs=(), result_mode="together")
+            with closing(sqlite3.connect(repository._path)) as connection, connection:
+                connection.execute("CREATE TRIGGER reject_current BEFORE INSERT ON trade_setup_classifications BEGIN SELECT RAISE(ABORT,'current rejected'); END")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "current rejected"):
+                service.prepare(current, (), **args)
+            self.assertEqual((original, "원문 보존"), repository.load_trade_setup(current.group_id))
+            self.assertEqual((), repository.load_journal_analysis_revisions(current.group_id))
+            self.assertEqual({}, repository.load_trade_setup_cycle_overrides(current.group_id))
+            with closing(sqlite3.connect(repository._path)) as connection, connection:
+                connection.execute("DROP TRIGGER reject_current")
+            publish = repository.publish_trade_analysis
+            def commit_then_lose_ack(*args, **kwargs):
+                publish(*args, **kwargs)
+                raise OSError("committed ACK lost")
+            with patch.object(repository, "publish_trade_analysis", side_effect=commit_then_lose_ack):
+                with self.assertRaisesRegex(OSError, "ACK lost"):
+                    service.prepare(current, (), **args)
+            first = JournalRepository(repository._path).load_journal_analysis_revisions(current.group_id)[0]
+            repeated = service.prepare(current, (), **args)
+            self.assertEqual(first.revision_id, repeated.analysis_revision_id)
+            self.assertEqual((first,), repository.load_journal_analysis_revisions(current.group_id))
+            self.assertTrue(repeated.current_published)
+
+    def test_native_same_id_conflicts_preserve_current_for_each_identity_field(self):
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.application.journal_enrichment import journal_analysis_revision
+        with tempfile.TemporaryDirectory() as directory:
+            repository = JournalRepository(Path(directory) / "journal.db")
+            now = as_kst(datetime(2026, 10, 23, 10))
+            revision = journal_analysis_revision("group", "trade_setup", {"manual": "original"}, "trade-analysis/v3", {"type": "돌파"}, now=now)
+            original = TradeSetupClassification("돌파", 80, ("saved",))
+            manual = repository.load_trade_setup_manual_input("group", account_scope=LEGACY_ACCOUNT_SCOPE)
+            repository.publish_trade_analysis(revision, original, expected_manual_revision=manual.revision, now=now)
+            scope = AccountScope("kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111")
+            for changes in ({"content": {"type": "눌림"}}, {"input_fingerprint": "different"}, {"analysis_version": "different"}, {"group_id": "other"}, {"origin_scope": scope}):
+                with self.subTest(changes=changes):
+                    candidate = replace(revision, **changes)
+                    expected = repository.load_trade_setup_manual_input(candidate.group_id, account_scope=candidate.origin_scope)
+                    with self.assertRaisesRegex(sqlite3.IntegrityError, "같은 분석 revision ID"):
+                        repository.publish_trade_analysis(candidate, TradeSetupClassification("기타", 1, ()), expected_manual_revision=expected.revision, now=now)
+                    self.assertEqual((original, ""), repository.load_trade_setup("group", LEGACY_ACCOUNT_SCOPE))
+                    self.assertEqual((revision,), repository.load_journal_analysis_revisions("group"))
+
     def test_snapshot_warning_callback_is_per_call_and_default_loader_contract_stays_positional(self):
         repository = FakeRepository()
         calls = []
@@ -185,7 +307,7 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
         self.assertEqual(("000001", episode().started_at, episode().ended_at), snapshots[0])
         self.assertEqual(1, len(repository.analysis_revisions))
         self.assertEqual(result.analysis_revision_id, repository.analysis_revisions[0].revision_id)
-        self.assertEqual("trade-analysis/v2", repository.analysis_revisions[0].analysis_version)
+        self.assertEqual("trade-analysis/v3", repository.analysis_revisions[0].analysis_version)
         self.assertEqual([as_kst(clock.return_value)], repository.saved_setup_times)
         self.assertEqual(as_kst(clock.return_value), repository.analysis_revisions[0].created_at)
 
@@ -387,7 +509,7 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
                 revisions = repository.load_journal_analysis_revisions(episode().group_id)
                 self.assertEqual(1, len(revisions))
                 self.assertEqual(result.analysis_revision_id, revisions[0].revision_id)
-                self.assertEqual("trade-analysis/v2", revisions[0].analysis_version)
+                self.assertEqual("trade-analysis/v3", revisions[0].analysis_version)
                 snapshots.assert_called_once_with("000001", episode().started_at, episode().ended_at)
                 clock.assert_called_once_with()
 
@@ -616,12 +738,13 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
                     # The old manifest version keeps its immutable input identity. Draft-only
                     # external repair is re-read but cannot overwrite that existing revision.
                     trace = DraftReadTrace()
+                    previous_setup = repository.load_trade_setup(current.group_id)
                     with patch("sqlite3.connect", side_effect=trace.connect(sqlite3.connect)):
                         with self.assertRaisesRegex(sqlite3.IntegrityError, "같은 분석 revision ID"):
                             service.prepare(current, DRAFT_MINUTE_ROWS, **arguments)
                     self.assertEqual(("custom",), trace.draft_keys())
                     self.assertEqual(trace.opened, trace.closed)
-                    self.assertEqual("사용자형", repository.load_trade_setup(current.group_id)[0].setup_type)
+                    self.assertEqual(previous_setup, repository.load_trade_setup(current.group_id))
                 trace = DraftReadTrace()
                 with patch("sqlite3.connect", side_effect=trace.connect(sqlite3.connect)):
                     second = service.prepare(current, DRAFT_MINUTE_ROWS,
@@ -660,8 +783,9 @@ class TradeAnalysisPreparationServiceTests(unittest.TestCase):
                     self.assertTrue(all(value.startswith("원래 ") for value in setup.evidence))
                 with self.assertRaisesRegex(sqlite3.IntegrityError, "같은 분석 revision ID"):
                     service.prepare(current, DRAFT_MINUTE_ROWS, **arguments)
-                self.assertTrue(all(value.startswith("편집 ")
-                                    for value in repository.load_trade_setup(current.group_id)[0].evidence))
+                persisted = repository.load_trade_setup(current.group_id)[0]
+                self.assertEqual((first.overall_setup.setup_type, first.overall_setup.confidence, first.overall_setup.evidence),
+                                 (persisted.setup_type, persisted.confidence, persisted.evidence))
                 second = service.prepare(current, DRAFT_MINUTE_ROWS,
                                          **{**arguments, "strategy_packs": (replace(pack, version=2),)})
             self.assertEqual(["custom", "custom", "custom"], reads)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from PySide6.QtCore import QEventLoop, QSettings, QSize, QTimer, QUrl, Qt
-from PySide6.QtGui import QColor, QResizeEvent
+from PySide6.QtGui import QCloseEvent, QColor, QResizeEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -55,20 +55,28 @@ def selected_high_cycle_periods(value: str) -> tuple[str, ...]:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_restorer: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None, mock_automation_opener: Callable[[], None] | None = None) -> None:
+    MINIMUM_SIZE = (480, 360)
+    def __init__(self, settings: SettingsRepository, api_path: Path | None = None, log_opener: Callable[[], None] | None = None, theme_manager_opener: Callable[[], None] | None = None, parent: QWidget | None = None, column_manager_opener: Callable[[], None] | None = None, backup_exporter: Callable[[], None] | None = None, backup_importer: Callable[[], None] | None = None, theme_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, column_manager_panel_factory: Callable[[QWidget], QWidget] | None = None, stock_lookup: object | None = None, drive_connector: Callable[[], None] | None = None, drive_downloader: Callable[[], None] | None = None, drive_restorer: Callable[[], None] | None = None, drive_uploader: Callable[[], None] | None = None, drive_disconnector: Callable[[], None] | None = None, drive_status: Callable[[], str] | None = None, theme_backup_exporter: Callable[[], None] | None = None, theme_backup_importer: Callable[[], None] | None = None, drive_client_importer: Callable[[], None] | None = None, update_checker: Callable[[], None] | None = None, journal_backup_exporter: Callable[[], None] | None = None, journal_backup_importer: Callable[[], None] | None = None, news_api_settings_opener: Callable[[], None] | None = None, shadow_settings_opener: Callable[[], None] | None = None, research_opener: Callable[[], None] | None = None, mock_automation_opener: Callable[[], None] | None = None, query_only: bool = False, data_dir: Path | None = None, finish_size_request: Callable[[SettingsRequestWorker], None] | None = None) -> None:
         super().__init__(parent)
+        self._query_only = query_only
+        self._data_dir = data_dir
         self._settings = settings
+        self._finish_size_request = finish_size_request
         self._save_request: SettingsRequestWorker | None = None
         self._api_path = api_path
-        self._data_source_path = api_path.with_name("data_source.json") if api_path is not None else None
+        self._data_source_path = DataSourceConfig.connection_path(api_path, query_only=query_only) if api_path is not None else None
         try:
             self._data_source = DataSourceConfig(self._data_source_path).load() if self._data_source_path else DataSourceSettings()
         except (ValueError, OSError, json.JSONDecodeError):
             self._data_source = DataSourceSettings()
         self._data_source_mode = QComboBox()
-        self._data_source_mode.addItem("이 PC에서 키움 API 직접 연결", "local")
-        self._data_source_mode.addItem("NAS로 연결", "personal_server")
-        visible_mode = self._data_source.mode if self._data_source.mode != "local_server" else "local"
+        if query_only:
+            self._data_source_mode.addItem("공통 데이터 공급에 연결", "personal_server")
+            self._data_source_mode.addItem("이 PC의 공통 서버에 연결", "local_server")
+        else:
+            self._data_source_mode.addItem("이 PC에서 키움 API 직접 연결", "local")
+            self._data_source_mode.addItem("NAS로 연결", "personal_server")
+        visible_mode = self._data_source.mode if query_only or self._data_source.mode != "local_server" else "local"
         self._data_source_mode.setCurrentIndex(max(0, self._data_source_mode.findData(visible_mode)))
         self._log_opener = log_opener
         self._theme_manager_opener = theme_manager_opener
@@ -96,18 +104,21 @@ class SettingsDialog(QDialog):
         self._mock_automation_opener = mock_automation_opener
         self._drive_status_label: QLabel | None = None
         self._google_drive_auto_download = QCheckBox("앱 시작 시 자동 다운로드")
-        self._google_drive_auto_download.setChecked(settings.get("google_drive_auto_download") == "1")
+        if not query_only:
+            self._google_drive_auto_download.setChecked(settings.get("google_drive_auto_download") == "1")
         self._google_drive_auto_upload = QCheckBox("변경 후 자동 업로드")
-        self._google_drive_auto_upload.setChecked(settings.get("google_drive_auto_upload") == "1")
+        if not query_only:
+            self._google_drive_auto_upload.setChecked(settings.get("google_drive_auto_upload") == "1")
         self._google_drive_auto_upload_on_exit = QCheckBox("종료 시 자동 업로드 시도 (종료가 늦어질 수 있음)")
-        self._google_drive_auto_upload_on_exit.setChecked(settings.get("google_drive_auto_upload_on_exit") == "1")
+        if not query_only:
+            self._google_drive_auto_upload_on_exit.setChecked(settings.get("google_drive_auto_upload_on_exit") == "1")
         self._auto_update_check = QCheckBox("앱 시작 시 업데이트 자동 확인")
         self._auto_update_check.setChecked(settings.get("auto_update_check") == "1")
         self._google_drive_sync_target = QComboBox()
         self._google_drive_sync_target.addItem("설정과 테마", "both")
         self._google_drive_sync_target.addItem("설정만", "settings")
         self._google_drive_sync_target.addItem("테마만", "themes")
-        saved_drive_target = settings.get("google_drive_sync_target")
+        saved_drive_target = settings.get("google_drive_sync_target") if not query_only else None
         self._google_drive_sync_target.setCurrentIndex(("both", "settings", "themes").index(saved_drive_target) if saved_drive_target in {"both", "settings", "themes"} else 0)
         self._google_drive_auto_download.toggled.connect(self.refresh_drive_status)
         self._google_drive_auto_upload.toggled.connect(self.refresh_drive_status)
@@ -116,7 +127,10 @@ class SettingsDialog(QDialog):
         self._dialog_size_save_timer = QTimer(self)
         self._dialog_size_save_timer.setSingleShot(True)
         self._dialog_size_save_timer.setInterval(350)
-        self._dialog_size_save_timer.timeout.connect(self._save_dialog_size)
+        self._dialog_size_save_timer.timeout.connect(
+            lambda: self._save_dialog_size()
+            if self._finish_size_request is None or self.isVisible() else None
+        )
         self.setWindowTitle("기본 설정")
 
         self._rank_query_type = QComboBox()
@@ -184,6 +198,11 @@ class SettingsDialog(QDialog):
         self._near_high_sound_cooldown.setToolTip("0초로 설정하면 같은 단계에 다시 진입할 때마다 안내합니다.")
         try:
             self._near_high_sound_cooldown.setValue(max(0, int(float(settings.get("near_high_sound_cooldown_seconds")))))
+        except OverflowError as error:
+            if data_dir is None:
+                raise
+            self.deleteLater()
+            raise ValueError("조회 설정 'near_high_sound_cooldown_seconds'의 원값을 현재 편집기에 적용할 수 없습니다. 원자료를 보존합니다.") from error
         except (TypeError, ValueError):
             self._near_high_sound_cooldown.setValue(int(DEFAULT_SETTINGS["near_high_sound_cooldown_seconds"]))
         self._near_high_sound_paths = {level: settings.get(f"near_high_sound_{level}") for level in ("interest", "caution", "fire")}
@@ -273,12 +292,79 @@ class SettingsDialog(QDialog):
             checkbox.setChecked(period in cycle_periods)
             self._high_header_cycle_checks[period] = checkbox
 
+        if data_dir is not None:
+            try:
+                self._validate_role_controls()
+            except (KeyError, TypeError, ValueError):
+                # No layout/resize/geometry save or settings worker has run.
+                self.deleteLater()
+                raise
         self._build_grouped_layout()
-        self._window_settings = QSettings("KiwoomMonitor", "SettingsDialog")
+        if data_dir is None:
+            self._window_settings = QSettings("KiwoomMonitor", "SettingsDialog")
+        else:
+            self._window_settings = QSettings(str(data_dir / "query-windows.ini"), QSettings.Format.IniFormat)
+            self._window_settings.beginGroup("SettingsDialog")
         geometry = self._window_settings.value("geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
         return
+
+    def _validate_role_controls(self) -> None:
+        """Reject only values this existing form cannot represent, without writing."""
+        def reject(key: str) -> None:
+            raise ValueError(f"조회 설정 '{key}'의 원값을 현재 편집기에 적용할 수 없습니다. 원자료를 보존합니다.")
+
+        for key, field in (
+            ("rank_query_type", self._rank_query_type), ("ui_mode", self._ui_mode),
+            ("near_high_row_alert_level", self._near_high_row_alert_level),
+            ("theme_trade_summary_period", self._theme_trade_summary_period),
+            ("theme_group_sort_basis", self._theme_group_sort_basis),
+            ("strength_display_mode", self._strength_display_mode),
+            ("high_distance_period", self._high_distance_period),
+        ):
+            if field.findData(self._settings.get(key)) < 0:
+                reject(key)
+        for name, field in self._decimal_fields.items():
+            key = f"decimal_{name}"
+            if field.findText(self._settings.get(key)) < 0:
+                reject(key)
+        for key, field in (
+            ("auto_update_check", self._auto_update_check),
+            ("rank_changed_highlight_enabled", self._rank_changed_highlight_enabled),
+            ("trade_value_alert_enabled", self._trade_value_alert_enabled),
+            ("near_high_show_icon", self._near_high_icons), ("near_high_sound_enabled", self._near_high_sounds),
+            ("theme_badge_enabled", self._theme_badge_enabled), ("show_server_clock", self._show_server_clock),
+            ("theme_trade_summary_enabled", self._theme_trade_summary_enabled),
+            ("theme_trade_summary_excluded_enabled", self._theme_trade_summary_excluded_enabled),
+            ("market_cap_highlight_enabled", self._market_cap_highlight_enabled),
+            ("market_cap_highlight_badge_enabled", self._market_cap_highlight_badge_enabled),
+            ("upper_limit_highlight_enabled", self._upper_limit_highlight_enabled),
+            ("near_high_alert_enabled", self._near_high_enabled), ("strength_show_icon", self._strength_icons),
+        ):
+            if self._settings.get(key) != ("1" if field.isChecked() else "0"):
+                reject(key)
+        for key, field in (("rank_changed_highlight_seconds", self._rank_changed_highlight_seconds),
+                           ("near_high_sound_cooldown_seconds", self._near_high_sound_cooldown)):
+            try:
+                original = float(self._settings.get(key))
+            except (TypeError, ValueError):
+                reject(key)
+            if original != field.value():
+                reject(key)
+        key = "high_header_cycle_periods"
+        original = {part.strip() for part in self._settings.get(key).split(",") if part.strip()}
+        represented = {period for period, field in self._high_header_cycle_checks.items() if field.isChecked()}
+        if original != represented:
+            reject(key)
+        for key, default, minimum in (("settings_dialog_width", 680, self.MINIMUM_SIZE[0]),
+                                      ("settings_dialog_height", 650, self.MINIMUM_SIZE[1])):
+            try:
+                original = int(self._settings.get(key))
+            except (TypeError, ValueError):
+                reject(key)
+            if original != max(minimum, self._dialog_dimension(key, default)):
+                reject(key)
 
     def _build_grouped_layout(self) -> None:
         self.resize(self._dialog_dimension("settings_dialog_width", 680), self._dialog_dimension("settings_dialog_height", 650))
@@ -289,7 +375,7 @@ class SettingsDialog(QDialog):
         # 만들면, Windows에서는 테두리를 잡는 즉시 창이 그 크기까지 튀어
         # 버린다. 실제로 허용할 최소 크기를 명시해 사용자가 원하는 높이까지
         # 자연스럽게 조절할 수 있게 한다.
-        self.setMinimumSize(480, 360)
+        self.setMinimumSize(*self.MINIMUM_SIZE)
         tabs = QTabWidget()
 
         strength_tab = QWidget(); strength_form = QFormLayout(strength_tab)
@@ -442,12 +528,14 @@ class SettingsDialog(QDialog):
         external_tab = QWidget(); external_form = QFormLayout(external_tab)
         external_form.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         external_form.addRow(self._section_title("API 연결"))
-        external_form.addRow("데이터 연결 방식", self._data_source_mode)
+        if not self._query_only:
+            external_form.addRow("데이터 연결 방식", self._data_source_mode)
         if self._api_path is not None:
-            api_button = QPushButton("키움 API 설정")
-            api_button.clicked.connect(lambda: self._open_api_settings("kiwoom"))
-            external_form.addRow("키움", api_button)
-            nas_button = QPushButton("NAS 연결 설정")
+            if not self._query_only:
+                api_button = QPushButton("키움 API 설정")
+                api_button.clicked.connect(lambda: self._open_api_settings("kiwoom"))
+                external_form.addRow("키움", api_button)
+            nas_button = QPushButton("조회 연결 설정" if self._query_only else "NAS 연결 설정")
             nas_button.clicked.connect(lambda: self._open_api_settings("nas"))
             external_form.addRow("NAS", nas_button)
         if self._news_api_settings_opener is not None:
@@ -537,6 +625,8 @@ class SettingsDialog(QDialog):
                 upload = QPushButton("지금 업로드")
                 upload.clicked.connect(self._drive_uploader)
                 manage_form.addRow("보내기", upload)
+        if self._data_dir is not None:
+            manage_form.addRow(QLabel("조회 역할의 전체 설정 백업과 복원은 아직 지원하지 않습니다. 테마 DB는 현재 프로필 백업 형식으로 저장·복원합니다."))
         manage_tab.setMinimumSize(0, 0)
         tabs.addTab(manage_tab, "관리")
 
@@ -592,6 +682,7 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(f"QWidget {{ font-size: {point_size}pt; }}")
 
     def done(self, result: int) -> None:
+        self._drain_save_request()
         self._dialog_size_save_timer.stop()
         self._window_settings.setValue("geometry", self.saveGeometry())
         if result != QDialog.DialogCode.Accepted:
@@ -604,7 +695,12 @@ class SettingsDialog(QDialog):
             "settings_dialog_height": str(self.height()),
         }
         settings = self._settings
-        SettingsRequestWorker(lambda: settings.set_many(values)).start()
+        finish = self._finish_size_request
+        worker = SettingsRequestWorker(lambda: settings.set_many(values), self.parent(),
+            retain_until_joined=finish is not None)
+        if finish is not None:
+            worker.finished.connect(lambda: finish(worker), Qt.ConnectionType.QueuedConnection)
+        worker.start()
 
     def _dialog_dimension(self, key: str, default: int) -> int:
         try:
@@ -748,13 +844,14 @@ class SettingsDialog(QDialog):
         if not source:
             return
         root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
-        destination = root / "data" / "strength_icons" / f"{level}.png"
+        data_dir = self._api_path.parent if self._api_path is not None else root / "data"
+        destination = data_dir / "strength_icons" / f"{level}.png"
         try:
             self._store_icon_image(Path(source), destination)
         except (OSError, ValueError, UnidentifiedImageError) as error:
             QMessageBox.warning(self, "이미지 저장", f"아이콘 이미지를 저장하지 못했습니다.\n{error}")
             return
-        self._strength_icon_images[level] = str(destination.relative_to(root))
+        self._strength_icon_images[level] = str(Path("data") / destination.relative_to(data_dir))
         self._update_strength_icon_image_label(level)
 
     def _clear_strength_icon_image(self, level: str) -> None:
@@ -784,13 +881,14 @@ class SettingsDialog(QDialog):
         if not source:
             return
         root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
-        destination = root / "data" / "near_high_icons" / f"{level}.png"
+        data_dir = self._api_path.parent if self._api_path is not None else root / "data"
+        destination = data_dir / "near_high_icons" / f"{level}.png"
         try:
             self._store_icon_image(Path(source), destination)
         except (OSError, ValueError, UnidentifiedImageError) as error:
             QMessageBox.warning(self, "이미지 저장", f"아이콘 이미지를 저장하지 못했습니다.\n{error}")
             return
-        self._near_high_icon_images[level] = str(destination.relative_to(root))
+        self._near_high_icon_images[level] = str(Path("data") / destination.relative_to(data_dir))
         self._update_near_high_icon_image_label(level)
 
     def _clear_near_high_icon_image(self, level: str) -> None:
@@ -829,14 +927,15 @@ class SettingsDialog(QDialog):
             return
         root = self._api_path.parent.parent if self._api_path is not None else Path(__file__).resolve().parents[3]
         suffix = source_path.suffix.lower() or ".wav"
-        destination = root / "data" / "near_high_sounds" / f"{level}{suffix}"
+        data_dir = self._api_path.parent if self._api_path is not None else root / "data"
+        destination = data_dir / "near_high_sounds" / f"{level}{suffix}"
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(source_path.read_bytes())
         except OSError as error:
             QMessageBox.warning(self, "소리 저장", f"소리 파일을 저장하지 못했습니다.\n{error}")
             return
-        self._near_high_sound_paths[level] = str(destination.relative_to(root))
+        self._near_high_sound_paths[level] = str(Path("data") / destination.relative_to(data_dir))
         self._near_high_sounds.setChecked(True)
         self._update_near_high_sound_label(level)
 
@@ -1000,9 +1099,12 @@ class SettingsDialog(QDialog):
     def _open_api_settings(self, section: str = "kiwoom") -> None:
         if self._api_path is None:
             return
+        if self._query_only:
+            section = "nas"
         dialog = ApiSettingsDialog(
             self._api_path, self, section=section,
             initial_mode=str(self._data_source_mode.currentData()),
+            query_only=self._query_only,
         )
         if dialog.exec():
             if section == "kiwoom":
@@ -1097,13 +1199,14 @@ class SettingsDialog(QDialog):
         save_setting("theme_group_sort_basis", str(self._theme_group_sort_basis.currentData()))
         save_setting("theme_trade_summary_excluded_stocks", self._theme_trade_summary_excluded_stocks.text().strip())
         save_setting("theme_trade_summary_excluded_enabled", "1" if self._theme_trade_summary_excluded_enabled.isChecked() else "0")
-        save_setting("google_drive_auto_download", "1" if self._google_drive_auto_download.isChecked() else "0")
-        save_setting("google_drive_auto_upload", "1" if self._google_drive_auto_upload.isChecked() else "0")
-        save_setting("google_drive_auto_upload_on_exit", "1" if self._google_drive_auto_upload_on_exit.isChecked() else "0")
-        save_setting("google_drive_sync_target", str(self._google_drive_sync_target.currentData()))
+        if not self._query_only:
+            save_setting("google_drive_auto_download", "1" if self._google_drive_auto_download.isChecked() else "0")
+            save_setting("google_drive_auto_upload", "1" if self._google_drive_auto_upload.isChecked() else "0")
+            save_setting("google_drive_auto_upload_on_exit", "1" if self._google_drive_auto_upload_on_exit.isChecked() else "0")
+            save_setting("google_drive_sync_target", str(self._google_drive_sync_target.currentData()))
         save_setting("auto_update_check", "1" if self._auto_update_check.isChecked() else "0")
         source_to_save: DataSourceSettings | None = None
-        if self._data_source_path is not None:
+        if self._data_source_path is not None and not self._query_only:
             selected_mode = str(self._data_source_mode.currentData())
             if selected_mode != self._data_source.mode:
                 source = DataSourceSettings(
@@ -1133,13 +1236,14 @@ class SettingsDialog(QDialog):
             return source_to_save
 
         self.setEnabled(False)
-        worker = SettingsRequestWorker(persist)
+        worker = SettingsRequestWorker(persist, self)
         self._save_request = worker
         worker.succeeded.connect(self._settings_saved)
         worker.failed.connect(self._settings_save_failed)
         worker.start()
 
     def _settings_saved(self, source: object) -> None:
+        self._drain_save_request()
         self._save_request = None
         if isinstance(source, DataSourceSettings):
             self._data_source = source
@@ -1148,6 +1252,17 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def _settings_save_failed(self, message: str) -> None:
+        self._drain_save_request()
         self._save_request = None
         self.setEnabled(True)
         QMessageBox.warning(self, "설정 저장", f"설정을 저장하지 못했습니다.\n{message}")
+
+    def _drain_save_request(self) -> None:
+        # A result signal precedes native QThread completion. Keep the actual
+        # request owned until its persist body and native thread both finish.
+        if self._save_request is not None:
+            self._save_request.wait()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._drain_save_request()
+        super().closeEvent(event)

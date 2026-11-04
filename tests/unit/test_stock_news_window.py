@@ -29,6 +29,7 @@ from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig, Naver
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
 from kiwoom_monitor.infrastructure.central_operational_settings import apply_to_local_news
 from kiwoom_monitor.infrastructure.central_ai_client import CentralAIClient
+from kiwoom_monitor.domain.news_observation import stable_document_hash
 from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis
 from kiwoom_monitor.application.news_grouping import NewsEventGroup
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import (
@@ -87,9 +88,22 @@ class StockNewsWindowTests(unittest.TestCase):
                 entered.set()
                 if not release.wait(3):
                     raise RuntimeError("controlled central AI gate timed out")
+                value = {"stock_code": "005930", "identity": calls[-1][3]["events"][0]["identity"],
+                         "provider": "gemini", "model": "server-model", "body_hash": "native-body",
+                         "summary": "NAS 요약", "outlook": "긍정", "confidence": 80,
+                         "reason": "계약 발표", "category": "수주·계약"}
+                reference = {"version": 1, "status": "ACCEPTED", "origin": "native_accepted", "analysis_revision_id": f"analysis-{len(calls)}",
+                             "target_id": "005930", "article_revision_id": f"article-{len(calls)}",
+                             "body_revision_id": f"body-{len(calls)}", "input_hash": "native-body",
+                             "provider": "gemini", "model": "server-model", "computed_at": 100.0,
+                             "available_at": 105.0, "output_hash": stable_document_hash(value),
+                             "prompt_version": "fixture-original-prompt", "schema_version": "fixture-original-schema",
+                             "inference_ref": {"inference_id": f"inference-{len(calls)}", "content_hash": "original-inference-hash", "input_index": 0},
+                             "requester": {"kind": "direct"}}
                 return Response(json.dumps({"provider": "gemini", "model": "server-model",
-                    "body_hashes": ["native-body"], "results": [{"summary": "NAS 요약", "outlook": "긍정",
-                        "confidence": 80, "reason": "계약 발표", "category": "수주·계약"}],
+                    "body_hashes": ["native-body"], "results": [value],
+                    "analysis_revision_ids": [reference["analysis_revision_id"]],
+                    "analysis_provenance": [reference],
                     "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
                 }).encode())
 
@@ -117,6 +131,8 @@ class StockNewsWindowTests(unittest.TestCase):
                     self.assertTrue(window._ai_button.isEnabled())
                     self.assertEqual(1, window._ai_repository.daily_count())
                     self.assertEqual("NAS 요약", window._ai_repository.load("005930", items[0]).analysis.summary)
+                    self.assertEqual("analysis-1", window._ai_repository.load("005930", items[0]).provenance["analysis_revision_id"])
+                    self.assertEqual(105.0, window._ai_repository.load("005930", items[0]).provenance["available_at"])
                     self.assertIn("NAS 요약", window._detail.toPlainText())
 
                     settings = config.load_ai()
@@ -140,6 +156,8 @@ class StockNewsWindowTests(unittest.TestCase):
                     wait_until(lambda: window._ai_worker is None)
                     self.assertEqual(2, window._ai_repository.daily_count())
                     self.assertIsNotNone(window._ai_repository.load("005930", items[1]))
+                    self.assertEqual("analysis-1", window._ai_repository.load("005930", items[0]).provenance["analysis_revision_id"])
+                    self.assertEqual("analysis-2", window._ai_repository.load("005930", items[1]).provenance["analysis_revision_id"])
                     self.assertFalse(window._auto_ai_identities)
                     for url, method, authorization, payload in calls:
                         self.assertEqual(("https://nas.example.test/api/v1/news/analyze", "POST", "Bearer fixture-token"),
@@ -156,7 +174,7 @@ class StockNewsWindowTests(unittest.TestCase):
 
     def test_manual_finished_and_automatic_ai_share_provider_credential_availability(self):
         class Worker(QObject):
-            completed = Signal(object, object, str, str, object, int)
+            completed = Signal(object)
             failed = Signal(str, bool, int)
             finished = Signal()
             def __init__(self, groups, stock_name, settings, parent, **kwargs):
@@ -410,7 +428,7 @@ class StockNewsWindowTests(unittest.TestCase):
             )
             stored = SimpleNamespace(
                 analysis=AINewsAnalysis("원문 요약", "긍정", 87, "판단 이유", ("긍정 근거",), ("부정 근거",), "수주·계약"),
-                provider="gemini", model="test-model",
+                provider="gemini", model="test-model", provenance={"status": "UNKNOWN"},
             )
 
             window._ai_result_cache[news_identity(item)] = stored
@@ -418,6 +436,7 @@ class StockNewsWindowTests(unittest.TestCase):
                 detail = window._ai_html(item)
             load.assert_not_called()
 
+            self.assertIn("판본 미확인", detail)
             self.assertIn(f"관련성 {item.assessment.relevance_score}점", detail)
             self.assertIn("신뢰도 87%", detail)
             self.assertLess(detail.index("<b>이유:</b>"), detail.index("<b>원문 요약:</b>"))
@@ -556,6 +575,7 @@ class StockNewsWindowTests(unittest.TestCase):
             news_coordinator.ensure_started = lambda: None
             news_coordinator._channel = SimpleNamespace(send=relayed.append)
             relay = SimpleNamespace(
+                _query_only=False,
                 _journal_news_inbox=SimpleNamespace(read_new=lambda: request_documents[0]),
                 _current_account_scope=current_after_switch,
                 _news_window=news_coordinator,
@@ -898,6 +918,42 @@ class StockNewsWindowTests(unittest.TestCase):
             self.assertFalse(window._auto_ai_identities)
             window.shutdown()
 
+    def test_previous_or_unknown_body_cannot_be_requeued_automatically_but_manual_request_remains(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            item = StockNewsItem("수정 기사", "새 본문", "https://example.com/policy", "https://example.com/policy",
+                datetime.now(UTC), assess_stock_news("테스트기업", "수정 기사", "새 본문"),
+                input_source={"version": 1, "article_revision_id": "article-1", "body_revision_id": "body-2", "body_content_hash": "new-hash"})
+            group = NewsEventGroup(item, (item,))
+            identity = news_identity(item)
+            window._visible_items, window._visible_groups = (item,), (group,)
+            window._ai_result_cache = {identity: StoredAINewsAnalysis(
+                AINewsAnalysis("원판단", "혼재", 50, "원근거"), "gemini", "model", datetime.now(UTC), "legacy-hash")}
+            with patch.object(window._config, "load_ai", return_value=NewsAISettings("gemini", "key", "model", 0, 1, True)), \
+                    patch.object(window, "_start_ai_groups") as start:
+                window._configure_auto_candidates({identity})
+                self.assertEqual(set(), window._auto_ai_identities)
+                window._auto_ai_identities = {identity}  # Already queued before the BODY changed.
+                window._auto_analyze_next()
+                start.assert_not_called()
+                window._start_ai_analysis(group, automatic=False)
+                start.assert_called_once_with((group,), automatic=False)
+            self.assertEqual("원판단", window._ai_result_cache[identity].analysis.summary)
+            window.shutdown()
+
+    def test_background_refresh_does_not_add_automatic_events_to_explicit_manual_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "monitor.sqlite3")
+            window._manual_ai_queue = True
+            window._auto_ai_identities = {"explicit-request"}
+            window._configure_auto_candidates({"background-event"})
+            window._configure_recent_auto_candidates()
+            self.assertEqual({"explicit-request"}, window._auto_ai_identities)
+            self.assertTrue(window._manual_ai_queue)
+            window.shutdown()
+
     def test_automatic_analysis_starts_with_newest_visible_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -923,6 +979,62 @@ class StockNewsWindowTests(unittest.TestCase):
 
             start.assert_called_once_with((groups[0],), automatic=True)
             window.shutdown()
+
+    def test_local_worker_freezes_actual_group_once_and_accepts_captured_stock_after_visible_switch(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.presentation.news_workers import AINewsWorker
+        from kiwoom_monitor.domain.news_ai_contract import AIRequestUsage, NewsAIResultEnvelope
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = StockNewsWindow(root / "news.env", root / "news.sqlite3")
+            window._window_settings = QSettings(str(root / "window.ini"), QSettings.Format.IniFormat)
+            settings = NewsAISettings("gemini", "fixture-key", "model")
+            when = datetime.fromisoformat("2026-10-29T09:00:00.125+09:00")
+            first = StockNewsItem("A", "description A", "https://fixture/A", "", when, assess_stock_news("company", "A", "description A"))
+            second = StockNewsItem("B", "summary B", "https://fixture/B", "", when, assess_stock_news("company", "B", "summary B"))
+            omitted = StockNewsItem("C", "", "", "", when, assess_stock_news("company", "C", ""))
+            group = NewsEventGroup(first, (first, second, omitted))
+            window._ai_groups = (group,)
+            window._ai_stock_code, window._stock_code = "005930", "000001"
+            window._ai_result_cache = {}
+            window._auto_ai_identities.clear()
+            worker = AINewsWorker((group,), "company", settings, window, stock_code="005930", now_provider=lambda: when)
+            window._ai_worker = worker
+            envelopes = []
+            worker.completed.connect(envelopes.append)
+            worker.completed.connect(window._on_ai_completed)
+            worker.finished.connect(window._on_ai_finished)
+            def fetch(url):
+                if url.endswith("/A"): return "😀 raw A"
+                raise ValueError("summary fallback")
+            expected = "[관련 기사 1/3: A]\n😀 raw A\n\n[관련 기사 2/3: B · 검색 요약]\nsummary B"
+            try:
+                with patch.object(window._config, "load_ai", return_value=settings), \
+                     patch("kiwoom_monitor.presentation.news_workers.fetch_article_text", side_effect=fetch), \
+                     patch("kiwoom_monitor.presentation.news_workers.analyze_articles", return_value=((AINewsAnalysis("local summary", "긍정", 80, "source reason"),), AIRequestUsage(10, 5, 15))) as provider:
+                    worker.start()
+                    wait_until(lambda: window._ai_worker is None and len(envelopes) == 1)
+                envelope = envelopes[0]
+                self.assertIsInstance(envelope, NewsAIResultEnvelope)
+                self.assertEqual((("A", expected),), provider.call_args[0][2])
+                self.assertEqual(1, provider.call_count)
+                self.assertEqual(3, envelope.article_count)
+                actual = envelope.inference["inputs"][0]
+                self.assertEqual(expected, actual["body"])
+                self.assertEqual([True, True, False], [source["used"] for source in actual["source_snapshot"]["members"]])
+                saved = window._ai_repository.load("005930", first)
+                self.assertEqual("local summary", saved.analysis.summary)
+                self.assertEqual(actual["input_binding"], saved.provenance["input_binding"])
+                self.assertEqual("repository_recorded", saved.provenance["origin"])
+                self.assertIsNone(window._ai_repository.load("000001", first))
+                self.assertEqual({}, window._ai_result_cache)
+                with closing(sqlite3.connect(root / "news.sqlite3")) as connection:
+                    self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM news_ai_inferences").fetchone()[0])
+                    self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM news_ai_requests").fetchone()[0])
+            finally:
+                window.shutdown()
+                self.app.processEvents()
 
 
 if __name__ == "__main__":

@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-import time
+import uuid
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.central_content_sync import CentralContentSyncService
 from kiwoom_monitor.infrastructure.persistence.theme_backup import (
-    ThemeBackupService, ThemeRevisionConflict,
+    ThemeRevisionConflict,
 )
 
 
@@ -43,7 +43,7 @@ class CentralThemeSyncDispatcher:
                 return
             self._generation += 1
             self._retry_index = 0
-            self._write_pending(f"{time.time():.9f}")
+            self._write_pending(uuid.uuid4().hex)
             if self._timer is not None:
                 self._timer.cancel()
             self._schedule_locked(self._debounce_seconds)
@@ -52,9 +52,9 @@ class CentralThemeSyncDispatcher:
     def has_pending(self) -> bool:
         return self._pending_path.is_file()
 
-    def flush_pending(self) -> bool:
-        """이전 실행에서 남은 변경과 중앙 완료본 중 최신 자료를 보존한다."""
-        if not self.has_pending:
+    def flush_pending(self, *, force: bool = False) -> bool:
+        """기존 대기/원 receipt를 복구하고 force면 깨끗한 기준본도 확인한다."""
+        if not force and not self.has_pending:
             return True
         return self._run()
 
@@ -64,37 +64,40 @@ class CentralThemeSyncDispatcher:
             timer, self._timer = self._timer, None
         if timer is not None:
             timer.cancel()
+        first_wait_error = None
         with self._runs_drained:
             while self._active_runs:
-                self._runs_drained.wait()
+                try:
+                    self._runs_drained.wait()
+                except BaseException as error:
+                    # A cancellation interrupts this wait, not the active run.
+                    # Keep the existing owner until its real drain completes.
+                    if first_wait_error is None:
+                        first_wait_error = error
+        if first_wait_error is not None:
+            raise first_wait_error
 
     def _run(self) -> bool:
         with self._state_lock:
             if self._closed:
                 return False
             self._timer = None
-            generation = self._generation
-            pending_token = self._read_pending()
             self._active_runs += 1
         try:
             try:
-                revision = (ThemeBackupService(self._database_path).revision()
-                            if self._database_path.is_file() else None)
                 with self._execution_lock:
-                    remote_snapshot, remote_completed_at = self._service.load_theme_snapshot()
-                    local_changed_at = self._pending_time(pending_token)
-                    if remote_completed_at is not None and remote_completed_at > local_changed_at:
-                        with self._state_lock:
-                            if generation != self._generation:
-                                return False
-                        self._service.apply_theme_snapshot(
-                            self._database_path, remote_snapshot, expected_revision=revision,
-                        )
-                        logger.info(
-                            "NAS 테마가 로컬 대기 변경보다 최신이어서 NAS 스냅샷을 적용했습니다."
-                        )
-                    else:
-                        self._service.replace_themes(self._database_path)
+                    with self._state_lock:
+                        if self._closed:
+                            return False
+                        generation = self._generation
+                        pending_token = self._read_pending()
+                        if not pending_token:
+                            pending_token = uuid.uuid4().hex
+                            self._write_pending(pending_token)
+                    result = self._service.replace_themes(self._database_path)
+                    if result.pending_collections:
+                        self.notify()
+                        return False
             except ThemeRevisionConflict as error:
                 logger.info("로컬 테마 편집을 보존하고 새 버전을 다시 동기화합니다: %s", error)
                 self.notify()
@@ -112,7 +115,8 @@ class CentralThemeSyncDispatcher:
                 if generation == self._generation:
                     self._retry_index = 0
                     self._clear_pending(pending_token)
-            return True
+                    return True
+                return False
         finally:
             with self._runs_drained:
                 self._active_runs -= 1
@@ -138,15 +142,6 @@ class CentralThemeSyncDispatcher:
             return self._pending_path.read_text(encoding="utf-8")
         except OSError:
             return ""
-
-    @staticmethod
-    def _pending_time(token: str) -> float:
-        try:
-            value = float(token.strip())
-        except ValueError:
-            return 0.0
-        # 이전 버전은 time_ns 정수를 기록했다. 남아 있는 표식도 안전하게 비교한다.
-        return value / 1_000_000_000.0 if value > 10_000_000_000.0 else value
 
     def _clear_pending(self, expected: str) -> None:
         try:

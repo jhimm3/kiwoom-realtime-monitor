@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
+from kiwoom_monitor.domain.news_ai_contract import decode_news_input_source
+
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
-from kiwoom_monitor.application.news_analysis import NewsAssessment
 from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
-from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
+from kiwoom_monitor.domain.news_ai_contract import NewsAssessment, StockNewsItem
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import news_identity
 from kiwoom_monitor.infrastructure.persistence.news_schema import initialize_news_schema
 from kiwoom_monitor.infrastructure.persistence.sqlite_connections import (
@@ -28,7 +30,7 @@ class StockNewsRepository:
     def load(self, stock_code: str, *, limit: int | None = None) -> tuple[StockNewsItem, ...]:
         with sqlite_read_connection(self._database_path) as connection:
             rows = connection.execute(
-                "SELECT title, description, link, original_link, published_at, relevant, category, outlook, reason, relevance_score, outlook_score "
+                "SELECT title, description, link, original_link, published_at, relevant, category, outlook, reason, relevance_score, outlook_score, input_source_json "
                 "FROM stock_news WHERE stock_code=? ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT ?",
                 (stock_code, max(1, self._stored_news_limit or 200 if limit is None else limit)),
             ).fetchall()
@@ -42,6 +44,7 @@ class StockNewsRepository:
                 assessment=NewsAssessment(
                     bool(row[5]), str(row[6]), str(row[7]), str(row[8]), int(row[9]), int(row[10])
                 ),
+                input_source=decode_news_input_source(row[11]),
             )
             for row in rows
         )
@@ -75,18 +78,20 @@ class StockNewsRepository:
             rows = tuple(_row(stock_code, item) for item in items)
             if rows:
                 connection.executemany(
-                    "INSERT INTO stock_news(stock_code, identity, title, description, link, original_link, published_at, relevant, category, outlook, reason, relevance_score, outlook_score) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "INSERT INTO stock_news(stock_code, identity, title, description, link, original_link, published_at, relevant, category, outlook, reason, relevance_score, outlook_score, input_source_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(stock_code, identity) DO UPDATE SET "
                     "title=excluded.title, description=excluded.description, link=excluded.link, original_link=excluded.original_link, "
                     "published_at=excluded.published_at, relevant=excluded.relevant, category=excluded.category, outlook=excluded.outlook, "
-                    "reason=excluded.reason, relevance_score=excluded.relevance_score, outlook_score=excluded.outlook_score "
+                    "reason=excluded.reason, relevance_score=excluded.relevance_score, outlook_score=excluded.outlook_score, "
+                    "input_source_json=excluded.input_source_json "
                     "WHERE stock_news.title IS NOT excluded.title OR stock_news.description IS NOT excluded.description "
                     "OR stock_news.link IS NOT excluded.link OR stock_news.original_link IS NOT excluded.original_link "
                     "OR stock_news.published_at IS NOT excluded.published_at OR stock_news.relevant IS NOT excluded.relevant "
                     "OR stock_news.category IS NOT excluded.category OR stock_news.outlook IS NOT excluded.outlook "
                     "OR stock_news.reason IS NOT excluded.reason OR stock_news.relevance_score IS NOT excluded.relevance_score "
-                    "OR stock_news.outlook_score IS NOT excluded.outlook_score",
+                    "OR stock_news.outlook_score IS NOT excluded.outlook_score "
+                    "OR stock_news.input_source_json IS NOT excluded.input_source_json",
                     rows,
                 )
             connection.execute(
@@ -164,7 +169,7 @@ class StockNewsRepository:
     ) -> tuple[StockNewsItem, ...]:
         with sqlite_read_connection(self._database_path) as connection:
             rows = connection.execute(
-                "SELECT n.title,n.description,n.link,n.original_link,n.published_at,n.relevant,n.category,n.outlook,n.reason,n.relevance_score,n.outlook_score "
+                "SELECT n.title,n.description,n.link,n.original_link,n.published_at,n.relevant,n.category,n.outlook,n.reason,n.relevance_score,n.outlook_score,n.input_source_json "
                 "FROM journal_news_links l JOIN stock_news n ON n.stock_code=l.stock_code AND n.identity=l.identity "
                 "WHERE l.group_id=? AND l.stock_code=? AND l.origin_broker=? "
                 "AND l.origin_environment=? AND l.canonical_account_ref=? AND l.is_deleted=0 "
@@ -177,6 +182,7 @@ class StockNewsRepository:
         return tuple(StockNewsItem(
             str(row[0]), str(row[1]), str(row[2]), str(row[3]), _parse_datetime(row[4]),
             NewsAssessment(bool(row[5]), str(row[6]), str(row[7]), str(row[8]), int(row[9]), int(row[10])),
+            input_source=decode_news_input_source(row[11]),
         ) for row in rows)
 
 
@@ -211,6 +217,8 @@ def _row(stock_code: str, item: StockNewsItem) -> tuple[object, ...]:
         assessment.reason,
         assessment.relevance_score,
         assessment.outlook_score,
+        (json.dumps(decode_news_input_source(item.input_source), ensure_ascii=False, separators=(",", ":"))
+         if getattr(item, "input_source", None) is not None else None),
     )
 
 

@@ -6,9 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from .candidate_monitor import CandidateMonitor
-
 if TYPE_CHECKING:
+    from .candidate_monitor import CandidateMonitor
     from fastapi import APIRouter
     from .database_observation_readers import ObservationRevisionPage
     from .external_market_collector import YahooDelayedMarketCollector
@@ -43,7 +42,7 @@ class OperationalSettingsState:
     """Per-app settings revision and candidate pointer shared with the app lifecycle."""
     settings: dict[str, Any]
     applied_revision: int
-    candidate_monitor: CandidateMonitor | None
+    candidate_monitor: "CandidateMonitor | None"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -51,9 +50,10 @@ def create_operational_settings_routers(
     store: "OperationalSettingsStore", authorize: Callable[..., None], state: OperationalSettingsState,
     external_market_service: "YahooDelayedMarketCollector | None",
     ai_service: "CentralAIService | None", news_service: "CentralNewsService | None",
-    publish_candidate_monitor: Callable[[CandidateMonitor | None], None], logger: Any,
-    *, get_ram_shadow_selection=None, update_ram_shadow_selection=None, publish_allocation_models=None,
+    publish_candidate_monitor: Callable[["CandidateMonitor | None"], None], logger: Any,
+    *, ram_shadow_session=None,
     now_provider=None,
+    candidate_workload_paused=None, candidate_capture_scope=None,
 ) -> tuple["APIRouter", "APIRouter"]:
     """Keep save-before-apply and retry without incrementing a persisted revision."""
     from fastapi import APIRouter, Depends, HTTPException
@@ -62,20 +62,23 @@ def create_operational_settings_routers(
     read_router, update_router = APIRouter(), APIRouter()
     operational = state.settings
 
-    if publish_allocation_models is not None:
+    if ram_shadow_session is not None:
         @update_router.post('/api/v1/research/ram-shadow/allocation-models',dependencies=[Depends(authorize)])
         async def post_allocation_models(document: dict[str,Any]):
-            async with state.lock:
-                try:
-                    return await publish_allocation_models(document)
-                except (ValueError,TypeError,KeyError,OverflowError) as error:
-                    raise HTTPException(422,str(error)) from error
-                except RuntimeError as error:
-                    raise HTTPException(503,str(error)) from error
+            try:
+                return await ram_shadow_session.publish_allocation_models(document)
+            except (ValueError,TypeError,KeyError,OverflowError) as error:
+                detail = ('ALLOCATION_SELECTION_REVISION_CONFLICT' if str(error) == 'ALLOCATION_SELECTION_REVISION_CONFLICT'
+                          else 'ALLOCATION_MODEL_INPUT_INVALID')
+                raise HTTPException(422,detail) from error
+            except RuntimeError as error:
+                detail = ('ALLOCATION_RUNTIME_NOT_READY' if str(error) == 'ALLOCATION_RUNTIME_NOT_READY'
+                          else 'ALLOCATION_MODEL_PUBLICATION_FAILED')
+                raise HTTPException(503,detail) from error
 
-    if get_ram_shadow_selection is not None and update_ram_shadow_selection is not None:
+    if ram_shadow_session is not None:
         from pydantic import ConfigDict
-        from .market_theme_shadow_monitor import join_owned_close
+        from .ram_shadow_selection_session import RamShadowSelectionConflict
 
         class RamShadowSelectionUpdate(BaseModel):
             model_config = ConfigDict(extra="forbid")
@@ -91,37 +94,31 @@ def create_operational_settings_routers(
 
         @read_router.get("/api/v1/research/ram-shadow/selection", dependencies=[Depends(authorize)])
         async def get_ram_shadow_settings():
-            return get_ram_shadow_selection()
+            return ram_shadow_session.selection()
 
         @update_router.put("/api/v1/research/ram-shadow/selection", dependencies=[Depends(authorize)])
         async def put_ram_shadow_settings(values: RamShadowSelectionUpdate):
-            async with state.lock:
-                current = get_ram_shadow_selection()
-                if values.expected_revision != current["revision"]:
-                    raise HTTPException(409, "RAM_SHADOW_SELECTION_REVISION_CONFLICT")
-                if not current["selection_supported"] or (
-                    not current["runtime_supported"] and (values.enabled if values.enabled is not None else current["enabled"])
-                ):
-                    raise HTTPException(422, "RAM_SHADOW_SELECTION_NOT_SUPPORTED")
-                changes = values.model_dump(exclude_none=True, exclude={"expected_revision"})
-                if "stock_thesis" in values.model_fields_set:
-                    changes["stock_thesis"] = values.stock_thesis
-                if "position_comparison" in values.model_fields_set:
-                    changes["position_comparison"] = values.position_comparison
-                if 'position_allocation' in values.model_fields_set:
-                    changes['position_allocation']=values.position_allocation
-                # One owner includes validation/native save/apply. Repeated caller
-                # cancellation cannot release the configuration lock ahead of work.
-                task = asyncio.create_task(update_ram_shadow_selection(changes), name="ram-shadow-selection-apply")
-                try:
-                    await join_owned_close(task)
-                except (ValueError, TypeError) as error:
-                    raise HTTPException(422, str(error)) from error
-                except RuntimeError as error:
-                    raise HTTPException(503, str(error)) from error
-                except OSError as error:
-                    raise HTTPException(503, "RAM_SHADOW_SELECTION_PENDING") from error
-                return get_ram_shadow_selection()
+            changes = values.model_dump(exclude_none=True, exclude={"expected_revision"})
+            if "stock_thesis" in values.model_fields_set:
+                changes["stock_thesis"] = values.stock_thesis
+            if "position_comparison" in values.model_fields_set:
+                changes["position_comparison"] = values.position_comparison
+            if 'position_allocation' in values.model_fields_set:
+                changes['position_allocation']=values.position_allocation
+            try:
+                return await ram_shadow_session.update(values.expected_revision, changes)
+            except RamShadowSelectionConflict as error:
+                raise HTTPException(409, str(error)) from error
+            except (ValueError, TypeError) as error:
+                detail = ('RAM_SHADOW_SELECTION_NOT_SUPPORTED' if str(error) == 'RAM_SHADOW_SELECTION_NOT_SUPPORTED'
+                          else 'RAM_SHADOW_SELECTION_INPUT_INVALID')
+                raise HTTPException(422, detail) from error
+            except RuntimeError as error:
+                codes = {'RAM_SHADOW_SERVER_CLOSING', 'RAM_SHADOW_SELECTION_APPLY_PENDING', 'RAM_SHADOW_SELECTION_SAVE_FAILED'}
+                detail = str(error) if str(error) in codes else 'RAM_SHADOW_SELECTION_PENDING'
+                raise HTTPException(503, detail) from error
+            except OSError as error:
+                raise HTTPException(503, "RAM_SHADOW_SELECTION_PENDING") from error
 
     class OperationalSettingsUpdate(BaseModel):
         expected_revision: int | None = Field(default=None, ge=0)
@@ -203,6 +200,7 @@ def create_operational_settings_routers(
             replacement = state.candidate_monitor
             if shadow_changed and bool(proposed["shadow_candidate_enabled"]):
                 try:
+                    from .candidate_monitor import CandidateMonitor
                     replacement = await asyncio.to_thread(
                         CandidateMonitor.from_json,
                         store,
@@ -212,6 +210,8 @@ def create_operational_settings_routers(
                             proposed["shadow_candidate_universe_max_age_seconds"]
                         ),
                         now_provider=now_provider,
+                        workload_paused=candidate_workload_paused,
+                        capture_scope=candidate_capture_scope,
                     )
                 except (TypeError, ValueError) as error:
                     raise HTTPException(status_code=422, detail=str(error)) from error

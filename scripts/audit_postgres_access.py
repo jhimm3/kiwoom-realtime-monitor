@@ -50,6 +50,7 @@ def proposal(method: str) -> tuple[str, str]:
         "claim_news_jobs": ("news.job_claim", "news_job_claim"),
         "finish_news_job": ("news.job_finish", "news_job_finish"),
         "save_news_body_revision": ("news.body", "news_body"),
+        "save_news_body_revision_receipt": ("news.body", "news_body"),
         "initialize": ("schema.migration", "central_schema"),
         "_connect": ("infrastructure.connection", "connection_factory"),
         "close": ("infrastructure.connection", "no_op"),
@@ -210,8 +211,11 @@ def inventory(root: Path, approvals_path: Path | None = None) -> dict:
                     reachable_helper_files.add(target_file)
                     pending.append((target_file, functions_by_file[target_file][target_name]))
                 elif (isinstance(item.func, ast.Attribute) and
-                      isinstance(item.func.value, ast.Name) and item.func.value.id == "self" and
-                      item.func.attr in methods and item.func.attr != "_connect"):
+                      isinstance(item.func.value, ast.Name)
+                      and (item.func.value.id == "self"
+                           or (item.func.value.id == source.class_name and item.args
+                               and isinstance(item.args[0], ast.Name) and item.args[0].id == "self"))
+                      and item.func.attr in methods and item.func.attr != "_connect"):
                     target = methods[item.func.attr]
                     pending.append((target.file, target.node))
         literals = [child.value for current in reachable.values() for child in ast.walk(current)

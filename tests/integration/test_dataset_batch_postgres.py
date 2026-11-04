@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import psycopg
 from kiwoom_monitor.central_server.database import PostgresQueryStore
-from kiwoom_monitor.central_server.diagnostic_metrics import summarize_db_calls
+from kiwoom_monitor.central_server.diagnostic_metrics import install_postgres_observation, summarize_db_calls
 from kiwoom_monitor.central_server.market_observations import market_state_observation
 from . import test_storage_boundary_postgres as storage
 
@@ -17,6 +17,8 @@ from . import test_storage_boundary_postgres as storage
 class DatasetBatchPostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # This explicit diagnostic fixture owns observer composition, independent of suite order.
+        install_postgres_observation()
         cls.url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
         if not cls.url:
             raise unittest.SkipTest('dedicated diagnostic PostgreSQL required')

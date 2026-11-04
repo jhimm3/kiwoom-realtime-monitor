@@ -44,7 +44,7 @@ from kiwoom_monitor.application.theme_preview import preview_theme_changes
 from kiwoom_monitor.domain.theme_import import validate_theme_header, validate_theme_rows
 from kiwoom_monitor.domain.theme_parser import parse_themes, theme_key
 from kiwoom_monitor.domain.theme_text_import import parse_theme_text
-from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsNativeWriteError, SettingsRepository
 from kiwoom_monitor.infrastructure.excel.theme_repository import ThemeRepository as ExcelThemeRepository
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import NewsAIRepository
 from kiwoom_monitor.presentation.similar_stock_dialog import choose_similar_stock, confirm_pending_name_change
@@ -839,8 +839,12 @@ class ThemeSuggestionReviewDialog(QDialog):
 
 
 class ThemeManagerDialog(QDialog):
-    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None, news_database_path: Path | None = None, *, stock_lookup: object | None = None, status_callback: Callable[[str], None] | None = None) -> None:
+    def __init__(self, repository: object, settings: SettingsRepository, on_excel_update: Callable[[], None] | None = None, on_image_update: Callable[[str], None] | None = None, on_catalog_sync: Callable[[], None] | None = None, parent: QWidget | None = None, on_themes_changed: Callable[[], None] | None = None, news_database_path: Path | None = None, *, stock_lookup: object | None = None, status_callback: Callable[[str], None] | None = None, theme_save_pending: Callable[[], bool] | None = None, on_theme_unapplied: Callable[[], None] | None = None, on_profile_renamed: Callable[[], None] | None = None, on_profile_selected: Callable[[], None] | None = None) -> None:
         super().__init__(parent); self._repository=repository; self._settings=settings; self._separators=",/|;" + settings.get("theme_custom_separators"); self._on_excel_update=on_excel_update; self._on_image_update=on_image_update; self._on_themes_changed=on_themes_changed; self._news_database_path=news_database_path; self._stock_lookup=stock_lookup; self._status_callback=status_callback; self.setWindowTitle("종목/테마 관리"); self.resize(560,420)
+        self._on_profile_selected = on_profile_selected
+        self._theme_save_pending = theme_save_pending
+        self._on_theme_unapplied = on_theme_unapplied
+        self._on_profile_renamed = on_profile_renamed
         self._save_request: SettingsRequestWorker | None = None
         self._save_completion_message = ""
         self._save_completion_title = "테마 업데이트 완료"
@@ -919,18 +923,52 @@ class ThemeManagerDialog(QDialog):
     def _refresh_theme_profiles(self) -> None:
         profiles = self._repository.list_profiles()
         active = getattr(self._repository, "active_profile", self._settings.get("theme_active_profile"))
-        self._theme_profile.blockSignals(True)
-        self._theme_profile.clear()
-        self._theme_profile.addItems(profiles)
-        self._theme_profile.setCurrentText(active if active in profiles else (profiles[0] if profiles else "기본 테마"))
-        self._theme_profile.blockSignals(False)
-    def _select_theme_profile(self, name: str) -> None:
-        if not name:
+        self.show_profile_names(self._repository, profiles, active)
+
+    def show_profile_names(self, repository: object, profiles: tuple[str, ...], active: str) -> None:
+        """Display the owner's projection without reads, writes or selection signals."""
+        if self._repository is not repository:
             return
-        self._repository.select_profile(name)
-        self._settings.set("theme_active_profile", name)
-        self._reload()
-        self._notify_themes_changed()
+        blocked = self._theme_profile.blockSignals(True)
+        try:
+            self._theme_profile.clear()
+            self._theme_profile.addItems(profiles)
+            self._theme_profile.setCurrentText(active if active in profiles else (profiles[0] if profiles else "기본 테마"))
+        finally:
+            self._theme_profile.blockSignals(blocked)
+    def _select_theme_profile(self, name: str) -> bool:
+        title = "현재 테마 프로필 선택"
+        if not name:
+            return False
+        if self.has_pending_theme_save or (self._theme_save_pending is not None and self._theme_save_pending()):
+            self._show_current_profile_name()
+            QMessageBox.warning(self, title, "기존 테마 저장과 화면 반영을 마친 뒤 선택을 다시 요청하세요. 진행 중인 작업은 계속됩니다.")
+            return False
+        try:
+            self._repository.select_current_profile(name, settings=self._settings)
+        except ValueError as error:
+            if not isinstance(error, SettingsNativeWriteError) or error.native_committed is False:
+                self._show_current_profile_name()
+            self._profile_change_failed(error, title)
+            return False
+        try:
+            if self._on_profile_selected is not None:
+                self._on_profile_selected()
+            else:
+                self._refresh_theme_profiles()
+                self._reload()
+        except Exception as cause:
+            error = SettingsNativeWriteError(
+                "테마 선택은 DB에 저장됐지만 현재 화면 적용에 실패했습니다. 다시 열어 확인하세요.",
+                native_committed=True, cache_invalidated=True)
+            error.__cause__ = cause
+            self._profile_change_failed(error, title)
+            return False
+        return True
+
+    def _show_current_profile_name(self) -> None:
+        profiles = tuple(self._theme_profile.itemText(i) for i in range(self._theme_profile.count()))
+        self.show_profile_names(self._repository, profiles, self._repository.active_profile)
     def _create_theme_profile(self, copy_current: bool) -> None:
         title = "현재 테마 복제" if copy_current else "새 테마 프로필"
         prompt = "새 프로필 이름을 입력하세요." if not copy_current else "현재 테마를 복제할 새 프로필 이름을 입력하세요."
@@ -943,31 +981,76 @@ class ThemeManagerDialog(QDialog):
             QMessageBox.warning(self, title, str(error))
             return
         self._refresh_theme_profiles()
-        self._theme_profile.setCurrentText(created)
+        if not self._select_theme_profile(created):
+            QMessageBox.information(self, title, "프로필은 생성됐지만 현재 선택은 적용되지 않았습니다. 생성된 프로필은 유지됩니다.")
     def _delete_current_theme_profile(self) -> None:
         name = self._theme_profile.currentText()
-        if QMessageBox.question(self, "테마 프로필 삭제", f"'{name}' 프로필의 모든 테마를 삭제합니다.\n되돌릴 수 없습니다.\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
+        title = "테마 프로필 삭제"
+        if QMessageBox.question(self, title, f"'{name}' 프로필의 모든 테마를 삭제합니다.\n되돌릴 수 없습니다.\n\n계속할까요?") != QMessageBox.StandardButton.Yes:
+            return
+        if self.has_pending_theme_save or (self._theme_save_pending is not None and self._theme_save_pending()):
+            QMessageBox.warning(self, title, "기존 테마 저장과 화면 반영을 마친 뒤 삭제를 다시 요청하세요. 진행 중인 작업은 계속됩니다.")
             return
         try:
-            self._repository.delete_profile(name)
+            self._repository.delete_profile(name, settings=self._settings)
         except ValueError as error:
-            QMessageBox.warning(self, "테마 프로필 삭제", str(error))
+            self._profile_change_failed(error, title)
             return
-        self._refresh_theme_profiles()
-        self._select_theme_profile(self._theme_profile.currentText())
+        try:
+            if self._on_profile_selected is not None:
+                self._on_profile_selected()
+            else:
+                self._refresh_theme_profiles()
+                self._reload()
+        except Exception as cause:
+            error = SettingsNativeWriteError(
+                "테마 삭제와 현재 선택은 DB에 저장됐지만 현재 화면 적용에 실패했습니다. 다시 열어 확인하세요.",
+                native_committed=True, cache_invalidated=True)
+            error.__cause__ = cause
+            self._profile_change_failed(error, title)
     def _rename_current_theme_profile(self) -> None:
         before = self._theme_profile.currentText()
-        after, accepted = QInputDialog.getText(self, "테마 프로필 이름 변경", "새 프로필 이름을 입력하세요.", text=before)
+        title = "테마 프로필 이름 변경"
+        after, accepted = QInputDialog.getText(self, title, "새 프로필 이름을 입력하세요.", text=before)
         if not accepted:
             return
-        try:
-            renamed = self._repository.rename_profile(before, after)
-        except ValueError as error:
-            QMessageBox.warning(self, "테마 프로필 이름 변경", str(error))
+        # Check after the nested input loop, before any native mutation. A
+        # queued worker result is pending until its actual owner publishes it.
+        if self.has_pending_theme_save or (self._theme_save_pending is not None and self._theme_save_pending()):
+            QMessageBox.warning(self, title, "기존 테마 저장과 화면 반영을 마친 뒤 이름 변경을 다시 요청하세요. 진행 중인 작업은 계속됩니다.")
             return
-        self._settings.set("theme_active_profile", renamed)
-        self._refresh_theme_profiles()
-        self._theme_profile.setCurrentText(renamed)
+        try:
+            self._repository.rename_profile(before, after, settings=self._settings)
+        except ValueError as error:
+            self._profile_change_failed(error, title)
+            return
+        try:
+            # This already selects the renamed current profile with signals
+            # blocked. Never re-enter generic select or separately save active.
+            if self._on_profile_renamed is not None:
+                self._on_profile_renamed()
+            else:
+                self._refresh_theme_profiles()
+        except Exception as cause:
+            error = SettingsNativeWriteError(
+                "테마 이름은 DB에 저장됐지만 현재 화면 적용에 실패했습니다. 다시 열어 확인하세요.",
+                native_committed=True, cache_invalidated=True)
+            error.__cause__ = cause
+            self._profile_change_failed(error, title)
+
+    def _profile_change_failed(self, error: Exception, title: str) -> None:
+        message = str(error)
+        if isinstance(error, SettingsNativeWriteError) and error.native_committed is not False:
+            self.setEnabled(False)
+            if self._on_theme_unapplied is not None:
+                try:
+                    self._on_theme_unapplied()
+                except Exception as publication_error:
+                    # Keep the original native phase/cache failure visible.
+                    message += f"\n현재 화면 적용 해제 중에도 오류가 발생했습니다: {publication_error}"
+            else:
+                self.close()
+        QMessageBox.warning(self, title, message)
     def _start_image_update(self) -> None:
         if self._on_image_update is None:
             return
@@ -1002,7 +1085,17 @@ class ThemeManagerDialog(QDialog):
         self._pending_column_widths = {}
         QMessageBox.warning(self, "테마 표 너비 저장", message)
     def _reload(self) -> None:
-        self._rows=self._repository.search(self._search.text()); self._table.setRowCount(len(self._rows))
+        self.show_theme_rows(self._repository, self._repository.search(self._search.text()))
+
+    def profile_search_text(self, repository: object) -> str | None:
+        return self._search.text() if self._repository is repository else None
+
+    def show_theme_rows(self, repository: object, rows: tuple[tuple[str, str, str], ...]) -> None:
+        """Render the owner's call-local rows; no query or persistent cache."""
+        if self._repository is not repository:
+            return
+        self._rows = rows
+        self._table.setRowCount(len(self._rows))
         for index,(_,name,themes) in enumerate(self._rows):
             self._table.setItem(index,0,QTableWidgetItem(name)); self._table.setItem(index,1,QTableWidgetItem(themes))
 
@@ -1244,6 +1337,11 @@ class ThemeManagerDialog(QDialog):
                 else:
                     repository.delete_themes((before,))
         self._submit_theme_change(apply_changes)
+
+    @property
+    def has_pending_theme_save(self) -> bool:
+        """Accepted native write/result publication still belongs to this editor."""
+        return self._save_request is not None
 
     def _notify_themes_changed(self) -> None:
         if self._on_themes_changed is not None:

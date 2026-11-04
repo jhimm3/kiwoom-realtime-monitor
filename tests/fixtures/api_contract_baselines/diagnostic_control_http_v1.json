@@ -20,7 +20,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-PUTcontrol",
@@ -37,7 +37,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-POSTtrace",
@@ -54,7 +54,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-GETtrace",
@@ -71,7 +71,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-POSTtrace/stop",
@@ -88,7 +88,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-GETtrace/missing",
@@ -105,7 +105,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-GETtrace/id/chunks/name",
@@ -122,7 +122,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "capabilities",
@@ -235,7 +235,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "invalid-control-model",
@@ -265,7 +265,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "strict-trace-model",
@@ -292,7 +292,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-initial",
@@ -309,7 +309,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-manifest-missing",
@@ -331,7 +331,7 @@
             "trace_id": "missing"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-chunk-missing",
@@ -354,7 +354,7 @@
             "chunk_name": "missing"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-chunk-conflict",
@@ -377,7 +377,7 @@
             "chunk_name": "incomplete"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-chunk",
@@ -398,7 +398,7 @@
             "chunk_name": "chunk.ndjson"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "control-unavailable",
@@ -415,7 +415,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-unavailable",
@@ -432,7 +432,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       }
     ],
     [
@@ -451,7 +451,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-PUTcontrol",
@@ -468,7 +468,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-POSTtrace",
@@ -485,7 +485,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-GETtrace",
@@ -502,7 +502,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-POSTtrace/stop",
@@ -519,7 +519,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-GETtrace/missing",
@@ -536,7 +536,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "unauthorized-GETtrace/id/chunks/name",
@@ -553,7 +553,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "capabilities",
@@ -666,7 +666,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "invalid-control-model",
@@ -696,7 +696,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "strict-trace-model",
@@ -723,7 +723,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-initial",
@@ -740,7 +740,7 @@
           "diagnostic-history.jsonl": null
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-manifest-missing",
@@ -762,7 +762,7 @@
             "trace_id": "missing"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-chunk-missing",
@@ -785,7 +785,7 @@
             "chunk_name": "missing"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-chunk-conflict",
@@ -808,7 +808,7 @@
             "chunk_name": "incomplete"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-chunk",
@@ -829,7 +829,7 @@
             "chunk_name": "chunk.ndjson"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "master-enable",
@@ -950,7 +950,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "master-repeat-idempotent",
@@ -1071,7 +1071,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "control-invalid-combination",
@@ -1088,7 +1088,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "child-ttl-bounded",
@@ -1105,7 +1105,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "child-session-required",
@@ -1122,7 +1122,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "child-stale-revision",
@@ -1139,7 +1139,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "child-wrong-instance",
@@ -1156,7 +1156,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "capture-enable",
@@ -1277,7 +1277,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "workload-pause",
@@ -1398,7 +1398,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "history-error-after-native-change",
@@ -1520,7 +1520,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-stale-session",
@@ -1537,7 +1537,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-busy-running",
@@ -1554,7 +1554,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-busy-stopping",
@@ -1571,7 +1571,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-busy-awaiting_persistence",
@@ -1588,7 +1588,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-busy-persisting",
@@ -1605,7 +1605,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-failure-rollback",
@@ -1633,7 +1633,7 @@
             }
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-failure-owned-by-another-operation",
@@ -1661,7 +1661,7 @@
             }
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-start-all-options",
@@ -1697,7 +1697,7 @@
             }
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-current",
@@ -1722,7 +1722,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-manifest",
@@ -1752,7 +1752,7 @@
             "trace_id": "contract-trace"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "trace-stop",
@@ -1781,7 +1781,7 @@
             "action": "stop"
           }
         ],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       },
       {
         "name": "master-disable-revokes-children",
@@ -1902,7 +1902,7 @@
           "diagnostic-history.jsonl": "{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 0}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"capture\", \"revision\": 1}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"external_market\", \"detail\": {\"target\": \"workload\", \"revision\": 2}}\n{\"at_utc\": \"2026-10-10T03:00:00+00:00\", \"command\": \"api_control\", \"workload\": \"\", \"detail\": {\"target\": \"master\", \"revision\": 8}}\n"
         },
         "trace_calls": [],
-        "storage_hash": "2c06e26e110c265f52d199fc98cbbf9ae26eba0e298fec34230b02140f3d6297"
+        "storage_hash": "31f1a1e19af55942ad0838634a01c5e44ee1550eee03c81555fbd4107b8f552e"
       }
     ]
   ]

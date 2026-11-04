@@ -5,7 +5,10 @@ import json
 import re
 import time
 from threading import Event
-from dataclasses import dataclass
+from kiwoom_monitor.domain.news_ai_contract import (
+    ANALYSIS_PROMPT_VERSION, AICompanyImpact, AIThemeCandidate, AINewsAnalysis,
+    AIRequestUsage, DEFAULT_MODELS, MODEL_OPTIONS,
+)
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -13,55 +16,8 @@ from kiwoom_monitor.infrastructure.naver_news import NewsAISettings
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
 
-# 대상 종목 관점 계약이 바뀌면 이전 분석을 완료 결과로 재사용하지 않는다.
-ANALYSIS_PROMPT_VERSION = "target-company-theme-v3"
 
-
-def analysis_body_hash(stock_name: str, body: str) -> str:
-    value = f"{ANALYSIS_PROMPT_VERSION}\0{stock_name.strip()}\0{body}"
-    return f"{ANALYSIS_PROMPT_VERSION}:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
-
-
-@dataclass(frozen=True)
-class AICompanyImpact:
-    company: str
-    outlook: str
-    confidence: int
-    reason: str
-
-
-@dataclass(frozen=True)
-class AIThemeCandidate:
-    name: str
-    confidence: int
-    evidence: str
-
-
-@dataclass(frozen=True)
-class AINewsAnalysis:
-    summary: str
-    outlook: str
-    confidence: int
-    reason: str
-    positive_evidence: tuple[str, ...] = ()
-    negative_evidence: tuple[str, ...] = ()
-    category: str = "기타 증권뉴스"
-    company_impacts: tuple[AICompanyImpact, ...] = ()
-    theme_candidates: tuple[AIThemeCandidate, ...] = ()
-
-
-@dataclass(frozen=True)
-class AIRequestUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
-
-
-DEFAULT_MODELS = {
-    "openai": "gpt-5.6-luna",
-    "gemini": "gemini-3.5-flash-lite",
-    "claude": "claude-haiku-4-5-20251001",
-}
+from kiwoom_monitor.domain.news_ai_contract import analysis_body_hash
 
 
 class NewsAIProviderError(RuntimeError):
@@ -76,31 +32,6 @@ class NewsAIProviderError(RuntimeError):
         else:
             message = f"AI 서버가 요청을 처리하지 못했습니다({self.status_code}). 잠시 후 다시 시도하세요."
         super().__init__(message)
-
-MODEL_OPTIONS = {
-    "openai": (
-        ("GPT-5.6 Luna · 저비용(추천)", "gpt-5.6-luna"),
-        ("GPT-5.4 mini · 저비용", "gpt-5.4-mini"),
-        ("GPT-5.6 Terra · 균형", "gpt-5.6-terra"),
-        ("GPT-5.6 Sol · 고품질", "gpt-5.6-sol"),
-    ),
-    "gemini": (
-        ("Gemini 3.5 Flash-Lite · 저비용(추천)", "gemini-3.5-flash-lite"),
-        ("Gemini 3.7 Flash · 최신 Flash", "gemini-3.7-flash"),
-        ("Gemini 3.6 Flash · 균형", "gemini-3.6-flash"),
-        ("Gemini 3.5 Flash · 일반", "gemini-3.5-flash"),
-        ("Gemini 3.1 Flash-Lite · 저비용", "gemini-3.1-flash-lite"),
-        ("Gemini 3.1 Pro Preview · 고품질", "gemini-3.1-pro-preview"),
-        ("Gemini 2.5 Flash · 범용", "gemini-2.5-flash"),
-    ),
-    "claude": (
-        ("Claude Haiku 4.5 · 저비용(추천)", "claude-haiku-4-5-20251001"),
-        ("Claude Sonnet 5 · 균형", "claude-sonnet-5"),
-        ("Claude Opus 5 · 고품질", "claude-opus-5"),
-        ("Claude Fable 5 · 최고급", "claude-fable-5"),
-    ),
-}
-
 
 def analyze_article(settings: NewsAISettings, stock_name: str, title: str, article_text: str) -> AINewsAnalysis:
     analyses, _usage = analyze_articles(settings, stock_name, ((title, article_text),))

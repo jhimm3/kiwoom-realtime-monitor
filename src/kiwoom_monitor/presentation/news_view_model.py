@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from kiwoom_monitor.application.news_grouping import NewsEventGroup
+from kiwoom_monitor.domain.news_ai_contract import news_ai_version_status
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem, news_provider
 from kiwoom_monitor.infrastructure.persistence.news_ai_repository import StoredAINewsAnalysis
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
@@ -44,6 +45,7 @@ def escape_html(value: object) -> str:
 def effective_judgment(
     item: StockNewsItem,
     stored: StoredAINewsAnalysis | None,
+    group: NewsEventGroup | None = None,
 ) -> tuple[str, str, str, str]:
     if stored is None:
         return (
@@ -63,7 +65,9 @@ def effective_judgment(
         outlook = "판단 보류"
     reason = result.reason or "AI 원문 분석에서 구체적인 판단 이유를 제공하지 않았습니다."
     category = result.category or item.assessment.category
-    return category, outlook, reason, f"AI 원문 분석 ({stored.provider} · 신뢰도 {result.confidence}%)"
+    version = news_ai_version_status(group.items if group is not None else (item,), stored.provenance)
+    notice = {"PREVIOUS": " · 이전 판단", "UNKNOWN": " · 판본 미확인"}.get(version, "")
+    return category, outlook, reason, f"AI 원문 분석{notice} ({stored.provider} · 신뢰도 {result.confidence}%)"
 
 
 def build_display_row(
@@ -72,8 +76,11 @@ def build_display_row(
     stored: StoredAINewsAnalysis | None,
 ) -> NewsDisplayRow:
     published = format_kst_time(item.published_at, "%m-%d %H:%M")
-    category, outlook, _reason, source = effective_judgment(item, stored)
+    category, outlook, _reason, source = effective_judgment(item, stored, group)
     displayed_outlook = f"{outlook}  ᴬᴵ" if source.startswith("AI 원문 분석") else outlook
+    for notice in ("이전 판단", "판본 미확인"):
+        if source.startswith(f"AI 원문 분석 · {notice} ("):
+            displayed_outlook += f" · {notice}"
     suffixes: list[str] = []
     if len(group.items) > 1:
         suffixes.append(f"관련 기사 {len(group.items)}건")
@@ -100,17 +107,24 @@ def related_articles_html(group: NewsEventGroup) -> str:
     return f"<hr><p><b>관련 기사 {len(group.items)}건</b></p><ul>{''.join(rows)}</ul>"
 
 
-def ai_detail_html(item: StockNewsItem, stored: StoredAINewsAnalysis | None) -> str:
+def ai_detail_html(item: StockNewsItem, stored: StoredAINewsAnalysis | None,
+                   group: NewsEventGroup | None = None) -> str:
     if stored is None:
         return ""
     result = stored.analysis
     positive = " / ".join(result.positive_evidence) or "-"
     negative = " / ".join(result.negative_evidence) or "-"
+    version = news_ai_version_status(group.items if group is not None else (item,), stored.provenance)
+    notice = {
+        "PREVIOUS": "이전 판단 · 현재 기사 본문과 다른 판본의 분석입니다. 새 분석은 직접 요청할 때만 실행합니다.",
+        "UNKNOWN": "판본 미확인 · 이 판단이 현재 기사 본문과 같은 판본인지 확인할 수 없습니다. 저장된 판단과 출처는 유지합니다.",
+    }.get(version, "")
     return (
         "<div style='background:#EEF6FF; border:1px solid #9CC7F2; padding:10px;'>"
         f"<h3 style='margin-top:0'>AI 원문 분석 · 관련성 {item.assessment.relevance_score}점"
         f" · 신뢰도 {result.confidence}%</h3>"
-        f"<p><b>판단:</b> {escape_html(result.outlook)}</p>"
+        + (f"<p style='color:#9A6700'><b>{escape_html(notice)}</b></p>" if notice else "")
+        + f"<p><b>판단:</b> {escape_html(result.outlook)}</p>"
         f"<p><b>원문 기준 분류:</b> {escape_html(result.category or item.assessment.category)}</p>"
         f"<p><b>이유:</b> {escape_html(result.reason)}</p>"
         f"<p><b>긍정 근거:</b> {escape_html(positive)}</p>"

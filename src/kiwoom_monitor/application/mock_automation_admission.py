@@ -40,6 +40,7 @@ class MockAutomationControl:
     execution_run_id: str
     changed_at: datetime
     reason: str
+    entry_resume_required: bool = False
 
     def __post_init__(self) -> None:
         if self.version != MOCK_AUTOMATION_CONTROL_VERSION:
@@ -50,6 +51,8 @@ class MockAutomationControl:
             raise ValueError("mock automation control identity and reason are required")
         if type(self.control_revision) is not int or self.control_revision <= 0:
             raise ValueError("control_revision must be a positive integer")
+        if type(self.entry_resume_required) is not bool:
+            raise ValueError("entry_resume_required must be a boolean")
         _require_aware(self.changed_at, "changed_at")
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,6 +65,7 @@ class MockAutomationControl:
             "execution_run_id": self.execution_run_id,
             "changed_at": self.changed_at.isoformat(),
             "reason": self.reason,
+            **({"entry_resume_required": True} if self.entry_resume_required else {}),
         }
 
 
@@ -344,6 +348,7 @@ def mock_automation_control_from_dict(value: Mapping[str, Any]) -> MockAutomatio
         execution_run_id=str(value["execution_run_id"]),
         changed_at=datetime.fromisoformat(str(value["changed_at"])),
         reason=str(value["reason"]),
+        entry_resume_required=value.get("entry_resume_required", False),
     )
 
 

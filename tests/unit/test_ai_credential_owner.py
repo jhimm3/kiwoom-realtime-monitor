@@ -122,11 +122,11 @@ class AICredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         from kiwoom_monitor.central_server.ai_service import _prepare_events
         entered, release = threading.Event(), threading.Event()
 
-        def prepare(*args):
+        def prepare(*args, **kwargs):
             entered.set()
             if not release.wait(5):
                 raise RuntimeError("fake gate timed out")
-            return _prepare_events(*args)
+            return _prepare_events(*args, **kwargs)
 
         try:
             with patch("kiwoom_monitor.central_server.ai_service._prepare_events", prepare):
@@ -351,8 +351,15 @@ class AICredentialAPITests(unittest.TestCase):
     def test_keyless_server_applies_three_fixed_profiles_without_paid_calls(self):
         from fastapi.testclient import TestClient
         from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
+        runners = []
+        def create_runner(*args, **kwargs):
+            runner = NewsJobRunner(*args, **kwargs)
+            runners.append(runner)
+            return runner
         with tempfile.TemporaryDirectory() as directory, patch(
-            "kiwoom_monitor.central_server.ai_service.analyze_articles", FakeAI()) as fake:
+            "kiwoom_monitor.central_server.ai_service.analyze_articles", FakeAI()) as fake, patch(
+            "kiwoom_monitor.central_server.news_jobs.NewsJobRunner", side_effect=create_runner):
             root = Path(directory)
             app = create_app(CentralServerSettings(f"sqlite:///{root / 'central.sqlite'}", "private-token",
                 credential_directory=str(root / "secrets"), news_query_set_enabled=False,
@@ -364,7 +371,8 @@ class AICredentialAPITests(unittest.TestCase):
                 service = runtime._hooks["gemini"].prepare.__self__.service
                 news = runtime._hooks["naver"].prepare.__self__.service
                 self.assertIs(service, news._ai_service)
-                self.assertIs(service, news._job_runner._ai_service)
+                self.assertEqual(1, len(runners))
+                self.assertIs(service, runners[0]._ai_service)
                 for provider in ("openai", "gemini", "claude"):
                     path = f"/api/v1/settings/credentials/{provider}/profiles/nas-{provider}-default/prepare"
                     payload = {"request_id": str(uuid.uuid4()), "expected_revision": 0,

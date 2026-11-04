@@ -6,8 +6,9 @@ import asyncio
 import logging
 import time
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from .market_observations import KST, as_kst
 
@@ -27,7 +28,8 @@ from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository imp
     ForwardEvaluationRepository,
 )
 
-from .mock_automation_runner import MockAutomationRunner
+if TYPE_CHECKING:
+    from .mock_automation_runner import MockAutomationRunner
 from .observation_frame_recovery import drain_thread_call
 from .mock_runtime import (
     MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION,
@@ -59,6 +61,7 @@ class MockAutomationSupervisor:
         self._price_source = price_source
         self._leader_context_source = leader_context_source
         self._runners: dict[str, MockAutomationRunner] = {}
+        self._preparing_runners: set[MockAutomationRunner] = set()
         # The current map is withdrawn before bundle replacement. Keep its
         # actual close owned until both the callback and shutdown can join it.
         self._runner_close_tasks: dict[MockAutomationRunner, asyncio.Task[None]] = {}
@@ -74,13 +77,13 @@ class MockAutomationSupervisor:
         if self._closing:
             return
         for runner in tuple(self._runners.values()):
-            runner.observe_automation_price(symbol, price)
+            runner.episode.observe_automation_price(symbol, price)
 
     def observe_leader_trade(self, payload, received_at, **source):
         if self._closing:
             return
         for runner in tuple(self._runners.values()):
-            runner.observe_leader_trade(payload, received_at, **source)
+            runner.episode.observe_leader_trade(payload, received_at, **source)
 
     def position_shadow_observation(self,observation):
         """Enrich one borrowed account cut using its current registered owner only."""
@@ -90,7 +93,7 @@ class MockAutomationSupervisor:
         base=PositionAccountObservation(**{field.name:getattr(observation,field.name) for field in fields(PositionAccountObservation)})
         runner=self._runners.get(base.account.account_ref)
         if self._closing or runner is None:return base
-        return runner.position_shadow_observation(
+        return runner.episode.position_shadow_observation(
             base, is_current=lambda: not self._closing and self._runners.get(base.account.account_ref) is runner,
         )
 
@@ -103,7 +106,7 @@ class MockAutomationSupervisor:
             )
 
     async def _close_runner(self, runner, *, withdraw=True) -> None:
-        account_ref = runner.account_ref
+        account_ref = runner.episode.account_ref
         if withdraw and self._runners.get(account_ref) is runner:
             self._runners.pop(account_ref)
         task = self._runner_close_tasks.get(runner)
@@ -117,17 +120,17 @@ class MockAutomationSupervisor:
 
     async def _join_runner_closes(self, account_ref) -> None:
         for runner, task in tuple(self._runner_close_tasks.items()):
-            if runner.account_ref == account_ref:
+            if runner.episode.account_ref == account_ref:
                 await asyncio.shield(task)
 
     async def bundle_changed(self, profile_id, bundle) -> None:
         # The owner can call this while activate owns the account lock during a
         # mode switch; taking that same lock here would deadlock.
-        for runner in tuple(self._runners.values()):
-            if runner.credential_profile_id == profile_id and not runner.is_bound_to(bundle):
+        for runner in tuple(dict.fromkeys((*self._runners.values(), *self._preparing_runners))):
+            if runner.episode.credential_profile_id == profile_id and not runner.episode.is_bound_to(bundle):
                 await self._close_runner(runner)
         for runner, task in tuple(self._runner_close_tasks.items()):
-            if runner.credential_profile_id == profile_id and not runner.is_bound_to(bundle):
+            if runner.episode.credential_profile_id == profile_id and not runner.episode.is_bound_to(bundle):
                 await asyncio.shield(task)
 
     async def close(self) -> None:
@@ -146,7 +149,7 @@ class MockAutomationSupervisor:
         for lock in tuple(self._locks.values()):
             async with lock:
                 pass
-        runners = tuple(dict.fromkeys((*self._runners.values(), *self._runner_close_tasks)))
+        runners = tuple(dict.fromkeys((*self._runners.values(), *self._preparing_runners, *self._runner_close_tasks)))
         results = await asyncio.gather(*(self._close_runner(runner, withdraw=False) for runner in runners), return_exceptions=True)
         for result in results:
             if isinstance(result, BaseException):
@@ -170,8 +173,8 @@ class MockAutomationSupervisor:
             await self._join_runner_closes(account_ref)
             existing_runner = self._runners.get(account_ref)
             if existing_runner is not None:
-                if existing_runner.is_bound_to(self._owner.bundle(credential_profile_id)):
-                    if existing_runner.status["spec_id"] != spec_id:
+                if existing_runner.episode.is_bound_to(self._owner.bundle(credential_profile_id)):
+                    if existing_runner.episode.status["spec_id"] != spec_id:
                         raise MockAutomationSupervisorError("MOCK_AUTOMATION_ALREADY_ACTIVE")
                     return self.status(account_ref, credential_profile_id=credential_profile_id)
                 await self._close_runner(existing_runner)
@@ -224,17 +227,29 @@ class MockAutomationSupervisor:
                 )
             elif bundle.automation_context != context:
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
+            else:
+                await self._owner.require_execution_settings(credential_profile_id,
+                    expected_settings_revision=expected_settings_revision, credential_revision=credential_revision)
 
             try:
-                await drain_thread_call(
-                    admit_mock_automation,
-                    self._repository,
-                    self._repository,
-                    bundle.runtime,
-                    account_ref=account_ref,
-                    spec_id=spec_id,
-                    requested_at=requested_at,
-                )
+                if control is not None and getattr(control, "entry_resume_required", False):
+                    # Reconnect management of an already admitted run. A new
+                    # key does not issue another admission or entry approval.
+                    receipt = await drain_thread_call(self._repository.load_mock_automation_lease_for_admission,
+                        account_ref, admission.admission_id)
+                    if receipt is None:
+                        raise MockAutomationSupervisorError("MOCK_AUTOMATION_ADMISSION_MISSING", 404)
+                    bundle.runtime.set_new_orders_enabled(False)
+                else:
+                    await drain_thread_call(
+                        admit_mock_automation,
+                        self._repository,
+                        self._repository,
+                        bundle.runtime,
+                        account_ref=account_ref,
+                        spec_id=spec_id,
+                        requested_at=requested_at,
+                    )
                 recovery = await bundle.monitor.refresh_recovery()
                 risk = await drain_thread_call(
                     self._repository.load_latest_mock_automation_risk, account_ref,
@@ -250,23 +265,15 @@ class MockAutomationSupervisor:
                     account_ref=account_ref,
                     spec_id=spec_id,
                 )
-                runner = MockAutomationRunner(
-                    self._store, bundle, spec, poll_seconds=self._poll_seconds, price_source=self._price_source,
-                    now_provider=self._now,
-                    leader_context_source=self._leader_context_source,
-                )
-                await runner.start()
-                if self._closing or self._owner.bundle(credential_profile_id) is not bundle:
-                    await self._close_runner(runner)
-                    raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
-            except Exception:
+                runner = await self._assemble_runner(bundle, spec, credential_profile_id)
+            except BaseException:
                 if self._owner.bundle(credential_profile_id) is bundle:
                     bundle.runtime.set_new_orders_enabled(False)
                 raise
             # No await between the final identity fence and publication. A
             # concurrent close has already set _closing before taking its cut.
             self._runner_close_tasks = {old: task for old, task in self._runner_close_tasks.items()
-                                        if old.account_ref != account_ref}
+                                        if old.episode.account_ref != account_ref}
             self._runners[account_ref] = runner
             self._restore_errors.pop(account_ref, None)
             self._restore_retry_after.pop(account_ref, None)
@@ -303,6 +310,7 @@ class MockAutomationSupervisor:
             control = await drain_thread_call(
                 self._repository.load_mock_automation_control, account_ref,
             )
+            bundle.refresh_automation_control(control)
             return self._status_from_control(
                 account_ref, credential_profile_id=credential_profile_id, control=control,
             )
@@ -324,7 +332,7 @@ class MockAutomationSupervisor:
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_SUPERVISOR_CLOSED", 503)
             await self._join_runner_closes(account_ref)
             existing_runner = self._runners.get(account_ref)
-            if existing_runner is not None and not existing_runner.is_bound_to(self._owner.bundle(credential_profile_id)):
+            if existing_runner is not None and not existing_runner.episode.is_bound_to(self._owner.bundle(credential_profile_id)):
                 await self._close_runner(existing_runner)
             control = await drain_thread_call(
                 self._repository.load_mock_automation_control, account_ref,
@@ -333,7 +341,9 @@ class MockAutomationSupervisor:
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_CONTROL_REVISION_CONFLICT")
             if (
                 control.active_spec_id != spec_id
-                or control.desired_state is not MockAutomationDesiredState.STOPPED
+                or (control.desired_state is not MockAutomationDesiredState.STOPPED
+                    and not (control.desired_state is MockAutomationDesiredState.RUNNING
+                             and getattr(control, "entry_resume_required", False)))
             ):
                 raise MockAutomationSupervisorError("MOCK_AUTOMATION_NOT_STOPPED")
             spec = await drain_thread_call(
@@ -349,6 +359,9 @@ class MockAutomationSupervisor:
             bundle = self._owner.bundle(credential_profile_id)
             if bundle is None or bundle.account_ref != account_ref:
                 raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
+            if bundle.runtime_mode is MockAccountRuntimeMode.AUTOMATIC:
+                await self._owner.require_execution_settings(credential_profile_id,
+                    expected_settings_revision=expected_settings_revision, credential_revision=credential_revision)
             context = MockAutomationRuntimeContext(
                 MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION,
                 account_ref,
@@ -367,7 +380,10 @@ class MockAutomationSupervisor:
                     automation_context=context,
                 )
             elif bundle.automation_context != context:
-                raise MockAutomationSupervisorError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
+                prior = bundle.automation_context
+                if prior is None or prior != replace(context, control_revision=prior.control_revision):
+                    raise MockAutomationSupervisorError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
+                bundle.refresh_automation_control(control)
             recovery = await bundle.monitor.refresh_recovery()
             risk = await drain_thread_call(
                 self._repository.load_latest_mock_automation_risk, account_ref,
@@ -383,7 +399,7 @@ class MockAutomationSupervisor:
                 account_ref=account_ref,
                 spec_id=spec_id,
             )
-            await drain_thread_call(
+            resumed = await drain_thread_call(
                 resume_mock_automation,
                 self._repository,
                 bundle.runtime,
@@ -392,27 +408,45 @@ class MockAutomationSupervisor:
                 resumed_at=self._now(),
                 reason=reason,
             )
+            bundle.refresh_automation_control(resumed)
             if account_ref not in self._runners:
                 try:
-                    runner = MockAutomationRunner(
-                        self._store, bundle, spec, poll_seconds=self._poll_seconds, price_source=self._price_source,
-                        now_provider=self._now,
-                        leader_context_source=self._leader_context_source,
-                    )
-                    await runner.start()
-                    if self._closing or self._owner.bundle(credential_profile_id) is not bundle:
-                        await self._close_runner(runner)
-                        raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
-                except Exception:
+                    runner = await self._assemble_runner(bundle, spec, credential_profile_id)
+                except BaseException:
                     if self._owner.bundle(credential_profile_id) is bundle:
                         bundle.runtime.set_new_orders_enabled(False)
                     raise
                 self._runner_close_tasks = {old: task for old, task in self._runner_close_tasks.items()
-                                            if old.account_ref != account_ref}
+                                            if old.episode.account_ref != account_ref}
                 self._runners[account_ref] = runner
                 self._restore_errors.pop(account_ref, None)
                 self._restore_retry_after.pop(account_ref, None)
             return self.status(account_ref, credential_profile_id=credential_profile_id)
+
+    async def _assemble_runner(self, bundle, spec, credential_profile_id):
+        from .mock_automation_episode import MockAutomationEpisode
+        from .mock_automation_runner import MockAutomationRunner
+        episode = MockAutomationEpisode(
+            self._store, bundle, spec, price_source=self._price_source,
+            now_provider=self._now, leader_context_source=self._leader_context_source,
+        )
+        runner = MockAutomationRunner(episode, monitor=getattr(bundle, "monitor", None),
+                                      poll_seconds=self._poll_seconds)
+        self._preparing_runners.add(runner)
+        try:
+            await drain_thread_call(runner.episode.prepare_restore)
+            if self._closing or self._owner.bundle(credential_profile_id) is not bundle:
+                raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
+            runner.attach_inputs()
+            await runner.start()
+            if self._closing or self._owner.bundle(credential_profile_id) is not bundle:
+                raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
+            return runner
+        except BaseException:
+            await self._close_runner(runner)
+            raise
+        finally:
+            self._preparing_runners.discard(runner)
 
     def status(self, account_ref: str, *, credential_profile_id: str = "") -> dict[str, Any]:
         control = self._repository.load_mock_automation_control(account_ref)
@@ -429,7 +463,7 @@ class MockAutomationSupervisor:
             "credential_profile_id": credential_profile_id,
             "runtime_mode": bundle.runtime_mode.value if bundle is not None else None,
             "control": control.to_dict() if control is not None else None,
-            "runner": runner.status if runner is not None else None,
+            "runner": runner.episode.status if runner is not None else None,
             "restore_error": self._restore_errors.get(account_ref, ""),
         }
 
@@ -450,14 +484,14 @@ class MockAutomationSupervisor:
             runner=self._runners.get(account_ref)
             if runner is None or bundle.run_id!=document['execution_run_id']:
                 raise MockAutomationSupervisorError('MOCK_AUTOMATION_RUNTIME_NOT_ACTIVE')
-            prior=runner.status.get('unfilled_population_source',{})
+            prior=runner.episode.status.get('unfilled_population_source',{})
             if prior.get('publication_ref')!=document['publication_ref']:
                 control=await drain_thread_call(self._repository.load_mock_automation_control,account_ref)
                 if (control is None or control.desired_state is not MockAutomationDesiredState.RUNNING
                         or (control.active_spec_id,control.execution_run_id,control.control_revision)!=(
                             document['spec_id'],document['execution_run_id'],document['expected_control_revision'])):
                     raise MockAutomationSupervisorError('MOCK_AUTOMATION_CONTROL_REVISION_CONFLICT')
-            return await drain_thread_call(runner.offer_native_unfilled_publication,document)
+            return await drain_thread_call(runner.episode.offer_native_unfilled_publication,document)
 
     def _require_automatic_bundle(
         self, credential_profile_id: str, account_ref: str, spec_id: str,
@@ -491,7 +525,7 @@ class MockAutomationSupervisor:
         for binding in self._owner.account_bindings():
             account_ref = binding.scope.account_ref
             runner = self._runners.get(account_ref)
-            if runner is not None and runner.is_bound_to(self._owner.bundle(binding.credential_profile_id)):
+            if runner is not None and runner.episode.is_bound_to(self._owner.bundle(binding.credential_profile_id)):
                 continue
             if time.monotonic() < self._restore_retry_after.get(account_ref, 0.0):
                 continue

@@ -235,7 +235,7 @@ class NasCredentialsDialogTests(unittest.TestCase):
             config = DataSourceConfig(root / "data_source.json"); config.save(self.client.source)
             original = {p.name: p.read_bytes() for p in root.iterdir()}
             parent = ApiSettingsDialog(api, section="nas")
-            with patch("kiwoom_monitor.presentation.api_settings_dialog.NasCredentialsDialog") as child:
+            with patch("kiwoom_monitor.presentation.nas_credentials_dialog.NasCredentialsDialog") as child:
                 parent._open_nas_credentials(); parent._open_nas_credentials()
                 self.assertIs(child.call_args_list[0].args[0], child.call_args_list[1].args[0])
                 parent._local_fallback.setChecked(True)
@@ -318,7 +318,7 @@ class NasRealCredentialsDialogTests(unittest.TestCase):
             DataSourceConfig(root / "data_source.json").save(self.client.source)
             original = {p.name: p.read_bytes() for p in root.iterdir()}
             parent = ApiSettingsDialog(api, section="nas")
-            with patch("kiwoom_monitor.presentation.api_settings_dialog.NasCredentialsDialog") as child:
+            with patch("kiwoom_monitor.presentation.nas_credentials_dialog.NasCredentialsDialog") as child:
                 parent._open_nas_provider_credentials("kiwoom_real")
                 parent._open_nas_provider_credentials("kiwoom_real")
                 parent._open_nas_credentials()

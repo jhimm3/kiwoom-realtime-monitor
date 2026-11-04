@@ -10,7 +10,7 @@ from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
 import asyncio
 import hmac
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as clock_time, timedelta
 from typing import Any
@@ -26,7 +26,6 @@ from .account_query import AccountQuerySessionManager
 from .credential_runtime import CredentialOperationError, CredentialRuntimeHooks, ValidatedCredential
 from .market_observations import as_kst
 from .rest_broker import CentralRestBroker, ACCOUNT_RECOVERY_ENDPOINTS
-from .diagnostic_replay_contract import captured_workload
 
 
 # Account WebSocket reception includes the after-hours market until 20:00.
@@ -163,9 +162,10 @@ class RealCredentialOwner:
     def __init__(self, store, vault, *, hmac_key: bytes, market_client=None,
                  market_broker=None, market_collector=None, on_change=None, account_poll_interval=30.0,
                  account_safety_interval=_ACCOUNT_SAFETY_INTERVAL_SECONDS,
-                 account_realtime_factory=None, account_event_publisher=None):
+                 account_realtime_factory=None, account_event_publisher=None, capture_scope=None):
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
         self.store, self.vault, self.hmac_key = store, vault, hmac_key
+        self._capture_scope = capture_scope
         self.collector = market_collector
         self._market_broker = market_broker
         self._market_role_revision = None
@@ -361,31 +361,33 @@ class RealCredentialOwner:
                     self._monitor_now(context)):
                 context.monitor_wake.set()
 
-    @captured_workload('account', 'real_account_events', actor_per_invocation=True)
     async def _write_account_events(self, context):
-        stop = context.monitor_stop
-        while context.pending_event is not None or not context.event_queue.empty() or not stop.is_set():
-            if context.pending_event is None:
+        capture_scope = self._capture_scope
+        with (capture_scope(self, 'account', 'real_account_events', actor_per_invocation=True)
+              if capture_scope is not None else nullcontext()):
+            stop = context.monitor_stop
+            while context.pending_event is not None or not context.event_queue.empty() or not stop.is_set():
+                if context.pending_event is None:
+                    try:
+                        context.pending_event = await asyncio.wait_for(context.event_queue.get(), 0.25)
+                    except asyncio.TimeoutError:
+                        continue
+                binding, revision, name, value, received_at = context.pending_event
                 try:
-                    context.pending_event = await asyncio.wait_for(context.event_queue.get(), 0.25)
-                except asyncio.TimeoutError:
-                    continue
-            binding, revision, name, value, received_at = context.pending_event
-            try:
-                await asyncio.to_thread(self.store.save_real_account_event, binding, name, value, received_at,
-                                        settings_revision=revision)
-                context.pending_event = None
-                context.last_event_at = received_at.isoformat()
-                if not context.dropped_events:
-                    context.event_error_code = None
-            except Exception:
-                context.event_error_code = "REAL_ACCOUNT_EVENT_STORE_FAILED"
-                if stop.is_set():
-                    return  # Retain the pending event; a live transition cannot commit.
-                try:
-                    await asyncio.wait_for(stop.wait(), self._account_poll_interval)
-                except asyncio.TimeoutError:
-                    pass
+                    await asyncio.to_thread(self.store.save_real_account_event, binding, name, value, received_at,
+                                            settings_revision=revision)
+                    context.pending_event = None
+                    context.last_event_at = received_at.isoformat()
+                    if not context.dropped_events:
+                        context.event_error_code = None
+                except Exception:
+                    context.event_error_code = "REAL_ACCOUNT_EVENT_STORE_FAILED"
+                    if stop.is_set():
+                        return  # Retain the pending event; a live transition cannot commit.
+                    try:
+                        await asyncio.wait_for(stop.wait(), self._account_poll_interval)
+                    except asyncio.TimeoutError:
+                        pass
 
     async def _restart_account_monitors(self, *profile_ids):
         for profile_id in profile_ids:
@@ -409,83 +411,85 @@ class RealCredentialOwner:
             if realtime is not None:
                 await realtime.close()
 
-    @captured_workload('account', 'real_account_recovery', actor_per_invocation=True)
     async def _monitor_account_cycles(self, profile_id, context):
-        # Leave bootstrap's first ranking request ahead of supplemental account reads.
-        stop, wake, binding, revision = context.monitor_stop, context.monitor_wake, context.binding, context.monitor_revision
-        loop = asyncio.get_running_loop()
-        started_at = loop.time()
-        last_attempt_at = started_at
-        # Keep scheduled reads between the 00/30-second ranking boundaries.
-        startup_delay = _account_startup_wait(self._monitor_now(context), self._account_poll_interval)
-        safety_delay = self._account_safety_interval
-        startup_pending = True
-        retry_at = None
-        failures = 0
-        prechecked = final_checked = None
-        while not stop.is_set():
-            now = self._monitor_now(context)
-            monotonic_now = loop.time()
-            boundary = _account_check_due(now, prechecked, final_checked)
-            active = _account_session_open(now)
-            startup_due = startup_pending and monotonic_now - started_at >= startup_delay
-            retry_due = retry_at is not None and monotonic_now >= retry_at
-            safety_due = (active and not startup_pending and retry_at is None
-                          and monotonic_now - last_attempt_at >= safety_delay)
-            if not (wake.is_set() or startup_due or retry_due or (boundary and not startup_pending) or safety_due):
-                delay = min(self._account_timer_cap, _seconds_until_account_check(
-                    now, prechecked, final_checked))
-                if startup_pending:
-                    delay = min(delay, started_at + startup_delay - monotonic_now)
-                elif retry_at is not None:
-                    delay = min(delay, retry_at - monotonic_now)
-                elif active:
-                    delay = min(delay, last_attempt_at + safety_delay - monotonic_now)
-                try:
-                    await asyncio.wait_for(wake.wait(), max(0.001, delay))
-                except asyncio.TimeoutError:
-                    pass
-                continue
-            if wake.is_set():
-                try:
-                    await asyncio.wait_for(stop.wait(), 0.5)
+        capture_scope = self._capture_scope
+        with (capture_scope(self, 'account', 'real_account_recovery', actor_per_invocation=True)
+              if capture_scope is not None else nullcontext()):
+            # Leave bootstrap's first ranking request ahead of supplemental account reads.
+            stop, wake, binding, revision = context.monitor_stop, context.monitor_wake, context.binding, context.monitor_revision
+            loop = asyncio.get_running_loop()
+            started_at = loop.time()
+            last_attempt_at = started_at
+            # Keep scheduled reads between the 00/30-second ranking boundaries.
+            startup_delay = _account_startup_wait(self._monitor_now(context), self._account_poll_interval)
+            safety_delay = self._account_safety_interval
+            startup_pending = True
+            retry_at = None
+            failures = 0
+            prechecked = final_checked = None
+            while not stop.is_set():
+                now = self._monitor_now(context)
+                monotonic_now = loop.time()
+                boundary = _account_check_due(now, prechecked, final_checked)
+                active = _account_session_open(now)
+                startup_due = startup_pending and monotonic_now - started_at >= startup_delay
+                retry_due = retry_at is not None and monotonic_now >= retry_at
+                safety_due = (active and not startup_pending and retry_at is None
+                              and monotonic_now - last_attempt_at >= safety_delay)
+                if not (wake.is_set() or startup_due or retry_due or (boundary and not startup_pending) or safety_due):
+                    delay = min(self._account_timer_cap, _seconds_until_account_check(
+                        now, prechecked, final_checked))
+                    if startup_pending:
+                        delay = min(delay, started_at + startup_delay - monotonic_now)
+                    elif retry_at is not None:
+                        delay = min(delay, retry_at - monotonic_now)
+                    elif active:
+                        delay = min(delay, last_attempt_at + safety_delay - monotonic_now)
+                    try:
+                        await asyncio.wait_for(wake.wait(), max(0.001, delay))
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                if wake.is_set():
+                    try:
+                        await asyncio.wait_for(stop.wait(), 0.5)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                    wake.clear()
+                if stop.is_set():
                     break
-                except asyncio.TimeoutError:
-                    pass
-                wake.clear()
-            if stop.is_set():
-                break
-            now = self._monitor_now(context)
-            current = now.time().replace(tzinfo=None)
-            # An earlier event refresh fulfills the same day's scheduled check.
-            if _ACCOUNT_SESSION_START <= current < _ACCOUNT_SESSION_END:
-                prechecked = now.date()
-            elif current >= _ACCOUNT_FINAL_CHECK:
-                final_checked = now.date()
-            startup_pending = False
-            last_attempt_at = loop.time()
-            safety_delay = _account_safety_wait(now, self._account_safety_interval)
-            try:
-                recovery = await self.read_account(profile_id, expected_binding_revision=binding.binding_revision)
-                received_at = as_kst(context.client.server_now())
-                await asyncio.to_thread(self.store.save_real_account_recovery, binding, recovery,
-                                        received_at, settings_revision=revision)
-                context.monitor_last_success_at = received_at.isoformat()
-                context.monitor_error_code = None
-                failures = 0
-                retry_at = None
-            except CredentialOperationError as error:
-                # A manual read owns the current cycle; skip rather than duplicate it.
-                if error.code != "PROFILE_BUSY" and not stop.is_set():
+                now = self._monitor_now(context)
+                current = now.time().replace(tzinfo=None)
+                # An earlier event refresh fulfills the same day's scheduled check.
+                if _ACCOUNT_SESSION_START <= current < _ACCOUNT_SESSION_END:
+                    prechecked = now.date()
+                elif current >= _ACCOUNT_FINAL_CHECK:
+                    final_checked = now.date()
+                startup_pending = False
+                last_attempt_at = loop.time()
+                safety_delay = _account_safety_wait(now, self._account_safety_interval)
+                try:
+                    recovery = await self.read_account(profile_id, expected_binding_revision=binding.binding_revision)
+                    received_at = as_kst(context.client.server_now())
+                    await asyncio.to_thread(self.store.save_real_account_recovery, binding, recovery,
+                                            received_at, settings_revision=revision)
+                    context.monitor_last_success_at = received_at.isoformat()
+                    context.monitor_error_code = None
+                    failures = 0
+                    retry_at = None
+                except CredentialOperationError as error:
+                    # A manual read owns the current cycle; skip rather than duplicate it.
+                    if error.code != "PROFILE_BUSY" and not stop.is_set():
+                        context.monitor_error_code = "REAL_ACCOUNT_COLLECTION_FAILED"
+                    failures += 1
+                    retry_at = (loop.time() + self._account_poll_interval
+                                if _account_session_open(now) or failures < 3 else None)
+                except Exception:
                     context.monitor_error_code = "REAL_ACCOUNT_COLLECTION_FAILED"
-                failures += 1
-                retry_at = (loop.time() + self._account_poll_interval
-                            if _account_session_open(now) or failures < 3 else None)
-            except Exception:
-                context.monitor_error_code = "REAL_ACCOUNT_COLLECTION_FAILED"
-                failures += 1
-                retry_at = (loop.time() + self._account_poll_interval
-                            if _account_session_open(now) or failures < 3 else None)
+                    failures += 1
+                    retry_at = (loop.time() + self._account_poll_interval
+                                if _account_session_open(now) or failures < 3 else None)
 
     def account_monitor_status(self, scope):
         context = next((value for value in self._contexts.values()

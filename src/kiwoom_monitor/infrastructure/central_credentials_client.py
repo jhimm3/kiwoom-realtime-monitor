@@ -11,6 +11,7 @@ from urllib.request import Request, HTTPRedirectHandler, HTTPSHandler, build_ope
 
 from .central_server_config import DataSourceSettings
 from .system_ssl import system_ssl_context
+from .central_content_client import _http_operation_context
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -72,9 +73,9 @@ class CentralCredentialsClient:
 
     def _request(self, method, path, body=None):
         self._validate_source()  # Before serializing or sending credentials.
-        with self._lock:
+        with self._lock, _http_operation_context(self.source.access_token) as request_id:
             request = Request(self.source.server_url.rstrip("/") + path, method=method,
-                headers={"Authorization": "Bearer " + self.source.access_token, "Content-Type": "application/json"},
+                headers={"Authorization": "Bearer " + self.source.access_token, "Content-Type": "application/json", "X-Request-ID": request_id},
                 data=json.dumps(body).encode("utf-8") if body is not None else None)
             try:
                 opener = build_opener(_NoRedirect(), HTTPSHandler(context=system_ssl_context()))

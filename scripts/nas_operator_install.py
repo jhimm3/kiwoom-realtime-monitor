@@ -28,6 +28,7 @@ PROJECT = '/volume1/docker/kiwoom-monitor'
 ROOT_LAUNCHER = op.ROOT_LAUNCHER
 CLIENT = op.CLIENT
 SUDOERS = op.SUDOERS
+_PRESERVE_TEST_RUNTIME = object()
 
 
 def executable(name, required=True):
@@ -372,12 +373,13 @@ def recover_helper_update(private):
     if record.get('state') in ('complete', 'rolled_back'):
         return
     targets = {HELPER + '/nas_operator.py', HELPER + '/nas_operator_worker.py'}
+    policy_targets = targets | {op.CONFIG}
     launcher_targets = targets | {PROJECT + '/source-runtime/runner.py', op.CONFIG}
     actual_targets = {x.get('path') for x in record.get('entries', [])}
     op.require(record.get('state') == 'prepared' and
                re.fullmatch('[a-f0-9]{32}', record.get('update_id', '')) and
                type(record.get('entries')) is list and len(record['entries']) == len(actual_targets) and
-               actual_targets in (targets, launcher_targets),
+               actual_targets in (targets, policy_targets, launcher_targets),
                'helper_update_journal_invalid')
     index = record.get('previous_index', {})
     op.require(index.get('state') == 'complete' and
@@ -407,12 +409,22 @@ def recover_helper_update(private):
     private.put_json('helper-update.json', record)
 
 
-def update_helpers(root, config, acltool):
+def update_helpers(root, config, acltool, *,
+                   isolated_test_runtime_policy=_PRESERVE_TEST_RUNTIME,
+                   clear_isolated_test_runtime=False):
     """Administrator-only helper refresh; no new sudoers surface or app release."""
     op.require(os.name == 'posix' and os.geteuid() == 0, 'administrator_install_required')
     op.require(config['helper_dir'] == HELPER and config['private'] == PRIVATE,
                'helper_update_scope_mismatch')
     launcher_source = root / 'scripts/nas_source_runtime.py'
+    policy_change = (isolated_test_runtime_policy is not _PRESERVE_TEST_RUNTIME or
+                     clear_isolated_test_runtime)
+    op.require(not (isolated_test_runtime_policy is not _PRESERVE_TEST_RUNTIME and
+                    clear_isolated_test_runtime), 'conflicting_isolated_test_policy_update')
+    op.require(not policy_change or not os.path.lexists(str(launcher_source)),
+               'isolated_test_policy_launcher_bundle_forbidden')
+    policy = (op.validate_isolated_test_runtime(isolated_test_runtime_policy)
+              if isolated_test_runtime_policy is not _PRESERVE_TEST_RUNTIME else None)
     update_launcher = launcher_source.is_file()
     if update_launcher:
         op.require(config.get('store') == PROJECT + '/source-runtime', 'helper_update_scope_mismatch')
@@ -437,6 +449,8 @@ def update_helpers(root, config, acltool):
                             op.require(hashlib.sha256(data).hexdigest() == item['installed_sha256'] and
                                        stat.S_IMODE(info.st_mode) == item['installed_mode'],
                                        'installed_helper_update_target_changed')
+                            if policy_change and item['path'] == op.CONFIG:
+                                op.require(op.decode(data) == config, 'isolated_test_policy_config_changed')
                         check_acl(path, acltool)
                     op.validate_sudo_policy(config, True)
                     active = store.json('active.json')['release_id']
@@ -445,6 +459,12 @@ def update_helpers(root, config, acltool):
                     replacement = [(HELPER + '/' + name, root.joinpath('scripts', name).read_bytes())
                                    for name in ('nas_operator.py', 'nas_operator_worker.py')]
                     reviewed = dict(config)
+                    if policy_change:
+                        if clear_isolated_test_runtime:
+                            reviewed.pop('isolated_test_runtime', None)
+                        else:
+                            reviewed['isolated_test_runtime'] = policy
+                        replacement += [(op.CONFIG, (json.dumps(reviewed, sort_keys=True) + '\n').encode())]
                     if update_launcher:
                         runner = launcher_source.read_bytes()
                         reviewed['runner_sha256'] = hashlib.sha256(runner).hexdigest()
@@ -509,13 +529,30 @@ def main():
     args.add_argument('--user', required=True)
     args.add_argument('--update', action='store_true',
                       help='administrator-only update of the installed fixed helpers')
+    policy_args = args.add_mutually_exclusive_group()
+    policy_args.add_argument('--isolated-test-runtime-policy', type=Path,
+                             help='root-protected reviewed JSON policy; valid only with --update')
+    policy_args.add_argument('--clear-isolated-test-runtime', action='store_true',
+                             help='remove the optional test policy; valid only with --update')
     value = args.parse_args()
     try:
+        op.require(value.update or not (value.isolated_test_runtime_policy is not None or
+                                       value.clear_isolated_test_runtime), 'isolated_test_policy_requires_update')
         if value.update:
             config = op.load_config()
             op.require(config['allowed_user'] == value.user, 'operator_account_changed')
-            result = update_helpers(Path(__file__).resolve().parents[1], config,
-                                    executable('synoacltool'))
+            acltool = executable('synoacltool')
+            options = {}
+            if value.isolated_test_runtime_policy is not None:
+                policy_path = value.isolated_test_runtime_policy
+                op.require(policy_path.is_absolute(), 'isolated_test_policy_protected_path_required')
+                with op.Tree(str(policy_path.parent), owners=(0,), protected=True) as tree:
+                    for path in (policy_path, *policy_path.parents):
+                        check_acl(path, acltool)
+                    options['isolated_test_runtime_policy'] = tree.json(policy_path.name)
+            elif value.clear_isolated_test_runtime:
+                options['clear_isolated_test_runtime'] = True
+            result = update_helpers(Path(__file__).resolve().parents[1], config, acltool, **options)
         else:
             result = install(value.user)
         print(json.dumps({'state': 'passed', 'result': result}, sort_keys=True))

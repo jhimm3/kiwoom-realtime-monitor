@@ -45,6 +45,9 @@ class DiagnosticTraceTests(unittest.TestCase):
                     stopper.start()
                     self.assertTrue(entered.wait(3))
                     self.assertFalse(finished.is_set())
+                    owned = trace.maintenance_status()
+                    self.assertEqual('running', owned['worker'])
+                    self.assertNotIn(owned['state'], ('not_created', 'complete', 'incomplete'))
                     with self.assertRaisesRegex(RuntimeError, "diagnostic_run_busy"):
                         with diagnostic_run_lock(control):
                             pass
@@ -55,6 +58,13 @@ class DiagnosticTraceTests(unittest.TestCase):
                     self.assertEqual("complete", stopped[0]["state"])
                     self.assertEqual(2, stopped[0]["written"])
                     self.assertEqual(0, stopped[0]["known_dropped"])
+                    owned = trace.maintenance_status()
+                    self.assertEqual('exited', owned['worker'])
+                    self.assertEqual('complete', owned['state'])
+                    self.assertEqual(stopped[0]['accepted'], owned['accepted'])
+                    self.assertEqual(stopped[0]['written'], owned['written'])
+                    self.assertTrue(all(owned[key] == 0 for key in ('queued', 'pending_events',
+                        'copy_reserved_bytes', 'charged_bytes', 'packing_events', 'packed_events')))
                     chunk = trace.chunk_bytes(identifier, stopped[0]["chunks"][0]["name"])
                     rows = [json.loads(line) for line in chunk.decode().splitlines()]
                     self.assertEqual(["call_start", "call_end"], [row["event_type"] for row in rows])

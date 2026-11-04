@@ -25,16 +25,49 @@ class FakeClient(FullChartClient):
 
 
 class DailyHighServiceTests(unittest.TestCase):
+    def test_corrected_query_basis_survives_midnight_and_replaced_source(self) -> None:
+        from datetime import datetime, timezone
+
+        clocks = [datetime(2031, 1, 1, 15, 5, tzinfo=timezone.utc)]
+        samples, requests = [], []
+
+        def now():
+            samples.append(clocks[0])
+            return clocks[0]
+
+        class Direct(FullChartClient):
+            def request(self, api_id, path, body):
+                requests.append((body["stk_cd"], body["base_dt"]))
+                if body["stk_cd"] == "005930":
+                    clocks[0] = datetime(2031, 1, 3, 0, 1)
+                return {"stk_dt_pole_chart_qry": [
+                    {"dt": "20310102", "high_pric": "200", "trde_prica": "100"},
+                    {"dt": "20310101", "high_pric": "180", "trde_prica": "200"},
+                ]}
+
+        service = DailyHighService(Direct(), include_nxt=True, now_provider=now)
+        target = service.load("005930")
+        self.assertEqual([("005930", "20310102"), ("005930_NX", "20310102")], requests)
+        self.assertEqual(1, len(samples))
+        self.assertEqual("2031-01-02", target.query_basis_date)
+        self.assertTrue(target.collection_verified)
+        self.assertEqual(4.0, target.previous_day_trade_value_eok)
+        # The next operation reads the replaced source instead of a cached day.
+        clocks[0] = datetime(2031, 1, 4, 12)
+        requests.clear()
+        later = service.load("005930")
+        self.assertEqual([("005930", "20310104"), ("005930_NX", "20310104")], requests)
+        self.assertEqual("2031-01-04", later.query_basis_date)
+        self.assertEqual(2, len(samples))
+
     def test_nas_wrappers_preserve_verified_highs_without_local_tr(self) -> None:
         import tempfile
-        from datetime import timedelta
+        from datetime import date, datetime, timedelta
         from pathlib import Path
         from kiwoom_monitor.infrastructure.kiwoom_rest.failover_client import FailoverKiwoomRestClient
         from kiwoom_monitor.infrastructure.kiwoom_rest.validation_client import ParallelValidationClient
         from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import CentralServerUnavailable
-        from kiwoom_monitor.application.daily_bar_coverage import daily_query_date
-
-        query_date = daily_query_date()
+        query_date = date(2031, 1, 2)
         basis = query_date.isoformat()
         rows = tuple({"trading_date": (query_date - timedelta(days=i)).isoformat(),
                       "high": 2000 + i, "open": 1000, "low": 900, "close": 1500,
@@ -61,7 +94,8 @@ class DailyHighServiceTests(unittest.TestCase):
                     client = (FailoverKiwoomRestClient(primary, NoTR()) if mode == "failover" else
                               ParallelValidationClient(primary, NoTR(), Path(directory) / "report.jsonl",
                                                        fallback_on_unavailable=mode == "validation_fallback"))
-                    target = DailyHighService(client, include_nxt=True).load("005930")
+                    target = DailyHighService(client, include_nxt=True,
+                                              now_provider=lambda: datetime(2031, 1, 2, 0, 5)).load("005930")
                     self.assertEqual(2249, target.high_250_price)
                     self.assertTrue(target.collection_verified)
                     self.assertEqual("ready", target.period_status("250"))

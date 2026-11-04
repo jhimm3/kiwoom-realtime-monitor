@@ -13,7 +13,8 @@ from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_meta
 from kiwoom_monitor.central_server.database_codec import bounded_limit, dataset_snapshot_result_rows
 from kiwoom_monitor.central_server.database_observation_writes import (
     _append_postgres_observation_revision, _append_sqlite_observation_revision,
-    _market_metadata_upsert_sql,
+    _market_metadata_upsert_sql, RANK_HEAD_KINDS, _save_rank_current,
+    _lock_rank_head_writes, _validate_rank_head_reference, _rank_slot_order_key,
 )
 from kiwoom_monitor.central_server.database_top20_statistics import (
     _top20_statistics_cache_day, _top20_today,
@@ -57,12 +58,28 @@ class SQLiteDatasetStoreMixin:
             return
         saved_at = self._now_provider().timestamp()
         with self._lock, self._connection() as connection:
-            for kind, subject, snapshot_key, payload, observation in values:
+            first_payload_json = json.dumps(values[0][3], ensure_ascii=False, separators=(",", ":"))
+            if any(value[0] in RANK_HEAD_KINDS for value in values):
+                connection.execute("BEGIN IMMEDIATE")
+            for index, (kind, subject, snapshot_key, payload, observation) in enumerate(values):
+                payload_json = first_payload_json if index == 0 else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                if kind in RANK_HEAD_KINDS and observation is not None and self._observation_history_enabled:
+                    _save_rank_current(connection, postgres=False, kind=kind, subject=subject, key=snapshot_key,
+                                       payload=payload, observation=observation, saved_at=saved_at,
+                                       now_provider=self._now_provider)
+                    continue
+                columns = "kind,subject,snapshot_key,saved_at,payload_json"
+                parameters = (kind, subject, snapshot_key, saved_at, payload_json)
+                slot_update = ""
+                if kind in RANK_HEAD_KINDS:
+                    columns += ",slot_order_key"
+                    parameters += (_rank_slot_order_key(snapshot_key),)
+                    slot_update = ",slot_order_key=excluded.slot_order_key"
                 connection.execute(
-                    "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
-                    "VALUES(?,?,?,?,?) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
-                    "saved_at=excluded.saved_at,payload_json=excluded.payload_json",
-                    (kind, subject, snapshot_key, saved_at, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+                    f"INSERT INTO central_dataset_snapshots({columns}) VALUES(" + ",".join(("?",) * len(parameters)) + ") "
+                    "ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
+                    "saved_at=excluded.saved_at,payload_json=excluded.payload_json,revision_id=NULL" + slot_update,
+                    parameters,
                 )
                 cache_day = _top20_statistics_cache_day(kind, subject)
                 if cache_day:
@@ -87,16 +104,26 @@ class SQLiteDatasetStoreMixin:
                         )
 
     def load_dataset_snapshots(self, kind: str, subject: str = "", limit: int = 100) -> list[dict[str, Any]]:
-        sql = "SELECT subject,snapshot_key,saved_at,payload_json FROM central_dataset_snapshots WHERE kind=?"
+        sql = ("SELECT s.subject,s.snapshot_key,s.saved_at,"
+               "CASE WHEN s.revision_id IS NULL THEN s.payload_json ELSE r.payload_json END,"
+               "s.revision_id,r.revision_id,r.kind,r.subject,r.observation_key "
+               "FROM central_dataset_snapshots s LEFT JOIN central_observation_revisions r "
+               f"ON r.revision_id=s.revision_id WHERE s.kind=?")
         parameters: list[object] = [kind]
         if subject:
-            sql += " AND subject=?"
+            sql += " AND s.subject=?"
             parameters.append(subject)
-        sql += " ORDER BY snapshot_key DESC LIMIT ?"
+        if kind in RANK_HEAD_KINDS:
+            sql += " AND s.kind IN ('ranking','top20_membership') ORDER BY COALESCE(s.slot_order_key,s.snapshot_key) DESC,s.snapshot_key DESC LIMIT ?"
+        else:
+            sql += " ORDER BY s.snapshot_key DESC LIMIT ?"
         parameters.append(bounded_limit(limit, 5000))
         with self._lock, self._connection() as connection:
             rows = connection.execute(sql, parameters).fetchall()
-        return dataset_snapshot_result_rows(rows)
+        for row in rows:
+            if row[4] is not None:
+                _validate_rank_head_reference((kind, row[0], row[1]), row[5:9])
+        return dataset_snapshot_result_rows(row[:4] for row in rows)
 
 class PostgresDatasetStoreMixin:
     def save_dataset_snapshot(
@@ -155,6 +182,7 @@ class PostgresDatasetStoreMixin:
             with connection.cursor() as cursor:
                 if asynchronous_commit:
                     cursor.execute("SET LOCAL synchronous_commit TO OFF")
+                _lock_rank_head_writes(cursor, values)
                 historical_cache_days = sorted({
                     day for kind, subject, *_ in serialized
                     if (day := _top20_statistics_cache_day(kind, subject))
@@ -189,13 +217,16 @@ class PostgresDatasetStoreMixin:
                         POSTGRES_MULTIROW_UPSERT_ROWS, _execute_multirow_upsert,
                         _save_postgres_metadata,
                     )
+                    rank_batch = next(iter(snapshot_kinds)) in RANK_HEAD_KINDS
+                    snapshot_columns = "kind,subject,snapshot_key,saved_at,payload_json" + (",slot_order_key" if rank_batch else "")
                     _execute_multirow_upsert(
                         cursor,
-                        "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) VALUES",
-                        [(kind, subject, key, saved_at, payload_json)
+                        f"INSERT INTO central_dataset_snapshots({snapshot_columns}) VALUES",
+                        [(kind, subject, key, saved_at, payload_json) + ((_rank_slot_order_key(key),) if rank_batch else ())
                          for kind, subject, key, payload_json, *_ in serialized],
                         "ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
-                        "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
+                        "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json,revision_id=NULL" +
+                        (",slot_order_key=EXCLUDED.slot_order_key" if rank_batch else ""),
                         placeholder="%s", batch_size=POSTGRES_MULTIROW_UPSERT_ROWS,
                     )
                     _save_postgres_metadata(cursor, [
@@ -206,12 +237,24 @@ class PostgresDatasetStoreMixin:
                     # Duplicate identities, research history and cache invalidation
                     # retain their sequential read/write/revision behavior.
                     for kind, subject, snapshot_key, payload_json, payload, observation in serialized:
+                        if kind in RANK_HEAD_KINDS and observation is not None and self._observation_history_enabled:
+                            _save_rank_current(cursor, postgres=True, kind=kind, subject=subject, key=snapshot_key,
+                                               payload=payload, observation=observation, saved_at=saved_at,
+                                               now_provider=self._now_provider)
+                            continue
                         cache_day = _top20_statistics_cache_day(kind, subject)
+                        columns = "kind,subject,snapshot_key,saved_at,payload_json"
+                        parameters = (kind, subject, snapshot_key, saved_at, payload_json)
+                        slot_update = ""
+                        if kind in RANK_HEAD_KINDS:
+                            columns += ",slot_order_key"
+                            parameters += (_rank_slot_order_key(snapshot_key),)
+                            slot_update = ",slot_order_key=EXCLUDED.slot_order_key"
                         cursor.execute(
-                            "INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
-                            "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
-                            "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json",
-                            (kind, subject, snapshot_key, saved_at, payload_json),
+                            f"INSERT INTO central_dataset_snapshots({columns}) VALUES(" + ",".join(("%s",) * len(parameters)) + ") "
+                            "ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET "
+                            "saved_at=EXCLUDED.saved_at,payload_json=EXCLUDED.payload_json,revision_id=NULL" + slot_update,
+                            parameters,
                         )
                         if cache_day:
                             cursor.execute(
@@ -249,15 +292,17 @@ class PostgresDatasetStoreMixin:
             connection.close()
         completed_at = monotonic()
         elapsed_ms = round((completed_at - started_at) * 1000)
-        from .diagnostic_metrics import record_writer_transaction
+        from .postgres_access import database_observer
+        observer = database_observer()
         snapshot_kind = next(iter(snapshot_kinds)) if len(snapshot_kinds) == 1 else "mixed"
-        record_writer_transaction(
-            f"dataset:{snapshot_kind}", len(values), elapsed_ms,
-            commit_ms=commit_ms,
-            connect_ms=round((connected_at - serialized_at) * 1000),
-            execute_ms=round((revision_at - connected_at) * 1000),
-            db_call_id=writer.call_id if writer is not None else None,
-        )
+        if observer is not None:
+            observer.record_writer_transaction(
+                f"dataset:{snapshot_kind}", len(values), elapsed_ms,
+                commit_ms=commit_ms,
+                connect_ms=round((connected_at - serialized_at) * 1000),
+                execute_ms=round((revision_at - connected_at) * 1000),
+                db_call_id=writer.call_id if writer is not None else None,
+            )
         if elapsed_ms >= 1000:
             kinds = ",".join(sorted({value[0] for value in values}))
             logger.warning(
@@ -281,12 +326,19 @@ class PostgresDatasetStoreMixin:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         started_at = monotonic()
-        sql = "SELECT subject,snapshot_key,saved_at,payload_json FROM central_dataset_snapshots WHERE kind=%s"
+        sql = ("SELECT s.subject,s.snapshot_key,s.saved_at,"
+               "CASE WHEN s.revision_id IS NULL THEN s.payload_json ELSE r.payload_json END,"
+               "s.revision_id,r.revision_id,r.kind,r.subject,r.observation_key "
+               "FROM central_dataset_snapshots s LEFT JOIN central_observation_revisions r "
+               f"ON r.revision_id=s.revision_id WHERE s.kind=%s")
         parameters: list[object] = [kind]
         if subject:
-            sql += " AND subject=%s"
+            sql += " AND s.subject=%s"
             parameters.append(subject)
-        sql += " ORDER BY snapshot_key DESC LIMIT %s"
+        if kind in RANK_HEAD_KINDS:
+            sql += " AND s.kind IN ('ranking','top20_membership') ORDER BY COALESCE(s.slot_order_key,s.snapshot_key) DESC,s.snapshot_key DESC LIMIT %s"
+        else:
+            sql += " ORDER BY s.snapshot_key DESC LIMIT %s"
         parameters.append(bounded_limit(limit, 5000))
         connection_started_at = monotonic()
         context = DBWriterContext(
@@ -312,4 +364,7 @@ class PostgresDatasetStoreMixin:
                 round((fetched_at - connected_at) * 1000),
                 round((completed_at - fetched_at) * 1000),
             )
-        return dataset_snapshot_result_rows(rows)
+        for row in rows:
+            if row[4] is not None:
+                _validate_rank_head_reference((kind, row[0], row[1]), row[5:9])
+        return dataset_snapshot_result_rows(row[:4] for row in rows)

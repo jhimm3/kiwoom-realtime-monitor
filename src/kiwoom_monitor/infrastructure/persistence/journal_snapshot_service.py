@@ -9,7 +9,7 @@ from typing import Callable, Protocol
 
 from kiwoom_monitor.domain.order_contract import AccountScope
 from kiwoom_monitor.domain.snapshot_provenance import mark_news_backfilled
-from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
+from kiwoom_monitor.domain.news_ai_contract import StockNewsItem
 from kiwoom_monitor.infrastructure.persistence.journal_snapshot_repository import TradeEntrySnapshot
 from kiwoom_monitor.infrastructure.persistence.stock_news_repository import StockNewsRepository
 

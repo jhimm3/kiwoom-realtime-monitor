@@ -68,6 +68,152 @@ from kiwoom_monitor.domain.research_contract import ObservationRevisionSource
 
 
 class CentralServerDatabaseTests(unittest.TestCase):
+    @staticmethod
+    def _journal_analysis_value(key="revision-1", *, owner="11111111-1111-4111-8111-111111111111"):
+        return {"owner": owner, "key": key, "document": {
+            "revision_id": key, "group_id": "same-group", "analysis_kind": "trade_setup",
+            "input_fingerprint": "original-input", "analysis_version": "trade-analysis/v2",
+            "content_json": ' { "selected_types" : [ "돌파" ] } ',
+            "created_at": "2026-10-23T09:00:00.123+09:00", "origin_broker": "kiwoom",
+            "origin_environment": "mock", "origin_account_ref": owner, "canonical_account_ref": owner,
+        }}
+
+    def test_journal_analysis_batch_preserves_first_raw_receipt_and_rolls_back_mixed_conflict(self):
+        from copy import deepcopy
+        from kiwoom_monitor.application.journal_enrichment import JournalAnalysisRevisionConflict
+        clock = Mock(return_value=datetime.fromisoformat("2026-10-23T10:00:00+09:00"))
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.db", now_provider=clock)
+            self.addCleanup(store.close)
+            store.initialize()
+            first = self._journal_analysis_value()
+            receipt = store.accept_journal_analysis_revisions([first, self._journal_analysis_value("revision-2")])
+            self.assertEqual((2, 2, 0), (receipt["saved"], receipt["inserted"], receipt["replayed"]))
+            before = store.load_documents("journal_v2_analysis_revisions")
+            replay = deepcopy(first)
+            replay["document"].update(content_json='{"selected_types":["돌파"]}', created_at="2030-01-02T09:00:00")
+            clock.return_value = datetime.fromisoformat("2030-01-03T09:00:00+09:00")
+            replay_receipt = store.accept_journal_analysis_revisions([replay])
+            self.assertEqual((0, 1), (replay_receipt["inserted"], replay_receipt["replayed"]))
+            self.assertEqual(receipt["documents"][0], replay_receipt["documents"][0])
+            self.assertEqual(first["document"], replay_receipt["documents"][0]["document"])
+            changed = deepcopy(first)
+            changed["document"]["content_json"] = '{"selected_types":["눌림"]}'
+            with self.assertRaisesRegex(JournalAnalysisRevisionConflict, "conflict"):
+                store.accept_journal_analysis_revisions([self._journal_analysis_value("0-new"), changed])
+            self.assertEqual(before, store.load_documents("journal_v2_analysis_revisions"))
+            with self.assertRaisesRegex(ValueError, "owner/key"):
+                store.accept_journal_analysis_revisions([{**first, "key": "wrong-key"}])
+            with self.assertRaises(JournalAnalysisRevisionConflict):
+                store.accept_journal_analysis_revisions([self._journal_analysis_value("new"), {
+                    **self._journal_analysis_value("new"), "document": {**changed["document"], "revision_id": "new"},
+                }])
+            self.assertEqual(before, store.load_documents("journal_v2_analysis_revisions"))
+            # The same key under a different original account remains independent.
+            other = self._journal_analysis_value(owner="22222222-2222-4222-8222-222222222222")
+            self.assertEqual(1, store.accept_journal_analysis_revisions([other])["inserted"])
+
+    def test_journal_analysis_native_blocks_generic_overwrite_preserving_sync_tombstone_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.db")
+            self.addCleanup(store.close)
+            store.initialize()
+            value = self._journal_analysis_value()
+            store.accept_journal_analysis_revisions([value])
+            for write in (store.upsert_documents, store.replace_documents):
+                with self.subTest(write=write.__name__), self.assertRaisesRegex(ValueError, "accept_journal_analysis_revisions"):
+                    write("journal_v2_analysis_revisions", [value])
+            with self.assertRaisesRegex(ValueError, "accept_journal_analysis_revisions"):
+                store.insert_immutable_document("journal_v2_analysis_revisions", value["owner"], value["key"], value["document"])
+            state = {**value, "document": {
+                "collection": "journal_v2_analysis_revisions", "is_deleted": True,
+                "owner": value["owner"], "document_key": value["key"],
+            }}
+            for write in (store.upsert_documents, store.replace_documents):
+                with self.subTest(write=write.__name__):
+                    write("journal_v2_sync_states", [state])
+                    self.assertEqual(state["document"], store.load_documents("journal_v2_sync_states")[0]["document"])
+            state["document"]["collection"] = "journal_v2_reviews"
+            store.upsert_documents("journal_v2_sync_states", [state])
+            self.assertEqual(state["document"], store.load_documents("journal_v2_sync_states")[0]["document"])
+            self.assertEqual(value["document"], store.load_documents("journal_v2_analysis_revisions")[0]["document"])
+
+    def test_journal_analysis_committed_ack_loss_replays_original_receipt(self):
+        from copy import deepcopy
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.db")
+            self.addCleanup(store.close)
+            store.initialize()
+            original_connection = store._connection
+            @contextmanager
+            def committed_ack_loss():
+                with original_connection() as connection:
+                    yield connection
+                raise OSError("controlled committed ACK loss")
+            first = self._journal_analysis_value()
+            with patch.object(store, "_connection", committed_ack_loss):
+                with self.assertRaisesRegex(OSError, "committed ACK loss"):
+                    store.accept_journal_analysis_revisions([first])
+            before = store.load_documents("journal_v2_analysis_revisions")
+            replay = deepcopy(first)
+            replay["document"].update(created_at="2030-01-02T09:00:00+09:00", content_json='{"selected_types":["돌파"]}')
+            receipt = store.accept_journal_analysis_revisions([replay])
+            self.assertEqual((0, 1), (receipt["inserted"], receipt["replayed"]))
+            self.assertEqual(before, receipt["documents"])
+            self.assertEqual(before, store.load_documents("journal_v2_analysis_revisions"))
+
+    def test_journal_analysis_sqlite_concurrent_batches_and_native_cost_keep_one_transaction(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from copy import deepcopy
+        from kiwoom_monitor.application.journal_enrichment import JournalAnalysisRevisionConflict
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "central.db"
+            stores = [SQLiteQueryStore(path) for _ in range(2)]
+            for store in stores:
+                self.addCleanup(store.close)
+            stores[0].initialize()
+            original = self._journal_analysis_value()
+            changed = deepcopy(original)
+            changed["document"]["content_json"] = '{"selected_types":["눌림"]}'
+            barrier = Barrier(2)
+            def accept(index):
+                barrier.wait(timeout=5)
+                try:
+                    return stores[index].accept_journal_analysis_revisions([original if index == 0 else changed])
+                except JournalAnalysisRevisionConflict:
+                    return "conflict"
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                outcomes = list(executor.map(accept, range(2)))
+            self.assertEqual(1, outcomes.count("conflict"))
+            self.assertEqual(1, sum(item["inserted"] for item in outcomes if isinstance(item, dict)))
+            first = stores[0].load_documents("journal_v2_analysis_revisions")
+            other = self._journal_analysis_value("revision-2")
+            barrier = Barrier(2)
+            def replay(index):
+                barrier.wait(timeout=5)
+                batch = [first[0], other]
+                return stores[index].accept_journal_analysis_revisions(batch if index == 0 else batch[::-1])
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                receipts = list(executor.map(replay, range(2)))
+            self.assertEqual(1, sum(item["inserted"] for item in receipts))
+            statements = []
+            native_connect = stores[0]._connect
+            def traced_connect():
+                connection = native_connect()
+                connection.set_trace_callback(statements.append)
+                return connection
+            with patch.object(stores[0], "_connect", side_effect=traced_connect) as connect:
+                receipts = stores[0].accept_journal_analysis_revisions([self._journal_analysis_value(f"cost-{i}") for i in range(4)])
+            self.assertEqual(4, receipts["inserted"])
+            self.assertEqual(1, connect.call_count)
+            operations = [sql.split()[0].upper() for sql in statements]
+            self.assertEqual(1, operations.count("BEGIN"))
+            self.assertEqual(1, operations.count("COMMIT"))
+            self.assertEqual(4, operations.count("INSERT"))
+            self.assertEqual(4, operations.count("SELECT"))
+            self.assertNotIn("UPDATE", operations)
+
     def test_postgres_kst_connections_preserve_existing_safety_options(self):
         cases = (
             ('dbname=fixture', {}, '-c timezone=Asia/Seoul'),
@@ -193,9 +339,10 @@ class CentralServerDatabaseTests(unittest.TestCase):
             store.close()
 
     def test_mock_lineage_read_uses_exact_account_keys_and_primary_key_lookups(self):
+        from kiwoom_monitor.central_server import diagnostic_trace as trace
         from kiwoom_monitor.central_server.database_execution import _mock_automation_lineage_query
         from kiwoom_monitor.central_server.diagnostic_replay_contract import (
-            freeze_payload, thaw_payload, validate_operation,
+            freeze_payload, install_store_capture, thaw_payload, validate_operation,
         )
 
         store = SQLiteQueryStore(Path(":memory:"))
@@ -224,6 +371,16 @@ class CentralServerDatabaseTests(unittest.TestCase):
         with patch.object(store, "_connect", wraps=store._connect) as connect:
             self.assertEqual(expected, store.load_mock_automation_lineage(owner, **arguments))
             self.assertEqual(1, connect.call_count)
+        install_store_capture(store)
+        with (patch.object(trace, "input_token", return_value="lineage-fixture"),
+              patch.object(trace, "emit_payload") as emit_payload,
+              patch.object(trace, "emit"),
+              patch.object(store, "_connect", wraps=store._connect) as connect,
+              store.mock_automation_read_scope() as reader):
+            self.assertEqual(expected, store.load_mock_automation_lineage(owner, **arguments, _reader=reader))
+            self.assertEqual(1, connect.call_count)
+        emit_payload.assert_called_once()
+        self.assertEqual(captured_arguments, emit_payload.call_args.args[-1])
         self.assertEqual({}, store.load_mock_automation_lineage("missing-account", **arguments))
         self.assertEqual(
             {role: value for role, value in expected.items() if role != "recovery"},
@@ -832,6 +989,10 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 (18, CENTRAL_ACCOUNT_SCOPE_ALIAS_MIGRATION_NAME),
                 (19, "encrypted_credential_activation_ledger"),
                 (20, CENTRAL_FIVE_MINUTE_BARS_MIGRATION_NAME),
+                (21, "shadow_checkpoint_frames"),
+                (22, "central-news-ai-inference-v1"),
+                (23, "news_body_processor_attempt_owner"),
+                (24, "rank_current_revision_heads"),
             ],
             versions,
         )
@@ -891,9 +1052,12 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 with connection:
                     CentralSchemaMigrationRunner(connection.cursor(), "sqlite").apply(old_plan)
             store = SQLiteQueryStore(path)
-            store.initialize()
-            store.save_shadow_monitor_state("old-monitor", document)
-            store.initialize()
+            # Freeze the earlier PG-only21/SQLite20 checkpoint contract. The
+            # later shared inference22 and BODY-owner23 migrations are tested below.
+            with patch("kiwoom_monitor.central_server.database.central_schema_migrations", return_value=old_plan):
+                store.initialize()
+                store.save_shadow_monitor_state("old-monitor", document)
+                store.initialize()
             with closing(sqlite3.connect(path)) as connection:
                 with connection:
                     # Simulate the exact migration plan supported by the prior
@@ -912,6 +1076,32 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 self.assertEqual(0, connection.execute(
                     "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'central_shadow_checkpoint_%'",
                 ).fetchone()[0])
+            self.assertEqual(document, store.load_shadow_monitor_state("old-monitor"))
+            store.initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(24, connection.execute(
+                    "SELECT MAX(version) FROM central_schema_migrations",
+                ).fetchone()[0])
+                self.assertEqual((23, "news_body_processor_attempt_owner"), connection.execute(
+                    "SELECT version,name FROM central_schema_migrations WHERE version=23",
+                ).fetchone())
+                columns = {row[1]: row for row in connection.execute("PRAGMA table_info(central_news_jobs)")}
+                self.assertEqual(("TEXT", 1, "''"), columns["body_processor_owner"][2:5])
+                self.assertEqual(("TEXT", 0, None), columns["body_input_ref"][2:5])
+                self.assertEqual(encoded, connection.execute(
+                    "SELECT document_json FROM central_shadow_monitor_state WHERE monitor_id=?",
+                    ("old-monitor",),
+                ).fetchone()[0])
+                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM central_news_ai_inferences").fetchone()[0])
+                # Code rollback does not roll back a newer native schema. The
+                # prior runner must reject the newer schema and preserve legacy raw state.
+                with self.assertRaisesRegex(CentralSchemaMigrationError, "newer than supported 20"):
+                    CentralSchemaMigrationRunner(connection.cursor(), "sqlite").apply(old_plan)
+                self.assertEqual(encoded, connection.execute(
+                    "SELECT document_json FROM central_shadow_monitor_state WHERE monitor_id=?",
+                    ("old-monitor",),
+                ).fetchone()[0])
+            store.initialize()
             self.assertEqual(document, store.load_shadow_monitor_state("old-monitor"))
             store.close()
 
@@ -2266,6 +2456,9 @@ class CentralServerDatabaseTests(unittest.TestCase):
         )
 
     def test_commit_diagnostics_are_capture_gated_and_wal_permission_failure_is_nonfatal(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_metrics import install_postgres_observation
+        install_postgres_observation()
+
         class Cursor:
             def __init__(self) -> None:
                 self.statements: list[str] = []
@@ -2377,6 +2570,9 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(["RuntimeError"], record.call_args.kwargs["commit_probe_errors"])
 
     def test_minute_metadata_diagnostic_gate_only_skips_metadata(self) -> None:
+        from kiwoom_monitor.central_server.diagnostic_metrics import install_postgres_observation
+        install_postgres_observation()
+
         class Cursor:
             def __init__(self) -> None:
                 self.statements: list[str] = []

@@ -286,7 +286,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return True
 
-        with patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", side_effect=lambda _: paused[0]), \
+        with patch.object(service, "_workload_paused", side_effect=lambda _: paused[0]), \
                 patch.object(service, "_backfill_entry_minutes", new_callable=AsyncMock, side_effect=minutes_ready) as minutes, \
                 patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
                 patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock) as flow, \
@@ -501,7 +501,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 patch.object(service, "_ensure_entry_daily_history", new_callable=AsyncMock) as daily, \
                 patch.object(service, "_capture_candidate_investor_flow", new_callable=AsyncMock), \
                 patch.object(service, "_ensure_historical_high", new_callable=AsyncMock), \
-                patch("kiwoom_monitor.central_server.autonomous_top20.is_paused", return_value=True):
+                patch.object(service, "_workload_paused", return_value=True):
             await service._ensure_fundamentals(("005930",), "2026-09-30")
             await service._ensure_fundamentals(("005930",), "2026-09-30")
             daily.assert_awaited_once()
@@ -651,16 +651,16 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             return calls > 1
 
-        service.backfill_day = flaky  # type: ignore[method-assign]
-        service._schedule_backfill("2026-09-24")
-        await service._backfill_task
+        service.after_close.run_day = flaky  # type: ignore[method-assign]
+        service.after_close.schedule("2026-09-24")
+        await service.after_close._backfill_task
         await asyncio.sleep(0)
-        self.assertEqual("", service._last_backfill_day)
-        service._backfill_retry_at = 0.0
-        service._schedule_backfill("2026-09-24")
-        await service._backfill_task
+        self.assertEqual("", service.after_close._last_backfill_day)
+        service.after_close._backfill_retry_at = 0.0
+        service.after_close.schedule("2026-09-24")
+        await service.after_close._backfill_task
         await asyncio.sleep(0)
-        self.assertEqual("2026-09-24", service._last_backfill_day)
+        self.assertEqual("2026-09-24", service.after_close._last_backfill_day)
         self.assertEqual(2, calls)
 
     async def test_failed_flow_retry_skips_successful_bar_steps_and_checks_new_codes(self) -> None:
@@ -686,13 +686,13 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             _Broker(), RealtimeHub(), store,  # type: ignore[arg-type]
             now_provider=lambda: datetime.fromisoformat("2026-09-14T20:05:00+09:00"),
         )
-        service._backfill_market_indexes = AsyncMock()  # type: ignore[method-assign]
-        service._nxt_enabled = AsyncMock(return_value=False)  # type: ignore[method-assign]
-        service._backfill_daily = AsyncMock()  # type: ignore[method-assign]
-        service._backfill_minutes = AsyncMock()  # type: ignore[method-assign]
+        service.after_close._backfill_market_indexes = AsyncMock()  # type: ignore[method-assign]
+        service.after_close._nxt_enabled = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        service.after_close._backfill_daily = AsyncMock()  # type: ignore[method-assign]
+        service.after_close._backfill_minutes = AsyncMock()  # type: ignore[method-assign]
         flow_calls: list[str] = []
         # This fixture tests native backfill retry progress, not derived publication.
-        service.reconcile_top20_day = AsyncMock()  # type: ignore[method-assign]
+        service.after_close.reconcile = AsyncMock()  # type: ignore[method-assign]
         fail_b = True
 
         async def flow(code: str, _day: str) -> None:
@@ -700,22 +700,22 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             if code == "B" and fail_b:
                 raise RuntimeError("empty program flow")
 
-        service._backfill_candidate_flows = flow  # type: ignore[method-assign]
-        self.assertFalse(await service.backfill_day("2026-09-14"))
-        self.assertFalse(await service.backfill_day("2026-09-14"))
-        self.assertEqual(["A", "B"], [call.args[0] for call in service._backfill_daily.await_args_list])
+        service.after_close._backfill_candidate_flows = flow  # type: ignore[method-assign]
+        self.assertFalse(await service.after_close.run_day("2026-09-14"))
+        self.assertFalse(await service.after_close.run_day("2026-09-14"))
+        self.assertEqual(["A", "B"], [call.args[0] for call in service.after_close._backfill_daily.await_args_list])
         self.assertEqual(["A", "B", "B"], flow_calls)
 
         store.codes.append("C")
         fail_b = False
-        self.assertTrue(await service.backfill_day("2026-09-14"))
-        self.assertEqual(["A", "B", "C"], [call.args[0] for call in service._backfill_daily.await_args_list])
+        self.assertTrue(await service.after_close.run_day("2026-09-14"))
+        self.assertEqual(["A", "B", "C"], [call.args[0] for call in service.after_close._backfill_daily.await_args_list])
         self.assertEqual(["A", "B", "B", "B", "C"], flow_calls)
 
         # A later explicit rerun revalidates persisted completion after the retry finishes.
-        self.assertTrue(await service.backfill_day("2026-09-14"))
+        self.assertTrue(await service.after_close.run_day("2026-09-14"))
         self.assertEqual(["A", "B", "C", "A", "B", "C"],
-                         [call.args[0] for call in service._backfill_daily.await_args_list])
+                         [call.args[0] for call in service.after_close._backfill_daily.await_args_list])
 
     async def test_weekday_without_0s_trading_evidence_does_not_start_after_close_backfill(self) -> None:
         class EmptyStore:
@@ -727,7 +727,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             now_provider=lambda: datetime.fromisoformat("2026-09-25T20:06:00+09:00"),
         )  # type: ignore[arg-type]
         service.refresh_ranking_once = AsyncMock(return_value=())  # type: ignore[method-assign]
-        service.backfill_day = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        service.after_close.run_day = AsyncMock(return_value=True)  # type: ignore[method-assign]
 
         with patch(
             "kiwoom_monitor.central_server.autonomous_top20.asyncio.sleep",
@@ -736,7 +736,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await service._schedule_loop()
 
-        service.backfill_day.assert_not_awaited()
+        service.after_close.run_day.assert_not_awaited()
 
     def test_market_operation_day_is_saved_as_kiwoom_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -808,6 +808,178 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 await service._market_catalog_task
             await service.close()
             store.close()
+
+    async def test_public_close_joins_scheduled_membership_native_commit_after_repeated_cancel(self) -> None:
+        from contextlib import ExitStack, closing, contextmanager, nullcontext
+        import json
+        import sqlite3
+        from kiwoom_monitor.central_server import async_lifetime
+        from kiwoom_monitor.central_server.diagnostic_replay_contract import _OWNER, captured_workload_scope
+        from kiwoom_monitor.central_server.diagnostic_replay_runtime import ReplayRuntimeScope
+
+        with ExitStack() as fixtures:
+            try:
+                for scoped_owner in (False, True):
+                    with self.subTest(scoped_owner=scoped_owner):
+                        directory = fixtures.enter_context(tempfile.TemporaryDirectory())
+                        clock = datetime.fromisoformat("2026-09-10T18:00:00+09:00")
+                        day, key = "2026-09-10", "2026-09-10T18:00:00"
+                        path = Path(directory) / "monitor.sqlite3"
+                        store = SQLiteQueryStore(path, now_provider=lambda: clock)
+                        fixtures.callback(store.close)
+                        store.initialize()
+                        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+                        writer_context = threading.local()
+                        native_connection, native_save = store._connection, store.save_dataset_snapshot
+                        staged, calls, events, owners, errors = [], [], [], [], []
+                        rows = _ranking_rows("180000")
+                        runtime = ReplayRuntimeScope() if scoped_owner else None
+                        broker = _Broker()
+
+                        async def external_response(api_id, _path, _body, **_kwargs):
+                            if api_id == "ka00198":
+                                return BrokerResult({"item_inq_rank": rows}, False, "")
+                            if api_id == "ka10100":
+                                return BrokerResult({"nxtEnable": "N"}, False, "")
+                            raise AssertionError("unexpected external request: " + api_id)
+
+                        broker.request = AsyncMock(side_effect=external_response)
+                        service = AutonomousTop20Service(
+                            broker, RealtimeHub(), store, now_provider=lambda: clock,
+                            catalog_loader=lambda: (), minute_backfill_enabled=False,
+                            capture_scope=captured_workload_scope,
+                        )
+
+                        def read_native(connection):
+                            self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
+                            return {
+                                "snapshots": connection.execute(
+                                    "SELECT snapshot_key,payload_json,revision_id FROM central_dataset_snapshots "
+                                    "WHERE kind='top20_membership' AND subject=?", (day,)).fetchall(),
+                                "metadata": connection.execute(
+                                    "SELECT observation_key,effective_at,available_at,source,revision_id "
+                                    "FROM central_market_data_observation_meta "
+                                    "WHERE dataset_kind='candidate_set' AND subject=?", (day,)).fetchall(),
+                                "revisions": connection.execute(
+                                    "SELECT revision_id,observation_key,payload_hash,revision_of,payload_json,source_id "
+                                    "FROM central_observation_revisions "
+                                    "WHERE kind='top20_membership' AND subject=?", (day,)).fetchall(),
+                            }
+
+                        def independent_native():
+                            with closing(sqlite3.connect(path)) as connection:
+                                return read_native(connection)
+
+                        @contextmanager
+                        def observed_connection():
+                            selected = getattr(writer_context, "membership", False)
+                            with native_connection() as connection:
+                                yield connection
+                                if selected:
+                                    staged.append(read_native(connection))
+                                    events.append("before_commit")
+                                    entered.set()
+                                    if not release.wait(timeout=2):
+                                        raise TimeoutError("test did not release dataset save")
+                            if selected:
+                                events.append("commit_returned")
+
+                        def observed_save(*args, **kwargs):
+                            selected = args[:3] == ("top20_membership", day, key)
+                            writer_context.membership = selected
+                            if selected:
+                                calls.append(args[:3])
+                                owners.append((async_lifetime._WORK_OWNER.get(), _OWNER.get()))
+                            try:
+                                result = native_save(*args, **kwargs)
+                                if selected:
+                                    events.append("save_returned")
+                                return result
+                            except BaseException as error:
+                                if selected:
+                                    errors.append(error)
+                                raise
+                            finally:
+                                writer_context.membership = False
+                                if selected:
+                                    finished.set()
+
+                        started, closing_waiters = (), []
+                        try:
+                            with patch.object(store, "_connection", observed_connection), \
+                                    patch.object(store, "save_dataset_snapshot", observed_save), \
+                                    runtime.activate() if runtime is not None else nullcontext():
+                                await service.start()
+                                started = tuple(service._tasks)
+                                self.assertEqual(
+                                    ["nas-top20-schedule", "nas-top20-events", "nas-top20-index", "nas-top20-persistence"],
+                                    [task.get_name() for task in started],
+                                )
+                                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                                self.assertEqual([{"snapshots": 1, "metadata": 1, "revisions": 1}],
+                                                 [{name: len(values) for name, values in value.items()} for value in staged])
+                                self.assertEqual({"snapshots": [], "metadata": [], "revisions": []}, independent_native())
+                                self.assertEqual(key, staged[0]["snapshots"][0][0])
+                                # A1 stores one immutable payload and two raw references, not JSON copies.
+                                revision_id = staged[0]["revisions"][0][0]
+                                self.assertIsNone(staged[0]["snapshots"][0][1])
+                                self.assertEqual(revision_id, staged[0]["snapshots"][0][2])
+                                self.assertIsNone(staged[0]["metadata"][0][3])
+                                self.assertEqual(revision_id, staged[0]["metadata"][0][4])
+                                self.assertEqual(rows, json.loads(staged[0]["revisions"][0][4])["items"])
+                                self.assertEqual("nas-autonomous-ka00198", staged[0]["revisions"][0][5])
+                                self.assertEqual("pending", service.latest_membership_snapshot(day)["persistence_state"])
+                                work_owner, capture_owner = owners[0]
+                                self.assertEqual(None if runtime is None else (runtime.create_task, runtime.to_thread), work_owner)
+                                self.assertEqual(f"autonomous_top20:{id(service):x}:{id(started[0]):x}", capture_owner.actor_id)
+                                if runtime is not None:
+                                    self.assertGreaterEqual(runtime.status()["pending_threads"], 1)
+                                    runtime.begin_shutdown()
+
+                                async def close_owner():
+                                    await service.close()
+                                    self.assertTrue(finished.is_set())
+                                    self.assertEqual(staged[0], independent_native())
+                                    events.append("close_returned")
+
+                                closing_waiters.append(asyncio.create_task(close_owner()))
+                                await asyncio.sleep(.03)
+                                self.assertFalse(closing_waiters[-1].done())
+                                self.assertFalse(finished.is_set())
+                                for _ in range(2):
+                                    started[0].cancel()
+                                    await asyncio.sleep(0)
+                                    self.assertFalse(started[0].done())
+                                closing_waiters[-1].cancel()
+                                with self.assertRaises(asyncio.CancelledError):
+                                    await closing_waiters[-1]
+                                closing_waiters.append(asyncio.create_task(close_owner()))
+                                await asyncio.sleep(.03)
+                                self.assertFalse(closing_waiters[-1].done())
+                                self.assertFalse(finished.is_set())
+                                release.set()
+                                await closing_waiters[-1]
+                                self.assertEqual(["before_commit", "commit_returned", "save_returned", "close_returned"], events)
+                                self.assertEqual([("top20_membership", day, key)], calls)
+                                self.assertEqual([], errors)
+                                self.assertTrue(all(task.done() for task in started))
+                                self.assertEqual([], service._tasks)
+                                self.assertIsNone(service._subscriber)
+                                if runtime is not None:
+                                    state = await runtime.drain(timeout=2)
+                                    self.assertTrue(state["execution_succeeded"])
+                                    self.assertEqual((0, 0, 0), tuple(state[name] for name in
+                                                     ("pending_tasks", "pending_threads", "submitted_threads")))
+                        finally:
+                            release.set()
+                            await asyncio.gather(*closing_waiters, return_exceptions=True)
+                            await service.close()
+                            await asyncio.gather(*started, return_exceptions=True)
+                            if calls:
+                                # The original-source negative run must also join before deleting its fixture.
+                                await asyncio.to_thread(finished.wait)
+            finally:
+                await asyncio.get_running_loop().shutdown_default_executor()
 
     def test_nonboundary_start_uses_current_half_minute_as_freshness_target(self) -> None:
         self.assertEqual(
@@ -887,7 +1059,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         service = AutonomousTop20Service(
             _Broker(), RealtimeHub(), object(), now_provider=now_provider,
         )  # type: ignore[arg-type]
-        service._is_observed_krx_trading_day = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        service.after_close._is_observed_krx_trading_day = AsyncMock(return_value=True)  # type: ignore[method-assign]
         service.refresh_ranking_once = AsyncMock(return_value=())  # type: ignore[method-assign]
         backfill_started = asyncio.Event()
 
@@ -895,7 +1067,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             backfill_started.set()
             await asyncio.Event().wait()
 
-        service.backfill_day = blocked_backfill  # type: ignore[method-assign]
+        service.after_close.run_day = blocked_backfill  # type: ignore[method-assign]
         sleep_count = 0
 
         async def stop_after_two_iterations(_delay: float) -> None:
@@ -922,9 +1094,8 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(backfill_started.is_set())
         self.assertEqual(2, service.refresh_ranking_once.await_count)
-        for task in tuple(service._fundamentals_tasks):
-            task.cancel()
-        await asyncio.gather(*tuple(service._fundamentals_tasks), return_exceptions=True)
+        service.after_close.request_stop()
+        await service.after_close.join()
 
     async def test_stale_kiwoom_ranking_retries_with_adaptive_delay(self) -> None:
         class StaleRankingBroker(_Broker):
@@ -1443,11 +1614,11 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         )
         service._schedule_market_catalog = lambda _day: None
         service._schedule_subscription_update = lambda _day: None
-        service._backfill_market_indexes = AsyncMock()
-        service._nxt_enabled = AsyncMock(return_value=False)
-        service._backfill_daily = AsyncMock()
-        service._backfill_minutes = AsyncMock()
-        service._backfill_candidate_flows = AsyncMock()
+        service.after_close._backfill_market_indexes = AsyncMock()
+        service.after_close._nxt_enabled = AsyncMock(return_value=False)
+        service.after_close._backfill_daily = AsyncMock()
+        service.after_close._backfill_minutes = AsyncMock()
+        service.after_close._backfill_candidate_flows = AsyncMock()
         return service
 
     async def test_daily_entrants_retry_departed_code_skip_replay_and_reset_next_day(self) -> None:
@@ -1517,11 +1688,11 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaisesRegex(RuntimeError, "save failed"):
                             await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
                 restarted = self._entrant_service(store, broker)
-                self.assertTrue(await restarted.backfill_day("2026-09-10"))
+                self.assertTrue(await restarted.after_close.run_day("2026-09-10"))
                 codes = {row["key"] for row in store.load_documents("top20_daily_entrants", "2026-09-10")}
                 self.assertIn("099999", codes)
                 self.assertEqual(history_enabled, "005930" in codes)
-                self.assertEqual(codes, {call.args[0] for call in restarted._backfill_daily.await_args_list})
+                self.assertEqual(codes, {call.args[0] for call in restarted.after_close._backfill_daily.await_args_list})
                 self.assertEqual("", restarted._entrants_day)
                 store.close()
 
@@ -1545,7 +1716,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 return original_save(collection, documents)
 
             with patch.object(store, "upsert_documents", side_effect=blocked_save):
-                task = asyncio.create_task(service.backfill_day(old_day))
+                task = asyncio.create_task(service.after_close.run_day(old_day))
                 try:
                     self.assertTrue(await asyncio.to_thread(entered.wait, 5))
                     codes = await service.refresh_ranking_once(datetime(2026, 9, 10, 9, 0))
@@ -1561,7 +1732,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(old_day + "T09:00:00", previous[0]["document"]["first_seen_at"])
             self.assertEqual(set(codes), {row["key"] for row in current})
             self.assertTrue(all(row["document"]["first_seen_at"].startswith("2026-09-10") for row in current))
-            self.assertEqual(["OLD"], [call.args[0] for call in service._backfill_daily.await_args_list])
+            self.assertEqual(["OLD"], [call.args[0] for call in service.after_close._backfill_daily.await_args_list])
             store.close()
 
     async def test_daily_entrant_recovery_does_not_silently_accept_truncated_history(self) -> None:
@@ -1571,9 +1742,9 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
         store.load_observation_revisions.return_value = []
         service = self._entrant_service(store, _Broker())
         with self.assertRaisesRegex(RuntimeError, "recovery limit reached"):
-            await service.backfill_day("2026-09-10")
+            await service.after_close.run_day("2026-09-10")
         store.upsert_documents.assert_not_called()
-        service._backfill_daily.assert_not_awaited()
+        service.after_close._backfill_daily.assert_not_awaited()
 
     async def test_ranking_is_archived_and_keeps_an_internal_subscription(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1756,7 +1927,7 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                 now_provider=lambda: datetime(2026, 9, 14, 15, 35),
             )
 
-            await service.backfill_day("2026-09-14")
+            await service.after_close.run_day("2026-09-14")
             store.close()
 
         self.assertEqual([], broker.calls)
@@ -2453,7 +2624,7 @@ class Top20CollectorLockBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 async def response(_requested_at):
                     response_ready.set()
                     return BrokerResult({"item_inq_rank": rows}, False, ""), rows, False, False
-                loop = refresh = None
+                loop = persistence = refresh = None
                 try:
                     with patch.object(service, "_select_ranking_response", side_effect=response), \
                             patch.object(service, "_schedule_market_catalog"), \
@@ -2461,6 +2632,7 @@ class Top20CollectorLockBoundaryTests(unittest.IsolatedAsyncioTestCase):
                             patch.object(service, "_persist_missing_daily_entrants", new_callable=AsyncMock), \
                             patch.object(service._hub, "update_subscription", side_effect=subscription):
                         loop = asyncio.create_task(service._index_loop())
+                        persistence = asyncio.create_task(service._persistence_loop())
                         self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
                         self.assertFalse(service._collector_lock.locked(), "index storage must not own collector RAM lock")
                         clock[0] += timedelta(milliseconds=750)
@@ -2488,7 +2660,9 @@ class Top20CollectorLockBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     blocked.release.set()
                     if loop is not None:
                         loop.cancel()
-                    await asyncio.gather(*(task for task in (loop, refresh) if task is not None), return_exceptions=True)
+                    if persistence is not None:
+                        persistence.cancel()
+                    await asyncio.gather(*(task for task in (loop, persistence, refresh) if task is not None), return_exceptions=True)
                     await service.close()
                     self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
                     store.close()
@@ -2505,11 +2679,12 @@ class Top20CollectorLockBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 blocked = _BlockedIndexWrite(store.save_dataset_snapshot)
                 store.save_dataset_snapshot = blocked
                 runtime = ReplayRuntimeScope()
-                loop = closing = recovered = None
+                loop = persistence = closing = recovered = None
                 try:
                     with runtime.activate():
                         loop = owned_create_task(service._index_loop(), name="test-real-index-loop")
-                        service._tasks.append(loop)
+                        persistence = owned_create_task(service._persistence_loop(), name="test-real-persistence-loop")
+                        service._tasks.extend((loop, persistence))
                         self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
                         self.assertFalse(service._collector_lock.locked())
                         runtime.begin_shutdown()
@@ -2547,12 +2722,277 @@ class Top20CollectorLockBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     blocked.release.set()
                     if loop is not None:
                         loop.cancel()
-                    await asyncio.gather(*(task for task in (loop, closing) if task is not None), return_exceptions=True)
+                    if persistence is not None:
+                        persistence.cancel()
+                    await asyncio.gather(*(task for task in (loop, persistence, closing) if task is not None), return_exceptions=True)
                     if recovered is not None:
                         await recovered.close()
                     await service.close()
                     self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
                     store.close()
+
+    async def test_slow_index_and_program_native_writes_keep_sampling_the_same_complete_minute(self):
+        from tests.unit.test_top20_program_shutdown import _snapshot
+
+        for stage in ("index", "program"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                store, service, clock = self._seed_loop(directory)
+                start = clock[0]
+                first = service._advance(start).completed
+                self.assertIsNotNone(first)
+                await service._queue_index(first)
+                native = store.save_dataset_snapshot if stage == "index" else store.save_dataset_snapshots
+                blocked = _BlockedIndexWrite(native)
+                if stage == "index":
+                    store.save_dataset_snapshot = blocked
+                else:
+                    store.save_dataset_snapshots = lambda values: (
+                        blocked(values) if any(value[0] == "program_flow" for value in values) else native(values)
+                    )
+                    service._program_snapshots.enqueue(_snapshot())
+                observed = []
+                native_advance = service._advance
+                def advance(now):
+                    observed.append(now)
+                    return native_advance(now)
+                service._advance = advance
+                loops = [asyncio.create_task(service._index_loop()),
+                         asyncio.create_task(service._persistence_loop())]
+                service._tasks = loops
+                try:
+                    self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 1))
+                    for quarter in range(1, 11):
+                        clock[0] = start + timedelta(seconds=quarter / 4)
+                        await asyncio.sleep(.225)
+                    self.assertFalse(blocked.release.is_set())
+                    self.assertFalse(service._collector_lock.locked())
+                    self.assertGreaterEqual(service._collector.last_observed_at, start + timedelta(seconds=2))
+                    self.assertTrue(service._collector.minute_complete)
+                    self.assertTrue(observed)
+                    self.assertLessEqual(max((b - a).total_seconds()
+                                             for a, b in zip([start] + observed, observed)), 2)
+                    blocked.release.set()
+                    self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                    await service.close()
+                    completed = None
+                    for quarter in range(11, 241):
+                        clock[0] = start + timedelta(seconds=quarter / 4)
+                        update = native_advance(clock[0])
+                        if update.completed is not None:
+                            completed = update.completed
+                    self.assertIsNotNone(completed)
+                    self.assertEqual("realtime_complete", completed.capture_state)
+                    self.assertEqual((60.0, 60.0, 0.0), completed.market_values)
+                    self.assertEqual(120.0, completed.total)
+                    self.assertEqual({"005930", "000660"}, set(completed.codes))
+                    self.assertEqual((1, 1, 0), completed.market_counts)
+                    self.assertEqual(((start.isoformat(timespec="seconds"), ("005930", "000660")),),
+                                     completed.cohort_segments)
+                    self._assert_original_record(store, available_at=start)
+                    self.assertEqual({}, service._pending_index_records)
+                    self.assertEqual({}, service._outbox.load())
+                    self.assertEqual(blocked.calls, blocked.completed)
+                    self.assertEqual([], service._tasks)
+                    self.assertIsNone(service._subscriber)
+                    if stage == "program":
+                        rows = store.load_dataset_snapshots("program_flow", "005930", 10)
+                        self.assertEqual([_snapshot()["payload"]], [row["payload"] for row in rows])
+                finally:
+                    blocked.release.set()
+                    for loop in loops:
+                        loop.cancel()
+                    await asyncio.gather(*loops, return_exceptions=True)
+                    await service.close()
+                    self.assertTrue(await asyncio.to_thread(blocked.wait_completed))
+                    store.close()
+
+    async def test_failed_index_retry_does_not_block_sampling_or_program_persistence(self):
+        from tests.unit.test_top20_program_shutdown import _snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            store, service, clock = self._seed_loop(directory)
+            first = service._advance(clock[0]).completed
+            self.assertIsNotNone(first)
+            await service._queue_index(first)
+            service._program_snapshots.enqueue(_snapshot())
+            native_single, native_batch = store.save_dataset_snapshot, store.save_dataset_snapshots
+            saved_program = asyncio.Event()
+            event_loop = asyncio.get_running_loop()
+            def failed_index(*args, **kwargs):
+                raise OSError("controlled index remains unavailable")
+            def program_batch(values):
+                native_batch(values)
+                event_loop.call_soon_threadsafe(saved_program.set)
+            store.save_dataset_snapshot = failed_index
+            store.save_dataset_snapshots = program_batch
+            loops = [asyncio.create_task(service._index_loop()),
+                     asyncio.create_task(service._persistence_loop())]
+            service._tasks = loops
+            try:
+                with self.assertLogs("kiwoom_monitor.central_server.autonomous_top20", level="WARNING") as logged:
+                    await asyncio.wait_for(saved_program.wait(), 1)
+                self.assertIn("controlled index remains unavailable", " ".join(logged.output))
+                self.assertEqual(clock[0], service._collector.last_observed_at)
+                self.assertTrue(service._collector.minute_complete)
+                self.assertEqual(1, len(service._pending_index_records))
+                self.assertEqual(1, len(service._outbox.load()))
+                self.assertEqual([], store.load_dataset_snapshots("top20_index", "2026-09-10", 10))
+                rows = store.load_dataset_snapshots("program_flow", "005930", 10)
+                self.assertEqual([_snapshot()["payload"]], [row["payload"] for row in rows])
+            finally:
+                await service.close()
+                store.save_dataset_snapshot, store.save_dataset_snapshots = native_single, native_batch
+                store.close()
+
+
+class ProducerOptionalToolBoundaryTests(unittest.TestCase):
+    def test_actual_producers_and_sqlite_lifetimes_run_with_all_diagnostic_sources_physically_absent(self):
+        import hashlib
+        import json
+        import os
+        import shutil
+        import subprocess
+        import sys
+
+        original = Path(__file__).resolve().parents[2]
+        selected = [
+            "tests.unit.test_autonomous_top20.AutonomousTop20Tests.test_ranking_is_archived_and_keeps_an_internal_subscription",
+            "tests.unit.test_autonomous_top20.AutonomousTop20Tests.test_catalog_loader_duplicate_codes_are_saved_once",
+            "tests.unit.test_autonomous_top20.AutonomousTop20Tests.test_candidate_flow_capture_and_finalization_are_nas_owned_and_idempotent",
+            "tests.unit.test_autonomous_top20.Top20IndexFlushOwnershipTests.test_cancelled_index_waiters_and_close_do_not_abandon_or_overlap_native_save",
+            "tests.unit.test_autonomous_top20.Top20IndexFlushOwnershipTests.test_index_write_ack_and_outbox_remove_failures_keep_retryable_payload",
+            "tests.unit.test_market_events.MarketEventServiceTests.test_vi_live_and_backfill_resends_are_immutable_deduplicated",
+            "tests.unit.test_market_events.MarketEventServiceTests.test_vi_failed_owner_allows_waiting_duplicate_to_save",
+            "tests.unit.test_market_events.MarketEventServiceTests.test_vi_cancelled_owner_keeps_guard_until_thread_commit_and_close_drains",
+            "tests.unit.test_mock_account_monitor.MockAccountMonitorTests.test_startup_recovery_04_refresh_and_00_fill_share_one_runtime",
+            "tests.unit.test_candidate_monitor.SelectedRamShadowRecordingTests.test_eight_consumers_one_context_one_commit_and_unchanged_state_no_write",
+            "tests.unit.test_news_source_collection.QuerySetNewsCollectorTests.test_service_start_collects_without_desktop_request",
+            "tests.unit.test_morning_market_brief.NativeMorningBriefLifetimeTests.test_native_schedule_claim_completion_restart_and_shutdown",
+            "tests.unit.test_external_market_collector.ExternalMarketAutomaticRollTests.test_real_zero_and_old_shared_window_keep_existing_roll_rules",
+        ]
+        with tempfile.TemporaryDirectory(prefix="producer-tools-absent-") as directory:
+            root = Path(directory)
+            source = root / "src"
+            shutil.copytree(original / "src", source,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "diagnostic*.py"))
+            self.assertFalse(list(source.rglob("diagnostic*.py")))
+            support_files = (
+                ("tests/__init__.py", "tests/__init__.py"),
+                ("tests/unit/__init__.py", "tests/unit/__init__.py"),
+                ("tests/unit/test_autonomous_top20.py", "tests/unit/test_autonomous_top20.py"),
+                ("tests/unit/test_market_events.py", "tests/unit/test_market_events.py"),
+                ("tests/unit/test_mock_account_monitor.py", "tests/unit/test_mock_account_monitor.py"),
+                ("tests/unit/test_candidate_monitor.py", "tests/unit/test_candidate_monitor.py"),
+                ("tests/unit/test_theme_leadership.py", "tests/unit/test_theme_leadership.py"),
+                ("tests/unit/test_market_research_features.py", "tests/unit/test_market_research_features.py"),
+                ("tests/unit/test_news_source_collection.py", "tests/unit/test_news_source_collection.py"),
+                ("tests/unit/test_morning_market_brief.py", "tests/unit/test_morning_market_brief.py"),
+                ("tests/unit/test_external_market_collector.py", "tests/unit/test_external_market_collector.py"),
+                ("tests/unit/test_entry_thesis.py", "tests/unit/test_entry_thesis.py"),
+                ("scripts/preview_market_theme_shadow.py", "producer_support/preview_market_theme_shadow.py"),
+            )
+            import_source = b"\nfrom scripts.preview_market_theme_shadow import evaluate_document"
+            import_target = b"\nfrom producer_support.preview_market_theme_shadow import evaluate_document"
+            mapped_support = {"tests/unit/test_entry_thesis.py", "tests/unit/test_market_research_features.py"}
+            expected, support_proof = {}, []
+            for source_relative, destination_relative in support_files:
+                content = (original / source_relative).read_bytes()
+                source_digest = hashlib.sha256(content).hexdigest()
+                if source_relative in mapped_support:
+                    self.assertEqual(1, content.count(import_source))
+                    content = content.replace(import_source, import_target)
+                    self.assertEqual(source_digest, hashlib.sha256(content.replace(import_target, import_source)).hexdigest())
+                destination = root / destination_relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+                expected[destination_relative] = hashlib.sha256(content).hexdigest()
+                if source_relative not in mapped_support:
+                    self.assertEqual(source_digest, expected[destination_relative])
+                support_proof.append({"source": source_relative, "destination": destination_relative,
+                    "source_raw_sha256": source_digest, "copy_raw_sha256": expected[destination_relative],
+                    "import_mappings": int(source_relative in mapped_support)})
+            self.assertFalse((root / "scripts").exists())
+            for relative in ("src/kiwoom_monitor/__init__.py", "src/kiwoom_monitor/central_server/__init__.py",
+                             "src/kiwoom_monitor/central_server/autonomous_top20.py",
+                             "src/kiwoom_monitor/central_server/market_events.py",
+                             "src/kiwoom_monitor/central_server/database.py",
+                             "src/kiwoom_monitor/central_server/mock_account_monitor.py",
+                             "src/kiwoom_monitor/central_server/market_theme_shadow_monitor.py",
+                             "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+                             "src/kiwoom_monitor/central_server/news_service.py",
+                             "src/kiwoom_monitor/central_server/news_sources.py",
+                             "src/kiwoom_monitor/central_server/morning_market_brief.py",
+                             "src/kiwoom_monitor/central_server/external_market_collector.py",
+                             "src/kiwoom_monitor/central_server/database_documents.py",
+                             "src/kiwoom_monitor/central_server/database_news_sources.py",
+                             "src/kiwoom_monitor/central_server/database_external_market.py"):
+                expected[relative] = hashlib.sha256((original / relative).read_bytes()).hexdigest()
+            child = r'''
+import hashlib, io, json, os, sys, unittest
+from pathlib import Path
+if os.name == 'nt':
+    import runpy
+    runpy.run_path(os.environ['KIWOOM_REGRESSION_REGISTRY_HELPER'])['join_from_environment']()
+root = Path(sys.argv[1]).resolve()
+selected, expected = json.loads(sys.argv[2]), json.loads(sys.argv[3])
+source = root / 'src'
+assert not list(source.rglob('diagnostic*.py'))
+assert not (root / 'scripts').exists()
+for relative, digest in expected.items():
+    assert hashlib.sha256((root / relative).read_bytes()).hexdigest() == digest
+sys.path[:0] = [str(source), str(root)]
+suite = unittest.TestLoader().loadTestsFromNames(selected)
+assert suite.countTestCases() == len(selected)
+log = io.StringIO()
+class ActualIdResult(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.actual_ids = []
+    def startTest(self, test):
+        self.actual_ids.append(test.id())
+        super().startTest(test)
+result = unittest.TextTestRunner(stream=log, resultclass=ActualIdResult).run(suite)
+assert result.wasSuccessful() and result.testsRun == len(selected) and not result.skipped, log.getvalue()
+assert result.actual_ids == selected, (result.actual_ids, selected)
+assert not any(name.startswith('kiwoom_monitor.') and '.diagnostic' in name for name in sys.modules)
+assert not any(name == 'scripts' or name.startswith('scripts.') for name in sys.modules)
+origins = {}
+for name, module in list(sys.modules.items()):
+    if (name == 'kiwoom_monitor' or name.startswith('kiwoom_monitor.')
+            or name.startswith('tests.') or name.startswith('producer_support.')):
+        path = Path(module.__file__).resolve()
+        assert path.is_relative_to(root), (name, str(path))
+        if name == 'kiwoom_monitor' or name.startswith('kiwoom_monitor.'):
+            assert path.is_relative_to(source), (name, str(path))
+        origins[name] = {'file':str(path), 'raw_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+scope = getattr(sys, '_kiwoom_regression_registry_override', None)
+assert os.name != 'nt' or scope is not None
+description = getattr(scope, 'description', {})
+print(json.dumps({'tools_physically_absent':True, 'selected_ids':selected,
+    'actual_ids':result.actual_ids,
+    'reused_native_tests':result.testsRun, 'origins':origins,
+    'joined_owned_HKCU':scope is not None,
+    'registry_key':description.get('key'), 'registry_owner_pid':description.get('owner_pid')}))
+'''
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-X", "utf8", "-c", child,
+                 str(root), json.dumps(selected), json.dumps(expected)],
+                cwd=root, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), capture_output=True,
+                text=True, encoding="utf-8", errors="backslashreplace", timeout=15,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            evidence = json.loads(result.stdout.splitlines()[-1])
+            self.assertTrue(evidence["tools_physically_absent"])
+            self.assertEqual(selected, evidence["selected_ids"])
+            self.assertEqual(selected, evidence["actual_ids"])
+            self.assertEqual(len(selected), evidence["reused_native_tests"])
+            if os.name == "nt":
+                scope = getattr(sys, "_kiwoom_regression_registry_override", None)
+                self.assertIsNotNone(scope)
+                self.assertTrue(evidence["joined_owned_HKCU"])
+                self.assertEqual(scope.description["key"], evidence["registry_key"])
+                self.assertEqual(scope.description["owner_pid"], evidence["registry_owner_pid"])
+            print("PRODUCER_ABSENCE_EVIDENCE=" + json.dumps({**evidence, "test_support": support_proof}, sort_keys=True))
 
 
 if __name__ == "__main__":

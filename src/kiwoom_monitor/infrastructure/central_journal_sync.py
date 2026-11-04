@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
+from kiwoom_monitor.application.journal_enrichment import (
+    JOURNAL_ANALYSIS_REVISION_COLLECTION,
+    JournalAnalysisRevisionConflict,
+    journal_analysis_revision_content,
+)
 
 from kiwoom_monitor.infrastructure.central_content_client import (
     CentralContentClient,
@@ -21,6 +26,9 @@ from kiwoom_monitor.infrastructure.central_sync_utils import (
     normalize_batch_size,
     table_names,
     upload_documents,
+)
+from kiwoom_monitor.infrastructure.persistence.journal_trade_repository import (
+    JournalTradeRepositoryMixin,
 )
 
 
@@ -144,7 +152,9 @@ class CentralJournalSyncService:
                 ]
                 saved += upload_documents(
                     self._client, spec.collection,
-                    self._changed_documents(documents, remote), self._batch_size,
+                    (self._changed_analysis_revisions(documents, remote)
+                     if spec.collection == JOURNAL_ANALYSIS_REVISION_COLLECTION
+                     else self._changed_documents(documents, remote)), self._batch_size,
                 )
             if sync_states_enabled:
                 state_rows = list(connection.execute(
@@ -193,6 +203,23 @@ class CentralJournalSyncService:
         finally:
             connection.close()
         return saved
+
+    @staticmethod
+    def _changed_analysis_revisions(
+        documents: list[dict[str, Any]], remote: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        existing = {
+            (str(value.get("owner", "")), str(value.get("key", ""))): value["document"]
+            for value in remote if isinstance(value.get("document"), dict)
+        }
+        changed = []
+        for value in documents:
+            stored = existing.get((str(value["owner"]), str(value["key"])))
+            if stored is None:
+                changed.append(value)
+            elif journal_analysis_revision_content(stored) != journal_analysis_revision_content(value["document"]):
+                raise JournalAnalysisRevisionConflict("immutable journal analysis revision conflict during sync")
+        return changed
 
     @staticmethod
     def _changed_documents(
@@ -248,10 +275,23 @@ class CentralJournalSyncService:
                     connection, spec, document_key, document, str(incoming[spec.version])):
                 self._record_legacy_source(connection, legacy_source)
                 continue
+            if spec.table == "journal_analysis_revisions":
+                # Reuse immutable conflict/readback semantics; a remote receipt
+                # is never permission to replace the content of an existing ID.
+                JournalTradeRepositoryMixin.accept_journal_analysis_document(connection, incoming)
+                self._record_legacy_source(connection, legacy_source)
+                if sync_states_enabled:
+                    self._record_sync_state(connection, spec.collection, document_key, document, False,
+                                            str(incoming[spec.version]))
+                continue
             where = " AND ".join(f"{key}=?" for key in spec.keys)
+            local_keys = spec.keys
+            if spec.table in {"trade_setup_classifications", "trade_setup_cycle_overrides"}:
+                local_keys = (*spec.keys, "origin_broker", "origin_environment", "origin_account_ref")
+                where = " AND ".join(f"{key}=?" for key in local_keys)
             local = connection.execute(
                 f"SELECT * FROM {spec.table} WHERE {where}",
-                tuple(incoming[key] for key in spec.keys),
+                tuple(incoming[key] for key in local_keys),
             ).fetchone()
             if local is not None and spec.table in _ACCOUNT_SCOPED_TABLES:
                 local_is_v2 = str(dict(local).get("origin_broker", "legacy")) != "legacy"
@@ -272,10 +312,10 @@ class CentralJournalSyncService:
                 self._record_legacy_source(connection, legacy_source)
                 continue
             names = tuple(incoming)
-            updates = tuple(name for name in names if name not in spec.keys)
+            updates = tuple(name for name in names if name not in local_keys)
             sql = (
                 f"INSERT INTO {spec.table}({','.join(names)}) VALUES({','.join('?' for _ in names)}) "
-                f"ON CONFLICT({','.join(spec.keys)}) DO UPDATE SET "
+                f"ON CONFLICT({','.join(local_keys)}) DO UPDATE SET "
                 + ",".join(f"{name}=excluded.{name}" for name in updates)
             )
             connection.execute(sql, tuple(incoming[name] for name in names))

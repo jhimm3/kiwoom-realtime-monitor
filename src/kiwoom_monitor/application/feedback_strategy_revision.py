@@ -7,19 +7,20 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, TYPE_CHECKING
 
 from kiwoom_monitor.application.forward_evaluation import (
     FeedbackImprovementProposalRevision,
     feedback_improvement_from_dict,
 )
-from kiwoom_monitor.application.research_families import (
+from kiwoom_monitor.domain.strategy_contract import (
     get_research_family,
     parse_strategy_config,
 )
-from kiwoom_monitor.application.research_queue import build_research_job_identity
-from kiwoom_monitor.application.research_search import ExperimentSpec
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+
+if TYPE_CHECKING:
+    from kiwoom_monitor.application.research_search import ExperimentSpec
 
 
 FEEDBACK_STRATEGY_VERSION = "feedback_strategy_version/v1"
@@ -242,6 +243,8 @@ def build_feedback_revalidation_spec(
     strategy: FeedbackStrategyVersion,
 ) -> ExperimentSpec:
     """Apply a version to an existing development template without opening final data."""
+    from kiwoom_monitor.application.research_search import ExperimentSpec
+
     strategy = feedback_strategy_version_from_dict(strategy.to_dict())
     if template.final_holdout_accessed_at or template.final_holdout_access_reason:
         raise ValueError("feedback revalidation cannot use a final holdout template")
@@ -302,6 +305,9 @@ def dispatch_feedback_revalidation(
     adoption_reason: str,
 ) -> tuple[FeedbackStrategyVersion, FeedbackRevalidationReceipt]:
     """Persist a new version, enqueue its exact development spec, then confirm dispatch."""
+    from kiwoom_monitor.application.research_search import ExperimentSpec
+    from kiwoom_monitor.application.research_queue import build_research_job_identity
+
     if not campaign_id.strip() or not template_job_id.strip():
         raise ValueError("feedback revalidation campaign and template job are required")
     template_job = research_repository.load_campaign_job(campaign_id, template_job_id)

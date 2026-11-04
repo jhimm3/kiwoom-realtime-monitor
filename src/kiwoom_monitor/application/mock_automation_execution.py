@@ -8,10 +8,10 @@ from dataclasses import dataclass, replace
 from copy import deepcopy
 from datetime import datetime, timedelta
 from enum import StrEnum
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Mapping, Protocol
 
-from kiwoom_monitor.application.breakout_strategy import StrategyDecision
+from kiwoom_monitor.domain.strategy_contract import StrategyDecision
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationAdmission,
@@ -326,30 +326,35 @@ class MockAutomationStopRevision:
 
 
 class MockAutomationExecutionRepository(Protocol):
+    def mock_automation_read_scope(self) -> AbstractContextManager[Any]: ...
     def load_mock_automation_spec(
-        self, account_ref: str, spec_id: str,
+        self, account_ref: str, spec_id: str, *,
+        require_canonical_document: bool = False, _reader: Any = None,
     ) -> MockAutomationOperatingSpec | None: ...
     def load_profile(
-        self, strategy_ref: str, profile_id: str,
+        self, strategy_ref: str, profile_id: str, *, _reader: Any = None,
     ) -> ForwardEvaluationSpec | None: ...
     def save_mock_automation_spec(self, value: MockAutomationOperatingSpec) -> bool: ...
+    def revalidate_stored_mock_automation_spec(
+        self, value: MockAutomationOperatingSpec, profile: ForwardEvaluationSpec | None, *, _reader: Any = None,
+    ) -> None: ...
     def load_mock_automation_admissions(
         self, account_ref: str,
     ) -> tuple[MockAutomationAdmission, ...]: ...
     def load_mock_automation_admission_for_spec(
-        self, account_ref: str, spec_id: str,
+        self, account_ref: str, spec_id: str, *, _reader: Any = None,
     ) -> MockAutomationAdmission | None: ...
     def load_mock_automation_lease_receipts(
         self, account_ref: str,
     ) -> tuple[MockAutomationLeaseReceipt, ...]: ...
     def load_mock_automation_lease_for_admission(
-        self, account_ref: str, admission_id: str,
+        self, account_ref: str, admission_id: str, *, _reader: Any = None,
     ) -> MockAutomationLeaseReceipt | None: ...
     def load_mock_automation_recovery_decisions(
         self, account_ref: str,
     ) -> tuple[MockAutomationRecoveryDecision, ...]: ...
     def load_latest_mock_automation_recovery(
-        self, account_ref: str, admission_id: str,
+        self, account_ref: str, admission_id: str, *, _reader: Any = None,
     ) -> MockAutomationRecoveryDecision | None: ...
     def save_mock_automation_decision_gate(self, value: MockAutomationDecisionGate) -> bool: ...
     def save_mock_automation_dispatch_receipt(
@@ -365,7 +370,7 @@ class MockAutomationExecutionRepository(Protocol):
         self, account_ref: str,
     ) -> tuple[MockAutomationDecisionGate, ...]: ...
     def load_mock_automation_approved_gate(
-        self, account_ref: str, intent_id: str,
+        self, account_ref: str, intent_id: str, *, _reader: Any = None,
     ) -> MockAutomationDecisionGate | None: ...
     def load_mock_automation_decision_gate(self, account_ref: str, gate_id: str) -> MockAutomationDecisionGate | None: ...
     def save_mock_automation_stop_revision(self, value: MockAutomationStopRevision) -> bool: ...
@@ -373,14 +378,14 @@ class MockAutomationExecutionRepository(Protocol):
         self, account_ref: str,
     ) -> tuple[MockAutomationStopRevision, ...]: ...
     def load_latest_mock_automation_stop(
-        self, account_ref: str, admission_id: str,
+        self, account_ref: str, admission_id: str, *, _reader: Any = None,
     ) -> MockAutomationStopRevision | None: ...
-    def load_mock_automation_control(self, account_ref: str) -> MockAutomationControl | None: ...
+    def load_mock_automation_control(self, account_ref: str, *, _reader: Any = None) -> MockAutomationControl | None: ...
     def save_mock_automation_control(
         self, value: MockAutomationControl, *, expected_revision: int,
     ) -> bool: ...
     def load_latest_mock_automation_risk(
-        self, account_ref: str,
+        self, account_ref: str, *, _reader: Any = None,
     ) -> MockAutomationRiskSnapshot | None: ...
 
 
@@ -452,6 +457,9 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
         or control.execution_run_id != admission.execution_run_id
     ):
         reasons.append("AUTOMATION_CONTROL_NOT_RUNNING")
+    if (control is not None and getattr(control, "entry_resume_required", False)
+            and decision.final_action in {"ENTER", "ADD", "REENTER"}):
+        reasons.append("CREDENTIAL_CHANGE_REQUIRES_EXPLICIT_ENTRY_RESUME")
     if not metrics.recovery_complete:
         reasons.append("BROKER_RECOVERY_INCOMPLETE")
     if metrics.reconciliation_pending:
@@ -772,12 +780,28 @@ def assess_mock_automation_decision_from_risk(repository, runtime, decision, rec
 
 
 def _native_gate_context(repository, runtime, recovery, risk, account_ref, spec_id):
-    metrics = _validated_risk_metrics(repository, runtime, recovery, risk, account_ref, spec_id)
-    spec, profile, admission, lease, recovered, stop, control = _load_context(repository, account_ref, spec_id)
-    if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
-        raise ValueError('mock automation runtime does not match its admission')
-    repository.save_mock_automation_spec(spec)
-    return spec, profile, admission, lease, recovered, stop, control, metrics, runtime.server_now(), len(runtime.load_active_intents())
+    scope = getattr(repository, 'mock_automation_read_scope', None)
+    with (scope() if callable(scope) else nullcontext()) as reader:
+        metrics, admission = _validated_risk_metrics_and_admission(
+            repository, runtime, recovery, risk, account_ref, spec_id, _reader=reader)
+        spec, profile, admission, lease, recovered, stop, control = _load_context(
+            repository, account_ref, spec_id, admission=admission,
+            require_canonical_spec=True, _reader=reader,
+        )
+        if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
+            raise ValueError('mock automation runtime does not match its admission')
+        reader_args = {} if reader is None else {'_reader': reader}
+        repository.revalidate_stored_mock_automation_spec(spec, profile, **reader_args)
+        scoped_reader = getattr(type(runtime), 'active_intent_reader_for', None)
+        load_active = (scoped_reader(runtime, repository)
+                       if reader is not None and callable(scoped_reader) else None)
+        if load_active is not None:
+            now = runtime.server_now()
+            in_flight = len(load_active(_reader=reader))
+    if load_active is None:
+        now = runtime.server_now()
+        in_flight = len(runtime.load_active_intents())
+    return spec, profile, admission, lease, recovered, stop, control, metrics, now, in_flight
 
 
 def assess_mock_unfilled_gate_bundle_from_risk(repository, runtime, decision, recovery, risk, *,
@@ -906,10 +930,114 @@ def unfilled_execution_policy_rejections(spec, policy, root):
     return tuple(reasons)
 
 
+def unfilled_registration_policy(body, spec, *, account_ref, run_id):
+    from kiwoom_monitor.application.order_lifecycle import UnfilledOrderManagementPolicy, unfilled_plan_intent
+    if (not isinstance(body, Mapping) or spec.unfilled_execution_policy is None
+            or set(body) != {'version','spec_id','account_ref','execution_run_id','control_revision',
+                              'operating_policy_id','root_intent','purpose','target_quantity','policy','registration_id'}
+            or body['version'] != 'mock-unfilled-registration/v1'
+            or (body['spec_id'], body['account_ref'], body['execution_run_id'], body['operating_policy_id']) !=
+                (spec.spec_id, account_ref, run_id, spec.unfilled_execution_policy.policy_id)
+            or type(body['control_revision']) is not int or body['control_revision'] <= 0
+            or type(body['target_quantity']) is not int or body['target_quantity'] < 0
+            or body['registration_id'] != _content_id('unfilled_registration', {k:v for k,v in body.items() if k != 'registration_id'})):
+        raise ValueError('invalid_unfilled_native_registration')
+    intent = unfilled_plan_intent(body['root_intent'])
+    raw = dict(body['policy'])
+    for name in ('anchor_available_at','valid_until','wait_until','protection_deadline'):
+        raw[name] = datetime.fromisoformat(raw[name])
+    policy = UnfilledOrderManagementPolicy(**raw)
+    if (intent.account_ref != account_ref or intent.run_id != run_id
+            or intent.intent_id.startswith('unfilled-native-child:') or policy.anchor_intent_id != intent.intent_id
+            or policy.anchor_price_won != intent.limit_price or policy.purpose != body['purpose']
+            or (intent.side is OrderSide.BUY) != (policy.purpose == 'BUY_OPPORTUNITY')):
+        raise ValueError('unfilled_native_registration_root_mismatch')
+    frozen = spec.unfilled_execution_policy
+    end = intent.created_at + timedelta(seconds=frozen.maximum_management_seconds)
+    if (body['target_quantity'] != (intent.quantity if intent.side is OrderSide.BUY else 0)
+            or policy.anchor_available_at != intent.created_at
+            or policy.anchor_price_input_ref != 'original-decision:' + intent.decision_id
+            or policy.valid_until != end or policy.wait_until != min(end, intent.expires_at)
+            or policy.protection_deadline != min(end, intent.created_at + timedelta(seconds=frozen.max_snapshot_age_seconds))
+            or any(getattr(policy, name) != getattr(frozen, name) for name in (
+                'maximum_reprices','maximum_adverse_slippage_bps','protective_slippage_bps',
+                'max_snapshot_age_seconds','minimum_net_advantage_won','uncertainty_multiplier',
+                'minimum_paired_samples','reprice_horizon_seconds'))):
+        raise ValueError('unfilled_native_registration_frozen_policy_mismatch')
+    return policy
+
+
+def validate_unfilled_original_gate(spec, root, original_gate, *, account_ref, execution_run_id,
+                                    admission_id, control_revision):
+    """Read the immutable original approval; never approve a management command."""
+    if (root is None or original_gate is None
+            or root.intent.environment != 'mock' or root.intent.account_ref != account_ref
+            or (account_ref, execution_run_id) != (spec.account_scope.account_ref, root.intent.run_id)
+            or original_gate.version != MOCK_AUTOMATION_DECISION_GATE_VERSION
+            or original_gate.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+            or original_gate.action != ('ENTER' if root.intent.side is OrderSide.BUY else 'EXIT')
+            or original_gate.replacement_binding is not None
+            or root.intent.policy_version != original_gate.version + ':' + spec.session_profile
+            or (original_gate.account_ref, original_gate.spec_id, original_gate.execution_run_id,
+                original_gate.admission_id, original_gate.control_revision) !=
+                (account_ref, spec.spec_id, execution_run_id, admission_id, control_revision)
+            or (original_gate.intent_id, original_gate.strategy_decision_id, original_gate.symbol,
+                original_gate.quantity, original_gate.limit_price, original_gate.decided_at) !=
+                (root.intent.intent_id, root.intent.decision_id, root.intent.symbol,
+                 root.intent.quantity, root.intent.limit_price, root.intent.created_at)
+            or root.intent.intent_id != mock_automation_intent_id(spec.spec_id, root.intent.decision_id)):
+        raise ValueError('unfilled_original_approval_lineage_changed')
+
+
+def validate_unfilled_original_approval(spec, scope, policy, root, original_gate, registration, *,
+                                       admission_id, current_control_revision):
+    """Verify original enrollment; this does not approve a current command."""
+    from kiwoom_monitor.application.order_lifecycle import unfilled_plan_intent
+    registered_policy = unfilled_registration_policy(registration, spec,
+        account_ref=scope.get('account_ref'), run_id=scope.get('execution_run_id'))
+    if (root is None or original_gate is None or registered_policy != policy
+            or type(scope.get('control_revision')) is not int
+            or not 0 < scope['control_revision'] <= current_control_revision
+            or scope.get('candidate_package_hash') != spec.candidate_package_hash
+            or root.intent.environment != 'mock' or root.intent.account_ref != scope.get('account_ref')
+            or (scope.get('account_ref'), scope.get('spec_id'), scope.get('execution_run_id')) !=
+                (spec.account_scope.account_ref, spec.spec_id, root.intent.run_id)
+            or (registration.get('account_ref'), registration.get('spec_id'),
+                registration.get('execution_run_id'), registration.get('control_revision')) !=
+                (scope['account_ref'], scope['spec_id'], scope['execution_run_id'], scope['control_revision'])
+            or policy.purpose not in {'BUY_OPPORTUNITY', 'PROTECTIVE_EXIT', 'TAKE_PROFIT'}
+            or unfilled_plan_intent(registration['root_intent']) != root.intent
+            or root.intent.intent_id.startswith('unfilled-native-child:')
+            or unfilled_execution_policy_rejections(spec, policy, root)):
+        raise ValueError('unfilled_original_approval_lineage_changed')
+    validate_unfilled_original_gate(spec, root, original_gate, account_ref=scope['account_ref'],
+        execution_run_id=scope['execution_run_id'], admission_id=admission_id,
+        control_revision=scope['control_revision'])
+
+
+def unfilled_management_control_revision(repository, spec, control, scope, policy, root, registration, *, admission_id,
+                                         _reader=None):
+    """Keep enrollment fixed while requiring the current RUNNING authority."""
+    if (control is None or control.desired_state is not MockAutomationDesiredState.RUNNING
+            or control.active_spec_id != spec.spec_id
+            or control.execution_run_id != scope['execution_run_id']
+            or control.account_ref != scope['account_ref']):
+        raise ValueError('unfilled_native_plan_control_changed')
+    if root is None:
+        raise ValueError('unfilled_native_root_missing')
+    if control.control_revision != scope['control_revision']:
+        reader_args = {} if _reader is None else {'_reader': _reader}
+        original = repository.load_mock_automation_approved_gate(scope['account_ref'], root.intent.intent_id, **reader_args)
+        validate_unfilled_original_approval(spec, scope, policy, root, original, registration,
+            admission_id=admission_id, current_control_revision=control.control_revision)
+    return control.control_revision
+
+
 def dispatch_mock_unfilled_replacement_from_risk(
     repository, runtime, *, plan, policy, broker_snapshot, target, observation, assessment, recovery, risk,
     protection_review_required=False,
     execution_cancelled=False,
+    registration=None,
 ):
     """Fresh native approval for one fixed child; never promote an OFF receipt."""
     from dataclasses import asdict
@@ -985,6 +1113,10 @@ def dispatch_mock_unfilled_replacement_from_risk(
             strategy_ref=spec.strategy_ref, plan=plan, root=root, managed=managed,
             protection_review_required=pending_protection(),
         )
+        if legacy.control_revision != scope['control_revision']:
+            original = repository.load_mock_automation_approved_gate(account_ref, root.intent.intent_id)
+            validate_unfilled_original_approval(spec, scope, policy, root, original, registration,
+                admission_id=legacy.admission_id, current_control_revision=legacy.control_revision)
         frozen = spec.unfilled_execution_policy
         reasons = list(purpose['reasons'])
         reasons.extend(unfilled_execution_policy_rejections(spec, policy, root))
@@ -1024,7 +1156,7 @@ def dispatch_mock_unfilled_replacement_from_risk(
         control = repository.load_mock_automation_control(account_ref)
         now = runtime.server_now()
         if (control is None or control.desired_state is not MockAutomationDesiredState.RUNNING
-                or control.active_spec_id != spec_id or control.control_revision != scope['control_revision']
+                or control.active_spec_id != spec_id or control.control_revision != legacy.control_revision
                 or runtime.load_intent(managed.intent.intent_id) != managed
                 or runtime.load_intent(intent.intent_id) is not None
                 or not 0 <= (now - risk.observed_at).total_seconds() <= frozen.max_snapshot_age_seconds
@@ -1052,15 +1184,22 @@ def _fixed_replacement_binding(gate):
 
 
 def _validated_risk_metrics(repository, runtime, recovery, risk, account_ref, spec_id):
+    return _validated_risk_metrics_and_admission(
+        repository, runtime, recovery, risk, account_ref, spec_id)[0]
+
+
+def _validated_risk_metrics_and_admission(repository, runtime, recovery, risk, account_ref, spec_id, *, _reader=None):
+    """Keep this evaluation's immutable admission; recovery remains a fresh read."""
+    reader_args = {} if _reader is None else {"_reader": _reader}
     loader = getattr(repository, "load_latest_mock_automation_risk", None)
-    current = loader(account_ref) if callable(loader) else None
+    current = loader(account_ref, **reader_args) if callable(loader) else None
     if current != risk:
         raise RuntimeError("latest mock automation risk snapshot changed")
-    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id, **reader_args)
     if admission is None:
         raise ValueError("mock automation admission is missing")
     recovered = repository.load_latest_mock_automation_recovery(
-        account_ref, admission.admission_id,
+        account_ref, admission.admission_id, **reader_args,
     )
     if recovered is None or (
         recovered.risk_snapshot_id != risk.snapshot_id
@@ -1087,7 +1226,7 @@ def _validated_risk_metrics(repository, runtime, recovery, risk, account_ref, sp
         owned_position_quantities=risk.owned_position_quantities,
         pending_sell_quantities=risk.pending_sell_quantities,
     )
-    return metrics
+    return metrics, admission
 
 
 def emergency_stop_mock_automation(
@@ -1132,6 +1271,7 @@ def emergency_stop_mock_automation(
         execution_run_id=admission.execution_run_id,
         changed_at=stopped_at,
         reason=reason.strip(),
+        entry_resume_required=getattr(control, "entry_resume_required", False),
     )
     try:
         saved = repository.save_mock_automation_control(
@@ -1193,7 +1333,9 @@ def resume_mock_automation(
         or control.execution_run_id != admission.execution_run_id
     ):
         raise RuntimeError("mock automation control does not belong to this run")
-    if control.desired_state is not MockAutomationDesiredState.STOPPED:
+    if (control.desired_state is not MockAutomationDesiredState.STOPPED
+            and not (control.desired_state is MockAutomationDesiredState.RUNNING
+                     and getattr(control, "entry_resume_required", False))):
         raise RuntimeError("mock automation is not stopped")
     repository.save_mock_automation_spec(spec)  # Revalidate the current account binding.
     recovery = repository.load_latest_mock_automation_recovery(
@@ -1284,28 +1426,36 @@ def mock_automation_stop_revision_from_dict(value: Mapping[str, Any]) -> MockAut
     return revision
 
 
-def _load_context(repository, account_ref: str, spec_id: str):
-    spec = repository.load_mock_automation_spec(account_ref, spec_id)
+def _load_context(
+    repository, account_ref: str, spec_id: str, *,
+    admission=None, require_canonical_spec=False, _reader=None,
+):
+    reader_args = {} if _reader is None else {"_reader": _reader}
+    spec_args = {"require_canonical_document": True} if require_canonical_spec else {}
+    spec = repository.load_mock_automation_spec(account_ref, spec_id, **spec_args, **reader_args)
     if spec is None:
         raise ValueError("mock automation operating spec is not stored")
-    profile = repository.load_profile(spec.strategy_ref, spec.forward_profile_id)
-    admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+    profile = repository.load_profile(spec.strategy_ref, spec.forward_profile_id, **reader_args)
+    if admission is None:
+        admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id, **reader_args)
     if admission is None:
         raise ValueError("mock automation admission is missing")
     lease = repository.load_mock_automation_lease_for_admission(
-        account_ref, admission.admission_id,
+        account_ref, admission.admission_id, **reader_args,
     )
     if lease is None:
         raise ValueError("mock automation lease receipt is missing")
+    # The current recovery pointer is mutable across native writers. Keep this
+    # later read even when the immutable admission came from the same evaluation.
     recovery = repository.load_latest_mock_automation_recovery(
-        account_ref, admission.admission_id,
+        account_ref, admission.admission_id, **reader_args,
     )
     if recovery is None:
         raise ValueError("mock automation recovery decision is missing")
     latest_stop = repository.load_latest_mock_automation_stop(
-        account_ref, admission.admission_id,
+        account_ref, admission.admission_id, **reader_args,
     )
-    control = repository.load_mock_automation_control(account_ref)
+    control = repository.load_mock_automation_control(account_ref, **reader_args)
     return spec, profile, admission, lease, recovery, latest_stop, control
 
 

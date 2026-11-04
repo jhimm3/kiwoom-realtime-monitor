@@ -9,13 +9,13 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime
-from time import time
-from typing import Any
-from zoneinfo import ZoneInfo
+from typing import Any, Callable
 
 from kiwoom_monitor.domain.news_observation import (
     ARTICLE_BODY_EXTRACTOR_VERSION, SUPPLY_CONTRACT_RULE_VERSION, stable_document_hash,
+    news_article_content_hash,
 )
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from .database_codec import bounded_limit
 from .database_news_job_writes import (
     _insert_sqlite_news_job, _insert_postgres_news_job, _notify_news_job_wakeup,
@@ -41,7 +41,9 @@ class SQLiteNewsSourceStoreMixin:
 
     def save_news_source_page(self, value: dict[str, Any]) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
-            result = _save_sqlite_news_source_page(connection, value)
+            result = _save_sqlite_news_source_page(
+                connection, value, now_provider=self._now_provider,
+            )
         if value.get("items"):
             _notify_news_job_wakeup(self)
         return result
@@ -49,7 +51,9 @@ class SQLiteNewsSourceStoreMixin:
     def load_news_source_diagnostics(self, *, source_id: str = "", days: int = 7,
                                      limit: int = 100) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
-            return _load_sqlite_news_source_diagnostics(connection, source_id, days, limit)
+            return _load_sqlite_news_source_diagnostics(
+                connection, source_id, days, limit, now_provider=self._now_provider,
+            )
 
     def load_market_news_feed(self, source: str, *, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock, self._connection() as connection:
@@ -89,7 +93,9 @@ class PostgresNewsSourceStoreMixin:
             rows_attempted=len(items) if isinstance(items, (list, tuple)) else None,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            result = _save_postgres_news_source_page(cursor, value)
+            result = _save_postgres_news_source_page(
+                cursor, value, now_provider=self._now_provider,
+            )
         if items:
             _notify_news_job_wakeup(self)
         return result
@@ -105,7 +111,9 @@ class PostgresNewsSourceStoreMixin:
             access_mode="read",
         )
         with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
-            return _load_postgres_news_source_diagnostics(cursor, source_id, days, limit)
+            return _load_postgres_news_source_diagnostics(
+                cursor, source_id, days, limit, now_provider=self._now_provider,
+            )
 
     def load_market_news_feed(self, source: str, *, limit: int = 200) -> list[dict[str, Any]]:
         from .postgres_access import DBWriterContext, open_observed_connection
@@ -145,26 +153,19 @@ def _source_item(
     )
 
 
-def _news_article_content_hash(document: dict[str, Any]) -> str:
-    # 언론사명·도메인은 URL에서 다시 계산할 수 있는 검색 편의 필드다. 이 값의
-    # 추가나 매핑 보정만으로 원문 기사 리비전을 새로 만들지 않는다.
-    content = {
-        key: value for key, value in document.items()
-        if key not in {"publisher_domain", "publisher_name"}
-    }
-    return stable_document_hash(content)
 
 
 def _save_sqlite_news_source_page(connection: sqlite3.Connection,
-                                  value: dict[str, Any]) -> dict[str, Any]:
-    now = time()
+                                  value: dict[str, Any], *,
+                                  now_provider: Callable[[], datetime] = kst_now) -> dict[str, Any]:
+    now = as_kst(now_provider()).timestamp()
     source_id, query_text = str(value["source_id"]), str(value["query_text"])
     run_id, page_start = str(value.get("run_id") or uuid.uuid4().hex), int(value.get("page_start") or 1)
     new_count, duplicate_count = 0, 0
     for raw in value.get("items", []):
         identity, document, targets, processing_excluded = _source_item(raw)
         document.update({"identity": identity, "stock_code": "GLOBAL"})
-        content_hash = _news_article_content_hash(document)
+        content_hash = news_article_content_hash(document)
         source_latest = connection.execute(
             "SELECT article_revision_id,content_hash FROM central_news_source_observations "
             "WHERE source_id=? AND identity=? ORDER BY accepted_sequence DESC LIMIT 1",
@@ -183,7 +184,7 @@ def _save_sqlite_news_source_page(connection: sqlite3.Connection,
             duplicate_count += 1
         else:
             article_revision_id, duplicate = uuid.uuid4().hex, False
-            available_at = time()
+            available_at = as_kst(now_provider()).timestamp()
             connection.execute(
                 "INSERT INTO central_news_article_revisions(article_revision_id,stock_code,identity,content_hash,"
                 "collector_id,published_at,received_at,available_at,collection_scope,revision_of,document_json) "
@@ -196,24 +197,28 @@ def _save_sqlite_news_source_page(connection: sqlite3.Connection,
         if not processing_excluded:
             _insert_sqlite_news_job(
                 connection, article_revision_id, "GLOBAL", "GLOBAL", "BODY", content_hash,
-                ARTICLE_BODY_EXTRACTOR_VERSION, document, time(),
+                ARTICLE_BODY_EXTRACTOR_VERSION, document, as_kst(now_provider()).timestamp(),
             )
         for target in targets:
-            _insert_sqlite_article_target(connection, article_revision_id, identity, target)
+            _insert_sqlite_article_target(
+                connection, article_revision_id, identity, target, now_provider=now_provider,
+            )
             if not processing_excluded and str(target.get("relation_status") or "") == "confirmed":
-                _enqueue_sqlite_existing_body_rule(connection, article_revision_id, target)
+                _enqueue_sqlite_existing_body_rule(
+                    connection, article_revision_id, target, now_provider=now_provider,
+                )
         connection.execute(
             "INSERT INTO central_news_source_observations(observation_id,run_id,source_id,query_text,page_start,"
             "article_revision_id,identity,published_at,received_at,available_at,content_hash,duplicate,document_json) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (uuid.uuid4().hex, run_id, source_id, query_text, page_start, article_revision_id, identity,
-             document.get("published_at"), now, time(), content_hash, int(duplicate),
+             document.get("published_at"), now, as_kst(now_provider()).timestamp(), content_hash, int(duplicate),
              json.dumps({"query_membership": query_text, "targets": targets,
                          "processing_excluded": processing_excluded, **document},
                         ensure_ascii=False, separators=(",", ":"))),
         )
     raw_count = len(value.get("items", []))
-    completed = float(value.get("completed_at") or time())
+    completed = float(value.get("completed_at") or as_kst(now_provider()).timestamp())
     run_document = dict(value.get("document") or {})
     connection.execute(
         "INSERT INTO central_news_source_runs(run_revision_id,run_id,source_id,scope,page_start,checked_at,completed_at,"
@@ -230,7 +235,8 @@ def _save_sqlite_news_source_page(connection: sqlite3.Connection,
 
 
 def _insert_sqlite_article_target(connection: sqlite3.Connection, article_revision_id: str,
-                                  identity: str, target: dict[str, Any]) -> bool:
+                                  identity: str, target: dict[str, Any], *,
+                                  now_provider: Callable[[], datetime] = kst_now) -> bool:
     code = str(target.get("stock_code") or "") or None
     name = str(target.get("stock_name") or "") or None
     status = str(target.get("relation_status") or "unresolved")
@@ -252,14 +258,15 @@ def _insert_sqlite_article_target(connection: sqlite3.Connection, article_revisi
         "stock_name,relation_status,evidence_text,rule_version,available_at,revision_of,document_json) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (uuid.uuid4().hex, article_revision_id, identity, code, name, status,
-         str(target.get("evidence_text") or ""), version, time(), str(previous[0]) if previous else None,
+         str(target.get("evidence_text") or ""), version, as_kst(now_provider()).timestamp(), str(previous[0]) if previous else None,
          json.dumps(document, ensure_ascii=False, separators=(",", ":"))),
     )
     return True
 
 
 def _enqueue_sqlite_existing_body_rule(
-    connection: sqlite3.Connection, article_revision_id: str, target: dict[str, Any],
+    connection: sqlite3.Connection, article_revision_id: str, target: dict[str, Any], *,
+    now_provider: Callable[[], datetime] = kst_now,
 ) -> None:
     body = connection.execute(
         "SELECT body_revision_id,content_hash FROM central_news_body_revisions "
@@ -274,7 +281,7 @@ def _enqueue_sqlite_existing_body_rule(
         SUPPLY_CONTRACT_RULE_VERSION,
         {"body_revision_id": str(body[0]), "stock_code": target_code,
          "stock_name": str(target.get("stock_name") or target_code)},
-        time(), str(body[0]),
+        as_kst(now_provider()).timestamp(), str(body[0]),
     )
 
 
@@ -297,8 +304,11 @@ def _upsert_sqlite_source_cursor(connection: sqlite3.Connection, value: dict[str
     )
 
 
-def _save_postgres_news_source_page(cursor: Any, value: dict[str, Any]) -> dict[str, Any]:
-    now = time()
+def _save_postgres_news_source_page(
+    cursor: Any, value: dict[str, Any], *,
+    now_provider: Callable[[], datetime] = kst_now,
+) -> dict[str, Any]:
+    now = as_kst(now_provider()).timestamp()
     source_id, query_text = str(value["source_id"]), str(value["query_text"])
     run_id, page_start = str(value.get("run_id") or uuid.uuid4().hex), int(value.get("page_start") or 1)
     new_count, duplicate_count = 0, 0
@@ -306,7 +316,7 @@ def _save_postgres_news_source_page(cursor: Any, value: dict[str, Any]) -> dict[
     for raw in value.get("items", []):
         identity, document, targets, processing_excluded = _source_item(raw)
         document.update({"identity": identity, "stock_code": "GLOBAL"})
-        content_hash = _news_article_content_hash(document)
+        content_hash = news_article_content_hash(document)
         cursor.execute(
             "SELECT article_revision_id,content_hash FROM central_news_source_observations "
             "WHERE source_id=%s AND identity=%s ORDER BY accepted_sequence DESC LIMIT 1",
@@ -326,7 +336,7 @@ def _save_postgres_news_source_page(cursor: Any, value: dict[str, Any]) -> dict[
             duplicate_count += 1
         else:
             article_revision_id, duplicate = uuid.uuid4().hex, False
-            available_at = time()
+            available_at = as_kst(now_provider()).timestamp()
             cursor.execute(
                 "INSERT INTO central_news_article_revisions(article_revision_id,stock_code,identity,content_hash,"
                 "collector_id,published_at,received_at,available_at,collection_scope,revision_of,document_json) "
@@ -338,7 +348,7 @@ def _save_postgres_news_source_page(cursor: Any, value: dict[str, Any]) -> dict[
             new_count += 1
         if not processing_excluded:
             _insert_postgres_news_job(cursor, article_revision_id, "GLOBAL", "GLOBAL", "BODY", content_hash,
-                                      ARTICLE_BODY_EXTRACTOR_VERSION, document, time())
+                                      ARTICLE_BODY_EXTRACTOR_VERSION, document, as_kst(now_provider()).timestamp())
         cursor.execute(
             "SELECT article_revision_id FROM central_news_article_revisions "
             "WHERE article_revision_id=%s FOR UPDATE", (article_revision_id,),
@@ -346,21 +356,25 @@ def _save_postgres_news_source_page(cursor: Any, value: dict[str, Any]) -> dict[
         if cursor.fetchone() is None:
             raise ValueError("소스 관측에 연결할 기사 리비전이 없습니다.")
         for target in targets:
-            _insert_postgres_article_target(cursor, article_revision_id, identity, target)
+            _insert_postgres_article_target(
+                cursor, article_revision_id, identity, target, now_provider=now_provider,
+            )
             if not processing_excluded and str(target.get("relation_status") or "") == "confirmed":
-                _enqueue_postgres_existing_body_rule(cursor, article_revision_id, target)
+                _enqueue_postgres_existing_body_rule(
+                    cursor, article_revision_id, target, now_provider=now_provider,
+                )
         cursor.execute(
             "INSERT INTO central_news_source_observations(observation_id,run_id,source_id,query_text,page_start,"
             "article_revision_id,identity,published_at,received_at,available_at,content_hash,duplicate,document_json) "
             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (uuid.uuid4().hex, run_id, source_id, query_text, page_start, article_revision_id, identity,
-             document.get("published_at"), now, time(), content_hash, duplicate,
+             document.get("published_at"), now, as_kst(now_provider()).timestamp(), content_hash, duplicate,
              json.dumps({"query_membership": query_text, "targets": targets,
                          "processing_excluded": processing_excluded, **document},
                         ensure_ascii=False, separators=(",", ":"))),
         )
     raw_count = len(value.get("items", []))
-    completed = float(value.get("completed_at") or time())
+    completed = float(value.get("completed_at") or as_kst(now_provider()).timestamp())
     cursor.execute(
         "INSERT INTO central_news_source_runs(run_revision_id,run_id,source_id,scope,page_start,checked_at,completed_at,"
         "raw_count,unique_count,duplicate_count,request_count,budget_remaining,truncated,coverage,error,document_json) "
@@ -376,7 +390,8 @@ def _save_postgres_news_source_page(cursor: Any, value: dict[str, Any]) -> dict[
 
 
 def _insert_postgres_article_target(cursor: Any, article_revision_id: str, identity: str,
-                                    target: dict[str, Any]) -> bool:
+                                    target: dict[str, Any], *,
+                                    now_provider: Callable[[], datetime] = kst_now) -> bool:
     code, name = str(target.get("stock_code") or "") or None, str(target.get("stock_name") or "") or None
     status, version = str(target.get("relation_status") or "unresolved"), str(target.get("rule_version") or "exact-krx-company-name-v1")
     cursor.execute(
@@ -396,14 +411,15 @@ def _insert_postgres_article_target(cursor: Any, article_revision_id: str, ident
         "stock_name,relation_status,evidence_text,rule_version,available_at,revision_of,document_json) "
         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (uuid.uuid4().hex, article_revision_id, identity, code, name, status,
-         str(target.get("evidence_text") or ""), version, time(), str(previous[0]) if previous else None,
+         str(target.get("evidence_text") or ""), version, as_kst(now_provider()).timestamp(), str(previous[0]) if previous else None,
          json.dumps(dict(target), ensure_ascii=False, separators=(",", ":"))),
     )
     return True
 
 
 def _enqueue_postgres_existing_body_rule(
-    cursor: Any, article_revision_id: str, target: dict[str, Any],
+    cursor: Any, article_revision_id: str, target: dict[str, Any], *,
+    now_provider: Callable[[], datetime] = kst_now,
 ) -> None:
     cursor.execute(
         "SELECT body_revision_id,content_hash FROM central_news_body_revisions "
@@ -419,7 +435,7 @@ def _enqueue_postgres_existing_body_rule(
         SUPPLY_CONTRACT_RULE_VERSION,
         {"body_revision_id": str(body[0]), "stock_code": target_code,
          "stock_name": str(target.get("stock_name") or target_code)},
-        time(), str(body[0]),
+        as_kst(now_provider()).timestamp(), str(body[0]),
     )
 
 
@@ -484,8 +500,10 @@ def _source_diagnostics(cursor_rows: list[tuple[object, ...]], run_rows: list[tu
 
 
 def _load_sqlite_news_source_diagnostics(connection: sqlite3.Connection, source_id: str,
-                                         days: int, limit: int) -> dict[str, Any]:
-    cutoff, bounded = time() - max(1, min(31, int(days))) * 86400, bounded_limit(limit, 1000)
+                                         days: int, limit: int, *,
+                                         now_provider: Callable[[], datetime] = kst_now) -> dict[str, Any]:
+    current = as_kst(now_provider())
+    cutoff, bounded = current.timestamp() - max(1, min(31, int(days))) * 86400, bounded_limit(limit, 1000)
     where, params = (" WHERE source_id=?", [source_id]) if source_id else ("", [])
     cursors = connection.execute("SELECT " + ",".join(_NEWS_SOURCE_CURSOR_KEYS) +
                                  " FROM central_news_source_cursors" + where + " ORDER BY source_id", params).fetchall()
@@ -524,7 +542,7 @@ def _load_sqlite_news_source_diagnostics(connection: sqlite3.Connection, source_
     ).fetchall()
     budgets = connection.execute(
         "SELECT scope,request_count FROM central_news_request_budget WHERE budget_date=?",
-        (datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat(),),
+        (current.date().isoformat(),),
     ).fetchall()
     jobs = connection.execute("SELECT state,COUNT(*) FROM central_news_jobs GROUP BY state").fetchall()
     observed_articles = "SELECT DISTINCT article_revision_id FROM central_news_source_observations" + run_where.replace("checked_at", "available_at")
@@ -564,8 +582,10 @@ def _load_sqlite_news_source_diagnostics(connection: sqlite3.Connection, source_
 
 
 def _load_postgres_news_source_diagnostics(cursor: Any, source_id: str,
-                                           days: int, limit: int) -> dict[str, Any]:
-    cutoff, bounded = time() - max(1, min(31, int(days))) * 86400, bounded_limit(limit, 1000)
+                                           days: int, limit: int, *,
+                                           now_provider: Callable[[], datetime] = kst_now) -> dict[str, Any]:
+    current = as_kst(now_provider())
+    cutoff, bounded = current.timestamp() - max(1, min(31, int(days))) * 86400, bounded_limit(limit, 1000)
     where, params = (" WHERE source_id=%s", [source_id]) if source_id else ("", [])
     cursor.execute("SELECT " + ",".join(_NEWS_SOURCE_CURSOR_KEYS) +
                    " FROM central_news_source_cursors" + where + " ORDER BY source_id", params)
@@ -607,7 +627,7 @@ def _load_postgres_news_source_diagnostics(cursor: Any, source_id: str,
         run_where.replace("checked_at", "available_at") + " GROUP BY source_id", run_params)
     source_identities = cursor.fetchall()
     cursor.execute("SELECT scope,request_count FROM central_news_request_budget WHERE budget_date=%s",
-                   (datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat(),))
+                   (current.date().isoformat(),))
     budgets = cursor.fetchall()
     cursor.execute("SELECT state,COUNT(*) FROM central_news_jobs GROUP BY state")
     jobs = cursor.fetchall()

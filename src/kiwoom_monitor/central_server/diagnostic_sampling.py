@@ -7,6 +7,11 @@ import time
 from collections import Counter, defaultdict
 from hashlib import sha256
 from pathlib import Path
+from datetime import UTC, datetime
+
+from .diagnostic_workloads import (
+    _set, _history, control_snapshot, diagnostic_tool_status, paused_workloads,
+)
 
 
 def _db_calls_report(before: dict, after: dict, session_id: str,
@@ -598,3 +603,371 @@ def read_host_snapshot() -> dict[str, object]:
             "uncontrolled_importers": _uncontrolled_importers(),
             "scope_note": "host counters and saved mapping are not per-transaction attribution"}
 
+
+def _session_active(path: Path, session_id: str) -> bool:
+    tool = diagnostic_tool_status(path)
+    return bool(tool["enabled"] and tool["session_id"] == session_id)
+
+
+def _aborted_phase(label: str, reason: str, *, samples: int = 0) -> dict:
+    return {"label": label, "state": "aborted", "reason": reason,
+            "samples": samples, "elapsed_seconds": 0}
+
+
+def measure(seconds: int, label: str, session_id: str, *, path: Path, api,
+            stop=None, checkpoint=None, database_url=None,
+            on_started=None, include_raw_calls: bool = True) -> dict:
+    if (stop is not None and stop.is_set()) or not _session_active(path, session_id):
+        return _aborted_phase(label, "diagnostic_session_ended")
+    import psycopg
+
+    database_url = database_url or os.environ["KIWOOM_SERVER_DATABASE_URL"]
+    log_path, offset = _log_position()
+    device_before = _device_stats()
+    host_before = _host_usage()
+    runtime_before = api("/api/v1/diagnostics/workloads")
+    writer_registry = api("/api/v1/diagnostics/writers")
+    importers_before = _uncontrolled_importers()
+    control_before = control_snapshot(path)
+    db_probe_at = time.time()
+    db_calls_before = api("/api/v1/diagnostics/db-calls",
+                           {"start": db_probe_at - 1, "end": db_probe_at})
+    wait_counts: Counter[str] = Counter()
+    active_counts: Counter[str] = Counter()
+    blocking_counts: Counter[str] = Counter()
+    max_query_ms: dict[str, int] = {}
+    activity_rows_truncated = False
+    commit_activity_samples: list[dict] = []
+    commit_activity_samples_dropped = 0
+    started = time.time()
+    started_mono = time.monotonic()
+    started_iso = datetime.now(UTC).isoformat()
+    first_device_stats = _device_stats()
+    device_samples = [{"at": time.time(), "stats": first_device_stats}]
+    next_pg_sample = started_mono
+    next_device_sample = started_mono + 0.25
+    measure_deadline = started_mono + seconds
+    aborted_reason = None
+    samples = 0
+    if (stop is not None and stop.is_set()) or not _session_active(path, session_id):
+        return _aborted_phase(label, "diagnostic_session_ended")
+    try:
+        with psycopg.connect(database_url, autocommit=True, connect_timeout=5) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SET default_transaction_read_only=on")
+                cursor.execute("SET statement_timeout TO '2000ms'")
+                wal_timing = _wal_timing_status(cursor)
+                io_timing = _io_timing_status(cursor)
+                before = _snapshot(cursor)
+                before_pg_stat_io = _optional_io_snapshot(cursor, _pg_stat_io_snapshot)
+                before_checkpointer = _optional_io_snapshot(cursor, _checkpointer_snapshot)
+                if on_started is not None:
+                    # The replay clock begins only after its dedicated DB
+                    # baseline is captured, so its first call is measured.
+                    started = time.time()
+                    started_mono = time.monotonic()
+                    started_iso = datetime.now(UTC).isoformat()
+                    measure_deadline = started_mono + seconds
+                    next_pg_sample = started_mono
+                    next_device_sample = started_mono + 0.25
+                    device_samples = [{"at": started, "stats": _device_stats()}]
+                    on_started()
+                while time.monotonic() < measure_deadline:
+                    if stop is not None and stop.is_set():
+                        aborted_reason = "cancel_requested"
+                        break
+                    if not _session_active(path, session_id):
+                        aborted_reason = "diagnostic_session_ended"
+                        break
+                    now_mono = time.monotonic()
+                    if now_mono >= next_pg_sample and next_pg_sample < measure_deadline:
+                        activity_probe_started = time.time()
+                        cursor.execute(
+                            "SELECT pid,backend_start,state,COALESCE(wait_event_type,''),"
+                            "COALESCE(wait_event,''),"
+                            "EXTRACT(EPOCH FROM clock_timestamp()-query_start)*1000,"
+                            "pg_blocking_pids(pid),query FROM pg_stat_activity "
+                            "WHERE datname=current_database() AND pid<>pg_backend_pid() "
+                            "ORDER BY query_start NULLS LAST LIMIT 201"
+                        )
+                        activity_rows = cursor.fetchall()
+                        activity_probe_finished = time.time()
+                        activity_rows_truncated |= len(activity_rows) > 200
+                        for pid, backend_start, state, wait_type, wait_event, query_age, blockers, query in activity_rows[:200]:
+                            if state != "active":
+                                continue
+                            wait_counts[f"{wait_type or 'CPU'}:{wait_event or '-'}"] += 1
+                            statement = (query or "").lower()
+                            if hasattr(backend_start, "timestamp"):
+                                if len(commit_activity_samples) < 8192:
+                                    commit_activity_samples.append({
+                                        "pid": pid, "backend_started_at": backend_start.timestamp(),
+                                        "started_at": activity_probe_started,
+                                        "finished_at": activity_probe_finished,
+                                        "wait_type": wait_type, "wait_event": wait_event,
+                                        "blocking_pids": list(blockers or ()),
+                                        "statement_type": ("COMMIT" if statement.strip().rstrip(";")
+                                                           in {"commit", "end"} else "OTHER"),
+                                    })
+                                else:
+                                    commit_activity_samples_dropped += 1
+                            category = "minute_bars" if "central_minute_bars" in statement else (
+                                "news" if "central_news_" in statement else "other"
+                            )
+                            active_counts[category] += 1
+                            if blockers:
+                                blocking_counts[category] += 1
+                            max_query_ms[category] = max(max_query_ms.get(category, 0),
+                                                         int(query_age or 0))
+                        samples += 1
+                        if checkpoint is not None:
+                            checkpoint(started, time.time())
+                        next_pg_sample = time.monotonic() + 1.0
+                    if now_mono >= next_device_sample and next_device_sample < measure_deadline:
+                        current_stats = _device_stats()
+                        device_samples.append({"at": time.time(), "stats": current_stats})
+                        next_device_sample = time.monotonic() + 0.25
+                    if not _session_active(path, session_id):
+                        aborted_reason = "diagnostic_session_ended"
+                        break
+                    next_tick = min(next_pg_sample, next_device_sample, measure_deadline)
+                    delay = max(0.005, min(0.05, next_tick - time.monotonic()))
+                    if stop is None:
+                        time.sleep(delay)
+                    else:
+                        stop.wait(delay)
+                if stop is not None and stop.is_set():
+                    aborted_reason = "cancel_requested"
+                elif not _session_active(path, session_id):
+                    aborted_reason = "diagnostic_session_ended"
+                if not aborted_reason:
+                    after = _snapshot(cursor)
+                    after_pg_stat_io = _optional_io_snapshot(cursor, _pg_stat_io_snapshot)
+                    after_checkpointer = _optional_io_snapshot(cursor, _checkpointer_snapshot)
+    except psycopg.Error as error:
+        return {"label": label, "state": "aborted", "reason": "database_probe_failed",
+                "error_type": type(error).__name__, "samples": samples,
+                "started_at_utc": started_iso,
+                "elapsed_seconds": round(time.time() - started, 3)}
+    elapsed = time.time() - started
+    ended = time.time()
+    device_after = _device_stats()
+    device_samples.append({"at": time.time(), "stats": device_after})
+    if aborted_reason:
+        return {"label": label, "state": "aborted", "reason": aborted_reason,
+                "started_at_utc": started_iso, "elapsed_seconds": round(elapsed, 3),
+                "samples": samples, "wait_samples": dict(wait_counts),
+                "active_query_samples": dict(active_counts),
+                "blocking_samples": dict(blocking_counts),
+                "max_query_ms": max_query_ms,
+                "activity_rows_truncated": activity_rows_truncated}
+    reset_before = before.get("stats_reset", {})
+    reset_after = after.get("stats_reset", {})
+    resets = {scope: reset_before.get(scope) != reset_after.get(scope)
+              for scope in ("wal", "database")}
+    wal_keys = {"wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full",
+                "wal_write", "wal_sync", "wal_write_time_ms", "wal_sync_time_ms"}
+    delta = {}
+    for key, old in before.items():
+        if key == "stats_reset":
+            continue
+        new = after[key]
+        delta[key] = (None if new < old or resets["wal" if key in wal_keys else "database"]
+                      else round(new - old, 3))
+    pg_stat_io_delta = _counter_delta(before_pg_stat_io, after_pg_stat_io)
+    checkpointer_delta = _counter_delta(before_checkpointer, after_checkpointer)
+    runtime_after = api("/api/v1/diagnostics/workloads")
+    market_bar_saves = api("/api/v1/diagnostics/market-bar-saves",
+                            {"start": started, "end": ended})
+    db_calls_after = api("/api/v1/diagnostics/db-calls",
+                          {"start": started, "end": ended})
+    db_calls_raw = (api("/api/v1/diagnostics/db-calls",
+                        {"start": started, "end": ended, "mode": "raw", "limit": 50_000})
+                    if include_raw_calls else None)
+    db_calls = _db_calls_report(db_calls_before, db_calls_after, session_id,
+                                control_before, control_snapshot(path))
+    db_commit_activity = _correlate_db_commit_activity(
+        db_calls_raw, commit_activity_samples,
+        dropped_samples=commit_activity_samples_dropped,
+        rows_truncated=activity_rows_truncated,
+    )
+    if db_calls.get("state") != "complete" and db_commit_activity["state"] != "unavailable":
+        db_commit_activity["state"] = "incomplete"
+        db_commit_activity["reason"] = db_calls.get("reason", "db_call_window_incomplete")
+    market_bar_saves = _correlate_commit_device_samples(market_bar_saves, device_samples)
+    wal_timing = (_wal_timing_report(wal_timing, delta, market_bar_saves)
+                  if delta.get("wal_write_time_ms") is not None and
+                  delta.get("wal_sync_time_ms") is not None else
+                  {"time_values_available": False, "reason": "stats_reset_or_counter_decreased"})
+    return {
+        "label": label, "state": "aborted" if aborted_reason else "complete",
+        "reason": aborted_reason, "samples": samples,
+        "started_at_utc": started_iso,
+        "elapsed_seconds": round(elapsed, 3),
+        "paused_at_end": sorted(paused_workloads(path=path)),
+        "runtime_before": runtime_before,
+        "runtime_after": runtime_after,
+        "writer_registry": writer_registry,
+        "uncontrolled_importers_before": importers_before,
+        "uncontrolled_importers_after": _uncontrolled_importers(),
+        "database_delta": delta,
+        "database_delta_scope": {
+            "name": "whole_measurement_interval_delta",
+            "started_at_utc": started_iso,
+            "ended_at_utc": datetime.fromtimestamp(ended, UTC).isoformat(),
+            "wal_statistics": "cluster-wide pg_stat_wal counters",
+            "database_statistics": "pg_stat_database counters for current_database()",
+            "replay_exclusive": False,
+            "includes_sampler_activity": True,
+            "scope_note": (
+                "database_delta is the before/after delta for the entire measurement interval. "
+                "WAL is cluster-wide; database transaction counters include sampler probes and "
+                "other work in the measured database. Use replay.direct_call_totals for calls "
+                "correlated to replay; PostgreSQL does not expose per-transaction WAL bytes here."
+            ),
+        },
+        "statistics_reset": resets,
+        "pg_stat_io_delta": pg_stat_io_delta,
+        "checkpointer_delta": checkpointer_delta,
+        "wal_timing": wal_timing,
+        "io_timing": io_timing,
+        "storage_mapping": _storage_mapping(),
+        "wal_bytes_per_second": (round(delta["wal_bytes"] / elapsed, 2)
+                                 if elapsed > 0 and delta.get("wal_bytes") is not None
+                                 else None),
+        "wait_samples": dict(wait_counts), "active_query_samples": dict(active_counts),
+        "blocking_samples": dict(blocking_counts), "max_query_ms": max_query_ms,
+        "activity_rows_truncated": activity_rows_truncated,
+        "log_counts": _log_counts(log_path, offset),
+        "market_bar_saves": market_bar_saves,
+        "db_calls": db_calls,
+        "db_commit_activity": db_commit_activity,
+        "db_calls_raw": db_calls_raw,
+        "storage_devices": _device_delta(device_before, device_after, elapsed),
+        "host_before": host_before, "host_after": _host_usage(),
+    }
+
+
+def _external_market_activity(phase: dict) -> dict[str, object]:
+    def runtime(label: str) -> dict:
+        workloads = phase.get(label, {}).get("workloads", {})
+        item = workloads.get("external_market", {}) if isinstance(workloads, dict) else {}
+        value = item.get("runtime", {}) if isinstance(item, dict) else {}
+        return value if isinstance(value, dict) else {}
+
+    before = runtime("runtime_before")
+    after = runtime("runtime_after")
+    try:
+        attempts = max(0, int(after.get("collection_attempts", 0))
+                      - int(before.get("collection_attempts", 0)))
+    except (TypeError, ValueError):
+        attempts = 0
+    try:
+        completions = max(0, int(after.get("collection_completions", 0))
+                          - int(before.get("collection_completions", 0)))
+    except (TypeError, ValueError):
+        completions = 0
+    try:
+        saved_rows = max(0, int(after.get("collection_saved_rows_total", 0))
+                         - int(before.get("collection_saved_rows_total", 0)))
+    except (TypeError, ValueError):
+        saved_rows = 0
+    return {
+        "observed": completions > 0,
+        "collection_attempts": attempts,
+        "collection_completions": completions,
+        "last_collection_completed_at": after.get("last_collection_completed_at"),
+        "saved_rows_delta": saved_rows,
+        "last_collection_error": after.get("last_collection_error") if attempts else None,
+    }
+
+
+def run_measurement(args, path: Path, seconds: int, test_id: str,
+                    session_id: str, *, api, stop=None, checkpoint=None,
+                    include_raw_calls: bool = True) -> dict:
+    if args.command == "measure":
+        phase = measure(seconds, args.label, session_id, api=api, path=path, stop=stop,
+                         checkpoint=checkpoint, include_raw_calls=include_raw_calls)
+        return {"kind": "measure", "test_id": test_id,
+                "state": phase["state"], "phase": phase}
+
+    # A/B/A ordering helps distinguish workload effect from time trend.
+    if args.workload in paused_workloads(path=path):
+        raise ValueError("comparison target is already paused; resume it first")
+    configured = api("/api/v1/diagnostics/workloads").get("workloads", {}).get(args.workload, {})
+    if not configured.get("configured"):
+        raise ValueError("target is disabled or live runtime status is unavailable")
+    external_runtime = configured.get("runtime", {}) if args.workload == "external_market" else {}
+    if args.workload == "external_market":
+        if not external_runtime.get("operational_enabled") or not external_runtime.get("running"):
+            raise ValueError("external_market collector is not operationally running; check its NAS setting")
+        poll_seconds = int(external_runtime.get("poll_seconds") or 0)
+        if poll_seconds and seconds <= poll_seconds:
+            raise ValueError(
+                f"duration must exceed external_market poll_seconds ({poll_seconds}s); "
+                "use a longer phase or lower its configured polling interval"
+            )
+    phases = []
+    lease = min(3600, seconds * 3 + 120)
+    test_owner = f"test:{test_id}"
+    paused_by_test = False
+    try:
+        phases.append(measure(seconds, "baseline_on", session_id, api=api, path=path, stop=stop,
+                               checkpoint=checkpoint, include_raw_calls=include_raw_calls))
+        if phases[-1]["state"] == "aborted":
+            return {"kind": "compare", "test_id": test_id, "workload": args.workload,
+                    "state": "aborted", "phases": phases}
+        if not _session_active(path, session_id):
+            return {"kind": "compare", "test_id": test_id, "workload": args.workload,
+                    "state": "aborted", "phases": phases}
+        _set(path, args.workload, True, lease, owner=test_owner,
+             expected_session=session_id)
+        if not _session_active(path, session_id):
+            return {"kind": "compare", "test_id": test_id, "workload": args.workload,
+                    "state": "aborted", "phases": phases}
+        paused_by_test = True
+        _history("test_pause", workload=args.workload, detail={"test_id": test_id})
+        (stop.wait(2) if stop is not None else time.sleep(2))  # settle, not drain ACK
+        phases.append(measure(seconds, "paused", session_id, api=api, path=path, stop=stop,
+                               checkpoint=checkpoint, include_raw_calls=include_raw_calls))
+        if phases[-1]["state"] == "aborted":
+            return {"kind": "compare", "test_id": test_id, "workload": args.workload,
+                    "state": "aborted", "phases": phases}
+        _set(path, args.workload, False, lease, owner=test_owner,
+             expected_session=session_id)
+        paused_by_test = False
+        _history("test_resume", workload=args.workload, detail={"test_id": test_id})
+        (stop.wait(2) if stop is not None else time.sleep(2))
+        phases.append(measure(seconds, "resumed_on", session_id, api=api, path=path, stop=stop,
+                               checkpoint=checkpoint, include_raw_calls=include_raw_calls))
+        if args.workload == "external_market":
+            for phase in phases:
+                phase["target_activity"] = _external_market_activity(phase)
+            on_activity = [phases[0]["target_activity"]["observed"],
+                           phases[2]["target_activity"]["observed"]]
+            paused_activity = phases[1]["target_activity"]["observed"]
+            valid = all(on_activity) and not paused_activity
+            report_conclusion = ("target_activity_observed; inspect measured deltas before attribution"
+                                 if valid else "inconclusive_target_activity_not_confirmed")
+        else:
+            valid = None
+            report_conclusion = "measurement_only; inspect activity and repeat before attribution"
+    finally:
+        if paused_by_test:
+            if _session_active(path, session_id):
+                _set(path, args.workload, False, lease, owner=test_owner,
+                     expected_session=session_id)
+                _history("test_restore", workload=args.workload,
+                         detail={"test_id": test_id})
+    report = {"kind": "compare", "test_id": test_id,
+            "workload": args.workload, "phases": phases,
+            "state": "aborted" if phases[-1]["state"] == "aborted" else "complete",
+            "conclusion": report_conclusion,
+            "limitations": [
+                "An in-flight task can finish after its pause; check log counts before attribution.",
+                "A phase without workload activity cannot establish that workload's effect.",
+                "External importers, backup, and host I/O are not controlled by this command.",
+            ]}
+    if args.workload == "external_market":
+        report["valid_for_attribution"] = valid
+    return report

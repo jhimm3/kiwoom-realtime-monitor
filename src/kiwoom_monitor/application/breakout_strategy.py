@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from kiwoom_monitor.domain.strategy_contract import (
+    BREAKOUT_STRATEGY_ID as STRATEGY_ID, BREAKOUT_STRATEGY_VERSION as STRATEGY_VERSION,
+    REGULAR_SESSION_EXIT_POLICY, StrategyRuntimeConfig, validate_session_exit_policy,
+    BreakoutStrategyConfig, default_shadow_breakout_config, StrategyDecision,
+)
+
 import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
@@ -30,37 +36,7 @@ from kiwoom_monitor.application.market_session_schedule import (
 )
 
 
-STRATEGY_ID = "krx_bar_close_breakout"
-STRATEGY_VERSION = "v1"
 STATE_NAMES = frozenset({"flat", "candidate", "open", "cooldown"})
-REGULAR_SESSION_EXIT_POLICY = "krx_regular_before_auction/v1"
-
-
-class StrategyRuntimeConfig(Protocol):
-    strategy_version: str
-    rank_persistence_enabled: bool
-    rank_persistence_required: bool
-    rank_top_k: int | None
-    rank_window_seconds: int | None
-    rank_max_gap_seconds: int | None
-    rank_min_residency_seconds: int | None
-    stop_loss_bps: int
-    target_bps: int
-    max_hold_minutes: int
-    quantity: int
-    capital_won: int
-    signal_valid_seconds: int
-    session_exit_policy: str
-    session_exit_buffer_seconds: int
-
-
-def validate_session_exit_policy(policy: str, buffer_seconds: int) -> None:
-    if type(buffer_seconds) is not int:
-        raise ValueError("session exit buffer must be integer seconds")
-    if policy == "" and buffer_seconds == 0:
-        return
-    if policy != REGULAR_SESSION_EXIT_POLICY or not 60 <= buffer_seconds <= 3600:
-        raise ValueError("registered regular session exit policy requires a 60-3600 second buffer")
 
 
 def regular_session_fill_deadline(at: datetime) -> datetime:
@@ -98,98 +74,6 @@ def session_entry_time_rejection(config: StrategyRuntimeConfig, at: datetime, *,
     if local + required >= deadline:
         return "session_entry_budget_exhausted"
     return ""
-
-
-@dataclass(frozen=True)
-class BreakoutStrategyConfig:
-    strategy_version: str
-    rolling_factor_version: str
-    rank_factor_version: str
-    lookback_bars: int
-    buffer_bps: int
-    rank_persistence_enabled: bool
-    rank_persistence_required: bool
-    rank_top_k: int | None
-    rank_window_seconds: int | None
-    rank_max_gap_seconds: int | None
-    rank_min_residency_seconds: int | None
-    stop_loss_bps: int
-    target_bps: int
-    max_hold_minutes: int
-    quantity: int
-    capital_won: int
-    signal_valid_seconds: int
-    cooldown_seconds: int
-    session_exit_policy: str = ""
-    session_exit_buffer_seconds: int = 0
-
-    def __post_init__(self) -> None:
-        validate_session_exit_policy(self.session_exit_policy, self.session_exit_buffer_seconds)
-        if self.strategy_version != STRATEGY_VERSION:
-            raise ValueError(f"unregistered strategy: {STRATEGY_ID}/{self.strategy_version}")
-        get_factor_definition(ROLLING_HIGH_BREAKOUT_ID, self.rolling_factor_version)
-        get_factor_definition(RANK_PERSISTENCE_ID, self.rank_factor_version)
-        if self.rank_persistence_enabled:
-            if None in (
-                self.rank_top_k, self.rank_window_seconds, self.rank_max_gap_seconds,
-                self.rank_min_residency_seconds,
-            ):
-                raise ValueError("enabled rank persistence requires all rank parameters")
-            RankPersistenceParameters(
-                top_k=int(self.rank_top_k),
-                window_seconds=int(self.rank_window_seconds),
-                max_gap_seconds=int(self.rank_max_gap_seconds),
-            )
-            if int(self.rank_min_residency_seconds) < 0:
-                raise ValueError("rank_min_residency_seconds must not be negative")
-        elif self.rank_persistence_required:
-            raise ValueError("disabled rank persistence cannot be required")
-        RollingHighBreakoutParameters(self.lookback_bars, self.buffer_bps)
-        if self.stop_loss_bps <= 0 or self.target_bps <= 0:
-            raise ValueError("stop_loss_bps and target_bps must be positive")
-        if self.max_hold_minutes <= 0 or self.quantity <= 0 or self.capital_won <= 0:
-            raise ValueError("hold duration, quantity, and capital must be positive")
-        if self.signal_valid_seconds <= 0 or self.cooldown_seconds < 0:
-            raise ValueError("signal validity must be positive and cooldown must not be negative")
-
-    def to_dict(self) -> dict[str, Any]:
-        document = asdict(self)
-        if not self.session_exit_policy:
-            document.pop("session_exit_policy")
-            document.pop("session_exit_buffer_seconds")
-        if not self.rank_persistence_enabled:
-            document.update({
-                "rank_persistence_required": False,
-                "rank_top_k": None,
-                "rank_window_seconds": None,
-                "rank_max_gap_seconds": None,
-                "rank_min_residency_seconds": None,
-            })
-        return document
-
-
-def default_shadow_breakout_config() -> BreakoutStrategyConfig:
-    """Return the editable initial profile used by the order-free live monitor."""
-    return BreakoutStrategyConfig(
-        strategy_version="v1",
-        rolling_factor_version="v1",
-        rank_factor_version="v1",
-        lookback_bars=5,
-        buffer_bps=0,
-        rank_persistence_enabled=True,
-        rank_persistence_required=True,
-        rank_top_k=20,
-        rank_window_seconds=300,
-        rank_max_gap_seconds=60,
-        rank_min_residency_seconds=60,
-        stop_loss_bps=300,
-        target_bps=500,
-        max_hold_minutes=10,
-        quantity=1,
-        capital_won=1_000_000,
-        signal_valid_seconds=60,
-        cooldown_seconds=30,
-    )
 
 
 @dataclass(frozen=True)
@@ -231,27 +115,6 @@ class FeatureSnapshot:
     strategy_version: str
     policy_version: str
     state_before: Mapping[str, Any]
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class StrategyDecision:
-    decision_id: str
-    run_id: str
-    snapshot_id: str
-    symbol: str
-    proposal: str
-    final_action: str
-    quantity: int
-    signal_reference_price: int
-    required_capital_won: int
-    reasons: tuple[str, ...]
-    constraints: tuple[str, ...]
-    state_before: Mapping[str, Any]
-    state_after: Mapping[str, Any]
-    decided_at: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -35,13 +35,12 @@ from kiwoom_monitor.infrastructure.central_operational_settings import (
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient, KiwoomSettings
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import ApiProfiles, LocalApiConfig
+from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import RemoteKiwoomRestClient
 from kiwoom_monitor.infrastructure.local_storage_diagnostics import inspect_local_storage
-from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
-from kiwoom_monitor.infrastructure.news_ai import DEFAULT_MODELS, MODEL_OPTIONS
+from kiwoom_monitor.domain.news_ai_contract import DEFAULT_MODELS, MODEL_OPTIONS
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
-from kiwoom_monitor.presentation.nas_credentials_dialog import NasCredentialsDialog, PROVIDER_LABELS
 
 
 def _section_title(text: str) -> QLabel:
@@ -66,10 +65,12 @@ def _load_resource_document(source: DataSourceSettings) -> dict[str, object]:
 
 class ApiSettingsDialog(QDialog):
     def __init__(self, path: Path, parent: QWidget | None = None, *, active_route: str = "",
-                 section: str = "kiwoom", initial_mode: str | None = None) -> None:
+                 section: str = "kiwoom", initial_mode: str | None = None,
+                 query_only: bool = False) -> None:
         super().__init__(parent)
-        self._section = "nas" if section == "nas" else "kiwoom"
-        self.setWindowTitle("NAS 연결 설정" if self._section == "nas" else "키움 API 설정")
+        self._query_only = query_only
+        self._section = "nas" if query_only or section == "nas" else "kiwoom"
+        self.setWindowTitle("조회 연결 설정" if query_only else "NAS 연결 설정" if self._section == "nas" else "키움 API 설정")
         self._path = path
         self._mock_app_key = QLineEdit()
         self._mock_secret_key = QLineEdit()
@@ -80,18 +81,22 @@ class ApiSettingsDialog(QDialog):
         self._environment = QComboBox()
         self._environment.addItem("모의투자", "mock")
         self._environment.addItem("실전투자", "real")
-        self._data_source_path = path.with_name("data_source.json")
+        self._data_source_path = DataSourceConfig.connection_path(path, query_only=query_only)
         try:
             self._data_source = DataSourceConfig(self._data_source_path).load()
         except (ValueError, OSError, json.JSONDecodeError):
             self._data_source = DataSourceSettings()
         self._data_source_mode = QComboBox()
-        self._data_source_mode.addItem("이 PC에서 키움 API 직접 연결", "local")
-        self._data_source_mode.addItem("이 PC의 Docker 서버 사용 (앱 재시작 후 적용)", "local_server")
-        self._data_source_mode.addItem("NAS로 연결 (앱 재시작 후 전체 적용)", "personal_server")
+        if query_only:
+            self._data_source_mode.addItem("공통 데이터 공급에 연결", "personal_server")
+            self._data_source_mode.addItem("이 PC의 공통 서버에 연결", "local_server")
+        else:
+            self._data_source_mode.addItem("이 PC에서 키움 API 직접 연결", "local")
+            self._data_source_mode.addItem("이 PC의 Docker 서버 사용 (앱 재시작 후 적용)", "local_server")
+            self._data_source_mode.addItem("NAS로 연결 (앱 재시작 후 전체 적용)", "personal_server")
         mode_index = self._data_source_mode.findData(self._data_source.mode)
         self._data_source_mode.setCurrentIndex(max(0, mode_index))
-        if initial_mode in {"local", "local_server", "personal_server"}:
+        if initial_mode in {"local", "local_server", "personal_server"} and self._data_source_mode.findData(initial_mode) >= 0:
             self._data_source_mode.setCurrentIndex(self._data_source_mode.findData(initial_mode))
         self._server_url = QLineEdit(self._data_source.server_url)
         self._server_url.setPlaceholderText("예: https://monitor.example.com")
@@ -155,7 +160,7 @@ class ApiSettingsDialog(QDialog):
         self._closed = False
         self._initial_load_started = False
 
-        if path.exists():
+        if path.exists() and not query_only:
             try:
                 profiles = LocalApiConfig(path).load_profiles()
                 self._mock_app_key.setText(profiles.mock_app_key)
@@ -205,60 +210,63 @@ class ApiSettingsDialog(QDialog):
             layout.addRow("이 PC 저장량", local_resource_row)
         else:
             layout.addRow("현재 실제 연결", self._active_route_status)
-            layout.addRow("NAS 주소", self._server_url)
-            layout.addRow("NAS 접속 토큰", self._server_token)
-            self._nas_credentials_client = None
-            self._nas_credentials_button = QPushButton("NAS 모의계좌·API 키 관리")
-            self._nas_credentials_button.clicked.connect(self._open_nas_credentials)
-            layout.addRow(self._nas_credentials_button)
-            self._nas_provider_clients = {}
-            self._nas_real_credentials_button = QPushButton("NAS 실전계좌·API 키 관리")
-            self._nas_real_credentials_button.clicked.connect(
-                lambda: self._open_nas_provider_credentials("kiwoom_real"))
-            layout.addRow(self._nas_real_credentials_button)
-            self._nas_provider_button = QPushButton("NAS 뉴스·AI API 키 관리")
-            provider_menu = QMenu(self._nas_provider_button)
-            for provider, label in PROVIDER_LABELS.items():
-                action = provider_menu.addAction(label)
-                action.triggered.connect(lambda checked=False, selected=provider: self._open_nas_provider_credentials(selected))
-            self._nas_provider_button.setMenu(provider_menu)
-            layout.addRow(self._nas_provider_button)
+            layout.addRow("공급 주소" if query_only else "NAS 주소", self._server_url)
+            layout.addRow("공급 접속 토큰" if query_only else "NAS 접속 토큰", self._server_token)
+            if not query_only:
+                from kiwoom_monitor.presentation.nas_credentials_dialog import PROVIDER_LABELS
+                self._nas_credentials_client = None
+                self._nas_credentials_button = QPushButton("NAS 모의계좌·API 키 관리")
+                self._nas_credentials_button.clicked.connect(self._open_nas_credentials)
+                layout.addRow(self._nas_credentials_button)
+                self._nas_provider_clients = {}
+                self._nas_real_credentials_button = QPushButton("NAS 실전계좌·API 키 관리")
+                self._nas_real_credentials_button.clicked.connect(
+                    lambda: self._open_nas_provider_credentials("kiwoom_real"))
+                layout.addRow(self._nas_real_credentials_button)
+                self._nas_provider_button = QPushButton("NAS 뉴스·AI API 키 관리")
+                provider_menu = QMenu(self._nas_provider_button)
+                for provider, label in PROVIDER_LABELS.items():
+                    action = provider_menu.addAction(label)
+                    action.triggered.connect(lambda checked=False, selected=provider: self._open_nas_provider_credentials(selected))
+                self._nas_provider_button.setMenu(provider_menu)
+                layout.addRow(self._nas_provider_button)
             layout.addRow("장애 대응", self._local_fallback)
             layout.addRow("데이터 검증", self._parallel_validation)
-            layout.addRow(_section_title("NAS 운영 설정"))
-            layout.addRow("적용 상태", self._nas_operations_status)
-            reload_button = QPushButton("운영 설정 다시 불러오기")
-            reload_button.clicked.connect(self._load_nas_operational_settings)
-            layout.addRow(reload_button)
-            layout.addRow("AI 공급자", self._nas_ai_provider)
-            layout.addRow("AI 모델", self._nas_ai_model)
-            layout.addRow("AI 하루 최대 요청", self._nas_ai_daily_limit)
-            layout.addRow("등록 종목 뉴스 수집 주기", self._nas_news_refresh)
-            layout.addRow(self._nas_dart_enabled)
-            layout.addRow(_section_title("NAS 뉴스 수집원"))
-            layout.addRow(self._nas_stock_search_enabled)
-            layout.addRow(self._nas_query_enabled)
-            layout.addRow("검색어 (최대 50개)", self._nas_query_text)
-            layout.addRow("검색어별 수집 주기", self._nas_query_refresh)
-            layout.addRow(self._nas_stock_site_enabled)
-            layout.addRow("종목뉴스 API 주소", self._nas_stock_site_url)
-            layout.addRow(self._nas_market_news_enabled)
-            layout.addRow("FLASH API 주소", self._nas_flash_url)
-            layout.addRow("WORLD API 주소", self._nas_world_url)
-            query_note = QLabel("검색어는 한 줄에 하나씩 입력합니다. 공통 검색은 종목별 수집과 별도로 실행되며 하루 요청 한도 안에서 수집합니다.")
-            query_note.setWordWrap(True)
-            layout.addRow(query_note)
-            layout.addRow(_section_title("해외 지연 시세"))
-            layout.addRow(self._nas_external_enabled)
-            layout.addRow("수집 주기", self._nas_external_poll)
-            layout.addRow(self._nas_external_roll)
-            layout.addRow("월물 전환 확인 횟수", self._nas_external_confirmations)
-            resource_button = QPushButton("사용량 새로고침")
-            resource_button.clicked.connect(self._load_nas_resource_usage)
-            resource_row = QHBoxLayout()
-            resource_row.addWidget(resource_button)
-            resource_row.addWidget(self._nas_resource_status, 1)
-            layout.addRow("서버 사용량", resource_row)
+            if not query_only:
+                layout.addRow(_section_title("NAS 운영 설정"))
+                layout.addRow("적용 상태", self._nas_operations_status)
+                reload_button = QPushButton("운영 설정 다시 불러오기")
+                reload_button.clicked.connect(self._load_nas_operational_settings)
+                layout.addRow(reload_button)
+                layout.addRow("AI 공급자", self._nas_ai_provider)
+                layout.addRow("AI 모델", self._nas_ai_model)
+                layout.addRow("AI 하루 최대 요청", self._nas_ai_daily_limit)
+                layout.addRow("등록 종목 뉴스 수집 주기", self._nas_news_refresh)
+                layout.addRow(self._nas_dart_enabled)
+                layout.addRow(_section_title("NAS 뉴스 수집원"))
+                layout.addRow(self._nas_stock_search_enabled)
+                layout.addRow(self._nas_query_enabled)
+                layout.addRow("검색어 (최대 50개)", self._nas_query_text)
+                layout.addRow("검색어별 수집 주기", self._nas_query_refresh)
+                layout.addRow(self._nas_stock_site_enabled)
+                layout.addRow("종목뉴스 API 주소", self._nas_stock_site_url)
+                layout.addRow(self._nas_market_news_enabled)
+                layout.addRow("FLASH API 주소", self._nas_flash_url)
+                layout.addRow("WORLD API 주소", self._nas_world_url)
+                query_note = QLabel("검색어는 한 줄에 하나씩 입력합니다. 공통 검색은 종목별 수집과 별도로 실행되며 하루 요청 한도 안에서 수집합니다.")
+                query_note.setWordWrap(True)
+                layout.addRow(query_note)
+                layout.addRow(_section_title("해외 지연 시세"))
+                layout.addRow(self._nas_external_enabled)
+                layout.addRow("수집 주기", self._nas_external_poll)
+                layout.addRow(self._nas_external_roll)
+                layout.addRow("월물 전환 확인 횟수", self._nas_external_confirmations)
+                resource_button = QPushButton("사용량 새로고침")
+                resource_button.clicked.connect(self._load_nas_resource_usage)
+                resource_row = QHBoxLayout()
+                resource_row.addWidget(resource_button)
+                resource_row.addWidget(self._nas_resource_status, 1)
+                layout.addRow("서버 사용량", resource_row)
         self._connection_status = QLabel("연결 확인 전")
         test_button = QPushButton("연결 테스트")
         self._test_button = test_button
@@ -282,7 +290,7 @@ class ApiSettingsDialog(QDialog):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._closed = False
-        if self._section == "nas" and not self._initial_load_started:
+        if self._section == "nas" and not self._initial_load_started and not self._query_only:
             self._initial_load_started = True
             self._load_nas_operational_settings()
 
@@ -302,14 +310,22 @@ class ApiSettingsDialog(QDialog):
             server_url=self._server_url.text().strip().rstrip("/"),
             access_token=self._server_token.text().strip(),
             local_fallback_enabled=(
-                self._local_fallback.isChecked() if mode == "personal_server" else False
+                self._data_source.local_fallback_enabled if self._query_only
+                else self._local_fallback.isChecked() if mode == "personal_server" else False
             ),
             parallel_validation_enabled=(
-                self._parallel_validation.isChecked() if mode == "personal_server" else False
+                self._data_source.parallel_validation_enabled if self._query_only
+                else self._parallel_validation.isChecked() if mode == "personal_server" else False
             ),
         )
 
     def _refresh_source_controls(self) -> None:
+        if self._query_only:
+            self._server_url.setEnabled(True)
+            self._server_token.setEnabled(True)
+            self._local_fallback.setEnabled(False)
+            self._parallel_validation.setEnabled(False)
+            return
         mode = str(self._data_source_mode.currentData())
         if mode == "local_server":
             if not self._server_url.text().strip():
@@ -328,6 +344,9 @@ class ApiSettingsDialog(QDialog):
             self._nas_provider_button.setEnabled(personal)
 
     def _open_nas_credentials(self):
+        if self._query_only:
+            return
+        from kiwoom_monitor.presentation.nas_credentials_dialog import NasCredentialsDialog
         source = self.data_source_values
         previous = self._nas_credentials_client.source if self._nas_credentials_client else None
         if previous is None or (previous.mode, previous.server_url, previous.access_token) != (
@@ -340,6 +359,9 @@ class ApiSettingsDialog(QDialog):
             dialog.deleteLater()
 
     def _open_nas_provider_credentials(self, provider):
+        if self._query_only:
+            return
+        from kiwoom_monitor.presentation.nas_credentials_dialog import NasCredentialsDialog
         source = self.data_source_values
         client = self._nas_provider_clients.get(provider)
         previous = client.source if client else None
@@ -358,6 +380,15 @@ class ApiSettingsDialog(QDialog):
             return
         profiles = self.values
         source = self.data_source_values
+        if self._query_only:
+            try:
+                source.validate()
+            except ValueError as error:
+                QMessageBox.warning(self, "입력 확인", str(error))
+                return
+            DataSourceConfig(self._data_source_path).save(source)
+            self.accept()
+            return
         if self._section == "kiwoom":
             active_pair = (profiles.real_app_key, profiles.real_secret_key) if profiles.active_environment == "real" else (profiles.mock_app_key, profiles.mock_secret_key)
             local_key_required = source.mode == "local" or source.local_fallback_enabled or source.parallel_validation_enabled
@@ -388,6 +419,8 @@ class ApiSettingsDialog(QDialog):
         self.accept()
 
     def _load_nas_operational_settings(self) -> None:
+        if self._query_only:
+            return
         if self._operations_worker is not None:
             return
         source = self.data_source_values
@@ -405,7 +438,7 @@ class ApiSettingsDialog(QDialog):
     @Slot(object)
     def _operations_loaded(self, values: dict[str, object]) -> None:
         self._operations_worker = None
-        if self._closed:
+        if self._closed or self._query_only:
             return
         self._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(True)
         self._nas_operations_available = True
@@ -445,6 +478,7 @@ class ApiSettingsDialog(QDialog):
         self._nas_external_confirmations.setValue(int(values.get("external_market_roll_confirmations", 2)))
         self._operations_baseline = self._nas_operation_values()
         try:
+            from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
             apply_to_local_news(LocalNaverNewsConfig(self._path.with_name("naver_news.dat")), values)
         except (OSError, ValueError):
             # NAS 화면 표시는 성공했으므로 로컬 미러 실패만 상태에 덧붙인다.
@@ -510,6 +544,8 @@ class ApiSettingsDialog(QDialog):
         return values
 
     def _save_nas_operational_settings(self, source: DataSourceSettings) -> None:
+        if self._query_only:
+            return
         if self._nas_sources_available:
             for label, widget in (("종목뉴스", self._nas_stock_site_url),
                                   ("FLASH", self._nas_flash_url), ("WORLD", self._nas_world_url)):
@@ -530,6 +566,7 @@ class ApiSettingsDialog(QDialog):
         changes = {name: value for name, value in self._nas_operation_values().items()
                    if value != self._operations_baseline.get(name)}
         source_path = self._data_source_path
+        from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
         news_path = self._path.with_name("naver_news.dat")
 
         def save() -> object:
@@ -692,7 +729,18 @@ class ApiSettingsDialog(QDialog):
             return
         profiles = self.values
         source = self.data_source_values
-        if self._section == "nas":
+        if self._query_only:
+            try:
+                source.validate()
+            except ValueError as error:
+                QMessageBox.warning(self, "입력 확인", str(error))
+                return
+
+            def test() -> object:
+                RemoteKiwoomRestClient(source.server_url, source.access_token,
+                                       timeout_seconds=10).require_query_access()
+                return None
+        elif self._section == "nas":
             try:
                 source.validate()
             except ValueError as error:

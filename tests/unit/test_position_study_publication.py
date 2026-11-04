@@ -1,3 +1,5 @@
+
+from tests.unit.test_mock_automation_runner import _prepared_runner, _apply_runner_fills
 """Native v2 reported replay and conservative current-goal RAM integration."""
 from copy import deepcopy
 from dataclasses import replace
@@ -597,10 +599,10 @@ class CurrentStudyRamTests(unittest.IsolatedAsyncioTestCase):
                 **{key:getattr(native_profile,key) for key in ('maximum_daily_loss_won','maximum_data_gap_seconds',
                     'maximum_submission_unknown_count','maximum_reconnect_count','maximum_balance_mismatch_count')})
         state.base.bundle.automation_context=SimpleNamespace(execution_run_id=state.base.run_id,spec_id=state.base.spec.spec_id)
-        state.runner=MockAutomationRunner(state.base.store,state.base.bundle,state.base.spec);state.runner._bootstrap_pending=False
+        state.runner=_prepared_runner(state.base.store,state.base.bundle,state.base.spec);state.runner.episode._input_progress._bootstrap_pending=False
         position=raw['portfolio']['position'];opened=datetime.fromisoformat(position['opened_at'])
         fill=replace(state.base.event(1,'controlled-current','BUY',10,1020),occurred_at=opened,received_at=opened)
-        state.base.events.values=[fill];state.runner._apply_new_fills()
+        state.base.events.values=[fill];_apply_runner_fills(state.runner)
         account=AccountSnapshot(native.ACCOUNT_REF,raw['portfolio']['cash_won'],0,{'005930':10},cut)
         paid=replace(cost(cut.date(),'매수',10200,position['entry_commission']),origin_scope=state.base.spec.account_scope)
         risk=build_mock_automation_risk_snapshot(MockAccountRecovery(account,()),(fill,),(paid,),(),
@@ -645,7 +647,7 @@ class CurrentStudyRamTests(unittest.IsolatedAsyncioTestCase):
             'symbols':['005930'],'expected_execution_run_id':state.base.run_id,'expected_binding_revision':1,
             'data_path':'nas','maximum_daily_loss_won':1000,'cost_model':base.execution.cost_model.to_dict()},default=_json_value))
         runtime=MarketThemeShadowRuntime(hub,collector,tuple((m,context) for m in monitors),
-            position_account_source=source,position_allocation=compile_dynamic_allocation_ram_selection(document))
+            position_account_source=source,position_allocation=compile_dynamic_allocation_ram_selection(document), now_provider=collector._now_provider)
         collector.set_ram_observation_retention(runtime._retention,owner=runtime);runtime._retention_owned=True
         for second in range(60):
             clock[0]=start+timedelta(seconds=second)
@@ -720,7 +722,7 @@ class CurrentStudyRamTests(unittest.IsolatedAsyncioTestCase):
             await runtime._dispatch(runtime._snapshot())
             self.assertIsNone(conditional()['result']);self.assertIn('current_account_study_basis_unavailable',conditional()['reasons'])
             monitor._risk_costs={('paid',):paid}
-            state.runner.request_protection_review(reason='controlled',input_ref='native-risk',requested_at=clock[0])
+            state.runner.episode.request_protection_review(reason='controlled',input_ref='native-risk',requested_at=clock[0])
             await runtime._dispatch(runtime._snapshot())
             self.assertIsNone(conditional()['result']);self.assertIn('conditional_current_native_binding_or_protection_invalid',conditional()['reasons'])
             owner._runners.clear();await runtime._dispatch(runtime._snapshot())
@@ -783,7 +785,7 @@ class CurrentStudyRamTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1,source.call_count)
             await runtime.close()
         changed,_,_,changed_source,changed_monitor,changed_state,changed_owner=self.prepare(2,native_mode=True)
-        changed_state.runner._spec=replace(changed_state.runner._spec,maximum_daily_loss_won=999)
+        changed_state.runner.episode._spec=replace(changed_state.runner.episode._spec,maximum_daily_loss_won=999)
         with patch('sqlite3.connect',side_effect=AssertionError('v4 policy mismatch DB read')):
             await changed._dispatch(changed._snapshot())
         conditional=changed.latest_results['position_allocation']['r4_action_comparison']['goals'][0]['model_support']['conditional_shadow']

@@ -25,6 +25,40 @@ class DiagnosticWorkloadTests(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         refresh_capture_state(force=True)
 
+    def test_control_owner_observation_preserves_unknown_read_and_decode_state(self):
+        from kiwoom_monitor.central_server.diagnostic_workloads import _set_tool, maintenance_status
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'control.json'
+            self.assertEqual({'source':'unknown'}, maintenance_status(path))
+            for raw in ('not-json', 'null', '[]', '{"schema":99}'):
+                path.write_text(raw, encoding='utf-8')
+                self.assertEqual({'source':'unknown'}, maintenance_status(path))
+                self.assertFalse(diagnostic_tool_status(path)['enabled'])
+            _set_tool(path, False)
+            self.assertEqual({'source':'known', 'master_enabled':False, 'trace_enabled':False,
+                              'paused_count':0}, maintenance_status(path))
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            # Effective OFF and old-instance invalidation remain the native policy.
+            payload['instance_id'] = 'another-process-lifetime'
+            path.write_text(json.dumps(payload), encoding='utf-8')
+            self.assertFalse(diagnostic_tool_status(path)['enabled'])
+            self.assertEqual('known', maintenance_status(path)['source'])
+            payload['instance_id'] = instance_id()
+            payload['diagnostic_tool'] = {'expires_at': float('inf')}
+            path.write_text(json.dumps(payload), encoding='utf-8')
+            self.assertTrue(diagnostic_tool_status(path)['enabled'])
+            self.assertEqual({'source':'unknown'}, maintenance_status(path))
+            payload['control_revision'] = float('inf')
+            path.write_text(json.dumps(payload), encoding='utf-8')
+            with self.assertRaises(OverflowError):
+                diagnostic_tool_status(path)
+            self.assertEqual({'source':'unknown'}, maintenance_status(path))
+            with patch.object(Path, 'read_text', side_effect=PermissionError('fixture')):
+                self.assertEqual({'source':'unknown'}, maintenance_status(path))
+                self.assertFalse(diagnostic_tool_status(path)['enabled'])
+            with patch('kiwoom_monitor.central_server.diagnostic_workloads.control_path', return_value=None):
+                self.assertEqual({'source':'unconfigured'}, maintenance_status())
+
     def test_master_defaults_off_and_masks_all_children(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "controls.json"

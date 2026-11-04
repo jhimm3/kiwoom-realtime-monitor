@@ -24,7 +24,10 @@ if str(SOURCE_ROOT) not in sys.path:
 from kiwoom_monitor.infrastructure.historical_research_readiness import (
     assess_historical_development_readiness,
 )
-from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset, load_research_input
+from kiwoom_monitor.infrastructure.research_data_source import (
+    FrozenResearchDataset, load_research_input, load_daily_development_source,
+    read_research_input_object as _read_mapping,
+)
 from kiwoom_monitor.application.market_session_schedule import (
     KST, krx_regular_session_hours, research_session_profile_contract_matches,
 )
@@ -229,45 +232,6 @@ def prepare_daily_requests(selection: Path, source: Path, output: Path, *,
     return tuple(path for path, _ in documents)
 
 
-def load_daily_development_source(plan: Mapping[str, Any], source: Path, *,
-                                  checkpoint: Callable[[], None] = lambda: None) -> FrozenResearchDataset:
-    """요청 생성과 읽기 전용 점검이 같은 개발 자료 범위 검사를 사용한다."""
-    source = Path(source).resolve()
-    checkpoint()
-    cases = plan["selection"]["cases"]
-    expected_dates = [case["selection_date"] for case in cases]
-    manifest = _read_mapping(source / "manifest.json", "development-only source manifest")
-    if (manifest.get("runtime_input_version") != "historical_reconstruction_strategy/v1"
-            or any(key in manifest for key in ("bundle_version", "development_partition", "final_holdout_partition"))
-            or manifest.get("selected_dates") != expected_dates
-            or manifest.get("excluded_cases") != []
-            or manifest.get("theme_snapshots_file")
-            or not research_session_profile_contract_matches(manifest.get("research_session_profile"), "krx-regular/v1")
-            or not manifest.get("dataset_id") or not manifest.get("revision_ids_hash")):
-        raise ValueError("source must contain exactly the declared development cases; OOS/full/partition inputs are forbidden")
-    dataset = load_research_input(source, session_profile="krx-regular/v1", checkpoint=checkpoint)
-    if dataset.manifest != manifest:
-        raise ValueError("development source manifest changed while loading")
-    # Inspect actual case/date scope as well as the pre-load declaration.
-    case_by_date = {case["selection_date"]: case for case in cases}
-    for row in dataset.observations:
-        checkpoint()
-        payload = row.get("payload", {})
-        if row.get("kind") == "historical_candidate_population":
-            selected = payload.get("selection_date")
-            if (selected not in case_by_date
-                    or len(set(payload.get("codes", []))) != case_by_date[selected]["candidate_codes_after_exclusion"]
-                    or set(payload.get("codes", [])) & set(case_by_date[selected].get("excluded_codes", []))):
-                raise ValueError("source candidate population differs from the frozen daily plan")
-        elif row.get("kind") == "minute_bar":
-            selected = payload.get("historical_case_date")
-            observed = datetime.fromisoformat(payload["bar_end"])
-            if (observed.tzinfo is None or selected not in case_by_date
-                    or observed.astimezone(KST).date().isoformat() != case_by_date[selected]["outcome_date"]):
-                raise ValueError("source bar falls outside the declared development result day")
-        else:
-            raise ValueError("daily historical source contains an unsupported observation kind")
-    return dataset
 
 
 def prepare_requests(
@@ -398,18 +362,6 @@ def _execution_model() -> dict[str, Any]:
     }
 
 
-def _read_mapping(path: Path, label: str) -> Mapping[str, Any]:
-    try:
-        with path.open("rb") as stream:
-            encoded = stream.read(4 * 1024 * 1024 + 1)
-        if len(encoded) > 4 * 1024 * 1024:
-            raise ValueError(f"{label} exceeds 4 MiB")
-        value = json.loads(encoded.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"{label} cannot be read") from exc
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{label} must be an object")
-    return value
 
 
 def _write_immutable_json(path: Path, value: Mapping[str, Any]) -> None:

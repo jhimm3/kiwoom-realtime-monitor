@@ -17,7 +17,7 @@ from kiwoom_monitor.central_server.diagnostic_account_input import (
 from kiwoom_monitor.central_server.diagnostic_recorded_execution import _execute_recorded_operations
 from kiwoom_monitor.central_server.diagnostic_replay_contract import (
     InputRejected, capture_owner, freeze_payload, thaw_payload, thaw_operation_arguments,
-    validate_operation,
+    validate_operation, install_store_capture,
 )
 from kiwoom_monitor.domain.order_contract import (
     AccountBinding, AccountEnvironment, AccountScope, AccountSnapshot,
@@ -141,6 +141,7 @@ class DiagnosticAccountInputTests(unittest.TestCase):
     def test_repository_native_capture_keeps_tokens_outside_recording(self):
         with tempfile.TemporaryDirectory() as root:
             store = SQLiteQueryStore(Path(root) / 'source.sqlite3')
+            install_store_capture(store)
             store.initialize()
             store._execution_wall_now = lambda: NOW
             repository = ExecutionRepository(store)
@@ -178,11 +179,31 @@ class DiagnosticAccountInputTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_capture_records_control_read_without_the_native_scope_or_cursor(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = SQLiteQueryStore(Path(root) / 'source.sqlite3')
+            install_store_capture(store)
+            store.initialize()
+            try:
+                with deferred_capture(account_inputs=True) as (identifier, _):
+                    with capture_owner('account', 'fixture', 'actor'):
+                        with store.mock_automation_read_scope() as reader:
+                            self.assertIsNone(store.load_mock_automation_control(REF, _reader=reader))
+                    final = persist_now()
+                    self.assertEqual(0, final['input_rejected'])
+                    _, rows = trace.recorded_events(identifier)
+                    starts = [row for row in rows if row['event_type'] == 'operation_start']
+                    self.assertEqual(['load_mock_automation_control'], [row['method'] for row in starts])
+                    self.assertEqual({'account_ref': REF}, thaw_operation_arguments(starts[0]))
+            finally:
+                store.close()
+
     def test_same_initial_db_and_input_remove_capture_rejections_without_extra_commits(self):
         contents, counts, rejections = [], [], []
         with tempfile.TemporaryDirectory() as root:
             for enabled in (False, True):
                 store = SQLiteQueryStore(Path(root) / ('after.sqlite3' if enabled else 'before.sqlite3'))
+                install_store_capture(store)
                 store.initialize()
                 store._execution_wall_now = lambda: NOW
                 observed = []

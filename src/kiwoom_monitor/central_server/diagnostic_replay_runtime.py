@@ -12,26 +12,12 @@ from contextvars import ContextVar, copy_context
 import math
 from threading import RLock, get_ident
 
+from .async_lifetime import bind_owned_work, owned_create_task, owned_to_thread
+
 
 _RUNTIME = ContextVar("owned_replay_runtime", default=None)
 _SHUTDOWN = ContextVar("owned_replay_shutdown", default=False)
 _THREAD = ContextVar("owned_replay_thread", default=None)
-
-
-def owned_create_task(coroutine, *, name=None, shutdown=False):
-    from .diagnostic_rest_input import replay_task_input_context
-    with replay_task_input_context(name):
-        runtime = _RUNTIME.get()
-        if runtime is None:
-            return asyncio.create_task(coroutine, name=name)
-        return runtime.create_task(coroutine, name=name, shutdown=shutdown)
-
-
-async def owned_to_thread(function, /, *args, **kwargs):
-    runtime = _RUNTIME.get()
-    if runtime is None:
-        return await asyncio.to_thread(function, *args, **kwargs)
-    return await runtime.to_thread(function, *args, **kwargs)
 
 
 def owned_payload_credit():
@@ -83,7 +69,8 @@ class ReplayRuntimeScope:
             raise RuntimeError("replay_runtime_shared_owner")
         token = _RUNTIME.set(self)
         try:
-            yield self
+            with bind_owned_work(create_task=self.create_task, to_thread=self.to_thread):
+                yield self
         finally:
             _RUNTIME.reset(token)
 

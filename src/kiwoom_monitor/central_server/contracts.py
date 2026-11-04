@@ -8,6 +8,7 @@ from .market_observations import KST, as_kst
 
 API_VERSION = "v1"
 SCHEMA_VERSION = 1
+OPERATOR_STATE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -50,4 +51,16 @@ def health_document(now: datetime | None = None) -> dict[str, object]:
         "api_version": API_VERSION,
         "schema_version": SCHEMA_VERSION,
         "server_time": as_kst(now if now is not None else datetime.now(KST)).isoformat(),
+    }
+
+
+def operator_state_document(*, now: datetime, composition: str,
+                            control: dict[str, object], trace: dict[str, object],
+                            runs: dict[str, object]) -> dict[str, object]:
+    """Serialize owner facts for diagnostic exclusion, never business idle/authority."""
+    return {
+        "contract": "operator-state", "version": OPERATOR_STATE_VERSION,
+        "scope": "diagnostic_exclusion", "checked_at": as_kst(now).isoformat(),
+        "composition": composition,
+        "control": dict(control), "trace": dict(trace), "runs": dict(runs),
     }

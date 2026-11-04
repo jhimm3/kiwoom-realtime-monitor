@@ -212,23 +212,27 @@ def _run_news_process(arguments: list[str]) -> int:
     configure_logging(database_path.parent / "logs")
     initialize_news_database(database_path)
 
-    _set_taskbar_app_id()
-    app = QApplication(sys.argv[:1])
-    app.setApplicationName("키움 실시간 모니터 뉴스")
-    app.setWindowIcon(QIcon(str(_application_icon_path())))
-    # 메인 앱이 명령 파일을 쓰기 전에는 표시된 창이 없다. 이때 Qt의 기본
-    # lastWindowClosed 동작으로 자식 프로세스가 먼저 끝나지 않게 유지한다.
-    # 사용자가 뉴스창을 닫아도 프로세스는 대기하고 다음 더블클릭에 재사용한다.
-    app.setQuitOnLastWindowClosed(False)
-    window = StockNewsWindow(config_path, database_path)
-    from kiwoom_monitor.presentation.market_news_window import MarketNewsWindow
-    market_window = MarketNewsWindow(config_path, database_path)
-    window.setWindowIcon(app.windowIcon())
+    window: StockNewsWindow | None = None
+    market_window = None
+    command_timer: QTimer | None = None
+    parent_timer: QTimer | None = None
+    activation_timer: QTimer | None = None
+    content_sync_timer: QTimer | None = None
+    content_sync_thread: threading.Thread | None = None
+    stopping = False
+    last_content_signature: tuple[int, int] | None = None
     logger = logging.getLogger(__name__)
-    logger.info("뉴스 전용 프로세스 시작: parent=%s", options.parent_pid)
     last_request_id = -1
     restore_after_main = False
     last_published_visibility: bool | None = None
+    primary_error: BaseException | None = None
+    cleanup_errors: list[tuple[str, BaseException]] = []
+
+    def cleanup(stage: str, action) -> None:
+        try:
+            action()
+        except BaseException as error:
+            cleanup_errors.append((stage, error))
 
     def publish_visibility(*, force: bool = False) -> None:
         nonlocal last_published_visibility
@@ -246,199 +250,245 @@ def _run_news_process(arguments: list[str]) -> int:
         except OSError:
             logger.debug("뉴스창 상태 파일 저장 실패", exc_info=True)
 
-    def raise_without_focus() -> None:
-        """Windows 포커스는 메인창에 둔 채 뉴스창만 같은 Z 순서로 올린다."""
-        if sys.platform != "win32":
-            window.raise_()
-            return
-        # 단순 raise()는 백그라운드 프로세스 포커스 보호에 막힐 수 있다.
-        # TOPMOST→NOTOPMOST를 연속 적용하면 포커스와 항상-위 속성은 건드리지
-        # 않으면서 현재 앱들 위의 일반 창 순서로 이동한다.
-        _raise_hwnd_without_focus(int(window.winId()))
+    def stop_admission() -> None:
+        nonlocal stopping
+        stopping = True
+        for name, timer in (("command", command_timer), ("parent", parent_timer),
+                            ("activation", activation_timer), ("content", content_sync_timer)):
+            if timer is not None:
+                cleanup(name + ".stop", timer.stop)
 
-    def dock_beside_main(geometry: object, mode: str) -> None:
-        if not isinstance(geometry, list) or len(geometry) != 4:
-            return
-        try:
-            main_x, main_y, main_width, main_height = (int(value) for value in geometry)
-        except (TypeError, ValueError):
-            return
-        screen = QApplication.screenAt(QPoint(main_x + main_width // 2, main_y + main_height // 2))
-        available = screen.availableGeometry() if screen is not None else QApplication.primaryScreen().availableGeometry()
-        news_frame = window.frameGeometry()
-        news_width = news_frame.width()
-        news_height = news_frame.height()
-        if mode == "docked_left":
-            x, y = main_x - news_width, main_y
-        elif mode == "docked_top":
-            x, y = main_x, main_y - news_height
-        elif mode == "docked_bottom":
-            x, y = main_x, main_y + main_height
-        else:
-            x, y = main_x + main_width, main_y
-        x = max(available.left(), min(x, available.right() - news_width + 1))
-        y = max(available.top(), min(main_y, available.bottom() - news_height + 1))
-        if mode in {"docked_top", "docked_bottom"}:
-            y = main_y - news_height if mode == "docked_top" else main_y + main_height
-            y = max(available.top(), min(y, available.bottom() - news_height + 1))
-        window.move(x, y)
-
-    def poll_command() -> None:
-        nonlocal last_request_id, restore_after_main
-        try:
-            document = json.loads(command_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        request_id = int(document.get("request_id", -1))
-        if request_id <= last_request_id:
-            return
-        last_request_id = request_id
-        action = str(document.get("action", "show"))
-        mode = str(document.get("window_mode", "independent"))
-        if action == "shutdown":
-            logger.info("뉴스 전용 프로세스 종료 명령 수신")
-            market_window.shutdown()
-            window.shutdown()
-            publish_visibility(force=True)
-            app.quit()
-            return
-        if action == "minimize":
-            restore_after_main = window.isVisible() and not window.isMinimized()
-            if restore_after_main:
-                window.showMinimized()
-            publish_visibility(force=True)
-            return
-        if action == "restore":
-            if restore_after_main:
-                window.showNormal()
-                # showNormal()만 호출하면 별도 프로세스인 뉴스창이 복원은
-                # 되어도 메인창 뒤에 남을 수 있다. 최소화 전에 보이던 창은
-                # 포커스를 빼앗지 않는 방식으로 두 창의 Z 순서도 함께 복원한다.
-                raise_without_focus()
-                restore_after_main = False
-            publish_visibility(force=True)
-            return
-        if action == "reload_settings":
-            window._on_settings_saved()
-            publish_visibility(force=True)
-            return
-        if action == "sync":
-            if mode.startswith("docked_") or mode == "docked":
-                dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
-            if (mode == "linked" or mode.startswith("docked_") or mode == "docked") and window.isVisible():
-                raise_without_focus()
-            return
-        if action == "market_news":
-            market_window.show_news()
-            return
-        if _apply_show_command(window, document):
-            if mode.startswith("docked_") or mode == "docked":
-                dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
-            publish_visibility(force=True)
-        elif document.get("code") or document.get("name"):
-            logging.getLogger(__name__).warning("잘못된 계좌 범위가 포함된 뉴스 명령을 거절했습니다.")
-
-    command_timer = QTimer()
-    command_timer.setInterval(80)
-    command_timer.timeout.connect(poll_command)
-    command_timer.start()
-    parent_timer = QTimer()
-    parent_timer.setInterval(1_000)
-
-    def stop_if_parent_exited() -> None:
-        if _parent_is_alive(options.parent_pid):
-            return
-        logger.info("메인 프로세스 종료 감지: parent=%s", options.parent_pid)
-        window.shutdown()
-        market_window.shutdown()
-        app.quit()
-
-    parent_timer.timeout.connect(stop_if_parent_exited)
-    parent_timer.start()
-    news_was_active = False
-    activation_timer = QTimer()
-    activation_timer.setInterval(100)
-
-    def sync_parent_on_news_activation() -> None:
-        nonlocal news_was_active
-        active = window.isVisible() and window.isActiveWindow()
-        if active and not news_was_active:
-            mode = str(window._window_mode.currentData() or "independent")
-            if mode == "linked" or mode.startswith("docked_") or mode == "docked":
-                # 부모를 먼저 올리고 뉴스창을 다시 위에 두어 사용자가 선택한
-                # 뉴스창의 키보드 포커스와 시각적 우선순위를 유지한다.
-                _raise_hwnd_without_focus(_find_visible_window(options.parent_pid))
-                raise_without_focus()
-        news_was_active = active
-        publish_visibility()
-
-    activation_timer.timeout.connect(sync_parent_on_news_activation)
-    activation_timer.start()
-
-    # 뉴스 수집과 AI 분석은 뉴스 전용 프로세스의 로컬 DB에 먼저 안전하게
-    # 저장된다. 중앙 모드에서는 파일 변경을 감지한 뒤 별도 daemon 스레드가
-    # 중앙 저장소에 복사한다. 네트워크 지연이나 서버 장애가 뉴스창 Qt 루프는
-    # 물론 메인 실시간 표에도 전달되지 않는다.
-    content_sync_timer: QTimer | None = None
-    content_sync_running = threading.Event()
-    last_content_signature: tuple[int, int] | None = None
     try:
-        source = DataSourceConfig(config_path.with_name("data_source.json")).load()
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        logger.warning("중앙 콘텐츠 설정을 읽지 못했습니다: %s", error)
-        source = None
-    if source is not None and source.mode in {"local_server", "personal_server"}:
-        content_sync = CentralContentSyncService(CentralContentClient(
-            source.server_url, source.access_token,
-        ))
-        main_database_path = database_path.with_name("monitor.sqlite3")
-        # Check the existing delta manifest once after restart, including unsent edits.
-        sync_news_catalog = source.mode != "personal_server"
-
-        def schedule_content_sync() -> None:
-            nonlocal last_content_signature
-            signature = _news_content_signature(database_path)
-            if content_sync_running.is_set():
+        _set_taskbar_app_id()
+        app = QApplication(sys.argv[:1])
+        app.setApplicationName("키움 실시간 모니터 뉴스")
+        app.setWindowIcon(QIcon(str(_application_icon_path())))
+        # 메인 앱이 명령 파일을 쓰기 전에는 표시된 창이 없다. 이때 Qt의 기본
+        # lastWindowClosed 동작으로 자식 프로세스가 먼저 끝나지 않게 유지한다.
+        # 사용자가 뉴스창을 닫아도 프로세스는 대기하고 다음 더블클릭에 재사용한다.
+        app.setQuitOnLastWindowClosed(False)
+        window = StockNewsWindow(config_path, database_path)
+        from kiwoom_monitor.presentation.market_news_window import MarketNewsWindow
+        market_window = MarketNewsWindow(config_path, database_path)
+        window.setWindowIcon(app.windowIcon())
+        logger.info("뉴스 전용 프로세스 시작: parent=%s", options.parent_pid)
+        def raise_without_focus() -> None:
+            """Windows 포커스는 메인창에 둔 채 뉴스창만 같은 Z 순서로 올린다."""
+            if sys.platform != "win32":
+                window.raise_()
                 return
-            local_changed = signature != last_content_signature
-            content_sync_running.set()
+            # 단순 raise()는 백그라운드 프로세스 포커스 보호에 막힐 수 있다.
+            # TOPMOST→NOTOPMOST를 연속 적용하면 포커스와 항상-위 속성은 건드리지
+            # 않으면서 현재 앱들 위의 일반 창 순서로 이동한다.
+            _raise_hwnd_without_focus(int(window.winId()))
 
-            def run() -> None:
-                nonlocal last_content_signature
-                try:
-                    if local_changed:
-                        uploaded_signature = _news_content_signature(database_path)
-                        pushed = content_sync.push(
+        def dock_beside_main(geometry: object, mode: str) -> None:
+            if not isinstance(geometry, list) or len(geometry) != 4:
+                return
+            try:
+                main_x, main_y, main_width, main_height = (int(value) for value in geometry)
+            except (TypeError, ValueError):
+                return
+            screen = QApplication.screenAt(QPoint(main_x + main_width // 2, main_y + main_height // 2))
+            available = screen.availableGeometry() if screen is not None else QApplication.primaryScreen().availableGeometry()
+            news_frame = window.frameGeometry()
+            news_width = news_frame.width()
+            news_height = news_frame.height()
+            if mode == "docked_left":
+                x, y = main_x - news_width, main_y
+            elif mode == "docked_top":
+                x, y = main_x, main_y - news_height
+            elif mode == "docked_bottom":
+                x, y = main_x, main_y + main_height
+            else:
+                x, y = main_x + main_width, main_y
+            x = max(available.left(), min(x, available.right() - news_width + 1))
+            y = max(available.top(), min(main_y, available.bottom() - news_height + 1))
+            if mode in {"docked_top", "docked_bottom"}:
+                y = main_y - news_height if mode == "docked_top" else main_y + main_height
+                y = max(available.top(), min(y, available.bottom() - news_height + 1))
+            window.move(x, y)
+
+        def poll_command() -> None:
+            nonlocal last_request_id, restore_after_main
+            if stopping:
+                return
+            try:
+                document = json.loads(command_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return
+            request_id = int(document.get("request_id", -1))
+            if request_id <= last_request_id:
+                return
+            last_request_id = request_id
+            action = str(document.get("action", "show"))
+            mode = str(document.get("window_mode", "independent"))
+            if action == "shutdown":
+                logger.info("뉴스 전용 프로세스 종료 명령 수신")
+                stop_admission()
+                app.quit()
+                return
+            if action == "minimize":
+                restore_after_main = window.isVisible() and not window.isMinimized()
+                if restore_after_main:
+                    window.showMinimized()
+                publish_visibility(force=True)
+                return
+            if action == "restore":
+                if restore_after_main:
+                    window.showNormal()
+                    # showNormal()만 호출하면 별도 프로세스인 뉴스창이 복원은
+                    # 되어도 메인창 뒤에 남을 수 있다. 최소화 전에 보이던 창은
+                    # 포커스를 빼앗지 않는 방식으로 두 창의 Z 순서도 함께 복원한다.
+                    raise_without_focus()
+                    restore_after_main = False
+                publish_visibility(force=True)
+                return
+            if action == "reload_settings":
+                window._on_settings_saved()
+                publish_visibility(force=True)
+                return
+            if action == "sync":
+                if mode.startswith("docked_") or mode == "docked":
+                    dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
+                if (mode == "linked" or mode.startswith("docked_") or mode == "docked") and window.isVisible():
+                    raise_without_focus()
+                return
+            if action == "market_news":
+                market_window.show_news()
+                return
+            if _apply_show_command(window, document):
+                if mode.startswith("docked_") or mode == "docked":
+                    dock_beside_main(document.get("main_geometry"), "docked_right" if mode == "docked" else mode)
+                publish_visibility(force=True)
+            elif document.get("code") or document.get("name"):
+                logging.getLogger(__name__).warning("잘못된 계좌 범위가 포함된 뉴스 명령을 거절했습니다.")
+
+        command_timer = QTimer()
+        command_timer.setInterval(80)
+        command_timer.timeout.connect(poll_command)
+        command_timer.start()
+        parent_timer = QTimer()
+        parent_timer.setInterval(1_000)
+
+        def stop_if_parent_exited() -> None:
+            if stopping:
+                return
+            if _parent_is_alive(options.parent_pid):
+                return
+            logger.info("메인 프로세스 종료 감지: parent=%s", options.parent_pid)
+            stop_admission()
+            app.quit()
+
+        parent_timer.timeout.connect(stop_if_parent_exited)
+        parent_timer.start()
+        news_was_active = False
+        activation_timer = QTimer()
+        activation_timer.setInterval(100)
+
+        def sync_parent_on_news_activation() -> None:
+            nonlocal news_was_active
+            if stopping:
+                return
+            active = window.isVisible() and window.isActiveWindow()
+            if active and not news_was_active:
+                mode = str(window._window_mode.currentData() or "independent")
+                if mode == "linked" or mode.startswith("docked_") or mode == "docked":
+                    # 부모를 먼저 올리고 뉴스창을 다시 위에 두어 사용자가 선택한
+                    # 뉴스창의 키보드 포커스와 시각적 우선순위를 유지한다.
+                    _raise_hwnd_without_focus(_find_visible_window(options.parent_pid))
+                    raise_without_focus()
+            news_was_active = active
+            publish_visibility()
+
+        activation_timer.timeout.connect(sync_parent_on_news_activation)
+        activation_timer.start()
+
+        # 뉴스 수집과 AI 분석은 뉴스 전용 프로세스의 로컬 DB에 먼저 안전하게
+        # 저장된다. 중앙 모드에서는 파일 변경을 감지한 뒤 별도 daemon 스레드가
+        # 중앙 저장소에 복사한다. 네트워크 지연이나 서버 장애가 뉴스창 Qt 루프는
+        # 물론 메인 실시간 표에도 전달되지 않는다.
+        try:
+            source = DataSourceConfig(config_path.with_name("data_source.json")).load()
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            logger.warning("중앙 콘텐츠 설정을 읽지 못했습니다: %s", error)
+            source = None
+        if source is not None and source.mode in {"local_server", "personal_server"}:
+            content_sync = CentralContentSyncService(CentralContentClient(
+                source.server_url, source.access_token,
+            ))
+            main_database_path = database_path.with_name("monitor.sqlite3")
+            # Check the existing delta manifest once after restart, including unsent edits.
+            sync_news_catalog = source.mode != "personal_server"
+
+            def schedule_content_sync() -> None:
+                nonlocal content_sync_thread, last_content_signature
+                if stopping:
+                    return
+                signature = _news_content_signature(database_path)
+                if content_sync_thread is not None and content_sync_thread.is_alive():
+                    return
+                local_changed = signature != last_content_signature
+
+                def run() -> None:
+                    nonlocal last_content_signature
+                    try:
+                        if local_changed:
+                            uploaded_signature = _news_content_signature(database_path)
+                            pushed = content_sync.push(
+                                main_database_path, database_path,
+                                sync_news_catalog=sync_news_catalog,
+                            )
+                            if (not pushed.pending_collections
+                                    and uploaded_signature == _news_content_signature(database_path)):
+                                last_content_signature = uploaded_signature
+                        pulled = content_sync.pull(
                             main_database_path, database_path,
                             sync_news_catalog=sync_news_catalog,
                         )
-                        if (not pushed.pending_collections
-                                and uploaded_signature == _news_content_signature(database_path)):
-                            last_content_signature = uploaded_signature
-                    pulled = content_sync.pull(
-                        main_database_path, database_path,
-                        sync_news_catalog=sync_news_catalog,
-                    )
-                    # Pull writes and concurrent edits are checked against the manifest next tick.
-                    logger.info(
-                        "중앙 콘텐츠 동기화 완료: 내려받기 %s건, 로컬 변경=%s",
-                        pulled.total, local_changed,
-                    )
-                except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
-                    logger.warning("중앙 콘텐츠 변경분 보존 실패(로컬 자료 유지): %s", error)
-                finally:
-                    content_sync_running.clear()
+                        # Pull writes and concurrent edits are checked against the manifest next tick.
+                        logger.info(
+                            "중앙 콘텐츠 동기화 완료: 내려받기 %s건, 로컬 변경=%s",
+                            pulled.total, local_changed,
+                        )
+                    except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                        logger.warning("중앙 콘텐츠 변경분 보존 실패(로컬 자료 유지): %s", error)
 
-            threading.Thread(target=run, name="news-central-content-sync", daemon=True).start()
+                content_sync_thread = threading.Thread(target=run, name="news-central-content-sync", daemon=True)
+                content_sync_thread.start()
 
-        content_sync_timer = QTimer()
-        content_sync_timer.setInterval(60_000)
-        content_sync_timer.timeout.connect(schedule_content_sync)
-        content_sync_timer.start()
-        QTimer.singleShot(1_000, schedule_content_sync)
-    publish_visibility(force=True)
-    poll_command()
-    return app.exec()
+            content_sync_timer = QTimer()
+            content_sync_timer.setInterval(60_000)
+            content_sync_timer.timeout.connect(schedule_content_sync)
+            content_sync_timer.start()
+            QTimer.singleShot(1_000, schedule_content_sync)
+
+        app.aboutToQuit.connect(stop_admission)
+        publish_visibility(force=True)
+        poll_command()
+        return 0 if stopping else app.exec()
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        stop_admission()
+        if market_window is not None:
+            cleanup("market.shutdown", market_window.shutdown)
+        if window is not None:
+            cleanup("stock.shutdown", window.shutdown)
+            cleanup("visibility", lambda: publish_visibility(force=True))
+        # main retains the shared lease through every accepted native worker.
+        if content_sync_thread is not None and content_sync_thread.ident is not None:
+            cleanup("content.join", content_sync_thread.join)
+        if cleanup_errors:
+            failure = primary_error if primary_error is not None else cleanup_errors[0][1]
+            for stage, error in cleanup_errors:
+                if error is not failure:
+                    failure.add_note(f"NEWS_CLEANUP_FAILED:{stage}:{type(error).__name__}:{error}")
+                    for note in getattr(error, "__notes__", ()):
+                        failure.add_note(note)
+            if primary_error is None:
+                raise failure
 
 
 if __name__ == "__main__":

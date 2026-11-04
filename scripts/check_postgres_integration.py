@@ -573,7 +573,7 @@ def main() -> int:
             body_revision_id = _save_postgres_news_body(cursor, {
                 "article_revision_id": article_revision_id, "extractor_version": "integration-v1",
                 "fetched_at": now, "status": "summary_only", "body_text": "공급계약 체결",
-            })
+            })["body_revision_id"]
             rule_result = classify_supply_contract({
                 "stock_code": marker, "stock_name": "통합기업",
                 "title": "통합기업, 고객사와 500억원 공급계약 체결",
@@ -825,7 +825,8 @@ def main() -> int:
                 activated = store.finalize_credential_activation(activation)
                 repeated = store.finalize_credential_activation(activation)
                 checks["credential_activation_idempotency"] = (
-                    activated == repeated and activated["binding_revision"] == binding["binding_revision"] + 1
+                    activated == repeated and activated["binding_revision"] == binding["binding_revision"]
+                    and store.load_latest_account_binding(marker, "kiwoom", "mock")["verified_at"] == binding["verified_at"]
                     and len(store.load_credential_activations(marker)) == 1
                 )
                 account_settings_scope = {"broker": "kiwoom", "environment": "mock", "account_ref": account_ref}
@@ -919,7 +920,8 @@ def main() -> int:
                 real_rotated = store.finalize_credential_activation({**real_activation,
                     "credential_revision": 2, "operation_id": str(uuid.uuid4()), "request_id": str(uuid.uuid4())})
                 checks["real_account_rotation_preserves_preferences"] = (
-                    real_rotated["binding_revision"] == real_receipt["binding_revision"] + 1
+                    real_rotated["binding_revision"] == real_receipt["binding_revision"]
+                    and real_rotated["credential_revision"] == real_receipt["credential_revision"] + 1
                     and real_changed == store.load_account_settings(real_scope))
                 real_bindings = store.load_account_bindings()
                 try:
@@ -1012,12 +1014,12 @@ def main() -> int:
             )
             if int(cursor.fetchone()[0]) != 0:
                 raise RuntimeError("rollback_failed")
-        print(json.dumps({
+        result = {
             "status": "ok", "schema_version": migrations[-1][0],
             "checks": checks, "rollback": True,
-        }))
-        return 0
+        }
     finally:
+        primary_error = sys.exc_info()[1]
         try:
             with store._connect() as connection, connection.cursor() as cursor:
                 cursor.execute(
@@ -1041,6 +1043,11 @@ def main() -> int:
                 cursor.execute(
                     "DELETE FROM central_dataset_snapshots WHERE kind=%s AND subject=%s",
                     ("ranking", marker),
+                )
+                # Both exact-owned current children must be removed before immutable parents.
+                cursor.execute(
+                    "DELETE FROM central_market_data_observation_meta WHERE dataset_kind=%s AND subject IN (%s,%s)",
+                    ("candidate_set", marker, rollback_marker),
                 )
                 cursor.execute(
                     "DELETE FROM central_observation_revisions WHERE subject IN (%s,%s,%s)",
@@ -1111,9 +1118,16 @@ def main() -> int:
                 cursor.execute("DELETE FROM central_hot_cohort_current WHERE stock_code=%s", (marker,))
                 cursor.execute("DELETE FROM central_vi_event_revisions WHERE stock_code=%s", (marker,))
                 cursor.execute("DELETE FROM central_news_request_budget WHERE budget_date=%s", (budget_date,))
-        except Exception:
-            pass
-        store.close()
+        except Exception as cleanup_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(f"integration cleanup failed: {type(cleanup_error).__name__}")
+            print(json.dumps({"status": "cleanup_failed", "reason": type(cleanup_error).__name__}), file=sys.stderr)
+        finally:
+            store.close()
+    # A success receipt is emitted only after the exact-owned cleanup committed.
+    print(json.dumps(result))
+    return 0
 
 
 if __name__ == "__main__":

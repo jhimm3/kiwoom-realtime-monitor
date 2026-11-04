@@ -5,10 +5,10 @@ from __future__ import annotations
 from kiwoom_monitor.domain.time_basis import kst_now
 
 import asyncio
-from .diagnostic_replay_contract import captured_workload
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, time as clock_time, timezone
@@ -32,7 +32,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     parse_account_balance_changes,
     parse_order_executions,
 )
-from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+from kiwoom_monitor.infrastructure.persistence.execution_repository import AccountExecutionEventPage, ExecutionRepository
 from kiwoom_monitor.domain.order_contract import AccountScope, AccountSnapshot
 
 
@@ -257,8 +257,10 @@ class MockAccountMonitor:
         automation_binding_revision: int = 0,
         automation_account_scope: AccountScope | None = None,
         new_orders_enabled_on_start: bool = True,
+        capture_scope=None,
     ) -> None:
         self._reader = reader
+        self._capture_scope = capture_scope
         self._read_limiter = read_limiter
         self._runtime = runtime
         self._repository = repository
@@ -373,6 +375,11 @@ class MockAccountMonitor:
         if cut is not None:
             listener(cut)  # Deliver activation's already ACKed cut without another TR.
 
+    @property
+    def automation_execution_inputs_enabled(self) -> bool:
+        """Read the existing owner selection without copying its readiness."""
+        return self._automation_execution_inputs_enabled
+
     def set_automation_execution_inputs_enabled(self, enabled):
         if type(enabled) is not bool:
             raise ValueError('automation execution input selection must be boolean')
@@ -444,21 +451,23 @@ class MockAccountMonitor:
             self._start_task = asyncio.create_task(self._start(initial_read), name="mock-monitor-start")
         await asyncio.shield(self._start_task)
 
-    @captured_workload('account', 'execution_start', actor_per_invocation=True)
     async def _start(self, initial_read: bool) -> None:
-        if self._task is not None:
-            return
-        await asyncio.to_thread(
-            self._runtime.start,
-            lease_seconds=self._lease_seconds,
-            new_orders_enabled=self._new_orders_enabled_on_start,
-        )
-        self._task = asyncio.create_task(self._run(), name="kiwoom-mock-account-monitor")
-        self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="mock-monitor-heartbeat")
-        if initial_read:
-            await self._recover()
-        else:
-            self._request_recovery()
+        capture_scope = self._capture_scope
+        with (capture_scope(self, 'account', 'execution_start', actor_per_invocation=True)
+              if capture_scope is not None else nullcontext()):
+            if self._task is not None:
+                return
+            await asyncio.to_thread(
+                self._runtime.start,
+                lease_seconds=self._lease_seconds,
+                new_orders_enabled=self._new_orders_enabled_on_start,
+            )
+            self._task = asyncio.create_task(self._run(), name="kiwoom-mock-account-monitor")
+            self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="mock-monitor-heartbeat")
+            if initial_read:
+                await self._recover()
+            else:
+                self._request_recovery()
 
     async def close(self) -> None:
         self._accepting = False
@@ -468,23 +477,25 @@ class MockAccountMonitor:
             self._close_task = asyncio.create_task(self._close(), name="mock-monitor-close")
         await asyncio.shield(self._close_task)
 
-    @captured_workload('account', 'execution_stop', actor_per_invocation=True)
     async def _close(self) -> None:
-        self._invalidate_position_observation()
-        if self._start_task is not None:
-            await asyncio.gather(asyncio.shield(self._start_task), return_exceptions=True)
-        if self._task is not None:
-            self._queue.put_nowait(("stop", None))
-            await asyncio.shield(self._task)
-            self._task = None
-        if self._work:
-            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._work)), return_exceptions=True)
-        self._heartbeat_stop.set()
-        if self._heartbeat_task is not None:
-            await asyncio.shield(self._heartbeat_task)
-            self._heartbeat_task = None
-        if self._start_task is not None:
-            await asyncio.to_thread(self._runtime.stop)
+        capture_scope = self._capture_scope
+        with (capture_scope(self, 'account', 'execution_stop', actor_per_invocation=True)
+              if capture_scope is not None else nullcontext()):
+            self._invalidate_position_observation()
+            if self._start_task is not None:
+                await asyncio.gather(asyncio.shield(self._start_task), return_exceptions=True)
+            if self._task is not None:
+                self._queue.put_nowait(("stop", None))
+                await asyncio.shield(self._task)
+                self._task = None
+            if self._work:
+                await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._work)), return_exceptions=True)
+            self._heartbeat_stop.set()
+            if self._heartbeat_task is not None:
+                await asyncio.shield(self._heartbeat_task)
+                self._heartbeat_task = None
+            if self._start_task is not None:
+                await asyncio.to_thread(self._runtime.stop)
 
     async def _owned(self, factory: Callable[[], Awaitable[_Result]]) -> _Result:
         task = asyncio.create_task(factory(), name="mock-monitor-work")
@@ -523,21 +534,23 @@ class MockAccountMonitor:
             self._recovery_queued = True
             self._queue.put_nowait(("recover", None))
 
-    @captured_workload('account', 'execution_heartbeat', actor_per_invocation=True)
     async def _heartbeat(self) -> None:
-        while not self._heartbeat_stop.is_set():
-            try:
-                await asyncio.wait_for(self._heartbeat_stop.wait(), timeout=self._heartbeat_seconds)
-            except TimeoutError:
+        capture_scope = self._capture_scope
+        with (capture_scope(self, 'account', 'execution_heartbeat', actor_per_invocation=True)
+              if capture_scope is not None else nullcontext()):
+            while not self._heartbeat_stop.is_set():
                 try:
-                    await asyncio.to_thread(self._runtime.heartbeat)
-                except Exception:
-                    self._accepting = False
-                    self._invalidate_position_observation()
-                    logger.exception("모의계좌 실행 임대 갱신 실패; 계좌 모니터를 중지합니다")
-                    return
-                if not self._recovered_once:
-                    self._request_recovery()
+                    await asyncio.wait_for(self._heartbeat_stop.wait(), timeout=self._heartbeat_seconds)
+                except TimeoutError:
+                    try:
+                        await asyncio.to_thread(self._runtime.heartbeat)
+                    except Exception:
+                        self._accepting = False
+                        self._invalidate_position_observation()
+                        logger.exception("모의계좌 실행 임대 갱신 실패; 계좌 모니터를 중지합니다")
+                        return
+                    if not self._recovered_once:
+                        self._request_recovery()
 
     async def _run(self) -> None:
         while True:
@@ -559,119 +572,143 @@ class MockAccountMonitor:
     async def _recover(self) -> MockAccountRecovery:
         return await self._owned(self._recover_once)
 
-    @captured_workload('account', 'mock_account_recovery', actor_per_invocation=True)
     async def _recover_once(self) -> MockAccountRecovery:
-        async with self._recovery_lock:
-            self._position_loop = asyncio.get_running_loop()
-            self._invalidate_position_observation()
-            position_generation = self._position_generation
-            scope_requested = self._position_order_scope_requested or self._automation_execution_inputs_enabled
-            expected_runtime_revision = self._runtime.observation_revision
-            before, before_complete = (), False
-            ledger_read_failed = False
-            if scope_requested:
-                try:
-                    before, before_complete = await asyncio.to_thread(self._repository.account_active_intents, self._runtime.account_ref)
-                except Exception:
-                    ledger_read_failed = True
-                    logger.exception("계좌 전체 RAM 관측 원장 읽기 실패")
-            query_started_at = self._aware_now()
-            if self._read_limiter is None:
-                recovery = await self._reader.read()
-            else:
-                async with self._read_limiter:
-                    recovery = await self._reader.read()
-            received_at = self._aware_now()
-            await asyncio.to_thread(
-                self._repository.save_account_snapshot, "mock", recovery.account, received_at,
-            )
-            records, unmapped = [], []
-            for snapshot in recovery.orders:
-                record = await asyncio.to_thread(
-                    self._repository.find_by_broker_order_id,
-                    "mock", self._runtime.account_ref, self._runtime.run_id, snapshot.broker_order_id,
-                )
-                if record is not None and record.intent.run_id == self._runtime.run_id:
-                    expected_runtime_revision += 2
-                    records.append(await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot))
-                else:
-                    unmapped.append(snapshot.broker_order_id)
-            reconciled = False
-            risk = None
-            after, after_complete = (), False
-            if scope_requested:
-                try:
-                    after, after_complete = await asyncio.to_thread(self._repository.account_active_intents, self._runtime.account_ref)
-                except Exception:
-                    ledger_read_failed = True
-                    logger.exception("계좌 전체 RAM 관측 원장 읽기 실패")
-            if self._risk_repository is not None:
-                active, risk = await self._publish_risk(recovery, query_started_at,
-                    active_records=tuple(r for r in after if r.intent.run_id == self._runtime.run_id)
-                    if scope_requested and after_complete else None)
-                records = list({record.intent.intent_id: record for record in (*records, *active)}.values())
-                reconciled = risk.reconciliation_complete
-            self._position_revision += 1
-            # Broker recovery is account-wide; these local records are run-scoped.
-            # Missing cross-run/queued coverage cannot be promoted by an empty TR.
-            if position_generation == self._position_generation and self._accepting:
-                reasons = ("account_wide_intent_coverage_unverified",)
-                if len(records) > 400 or len(unmapped) > 400:
-                    reasons += ("order_observation_budget_exceeded",)
-                input_ref = f"mock-account-ram:{self._position_session}:{self._position_revision}"
-                observed_runtime_revision = self._runtime.observation_revision
+        capture_scope = self._capture_scope
+        with (capture_scope(self, 'account', 'mock_account_recovery', actor_per_invocation=True)
+              if capture_scope is not None else nullcontext()):
+            async with self._recovery_lock:
+                self._position_loop = asyncio.get_running_loop()
+                self._invalidate_position_observation()
+                position_generation = self._position_generation
+                scope_requested = self._position_order_scope_requested or self._automation_execution_inputs_enabled
+                expected_runtime_revision = self._runtime.observation_revision
+                before, before_complete = (), False
+                ledger_read_failed = False
                 if scope_requested:
                     try:
-                        self._position_observation = deepcopy(reconcile_position_account_observation(recovery, before, after,
-                            input_ref=input_ref, observed_at=self._aware_now(), ledger_complete=before_complete and after_complete,
-                            runtime_stable=(expected_runtime_revision == observed_runtime_revision
-                                            and not self._runtime.observation_in_progress),
-                            ledger_read_failed=ledger_read_failed))
-                        self._position_observation = replace(self._position_observation, risk_snapshot=deepcopy(risk))
+                        before, before_complete = await asyncio.to_thread(self._repository.account_active_intents, self._runtime.account_ref)
                     except Exception:
-                        logger.exception("계좌 전체 RAM 관측 대사 실패")
-                        self._position_observation = None
+                        ledger_read_failed = True
+                        logger.exception("계좌 전체 RAM 관측 원장 읽기 실패")
+                query_started_at = self._aware_now()
+                if self._read_limiter is None:
+                    recovery = await self._reader.read()
                 else:
-                    self._position_observation = PositionAccountObservation(
-                        deepcopy(recovery.account), tuple(deepcopy(records[:400])), input_ref, self._aware_now(),
-                        reconciled, False, reasons, tuple(sorted(unmapped)[:400]))
-                    self._position_observation = replace(self._position_observation, risk_snapshot=deepcopy(risk))
-                self._position_runtime_revision = observed_runtime_revision
-                if (risk is not None and expected_runtime_revision == observed_runtime_revision
-                        and not self._runtime.observation_in_progress):
-                    self._automation_risk_cut = {"risk": deepcopy(risk), "account": deepcopy(recovery.account)}
-                    if self._automation_execution_inputs_enabled and self._position_observation is not None:
-                        facts = tuple(sorted((order.broker_order_id, order.state.value, order.filled_quantity,
-                            order.remaining_quantity, tuple(sorted((f.execution_id, f.quantity, f.price) for f in order.fills)))
-                            for order in recovery.orders))
-                        if facts != self._automation_execution_fingerprint:
-                            self.automation_execution_revision += 1
-                            self._automation_execution_fingerprint = facts
-                        self._automation_execution_cut = {'risk': risk,
-                            'observation': self._position_observation,
-                            'recovery': replace(recovery, account=self._position_observation.account)}
-                self._position_changed()
-                self._automation_risk_changed()
-            self._recovered_once = True
-            return recovery
+                    async with self._read_limiter:
+                        recovery = await self._reader.read()
+                received_at = self._aware_now()
+                await asyncio.to_thread(
+                    self._repository.save_account_snapshot, "mock", recovery.account, received_at,
+                )
+                records, unmapped = [], []
+                for snapshot in recovery.orders:
+                    record = await asyncio.to_thread(self._runtime.reconcile_by_broker_order, snapshot)
+                    if record is not None:
+                        expected_runtime_revision += 2
+                        records.append(record)
+                    else:
+                        unmapped.append(snapshot.broker_order_id)
+                reconciled = False
+                risk = None
+                after, after_complete, first_event_page = (), False, None
+                if scope_requested:
+                    after, after_complete, first_event_page, after_read_failed = await asyncio.to_thread(
+                        self._read_post_reconcile_ledger,
+                    )
+                    ledger_read_failed |= after_read_failed
+                if self._risk_repository is not None:
+                    active, risk = await self._publish_risk(recovery, query_started_at,
+                        active_records=tuple(r for r in after if r.intent.run_id == self._runtime.run_id)
+                        if scope_requested and after_complete else None,
+                        first_event_page=first_event_page)
+                    records = list({record.intent.intent_id: record for record in (*records, *active)}.values())
+                    reconciled = risk.reconciliation_complete
+                self._position_revision += 1
+                # Broker recovery is account-wide; these local records are run-scoped.
+                # Missing cross-run/queued coverage cannot be promoted by an empty TR.
+                if position_generation == self._position_generation and self._accepting:
+                    reasons = ("account_wide_intent_coverage_unverified",)
+                    if len(records) > 400 or len(unmapped) > 400:
+                        reasons += ("order_observation_budget_exceeded",)
+                    input_ref = f"mock-account-ram:{self._position_session}:{self._position_revision}"
+                    observed_runtime_revision = self._runtime.observation_revision
+                    if scope_requested:
+                        try:
+                            self._position_observation = deepcopy(reconcile_position_account_observation(recovery, before, after,
+                                input_ref=input_ref, observed_at=self._aware_now(), ledger_complete=before_complete and after_complete,
+                                runtime_stable=(expected_runtime_revision == observed_runtime_revision
+                                                and not self._runtime.observation_in_progress),
+                                ledger_read_failed=ledger_read_failed))
+                            self._position_observation = replace(self._position_observation, risk_snapshot=deepcopy(risk))
+                        except Exception:
+                            logger.exception("계좌 전체 RAM 관측 대사 실패")
+                            self._position_observation = None
+                    else:
+                        self._position_observation = PositionAccountObservation(
+                            deepcopy(recovery.account), tuple(deepcopy(records[:400])), input_ref, self._aware_now(),
+                            reconciled, False, reasons, tuple(sorted(unmapped)[:400]))
+                        self._position_observation = replace(self._position_observation, risk_snapshot=deepcopy(risk))
+                    self._position_runtime_revision = observed_runtime_revision
+                    if (risk is not None and expected_runtime_revision == observed_runtime_revision
+                            and not self._runtime.observation_in_progress):
+                        self._automation_risk_cut = {"risk": deepcopy(risk), "account": deepcopy(recovery.account)}
+                        if self._automation_execution_inputs_enabled and self._position_observation is not None:
+                            facts = tuple(sorted((order.broker_order_id, order.state.value, order.filled_quantity,
+                                order.remaining_quantity, tuple(sorted((f.execution_id, f.quantity, f.price) for f in order.fills)))
+                                for order in recovery.orders))
+                            if facts != self._automation_execution_fingerprint:
+                                self.automation_execution_revision += 1
+                                self._automation_execution_fingerprint = facts
+                            self._automation_execution_cut = {'risk': risk,
+                                'observation': self._position_observation,
+                                'recovery': replace(recovery, account=self._position_observation.account)}
+                    self._position_changed()
+                    self._automation_risk_changed()
+                self._recovered_once = True
+                return recovery
+
+    def _read_post_reconcile_ledger(self):
+        account_ref = self._runtime.account_ref
+        can_share = (isinstance(self._repository, ExecutionRepository) and self._risk_repository is not None
+                     and self._account_scope is not None and self._account_scope.account_ref == account_ref)
+        active_read = False
+        try:
+            with (self._repository.mock_automation_read_scope() if can_share else nullcontext()) as reader:
+                reader_args = {} if reader is None else {"_reader": reader}
+                records, complete = self._repository.account_active_intents(account_ref, **reader_args)
+                active_read = True
+                page = None if reader is None else self._repository.account_events(
+                    "mock", account_ref, after_sequence=self._risk_event_cursor, limit=1000, _reader=reader,
+                )
+        except Exception:
+            if active_read:
+                raise
+            # An active-ledger failure must not keep Risk from reading events independently.
+            logger.exception("계좌 전체 RAM 관측 원장 읽기 실패")
+            return (), False, None, True
+        return records, complete, page, False
 
     async def _publish_risk(
         self, recovery: MockAccountRecovery, query_started_at: datetime, *, active_records=None,
+        first_event_page: AccountExecutionEventPage | None = None,
     ) -> tuple:
         if self._account_scope is None or self._account_scope.account_ref != self._runtime.account_ref:
             raise RuntimeError("MOCK_AUTOMATION_RISK_SCOPE_MISSING")
         cursor = self._risk_event_cursor
+        page = first_event_page
         while True:
-            page = await asyncio.to_thread(
-                self._repository.account_events,
-                "mock", self._runtime.account_ref, after_sequence=cursor, limit=1000,
-            )
+            if page is None:
+                page = await asyncio.to_thread(
+                    self._repository.account_events,
+                    "mock", self._runtime.account_ref, after_sequence=cursor, limit=1000,
+                )
             self._risk_events.extend(page.events)
             cursor = page.next_cursor
             if not page.has_more:
                 break
             if len(self._risk_events) >= 100_000:
                 raise RuntimeError("MOCK_AUTOMATION_EVENT_HISTORY_LIMIT")
+            page = None
         self._risk_event_cursor = cursor
         # The recovery lock owns this read-only history through the Risk ACK.
         events = self._risk_events
@@ -739,20 +776,22 @@ class MockAccountMonitor:
     async def _reconcile_execution(self, execution: OrderExecution) -> None:
         await self._owned(lambda: self._reconcile_execution_once(execution))
 
-    @captured_workload('account', 'mock_account_event', actor_per_invocation=True)
     async def _reconcile_execution_once(self, execution: OrderExecution) -> None:
-        record = await asyncio.to_thread(
-            self._repository.find_by_broker_order_id,
-            "mock", self._runtime.account_ref, self._runtime.run_id, execution.order_no,
-        )
-        if record is None or record.intent.run_id != self._runtime.run_id:
-            return
-        as_of = self._aware_now()
-        snapshot = snapshot_from_order_execution(
-            execution, account_ref=self._runtime.account_ref, as_of=as_of,
-        )
-        await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot)
-        self.request_automation_execution_recovery()
+        capture_scope = self._capture_scope
+        with (capture_scope(self, 'account', 'mock_account_event', actor_per_invocation=True)
+              if capture_scope is not None else nullcontext()):
+            record = await asyncio.to_thread(
+                self._repository.find_by_broker_order_id,
+                "mock", self._runtime.account_ref, self._runtime.run_id, execution.order_no,
+            )
+            if record is None or record.intent.run_id != self._runtime.run_id:
+                return
+            as_of = self._aware_now()
+            snapshot = snapshot_from_order_execution(
+                execution, account_ref=self._runtime.account_ref, as_of=as_of,
+            )
+            await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot)
+            self.request_automation_execution_recovery()
 
     def _aware_now(self) -> datetime:
         value = self._now()

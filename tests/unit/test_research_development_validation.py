@@ -15,7 +15,7 @@ import test_research_development_partitions as fixtures
 from kiwoom_monitor import research_process as rp
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import load_research_input, prepare_development_partition
-from scripts import run_research as runner
+from kiwoom_monitor import research_run as runner
 
 
 class DevelopmentValidationTests(unittest.TestCase):

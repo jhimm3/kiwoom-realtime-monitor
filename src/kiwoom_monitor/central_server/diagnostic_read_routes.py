@@ -1,8 +1,10 @@
-"""Diagnostic read HTTP policy; native metrics, control and storage retain ownership."""
+"""Installed diagnostic tool composition and its read HTTP policy."""
 import asyncio
 import json
 from collections.abc import Callable
 from typing import Any, Protocol, TYPE_CHECKING
+
+from . import diagnostic_trace as trace
 
 if TYPE_CHECKING:
     from fastapi import APIRouter
@@ -13,32 +15,112 @@ class DiagnosticStorageReadStore(Protocol):
     def storage_breakdown(self) -> list[dict[str, object]]: ...
 
 
+def compose_application_inputs(store) -> dict[str, Any]:
+    """Install native-store observation and build the app's one tool input set."""
+    from . import diagnostic_rest_input, diagnostic_top20_input, diagnostic_top20_flow_input
+    from .diagnostic_top20_lifecycle_input import HubInputRecorder, CollectorInputRecorder
+    from .diagnostic_top20_subscription_v2 import SubscriptionRecorder
+    from .diagnostic_replay_contract import captured_workload, captured_workload_scope, install_store_capture
+    from .diagnostic_workloads import is_paused
+
+    install_store_capture(store)
+    hub = HubInputRecorder()
+    return {
+        "hub": hub,
+        "broker": diagnostic_rest_input,
+        "subscription": SubscriptionRecorder(hub_observer=hub),
+        "collector": CollectorInputRecorder(hub_observer=hub),
+        "news_scope": captured_workload("news", "news_jobs"),
+        "news_paused": lambda: is_paused("news_jobs"),
+        "news": {"workload_paused": is_paused},
+        "morning_brief": {"workload_paused": is_paused},
+        "external_market": {"workload_paused": is_paused},
+        "historical_archive": {"workload_paused": is_paused},
+        "candidate": {"workload_paused": is_paused, "capture_scope": captured_workload_scope},
+        "accounts": {"capture_scope": captured_workload_scope},
+        "market_events": {"capture_scope": captured_workload_scope},
+        "top20": {
+            "capture_scope": captured_workload_scope,
+            "ranking_input_observer": diagnostic_top20_input,
+            "flow_input_observer": diagnostic_top20_flow_input,
+            "catalog_input_observer": diagnostic_rest_input,
+            "workload_paused": is_paused,
+        },
+    }
+
+
+def operator_state_facts(runs) -> dict[str, dict[str, object]]:
+    """Read only the installed owners, without HTTP, report files or product probes."""
+    from .diagnostic_workloads import maintenance_status
+    return {
+        "control": maintenance_status(),
+        "trace": trace.maintenance_status(),
+        "runs": runs.maintenance_status() if runs is not None else {"state": "not_created"},
+    }
+
+
+def install_application_routes(
+    app, store, authorize, database_url, top20_service, news_service,
+    external_market_service, current_candidate_monitor, historical_archive, *,
+    morning_brief, current_news_job_runner, server_build, logger,
+):
+    """Keep diagnostic read/control/run registration and run ownership together."""
+    from fastapi import HTTPException
+    from .diagnostic_workloads import control_path
+    from .diagnostic_runs import DiagnosticRuns
+    from .diagnostic_control_routes import create_diagnostic_control_router
+    from .diagnostic_run_routes import create_diagnostic_run_router
+
+    router, diagnostic_workloads = create_diagnostic_read_router(
+        store, authorize, database_url, top20_service, news_service,
+        external_market_service, current_candidate_monitor, historical_archive,
+        morning_brief=morning_brief, current_news_job_runner=current_news_job_runner)
+    app.include_router(router)
+
+    def diagnostic_internal_api(path: str, query: dict | None = None) -> dict:
+        query = query or {}
+        if path.endswith("/workloads"):
+            loop = app.state.diagnostic_loop
+            return asyncio.run_coroutine_threadsafe(diagnostic_workloads(), loop).result(timeout=10)
+        if path.endswith("/writers"):
+            from .diagnostic_writer_registry import writer_registry
+            return {"writers": writer_registry(), "coverage": "instrumented_postgres_writers_only"}
+        if path.endswith("/db-calls"):
+            from .diagnostic_metrics import summarize_db_calls
+            return summarize_db_calls(query["start"], query["end"],
+                                      mode=query.get("mode", "summary"),
+                                      limit=int(query.get("limit", 200)))
+        if path.endswith("/market-bar-saves"):
+            from .diagnostic_metrics import summarize_market_bar_saves
+            return summarize_market_bar_saves(query["start"], query["end"])
+        raise ValueError("unsupported_diagnostic_section")
+
+    diagnostic_path = control_path()
+    runs = (DiagnosticRuns(diagnostic_path, diagnostic_internal_api, database_url)
+            if diagnostic_path else None)
+
+    def require_diagnostic_runs():
+        if runs is None:
+            raise HTTPException(501, detail="DIAGNOSTIC_CONTROL_UNAVAILABLE")
+        return runs
+
+    app.include_router(create_diagnostic_control_router(
+        authorize, diagnostic_path, runs, require_diagnostic_runs,
+        diagnostic_workloads, database_url, server_build, account_context_store=store))
+    app.include_router(create_diagnostic_run_router(
+        authorize, require_diagnostic_runs, database_url, server_build, logger))
+    return runs
+
+
 def create_diagnostic_read_router(
     store: DiagnosticStorageReadStore, authorize: Callable[..., None], database_url: str,
     top20_service: Any, news_service: Any, external_market_service: Any,
-    current_candidate_monitor: Callable[[], Any], historical_archive: Any, *, morning_brief=None,
+    current_candidate_monitor: Callable[[], Any], historical_archive: Any, *,
+    current_news_job_runner: Callable[[], Any], morning_brief=None,
 ) -> tuple["APIRouter", Callable[..., Any]]:
     """Return the same workload reader used by HTTP and diagnostic control/run sampling."""
     from fastapi import APIRouter, Depends, HTTPException
-    from .resource_usage import resource_usage
-
     router = APIRouter()
-
-    @router.get("/api/v1/diagnostics/resources", dependencies=[Depends(authorize)])
-    async def diagnostics_resources() -> dict[str, object]:
-        database_size, storage_categories = await asyncio.gather(
-            asyncio.to_thread(store.storage_size_bytes),
-            asyncio.to_thread(store.storage_breakdown),
-        )
-        return {
-            **resource_usage("/app/data", database_size),
-            "storage_categories": storage_categories,
-            "storage_category_bytes_are_estimates": True,
-            "retention_policy": {
-                "mode": "unlimited",
-                "automatic_deletion_enabled": False,
-            },
-        }
 
     @router.get("/api/v1/diagnostics/workloads", dependencies=[Depends(authorize)])
     async def diagnostic_workloads() -> dict[str, object]:
@@ -55,7 +137,7 @@ def create_diagnostic_read_router(
             "minute_backfill": bool(top20_service and top20_service._minute_backfill_enabled),
             "minute_query_metadata": bool(database_url.startswith("postgres")),
             "top20_after_close": top20_service is not None,
-            "news_jobs": bool(news_service and news_service._job_runner),
+            "news_jobs": current_news_job_runner() is not None,
             "news_stock_refresh": bool(news_service and (
                 news_service._naver_api_enabled or news_service._naver_stock_enabled
                 or news_service._dart_enabled)),

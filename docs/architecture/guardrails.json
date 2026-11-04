@@ -28,6 +28,12 @@
         "forbidden": [
           "kiwoom_monitor.presentation."
         ]
+      },
+      {
+        "source": "kiwoom_monitor.",
+        "forbidden": [
+          "kiwoom_monitor.central_server.database_rank_import"
+        ]
       }
     ],
     "ram_paths": [
@@ -1544,6 +1550,1355 @@
         "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.claim_news_jobs|cursor.execute": 1,
         "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.claim_news_jobs.select_candidates|cursor.execute": 0,
         "db|src/kiwoom_monitor/central_server/database_news_jobs.py|PostgresNewsJobStoreMixin.claim_news_jobs.claim_candidates|cursor.execute": 1
+      }
+    },
+    {
+      "id": "AR-v1-wave3-news-result-20261023",
+      "reason": "AR04 actual BODY/RULE runner now calls one native valid-attempt acceptance command. New sites own the existing claim authority read and BODY/RULE side effects plus terminal receipt under one native transaction; original claim/AI/other collection behavior is unchanged.",
+      "connection": "NewsJobRunner._accept_result -> existing SQLite/Postgres revision mixins -> attempt guard/immutable BODY or RULE projection/events -> terminal -> COMMIT. No new connection owner/cache/queue or optional diagnostic side effect. Existing generic-document APIs are not duplicated in the runner.",
+      "validation": "Owned-source unit95 and actual PC isolated PG13 passed; before stale attempt published old BODY after newer completion, after side effects0. BODY connection5->3/SQL17->14/COMMIT4->2, RULE8->6/26->23/4->2. New authority SELECT is required. Last failed-replay fence assertions pass SQLite and await final current PG integration. First stop40 failure and later75 cleanup remain separate, not40 acceptance. tmp/ar-v1-wave3-20261023/ar04-implementation.json.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|SQLiteNewsRevisionStoreMixin.accept_news_job_result|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_accept_news_job_result.execute|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_accept_news_job_result.save_document|execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_accept_news_job_result|execute": 4
+      }
+    },
+    {
+      "id": "AR-v1-wave3-theme-generation-20261023",
+      "reason": "AR04/05 native accepted theme generation and pinned local editable snapshot reuse existing history and backup owners. These exact sites add predecessor/publication-ID checks, native generation transaction and coherent borrowed-connection export; API/sync caller conversion is still pending.",
+      "connection": "ThemeBackupService.read_sync_snapshot -> one BEGIN/read revision+full document. Native publish/read in existing document mixins -> current history/three projections under the same writer transaction. Existing PG full metadata upsert/replace acquire the same history lock before document writes and explicit READ COMMITTED; standalone append still owns its lock. Other generic collections are unchanged.",
+      "validation": "Owned-source unit98+actual PC isolated PG10+existing theme PG1=109 passed, original two-connection DeadlockDetected preserved and both generic upsert/replace races now pass. Same projection: native connection3->1/execute10->7/COMMIT3->1; SELECT1->2 is required identity/CAS. Local connection3->1/SELECT23->20 with identical revision/document/hash; old mixed snapshot reproduced. Guard permission is source-site ownership only, not live UI/operating speedup or full AR acceptance. tmp/ar-v1-wave3-20261023/ar05-theme-implementation.json.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.publish_theme_snapshot|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.replace_documents|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.upsert_documents|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.publish_theme_snapshot|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_load_accepted_theme_snapshot|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_publish_theme_snapshot|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_publish_theme_snapshot|cursor.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService.export_document|connection.execute": 10,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService.read_sync_snapshot|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService.read_sync_snapshot|sqlite3.connect": 1
+      }
+    },
+    {
+      "id": "AR-v1-wave3-journal-manual-publication-20261023",
+      "reason": "AR05 native scope-key preservation migration and final analysis publication own immutable revision/manual-content CAS/current publication together. New helpers replace caller read/write/read composition; legacy/v2 data and original ownership are not rewritten.",
+      "connection": "JournalWindow scoped intent+clock -> preparation frozen effective input/manual snapshot -> existing repository final native transaction. Scope-key v9->10 migration preserves both legacy rows and new scoped edits; rollback restores both tables/version. Exact retired helper sites are ratcheted down only in these changed owner modules.",
+      "validation": "Owned-source182 unique related IDs passed including native stale edit/delete, legacy/v2, same-ID conflict/current rollback, COMMIT ACK loss, scoped sync/tombstone/backup and final DDL fault rollback. Native connection6->4, SELECT5 unchanged, BEGIN/COMMIT2->1. Tests/cold fixture initialization are separate setup costs. tmp/ar-v1-wave3-20261023/ar05-implementation.json.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_schema.py|_migrate_scoped_trade_setup_keys_v10|connection.execute": 4,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin._accept_analysis_revision_payload|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin._read_trade_setup_manual_input|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin._write_trade_analysis_setup|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin.load_trade_setup_manual_input|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin.publish_trade_analysis|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin.publish_trade_analysis|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin.save_journal_analysis_revision|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_trade_repository.py|JournalTradeRepositoryMixin.save_trade_analysis_setup|connection.execute": 0
+      }
+    },
+    {
+      "id": "AR-v1-wave3-diagnostic-body-owner-20261023",
+      "reason": "AR09 moves the existing selected diagnostic measurement body from CLI to its existing sampling owner. Three SQL source sites and one psycopg factory site are relocated code, not new normal product/hot-path I/O.",
+      "connection": "DiagnosticRuns and CLI both consume the existing sampling implementation; CLI retains transport/default path/raw-summary adaptation. This tool remains installed and working. Common native factory/context/store capture/metadata isolation is a separate pending cut.",
+      "validation": "Owned-source77 related IDs and15 installed golden cases passed; moved8/helper21 ASTs and three SQL literals preserved, API/SQL counts unchanged. Scripts physically absent copy still runs enabled-session cancellation/report/lease cleanup and actual SQLite reopen; whole diagnostic-module absence is not accepted. tmp/ar-v1-wave3-20261023/ar09-implementation.json.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/diagnostic_sampling.py|measure|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/diagnostic_sampling.py|measure|psycopg.connect": 1
+      }
+    },
+    {
+      "id": "AR-v1-wave4-journal-immutable-native-20261023",
+      "reason": "AR04/05 immutable remote journal batch acceptance; three exact new native call-site keys, not runtime allowance for arbitrary I/O",
+      "connection": "Existing authenticated content POST -> native accept_journal_analysis_revisions -> one transaction and original row readback -> PC sync",
+      "validation": "First raw receipt/time immutable, sorted competing identities, mixed conflict rollback, ACK-loss replay, authorized tombstone/new revision; no remote stale-false policy invented. Required authority SELECT is not claimed as eliminated cost; current SQLite/PG/ASGI related run pending",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.accept_journal_analysis_revisions|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_accept_journal_analysis_revisions|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.accept_journal_analysis_revisions|cursor.execute": 1
+      }
+    },
+    {
+      "id": "AR-v1-wave4-pc-observation-type-contract-20261023",
+      "reason": "Existing realtime DTO types referenced only under TYPE_CHECKING/postponed annotations by the actual pure RAM owner. Avoid a redundant protocol/DTO adapter or runtime infrastructure import. This exact type dependency is not a broad layer exception.",
+      "connection": "MainWindow -> PcMarketSession ingest/gap/projection; existing aggregator, AppController buffers and native writer unchanged; no runtime import or new source/DB/worker owner",
+      "validation": "986 prior assertions and 138 IDs preserved with receiver-only edits; supplied corrected clock, same gap/none merge values, GUI/native close and writer consumers; source AST TYPE_CHECKING location reviewed, current related native/GUI execution pending",
+      "limits": {
+        "boundary|kiwoom_monitor.application.pc_market_session|kiwoom_monitor.infrastructure.kiwoom_rest.realtime": 1
+      }
+    },
+    {
+      "id": "AR-v1-wave5-current-theme-native-read-20261024",
+      "reason": "One exact source SELECT helper replaces three independently paginated collection reads, shared by actual SQLite and PostgreSQL owners.",
+      "connection": "Actual authenticated current-theme route -> native one-statement snapshot -> existing current projection codec. Not historical-head adoption.",
+      "validation": "Seven real SQLite and seven real PG contracts plus actual HTTP/ASGI cancellation/clock/auth; current runtime pending, no arbitrary extra I/O permitted.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_load_current_theme_snapshot|cursor.execute": 1
+      }
+    },
+    {
+      "id": "AR-v1-wave8-ai-authority-native-20261024",
+      "reason": "Exact borrowed-native helper sites for immutable actual inference, requester/attempt acceptance and first-receipt conflict readback. Existing projection/revision SQL is moved; no new connection or transaction owner. Only this changed native module is ratcheted down.",
+      "connection": "Existing CentralAIService -> actual usage/inference persistence -> same native job/attempt lock -> projection/revision/terminal acceptance. Current NAS-local article/BODY pins remain; this is not future PC producer/result independence.",
+      "validation": "Independent exact-six-site review: tmp/ar-v1-wave8-20261024/ai-native-sites-review.json. Earlier isolated SQLite queued connections/COMMIT5/3 unchanged, SELECT3->6 and INSERT3->4; direct connections2->3/COMMIT1->2 are necessary safety cost, not speedup. Current integrated related/native PG verification pending. No adopted baseline, old review, deadline or performance oracle reset.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_accept_news_ai_output.query|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_news_ai_inference.execute|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_news_ai_inference|execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_news_ai_results|db.executemany": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_news_ai_revisions.execute|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_news_ai_revisions|execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|PostgresNewsRevisionStoreMixin.save_news_ai_results|cursor.executemany": 0,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|SQLiteNewsRevisionStoreMixin.save_news_ai_results|connection.executemany": 0,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_postgres_news_ai|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_sqlite_news_ai|connection.execute": 0
+      }
+    },
+    {
+      "id": "AR-v1-wave15-theme-prepared-ACK-native-current-20261024",
+      "reason": "Exact native current/projection coherent read and existing ThemeBackupService durable prepared-before-send/ACK-after-response ownership. Retire four old revision-free relay DB call keys. No new queue/cache/Manager or generic snapshot adoption.",
+      "connection": "Existing theme editor→dispatcher/content owner→one authenticated native generation publication; same native transaction/first receipt/CAS. News app→same runner/native bound enqueue is ownership relocation.",
+      "validation": "Independent exact-key/body/consumer/core review: tmp/ar-v1-wave15-20261024/review-theme-news-static-deltas.json. Current U unit collection has24complete modules757PASS, query sameID QtAbort+missing-case and AppController original180 incomplete retained, not whole integration PASS. Actual isolated sourceA PG14/sourceC bridge remains source-specific. HTTP3→1/central COMMIT3→1/local durable0→2/total3→3; static sites are not runtime savings. Current guards/related recheck required.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.load_accepted_theme_snapshot|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.load_accepted_theme_snapshot|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._read_sync_state|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._sync_transaction|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._sync_transaction|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._write_sync_state|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/central_content_sync.py|CentralContentSyncService._read_themes|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/central_content_sync.py|CentralContentSyncService._read_themes|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/central_content_sync.py|CentralContentSyncService._write_themes|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/central_content_sync.py|CentralContentSyncService._write_themes|sqlite3.connect": 0
+      }
+    },
+    {
+      "id": "AR-v1-wave20-result-only-native-first-receipt-20261024",
+      "reason": "New explicit result-only role boundary requires one immutable INSERT/winner SELECT in caller transaction; SQLite BEGIN IMMEDIATE and PG READ COMMITTED preserve concurrent first receipt. No UPDATE/second transaction or generic collection bypass.",
+      "connection": "Completed original manifest -> explicit owner-pinned no-redirect HTTP -> app-owned native store -> first immutable storage-only receipt -> separate local ACK. Not native research COMPLETE/scientific approval/order permission.",
+      "validation": "Independent C2 and E followup reviewed exact source. Current AA917=915PASS/2additive-API-oracle failures retained; actual workflow/cancellation/owner/native behavior PASS. E normalHTTP/connection/SELECT2->1, INSERT/COMMIT1 unchanged. Current PG4 and corrected strict app oracle pending; no global acceptance.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.accept_research_result|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.accept_research_result|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_accept_research_result|cursor.execute": 2
+      }
+    },
+    {
+      "id": "AR-v1-wave24-offline-rank-cursor-owner-20261024",
+      "reason": "A removable one-off native command must import the exact frozen historical rank relations into a proven-new offline target, preserve gaps/identity/typed values and atomically accept data plus first receipt. Explicit native cursor SQL is required and is never normal runtime/tick I/O.",
+      "connection": "Explicit verified artifact -> scripts.import_preserved_rank_history -> database_rank_import caller-owned cursor -> new/offline native transaction. Normal kiwoom_monitor modules may not import this transient command; existing runtime writer is byte-identical. Public generic mutators reserve only native receipt/target namespaces.",
+      "validation": "Independent D/E/F review and actual F18 (including real PostgreSQL source-to-both-targets, concurrent/rollback/COMMIT ACK loss) retained; current root related109/actual PG12 pending. First failure snapshots preserved, no baseline reset. Shared accepted-wait route keeps all existing SQL unchanged.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|_rank_document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|_rank_insert_document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|_rank_lock|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|_rank_rows|reader.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|_reserve_rank_sequence|cursor.execute": 6,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|accept_preserved_rank_history|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|accept_preserved_rank_history|cursor.executemany": 2,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|prepare_preserved_rank_target|cursor.execute": 1
+      },
+      "rules_change": {
+        "from": "74a03078f23d918bfff7231fe1a27dc092fd0f047259f1bc294069a50aa58dcd",
+        "to": "46d1b4aa49cc421c03198f2727f889ae6dce1a01ed160440487085d665db063e"
+      }
+    },
+    {
+      "id": "AR-v1-p2a-raw-settings-native-20261025",
+      "reason": "Required explicit minimum settings migration needs one caller-selected offline native transaction preserving original primitive values/versions and first receipt. P0 and P2 share the same readonly SQLite snapshot, preventing duplicate source ownership; no normal/runtime I/O increase.",
+      "connection": "One-off capture/verify/explicit selection -> SettingsBackupService.accept_preserved_current_settings -> exclusive offline target/value+originalversion+immutable firstreceipt. P0 rank exporter uses same public snapshot; normal backup/defaults/sync/clock and runtime authority unchanged.",
+      "validation": "Independent exact5file B review/current B55 evidence; source WAL/noDML, rollback/cancel/ACK/retry/noop/CLI and raw readers. Current root146+actualPCPG12 pending; final role schema/normal writes/initialize/restart remain mandatory P3, not falsely accepted.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_backup.py|SettingsBackupService.accept_preserved_current_settings.select|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_backup.py|SettingsBackupService.accept_preserved_current_settings|connection.commit": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_backup.py|SettingsBackupService.accept_preserved_current_settings|connection.execute": 5,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_backup.py|SettingsBackupService.accept_preserved_current_settings|connection.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_backup.py|SettingsBackupService.accept_preserved_current_settings|connection.rollback": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_backup.py|SettingsBackupService.accept_preserved_current_settings|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/sqlite_read_snapshot.py|readonly_sqlite_snapshot|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/sqlite_read_snapshot.py|readonly_sqlite_snapshot|connection.rollback": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/sqlite_read_snapshot.py|readonly_sqlite_snapshot|sqlite3.connect": 1
+      }
+    },
+    {
+      "id": "AR-v1-news-body-role-native-20261025",
+      "reason": "Explicit BODY-only producer needs native owner/attempt fencing and an immutable first input/cache pin. Existing revision owner atomically accepts BODY/RULE/job terminal state; no extra default NAS claim path or realtime I/O.",
+      "connection": "Scoped producer grant -> four BODY HTTP handlers -> same application QueryStore -> existing revision transaction owner. Queue row decoder lives in existing lower job writer; pure article hash lives in domain. The initial five cycle edges were removed, not exempted.",
+      "validation": "Source99 current related124+actual disposable PC PostgreSQL34=158 PASS; source98 first553=550PASS3failed methods retained (schema23 oracle strengthened and fixed; native query Abort/account HTTP contract remain). Original38 methods preserved, new exact4 SQL keys only, no new cycle exemptions/default NAS I/O. Native owner/attempt/source/pin/atomic acceptance/cancel/ACK and existing native claim/retry/historical import readers covered; whole role/multi-PC/operating acceptance incomplete. Evidence tmp/ar-v1-wave26-20261025/verification.json.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|SQLiteNewsRevisionStoreMixin.accept_news_body_job_result|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|SQLiteNewsRevisionStoreMixin.claim_news_body_job|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|SQLiteNewsRevisionStoreMixin.load_news_body_job_input|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_news_body_execute|db.execute": 2
+      }
+    },
+    {
+      "id": "2026-10-25-ar-v1-p3-role-settings-install",
+      "reason": "Bounded explicit settings-only fresh/selected installation needs existing Database native relation setup, exact raw seed/readback and first receipt atomicity. No periodic/runtime input work is added. Existing default initialize adds exactly one startup ownership SELECT to reject a settings-only role DB before legacy migrations; ordinary set/save/tick paths are unchanged.",
+      "connection": "Existing preserve_current_settings command -> existing Database.initialize_role_settings native transaction -> four existing normal repository relations/role metadata/first original receipt; unchanged repositories and Runtime bootstrap.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_role_settings|connection.commit": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_role_settings|connection.execute": 7,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_role_settings|connection.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_role_settings|connection.rollback": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_role_settings|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize|connection.execute": 13
+      },
+      "validation": "Current source100 selected local251+actual disposable PC PG18=269 PASS; exact IDs/import origins/source start-end/19 worker-tree-HKCU-TEMP and PG cleanup verified. Static architecture/consumers/semantic100records6559defs PASS. Original99 reviews/goldens/failures preserved. Six source-site limits are not measured runtime costs; periodic setters/tick I/O unchanged. Current query10 PASS is nonreproduction, not a fix for earlier Abort. Full P3 role bootstrap/NULL consumer/Runtime/trusted artifact and whole v1 remain incomplete. Evidence tmp/ar-v1-wave27-20261025/main-integration/verification.json."
+    },
+    {
+      "id": "2026-10-26-ar-v1-s1-query-role-native-owner",
+      "reason": "Explicit single query-role DB reuses existing native initialization, seed/readback, settings version/cache and theme snapshot/restore owners. New source sites are bounded startup/native commands, not per-tick I/O. Relocated old five site budgets are reduced to exact7/5/0/0/0 instead of leaving duplicate headroom. Initial adoption/rules/prior review history are unchanged.",
+      "connection": "Explicit query argv -> AppPaths/root lease/restore gate -> Database.initialize_query_role -> same Settings/Columns/stock/bar/theme DB. ThemeBackup injected SettingsRepository shares one native restore/COMMIT then cache publication; pending accepted UI writes block only explicit restore until completion. Legacy no-port/full consumers remain live.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._create_role_settings_seed|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._create_role_settings_seed|connection.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._initialize_stock_catalog|connection.execute": 6,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|connection.commit": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|connection.execute": 9,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|connection.rollback": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_repository.py|SettingsRepository.write_many_in_transaction|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_repository.py|SettingsRepository.write_many_in_transaction|connection.executemany": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._apply_all_profiles|connection.execute": 17,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._import_all_profiles_with_settings|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._import_all_profiles_with_settings|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._require_settings_connection|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize|connection.execute": 7,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_role_settings|connection.execute": 5,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_role_settings|connection.executemany": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_repository.py|SettingsRepository.set_many|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_repository.py|SettingsRepository.set_many|connection.executemany": 0
+      },
+      "validation": "Reviewed exact13 new-owner keys plus5 downward overrides. Product14 are byte identical from v2 to integrated v4. Prior v3 complete297 produced294PASS/2fixtureFAIL/1helperERROR (preserved); unchanged18 modules285PASS plus v4 query12PASS is incremental scope evidence, not a single current-source297 run. Integrated current-main query12 also PASS/76.318s with exact IDs/origins/source/Job/tree/HKCU/TEMP cleanup. Same native commit-ACK/close/cache/rollback, pending writer, schema/seed/first receipt and shared-backup contracts covered. Source1209 LF9fe75b326dc7f35090b5cca58c41198631ab1ff291e5cb140ad8fd70cd99f0fc. Actual PG5/wholeHEAD/wholeAR/operating acceptance remain incomplete. Evidence tmp/ar-v1-wave28-20261025/query-settings/root-main-integration/integration.json and native-preparation/native-v1/run.json; exact-key reviews query-settings-s1-guard-v2-review.json and query-settings-s1-retired-site-review.json."
+    },
+    {
+      "id": "2026-10-26-ar-v1-s2-current-profile-native-owner",
+      "reason": "Reuse one existing SettingsRepository native transaction/terminal ACK/close/cache owner for current rename and injected restore. Theme owners retain business SQL; UI separate active/version save and obsolete no-port rename are removed. No tick/startup I/O or new Manager/queue/cache. Four moved keys are bounded; five old owner budgets explicitly retire to zero.",
+      "connection": "ThemeManager input and accepted-work admission -> ThemeRepository.rename_profile -> same actual SettingsRepository/native DB -> profile/name/active/version one transaction -> same-port cache -> existing repository notify -> MainWindow single name-list projection across editors. Unknown/True failures deactivate full/query projections, without cancelling accepted work or closing unrelated ranking/chart. Existing no-port restore/select consumers remain.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_repository.py|SettingsRepository.commit_native_write|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_repository.py|SettingsRepository.commit_native_write|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/settings_repository.py|SettingsRepository.require_native_connection|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.rename_profile.write|connection.execute": 4,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._import_all_profiles_with_settings|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._import_all_profiles_with_settings|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_backup.py|ThemeBackupService._require_settings_connection|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.rename_profile|connection.commit": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.rename_profile|connection.execute": 0
+      },
+      "validation": "Frozen S2-v4 related161/8 modules PASS, discovery169/unselected shared8, exact IDs/imports/source/worker180/child35/UI12/Job/HKCU/TEMP verified. Actual historical source103 UI cost1 verifies COMMIT2 and old-active at notify; candidate UI/repository native trace verifies COMMIT1 and saved-active/version before notify. No inferred SELECT/connection/WAL/latency reduction. Independent v3/v4 exact-key and control-flow/full-mode review; current main integration verification pending. Evidence tmp/ar-v1-wave29-20261026/s2-profile-rename-v4/native-preparation/native-v1/run.json, s2-profile-rename-independent-v4.json and s2-profile-rename-v4-independent-guard.json."
+    },
+    {
+      "id": "2026-10-26-ar-v1-ar09-normal-lifetime-cycle-retirement",
+      "reason": "Five existing normal producers now import common async_lifetime helpers rather than diagnostic runtime. Runtime/Tape retain tool admission/credit/lane/drain ownership and bind scoped callback tokens; accepted native waits and five producer function bodies are unchanged. Eleven former cyclic edges are absent from SCCs, so retire their historical allowances to0 without resetting adoption/rules/history. Five imports were removed; six real imports remain but are no longer cyclic. This is not eleven independent cycles or SQL/performance savings.",
+      "connection": "Normal TOP20/realtime/program/REST/market-events -> existing async_lifetime -> existing native task/thread accepted wait. Optional ReplayRuntimeScope/TaskTapeBindings activate scoped dispatch and preserve two real legacy aliases/canonical QueryStore consumer identities; no duplicate state/queue/DB owner.",
+      "limits": {
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.diagnostic_replay_runtime": 0,
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.program_snapshot_writer": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_recorded_execution|kiwoom_monitor.central_server.diagnostic_replay_runtime": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_baseline|kiwoom_monitor.central_server.diagnostic_replay_runtime": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_runtime|kiwoom_monitor.central_server.diagnostic_rest_input": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_outbox|kiwoom_monitor.central_server.diagnostic_replay_runtime": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_seed|kiwoom_monitor.central_server.diagnostic_top20_outbox": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_seed|kiwoom_monitor.central_server.program_snapshot_writer": 0,
+        "cycle|kiwoom_monitor.central_server.program_snapshot_writer|kiwoom_monitor.central_server.diagnostic_replay_runtime": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_collector|kiwoom_monitor.central_server.diagnostic_replay_runtime": 0,
+        "cycle|kiwoom_monitor.central_server.rest_broker|kiwoom_monitor.central_server.diagnostic_replay_runtime": 0
+      },
+      "validation": "Current-v2 exact11 candidate actual55/6 original suites,3 original180s workers PASS/33.594s; exact IDs/import origins/source/Job/HKCU/TEMP verified independently. Historical282 remains source-scoped partial evidence. Actual parser confirmed only11 cycle-key1->0, new cycle0 and DB/dynamic-call key counts unchanged. Preserve existing34 unrelated retirable limits and S2 exact9 owner limits. Current main core31+guard14 integration verification pending. Source1209 LF1c883a4b030173d64773f9385c745f45f6767d782872b88d2621df012ff4d4fe. Evidence tmp/ar-v1-wave29-20261026/ar09-normal-helper-current-v2/root-current55-run1/run.json, ar09-normal-helper-current-independent-actual.json, ar09-normal-helper-guard-review.json. Actual NAS sealed5 remains UNEXECUTED_REQUIRED; no PC/generalPG substitute or wholeAR09/operating acceptance."
+    },
+    {
+      "id": "2026-10-26-ar-v1-ar09-hub-explicit-observer",
+      "reason": "Remove the three Hub-to-tool import edges and expose only the existing optional lifecycle observer at the actual app/replay/source-fixture compositions. Publication KST is a product responsibility supplied by the existing corrected/virtual clock, once per unstamped event. Eleven former cyclic edges leave their SCCs and their historical allowances become0. Three exact diagnostic-only composition/cold-resource-validation edges now enter the existing diagnostic SCC; allow each once with the existing tools still installed. No product dependency/I/O rule or baseline reset, no claim of eleven independent cycles or SQL/latency savings.",
+      "connection": "Product RealtimeHub owns subscription/filter/queue/drop/gap/readiness/publication moment. Existing lifecycle module owns its capture callbacks and is passed explicitly by actual app and controlled replay factories. Original source fixture also receives its real virtual clock and observer; core has no diagnostic import or reverse re-export. Actual Collector/REST/TOP20/store capture/workload dependencies and temporary subscriber/Hub capture attachments remain later AR09 scope.",
+      "limits": {
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_collector_replay|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_recorded_execution|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_input|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_seed|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_subscription_v2|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_collector|kiwoom_monitor.central_server.realtime_hub": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_hub|kiwoom_monitor.central_server.diagnostic_top20_input": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_hub|kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_hub|kiwoom_monitor.central_server.diagnostic_trace": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_collector_replay|kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input": 1,
+        "cycle|kiwoom_monitor.central_server.diagnostic_recorded_execution|kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input": 1,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_seed|kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input": 1
+      },
+      "removal_condition": "The three new diagnostic-only cycle allowances are temporary until the real replay/seed lifecycle consumers and remaining tool-state/Collector boundaries are migrated or optional tooling is removed. Then retire each exact key to0. App composition dependency may be moved to the future optional tool composition; no broad cycle permission is granted.",
+      "validation": "Original MAIN107 baseline25 PASS. Frozen v1 actual301 executed:300 PASS/1 ERROR; original error and TEMP preserved. Frozen v2 changes only tests/top20_native_fixture.py clock/observer wiring; same failing oracle and linked replay execution pass6/2 original180s workers. V1 remaining295 are earlier-source evidence, not a v2 single301 execution. Actual main related57 and static gates are pending and recorded in separate integration evidence. Independent exact14-key review: tmp/ar-v1-wave31-20261026/hub-guard-review-v1.json. No DB/dynamic I/O key delta. Full five-producer/app tool absence, actual NAS sealed5/operator owner+valid lease+source admission and operating acceptance remain incomplete."
+    },
+    {
+      "id": "2026-10-26-ar-v1-s2-current-profile-selection",
+      "reason": "Move the identical four native normalization execute sites from the old self-owned transaction into one borrowed-connection business helper; retire old exact key to0. Existing generic callers keep their original connection/commit. Allow exactly one SELECT of an existing native NOCASE target within the existing SettingsRepository transaction, rejecting missing targets instead of creating them while switching an accepted writer's mutable view. No blanket DB allowance, no snapshot reset or claim that ordinary COMMIT1 becomes0.",
+      "connection": "Actual full/query editor -> existing accepted/queued owner fence -> ThemeRepository.select_current_profile -> same SettingsRepository.commit_native_write -> normalization+active/version -> acknowledged RAM/one notification -> MainWindow and same-owner editors. Generic five method ASTs and original SQL are unchanged; no per-tick or polling path added.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository._merge_case_insensitive_themes|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository._merge_profile_themes|connection.execute": 4,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.select_current_profile.write|connection.execute": 1
+      },
+      "removal_condition": "Retired normalization owner stays0. If current-profile business SQL or owner changes, review the real callers/transaction and related rollback/ACK/close/cache/queued-publication contracts before changing these exact limits. The new existing-target lookup is required identity validation, not temporary duplicated storage.",
+      "validation": "Original107 actual wrong-target write FAIL; isolated v2 actual169=168PASS/1preserved ordinary-view fixture error, v3 exact one receiver correction color26PASS. Same desired retarget assertions pass. Native COMMIT/ACK/close/cache/notify and full/query/create/delete/fallback are real. Root staged7 retains Hub17 exactly; actual main86 and static rechecks pending. Whole S2/AR/Q/installation and actual NAS sealed5/operator+lease remain incomplete. See tmp/ar-v1-wave31-20261026/profile-selection-root-integration/review109-append-proof.json."
+    },
+    {
+      "id": "2026-10-26-ar-v1-ar09-rest-explicit-input-observer",
+      "reason": "Retire the exact five old REST-core/tool cyclic edges to0 after removing product diagnostic imports. Two tool-only edges to existing metrics/flow input now supply the old captured-workload/flow hooks inside the same diagnostic subsystem and need exact1 allowances. No new product dependency/DB/dynamic-I/O permission or baseline reset; five retired edges are not five independent cycles.",
+      "connection": "Product broker owns actual native transport/ingestion/inflight/cache/credential/drain. Existing optional rest-input module owns capture ordinal/request lineage and existing scope callbacks. Real app/replay/source fixtures explicitly connect it. Capacity tool reconnects its existing Hub observer and virtual clock, leaving strict validator unchanged.",
+      "limits": {
+        "cycle|kiwoom_monitor.central_server.diagnostic_rest_input|kiwoom_monitor.central_server.rest_broker": 0,
+        "cycle|kiwoom_monitor.central_server.rest_broker|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.rest_broker|kiwoom_monitor.central_server.diagnostic_replay_contract": 0,
+        "cycle|kiwoom_monitor.central_server.rest_broker|kiwoom_monitor.central_server.diagnostic_rest_input": 0,
+        "cycle|kiwoom_monitor.central_server.rest_broker|kiwoom_monitor.central_server.diagnostic_top20_flow_input": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_rest_input|kiwoom_monitor.central_server.diagnostic_metrics": 1,
+        "cycle|kiwoom_monitor.central_server.diagnostic_rest_input|kiwoom_monitor.central_server.diagnostic_top20_flow_input": 1
+      },
+      "removal_condition": "Two diagnostic-only limits are temporary while these existing capture/workload consumers remain. Retire each to0 when actual tool callers/state are removed or migrated. Product-core imports remain0; never restore hidden hooks to make recorder output pass.",
+      "validation": "Original actualbaseline55PASS; v1 actual358/355PASS/3failures and original MAIN108 capacity11ERROR plus legacy scope observation1PASS preserved. V2 exact three cause-bound corrections related57PASS, original limits/assertions retained. Actual currentmain138/static pending. Whole app/Collector/store/five-producer absence, actualNAS5/operator owner+lease+source admission/post-fence remain incomplete."
+    },
+    {
+      "id": "2026-10-26-ar-v1-ar09-subscription-observer-state-owner",
+      "reason": "Retire the exact former Collector-to-v2-recorder cycle edge to0 after explicit optional composition. Move one tool completeness bool from Collector scratch state into the real per-collector recorder, without changing native progress. No new exception allowance or baseline reset.",
+      "connection": "Actual app creates the existing-tool recorder; Collector's nine optional evidence sites do not own native approval. Bare current receive path has no recorder module import. Legacy capture/lifecycle and other Collector dependencies remain unfinished scope.",
+      "limits": {
+        "cycle|kiwoom_monitor.central_server.realtime_collector|kiwoom_monitor.central_server.diagnostic_top20_subscription_v2": 0
+      },
+      "removal_condition": "Keep product direct recorder import at0. This tool instance and composition can be removed once its current need ends; remaining source/capture/workload/legacy contracts must be addressed separately.",
+      "validation": "Original current111 full related22PASS. Entire native _receive AST inverse equal and four moved tool methods preserve body/payload semantics. Current after-change native/state/source-absence/app+guard checks pending; actualNAS5 remains REQUIRED_UNEXECUTED."
+    },
+    {
+      "id": "2026-10-26-ar-v1-ar09-collector-input-observer-owner",
+      "reason": "Transfer Collector-only tape/high-water/legacy receipt state to the existing optional lifecycle recorder. Retire seven actual former core/tool cycle edges to0. Explicitly review exactly two internal tool bindings: the unchanged validator's direct replay consumer and the existing flush context token. No baseline reset or broad exception.",
+      "connection": "Live app and existing source factories explicitly install lifecycle_input.CollectorInputRecorder; bare Collector imports no diagnostic modules. Immutable codec/validator stay in replay_contract. Mutable recorder does not belong in codec/plan contract. lifecycle_input uses the existing diagnostic_metrics CURRENT_FLUSH_ID scope; collector_replay injects the original required validator. All native REG/ACK, RAM, writer, retry/drain and receipt semantics remain native-owned. Publication separately reuses await_native_call without new SQL.",
+      "limits": {
+        "cycle|kiwoom_monitor.central_server.diagnostic_collector_replay|kiwoom_monitor.central_server.realtime_collector": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_recorded_execution|kiwoom_monitor.central_server.realtime_collector": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_subscription_v2|kiwoom_monitor.central_server.realtime_collector": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_collector|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_collector|kiwoom_monitor.central_server.diagnostic_replay_contract": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_collector|kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input": 0,
+        "cycle|kiwoom_monitor.central_server.realtime_collector|kiwoom_monitor.central_server.diagnostic_trace": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_collector_replay|kiwoom_monitor.central_server.diagnostic_replay_contract": 1,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input|kiwoom_monitor.central_server.diagnostic_metrics": 1
+      },
+      "removal_condition": "Keep seven retired core/tool cycle keys at0. The two allowed internal edges exist only while these optional tools need the original validator and flush evidence scope; remove their limits when those consumers are retired or moved. Every other new cycle/DB/I/O site still requires review. Existing unrelated cyclic debt remains visible.",
+      "validation": "Entire moved class AST equals the frozen candidate after removing only three former self imports; 17 actual constructors import the sole new owner, no reexport/duplicate state. Exact existing-scanner comparison1373->1368 and non-cycle sites identical. Prior isolated Collector500PASS/1ERROR, original112 reproduces that missing observer, v3 fixture86PASS; publication before3FAIL/after18PASS. Current integrated native source acceptance is tracked separately in root-integration/integration.json; actualNASsealed5 remains REQUIRED_UNEXECUTED."
+    },
+    {
+      "id": "2026-10-26-ar-v1-profile-delete-native-selection-owner",
+      "reason": "Move captured-target delete and fresh saved selection/fallback/version into the existing single SettingsRepository native write. Retire the two former out-of-owner DELETE/COMMIT keys to0, allow exactly five SQL sites in the one transaction callback; not five extra runtime writes.",
+      "connection": "Actual ThemeManager/preview deletion -> same ThemeRepository.delete_profile(settings=existing port) -> existing commit_native_write. Count/target/current native identity/delete/fallback reads remain under one lock; normalization and selection stamp only when necessary. UI reuses coherent publication once and removes old second selection transaction/relay. Later modal selection is preserved; rollback/ACK-loss/cache/close/publication errors retain their original typed phase.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.delete_profile.write|connection.execute": 5,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.delete_profile|connection.commit": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/theme_repository.py|ThemeRepository.delete_profile|connection.execute": 0
+      },
+      "removal_condition": "Keep retired legacy delete.execute/commit at0. Keep the five exact native callback sites only while they implement count/captured target/fresh selection/delete/fallback atomicity. Future source/transaction moves require exact review; no global allowance or baseline reset.",
+      "validation": "Original actual2FAIL exposed COMMIT2/intermediate default and deletion surviving later selection failure. Isolated v2 complete related100PASS including query12 and guard14; source proof/renamed regression preserve rollback and committed publication failure separately. Current source100 tracked in profile-delete-integration/integration.json. Existing native queryAbort remains UNKNOWN with preserved failures and later PASS sources; not claimed fixed. Old settings/backup/MainWindow product unchanged."
+    },
+    {
+      "id": "2026-10-26-ar-v1-query-current-state-native-seed",
+      "reason": "Borrow existing query initializer transaction for seven allowlisted raw relations and exact eleven-relation typed/FK/catalog/active readback. Six static SQL call sites, no new connection/COMMIT/owner or runtime I/O.",
+      "connection": "Explicit verified single-cut installer -> existing Database.initialize_query_role FULL/FK/BEGIN IMMEDIATE -> native rows/readback/first receipt -> one COMMIT/rollback/close. No intermediate settings carrier or ThemeRepository normalization.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._seed_query_current_state|connection.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._seed_query_current_state|connection.execute": 5
+      },
+      "removal_condition": "Only this explicit raw seed branch may use these six sites. Retiring the installer requires explicit version/data handling for already-created first receipts; do not reset adopted limits or extend runtime writers.",
+      "validation": "Isolated44 source74deb3d0 actual PASS plus unobserved queryv3_13 sourced2e4030c actual PASS. Current integrated source656 pending; v1/v2 query input failures and MAIN115 old queryAbort preserved. Five execute/one executemany static sites inside one existing native initializer transaction; no extra connection/COMMIT/owner."
+    },
+    {
+      "id": "2026-10-27-ar-v1-ar09-optional-composition-native-observation",
+      "reason": "Retire only exact newly disappeared/lowered MAIN116 source sites and review four individual deferred tool-internal edges. Preserve original adoption/rules, all36 review entries and unrelated preexisting34 retirable limits. No snapshot reset or runtime cost claim.",
+      "connection": "Normal app/producer/store/native owners retain corrected KST clock, SQL/order/authority/transaction/ACK/recovery and close. Existing optional composition explicitly installs one native observer through install_store_capture; root removed its redundant two-statement installation from compose_application_inputs.",
+      "limits": {
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.diagnostic_replay_contract": 0,
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.diagnostic_rest_input": 0,
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.diagnostic_top20_flow_input": 0,
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.diagnostic_top20_input": 0,
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.market_ingest": 0,
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.autonomous_top20|kiwoom_monitor.central_server.rest_broker": 0,
+        "cycle|kiwoom_monitor.central_server.database_account_identity|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_account_settings|kiwoom_monitor.central_server.database_account_identity": 0,
+        "cycle|kiwoom_monitor.central_server.database_account_settings|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_credentials|kiwoom_monitor.central_server.database_account_identity": 0,
+        "cycle|kiwoom_monitor.central_server.database_credentials|kiwoom_monitor.central_server.database_account_settings": 0,
+        "cycle|kiwoom_monitor.central_server.database_credentials|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_datasets|kiwoom_monitor.central_server.database_market_bars": 0,
+        "cycle|kiwoom_monitor.central_server.database_datasets|kiwoom_monitor.central_server.database_top20_statistics": 0,
+        "cycle|kiwoom_monitor.central_server.database_datasets|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_datasets|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_documents|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_documents|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_execution|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_external_market|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_historical_news|kiwoom_monitor.central_server.database_news_jobs": 0,
+        "cycle|kiwoom_monitor.central_server.database_historical_news|kiwoom_monitor.central_server.database_news_revisions": 0,
+        "cycle|kiwoom_monitor.central_server.database_historical_news|kiwoom_monitor.central_server.database_news_sources": 0,
+        "cycle|kiwoom_monitor.central_server.database_historical_news|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_market_bars|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_market_bars|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_market_events|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_market_metadata|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_news_jobs|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_news_jobs|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_news_revisions|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_news_revisions|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_news_sources|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_observation_readers|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_query_cache|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_query_cache|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_realtime_snapshot|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_realtime_snapshot|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_research_export|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_shadow_state|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.database_shadow_state|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_storage_diagnostics|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_top20_reconciliation|kiwoom_monitor.central_server.database_top20_statistics": 0,
+        "cycle|kiwoom_monitor.central_server.database_top20_reconciliation|kiwoom_monitor.central_server.diagnostic_top20_display_input": 0,
+        "cycle|kiwoom_monitor.central_server.database_top20_reconciliation|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database_top20_statistics|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_account_identity": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_account_settings": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_credentials": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_datasets": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_documents": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_execution": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_external_market": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_historical_news": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_market_bars": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_market_events": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_market_metadata": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_news_jobs": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_news_revisions": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_news_sources": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_observation_readers": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_query_cache": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_realtime_snapshot": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_research_export": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_shadow_state": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_storage_diagnostics": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_top20_reconciliation": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.database_top20_statistics": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.diagnostic_replay_contract": 0,
+        "cycle|kiwoom_monitor.central_server.database|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_account_archive|kiwoom_monitor.central_server.database_account_settings": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_account_context|kiwoom_monitor.central_server.database": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_account_context|kiwoom_monitor.central_server.database_account_identity": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_collector_replay|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_recorded_execution|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_baseline|kiwoom_monitor.central_server.database": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_contract|kiwoom_monitor.central_server.database_account_identity": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_contract|kiwoom_monitor.central_server.database_query_cache": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_contract|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_database_cli|kiwoom_monitor.central_server.database": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay|kiwoom_monitor.central_server.database": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_flow_input|kiwoom_monitor.central_server.autonomous_top20": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_flow_input|kiwoom_monitor.central_server.market_ingest": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_flow_input|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_flow_input|kiwoom_monitor.central_server.rest_broker": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_input|kiwoom_monitor.central_server.autonomous_top20": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_input|kiwoom_monitor.central_server.rest_broker": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_seed|kiwoom_monitor.central_server.autonomous_top20": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_top20_seed|kiwoom_monitor.central_server.rest_broker": 0,
+        "cycle|kiwoom_monitor.central_server.market_ingest|kiwoom_monitor.central_server.postgres_access": 0,
+        "cycle|kiwoom_monitor.central_server.postgres_access|kiwoom_monitor.central_server.diagnostic_metrics": 0,
+        "cycle|kiwoom_monitor.central_server.postgres_access|kiwoom_monitor.central_server.diagnostic_replay_contract": 0,
+        "cycle|kiwoom_monitor.central_server.postgres_access|kiwoom_monitor.central_server.diagnostic_trace": 0,
+        "cycle|kiwoom_monitor.central_server.rest_broker|kiwoom_monitor.central_server.database_query_cache": 0,
+        "cycle|kiwoom_monitor.central_server.rest_broker|kiwoom_monitor.central_server.market_ingest": 0,
+        "cycle|kiwoom_monitor.central_server.diagnostic_metrics|kiwoom_monitor.central_server.diagnostic_replay_contract": 1,
+        "cycle|kiwoom_monitor.central_server.diagnostic_metrics|kiwoom_monitor.central_server.diagnostic_top20_display_input": 1,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_baseline|kiwoom_monitor.central_server.diagnostic_replay_contract": 1,
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_contract|kiwoom_monitor.central_server.diagnostic_metrics": 1
+      },
+      "removal_condition": "Keep all newly retired native/tool keys at their exact lowered values. Each allowed edge belongs only to the installed optional tool; remove its individual allowance when that consumer is removed or its dependency changes. Preserve unrelated34 existing debt for its own work; every other new edge/site remains blocked.",
+      "validation": "Existing static scanner read only: MAIN116 sites1369 versus current1276; exact proposed guard check recorded separately. Independent ar09-native-review closed source R1 while current runtime acceptance remains on hold. Original SQLite/PG assertions/deadlines and SQL/native transaction arguments retained; actualPG13/NAS5 and original queryAbort UNKNOWN remain unaccepted.",
+      "individual_deferred_tool_edges": {
+        "cycle|kiwoom_monitor.central_server.diagnostic_metrics|kiwoom_monitor.central_server.diagnostic_replay_contract": {
+          "reason": "Deferred installed observer scope reuses the unchanged account capture context and immutable replay identity; native postgres_access holds only the explicit observer pointer.",
+          "evidence": "tmp/ar-v1-wave35-20261027/ar09-native-review.json plus the exact current deferred import/function boundary in sparse-guard-evidence.json; source inspection only, runtime pending.",
+          "removal_condition": "Retire this exact key to0 when its optional consumer is removed or no longer needs the stated existing contract; do not reuse the allowance for a native product import or another edge."
+        },
+        "cycle|kiwoom_monitor.central_server.diagnostic_metrics|kiwoom_monitor.central_server.diagnostic_top20_display_input": {
+          "reason": "Installed post-SQL observation reads the existing display replay environment in its selected observer method; normal store/native SQL no longer imports the detailed display tool.",
+          "evidence": "tmp/ar-v1-wave35-20261027/ar09-native-review.json plus the exact current deferred import/function boundary in sparse-guard-evidence.json; source inspection only, runtime pending.",
+          "removal_condition": "Retire this exact key to0 when its optional consumer is removed or no longer needs the stated existing contract; do not reuse the allowance for a native product import or another edge."
+        },
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_baseline|kiwoom_monitor.central_server.diagnostic_replay_contract": {
+          "reason": "The optional baseline replay source explicitly installs capture on its own native source store after construction; normal Database construction does not import or auto-install that tool.",
+          "evidence": "tmp/ar-v1-wave35-20261027/ar09-native-review.json plus the exact current deferred import/function boundary in sparse-guard-evidence.json; source inspection only, runtime pending.",
+          "removal_condition": "Retire this exact key to0 when its optional consumer is removed or no longer needs the stated existing contract; do not reuse the allowance for a native product import or another edge."
+        },
+        "cycle|kiwoom_monitor.central_server.diagnostic_replay_contract|kiwoom_monitor.central_server.diagnostic_metrics": {
+          "reason": "The selected store-capture installer explicitly installs native observation before the existing idempotent wrapping guard; codec/validation and normal store construction do not start this binding.",
+          "evidence": "tmp/ar-v1-wave35-20261027/ar09-native-review.json plus the exact current deferred import/function boundary in sparse-guard-evidence.json; source inspection only, runtime pending.",
+          "removal_condition": "Retire this exact key to0 when its optional consumer is removed or no longer needs the stated existing contract; do not reuse the allowance for a native product import or another edge."
+        }
+      },
+      "retired_exact_sites": 97,
+      "preserved_preexisting_retirable": 34
+    },
+    {
+      "id": "2026-10-27-ar-v1-ar07-selected-artifact-startup-and-receipt-confirmation",
+      "reason": "Review only the exact candidate source-site delta and necessary startup/build/admission costs. Preserve original adoption/rules and all37 reviews; do not reset unrelated debt or infer runtime cost from static sites.",
+      "connection": "Protected startup config reads selected metadata once; existing build CLI reads one actual archive and20 member bytes. Receiver request path uses immutable expected H/profile and does no source scan/poll/tick I/O. Only an unselected/mismatched strict POST may read3 exact native documents to confirm a complete prior receipt after unchanged current-binding/eligibility checks; it cannot write/finish a partial prefix.",
+      "validation": "STATIC_NOT_PASS: exact before/after existing architecture scanner and static inventory only. Original MAIN117 raw18 baseline2FAIL/1ERROR is retained separately. V2 native5 full modules/actual PG/current source identity acceptance remain unexecuted; actual NAS/operator/lease/source admission/post-fence are not satisfied.",
+      "limits": {},
+      "status": "PROPOSED_STATIC_NOT_PASS_RUNTIME_UNEXECUTED",
+      "specific_necessary_costs": {
+        "startup_selected_metadata": "One protected local file read/decode per create_app; explicit restart applies replacement/revocation. No per-request metadata read or implicit source fallback.",
+        "build_actual_artifact": "Explicit CLI only: one archive read,20 in-memory ZIP member reads/hash; output create-only. No selection/deploy action.",
+        "blocked_receipt_confirmation": "Only mismatched/unselected strict publication: existing current binding plus3 native document reads and0writes; exact prior policy/package/receipt only. Ordinary selected new publication retains original write order/cost. Not a tick path/poll/cache."
+      },
+      "removal_condition": "Remove exact selected-artifact-specific allowances with that optional feature, retaining existing native storage/order owners; every other new site remains blocked."
+    },
+    {
+      "id": "2026-10-27-ar-v1-ar06-body-attempt-accepted-receipt",
+      "reason": "Exactly one existing attempt-local durable accepted-result proof; no schema/facade/route/service or polling. Preserve native owner, current authority, original input, generic local BODY/RULE/AI and all38 previous reviews.",
+      "connection": "Remote BODY runner -> existing client -> existing authenticated dict routes -> same SQLite BEGIN IMMEDIATE / PG locked native owner. Original envelope hash and first receipt share settlement COMMIT in body_input_ref JSON; claim already clears this attempt pin.",
+      "validation": "Independent static GO and actual before-cost measurement are evidence, not candidate execution PASS. Related unit/wire/native actualPCPG19, same-source after-cost and owner cleanup remain required. See integration.json for source-specific final results; NAS/operator/operating stays unexecuted.",
+      "limits": {},
+      "status": "INTEGRATED_PENDING_SCOPED_EXECUTION",
+      "specific_necessary_costs": {
+        "first_remote_result": "+1 existing-row UPDATE inside same existing native transaction, +0 connection/COMMIT; durable proof needed to distinguish accepted retry error from ordinary PENDING. Actual before: conn1 SELECT2 UPDATE1 COMMIT1.",
+        "exact_duplicate": "Before measured conn1 SELECT2 UPDATE0 COMMIT1 returning stale for PENDING. Preserve UPDATE0/retry_at, avoid second generic SELECT/clock and return verified first pending receipt; terminal duplicates retain already_completed/already_failed.",
+        "uncertain_POST": "One GET after uncertain transport only; no repeated POST/recompute/poll. Missing/old/mismatch/reclaimed proof remains UNKNOWN even when mutable state is terminal. Direct old POST success remains compatible.",
+        "hash": "One canonical original-envelope hash per remote result on producer/receiver, existing helper. BODY processing path only; no new 0B/tick DB or file access."
+      },
+      "scanner_limit": "Underlying DB execute site unchanged when existing _news_body_execute gains another caller. Static site count is not runtime SQL cost; preserve actual before/after measurement and native duplicate no-UPDATE trigger oracle.",
+      "evidence": "tmp/ar-v1-wave37-20261027/ar06-body-cost/before-run1/measurements.json",
+      "removal_condition": "Remove proof-specific fields/consumer handling with optional remote BODY role only after no actual consumer; retain native common jobs/input/settlement owners and archived original data. No operating cleanup authorized."
+    },
+    {
+      "id": "2026-10-27-ar-v1-ar09-existing-log-failure-health-projection",
+      "reason": "Connect existing minimal log-output failure owner to health, without a new diagnostics layer. Prior39 reviews/adoption/rules/limits unchanged; P3 is test-only independent composition.",
+      "connection": "Existing SafeFile/Stream/KSTdaily handlers retain latest safe sink_failure; infrastructure snapshot projects whitelisted file/console emit/kind from root and3existing namedlogger lists, dedup handleridentity. Existing app/health adds only logging field; operational/order/auth readiness unchanged.",
+      "validation": "Independent staticGO and inversewholeAST/old108tests preserved; current source-related runtime112 and P3composition remain pending at review creation. Latest runtime/source evidence in combined integration.json, not inferred from static sites.",
+      "limits": {},
+      "status": "INTEGRATED_PENDING_SCOPED_EXECUTION",
+      "specific_necessary_costs": {
+        "health": "Read existing bounded configured handler references/instance dictionaries only; no logger/handler configuration, probes, files, DB, network or new clock/poll. No reported failure yields unknown, not healthy.",
+        "safety": "Only exact emit/kind whitelist and fixed file/console category; no paths/handlerrepr/exception/rawrecords/secrets. Sticky history labelled latest_recorded_since_handler_configuration, not current readiness.",
+        "retention": "User approved future newPC log14day policy; NOT implemented by this change. Existing files/NASretention untouched; samefile followup must integrate sequentially."
+      },
+      "removal_condition": "Keep basic logging failure read independent of optional detailed tools; retiring a tool must not remove normal handler/error/log safety. No oldlog or operating data cleanup authorized."
+    },
+    {
+      "id": "2026-10-27-ar-v1-runner-position-state-owner",
+      "reason": "Move realposition state/reducer/publication fence out ofRunnerorchestration in sameexistingmodule; no competitorauthority found andnone invented. V1NameError wasstaticHOLDonly,V2bindingfixed. Preserveoriginal40reviews/adoption/rules/retirablelimits.",
+      "connection": "Runnerphase andnativeexecution lock/FILL→freshcontrol→unfilled/protection→clock/bootstrap/frame→checkpoint stay. Same-modulepositionownerusesborrowedofficialrepository/scalarpolicy andper-call originalcorrectedclock adapter, no storedRunner/bundle. Ownsfence/reducer/restoreingress/positioncheckpointprojection; aggregateACK stillRunner.",
+      "validation": "MAIN129 actual complete unit goal360: newly executed328 in29 unchanged original-class partitions +32 exact-same129 publication cases reused (core22/RAM10), all discovery/selected/executed/pass IDs equal/no duplicates/missing/skip, Job/tree/HKCU/ownedTEMP cleanup. Real PC disposable PostgreSQL10 (bootstrap9/checkpoint1) alsoPASS, actual owned-cluster DBdrop/status3/portclosed/cluster/passwordcleanup complete. Positive actual FILL/getter-zero-I/O and checkpoint/CAS/restore/STOP/cancel contracts covered. First-position-state cut only; not full AR07/episode ownership, AUTO085/account handoff/NAS sealed5/operator1/operating acceptance. V1 static NameError HOLD retained. See tmp/ar-v1-wave41-20261027/integration/source129-terminal-receipts.json and actual run reports.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "native": "Existing loader lookup remainsinside original pagedFILL/reducer flow; no new DB/file/poll orcompoundstorecall. Pre-reviewarchitectureactual1251276sitesPASS; static countisnotruntime cost proof.",
+        "publication": "Only copy/fence state moved; getterstillnonblocking/no nativeI/O, originalavailability callback/error/epoch contracts retained.",
+        "lifecycle": "Sameexecution/preflightlock andclose/drain; oldpartiallegacydecodeorder andcheckpointformat/version/revision/pending/no-op/ACKbarrier unchanged.",
+        "remaining": "FullAR07Episode including unfilled/protection/clock/aggregatecheckpoint isnotdeclaredcomplete; account/085/actualNAS/operator/operatingconditions unchanged."
+      },
+      "removal_condition": "If replacingexecutionrole, retireitspositionstate/reducer withthatrole; keepacceptednativeorders/FILL/checkpointreader andsharedsafety. No olddata deletion authorized."
+    },
+    {
+      "id": "2026-10-27-ar07-single-day-recorded-ingest-owner",
+      "reason": "Current profile daily replay reuses existing cursor rather than rebuilding a full as-of view for every minute; source time representation alone cannot change admission. Legacy None and leader path preserved. No new clock supplier/manager/storage layer.",
+      "connection": "execute_research named profile -> same ResearchReplayCursor ordered available instant/accepted sequence/revision -> existing family/native evaluation append. No product DB/file/TR/call site added.",
+      "validation": "SourceMAIN126 actual related153/153 PASS + strict diagnostic03/04 resolved and nonempty legacy output/control1 PASS; source/Job/HKCU/TEMP verified. Original diagnostic6 had4FAIL; after slice2FAIL remained, not all-PIT completion. See tmp/time-followup-20261027/research-fix-integration/acceptance126.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "native": "No new product I/O or clock access. Current-profile run adds one upfront ordered observation view to reuse existing bounded cursor instead of repeated full views. This is not a measured speed claim. Missing evaluations now become required native writes; original source/frozen documents remain unchanged."
+      }
+    },
+    {
+      "id": "2026-10-27-ar03-ar07-membership-actual-instant-order",
+      "reason": "Retained bulk recovery consumers use actual availability order by default; keep unprofiled historical text comparison explicit. Existing chronological flag/state owner reused, no new layer/clock.",
+      "connection": "Common membership decoder -> MinuteStrategyInputs.seed bounded horizon and CandidateMonitor bootstrap; singleton live accept preserves arrival order.",
+      "validation": "SourceMAIN127 actual related290/290 PASS + same frozen diagnostic6=5PASS/1FAIL and legacy before/after identity1PASS. Default/single-day/seed instant order is covered, original ISO source preserved; article strict-interval hypothesis and other frame/report sorting remain unaccepted. See tmp/time-followup-20261027/membership-order-integration/acceptance127.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "native": "Existing bulk sort compares aware instants with existing sequence/id tie-breakers; same window trim. No added DB/file/network/current-clock call, lock, task or queue."
+      }
+    },
+    {
+      "id": "2026-10-27-ar09-owned-pc-calendar-logs",
+      "reason": "Approved new PC log calendar lifecycle in same existing safe FileHandler boundary. Exact constant marker plus strict date/PID/part namespace protect legacy/unowned data. Header is a file ownership contract, not a second message; exact security oracles preserve single business record.",
+      "connection": "Existing bootstrap/news configure_logging -> PC KST LogRecord file/date lifecycle, exclusive file create and once-per-forward-day owned expiry -> same safe formatter/snapshot; NAS retention and business clocks untouched.",
+      "validation": "SourceMAIN128 actual logging21/app97=118PASS plus actual Windows two-child integration1PASS: independent PID files, busy old file preserved/safe retention status, close/day-transition cleanup, original/foreign files retained and exact child/Job/HKCU/TEMP cleanup. Earlier HOLD retained; old security assertions strengthened to exact header+single record, no timeout/skip/filter relaxation. See tmp/time-followup-20261027/final-integration/integration.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "filesystem": "One owner header per new PC file; exclusive new day/PID/part file; one directory scan on first emitted forward KST day/restart, read header/unlink only expired exact owned names. Normal same-day records add no scan/DB/network; existing message write unchanged. This feature cost is necessary for approved14-day policy; no new task/queue/process.",
+        "clock": "LogRecord.created epoch -> KST date for naming/retention only; no current Kiwoom request/provider or business timestamp rewrite.",
+        "static_scope": "Current architecture checker site keys remain1276. That is matched static sites, not proof of zero added filesystem I/O; independent actual ownership/failure tests cover dynamic Path operations."
+      }
+    },
+    {
+      "id": "2026-10-27-ar03-ar07-market-frame-instant-order",
+      "reason": "Existing market frame decoder owns coherent actual-instant ordering; consumer no longer depends on misleading lexicographic last mixed-offset string. Retained None comparison is explicit, not a new production fallback.",
+      "connection": "Existing ranking/D5 adapter owns actual-moment ordering -> existing strict execute final market regime cutoff and native180s outcome summary. Explicit session_profile=None uses chronological=False solely for fixed historical comparison; other bulk/historical consumers already select actual cut and live membership is singleton.",
+      "validation": "MAIN129 actual151 related PASS (106 complete original batch +45 same-source complete class partitions), frozen four-case after4PASS and exact full nonempty legacy JSON/run_id/logical/codehash same. Before3FAIL/legacy1PASS, original after JSON tuple/list bridge failure and original180s incomplete batch retained. Static meaning129/6701 and guard45/1276 PASS. Same test bodies/oracles/deadline180, exact actual publication32=22+10 union/no omissions; process-tree/HKCU/successTEMP cleanup confirmed. Whole PIT/global cumulative execution gate/PG/NAS/operating acceptance remain pending. See tmp/ar-v1-wave40-20261027/market-frame-integration/acceptance129.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "comparison": "Same single existing sort O(N logN), one aware datetime parse/UTC normalization per already-created frame for key only. No timestamp rewrite, DB/network/poll/current-clock call, duplicate state or new sort. CPU/latency benefit not measured.",
+        "legacy": "Explicit unprofiled None retains old string comparison and original fixed scientific identity; named profiles use existing raw-code digest. Original artifacts are never rewritten."
+      }
+    },
+    {
+      "id": "2026-10-27-ar07-input-progress-bootstrap-repair-owner",
+      "reason": "Actual native input state/transitions/ACK publication/restore/projection move together into existing Runner module owner; eliminates old5 Runner mutable fields and bootstrap/repair wrappers, no adapter forwarding/native authority cache.",
+      "connection": "Runner keeps FILL/freshcontrol/STOP/unfilled/protection/clock/nativeauthority/aggregatecheckpointACK. MockAutomationInputProgress owns cursor/bootstrap/protocol/recovery/receipt, actual seed+repair/ACK-before-install, cursor advancement, interleaved restore ingress and input-only checkpoint projection. Existing Minute/Leader adapters and ObservationFrameRecovery scratch codec unchanged. Only per-call store/adapter/leader/status replacement/checkpoint capabilities borrowed; no retained parent/bundle/DB/callback/task/clock.",
+      "validation": "MAIN131 frozen code tree: all fresh core360 (including publication32) + full public Supervisor28 = 388 PASS, exact IDs/source; real PC disposable PostgreSQL bootstrap9/checkpoint1 =10 PASS. All39 native workers/trees and owned HKCU cleanup receipts confirmed, all success TEMP absent, PG databases/cluster/port/password cleanup complete. Semantic131/6702 and static guard46/site1276/retirable34 PASS. Original180s/oracles/native cost/ACK-retry preserved; no runtime speed claim. Independent staticGO/inverse proof and all9 exact candidate SHA match. Source130 history and partial apply failure/recovery preserved. NAS sealed5/account1, whole AR07/strict PIT/source/T0/live acceptance remain unexecuted/incomplete. Evidence: tmp/ar-v1-wave42-20261027/input-integration/acceptance131.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "native": "Same seed/page read/cursor/commit/noop/force/ACKretry; native callbacks borrowed per operation, no additionalDB/nativeclock/remote query on tick/status/getter. Must validate existing actualcost/ACKcases; not measuredspeed claim.",
+        "state": "Exactlyfive moved fields, one owner per Runner, no duplicatewindow/codec/nativeauthority/checkpointACK state, no newlock/task/queue/process.",
+        "static": "Same1276 matchedI/Osite keys/retirable34 before review; that is static scope, not proof of runtimecost or full connection safety.",
+        "compatibility": "Same stored envelope/version/IDs/protection-incomplete projection/ordered decoder/branch failureasymmetry. Existing pure/scientificraw20 excludesNASRunner; no hash/approval rewriting."
+      }
+    },
+    {
+      "id": "2026-10-27-ar0708-presort-resource-cancel-lifetime",
+      "reason": "Approved AR07/08 lifetime boundary: move operational cancellation/resource checkpoints across preparation using existing guard cadence, preserve original malformed-data pre-registration rejection and durable cancellation/failure handling; no new service, clock, database, queue or polling task.",
+      "connection": "execute_research pre-registration ordered replay uses existing ResearchResourceGuard monotonic batch cadence; only marked original operational exception objects cross start_run into unchanged registered-run handlers; actual data key errors remain before start_run. Existing process/campaign/scoped authority and after-start cancel barrier remain; generic FAILED continues next candidate while typed resource/cancel breaks.",
+      "validation": "MAIN133 same frozen6+invalid1+actualSQLitehook1 and exact related40 (including actual caller/final-history/current scientific-hash admission) all48 fresh PASS; original180s/oracles/IDs unchanged, exact source/discovery/execution/pass and13 native Job/tree/HKCU/successTEMP cleanup checked. Before6:4FAIL/2legacyPASS; after6:6PASS. Key work9->0 pre-cancel,9->3 elapsed cancel/resource; native connections3/statuscancelled remain; stationary cancel callbacks4->2/RSS2->2. Nonempty None six scientific fields and original input identical. Initial metadata discovery-count omission and new-test tuple/named-row ERROR preserved; row_factory fixture-only one-line correction rerun current48. Semantic133/6705, guard47/site1276/retirable34 PASS; limits/rules/old46 untouched. No live speed/C-sort/largeN/wholePIT/NAS or operations acceptance. Evidence tmp/ar-v1-wave42-20261027/sort-v4-integration/acceptance133.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "sampling": "One existing monotonic cadence probe per ordered key; no RSS/filesystem/DB/cancel callback until original batch cadence due; entry/after-preparation and original after-start barriers stay distinct. Same native handler writes after operational failure, early failure can stop before remaining key parse.",
+        "preservation": "Actual malformed key reached -> ValueError before start_run row0; marked callback Exception object -> unchanged registered-run cancelled/failed handler row1. Generic parentFAILED continues later candidates, typed resource/cancel breaks; no new consumer gate.",
+        "scientific": "New-profile raw20 code digest changes with research_run; legacy None fixed codehash/full result unchanged; original input/time/hash/version not rewritten.",
+        "limits": "No claimed C/Timsort comparison-phase interruption, large-N peakRSS/time bound, whole strictPIT/NAS/operating acceptance."
+      }
+    },
+    {
+      "id": "2026-10-27-ar07-aggregate-checkpoint-ack-owner",
+      "reason": "Approved AR07 aggregate checkpoint responsibility cut: move state3 and actual no-op/attempt/native upsert/ACK transition together to one same-module owner; old Runner aliases removed. Existing test locations only repointed under exact raw/AST inverse.",
+      "connection": "Runner composes Position/InputProgress/protection/unfilled projections; MockAutomationCheckpoint owns revision/pending/last ACK and borrowed native write/clock, without cached authority/task/store/lock. Existing flow order and native transactions stay at original owners.",
+      "validation": "MAIN134: original before13318/18 PASS and same18 inside fresh357 PASS (existing356+actual public-position consumer1), real PC disposable PG Runner4/checkpoint1=5 PASS. Whole batch425 unit+5 PG=430 unique PASS;47 workers/trees/ownedHKCU/successTEMP cleanup and PG cluster/db/port/password cleanup verified. Original assertions/cost CSV/180s preserved: noop0 writes, force1/changed2, ACK-loss same-prefix retry, PG2 committed writes each row1/SQL1/COMMIT1. Existing rules/adopted limits/old47 unchanged; only exact additional logical commit dispatch key1 reviewed, not extra native SQL. Pure method/property getter overhead acknowledged. No source/time/hash/authority or live/NAS acceptance claim. Evidence tmp/ar-v1-wave43-20261027/integration/acceptance134.json.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/mock_automation_runner.py|MockAutomationRunner._save_checkpoint|self._checkpoint.commit": 1
+      },
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "static_commit_edge": "New logical owner commit call is classified as a DB site. It replaces the original inline identical native upsert tail; this is one dispatch edge, not a new SQL transaction/COMMIT. Existing matched upsert remains. Adopt only this exact key1; no blanket/reset.",
+        "runtime": "Pure Python owner method/property and immutable account_ref getter evaluation add overhead; no measured speed claim. Native/upsert/clock/serialization/deepcopy counts unchanged under same oracles pending runtime.",
+        "ownership": "State3 and actual transition co-owned. Projection/incomplete/protection selection remains necessary Runner composition. Store/now borrowed per call; fresh native authority/order/lease/task/lock not retained."
+      }
+    },
+    {
+      "id": "2026-10-27-ar09-optional-validation-runtime-imports",
+      "reason": "Approved AR09 removable validation tool boundary: eliminate three eager runtime imports, import only in existing enabled branch or TYPE_CHECKING. Strengthen existing physical absence case with validation source39 and actual non-import assertion.",
+      "connection": "bootstrap/ClientFactory retain original True constructor class/path/args; common realtime worker keeps all20 bodies/signals/annotations and only type-check import. Physical39 test retains original38 files and all native result/time/hash/pickle/5policy/20rows/9chart/deadline oracles.",
+      "validation": "MAIN134 AR09 existing43 PASS including current physical39 query absence, original True/False factory/recorder/worker/actual-child/failover regression and query full13; no validation module runtime import in query/disabled configuration. Source strictrestore composition25 also PASS: new1 has actual STAGED->COMMITTED/APPLYING->ROLLED_BACK, real lease termination->readonly selected raw11->target native install/reopen and preserved source values/versions/assets/ledger bytes. All fresh batch430 and47 cleanup validated. Original87 child assertions plus1 retained;38->39 means original38 plus exactvalidation1; no expected-value/deadline relaxation. Full enabled desktop integration, source/T0/Runtime/account handoff, actualNAS/operator/operating acceptance remain unverified. Evidence tmp/ar-v1-wave43-20261027/integration/acceptance134.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "runtime_imports": "Disabled/query path no longer eagerly imports validation producer. Existing enabled paths retain exact constructor/arguments; worker type-only edge has no runtime dependency.",
+        "preservation": "Keep recorder/current settings/14d logging/protected source/WS/reconnect/ACK/stop and plain FailoverClient; no package deletion, new collector, remote call, SQL or hidden fallback."
+      }
+    },
+    {
+      "id": "2026-10-27-ar09-operator-status-optional-diagnostic-observation",
+      "reason": "Approved AR09 removable-tool boundary: basic operator status may observe unavailable diagnostic endpoints without treating UNKNOWN as idle or changing strict mutation fences. Add only status observation mode and exact optional404 state.",
+      "connection": "Operator.status alone calls snapshot(observation_only=True); fixed docker python script receives exactly status marker and catches only404 from three known optional diagnostic endpoints. Successful health/busy fields remain, no arbitrary command/shell/env/mount or operational policy change.",
+      "validation": "MAIN135 exact portable25/25 fresh PASS (existing22+new3), actual module/class discovery69 matched and exactselected/planned/executed/passed IDs/origins/180s/Job-tree-ownedHKCU/successTEMP cleanup verified. Mocked transport/host control only, no actual NAS/docker/deploy/restore. Normal4GET shape, optional404 masks UNAVAILABLE/idleUNKNOWN+diagnostics_idlefalse, defaultstrict and401/403/5xx/timeout propagation preserved. All old49/rules/limits unchanged; current static135/6709/site1277 PASS. Exact operator/test/ledger beforeimages reconstruct executed134 source tree, preserving prior430 scoped evidence without rerun. Linux4/installedhelper/NASoperator fixture+lease/postfence remain unexecuted, no wholeAR09/operating acceptance. Evidence tmp/ar-v1-wave43-20261027/operator-integration/acceptance135.json.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "normal": "Same4 localhost GETs, existing5s timeout per request, same docker call/no shell. No DB or periodic task added.",
+        "missing": "Only status observation continues to gather other available facts after exact optional404; returns UNKNOWN, not idle. Sensitive callers defaultstrict andstillfail on first404; actualno extraoperations on NAS performed.",
+        "evidence": "Static site1277 unchanged; embedded HTTPcode runtime semantics are protected by existing/new protocol tests, not staticI/O site counts."
+      }
+    },
+    {
+      "id": "2026-10-27-ar07-coherent-episode-and-concrete-runner-lifetime",
+      "reason": "Approved v1 AR07: complete existing business Episode and three child owners move together; concrete Runner alone owns task/loop/event/input-listener lifetime. No forwarding facade, duplicated business state or new periodic work.",
+      "connection": "Supervisor business consumers use runner.episode; Runner owns start/attach/task/wake/detach/actual Task join. Episode owns57 business fields, execution locks and retained command futures; native account bundle remains separate. Query oldphysical39 adds exact new Episode only.",
+      "validation": "MAIN136 first413 executed:412PASS/1 readonly-fixture receiver FAIL, plus CandidateMonitor1 passed but origin evidence rejected by invalid required Runner import. Originals preserved. MAIN137 changes only the setter receiver and review ledger; exact two beforeimages reconstruct official MAIN136 entire source. New14/14 PASS on MAIN137 with Episode-only producer origin correction, accepted source136399+fresh13714=unique413. Separate actual PC PG5 on original136 PASS; SQL/noop/ACKloss/restart/native cost assertions retained, original source scoped. All48 unit workers/tree/HKCU cleanup and success TEMP47 absent/failureTEMP1 retained confirmed; PG cluster/DB/port/password cleanup confirmed. Fresh MAIN140 offline wheel414/full RECORD418/METADATA/entry3/Episode/raw20 plus intact/pruned40-module-absent originalROLE3 x2 environments=6 pairs PASS; actual installed origins and native worker/tree/HKCU/TEMP cleanup verified. Original query Abort remains UNKNOWN, no wholeAR07/source/PIT/085/NAS/operating acceptance. Evidence tmp/ar-v1-wave44-20261027/combined-integration/acceptance137.json.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/mock_automation_episode.py|MockAutomationEpisode._save_checkpoint|self._checkpoint.commit": 1
+      },
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "ownership": "Move original native/DB bodies and exact state owner; no new SQL/connection/COMMIT. Bounded task-present/property/callback calls only, no speed claim.",
+        "safety": "Preserve native account/Risk/control/lease/CAS, FILL/protection/session-clock/fixedDecision, source repair, checkpoint firstACK and both original close branches. Retire callbacks before native join; preserve task-is-not-None/forcedcheckpoint semantics and source time/hash/JSON.",
+        "evidence": "tmp/ar-v1-wave44-20261027/combined-integration/episode-stage.json",
+        "static_site_transfer": "Exactly original _save_checkpoint dispatch moved Runner->Episode; unchanged Checkpoint.commit native body. Old Runner review limit retained as retirable history; exact newsite1 only. Original adopted_limits/rules unchanged; no baseline reset or extra runtime write."
+      }
+    },
+    {
+      "id": "2026-10-27-ar06-accepted-ai-provenance-through-result-and-backup",
+      "reason": "Approved v1 AR06 article/BODY/analysis provenance must travel with the same accepted result through native/API/client/Qt/local/sync/backup. Preserve first native receipt and distinguish generic reported copies without a mutable side channel or raw inference API.",
+      "connection": "Native accepted writer returns same result-aligned provenance; API additive metadata plus legacy IDs -> client tuple7 -> same completed7 -> real slot/save/cache -> local own/shared rows -> sync/backup/reopen. Generic six write entrypoints record new/changed copies as REPORTED; existing exact native echo preserves original document/receipt. PC field migration is two nullable columns with atomic rollback/restart, not old data conversion.",
+      "validation": "Independent V4 GO and root integration preserved. Original MAIN139 unit177=172PASS/3FAIL/2ERROR and realPCPG20=19PASS/1FAIL remain immutable. MAIN140 changes five existing test methods plus review ledger only, product delta0; exact beforeimages reconstruct original139 whole source. Independent review confirms separate profile manifests, future schema6 above legal5, normal relay role fixture and existing accepted theme-generation active-profile contract. Fresh unit4/4 and exact native PG cost1/1 PASS, preserving original (3,1,0)/(2,0,1), real fresh revision firstINSERT then exact second currentSQL23505 and actual partial-write rollback. Source-scoped accepted unit172+4=176/177 and PG19+1=20/20 validate provenance/API/Qt/local/sync/backup storage cuts; one query bootstrap native QtAbort remains UNKNOWN and is NOT accepted. Diagnostic535 nonreproduction is excluded from normal acceptance. Fresh current wheel414 and intact/pruned ROLE3x2=6 pairs separately PASS, not queryAbort resolution or wholeAR acceptance. Original deadlines/JobHKCU/TEMP/realPCPG DB-cluster-port-password cleanup confirmed. Evidence tmp/ar-v1-wave44-20261027/combined-integration/acceptance140.json and tmp/ar-v1-wave45-20261027/ar07-current140-install-preparation/native-current/acceptance.json. ActualNAS6/Linux4/source-T0/account handoff/current084/keys/085/operating acceptance remain required and unexecuted.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_schema.py|_apply_v5_ai_provenance|connection.execute": 2
+      },
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "local_schema": "Two static execute sites inside one-time local news schema v5 migration: inspect existing two tables and add only missing nullable metadata columns. No UPDATE/backfill/source-time/hash/version rewrite; existing old rows NULL=>UNKNOWN; savepoint rollback/restart tested. Not a tick/periodic path.",
+        "native_normal": "Same existing read envelope, SQL/connection/transaction/COMMIT/clock counts. Generic AI upsert adds one serialized original-document comparison parameter (5->6), same native conflict row/conditional SQL; no extra SELECT. Necessary JSON/hash metadata encoding only, bounded by existing results; no performance gain claimed.",
+        "legacy": "Existing old backup/read compatibility represents actual stored material and known missing refs as UNKNOWN; no raw inference public read/current084/key policy change.",
+        "evidence": "tmp/ar-v1-wave44-20261027/combined-integration/AI138-stage.json"
+      }
+    },
+    {
+      "id": "2026-10-27-ar09-versioned-product-owner-state-and-strict-operator-consumer",
+      "reason": "Approved v1 AR09 product-only state/actual diagnostic owner facts: product query/collection must not require installed diagnostic tools; absence is immutable composition fact, installed owner lifetime/ACK facts remain authoritative. Reuse real owners rather than infer idle from missing404/empty reports.",
+      "connection": "create_app owns installed/not_installed composition; existing diagnostic control/trace/run owners expose scalar facts under their existing locks. Existing admin route reads through current request lifetime/native-thread join. Fixed Operator snapshot negotiates health+v1 owner read or unchanged strict legacy3diagnostic reads; idle consumes facts. Old helper/new product three routes and new helper/old product legacy path retained for explicit supported caller/rollback window.",
+      "validation": "MAIN139 exact portable55/55 fresh PASS, original53-Linux4+new3+directlease3. Actual physically absent app/auth read/common0B-save/close fixture, trace finalsync/native worker/ACK facts, retained real child/lease and cancelled read join, protocol/version/schema/error matrix/default strict legacy/sensitive control flow preserved. Full actual discovery/selected/executed/passed/origin/180s/Job-tree-ownedHKCU/successTEMP verified for six workers; root verification139-first.json confirms cleanup. ValidUNKNOWN remains readiness-readable but idlefalse; no global business idle or order/lease authority granted. Legacy4GET vs advertised health+state2 verified by protocol tests, not actual NAS speed. Actual Linux4/installedhelper/NAS6+genuine lease/source/postfence and operating acceptance remain unexecuted. AI unit177/PG20 original failures are separate, not green. Source139 artifacts immutable; accepted guard human validation only after all normal and diagnostic139 native handles terminal.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "supported_v1": "One manual fixed localhost health GET + one admin owner-state GET instead of old4 diagnostic transport calls; no DB request/poll/background task added. Native control read once per explicit status/read; trace/run copy bounded scalar facts under existing owner locks. Actual protocol call counts must be verified by current tests; no operational speed claim.",
+        "legacy": "Nonadvertising approved releases keep original4GET contract and required routes. Remove legacy only after installed helper/caller/rollback-source version1 acceptance; actual deployment/helper update not authorized here.",
+        "privacy_and_authority": "Public health version only; no account refs/paths/controlIDs/tokens/DSNs/raw inputs. Actual owner facts are diagnostic exclusion observation, not permission or global close/lease receipt.",
+        "evidence": "tmp/ar-v1-wave44-20261027/combined-integration/operator139-stage.json"
+      }
+    },
+    {
+      "id": "2026-10-27-ar08-journal-native-window-owned-final-join",
+      "reason": "Approved v1 AR01/05/08: window-owned native work must finish before sync/PID/source lease teardown. Four actual old-source SQLite/QThread cases prove that source authority was released while native transactions still ran.",
+      "connection": "JournalWindow owns account request parent and public finish_shutdown: existing admission flag, exact QObject-owned native worker strong tuple, interruption and actual wait, then existing CentralJournalSyncRunner.close. Process entry calls public finalization before original PID identity cleanup; outer source lease remains process-owned. Original UI shutdown3000/review saving and original exec exception identity remain unchanged.",
+      "validation": "Root exact MAIN140 baseline+candidate fixture4 produces4 real FAIL (native SQLite/thread still running but sync/PID/sourcelease released/exclusive restore allowed), source/exit1/failedTEMP preserved. Same fixture bytes on exact integrated V2 MAIN141 now4/4PASS within related48/48PASS: whole Journal45+existing account2+native analysis1, actual module discovery45/10/16, original41 AST/assertions/deadlines unchanged. Window-owned public finish_shutdown retains exact child tuple and actualwait before existing syncclose/PID/sourcelease; normalclose and original exec-error identity both verified. Current source/metadata immutable during execution, product/source origins and exact original IDs verified, all3 native workers/Job trees terminated, actual UUID HKCU absent and success TEMP removed. Native SQL/COMMIT/workers/timers unchanged by product patch; original UI3000 wait retained. Source140 Runtime ACK/reader7 is separate evidence after shared writer change. Queued callback final persistence/setup-before-try/parent forcedkill/selected source-target/account085/realNAS6/Linux4/helper/original queryAbort remain unaccepted. Evidence tmp/ar-v1-wave46-20261027/integration/acceptance141.json. Execution guard hash preserved separately from this post-validation explanation.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "execution": "No new DB SELECT/write/COMMIT, QThread, process, timer, cache, queue or business calculation. One final per-window child enumeration and actual native joins only on process exit; bounded UI wait remains3000ms. Actual infinite native stall retains source lease instead of inventing completion.",
+        "scope": "Already-created QObject child native completion only. No event-loop pumping or queued workflow result persistence, setup-before-try handling, parent force-kill policy, selected source/T0/target transfer, account085 or original query QtAbort resolution.",
+        "evidence": "tmp/ar-v1-wave46-20261027/ar08-journal-native-preparation/baseline4-run1/run.json"
+      }
+    },
+    {
+      "id": "2026-10-28-ar08-journal-initialization-failure-native-cleanup",
+      "reason": "Approved AR01/05/08 source lifetime: MAIN141 baseline2 proves constructor/setup exceptions release source lease and admit exclusive restore while real constructor-owned native SQLite work still runs. No new feature or guessed timeout.",
+      "connection": "JournalWindow owns cleanup for its active history startup when __init__ cannot return; process entry owns a successfully returned window through icon/PID/command-timer setup and exec, then calls existing finish_shutdown before original own-PID cleanup and outer source-lease release. Actual poll body and existing native/public owner remain unchanged.",
+      "validation": "Root exact MAIN141 baseline with unchanged added2 fixture:2FAIL/0ERROR, native SQLite/QThread still active while source lease released and exclusive restore admitted; failed TEMP retained. Same fixture bytes on exact MAIN142 product1/test1 gives related50/50PASS: Journal47+original selectedaccount2+nativeanalysis1; actual discovery47/10/16, original45 test bodies/deadlines/poll/finally unchanged, original setup exception identity/fixed native row/PID/lease order verified. All3 worker/Job trees terminated, actual UUID HKCU absent and successTEMP removed, source/guard/ledger immutable during execution. Independent narrowGO/whole-source HOLD; no preexisting optional validation daemon/queued final save/forcedkill/source-target/NAS/multi-PC/queryAbort acceptance. Initial root loader preparation error retained separately with actualnewtests0. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance142.json. Execution guard preserved separately; only this explanation/status updated after terminal.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "execution": "No new SELECT/write/connection/COMMIT, worker/timer/process/cache/queue or normal-path calculation. Failure paths now reuse exact window-owned native join/sync close before existing PID/lease cleanup.",
+        "scope": "Window-owned history-started QThreads and successfully constructed window setup only. Does not solve preexisting optional ParallelValidationClient Python daemon, queued final callback persistence, source/T0 target transfer, forced kill, original query Abort or NAS/multi-PC/operating acceptance."
+      }
+    },
+    {
+      "id": "2026-10-28-ar08-confirm-native-persistence-and-clock-owner",
+      "reason": "Approved AR01/05/08 queued result responsibility and time goal: confirmation currently writes only when queued UI slot executes. Same native2 on MAIN142 records exactly one write on the UI thread after native join and fails the required worker-owned persistence boundary.",
+      "connection": "All four confirmation callers use one composition site that directly injects existing repository.upsert_bars and query_client.server_now into ConfirmWorker as required callables. Worker normalizes the supplied instant to existing naive KST chart boundary, keeps original filter/source/service policy, commits using existing call-local SQLite transaction before completed; UI _confirmed no longer writes. Old internal API/tests are migrated, no compatibility save branch or new layer remains.",
+      "validation": "Root MAIN142 same native2:2FAIL/0ERROR, each one UI-thread repository save at the same failing boundary; raw proof does not claim unprinted helper locals as measurements. Exact MAIN143 related61/61PASS: Journal49+complete worker9+original selectedaccount2+nativeanalysis1, actual discovery49/9/10/16, unique/executed/source/guard/ledger matched. Native transaction commits exact rows+metadata before completed and before queued UI; SQLite trigger rollback gives failed1/completed0; later inactive-code UI delivery adds no same-result write. Same direct Confirm save count1->1, not all UI I/O0: existing live refresh/import_live_bars remains unchanged. Clock after-only1 has6 subcases of same instant naiveKST/KST/UTC versus host +/-9h/current-future exclusion/provider once; original8 worker tests migrated1 keeping original3 assertions, others unchanged. Four native workers/tree/actualUUID/successTEMP cleaned; failureTEMP retained. Initial proposed63 was corrected before after-execution to all actual current worker9/total61, no ID removal or deadline/assertion weakening. Independent21-condition narrowGO; other workflows/History cut/optionaldaemon/source transfer/queryAbort/NAS/multi-PC/operating unaccepted. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance143.json. Execution guard preserved separately, only this human explanation/status changed after native terminal.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "execution": "Same direct Confirm repository save1->1 moves from UI to native worker (inactive-code fixture); existing live refresh/import_live_bars is retained, not global UI I/O0. No new worker/process/timer/cache/queue or clock TR/poll. Current time comes once from existing in-memory server_now; existing native connection/transaction serializes the same filtered bars. Dynamic save callback concrete injection plus real SQLite contract tests prove connection; static site count alone does not. No new SQL trace/CPU/latency benchmark or total DB cost claim.",
+        "scope": "Only existing Confirm workflow; History account-cut/cancellation, Analysis revision/finish, other workflows, optional validation daemon, source/T0 target transfer, original queryAbort and NAS/operating acceptance remain unchanged and unaccepted."
+      }
+    },
+    {
+      "id": "2026-10-28-ar09-optional-validation-client-native-lifetime",
+      "reason": "Approved AR01/08/09 removable optional tool lifetime: existing ParallelValidationClient created an unowned daemon with no close. MAIN143 same new8 gives10 ordinary assertion failures/0ERROR including real constructor daemon leak, dependency close omission and duplicate report write. Rejected unintegrated V1 overlay separately fails1 at warning-I/O blocking primary admission, proving the new regression oracle detects it.",
+      "connection": "The existing comparison client owns one Condition for admission/active primary calls, existing FIFO, real thread reference/join, closing and retained failure. Report writer/metrics/queue remain independent, no HTTP/file/log/join holds lifetime lock. Journal uniquely owns its factory-created client; constructor is protected immediately after acquisition and actual QThread join precedes both sync/client close attempts with original first error identity. Main runtime separate client/0B producers are untouched.",
+      "validation": "Root same V2 fixture on MAIN143 executes8 IDs/10 assertion subcase failures/0ERROR including real constructor orphan daemon/dependency close/report retry. Rejected unintegrated V1 library overlay separately fails exact FIFO1 at primary admission blocked by warning I/O; raw failure/source143/explicit overlay hash preserved, not product/current acceptance. Exact integrated V2 MAIN144 related87/87PASS with actual discovery52/17/6/9/10/16, exact selected/executed/passed IDs/current source/fixture/guard/ledger matched. New8 actual real thread/queue/report/Window borrower paths verify close cut/primary completion/accepted FIFO/actual join/first-error identity/constructor cleanup and one report attempt. Report-open and first-warning gates stay closed while another primary returns; current same ID passes without oracle/deadline change. Report stage/API/error-class log outside lock is checked once, no sensitive payload. Existing61 bodies in touched files unchanged; six workers/Job trees terminated, actual UUID HKCU absent, successTEMP removed, failedTEMP retained. Independent V2 narrowGO preserves V1 HOLD2; root initial handoff KeyError is separately preparation0/import0/test0/native0. RAM-only failed result/remaining is not durable restart recovery; real I/O/large queue/parent forcekill bound/main runtime API swap/source transfer/wholeAR/NAS/operating not accepted. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance144.json. Execution guard preserved separately; human explanation/status only changed after terminal.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "execution": "No new Manager/service/queue/process/producer/timer/poll/SQL or repeated primary/local request. One lifecycle Condition is necessary to keep primary admission independent from synchronous report I/O; existing writer and metric locks are retained. close waits all admitted requests/FIFO and actual worker completion; real I/O hang/large queue and existing parent forced-kill deadline are not newly bounded.",
+        "failure": "A failed report is not retried; original error/failed job/local result/remaining queue retained in RAM and stage/API/error class logged once outside lifetime lock, no payload/token in log. close rethrows original error, not durable restart recovery. Borrowed stored/account/token/clock delegates stay usable and dependencies are not recursively closed.",
+        "scope": "Journal-owned instance only. Separate main runtime API replacement/0B/collector/hub/account authority, actual source/T0/whole transfer/NAS/operating and original queryAbort remain unaccepted. Baseline test-only SystemExit cleanup is not claimed as product lifetime behavior."
+      }
+    },
+    {
+      "id": "2026-10-28-ar08-confirm-observed-availability-precision",
+      "reason": "MAIN144 identical new3 execute3FAIL/0ERROR: actual SQLite metadata incorrectly available before result receipt, request-start stored instead of observation, no second corrected clock observation. Worker-only diagnostic overlay separately executes1FAIL/0ERROR at raw confirmed_at fractional precision BEFORE preserved overlay; do not claim measured post-overlay failure from that negative.",
+      "connection": "Actual Journal four Confirm callers -> existing start helper/now_provider -> actual QThread fetch/filter -> native repo row+local metadata COMMIT -> queued UI checked_at. Minute confirmed_at is read by preserve_confirmed and must retain same receipt. Existing schema TEXT/fromisoformat consumers and source/effective time/prices/rollback contracts unchanged.",
+      "validation": "MAIN144 same new3 actual3FAIL/0ERROR preserved; worker-only isolated overlay exact1FAIL/0ERROR at raw fractional precision BEFORE preserve, not a measured post-overlay failure. Integrated MAIN145 same3 and related98/98PASS: actual Window/fetch/native SQLite COMMIT and rollback/queued UI/domain metadata.was_available_by(end-1us false, end true)/preserved overlay; request20h scope/current-bar stays frozen; backward corrected clock conservative bound. Existing DB8 covers live no-op/receipt/null fields/API-confirmed retention/backfill atomic rollback/partial-day retry. All eight actual workers and Job trees exited; exact UUID HKCU absent; success TEMP removed, failure TEMP preserved; source/fixture/guard/ledger pins stable. Original research/order leak not established and original service metadata is not globally normalized. No whole AR/Q/CI/NAS/operating acceptance. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance145.json; execution guard saved separately before human validation update.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "clock": "One additional existing pure-RAM now_provider read at result observation. Request scope/current-bar/session classification remain at original cut. Conservative max(start, corrected observation) prevents backdating on backwards clock adjustment, not historical timestamp correction.",
+        "persistence": "Same row count/SQL/transaction/schema and native COMMIT/rollback; minute confirmed_at keeps fractional precision for later preserved metadata. No historical row/hash/version rewrite.",
+        "scope": "Journal-local metadata availability only. Existing central research/actual trading leakage not established; original per-bar service metadata is not globally normalized. No operating DB/lease/order/source authority/clock polling changes."
+      }
+    },
+    {
+      "id": "2026-10-28-ar0109-entry-whole-source-release-fence",
+      "reason": "Main optional client retirement requires actual completion of admitted source loaders, not only cache-generation publication. Existing MAIN145 yields no release receipt; same four new IDs execute5 assertion subcase failures/0ERROR at missing public receipt, NOT an unsafe-close reproduction. Initial V2 oracle held for missing downstream TR and wait observations; V3 exact same ID adds barriers, no extra ID or relaxed deadline.",
+      "connection": "Existing AppController replace_sources context still works and may ignore new receipt. Scalar investor and two actual backfill loader call sites borrow through complete stored lookup/fallback TR, finally release. Existing cache/TTL/late-publish fence, pending observed values, native write/ACK retry and immediate apply/rollback remain unchanged. Public receipt is only retired loader completion, not native-save completion or permission to close a client installed elsewhere.",
+      "validation": "Independent V2 HOLD for missing downstream TR/wait oracle preserved; V3 delta GO. Exact same new4 on MAIN145 executes5 ordinary subcase assertion failures/0ERROR at missing receipt None, not unsafe-close reproduction. MAIN146 A-only integrates V2 product bytes and V3 class AST-exact in existing writer test module; original seven class ASTs preserved. Related29/29PASS: caller8/writer11/investor7/program3, actual stored miss/_AL/KRX barriers/public wait nonreturn and last TR completion+actual joins, rollback old cohort then later success, candidate rollback and backfill2. Native writer/ACK-loss/pending/restore-failure/close/cancel regressions retained. Four actual workers/Job trees exited; exact UUID HKCU absent; success TEMP removed; failed TEMP retained; code/fixture/guard/ledger pins stable. Source146 evidence tmp/ar-v1-wave48-20261028/integration/acceptance146.json. A is retired loader completion only; Controller still does not consume receipt for client close, B/C main full lifecycle not accepted. No whole AR/Q/NAS/operating closure.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED_A_ONLY_B_C_UNCONNECTED",
+      "specific_necessary_costs": {
+        "ownership": "Existing source/cache lock admits whole-loader borrow, one small cohort count and read-only Event receipt per source transaction. Original loader I/O outside lock, three existing call sites covered, finally releases even on loader error. Event.set only; no callback close/provider query/report I/O in writer loop.",
+        "rollback": "Restore original borrow cohort to include pre-rollback old calls on next swap; copy cache identity as before to fence old and candidate late publication. Existing serial Controller owner/Exception rollback scope preserved; no promise of concurrent nested transactions or BaseException recovery.",
+        "scope": "A prerequisite only. No client close authority from receipt alone. B Controller retirement and C current/retired clients app shutdown unconnected. Existing DB/ACK/pending/source/account/order authority/news/key preserved."
+      }
+    },
+    {
+      "id": "2026-10-28-ar08-market-index-native-result-before-completed",
+      "reason": "Actual MarketIndex Window->worker originally fetched four parts then emitted success; only queued UI performed monitor DB write. MAIN146 same new native2 executes2FAIL/0ERROR: actual saved minute rows absent at final native join, and worker completed emitted before attempted failing storage. Not observed operating loss. Candidate v1 constructor-catch/free-lambda concerns were fixed before integration; constructor DB I/O was an incorrect root assumption and is explicitly withdrawn (actual constructor only path/clock assignment).",
+      "connection": "Journal selected index -> existing start/worker/actual QThread -> same monitor MinuteBarRepository minute+daily+metadata+affected-cache transaction -> completed -> original UI RAM/cache/chart reader. Capture only monitor path and bound server_now; constructor+replace are inside worker storage try, no Window private reads from native worker. Remove same result UI duplicate write; use explicit bound Slot for storage failure.",
+      "validation": "Independent v2 static GO/blocker0; actual constructor DB I/O0 (earlier root assumption withdrawn). MAIN146 same native2 actual2FAIL/0ERROR: missing saved minute rows and premature completed; oldnative trigger/rollback assertions were not reached and not claimed. Integrated MAIN147 primary73/73 plus peer-required additional existing producer/reader4/4 on identical source/guard/ledger = unique77PASS. Original73 plan/run preserved, supplemental selection reason recorded. Native Window->four fetches->same SQLite transaction+metadata->completed->UI and actualjoin before UI proves saved exact rows/clock and one native write/no UIduplicate; trigger daily failure rollback/zero completed/storagefailed and original bound UI status/cache retained. All8 actual workers/Job trees exited, exact UUID HKCU absent, successTEMP removed, failureTEMP retained; source/fixture/guard/ledger pins stable. SQL cache snapshot empty->empty is not nonempty-cache invalidation proof; unchanged helper SQL/existingtransaction3 protect native semantics. Same monitor reader/API/value/TR contracts additional4 verified. No wholeAR/Q/NAS/operating acceptance. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance147.json; execution guard preserved separately before this human update.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED",
+      "specific_necessary_costs": {
+        "persistence": "Same existing monitor repository/method/call-local transaction minute+daily+metadata+affected-cache deletion. Normal UI delivery write1->1; native join with unconsumed queued UI write0->1. No runtime latency or NAS benchmark claim, no extra data copy/store/SQL/retry/durability gate.",
+        "clock": "Capture existing queryclient.server_now bound callable; repository calls unchanged per batch and same-instant KST normalization, no extra clock HTTP/TR/poll. Constructor only path/callable setup (DB I/O0), exception still caught inside native storage boundary.",
+        "ownership": "Required save callback runs inside actual worker; completed after commit, storage_failed bound Window Slot preserves old text and does not update RAM requested days as success. No Window private state read by worker/new layer or process. Other workflow/main B/C/factory/operating acceptance excluded."
+      }
+    },
+    {
+      "id": "2026-10-28-ar0109-factory-unpublished-rest-client-cleanup",
+      "reason": "Actual bootstrap factory creates a fresh REST comparison daemon then can fail before returning its runtime dict; Controller cannot own a client it never receives. MAIN147 identical new1/two subcases executes2 assertion failures/0ERROR: cleanup_fails False reaches actual live daemon, True first reaches missing cleanup cause. Not two measured actual-stop failures. V1 fixture transport guard gap fixed by V2 actual Remote opener guard, original artifact retained.",
+      "connection": "Exact nested bootstrap build_api_runtime passed to Controller -> existing create_query_client -> new idle ParallelValidationClient -> later assembly failure -> public close/actual thread join -> original error. Client constructor failure remains its own existing boundary. Factory makes no request or realtime worker before return; independent actual transport guards prevent remote/local HTTP attempts in native test. Separate realtime Recorder and success-then-outer-setup ownership are not covered.",
+      "validation": "V1 fixture guard HOLD preserved; V2 actual remote transport guard staticGO. MAIN147 exact new1/two subcases actual2 assertion failures/0ERROR: False first live daemon assertion, True first missing cleanup cause (later actual-stop assertion not reached). Integrated MAIN148 same method plus related97/97PASS AppController74/comparison17/factory6, all after assertions reached: actual idle daemon stopped before original exception return, exact close1/current-old0/input0 and guarded local/remote/document/transport mocks0; injected cleanup error only after actual stop, not a real report-write failure. Original73 module bytes/helpers preserved except unique method insertion; original normal factory AST sequence/order unchanged. All3 actual workers/Job trees exited, UUID HKCU absent, successTEMP removed; source/fixture/guard/ledger pins stable. Existing full explicit cause chain not guaranteed on cleanup failure; known prior-cause current query-only route has no close/comparison OFF, no combined current regression established. Separate Recorder daemon/factory-later/outer setup/B2/C not accepted. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance148.json; guard execution snapshot kept separate from this human update.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED_REST_FACTORY_ONLY",
+      "specific_necessary_costs": {
+        "lifetime": "One public close only on failed fresh unpublished idle REST client, no accepted report job/HTTP and no extra thread. Normal assembly statements AST-identical, old/current runtime untouched; constructor-own failure remains outside.",
+        "errors": "Original assembly exception object remains primary; cleanup error becomes cause. This does not promise preservation of an already existing complete explicit cause chain; known query-only old-cause route has comparison OFF/no close so current combined regression not established. No generic new exception schema/policy/gate.",
+        "scope": "Separate RealtimeValidationRecorder still has anonymous daemon/closure lifetime and is being prepared in existing AR09; factory later-after-recorder error/normal replacement/full current/retired B2/C/outer setup/operating acceptance not covered."
+      }
+    },
+    {
+      "id": "2026-10-28-ar0109-main-rest-client-retirement-native-owner",
+      "reason": "Main runtime owned REST comparison client was replaced/closed without a consumer of actual source-release or observer close. Corrected v7 on MAIN148 selects12 (new9+producer3), executes1PASS/19 subcase assertion failures/12ERROR; actual old daemon remains after API switch and native DB/ACK retry reaches close1 expected/actual0. Other failures are missing retirement owner/publicfact and old API attrs, not twelve independent production defects. Original v6 run same aggregate is preserved separately: native case incorrectly asserted release inside uncommitted source context, so its later retry/close/fact/RAM was not reached.",
+      "connection": "Actual Controller API fence/apply/rollback -> owned retirement record -> existing single request worker opt-in retention -> public source wait/client close/read-only comparison snapshot -> same owner receives original object result and joins real Qt tail before release. Exact cleanup objects excluded from generic producers; other SettingsRequestWorkers stay protected. Current REST observer transferred once only after required storage completion. No concrete tool import/privateThread/queue access in Controller, borrowed provider delegates and source/account/order/clock/DB contracts preserved.",
+      "validation": "V5 structuralGO with producer/native coverage HOLD preserved; producer T1 and v7 independentGO preserved. V6 initial baseline12 actual1PASS/19 subcaseFAIL/12ERROR included one invalid native-C released assertion inside uncommitted context: rollback meant retry/close/fact/RAM not reached, never a C product defect. Original v6 review error and raw failure unchanged. V7 moves identical True/request_close after successful context exit, no product/deadline/9IDs/30 static logical-subcase change. Same original MAIN148 V7 baseline12 actual1PASS/19 subcaseFAIL/12ERROR: one real old daemon remains, native SQLite first COMMIT/ACKloss/pending0 block then exact retry/second ACK/row1/provider1/news1 reaches close1 expected actual0; old API absence/missing ownership errors separately classified. Integrated MAIN149 related120/120PASS (App83/producer17/sourcewriter11/factory6/defaultworker3); original74 incl MAIN148 factory oracle/helper AST preserved. Actual QThread result/native tail and public wait0 release, original report PermissionError/stopped snapshot/RAM failedjob plus remaining FIFO2 and no retry preserved. Mandatory real writer wait0True/pendingFalse before observer close off UI, default Settings modes/other workers, rollback/current/UNKNOWN/start/native cases verified. All6 workers/Job trees exited, exact UUID HKCU absent, successTEMP removed, failedTEMP retained; source/fixture/guard/ledger pins stable. No fullAR/Q/Recorder/NAS/operating closure, RAM-only report error not durable recovery. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance149.json; execution guard separately preserved before this human status update.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED_REST_B2_C_MAIN_LIFECYCLE",
+      "specific_necessary_costs": {
+        "lifetime": "One existing SettingsRequestWorker per eligible detached REST observer is necessary to keep source-release wait/report close I/O off UI/new entry writer. Retain-until-joined is opt-in; default start/run/atexit/release body preserved. Public release_after_join wait0 retains QObject and global owner until actual native join, no new process/queue/manager/timer/poll/limit/retry policy.",
+        "safety": "Existing API7-worker/queued-signal fence and SourceRelease whole-loader completion retained; rollback UNKNOWN references never grant close authority. Exact cleanup worker identities excluded from ordinary producers, mandatory native writer drain/pending0 precede current observer handoff. Original error and independent observation/start/native errors stay owned; actual stopped report error is not a core permanent gate.",
+        "cost": "No SELECT/UPDATE/COMMIT/request/clock/TR added to data or 0B path. Read-only lifecycle snapshot uses existing in-memory Condition and owned real thread. Optional library remains enabled-only import, no source/account/order/lease/olddata/hash change.",
+        "scope": "REST comparison client only; separate RealtimeValidationRecorder and factory/outer setup ownership still pending. No allAR/Q/multiPC/NAS/operating completion or real I/O hang bound claim."
+      }
+    },
+    {
+      "id": "2026-10-28-ar09-realtime-recorder-owned-native-lifetime",
+      "reason": "Existing RealtimeValidationRecorder created an anonymous daemon without public close or constructor failure join. Same new3 on MAIN149 actual3FAIL/0ERROR: old close attempt returns instead of waiting, public close absent after original OSError-continue, and start-after-real-start leaves actual writer alive. Test-only exact marker/SystemExit cleanup ends old daemon before TEMP deletion; not a product guarantee.",
+      "connection": "Existing CentralRealtimeWorker callbacks -> Recorder admission -> unchanged matching/metrics/report rows -> existing report queue -> real writer -> public close/frozen shared4fact. Reuse original matching lock as Condition backing, all file/log I/O outside it. Shared ComparisonLifecycleState already accepted in MAIN149 and defined once. Bootstrap/Controller ownership wiring is next separate stage, not completed here.",
+      "validation": "Class staticGO and V2 synchronized test T1GO preserved; old MAIN149 same3 actual3FAIL/0ERROR: close attempt returns before accepted work, public close absent, constructor-after-real-start actual thread alive. Exact old daemon test-only marker/SystemExit cleanup was measured by same tests before runner TEMP cleanup, not product guarantee. Integrated MAIN150 full20 (original17 plus3) plus actual CentralRealtimeWorker consumers3 =23/23PASS. Existing golden8 real temp-file matching/duplicates/late/skew/queue limits remain same; controlled stream native tests prove admitted/cut/actual wait+join/FIFO attempts, foreground nonblocking while report IO gated, OSError continue metrics and first original error/failedrowRAM/repeatedclose without retry, before/after-real-start constructor cleanup. Original production AST outside Recorder unchanged/sharedDTO defined1; all existing17/support AST unchanged. All2 workers/Job trees exited, actual UUID HKCU absent, successTEMP removed, failureTEMP retained; source/fixture/guard/ledger pins stable. Controlled stream is not real disk-failure/operating acceptance; active-flush race and fatal BaseException remaining FIFO not executed. wait_for_writes old Queue.join static fatal risk remains, no production caller and not shutdown API; future runtime owner uses directclose. Bootstrap/Controller owner still unconnected, not wholetool/AR/NAS closure. Evidence tmp/ar-v1-wave48-20261028/integration/acceptance150.json; execution guard snapshot preserved separately.",
+      "limits": {},
+      "status": "SCOPED_VALIDATED_RECORDER_CLASS_OWNER_UNCONNECTED",
+      "specific_necessary_costs": {
+        "ownership": "Existing matching Lock backs Condition/admitted operation count/cut and existing writer thread reference/join. No IO/logger while held, no new queue/process/manager/poll or normal source request/DB/clock call. Post-cut optional observation no-op preserves primary path, public fact is memory/actual thread only.",
+        "policy": "Same OSError continue/MISSING/skip/log/task_done and matching/limits/timestamps/accepted FIFO attempts. First raw error+failedrow/unmatched RAM retained only, original error rethrown after join; no close-forced expiration/new MISSING/retry/drop/durability gate.",
+        "limits": "Controlled I/O stream, existing real file goldens required. Fatal BaseException can leave queued rows; close directly reports after actual stop, wait_for_writes old Queue.join may wait forever after fatal and is not runtime shutdown API. Active-flush race not executed.",
+        "scope": "Class lifetime only; explicit factory/Controller/Window owner receiver and inline outcomes pending. No tool removal/new recording run/real NAS/operating/fullAR acceptance."
+      }
+    },
+    {
+      "id": "2026-10-29-ar0109-explicit-observer-ownership",
+      "reason": "MAIN150 same new8 executed:0PASS/10 assertion-subcase failures/23 missing-new-API errors. Real Recorder daemon remains after late factory failure (3 cases) and actual API reload (1); borrowed ports were closed merely because close existed. Other first failures are absent explicit tuple/receiver, not independently measured leaks.",
+      "connection": "Actual bootstrap _run_desktop nested factory -> exact REST/Recorder tuple and original inline assembly error -> real MainWindow -> AppController current/rollback/retirement. REST alone receives source receipt; Recorder follows realtime/native/signal fence. C drains mandatory storage first, then both owned observers exactly once.",
+      "validation": "Original MAIN150 negative8 and MAIN151137=136PASS/1newfixtureFAIL remain unchanged. MAIN152 changes only explicit fixture theme_ranks={} per original codec/actualproducer/existing fullDB writer input; fullsnapshot/41assert/14wait unchanged, all other90method/support AST unchanged. Current10 actualPASS: all8 owner/factory/newactualWindow tests plus oldnativeC and emptydict DBprepare/retry. NewdualC reached actualSQLite enrichedCOMMIT/ACKloss/cache_failed/samepayloadretry/pending0/actualwriterwait then bothrealcurrentobserverclose1 offUI, finalfullsnapshot/row1 and repeatclose. Two workers/Job/UUID/successTEMP/source/guard/ledger exact. Entire original151 source reconstructed in memory by only two known beforeimages (test1kw/ledgerappend); all product bytes unchanged and unchanged127 alreadyPASS reused. Valid137 union is source-scoped current10+prior127, not fresh single-source137 execution. Original49unresolved/global execution gate/queryAbort/outersetup/NAS6/Linux4/helper/policy/operating remain unaccepted. Rules/adopted/previous63 and limits unchanged.",
+      "status": "SCOPED_RUNTIME_OBSERVER_OWNERSHIP_VALIDATED_CURRENT10_UNCHANGED127_REUSED",
+      "limits": {}
+    },
+    {
+      "id": "2026-10-29-ar06-original-body-input-bundle-owner",
+      "reason": "C05 preserves actual member/source/raw input and separates synthetic AI bundle from original BODY; existing MAIN152 inline oracle executed1 FAIL/0ERROR at real unwanted native BODY row. New local immutable raw row is required once per batch and linked atomically to existing own/shared results; not a cache or optional diagnostics feature.",
+      "connection": "Native bulk article/BODY/current-evidence read -> source carrier -> API/DTO -> same stock_news/reopen/linked -> existing grouping/provider -> immutable inference/accepted narrow provenance; local Qt envelope -> NewsAIRepository.save_batch -> one same-owner transaction -> backup4. Legacy str BODY writer remains only for actual sealed replay consumer; private native/script callers explicitly extract receipt id.",
+      "validation": "MAIN154 same-source related293 plus actual owned loopback PC PG22 PASS: exact selected/discovered/executed/passed IDs, native rollback/immutable/stale/COMMIT ACK-loss/actual SQL cost and BODY receipt, 3 workers/Job/HKCU/TEMP plus schema/DB/port/cluster/password cleanup. Whole same-source scoped union491 includes existing469 plus22, not a whole regression or NAS6/operator acceptance. Original153 284PASS/3FAIL/1ERROR and baseline BODY-row failure are retained with minimal cause-specific fixes and unchanged original assertions/deadlines.",
+      "status": "C05_LOCAL_TECHNICAL_CONDITION_ACCEPTED_MAIN154",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_backup.py|NewsAIBackupService._import_v4|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_backup.py|NewsAIBackupService._import_v4|connection.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_backup.py|NewsAIBackupService._import_v4|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_backup.py|NewsAIBackupService.export_to|connection.execute": 4,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_repository.py|NewsAIRepository.save_batch|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_repository.py|_save_analysis|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_schema.py|_apply_v6_input_source|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_schema.py|_apply_v7_ai_inferences|connection.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_repository.py|NewsAIRepository.save|connection.execute": 0
+      },
+      "cost_basis": {
+        "local_fresh_batch": "raw INSERT1 in same existing result transaction; exact duplicate reads first receipt and never rewinds current",
+        "source_carrier": "same article row, unchanged/missing source expected0 writes and changedsource1; no perarticle SELECT",
+        "native_body_receipt": "returns actual native writer row values without added SELECT; corrected injected clock forwarded",
+        "backup_v4": "one same-cut raw-table SELECT plus existing projected results; v4 importer owns one connection/one transaction; old formats retain real readers",
+        "schema": "version6 optional carrier ALTER plus version7 immutable input table once per DB, no runtime polling",
+        "retired": "old save execute2 -> shared _save_analysis execute2 in existing transaction, no additional state owner"
+      },
+      "not_accepted": [
+        "AR06 P01/C06 policy",
+        "NAS6/Linux4/operating",
+        "whole cumulative execution gate"
+      ]
+    },
+    {
+      "id": "2026-10-29-ar08-pre-window-native-completion-owner",
+      "reason": "Before-controller setup failure released outer source lease while actual fresh observers/content remained live. Native completion must remain owned independently of fallible legacy close/lifecycle observation; repeated close consumes the same terminal native result. Existing active theme retry drain defers finite wait errors until accepted work ends.",
+      "connection": "Same bootstrap factory exact observers and bound native completion -> unpublished cleanup -> original inline tuple plus explicit completion -> actual MainWindow/AppController API reload/current retirement; mandatory content Thread.join/public owned process.wait precede outer AppDataLease. Same producer/source/writer ACK/actual Qt retirement join fences remain.",
+      "validation": "MAIN154 actual scoped176 PASS within current469 union, including original App91 split45/46 plus new7 and related78; single-worker App98 and App91 180-second timeouts preserved, not claimed fixed. Explicit receipt/real owned Thread.join and Popen.wait/finite wait failures/theme active drain/current and reload consumers verified in supported scope. H2 pending-native-start, C11 and C12 remain unaccepted. Current source PG22 passed separately; no NAS/operator/operating acceptance. H2 followup is now separately accepted for current target CPython3.13 by MAIN155 own22+caller40; original whole-worker App98/91 timeouts remain AR08-C24, not a single-worker PASS.",
+      "status": "C10_CURRENT_TARGET_TECHNICAL_CONDITION_ACCEPTED_H2_FOLLOWUP_MAIN155",
+      "limits": {},
+      "safety_limits": [
+        "Constructor native spawn before Thread.start started-event returns remains physical completion UNKNOWN (H2); no false true receipt or new private handle/platform/forced exit policy.",
+        "Explicit native completion is independent from getter UNKNOWN; original errors/tuples/retirement records are retained. No proof leaves old UNKNOWN/error rules unchanged.",
+        "H3 direct advance fixture proves real factory/adopt caller but is not a newly measured queued event-turn.",
+        "C11 partial Window and C12 postsetup/exec cleanup remain unimplemented; outer setup scope is not full app lifecycle acceptance."
+      ],
+      "cost": "No new DB/TR/poll/task/process/queue. Same terminal completion is reused instead of a second independent native drain. Sparse v1 baseline repair is startup only. Invalid fresh inference now tentative INSERT1 then rollback; valid SQL/commit counts unchanged."
+    },
+    {
+      "id": "2026-10-29-ar08-pending-native-start-owner",
+      "reason": "Actual native spawn can precede Thread.ident publication; original MAIN154 returns the constructor error while the real child is still held before ident. Before2 IDs/4subcase FAIL at actual child gate, not absent API or fake is_alive.",
+      "connection": "Actual constructor -> existing Thread.start -> actual C spawn -> exact started.wait fault -> same-owner finish_comparison_shutdown -> existing native handle join -> original error; two existing owners, no new lifecycle layer.",
+      "validation": "Actual MAIN154 before2 IDs/4subcases FAIL at still-live native pre-ident gate; MAIN155 own22 plus actual caller40 = unique62 PASS, exact IDs/current source and5 worker/Job/UUID/TEMP/source/metadata/fixture checks. Both pre-ident and post-Python-bootstrap native-tail gates, same real C handle join, original StartError/first wait error, terminal reuse/no extra native join and closed admission/borrowed close0 verified. Original20 assertions/helpers/deadlines unchanged; no support claim for unexecuted3.14/3.15, OS signal delivery or whole app lifecycle.",
+      "status": "CURRENT_TARGET_CPYTHON313_H2_TECHNICAL_CONDITION_ACCEPTED",
+      "limits": {},
+      "cost": "Only two same-owner completion methods change: normal public Thread.join identical; existing CPython3.13 native handle reused only when Python ident is absent. No new DB/I/O/TR/poll/task/queue/process/thread in product; test-only actual native gates/proxy.",
+      "safety_limits": [
+        "Original error/first wait error and exact terminal receipt retained; no synthetic native-completed proof.",
+        "Actual target runtime/CI/server configuration3.13; declared >=3.13 does not prove 3.14/3.15 H2. Unknown unsupported start states retain False/UNKNOWN; runtime expansion requires its own native evidence.",
+        "C11 partial constructor and C12 final drain remain separate.",
+        "Original source153 failures, App98/91 timeouts and queryAbort UNKNOWN remain preserved."
+      ]
+    },
+    {
+      "id": "2026-10-29-ar08-published-window-startup-owner",
+      "reason": "Actual partial MainWindow started native writers/Candidate before publication. Existing exact owners must accept work only after a complete Window and shutdown actions are published.",
+      "connection": "bootstrap constructor -> publish Window -> MainWindow.activate_startup -> existing AppController writers/Candidate poller/Research scheduling. Constructor except reuses exact C10 cleanup; no default-autostart compatibility or duplicate owner.",
+      "validation": "Original writer2FAIL and bootstrap1ID/2subcase native observer FAIL retained. Current157 App49-alone+query8=57PASS plus exact unchanged156 non-query166 reused yields223 unique scoped acceptance, not fresh same-source223. All20 accepted worker/Job/UUID/TEMP checks; current existing assertions/deadlines intact. Failed156 query2 IDs3subcase/App49 co-run180 incomplete remain original. Same49/180 native-alone passes; parallel resource contribution observed, exact CPU/I/O cause and whole App98/91/102 CI acceptance not claimed.",
+      "status": "C11_LOCAL_TECHNICAL_CONDITION_ACCEPTED_MAIN157_WITH_EXACT_REUSE",
+      "limits": {},
+      "cost": "Same workers/timers/DB/transport admitted once after publication; no new DB/TR/poll/task/queue/process/cache. Static1284 sites unchanged. Existing per-owner one-shot startup admission; query role retains physical processor absence.",
+      "safety_limits": [
+        "No after/native PASS claimed yet; fixture safety cleanup is after independent native assertions.",
+        "V2 oracle preparation errors corrected against actual existing two content joins and attrs; old assertions/expectations/timeouts not relaxed.",
+        "C12 intermediate activation/postsetup/exec/simultaneous source cleanup and whole gate remain unaccepted.",
+        "H2 current-target scope preserved; no other runtime or operating acceptance."
+      ]
+    },
+    {
+      "id": "2026-10-29-ar08-query-fixture-published-startup-phase",
+      "reason": "Existing embedded query test subclass queued configure/reject0 in constructor, before actual base startup now queues opening settings0; confirmed real modal FAIL. Move only those test-owned callbacks to after real base activation.",
+      "connection": "Actual bootstrap -> inherited subclass activation -> same base owner -> original API settings actual modal -> original fixture configure/reject -> query-only saved connection/native data/restart",
+      "validation": "MAIN157 exact8/8 PASS, actual13 full discovery, selected/executed/passed IDs equal and Job/HKCU/TEMP/source/metadata/fixture unchanged. Two original failed IDs/subcases plus negative-authority and derived-news/physical-package/native consumer all executed. No product, old assertion/value/0ms/12/35/180 changes. Old native Abort UNKNOWN and original156 failures retained.",
+      "status": "CURRENT_QUERY8_NATIVE_CONTRACT_PASSED",
+      "limits": {},
+      "cost": "Product source, calls, clock, DB/schema/hash and inputs unchanged. No extra real request/poll/task/process or new test ID; actual caller phase only.",
+      "not_accepted": [
+        "query8 after verification pending",
+        "App49 aggregate timeout cause",
+        "C16 original native Abort UNKNOWN",
+        "C12/whole gate/operating"
+      ]
+    },
+    {
+      "id": "R3-083-AR08-C12-published-window-native-owner-20261029",
+      "reason": "Existing published Window/Controller keep accepted producer/queued result/native store/observer ownership after direct exec or setup errors. Exact geometry completion replaces an unowned worker; hidden manual retry UI and exception event rejection repair actual connection gaps.",
+      "connection": "bootstrap -> Window.finish_shutdown -> same Controller; same Window/Controller QThread tree; geometry retained only at the actual explicit MainWindow callback and released by one lifecycle phase; source/lease stays after confirmed storage/native completion.",
+      "validation": "Current ROOT architecture initial PASS1284 without limit changes. Prototype evidence and peer V10 review are under tmp/ar-v1-wave51-20261029/c12-postsetup-owner. ROOT new6+related238 native verification pending; current normal source must be bound before execution.",
+      "status": "SOURCE_INTEGRATED_CURRENT_NATIVE_VERIFICATION_PENDING",
+      "limits": {},
+      "cost": {
+        "source_site_keys_before": 1284,
+        "source_site_keys_after_initial": 1284,
+        "adopted_limits_changes": 0,
+        "new_runtime_DB_or_clock_or_poll_paths": 0,
+        "native_wait": "One explicit same-worker completion: ordinary finished geometry blocking choice; existing default nonblocking wait0 and finished release unchanged. Existing shutdown timer owns waiting."
+      },
+      "not_accepted": [
+        "C12 normal current-source244 pending",
+        "Original App aggregate timeouts/C16 cause unknown",
+        "NAS6/Linux4/CI/operating acceptance"
+      ]
+    },
+    {
+      "id": "R3-083-AR08-C12-public-ready-dispatch-wake-20261029",
+      "reason": "Actual measured ready/native completion callback returned but public finish kept waiting in the same dispatcher. Reuse the existing ready signal to interrupt that wait; no fresh DB/clock/poll/task or broad shutdown policy.",
+      "connection": "Only AppController.finish_shutdown acquires a temporary direct ready->current dispatcher interrupt connection when waiting, finally disconnects that exact QMetaObject handle; existing request_close/native guards unchanged.",
+      "validation": "MAIN160 current original-phase new6+related122=128 actual PASS;17 native worker/tree/UUID scopes closed and successful TEMP17 absent. Same source/metadata and full discovery/origin/alias IDs verified. Original failures/helper-phase mistake retained; not fresh244/CI/operating acceptance.",
+      "status": "CURRENT128_SCOPED_LOCAL_PASS",
+      "execution_evidence": "tmp/ar-v1-wave51-20261029/integration160/acceptance160-c12.json",
+      "limits": {},
+      "cost": {
+        "source_site_keys_before": 1284,
+        "source_site_keys_after_initial": 1284,
+        "adopted_limits_changes": 0,
+        "new_DB_IO_clock_timer_poll_process": 0,
+        "temporary_Qt_connection": "only while existing public completion wait is active; exact handle removed in finally"
+      },
+      "not_accepted": [
+        "Original App aggregate timeouts/C16 cause unknown",
+        "NAS exact-selection/environment/Linux/CI/operating acceptance"
+      ],
+      "earlier_pending_review_reference": "R3-083-AR08-C12-published-window-native-owner-20261029"
+    },
+    {
+      "id": "R3-083-AR08-C17-headless-research-import-boundary-20261029",
+      "reason": "Installed core-only research actually completed single_run storage but failed the unchanged dependency oracle because application package eager service exports pulled chart/TradeTick annotations and the full Kiwoom REST package.",
+      "connection": "Remove unused eager service exports; the single real class consumer bootstrap imports RankingService from its owner. TradeTick remains the same transport DTO and is imported only for type checking in the unchanged aggregator.",
+      "validation": "Source162 actual query13+exact unchanged source161 other5modules75=88 related acceptance; not fresh88. Current162 core-only installed research success/invalid/cancel/restart4 PASS with same forbidden-module oracle; product414/raw20/RECORD/exact4 distributions and Job/UUID/TEMP checked. Original source160 import failure and source161 fixture4 errors retained. No whole-C17/C16/CI/operating acceptance.",
+      "status": "SCOPED_RELATED88_AND_CURRENT_INSTALLED_RESEARCH4_PASS",
+      "limits": {},
+      "cost": {
+        "new_DB_IO_clock_timer_poll_process": 0,
+        "new_layers_classes_shared_state": 0,
+        "scientific20_raw_changed": 0,
+        "transport_module_closure_static_before": 6,
+        "transport_module_closure_static_after": 0
+      },
+      "scope": {
+        "products": [
+          "src/kiwoom_monitor/application/__init__.py",
+          "src/kiwoom_monitor/application/minute_trade_value.py",
+          "src/kiwoom_monitor/bootstrap.py"
+        ],
+        "existing_test_strengthened": "tests.unit.test_research_process.ResearchProcessTests.test_headless_cli_executes_without_desktop_news_sources_or_site_packages",
+        "new_test_ids": 0
+      },
+      "not_accepted": [
+        "Original C16 Abort/aggregate app timeout cause",
+        "All-role installation/NAS/Linux/CI/operating acceptance"
+      ],
+      "execution_evidence": "tmp/ar-v1-wave51-20261029/integration162/acceptance162-c17-research4.json",
+      "current_open_validation": {
+        "scope": "AR08-C24 original aggregate, not C17 related subset",
+        "source": {
+          "files": 1211,
+          "lf_sha256": "0f6db73e4dbf900f5c4bacb430a4974fa56243b09d994fe0caeb8f7058dd6fa7",
+          "raw_sha256": "4275dea6354967029072baed2549df9936179be0ecba92ec8e1272616f4f1970"
+        },
+        "original_App108_worker180": "TIMEOUT180.134_NORMAL_PASS0",
+        "evidence": "tmp/ar-v1-wave51-20261029/integration162/aggregate108-failure-classification162.json",
+        "rules_limits_deadlines_or_assertions_changed": false
+      }
+    },
+    {
+      "id": "R3-083-AR06-C06-current-body-native-selection-20261029",
+      "reason": "Approved previous-BODY judgment policy requires native current-source selection and no-rewind catalog copies; original request-only projections could overwrite matching current judgments. First static gate rejected15 DB call-site keys (console preview showed first8).",
+      "connection": "Reuse existing native acceptance transaction and own/shared destinations. Current-source checks are batched in database_news_revisions and existing document/local projection writers. Active connection.info scopes native cuts. No new connection/schema/cache/timer/queue. Ordered PG advisory locks and fresh READ COMMITTED reads preserve absent-row/concurrent publication.",
+      "validation": "Independent frozen v3 R1/R2/T1 and v4 effective connection-scope reviews GO. MAIN163 related unit203 and isolated actual PG30 are required and not yet executed. Original ACK-loss/immutable/restore oracles and first static failure retained; no operational or CI acceptance.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.upsert_documents|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.upsert_documents|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|PostgresNewsRevisionStoreMixin.accept_news_job_result|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|PostgresNewsRevisionStoreMixin.save_news_ai_results|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_accept_news_job_result|execute": 6,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_native_news_catalog_values|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_protect_reported_news_ai.execute|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_protect_reported_news_ai|execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_save_news_ai_results|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_select_current_news_ai_results.execute|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_select_current_news_ai_results.read_batch|execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_select_current_news_ai_results|execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/central_content_sync.py|CentralContentSyncService._write_news|connection.execute": 4,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_repository.py|NewsAIRepository.save_batch|connection.execute": 3,
+        "db|src/kiwoom_monitor/infrastructure/persistence/news_ai_repository.py|_retain_matching_body_projections.read_batch|connection.execute": 1
+      },
+      "status": "INTEGRATED_PENDING_RELATED_UNIT_AND_REAL_PG",
+      "cost": {
+        "static_callsite_keys_before": 1284,
+        "static_callsite_keys_after": 1295,
+        "new_connections_schemas_caches_pollers": 0,
+        "runtime_SQL_counts": "PENDING; required current BODY checks, no performance saving claimed",
+        "original_begin_commit_atomic_oracles_preserved": true
+      },
+      "evidence": "tmp/ar-v1-wave52-20261029/integration163/integration.json"
+    },
+    {
+      "id": "R3-083-AR06-C06-scoped-runtime-acceptance-20261029",
+      "reason": "Actual MAIN163 unit/PG failures required only source receipt normalization, proven PREVIOUS replacement and elimination of irrelevant legacy SET/lock/read. Original failures and cost contracts preserved.",
+      "connection": "Same existing AI/native/local catalog/own-shared owners. Seven-field receipt normalized before new direct binding; core composer/validator and immutable original values unchanged. Source-bound ordered locks/fresh reads remain; unbound legacy avoids3 unnecessary SQL.",
+      "validation": "Source164203 unit PASS plus current165 PG3 and exact unchanged164 PG29 yields30 distinct required PG conditions. Exact whole-tree/source/AST bridge preserves all unchanged contracts. Not fresh165233/PG30, not C17/CI/NAS/operator/live acceptance. Current legacy success3SQL/commit1 and rollback2SQL/rollback1 assertions PASS.",
+      "limits": {},
+      "status": "C06_SCOPED_ACCEPTED_REUSE_EXPLICIT",
+      "evidence": "tmp/ar-v1-wave52-20261029/integration165/acceptance165-c06.json",
+      "original_failed_evidence": "tmp/ar-v1-wave52-20261029/integration163/first-failure-classification.json"
+    },
+    {
+      "id": "AR07-C20-credential-origin-native-read-scope-20261030",
+      "reason": "같은 계좌 key 교체에서 원 AUTO run/등록 관리와 명시 entry resume를 보존하는 필요한 native authority 및 짧은 read scope의 정확한 source-site만 추가한다. 기존7→10은 AUTO control/spec SELECT와 pause UPDATE3곳이다. 나머지5 key는 source-site 각각1이며 generic 기본 경로/기존 limits/reviews를 포괄 인상하지 않는다.",
+      "connection": "기존 credential activation receipt transaction 안에서 fresh control/spec과 entry pause를 원자적으로 처리한다. 원 등록/원 native root의 proof는 기존 native claim cursor에서 조회한다. A3/B6은 각각 짧은 fresh read connection으로 소유하고 PG READ COMMITTED READ ONLY/SQLite BEGIN0·SQL별 lock·완전 소비를 사용한다. binding/active/ACK후/native claim은 원 scope와 freshness를 유지한다.",
+      "validation": "Source3d two-job382 PASS; exact unchanged381 plus counter640 SQLite1 PASS; LinuxPG original management3/freshness1 PASS plus counter640 shortcircuit1 PASS with real rollback/close1. Original WindowsPG management3s failure and old Linux counter failure retained. Seven actual LinuxPG contexts each4connections/11SELECT/2SET/4commit/4close. Credential PG6 run002 reused only through exact product/default-path proof; current main native acceptance still pending. No source-site count is runtime frequency or NAS/operating/disk durability acceptance.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_credentials.py|_finalize_credential_activation|cursor.execute": 10,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.mock_automation_read_scope|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_scoped_document_row|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_mock_unfilled_management_origin.document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_mock_unfilled_management_origin.native_value|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_scoped_mock_automation_control|cursor.execute": 1
+      },
+      "status": "INTEGRATED_MAIN_VALIDATION_PENDING",
+      "evidence": "tmp/ar-v1-wave53-20261030/c20-integration171/integration-code-parity.json",
+      "original_failed_evidence": "tmp/ar07-c20-read-scope-pg1-prepare-20261030/ACTUAL_REPORT.md",
+      "counter_acceptance": "tmp/ar07-c20-shortcircuit-counter-fix-20261030/FINAL_RECEIPT.json",
+      "cycle_removed": "tmp/ar-v1-wave53-20261030/c20-integration171/cycle-removal-proof.json"
+    },
+    {
+      "id": "AR04-C07-native-current-head-reference-20261101",
+      "reason": "A1 transfers ranking current payload/semantic metadata ownership to existing immutable revisions, retaining inline-only historyOFF/no-observation paths. This is the exact reviewed owner/schema transition, not a new global snapshot or approval of previous debt.",
+      "connection": "Existing native transaction owns revision resolution and both current refs. SQLite FK PRAGMA and rank BEGIN IMMEDIATE protect same-transaction integrity. Sorted narrow PG raw-head/metadata/source lock domains protect normalized dedup and current authority; independent metadata writes share their existing domain. Import validates referenced fact/derived slot on first acceptance and replay. Reader remains one SQL and no new connection/cache/manager/poller is introduced.",
+      "validation": "Code review GO frozen22+exact PGfixture companion1, no open P1/P2. Native unit/PG/cost/sealed-ref regression pending. Original SQL cost assertion is retained until genuine native measurement; structural independent expected counts [8,7,8,10], original atomic outcome/commit/rollback/NotNull expectations unchanged. No end-to-end performance improvement claimed.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database.py|SQLiteQueryStore._connect|connection.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_datasets.py|SQLiteDatasetStoreMixin.save_dataset_snapshots|connection.execute": 5,
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_lock_rank_head_writes|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_lock_rank_metadata_write|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_resolve_observation_revision|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_save_rank_current|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_rank_import.py|_validate_imported_rank_heads|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_append_postgres_observation_revision|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_append_sqlite_observation_revision|connection.execute": 0
+      },
+      "retired_moved_limits": {
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_append_postgres_observation_revision|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_observation_writes.py|_append_sqlite_observation_revision|connection.execute": 2
+      },
+      "per_key_responsibility": {
+        "SQLiteQueryStore._connect": "Enable existing FK enforcement per native connection; no new connection.",
+        "SQLiteDatasetStoreMixin.save_dataset_snapshots": "BEGIN IMMEDIATE only for rank batch; all other dataset ownership unchanged.",
+        "_lock_rank_head_writes": "Sorted exact colliding head/metadata/source domains, runtime statements may be multiple per batch.",
+        "_lock_rank_metadata_write": "Same narrow metadata domain for independent current metadata replacement.",
+        "_resolve_observation_revision": "Move existing same-source last-revision SELECT and SQLite INSERT, retain PG bool append wrapper.",
+        "_save_rank_current": "Native head ref plus ref/inline metadata UPSERT within original single transaction.",
+        "_validate_imported_rank_heads": "Bounded target-native fact/projection verification including completed receipt replay."
+      },
+      "status": "INTEGRATED_RELATED_EXECUTION_PENDING",
+      "evidence": "tmp/ar-v1-wave58-20261101/c07-current-head177/product-integration.json",
+      "reviews": [
+        "tmp/ar04-c07-current-head-revision2-native-review176-20261101/REPORT.md",
+        "tmp/ar04-c07-current-head-code-archive-review176-20261101/revision2/REPORT.md"
+      ],
+      "baseline_handling": "Original adoption snapshot and all prior reviews unchanged; exact increases/new sites and moved-site zero limits are expressed solely in this new review."
+    },
+    {
+      "id": "AR04-C07-native-current-head-source-qualified-acceptance-20261101",
+      "reason": "Evidence-only completion of the existing A1 ownership/schema review. No new adopted site, limit, dependency permission or performance threshold.",
+      "connection": "Existing native revision owns normal historyON payload and semantic metadata once; current refs own mutable confirmation. Sole inline OFF/no-observation/legacy remains. Current/history/API, actual-instant projection, ACK/rollback/close, sealed restore and literalv1-to-PG24 are source-qualified.",
+      "validation": "source178 unit122 PASS; original178 PG24 21PASS/3FAIL retained; source179 corrected relatedPG5 PASS and other19 unchanged-proof, genuine local restricted-role sealed8 PASS; source180 required literal oldv1-to-PG24 exact1 PASS plus real cleanup. Actual measured SQL [8,7,8,10] and safety locks retained. No throughput/speedup, new fresh122/24, NAS7, C24 first3s, C16, fullCI or operations claim.",
+      "evidence": "tmp/ar-v1-wave58-20261101/c07-v1-pg24-180/acceptance180-v1pg1.json",
+      "limits": {}
+    },
+    {
+      "id": "AR01-ranking-cache-catalog-owner212-20261101",
+      "reason": "Existing immutable adoption baseline is preserved. Review ratchets the old public batch three IO keys to0 and allows the exact same three1-count sites in the same-owner shared native body. No added site/connection/commit budget; ranking cache no longer runs global former-name alias deletion and explicit catalog policy is preserved.",
+      "connection": "RankingService -> StockRepository.cache_ranking_stocks -> _upsert_stock_batch(seed_aliases=False); catalog upsert_many -> same body(True); single upsert unchanged.",
+      "validation": "Original205 alias282->274 failure preserved; same old batch body with only the known-seed branch separated. Current212 related26 selected; native acceptance pending.",
+      "evidence": [
+        "tmp/ar01-ranking-cache-alias212-20261101/인계212.md",
+        "tmp/ar01-ranking-cache-alias212-20261101/test-review-record185.json",
+        "tmp/ar08-c18-selected-target205-20261101/runtime-run001/root-failure-acceptance205.json"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository._upsert_stock_batch|con.commit": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository._upsert_stock_batch|con.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository._upsert_stock_batch|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.upsert_many|con.commit": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.upsert_many|con.executemany": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.upsert_many|sqlite3.connect": 0
+      }
+    },
+    {
+      "id": "AR05-current-drive-backup-set250-20261102",
+      "reason": "Explicituser newbackupset policy. Exactsameexisting2GoogleAPI folder lookup/create callsites nowuse constructor-owned validatedfolder name instead ofclassconstant. Static .execute classifies theseHTTPsites asdb; no newSQL/endpoint/IOsite-count orconnection/commitbudget. Originaladoptedbaseline preserved, oldexactkeysratcheted0 and2 replacementkeys1 only.",
+      "connection": "ActualFULLbootstrap CURRENT -> existingDriveService validatedlegacy/currentset -> existingfolderlookup/create; CURRENTv2manifest backup_set identity beforecomponentread/reuse, nooldfolder/aliasfallback/carry/duplicatewrites. LEGACYdefaultrealold/archiveAPIcontract preserved; querynoDrive.",
+      "validation": "Source250 actual29/29PASS37.2021408s; old16AST+sharedpendingpredicate retained; sourceexact/Job/HKCU/TEMPcleanup, newnamespace publicdownload/stage_restore/uploadwrongtag rejects, upload+freshreconnect/nativeDB andoldremotebytes preserved underfakeGoogletransport. Originalarchitecture250 failed2 signatures retained; ratifiedguard rerun required. No actualDrive/NAS/operating orperformanceacceptance.",
+      "evidence": [
+        "tmp/ar05-drive-backup-set250-20261102/related001/receipt.json",
+        "tmp/ar05-drive-backup-set250-20261102/INDEPENDENT_REVIEW250R2.json",
+        "tmp/ar05-drive-backup-set250-20261102/PREPARATION250.json"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/google_drive_sync.py|GoogleDriveSyncService._ensure_sync_folder|service.files().create(body={'name': self.FOLDER_NAME, 'mimeType': 'application/vnd.google-apps.folder'}, fields='id').execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/google_drive_sync.py|GoogleDriveSyncService._ensure_sync_folder|service.files().create(body={'name': self._folder_name, 'mimeType': 'application/vnd.google-apps.folder'}, fields='id').execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/google_drive_sync.py|GoogleDriveSyncService._find_sync_folder|service.files().list(spaces='drive', q=f\"name = '{self.FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false\", fields='files(id,modifiedTime)', pageSize=10).execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/google_drive_sync.py|GoogleDriveSyncService._find_sync_folder|service.files().list(spaces='drive', q=f\"name = '{self._folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false\", fields='files(id,modifiedTime)', pageSize=10).execute": 1
+      }
+    },
+    {
+      "id": "AR04-AR05-explicit-full-native-state-owner253-20261102",
+      "reason": "Approved v1 new full target must preserve selected current state and fresh initialization without adopting a query/old full DB or replaying legacy alias/default/profile mutations. Existing transaction and seed bodies move to one shared native owner. No additional connection/COMMIT site is introduced.",
+      "connection": "Explicit layout-bound capture/selection -> existing public installer/CLI -> Database full/query entrypoints -> shared _initialize_desktop_role native transaction/first receipt. Full raw11 roundtrip precedes missing fresh defaults, and plain full initialize borrows the original connection and returns read-only replay. Three empty compatibility tables retain actual current news/document consumers; no fabricated old migration history.",
+      "validation": "Frozen source253 actual118/118 PASS82.8572342s/9 modules; original44 cases in the two modified modules unchanged, six new cases cover original primitives/versions/clocks/old ACK exclusion, explicit full API/CLI layout and output, native one BEGIN/COMMIT, rejection rollback, real commit/close ACK loss, normal edits and read-only same-plan/plain reentry. Job/tree/owned HKCU/success TEMP removed; static190/6908/original49 preserved. Initial guard FAIL9 retained. This is selected native scope, not full bootstrap/catalog/CURRENT restore/installed or operating acceptance.",
+      "evidence": [
+        "tmp/ar05-full-native253-20261102/related001/receipt.json",
+        "tmp/ar05-full-native253-20261102/CODE_REVIEW253.json",
+        "tmp/ar05-full-native253-20261102/TEST_PREPARATION253.json",
+        "tmp/ar05-full-native253-20261102/CLI_TEST_PREPARATION253.json",
+        "tmp/ar05-full-native253-20261102/source253.json"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|connection.commit": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._initialize_desktop_role|connection.commit": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._initialize_desktop_role|connection.execute": 9,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|connection.rollback": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._initialize_desktop_role|connection.rollback": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize_query_role|sqlite3.connect": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._initialize_desktop_role|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._seed_query_current_state|connection.executemany": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._seed_current_state|connection.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._seed_query_current_state|connection.execute": 0,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._seed_current_state|connection.execute": 5,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._complete_full_defaults|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database._complete_full_defaults|connection.executemany": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/database.py|Database.initialize|connection.execute": 8
+      }
+    },
+    {
+      "id": "AR04-AR05-AR08-full-root-current-restore257-20261102",
+      "reason": "The existing native catalog transaction checks the role marker once before static legacy alias review. Full/query stores own their selected aliases and must not delete/reclassify them during catalog refresh. Legacy keeps its review behavior. Ranking cache bypass is unchanged. This adds one bounded cold SELECT site, no connection/COMMIT site or hot-path I/O.",
+      "connection": "Full CLI/root -> existing restore lease and CURRENT source/input/target binding -> native strict settings/columns -> existing Window/child/asset/update restart. StockRepository catalog/KIND commands borrow their original native transaction; seed_known_stock_aliases skips only legacy static reclassification for role-owned schemas. No new state owner, manager, cache, service or polling.",
+      "validation": "Frozen source257 related355/18 modules PASS with native catalog SQL/rollback/retry and selected alias/first-receipt preservation; actual full Window/stock consumer/paths/shutdown, query/default startup, CURRENT source/target rejection and interrupted rollback, asset layout and update archive/restart contracts. Existing original6908 test bodies preserved; source255 added30 and source257 strengthened only that new Window case. Original source255 native abort/cause UNKNOWN,349PASS/6nonpass and first metadata error remain preserved. No installed/operating handoff/CI acceptance inferred.",
+      "evidence": [
+        "tmp/ar05-full-root257-20261102/related001/run.json",
+        "tmp/ar05-full-root257-20261102/source257.json",
+        "tmp/ar05-full-root257-20261102/CORRECTION_REVIEW257.json",
+        "tmp/ar05-full-root257-20261102/architecture-initial257.json",
+        "tmp/ar05-full-root255-20261102/CATALOG_HANDOFF255.json",
+        "tmp/ar05-full-root255-20261102/ROOT_FAILURE255.json"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_aliases.py|seed_known_stock_aliases|connection.execute": 4
+      }
+    },
+    {
+      "id": "AR04-AR05-AR08-full-central-owner-and-selected-journal264-20261102",
+      "reason": "Existing native JournalRepository now owns atomic selected journal settings plus first receipt instead of an unconnected scratch-only importer. Additive schema11 creates one receipt relation. These seven cold manual import/migration SQL sites are necessary; original adoption and81 reviews are unchanged. No hot-path query/polling or per-tick I/O is added.",
+      "connection": "Source-free fixed3 -> existing preservation CLI -> exclusive full-root lease and read-only owned monitor validation -> native journal settings/receipt/close-reopen command -> existing public getters. Explicit-full local_server now passes a separate central.sqlite3 to the unchanged central process/store; default legacy, query non-start, CURRENT monitor/news and native order facts remain separate.",
+      "validation": "Frozen source264 related206/11 workers PASS with source/IDs/Job/HKCU/TEMP cleanup verified. Unchanged original260 changes from FAIL3 subcases (32->77 tables/full reopen rejected) to PASS without relaxing expectations. New journal raw/versions/times/first receipt, real ACK loss/close uncertainty/control/rollback and no-op checked; three schema fixture/version updates preserve old DDL/rows/migration history. Actual measured first/retry native connections3/1, manual full caller4/2; retry DDL/DML/clock0. These are first-vs-retry costs, not a measured operating speedup. GUI/installed/current actual-data handoff/live/NAS/CI/full regression not accepted.",
+      "evidence": [
+        "tmp/ar04-ar05-owner-integration264-20261102/source264.json",
+        "tmp/ar04-ar05-owner-integration264-20261102/related001/run.json",
+        "tmp/ar04-ar05-owner-integration264-20261102/MEASURED_COST264.json",
+        "tmp/ar04-ar05-owner-integration264-20261102/NATIVE_REVIEW264.json",
+        "tmp/ar05-local-server-store260-20261102/CAUSE260.json",
+        "tmp/ar05-journal-root261-20261102/IMPLEMENTATION263.json"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_database.py|JournalRepository.accept_preserved_current_settings|connection.commit": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_database.py|JournalRepository.accept_preserved_current_settings|connection.execute": 7,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_database.py|JournalRepository.accept_preserved_current_settings|connection.rollback": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_database.py|JournalRepository.accept_preserved_current_settings|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_database.py|_read_selected_settings_receipt|connection.execute": 3,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_database.py|_require_empty_selected_target|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_schema.py|_create_selected_settings_receipts|connection.execute": 1
+      }
+    },
+    {
+      "id": "AR04-AR07-shared-exact-research-time271-20261102",
+      "reason": "Measured actual retained KST revisions were misselected by UTC lexical research predicates. Existing storage exact-time conversion now has one common codec owner reused by metadata and research; no new manager/state/schema/data rewrite or site allowance.",
+      "connection": "SQLite native export retains one connection/lock and SELECT->export manifest/member INSERT. Existing raw range index supplies conservative candidates; exact microsecond KST keys determine eligibility/order with sequence/ID ties. Strict candidate errors fail the native operation; metadata retains its old naive-KST compatibility. PG TIMESTAMPTZ and frozen pages are unchanged.",
+      "validation": "Source271 related11 plus actual-copy HTTP272 one plus exact Windows framework owner273 one:13unique/4workers verified source/IDs/Job/HKCU/TEMP. Real UTC/KST fixed-watermark pages preserve original observations, first export INSERT3/SQL COMMIT1 only, fixed retry native DML/COMMIT0. Original272 aggregate FAIL preserved; actual body PASS reconciled using independently proved one HTTP bind plus one Proactor socketpair bind, all FD closed. Original269/270/RED/UUID failures preserved. Bounded membership2 only, not strategy/installed/operating/whole-role authority acceptance; broad campaign input bearer remains pending.",
+      "evidence": [
+        "tmp/ar05-research-http270-20261102/source271.json",
+        "tmp/ar05-research-http270-20261102/related002/run.json",
+        "tmp/ar05-research-http270-20261102/ROOT_RELATED_ACCEPTANCE271.json",
+        "tmp/ar05-research-http269-20261102/EXACT_TIME_DIAGNOSIS270.json",
+        "tmp/ar05-research-http269-20261102/PRODUCT_REVIEW270.json",
+        "tmp/ar05-research-http270-20261102/CAUSE_UUID271.json",
+        "tmp/ar05-research-http272-20261102/ROOT_ACCEPTANCE273.json",
+        "tmp/ar05-research-http272-20261102/RECONCILIATION_REVIEW273.json"
+      ],
+      "limits": {}
+    },
+    {
+      "id": "AR07-AR08-explicit-input-authority-and-child-environment277-20261102",
+      "reason": "Reuse existing immutable grant registry, native input source persistence and process owner to separate input-export authority from operator/order/result authority. Explicit saved connection replaces implicit broad config overwrite. Known unused research credentials are removed through optional existing launcher env; default inheritance stays unchanged. No new Manager/state/queue/schema or DB/I/O call site.",
+      "connection": "Two input HTTP dependencies only: observation fixed export/pages and theme history. UI stores per-template nas_config_path in the existing native owner; unchanged discover/prepare consumes that file and publishes frozen input in its existing claim/staging/signature transaction. Seven research launches use existing process owner with an explicit feature environment.",
+      "validation": "Source276 related85 plus actual child-boundary witness1=86/6workers PASS; known22 names absent, exact runtime/bootstrap/HKCU preserved, child exit0. Source277 adds one actual config-to-headless HTTP/native publication join and reuses existing consumer failure/cancel/restart/paused-ACK8:14/2workers PASS. Source276 products and all other artifacts are exactly unchanged after restoring only test module plus one appended ledger record; old86 are not relabeled as current14. Original source27581PASS/4fixture failures and static routing/fingerprint failures remain preserved. No authority/count/timeout/skip relaxation.",
+      "evidence": [
+        "tmp/ar07-input-authority274-20261102/ROOT_ACCEPTANCE276.json",
+        "tmp/ar07-input-authority274-20261102/ROOT_ACCEPTANCE277.json",
+        "tmp/ar07-input-authority274-20261102/ROOT_SOURCE_REUSE277.json",
+        "tmp/ar07-input-authority274-20261102/ROOT_FAILURE275.json"
+      ],
+      "limits": {}
+    },
+    {
+      "id": "AR08-C24-monotonic-native-risk-publication-373-20261104",
+      "reason": "An older concurrent Risk publisher could overwrite the current pointer after its precheck and immutable history commit. The repository retains typed validation and the two commits. Only the current publication's native write becomes conditional.",
+      "connection": "Existing monitor -> ForwardEvaluationRepository -> SQLite or PostgreSQL document store. SQLite reads and compares the current document under BEGIN IMMEDIATE, then updates the same account key. PostgreSQL uses one conflict-safe INSERT or JSONB-conditional UPDATE; a normal comparison miss revalidates the current revision. The usual connection count and existing claims/readers stay unchanged.",
+      "validation": "Source373 has 20 related Windows passes and one real isolated PostgreSQL pass. SQLite reproduced the stale overwrite before the fix and now rejects stale and equal-revision conflicts and republishes a newer candidate after a comparison miss. PostgreSQL retains immutable history when current publication fails, recovers on retry, and rejects a delayed older write with both history rows retained. The existing RAM ACK-loss check passed. Native SQL budgets permit only these exact sites and do not imply protective deadline or operational acceptance.",
+      "evidence": [
+        "tmp/ar08-c24-risk-cas373-20261104/BEFORE373.log",
+        "tmp/ar08-c24-risk-cas373-20261104/RESULTS373.json",
+        "tmp/ar08-c24-risk-cas373-20261104/pg-risk/results-mock-execution/run.json"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.publish_mock_automation_current_risk|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.publish_mock_automation_current_risk|connection.execute": 2
+      }
+    },
+    {
+      "id": "AR08-C24-post-ack-native-ledger-read-375-20261104",
+      "reason": "Post-checkpoint validation for a single native store can use the existing read connection for current intent and history checks. Four duplicate SQLite/PostgreSQL statement sites are moved to two shared native SQL sites.",
+      "connection": "The existing episode checks control, Risk, root intent/history and child intents/histories in the original short-circuit order. SQLite retains per-read locking and PostgreSQL retains READ COMMITTED READ ONLY. The reader is never lent to a different store and closes before heartbeat. Existing standalone readers retain their own connections and diagnostics.",
+      "validation": "Use the scoped peer-write visibility, retained STOP and owner fences, and measured connection count in the 375 evidence. A local read-scope result does not by itself establish the original protective deadline or NAS acceptance.",
+      "evidence": ["tmp/ar08-c24-post-ack-ledger375-20261104/ROOT_OUTCOME375.json"],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_execution_events|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_execution_intent|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_execution_events|connection.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_execution_intent|connection.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_execution_event_rows|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_execution_intent_row|cursor.execute": 1
+      }
+    },
+    {
+      "id": "AR08-C24-borrowed-recovery-lineage-cursor-398-20261104",
+      "reason": "Recovery with current Risk reads the existing immutable lineage SQL through the same read scope. A borrowed cursor and the standalone connection are mutually exclusive, and both execute the same single lineage query.",
+      "connection": "The borrowed reader closes before either recovery write. SQLite retains its statement lock. PostgreSQL retains READ COMMITTED and the scalar diagnostic path. The internal reader is excluded from replay arguments.",
+      "validation": "One native recovery lineage plus Risk scope and both writes observed in the original Windows PostgreSQL path. Related SQLite verifies one borrowed lineage connection and unchanged replay arguments. The original first cancel wait still errors.",
+      "evidence": ["tmp/ar08-c24-recovery-cancel-reads398-20261104/ROOT_OUTCOME398.json"],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_mock_automation_lineage|_reader.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_mock_automation_lineage|_reader.execute": 1
+      }
+    },
+    {
+      "id": "AR08-C24-current-binding-in-native-gate-399-20261104",
+      "reason": "The native gate already holds a read scope when checking immutable lineage and current Risk. The following current account binding still gets its own statement but can borrow that same cursor.",
+      "connection": "One shared SQL site replaces two backend sites. Standalone callers keep their native connection and SQLite keeps the existing statement lock. The active-order check and all write, ACK and lease boundaries stay separate.",
+      "validation": "Use the native plan open count and related current binding, Risk, STOP and recovery checks in the 399 receipt.",
+      "evidence": ["tmp/ar08-c24-binding-account-reads399-20261104/ROOT_OUTCOME399.json"],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|PostgresAccountIdentityStoreMixin.load_latest_account_binding|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|SQLiteAccountIdentityStoreMixin.load_latest_account_binding|connection.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|_latest_account_binding_row|cursor.execute": 1
+      }
+    },
+    {
+      "id": "AR08-C24-post-reconcile-account-ledger-scope-399-20261104",
+      "reason": "After reconciliation the account recovery owner reads active intents and the first Risk event page before any new broker request. Share one native read connection while retaining both fresh statements.",
+      "connection": "Four scalar SQL sites move to two shared query bodies. The before-REST cut remains separate. Active-read failure keeps the incomplete cut and independently reads Risk events. Event-read failure stops publication.",
+      "validation": "Use the actual account recovery open count and related scoped success, failure fallback, cursor and publication ACK checks in the 399 receipt.",
+      "evidence": ["tmp/ar08-c24-binding-account-reads399-20261104/ROOT_OUTCOME399.json"],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_account_active_execution_intents|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_account_active_execution_intents|connection.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_account_execution_events|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_account_execution_events|connection.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_account_active_execution_rows|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_account_execution_event_rows|cursor.execute": 1
+      }
+    },
+    {
+      "id": "AR08-C24-current-active-intent-reader-409-20261104",
+      "reason": "Run-scoped active-order reads use one shared SQL body on SQLite and PostgreSQL. The native gate retains a fresh final statement and can reuse its existing read-only connection.",
+      "connection": "The actual runtime and evaluation repository prove same native store identity. Other callers keep the standalone path. The scope closes before gate calculation, checkpoint, claim, or broker transport.",
+      "validation": "Use the C24 scoped peer-commit visibility, original protection connection comparison, and read/exit failure results recorded in the architecture plan.",
+      "evidence": [
+        "docs/architecture/app-target-20261023.md#c24-active-intent-native-409"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_active_execution_intents|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_active_execution_intents|connection.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_active_execution_rows|cursor.execute": 1
       }
     }
   ]

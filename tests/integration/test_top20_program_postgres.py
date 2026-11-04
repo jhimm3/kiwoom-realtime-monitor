@@ -57,7 +57,8 @@ class Top20ProgramPostgresTests(unittest.IsolatedAsyncioTestCase):
             now_provider=lambda: datetime.fromisoformat("2026-10-06T10:01:00+09:00"),
         )
         service._program_snapshots._pending[first] = _snapshot(first)
-        service._tasks = [asyncio.create_task(service._index_loop())]
+        service._tasks = [asyncio.create_task(service._index_loop()),
+                          asyncio.create_task(service._persistence_loop())]
         self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 2))
         service._program_snapshots._pending[newer] = _snapshot(newer, "100101", 77)
         closing = asyncio.create_task(service.close())

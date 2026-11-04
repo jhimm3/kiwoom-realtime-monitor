@@ -21,6 +21,7 @@ CENTRAL_TABLES = (
     "central_news_article_revisions",
     "central_news_body_revisions",
     "central_news_ai_revisions",
+    "central_news_ai_inferences",
     "central_news_event_revisions",
     "central_news_event_membership_revisions",
     "central_news_source_cursors",
@@ -51,6 +52,7 @@ CENTRAL_INDEXES = (
     "idx_central_five_minute_bars_lookup",
     "idx_central_second_trade_bars_lookup",
     "idx_central_dataset_lookup",
+    "idx_central_rank_slot_current",
     "idx_central_observation_lookup",
     "idx_central_observation_available",
     "idx_central_shadow_candidate_available",
@@ -78,9 +80,9 @@ CENTRAL_INDEXES = (
     "idx_central_account_scope_alias_target",
 )
 
-CENTRAL_SCHEMA_VERSION = 21
+CENTRAL_SCHEMA_VERSION = 24
 # PostgreSQL-only trailing migrations must not advance unchanged SQLite DBs.
-CENTRAL_SQLITE_SCHEMA_VERSION = 20
+CENTRAL_SQLITE_SCHEMA_VERSION = 24
 CENTRAL_SCHEMA_BASELINE_NAME = "current_central_storage_baseline"
 CENTRAL_MARKET_METADATA_MIGRATION_NAME = "market_data_observation_metadata"
 CENTRAL_MARKET_STATE_TIME_REPAIR_MIGRATION_NAME = "repair_market_state_special_trade_time"
@@ -828,9 +830,30 @@ def central_schema_migrations(dialect: str = "postgres"):
         CentralSchemaMigration(
             21,
             CENTRAL_SHADOW_CHECKPOINT_FRAMES_MIGRATION_NAME,
-            (),  # PostgreSQL-only; SQLite's supported plan still ends at 20.
+            (),  # PostgreSQL-only step; SQLite proceeds directly to shared v22.
             _shadow_checkpoint_schema_statements(),
         ),
+        CentralSchemaMigration(
+            22,
+            "central-news-ai-inference-v1",
+            ("CREATE TABLE IF NOT EXISTS central_news_ai_inferences ("
+             "accepted_sequence INTEGER PRIMARY KEY AUTOINCREMENT,inference_id TEXT NOT NULL UNIQUE,"
+             "target_id TEXT NOT NULL,content_hash TEXT NOT NULL,computed_at REAL NOT NULL,"
+             "available_at REAL NOT NULL,document_json TEXT NOT NULL)",),
+            ("CREATE TABLE IF NOT EXISTS central_news_ai_inferences ("
+             "accepted_sequence BIGSERIAL PRIMARY KEY,inference_id TEXT NOT NULL UNIQUE,"
+             "target_id TEXT NOT NULL,content_hash TEXT NOT NULL,computed_at DOUBLE PRECISION NOT NULL,"
+             "available_at DOUBLE PRECISION NOT NULL,document_json JSONB NOT NULL)",),
+        ),
+        CentralSchemaMigration(
+            23, "news_body_processor_attempt_owner",
+            ("ALTER TABLE central_news_jobs ADD COLUMN body_processor_owner TEXT NOT NULL DEFAULT ''",
+             "ALTER TABLE central_news_jobs ADD COLUMN body_input_ref TEXT"),
+            ("ALTER TABLE central_news_jobs ADD COLUMN body_processor_owner TEXT NOT NULL DEFAULT ''",
+             "ALTER TABLE central_news_jobs ADD COLUMN body_input_ref TEXT"),
+        ),
+        CentralSchemaMigration(24, "rank_current_revision_heads",
+                               _rank_current_head_schema("sqlite"), _rank_current_head_schema("postgres")),
     )
     return migrations[:CENTRAL_SQLITE_SCHEMA_VERSION] if dialect == "sqlite" else migrations
 
@@ -877,4 +900,35 @@ def _credential_schema_statements(dialect: str) -> tuple[str, ...]:
         "SELECT credential_profile_id,'kiwoom_' || MIN(environment),MIN(environment),'','active',MIN(verified_at) "
         "FROM central_account_binding_revisions GROUP BY credential_profile_id "
         "HAVING COUNT(DISTINCT environment)=1 ON CONFLICT(profile_id) DO NOTHING",
+    )
+
+
+def _rank_current_head_schema(dialect):
+    fields = ("venue", "unit", "value_kind", "completeness", "origin", "source", "candidate_universe")
+    inline = " AND ".join(name + " IS NOT NULL" for name in fields)
+    reference = " AND ".join(name + " IS NULL" for name in fields)
+    snapshot_check = "CHECK ((revision_id IS NULL AND payload_json IS NOT NULL) OR (revision_id IS NOT NULL AND payload_json IS NULL AND kind IN ('ranking','top20_membership')))"
+    meta_check = f"CHECK ((revision_id IS NULL AND {inline}) OR (revision_id IS NOT NULL AND {reference}))"
+    if dialect == "postgres":
+        return (
+            "ALTER TABLE central_dataset_snapshots ALTER COLUMN payload_json DROP NOT NULL",
+            "ALTER TABLE central_dataset_snapshots ADD COLUMN revision_id TEXT REFERENCES central_observation_revisions(revision_id)",
+            "ALTER TABLE central_dataset_snapshots ADD COLUMN slot_order_key TEXT",
+            "ALTER TABLE central_dataset_snapshots ADD CONSTRAINT central_dataset_current_xor " + snapshot_check,
+            "CREATE INDEX IF NOT EXISTS idx_central_rank_slot_current ON central_dataset_snapshots(kind,subject,COALESCE(slot_order_key,snapshot_key) DESC,snapshot_key DESC) WHERE kind IN ('ranking','top20_membership')",
+            *(f"ALTER TABLE central_market_data_observation_meta ALTER COLUMN {name} DROP NOT NULL" for name in fields),
+            "ALTER TABLE central_market_data_observation_meta ADD COLUMN revision_id TEXT REFERENCES central_observation_revisions(revision_id)",
+            "ALTER TABLE central_market_data_observation_meta ADD CONSTRAINT central_metadata_current_xor " + meta_check,
+        )
+    return (
+        "CREATE TABLE central_dataset_current_v24 (kind TEXT NOT NULL,subject TEXT NOT NULL,snapshot_key TEXT NOT NULL,saved_at REAL NOT NULL,payload_json TEXT,revision_id TEXT REFERENCES central_observation_revisions(revision_id),slot_order_key TEXT,PRIMARY KEY(kind,subject,snapshot_key)," + snapshot_check + ")",
+        "INSERT INTO central_dataset_current_v24(kind,subject,snapshot_key,saved_at,payload_json) SELECT kind,subject,snapshot_key,saved_at,payload_json FROM central_dataset_snapshots",
+        "DROP TABLE central_dataset_snapshots",
+        "ALTER TABLE central_dataset_current_v24 RENAME TO central_dataset_snapshots",
+        "CREATE INDEX idx_central_dataset_lookup ON central_dataset_snapshots(kind,subject,snapshot_key DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_central_rank_slot_current ON central_dataset_snapshots(kind,subject,COALESCE(slot_order_key,snapshot_key) DESC,snapshot_key DESC) WHERE kind IN ('ranking','top20_membership')",
+        "CREATE TABLE central_metadata_current_v24 (dataset_kind TEXT NOT NULL,subject TEXT NOT NULL,observation_key TEXT NOT NULL,effective_at TEXT,available_at TEXT,venue TEXT,unit TEXT,value_kind TEXT,completeness TEXT,origin TEXT,source TEXT DEFAULT '',candidate_universe TEXT,revision_id TEXT REFERENCES central_observation_revisions(revision_id),PRIMARY KEY(dataset_kind,subject,observation_key)," + meta_check + ")",
+        "INSERT INTO central_metadata_current_v24(dataset_kind,subject,observation_key,effective_at,available_at,venue,unit,value_kind,completeness,origin,source,candidate_universe) SELECT dataset_kind,subject,observation_key,effective_at,available_at,venue,unit,value_kind,completeness,origin,source,candidate_universe FROM central_market_data_observation_meta",
+        "DROP TABLE central_market_data_observation_meta",
+        "ALTER TABLE central_metadata_current_v24 RENAME TO central_market_data_observation_meta",
     )

@@ -1867,7 +1867,7 @@ class PersistedThesisRamLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     now, hub, collector, _, _ = helper.fixture(0)
                     monitor = MarketThemeShadowMonitor(theme_id=thesis.theme_id, leadership_venue="KRX", stock_thesis=request)
                     self.assertIsNone(monitor._state)
-                    runtime = MarketThemeShadowRuntime(hub, collector, ((monitor, shadow_inputs()),))
+                    runtime = MarketThemeShadowRuntime(hub, collector, ((monitor, shadow_inputs()),), now_provider=collector._now_provider)
                     try:
                         await runtime.start()
                         helper.trades(collector, now)

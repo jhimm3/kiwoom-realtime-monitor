@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -843,6 +844,249 @@ class JournalRepositoryTests(unittest.TestCase):
             rows = repository.load_daily_bars("005930", date(2026, 8, 27))
             self.assertEqual(1, len(rows))
             self.assertEqual((100, 110, 90, 105, 200, 3.5), rows[0][1:7])
+
+
+class SelectedJournalSettingsTests(unittest.TestCase):
+    """The fixed3 oracle at the actual journal native owner, without source DBs."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.root / "journal.sqlite3"
+        self.rows = [
+            ("personal_trade_rules", '[ "규칙 A", "규칙 B" ]', "2026-10-30T09:02:00+09:00"),
+            ("personal_trade_rules_structured", '[{"lesson":3,"lesson_topic":"주제","section":"절","subsection":"소절","role":"core_rule","target_topic":"대상","text":"원문 규칙"}]', "2026-10-30T00:03:00Z"),
+            ("strategy_packs", '[ {"pack_id":"mimosa_v1","name":"독립 원문 팩","version":7,"enabled":false,"priority":4,"setup_types":["돌파"],"required_data":["1분봉"],"source_files":["synthetic-unopened.docx"]} ]', "original-non-normalized-time"),
+        ]
+        self.owner = dict(
+            format="selected-journal-settings-target/v1", operation_id="fixture-install",
+            target_id="fixture-journal", source_instance="fixture-source", source_operation_id="fixture-cut",
+            artifact_sha256="a" * 64, monitor_role="fixture-full",
+            monitor_seed_sha256="b" * 64, monitor_layout_sha256="c" * 64,
+            runtime_state="OFFLINE_UNBOUND", order_authority=False,
+        )
+        self.now = "2026-11-02T12:00:00+09:00"
+
+    def accept(self, **kwargs):
+        return JournalRepository.accept_preserved_current_settings(
+            self.path, rows=kwargs.pop("rows", self.rows), ownership=kwargs.pop("ownership", self.owner),
+            receipt_at=kwargs.pop("receipt_at", lambda: self.now), **kwargs)
+
+    def raw_rows(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            return connection.execute("SELECT setting_key,value_json,updated_at FROM journal_settings ORDER BY setting_key").fetchall()
+
+    def fault_connections(self, mode, connections):
+        native = sqlite3.connect
+
+        class FaultConnection(sqlite3.Connection):
+            selected = False
+            def execute(connection, sql, *args, **kwargs):
+                cursor = super().execute(sql, *args, **kwargs)
+                if sql.startswith("INSERT INTO journal_selected_settings_receipts"):
+                    connection.selected = True
+                if mode == "row" and sql.startswith("INSERT INTO journal_settings("):
+                    raise OSError("fixture failure after native row insertion")
+                return cursor
+            def commit(connection):
+                if connection.selected and mode == "before_commit":
+                    raise OSError("fixture no native commit")
+                super().commit()
+                if connection.selected:
+                    if mode == "commit_close":
+                        sqlite3.Connection.close(connection)
+                    if mode in {"commit", "commit_close"}:
+                        raise OSError("fixture lost commit ACK")
+                    if mode == "keyboard":
+                        raise KeyboardInterrupt("fixture caller interrupted")
+                    if mode == "exit":
+                        raise SystemExit("fixture caller exited")
+            def close(connection):
+                if connection.selected and mode == "unclosed":
+                    raise OSError("fixture native close still pending")
+                super().close()
+                if connection.selected and mode == "close":
+                    raise OSError("fixture lost close ACK")
+
+        def connect(*args, **kwargs):
+            connection = native(*args, **kwargs, factory=FaultConnection)
+            connections.append(connection)
+            return connection
+        return connect
+
+    def test_selected_raw_types_original_times_versions_and_public_consumers_survive_reopen(self):
+        accepted = self.accept()
+        self.assertEqual("ACCEPTED", accepted["state"])
+        self.assertEqual(self.rows, self.raw_rows())
+        self.assertEqual(self.now, accepted["receipt"]["accepted_at"])
+        self.assertEqual((3, [], "OFFLINE_UNBOUND", False), tuple(accepted["receipt"][key]
+                         for key in ("rows", "missing_keys", "runtime_state", "order_authority")))
+        reader = JournalRepository(self.path)
+        self.assertEqual(("규칙 A", "규칙 B"), reader.load_personal_rules())
+        self.assertEqual("원문 규칙", reader.load_structured_personal_rules()[0].text)
+        pack = reader.load_strategy_packs()[0]
+        self.assertEqual(("독립 원문 팩", 7, False, ("synthetic-unopened.docx",)),
+                         (pack.name, pack.version, pack.enabled, pack.source_files))
+        self.assertEqual(self.rows, self.raw_rows())
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM trade_fills").fetchone()[0])
+        # TEXT affinity still preserves source BLOB storage primitives verbatim.
+        self.path = self.root / "blob" / "journal.sqlite3"
+        self.path.parent.mkdir()
+        blob_rows = [("personal_trade_rules", b"\x00raw\xff", b"original-time\x00")]
+        self.accept(rows=blob_rows)
+        self.assertEqual(blob_rows, self.raw_rows())
+
+    def test_exact_retry_has_no_ddl_dml_schema_initialization_or_new_receipt_clock(self):
+        from kiwoom_monitor.infrastructure.persistence import journal_database as owner_module
+        native, observations = sqlite3.connect, {}
+        for phase in ("first", "retry"):
+            statements, connections, writes = [], [], []
+            class TraceConnection(sqlite3.Connection):
+                def __init__(connection, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    connection.set_trace_callback(statements.append)
+                    connection.set_authorizer(lambda action, *_: (writes.append(action) if action in {
+                        sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+                        sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_DROP_TABLE,
+                    } else None) or sqlite3.SQLITE_OK)
+                    connections.append(connection)
+            with patch.object(sqlite3, "connect", side_effect=lambda *args, **kwargs: native(*args, **kwargs, factory=TraceConnection)):
+                if phase == "first":
+                    accepted = self.accept()
+                else:
+                    before = self.path.read_bytes()
+                    with patch.object(owner_module, "initialize_journal_database", side_effect=AssertionError("no schema replay")):
+                        repeated = self.accept(receipt_at=lambda: self.fail("no second clock"))
+                    self.assertEqual("EXACT_NOOP", repeated["state"])
+                    self.assertEqual(accepted["receipt"], repeated["receipt"])
+                    self.assertEqual(before, self.path.read_bytes())
+                    self.assertEqual([], writes)
+                    self.assertFalse(any(sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP")) for sql in statements))
+            for connection in connections:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connection.in_transaction
+            observations[phase] = dict(connections=len(connections), statements=len(statements),
+                selects=sum(sql.lstrip().upper().startswith("SELECT") for sql in statements),
+                begin=sum(sql.lstrip().upper().startswith("BEGIN") for sql in statements),
+                commit=sum(sql.lstrip().upper().startswith("COMMIT") for sql in statements),
+                rollback=sum(sql.lstrip().upper().startswith("ROLLBACK") for sql in statements),
+                write_authorizations=len(writes))
+        print("JOURNAL_SELECTED_NATIVE_COST " + json.dumps(observations, sort_keys=True))
+
+    def test_foreign_target_changed_binding_and_changed_raw_are_preserved(self):
+        JournalRepository(self.path)  # Existing empty DB is not implicitly adopted.
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "no matching"):
+            self.accept()
+        self.assertEqual(before, self.path.read_bytes())
+        self.path = self.root / "owned" / "journal.sqlite3"
+        self.path.parent.mkdir()
+        accepted = self.accept()
+        before = self.path.read_bytes()
+        for key, value in (("artifact_sha256", "d" * 64), ("monitor_role", "other-full"), ("operation_id", "other-install")):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.accept(ownership={**self.owner, key: value})
+            self.assertEqual(before, self.path.read_bytes())
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("UPDATE journal_settings SET value_json='user-current-edit' WHERE setting_key='personal_trade_rules'")
+        edited = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "raw data or first receipt conflict"):
+            self.accept()
+        self.assertEqual(edited, self.path.read_bytes())
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(accepted["receipt"], json.loads(connection.execute(
+                "SELECT receipt_json FROM journal_selected_settings_receipts").fetchone()[0]))
+
+    def test_mid_transaction_failure_rolls_back_rows_and_receipt_then_exact_resume(self):
+        connections = []
+        with patch.object(sqlite3, "connect", side_effect=self.fault_connections("row", connections)):
+            with self.assertRaisesRegex(ValueError, "acceptance is unconfirmed"):
+                self.accept()
+        self.assertEqual([], self.raw_rows())
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual([], connection.execute("SELECT * FROM journal_selected_settings_receipts").fetchall())
+        self.assertEqual("ACCEPTED", self.accept()["state"])
+        self.assertEqual(self.rows, self.raw_rows())
+
+    def test_pending_reservation_never_adopts_empty_foreign_schema(self):
+        connections = []
+        with patch.object(sqlite3, "connect", side_effect=self.fault_connections("row", connections)):
+            with self.assertRaises(ValueError):
+                self.accept()
+        self.path.unlink()  # This replacement belongs only to the synthetic fixture.
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("CREATE TABLE foreign_data(private_value TEXT)")
+        before = self.path.read_bytes()
+        with patch("kiwoom_monitor.infrastructure.persistence.journal_database.initialize_journal_database",
+                   side_effect=AssertionError("foreign schema must be refused before constructor")):
+            with self.assertRaisesRegex(ValueError, "foreign schema objects"):
+                self.accept()
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_commit_ack_loss_reopens_first_receipt_without_resubmission(self):
+        connections = []
+        with patch.object(sqlite3, "connect", side_effect=self.fault_connections("commit", connections)):
+            accepted = self.accept()
+        self.assertEqual("ACCEPTED_AFTER_ACK_UNCERTAINTY", accepted["state"])
+        self.assertEqual("OSError", accepted["native_outcome"]["primary_error_type"])
+        self.assertEqual(accepted["receipt"], self.accept(receipt_at=lambda: self.fail("no new receipt"))["receipt"])
+        self.assertEqual(self.rows, self.raw_rows())
+
+    def test_uncommitted_ack_failure_is_not_reported_accepted(self):
+        connections = []
+        with patch.object(sqlite3, "connect", side_effect=self.fault_connections("before_commit", connections)):
+            with self.assertRaisesRegex(ValueError, "acceptance is unconfirmed"):
+                self.accept()
+        self.assertEqual([], self.raw_rows())
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual([], connection.execute("SELECT * FROM journal_selected_settings_receipts").fetchall())
+
+    def test_commit_then_native_close_then_ack_loss_preserves_both_error_facts(self):
+        connections = []
+        with patch.object(sqlite3, "connect", side_effect=self.fault_connections("commit_close", connections)):
+            accepted = self.accept()
+        self.assertEqual("ACCEPTED_AFTER_ACK_UNCERTAINTY", accepted["state"])
+        self.assertEqual("OSError", accepted["native_outcome"]["primary_error_type"])
+        self.assertEqual([dict(phase="rollback", error_type="ProgrammingError")], accepted["native_outcome"]["cleanup_errors"])
+        self.assertTrue(accepted["native_outcome"]["native_connection_closed"])
+        self.assertEqual(accepted["receipt"], self.accept()["receipt"])
+
+    def test_lost_close_ack_reopens_without_hiding_close_error(self):
+        connections = []
+        with patch.object(sqlite3, "connect", side_effect=self.fault_connections("close", connections)):
+            accepted = self.accept()
+        self.assertEqual("ACCEPTED_AFTER_ACK_UNCERTAINTY", accepted["state"])
+        self.assertEqual([dict(phase="close", error_type="OSError")], accepted["native_outcome"]["cleanup_errors"])
+        self.assertTrue(accepted["native_outcome"]["native_connection_closed"])
+        self.assertEqual(self.rows, self.raw_rows())
+
+    def test_unconfirmed_native_close_never_reopens_or_reports_acceptance(self):
+        from kiwoom_monitor.infrastructure.persistence import journal_database as owner_module
+        connections = []
+        try:
+            with patch.object(sqlite3, "connect", side_effect=self.fault_connections("unclosed", connections)), \
+                    patch.object(owner_module, "_read_selected_settings_receipt", wraps=owner_module._read_selected_settings_receipt) as read:
+                with self.assertRaisesRegex(ValueError, "close is unconfirmed") as caught:
+                    self.accept()
+                self.assertEqual(0, read.call_count)
+            self.assertFalse(caught.exception.native_outcome["native_connection_closed"])
+        finally:
+            for connection in connections:
+                sqlite3.Connection.close(connection)  # Fixture owns this confirmed cleanup.
+        self.assertEqual("EXACT_NOOP", self.accept()["state"])
+
+    def test_cancellation_and_system_exit_after_commit_propagate_after_close(self):
+        for mode, exception in (("keyboard", KeyboardInterrupt), ("exit", SystemExit)):
+            with self.subTest(mode=mode):
+                self.path = self.root / mode / "journal.sqlite3"
+                self.path.parent.mkdir()
+                connections = []
+                with patch.object(sqlite3, "connect", side_effect=self.fault_connections(mode, connections)):
+                    with self.assertRaises(exception) as caught:
+                        self.accept()
+                self.assertTrue(caught.exception.native_outcome["native_connection_closed"])
+                self.assertEqual(exception.__name__, caught.exception.native_outcome["primary_error_type"])
+                self.assertEqual("EXACT_NOOP", self.accept()["state"])
 
 
 if __name__ == "__main__":

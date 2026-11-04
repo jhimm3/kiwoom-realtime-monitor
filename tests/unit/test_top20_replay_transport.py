@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server.diagnostic_replay_contract import validate_collector_message
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder
+
 import asyncio
 import copy
 from contextlib import ExitStack
 from datetime import datetime
 from threading import Lock
 import unittest
+from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server import diagnostic_trace as trace
@@ -18,6 +22,7 @@ from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import (
 from kiwoom_monitor.central_server.diagnostic_top20_transport import Top20SubscriptionTransport
 from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+from kiwoom_monitor.central_server import diagnostic_rest_input as rest_inputs
 from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
 from tests.unit.test_diagnostic_rest_input import Client, Store, recording, PATH
 from tests.unit.test_top20_lifecycle_inputs import Socket
@@ -28,7 +33,7 @@ NOW = datetime.fromisoformat("2026-10-07T09:00:10+09:00")
 
 class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
     async def request_tape(self, *, shared_lane=False, same_key=False):
-        events, broker = [], CentralRestBroker(Client(), Store())
+        events, broker = [], CentralRestBroker(Client(), Store(), input_observer=rest_inputs)
         try:
             with recording(events):
                 for lane, code in (("source:first", "005930"), ("source:second", "000660")):
@@ -50,7 +55,7 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
                 binding = client.task_bindings([
                     {"task_name": name, "spawn_ordinal": 1, "source_lane": "source:shared"}
                     for name in ("first", "second")])
-                broker = CentralRestBroker(client, Store())
+                broker = CentralRestBroker(client, Store(), input_observer=rest_inputs)
                 try:
                     with patch.object(trace, "input_token", return_value=None), binding.activate():
                         first = await owned_create_task(broker.request_unrecorded("ka10001", PATH,
@@ -74,7 +79,7 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
             {"task_name": "entry", "spawn_ordinal": 1, "source_lane": "source:first"},
             {"task_name": "entry", "spawn_ordinal": 2, "source_lane": "source:second"},
         ])
-        broker, release = CentralRestBroker(client, Store()), asyncio.Event()
+        broker, release = CentralRestBroker(client, Store(), input_observer=rest_inputs), asyncio.Event()
         async def request(code, delayed):
             if delayed:
                 await release.wait()
@@ -105,7 +110,7 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
         binding = client.task_bindings([
             {"task_name": "entry", "spawn_ordinal": 1, "source_lane": "source:first"},
         ])
-        broker = CentralRestBroker(client, Store())
+        broker = CentralRestBroker(client, Store(), input_observer=rest_inputs)
         async def parent():
             task = owned_create_task(broker.request_unrecorded("ka10001", PATH, {"stk_cd": "005930"}),
                                      name="unbound-child")
@@ -128,8 +133,9 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
             return True
         def payload(token, kind, fields, value):
             return scalar(token, kind, {**fields, "payload": freeze_payload(value).value})
-        hub = RealtimeHub()
-        collector = CentralRealtimeCollector(lambda: "", "real", hub, lambda: NOW)
+        hub_observer = hub_capture.HubInputRecorder()
+        hub = RealtimeHub(now_provider=lambda: NOW, observer=hub_observer)
+        collector = CentralRealtimeCollector(lambda: "", "real", hub, lambda: NOW, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
         collector._realtime_tape_version = collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
         with ExitStack() as stack:
             stack.enter_context(patch.object(trace, "input_token", side_effect=lambda kind:
@@ -151,10 +157,11 @@ class Top20ReplayTransportTests(unittest.IsolatedAsyncioTestCase):
         return read_realtime_tape(events), f"realtime_hub:{id(hub):x}"
 
     async def replay_transport(self, tape, component):
-        hub = RealtimeHub()
+        hub_observer = hub_capture.HubInputRecorder()
+        hub = RealtimeHub(now_provider=lambda: NOW, observer=hub_observer)
         collector = CentralRealtimeCollector(lambda: self.fail("network token invoked"),
-            "real", hub, lambda: NOW, store=Store())
-        await collector.start_input_replay()
+            "real", hub, lambda: NOW, store=Store(), input_observer=CollectorInputRecorder(hub_observer=hub_observer))
+        await collector.start_input_replay(message_validator=validate_collector_message)
         subscriber = hub.connect(capture_component="live:top20")
         hub.update_subscription(subscriber, ["005930"], [], program_codes=["005930"])
         transport = Top20SubscriptionTransport(collector, SubscriptionTape(tape),

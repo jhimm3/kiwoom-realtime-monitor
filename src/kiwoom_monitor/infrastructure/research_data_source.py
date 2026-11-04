@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
+from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol, Callable
+from typing import Any, Protocol, Callable, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import (
-    research_session_profile_document, research_session_profile_contract_matches,
+    KST, research_session_profile_document, research_session_profile_contract_matches,
 )
 from kiwoom_monitor.application.research_splits import DevelopmentPartitionSpec, ResearchEvaluationSpec, FinalHoldoutBatchSpec, warmup_start
+from kiwoom_monitor.application.research_resources import ResearchResourceBlocked
+from kiwoom_monitor.infrastructure.research_storage import (
+    write_research_storage_marker, research_storage_remaining_bytes, research_storage_text_bytes,
+    validate_research_storage_root,
+)
 
 
 class ResearchObservationClient(Protocol):
@@ -654,3 +661,218 @@ def research_input_encoded_bytes(root: Path) -> int:
                 total += file.stat().st_size
         return total
     return size(Path(root))
+
+
+def export_daily_dataset(client, start, end, kinds, subject, output, session_profile=None, *, initial_page=None, theme_history=None, checkpoint=lambda: None, max_encoded_bytes=None, reserve_bytes=lambda count: None):
+    """Keep the existing single-day file contract for both CLI modes."""
+    dataset = CentralResearchDataSource(client).load(
+        start, end, kinds, subject=subject, session_profile=session_profile,
+        initial_page=initial_page, checkpoint=checkpoint, max_encoded_bytes=max_encoded_bytes,
+    )
+    checkpoint()
+    theme_history = theme_history if theme_history is not None else client.load_theme_history(as_of=end.timestamp(), limit=1000)
+    checkpoint()
+    raw_theme_snapshots = theme_history.get("snapshots", [])
+    if not isinstance(raw_theme_snapshots, list) or not all(isinstance(value, dict) for value in raw_theme_snapshots):
+        raise ValueError("테마 이력 응답 형식이 올바르지 않습니다.")
+    theme_snapshots = [value for value in raw_theme_snapshots if isinstance(value, dict)]
+    output.mkdir(parents=True)
+    observations_path = output / "observations.jsonl"
+    def write_rows(path, values):
+        digest = hashlib.sha256()
+        size = 0
+        with path.open('wb') as handle:
+            for value in values:
+                checkpoint()
+                encoded = (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+                size += len(encoded)
+                if max_encoded_bytes is not None and size > max_encoded_bytes:
+                    raise ValueError('research_export_encoded_byte_limit_exceeded')
+                reserve_bytes(len(encoded))
+                handle.write(encoded)
+                digest.update(encoded)
+        return digest.hexdigest()
+    rows_hash = write_rows(observations_path, dataset.observations)
+    themes_path = output / "theme_snapshots.jsonl"
+    themes_hash = write_rows(themes_path, theme_snapshots)
+    manifest = dict(dataset.manifest)
+    manifest["observations_file"] = observations_path.name
+    manifest["observations_file_hash"] = rows_hash
+    manifest["theme_snapshots_file"] = themes_path.name
+    manifest["theme_snapshots_file_hash"] = themes_hash
+    manifest["theme_snapshot_count"] = len(theme_snapshots)
+    manifest["theme_snapshot_limit"] = 1000
+    manifest["theme_snapshot_history_may_be_truncated"] = len(theme_snapshots) == 1000
+    text = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2)
+    reserve_bytes(research_storage_text_bytes(text))
+    (output / "manifest.json").write_text(text, encoding="utf-8")
+    return manifest
+
+
+def prepare_campaign_nas_input(client, source, template_path, scope, known_fingerprints, *, checkpoint=lambda: None, max_encoded_bytes=32 * 1024 * 1024, begin_preparation=lambda: None, publication_context=nullcontext, record_staging=lambda path: None, rolling_range=None, validate_dataset=None):
+    """Probe fixed snapshots, stage verified files, then publish a new directory."""
+    checkpoint()
+    if (template_path / 'manifest.json').stat().st_size > 1024 * 1024:
+        raise ValueError('input_manifest_too_large')
+    template_manifest = json.loads((template_path / 'manifest.json').read_text(encoding='utf-8'))
+    children = template_manifest.get('children') if template_manifest.get('bundle_version') else None
+    if template_manifest.get('bundle_version') and (not isinstance(children, list) or not children):
+        raise ValueError('NAS preparation bundle child contract is invalid')
+    if rolling_range is not None and children:
+        raise ValueError('rolling NAS preparation requires a single daily template')
+    target_scope = {**scope, 'captured_range': rolling_range} if rolling_range is not None else scope
+    ranges = [entry['captured_range'] for entry in children] if children else [target_scope['captured_range']]
+    pages, themes, signatures = [], [], []
+    for captured in ranges:
+        checkpoint()
+        start, end = (datetime.fromisoformat(captured[key]) for key in ('start', 'end'))
+        if start.tzinfo is None or end.tzinfo is None or not timedelta(0) < end - start <= timedelta(days=1):
+            raise ValueError('NAS preparation requires bounded daily exports or a daily bundle')
+        page = client.load_research_observations_page(start, end, tuple(scope['kinds']), subject=scope.get('subject') or '', limit=1)
+        checkpoint()
+        manifest = page.get('manifest')
+        if not isinstance(manifest, dict) or not page.get('watermark') or not isinstance(page.get('observations'), list) or len(str(manifest.get('revision_ids_hash', ''))) != 64:
+            raise ValueError('NAS preparation probe contract is invalid')
+        count = int(manifest.get('revision_count', -1))
+        values = page['observations']
+        if count < 0 or len(values) != min(1, count) or page.get('next_cursor') != (1 if count > 1 else None) or (values and (not isinstance(values[0], dict) or values[0].get('ordinal') != 1 or not values[0].get('revision_id'))):
+            raise ValueError('NAS preparation probe is incomplete')
+        if manifest.get('captured_range') != captured or sorted(manifest.get('kinds', [])) != sorted(scope['kinds']) or (manifest.get('subject') or '') != (scope.get('subject') or ''):
+            raise ValueError('NAS preparation probe scope does not match the study')
+        if rolling_range is not None and count == 0:
+            return {'status': 'empty', 'signature': '', 'path': None}
+        history = client.load_theme_history(as_of=end.timestamp(), limit=1000)
+        checkpoint()
+        snapshots = history.get('snapshots')
+        if not isinstance(snapshots, list) or not all(isinstance(row, dict) for row in snapshots):
+            raise ValueError('NAS preparation theme history contract is invalid')
+        signatures.append({'revision_ids_hash': manifest['revision_ids_hash'], 'themes': hashlib.sha256(json.dumps(snapshots, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()})
+        pages.append(page)
+        themes.append(history)
+    signature_input = {'ranges': ranges, 'signatures': signatures} if rolling_range is not None else signatures
+    signature = hashlib.sha256(json.dumps(signature_input, sort_keys=True).encode()).hexdigest()
+    if rolling_range is None and signature == source['remote_signature']:
+        return {'status': 'unchanged', 'signature': signature, 'path': None}
+    operation_id = begin_preparation()
+    root = Path(source['root'])
+    validate_research_storage_root(root)
+    root.mkdir(parents=True, exist_ok=True)
+    cap = source.get('storage_cap_bytes', 0)
+    capacity_remaining = research_storage_remaining_bytes(root, source['source_id'], cap, checkpoint=checkpoint)
+    def reserve_bytes(count):
+        nonlocal capacity_remaining
+        if capacity_remaining is not None:
+            if count > capacity_remaining:
+                raise ResearchResourceBlocked('research_storage_capacity_reached')
+            capacity_remaining -= count
+    with tempfile.TemporaryDirectory(prefix='.nas-preparing-', dir=root) as temporary:
+        stage = Path(temporary)
+        if stage.resolve().parent != root.resolve():
+            raise ValueError('NAS staging directory is outside the source root')
+        record_staging(stage)
+        write_research_storage_marker(stage, source['source_id'], kind='preparing', reserve_bytes=reserve_bytes, operation_id=operation_id)
+        payload = stage / 'payload'
+        profile = (scope.get('research_session_profile') or {}).get('profile')
+        remaining = max_encoded_bytes
+        paths = []
+        for index, captured in enumerate(ranges):
+            relative = 'days/' + date.fromisoformat(children[index]['selected_date']).isoformat() if children else ''
+            output = payload / relative
+            start, end = (datetime.fromisoformat(captured[key]) for key in ('start', 'end'))
+            export_daily_dataset(client, start, end, tuple(scope['kinds']), scope.get('subject') or '', output, profile, initial_page=pages[index], theme_history=themes[index], checkpoint=checkpoint, max_encoded_bytes=remaining, reserve_bytes=reserve_bytes)
+            remaining -= sum((output / name).stat().st_size for name in ('observations.jsonl', 'theme_snapshots.jsonl'))
+            if remaining < 0:
+                raise ValueError('research_export_encoded_byte_limit_exceeded')
+            paths.append(relative)
+        if children:
+            write_frozen_research_bundle(payload, tuple(paths), reserve_bytes=reserve_bytes)
+        checkpoint()
+        dataset = load_research_input(payload, session_profile=profile, checkpoint=checkpoint)
+        if campaign_input_scope(dataset) != target_scope:
+            raise ValueError('prepared NAS dataset scope does not match the study')
+        if validate_dataset is not None:
+            validate_dataset(dataset, payload)
+        fingerprint = campaign_input_fingerprint(dataset, checkpoint=checkpoint)
+        if rolling_range is not None:
+            fingerprint = hashlib.sha256((json.dumps(rolling_range, sort_keys=True) + fingerprint).encode()).hexdigest()
+        del dataset
+        target = root / ('nas-' + source['source_id'][:12] + '-' + fingerprint)
+        if fingerprint in known_fingerprints:
+            return {'status': 'unchanged', 'signature': signature, 'path': None, 'fingerprint': fingerprint}
+        checkpoint()
+        if target.is_symlink() or target.resolve().parent != root.resolve():
+            raise ValueError('published NAS input target is outside the source root')
+        if target.exists():
+            existing = load_research_input(target, session_profile=profile, checkpoint=checkpoint)
+            existing_fingerprint = campaign_input_fingerprint(existing, checkpoint=checkpoint)
+            if rolling_range is not None:
+                existing_fingerprint = hashlib.sha256((json.dumps(rolling_range, sort_keys=True) + existing_fingerprint).encode()).hexdigest()
+            if campaign_input_scope(existing) != target_scope or existing_fingerprint != fingerprint:
+                raise ValueError('published NAS input conflicts with verified snapshot')
+        else:
+            write_research_storage_marker(payload, source['source_id'], kind='published', fingerprint=fingerprint, reserve_bytes=reserve_bytes, operation_id=operation_id)
+            # Count again to catch other files written during preparation. This is
+            # an application budget, not a filesystem quota against outside writers.
+            research_storage_remaining_bytes(root, source['source_id'], cap, checkpoint=checkpoint, allow_full=True)
+            checkpoint()
+            with publication_context():
+                validate_research_storage_root(root)
+                if target.is_symlink() or target.resolve().parent != root.resolve() or stage.resolve().parent != root.resolve() or payload.is_symlink() or payload.resolve().parent != stage.resolve():
+                    raise ValueError('NAS publication path escaped the source root')
+                payload.rename(target)
+        return {'status': 'prepared', 'signature': signature, 'path': str(target), 'fingerprint': fingerprint}
+
+
+def read_research_input_object(path: Path, label: str) -> Mapping[str, Any]:
+    try:
+        with path.open("rb") as stream:
+            encoded = stream.read(4 * 1024 * 1024 + 1)
+        if len(encoded) > 4 * 1024 * 1024:
+            raise ValueError(f"{label} exceeds 4 MiB")
+        value = json.loads(encoded.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} cannot be read") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def load_daily_development_source(plan: Mapping[str, Any], source: Path, *,
+                                  checkpoint: Callable[[], None] = lambda: None) -> FrozenResearchDataset:
+    """요청 생성과 읽기 전용 점검이 같은 개발 자료 범위 검사를 사용한다."""
+    source = Path(source).resolve()
+    checkpoint()
+    cases = plan["selection"]["cases"]
+    expected_dates = [case["selection_date"] for case in cases]
+    manifest = read_research_input_object(source / "manifest.json", "development-only source manifest")
+    if (manifest.get("runtime_input_version") != "historical_reconstruction_strategy/v1"
+            or any(key in manifest for key in ("bundle_version", "development_partition", "final_holdout_partition"))
+            or manifest.get("selected_dates") != expected_dates
+            or manifest.get("excluded_cases") != []
+            or manifest.get("theme_snapshots_file")
+            or not research_session_profile_contract_matches(manifest.get("research_session_profile"), "krx-regular/v1")
+            or not manifest.get("dataset_id") or not manifest.get("revision_ids_hash")):
+        raise ValueError("source must contain exactly the declared development cases; OOS/full/partition inputs are forbidden")
+    dataset = load_research_input(source, session_profile="krx-regular/v1", checkpoint=checkpoint)
+    if dataset.manifest != manifest:
+        raise ValueError("development source manifest changed while loading")
+    # Inspect actual case/date scope as well as the pre-load declaration.
+    case_by_date = {case["selection_date"]: case for case in cases}
+    for row in dataset.observations:
+        checkpoint()
+        payload = row.get("payload", {})
+        if row.get("kind") == "historical_candidate_population":
+            selected = payload.get("selection_date")
+            if (selected not in case_by_date
+                    or len(set(payload.get("codes", []))) != case_by_date[selected]["candidate_codes_after_exclusion"]
+                    or set(payload.get("codes", [])) & set(case_by_date[selected].get("excluded_codes", []))):
+                raise ValueError("source candidate population differs from the frozen daily plan")
+        elif row.get("kind") == "minute_bar":
+            selected = payload.get("historical_case_date")
+            observed = datetime.fromisoformat(payload["bar_end"])
+            if (observed.tzinfo is None or selected not in case_by_date
+                    or observed.astimezone(KST).date().isoformat() != case_by_date[selected]["outcome_date"]):
+                raise ValueError("source bar falls outside the declared development result day")
+        else:
+            raise ValueError("daily historical source contains an unsupported observation kind")
+    return dataset

@@ -409,6 +409,70 @@ class ExecutionActivationTests(unittest.TestCase):
                 self.assertEqual(1 if case == 'stale' else 0, raw.rollbacks)
                 self.assertEqual(0 if case == 'commit_error' else 1, raw.closes)
 
+    def test_verified_binding_same_instant_comparison_rejects_invalid_and_naive(self) -> None:
+        from kiwoom_monitor.domain.time_basis import same_aware_instant
+
+        expected = datetime(2026, 9, 16, 0, 0, tzinfo=timezone.utc)
+        originals = ("2026-09-16T00:00:00+00:00", "2026-09-16T09:00:00+09:00", "2026-09-16T00:00:00Z")
+        before = expected.isoformat()
+        for value in originals:
+            with self.subTest(value=value):
+                self.assertTrue(same_aware_instant(value, expected))
+        for value in ("2026-09-16T00:00:00+09:00", "not-a-timestamp", "",
+                      "2026-09-16T00:00:00", None):
+            with self.subTest(rejected=value):
+                self.assertFalse(same_aware_instant(value, expected))
+        self.assertFalse(same_aware_instant(originals[0], expected.replace(tzinfo=None)))
+        self.assertFalse(same_aware_instant(originals[0], None))
+        self.assertEqual(before, expected.isoformat())
+        self.assertEqual(("2026-09-16T00:00:00+00:00", "2026-09-16T09:00:00+09:00",
+                          "2026-09-16T00:00:00Z"), originals)
+
+    def test_repository_accepts_equivalent_binding_offset_without_rewriting_spec_or_binding(self) -> None:
+        store = SQLiteQueryStore(Path(":memory:"))
+        store.initialize()
+        self.addCleanup(store.close)
+        store.register_account_identity({
+            "broker": "kiwoom", "environment": "mock", "identity_fingerprint": "c" * 64,
+            "account_ref": MOCK_ACCOUNT_REF, "created_at": NOW.isoformat(),
+        })
+        binding_time = NOW.astimezone(timezone(timedelta(hours=9))).isoformat()
+        binding = store.append_account_binding({
+            "credential_profile_id": "nas-mock-default", "broker": "kiwoom",
+            "environment": "mock", "account_ref": MOCK_ACCOUNT_REF,
+            "verified_at": binding_time, "verification_method": "ka00001",
+        })
+        repository = ForwardEvaluationRepository(store)
+        profile = _spec(session_profile="krx-regular/v1", account_ref=MOCK_ACCOUNT_REF)
+        repository.save_profile(profile)
+        operating = _automation_spec(profile, binding_revision=binding["binding_revision"])
+        original, original_id = operating.to_dict(), operating.spec_id
+        self.assertNotEqual(binding_time, operating.binding_verified_at.isoformat())
+        self.assertEqual(datetime.fromisoformat(binding_time), operating.binding_verified_at)
+        self.assertTrue(repository.save_mock_automation_spec(operating))
+        self.assertFalse(repository.save_mock_automation_spec(operating))
+        stored = repository.load_mock_automation_spec(MOCK_ACCOUNT_REF, operating.spec_id)
+        self.assertEqual(original, stored.to_dict())
+        repository.revalidate_stored_mock_automation_spec(stored, repository.load_profile(
+            operating.strategy_ref, operating.forward_profile_id))
+        self.assertEqual(original_id, operating.spec_id)
+        self.assertEqual(binding_time, store.load_latest_account_binding(
+            "nas-mock-default", "kiwoom", "mock")["verified_at"])
+        for rejected in ("not-a-timestamp", NOW.replace(tzinfo=None).isoformat(),
+                         (NOW + timedelta(hours=9)).isoformat()):
+            with self.subTest(rejected=rejected):
+                newer = store.append_account_binding({
+                    "credential_profile_id": "nas-mock-default", "broker": "kiwoom",
+                    "environment": "mock", "account_ref": MOCK_ACCOUNT_REF,
+                    "verified_at": rejected, "verification_method": "ka00001",
+                })
+                candidate = _automation_spec(profile, binding_revision=newer["binding_revision"],
+                                             frozen_at=NOW + timedelta(days=1))
+                with self.assertRaisesRegex(ValueError, "^mock automation spec requires the current verified mock binding$"):
+                    repository.save_mock_automation_spec(candidate)
+                self.assertIsNone(repository.load_mock_automation_spec(MOCK_ACCOUNT_REF, candidate.spec_id))
+        self.assertEqual(original, repository.load_mock_automation_spec(MOCK_ACCOUNT_REF, original_id).to_dict())
+
 
 if __name__ == "__main__":
     unittest.main()

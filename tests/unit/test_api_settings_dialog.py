@@ -49,6 +49,7 @@ class ApiSettingsDialogTests(unittest.TestCase):
             loader = SimpleNamespace(load_top_stocks=lambda: (), server_now=lambda: now)
             window = MainWindow(database.settings, loader, stock_lookup=stocks,
                                 themes={"삼성전자": "반도체", "SK하이닉스": "반도체"})
+            window.activate_startup()
             window._app_controller._initial_ranking_timer.stop()
             initial_requests = set(_running_requests)
             created, callback_errors = [], []
@@ -114,7 +115,7 @@ class ApiSettingsDialogTests(unittest.TestCase):
                         ).fetchone())
                     database.settings.clear_cache()
                     window._ranked_stock_names = {"005930": "삼성전자", "000660": "SK하이닉스"}
-                    window._minute_aggregator.today_trade_value_eok = lambda code, _now: {"005930": 100., "000660": 40.}[code]
+                    window._pc_market_session.minute_aggregator.today_trade_value_eok = lambda code, _now: {"005930": 100., "000660": 40.}[code]
                     window._refresh_theme_trade_summary()
                     self.assertIn("140.00억", window._theme_trade_summary.text())
                     self.assertIn("40.00억", window._theme_trade_excluded_summary.text())

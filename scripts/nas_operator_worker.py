@@ -30,7 +30,24 @@ def memory_limit():
 
 def run_tests(names):
     suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in names)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+
+    def identities(current):
+        return [identity for item in current for identity in (
+            identities(item) if isinstance(item, unittest.TestSuite) else [item.id()])]
+
+    discovered_ids = identities(suite)
+    executed_ids, passed_ids = [], []
+
+    class IdentityResult(unittest.TextTestResult):
+        def startTest(self, test):
+            executed_ids.append(test.id())
+            super().startTest(test)
+
+        def addSuccess(self, test):
+            passed_ids.append(test.id())
+            super().addSuccess(test)
+
+    result = unittest.TextTestRunner(verbosity=2, resultclass=IdentityResult).run(suite)
     failed_tests = []
     for test, details in result.failures + result.errors:
         rendered = str(details)
@@ -57,6 +74,8 @@ def run_tests(names):
             'failures': len(result.failures), 'errors': len(result.errors),
             'expected_failures': len(result.expectedFailures),
             'unexpected_successes': len(result.unexpectedSuccesses),
+            'discovered_test_ids': discovered_ids, 'executed_test_ids': executed_ids,
+            'passed_test_ids': passed_ids,
             'failed_tests': failed_tests[:20], 'failed_tests_truncated': len(failed_tests) > 20}
 
 

@@ -10,6 +10,8 @@ import asyncio
 import copy
 import math
 import time
+from .diagnostic_top20_lifecycle_input import CollectorInputRecorder
+
 from collections import deque
 from datetime import datetime, timedelta
 from threading import Event
@@ -108,18 +110,28 @@ def build_top20_session(store, clock, client, bindings, *, outbox_path, minute_b
             or type(bindings) is not TaskTapeBindings or bindings.client is not client
             or not _store_clock_is_bound(store, clock)):
         raise ValueError("top20_session_fixture_resources_invalid")
-    hub = RealtimeHub()
+    from . import diagnostic_top20_lifecycle_input as hub_capture
+    hub_observer = hub_capture.HubInputRecorder()
+    hub = RealtimeHub(now_provider=clock.now, observer=hub_observer)
     ingestor = MarketDataIngestor(store, now_provider=clock.now)
+    from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+    from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+    from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+    from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+    from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+    from . import diagnostic_rest_input
     broker = CentralRestBroker(client, store, ingestor.ingest,
-                               ranking_reservation=True, wall_time=clock.wall_time)
+                               ranking_reservation=True, wall_time=clock.wall_time, input_observer=diagnostic_rest_input)
     service = AutonomousTop20Service(broker, hub, store, now_provider=clock.now,
         catalog_loader=bindings.catalog_loader, outbox_path=outbox_path,
-        minute_backfill_enabled=minute_backfill_enabled)
-    ingestor._on_daily_change = service.notify_daily_bars_changed
+        minute_backfill_enabled=minute_backfill_enabled,
+        capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+        flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
+    ingestor._on_daily_change = service.daily_reference.invalidate
     def forbidden_token():
         raise RuntimeError("top20_session_external_token_forbidden")
     collector = CentralRealtimeCollector(forbidden_token, "real", hub, clock.now, store=store,
-                                        snapshot_sleep=clock.sleep)
+                                        snapshot_sleep=clock.sleep, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
     return service, broker, collector
 
 
@@ -130,9 +142,8 @@ def _require_fresh_collector(collector):
         "_pending_stock_references", "_ram_stock_references", "_pending_market_history", "_pending_minute_retries",
         "_pending_minute_finalizations", "_continuous_from")})
     _empty(collector, {"_inflight_minute_bars": list, "_approved_trade_sources": set,
-        "_regular_close_notified": set, "_full_day_close_notified": set,
         "_token_tasks": set, "_flush_tasks": set, "_credential_drain_task": None,
-        "_credential_resume_task": None, "_boundary_task": None, "_reconnect_expiry_task": None})
+        "_credential_resume_task": None, "_reconnect_expiry_task": None})
     _scalars(collector, {"_credential_phase": "IDLE", "_credential_paused": False,
         "_credential_shutdown": False, "_connection_generation": 0, "_planned_reconnect": False,
         "_connected_once": False, "_abnormal_disconnects": 0, "_reconnects": 0,
@@ -183,6 +194,7 @@ async def execute_top20_session(service, broker, collector, *, clock, runtime, b
     receive tape inputs, but filters them by the new native requested universe.
     No past TOP20/store result is executed to fill that excluded state.
     """
+    from . import diagnostic_top20_lifecycle_input as hub_capture
     if (type(service) is not AutonomousTop20Service or type(broker) is not CentralRestBroker
             or type(collector) is not CentralRealtimeCollector or type(runtime) is not ReplayRuntimeScope
             or type(clock) is not Top20FixtureClock
@@ -190,6 +202,7 @@ async def execute_top20_session(service, broker, collector, *, clock, runtime, b
             or service._broker is not broker or service._hub is not collector._hub
             or service._store is not broker._store or service._store is not collector._store
             or service._now != clock.now or collector._now_provider != clock.now
+            or service._hub._now_provider != clock.now or type(service._hub._observer) is not hub_capture.HubInputRecorder
             or broker._source_wall_time != clock.wall_time or type(include_top20) is not bool
             or not _store_clock_is_bound(service._store, clock)
             or type(window_start_seconds) not in (int, float) or not math.isfinite(window_start_seconds)
@@ -246,7 +259,7 @@ async def execute_top20_session(service, broker, collector, *, clock, runtime, b
                     started_mono_ns=started_mono_ns, window_start_seconds=0, window_end_seconds=end_seconds,
                     clock=clock, _shared_runtime=runtime, _peer_operation_ids=peer_operation_ids,
                     concurrency=peer_concurrency, stop=peer_stop), name="top20-replay-peer-scheduler")
-            await collector.start_input_replay()
+            await collector.start_input_replay(message_validator=validate_collector_message)
             transport = Top20SubscriptionTransport(collector, subscription_tape,
                 source_hub_component=source_hub_component,
                 component_map={live_component: source_component},

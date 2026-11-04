@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from tests.unit.test_mock_automation_runner import _prepared_runner
+from tests.unit import test_news_jobs as _news_job_contracts
+from tests.collector_replay_clock import CollectorTestClock
+
 import asyncio
 import hashlib
 import json
@@ -30,9 +34,11 @@ from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigrati
 from kiwoom_monitor.central_server.central_schema import central_schema_migrations
 from kiwoom_monitor.central_server.credential_store import CredentialStore, CredentialStoreError
 from kiwoom_monitor.central_server.diagnostic_metrics import (
-    refresh_capture_state, summarize_db_calls, summarize_market_bar_saves,
+    install_postgres_observation, refresh_capture_state, summarize_db_calls, summarize_market_bar_saves,
 )
-from kiwoom_monitor.central_server.diagnostic_workloads import instance_id
+from kiwoom_monitor.central_server.diagnostic_workloads import instance_id, is_paused
+from kiwoom_monitor.central_server.diagnostic_replay_contract import capture_owner
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input
 from kiwoom_monitor.central_server.app import (
     _stored_market_response, _trade_value_comparison_summary,
 )
@@ -48,11 +54,13 @@ from kiwoom_monitor.central_server.postgres_access import (
     DBWriterContext, ObservedDBCursor, open_observed_connection,
 )
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
+from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
 from kiwoom_monitor.central_server.external_market_collector import YahooDelayedMarketCollector
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
 from kiwoom_monitor.central_server.market_news_sources import MarketFeedNewsCollector
 from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+from kiwoom_monitor.central_server.mock_automation_episode import MockAutomationEpisodePosition
 from kiwoom_monitor.application.breakout_strategy import StrategyState, default_shadow_breakout_config
 from kiwoom_monitor.application.breakout_strategy import StrategyDecision
 from kiwoom_monitor.application.research_families import BREAKOUT_FAMILY_ID
@@ -98,6 +106,227 @@ from kiwoom_monitor.domain.news_observation import (
 
 
 class PostgresAccessIntegrationTests(unittest.TestCase):
+    def test_native_store_without_diagnostic_source_preserves_commit_and_recovers_after_failed_write(self):
+        import shutil
+        import subprocess
+        import sys
+        from textwrap import dedent
+
+        source_package = Path(__file__).resolve().parents[2] / "src" / "kiwoom_monitor"
+        isolated_src = Path(self.tmp.name) / "source-without-diagnostics"
+        isolated_package = isolated_src / "kiwoom_monitor"
+        shutil.copytree(source_package, isolated_package, ignore=lambda path, names: {
+            name for name in names if name == "__pycache__"
+            or name.startswith("diagnostic") and name.endswith(".py")
+        })
+        self.assertFalse(list(isolated_package.rglob("diagnostic*.py")))
+        prefix = "AR09-" + uuid.uuid4().hex
+        self.keys.extend((prefix, prefix + "-failure"))
+        self.dataset_snapshot_keys.append(("nxt_eligibility", prefix, prefix))
+        self.execution_owner_keys.append("mock:" + prefix)
+        script = dedent('''
+            import hashlib, json, os, sys
+            from datetime import datetime, timezone, timedelta
+            from pathlib import Path
+            import psycopg
+
+            isolated_src, prefix = Path(sys.argv[1]).resolve(), sys.argv[2]
+            sys.path.insert(0, str(isolated_src))
+            from kiwoom_monitor.central_server import database
+            from kiwoom_monitor.central_server.database import PostgresQueryStore, StoredQuery
+            from kiwoom_monitor.central_server.postgres_access import DBWriterContext, database_observer
+            from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+
+            assert Path(database.__file__).resolve().is_relative_to(isolated_src)
+            assert database_observer() is None
+            assert DBWriterContext("test.absent", "query_cache", "save").recorded_identity == {}
+            now = datetime(2026, 10, 27, 9, 30, tzinfo=timezone(timedelta(hours=9)))
+            store = PostgresQueryStore(os.environ["KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL"],
+                                      now_provider=lambda: now)
+            store.initialize()
+            expires_at = now.timestamp() + 3600
+            first = StoredQuery({"identity": prefix, "ordinal": 1}, False, "")
+            store.save_query(prefix, "ka10080", expires_at, first)
+            assert store.load_query(prefix) == first
+            failed = prefix + "-failure"
+            try:
+                store.save_query(failed, "ka10080", expires_at, StoredQuery({"ordinal": 2}, False, None))
+            except psycopg.errors.NotNullViolation:
+                pass
+            else:
+                raise AssertionError("native_not_null_failure_missing")
+            assert store.load_query(failed) is None
+            recovered = StoredQuery({"identity": prefix, "ordinal": 3}, True, "next")
+            store.save_query(failed, "ka10080", expires_at, recovered)
+            assert store.load_query(failed) == recovered
+            payload = {"enabled": True, "observed_at": now.isoformat()}
+            store.save_dataset_snapshot("nxt_eligibility", prefix, prefix, payload)
+            rows = store.load_dataset_snapshots("nxt_eligibility", prefix)
+            assert len(rows) == 1 and rows[0]["payload"] == payload
+            assert store.storage_size_bytes() > 0
+            assert isinstance(store.storage_breakdown(), list)
+            store.load_top20_reconciliation_inputs("2026-01-05")
+            repository = ExecutionRepository(store)
+            assert repository.claim_runtime("mock", prefix, "run", "owner", now)
+            assert not repository.claim_runtime("mock", prefix, "run", "other", now)
+            assert not repository.release_runtime("mock", prefix, "run", "other")
+            assert repository.release_runtime("mock", prefix, "run", "owner")
+            store.close()
+            tools = [name for name in sys.modules if name.startswith("kiwoom_monitor.")
+                     and any(part.startswith("diagnostic") for part in name.split("."))]
+            assert tools == [], tools
+            native = ("database.py", "postgres_access.py", "database_datasets.py",
+                      "database_query_cache.py", "database_storage_diagnostics.py",
+                      "database_top20_reconciliation.py")
+            directory = isolated_src / "kiwoom_monitor" / "central_server"
+            print(json.dumps({"native_failure": "NotNullViolation", "successful_writes": 3,
+                              "lease_owner_fence": True,
+                              "execution_repository_sha256": hashlib.sha256((isolated_src / "kiwoom_monitor"
+                                  / "infrastructure" / "persistence" / "execution_repository.py").read_bytes()).hexdigest(),
+                              "diagnostic_modules": tools, "source_sha256": {
+                                  name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                                  for name in native}}, sort_keys=True))
+        ''')
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(isolated_src), prefix],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual("NotNullViolation", receipt["native_failure"])
+        self.assertEqual(3, receipt["successful_writes"])
+        self.assertTrue(receipt["lease_owner_fence"])
+        self.assertEqual(receipt["execution_repository_sha256"], hashlib.sha256((source_package
+            / "infrastructure" / "persistence" / "execution_repository.py").read_bytes()).hexdigest())
+        self.assertEqual([], receipt["diagnostic_modules"])
+        self.assertEqual(receipt["source_sha256"], {
+            name: hashlib.sha256((source_package / "central_server" / name).read_bytes()).hexdigest()
+            for name in receipt["source_sha256"]
+        })
+
+    def test_journal_analysis_batch_native_replay_conflict_concurrency_ack_and_cost(self):
+        from copy import deepcopy
+        from kiwoom_monitor.application.journal_enrichment import JournalAnalysisRevisionConflict
+        from tests.unit.test_central_server_database import CentralServerDatabaseTests
+        collection = "journal_v2_analysis_revisions"
+        owner = str(uuid.uuid4())
+        def value(key):
+            self.document_keys.append((collection, owner, key))
+            return CentralServerDatabaseTests._journal_analysis_value(key, owner=owner)
+        first, batch = value("first"), [value(f"batch-{i}") for i in range(4)]
+        started = time.time()
+        original = self.store.accept_journal_analysis_revisions([first])
+        four = self.store.accept_journal_analysis_revisions(batch)
+        replay = deepcopy(batch)
+        for item in replay:
+            item["document"].update(created_at="2030-01-02T09:00:00", content_json='{"selected_types":["돌파"]}')
+        again = self.store.accept_journal_analysis_revisions(replay)
+        self.assertEqual((1, 4, 0, 4), (original["inserted"], four["inserted"], again["inserted"], again["replayed"]))
+        self.assertEqual(four["documents"], again["documents"])
+        changed = deepcopy(first)
+        changed["document"]["input_fingerprint"] = "changed"
+        rolled_back = value("0-rolled-back")
+        with self.assertRaises(JournalAnalysisRevisionConflict):
+            self.store.accept_journal_analysis_revisions([rolled_back, changed])
+        self.assertIsNone(self.store.load_document(collection, owner, "0-rolled-back"))
+        calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                 if call["operation"] == "accept_journal_analysis_revisions"]
+        self.assertEqual(4, len(calls))
+        self.assertEqual([3, 9, 9, 5], [call["sql_calls"] for call in calls])
+        self.assertEqual(["committed", "committed", "committed", "rolled_back"], [call["outcome"] for call in calls])
+        self.assertTrue(all(call["transactions"] == 1 and call["backend_pid"] is not None for call in calls))
+        self.assertEqual([1, 1, 1, 0], [call["commits"] for call in calls])
+
+        contested = value("contested")
+        rival = deepcopy(contested)
+        rival["document"]["content_json"] = '{"selected_types":["눌림"]}'
+        barrier = Barrier(2)
+        def compete(item):
+            barrier.wait(timeout=5)
+            try:
+                return self.store.accept_journal_analysis_revisions([item])
+            except JournalAnalysisRevisionConflict:
+                return "conflict"
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(compete, [contested, rival]))
+        self.assertEqual(1, outcomes.count("conflict"))
+        self.assertEqual(1, sum(item["inserted"] for item in outcomes if isinstance(item, dict)))
+        pair = [value("paired-a"), value("paired-b")]
+        barrier = Barrier(2)
+        def pair_accept(index):
+            barrier.wait(timeout=5)
+            return self.store.accept_journal_analysis_revisions(pair if index == 0 else pair[::-1])
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(pair_accept, range(2)))
+        self.assertEqual(2, sum(item["inserted"] for item in outcomes))
+        self.assertEqual(2, sum(item["replayed"] for item in outcomes))
+
+        # Actual PG COMMIT succeeds, while its caller sees an unknown ACK. The
+        # retry uses the typed command/readback and preserves the first receipt.
+        ack_value = value("ack-loss")
+        native_connect = self.store._connect
+        connections = []
+        handles = []
+        ack_error = OSError("controlled committed ACK loss")
+        class LostAckConnection:
+            __exit__ = psycopg.Connection.__exit__
+            def __init__(self, raw):
+                self.raw = raw
+                self.commits = self.rollbacks = self.closes = 0
+            def __getattr__(self, name): return getattr(self.raw, name)
+            def __enter__(self): self.raw.__enter__(); return self
+            def commit(self):
+                self.commits += 1
+                self.raw.commit()
+                raise ack_error
+            def rollback(self):
+                self.rollbacks += 1
+                self.raw.rollback()
+            def close(self):
+                self.closes += 1
+                self.raw.close()
+        def lost_ack_connect():
+            raw = native_connect()
+            connections.append(raw)
+            handle = LostAckConnection(raw)
+            handles.append(handle)
+            return handle
+        try:
+            with patch.object(self.store, "_connect", side_effect=lost_ack_connect) as factory:
+                with self.assertRaisesRegex(OSError, "committed ACK loss") as caught:
+                    self.store.accept_journal_analysis_revisions([ack_value])
+            self.assertIs(ack_error, caught.exception)
+            factory.assert_called_once_with()
+            self.assertEqual(1, len(handles))
+            self.assertEqual((1, 0, 1),
+                             (handles[0].commits, handles[0].rollbacks, handles[0].closes))
+            # These ownership assertions precede the fixture's safety cleanup.
+            self.assertTrue(connections[0].closed)
+            ack_calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                         if call["operation"] == "accept_journal_analysis_revisions"
+                         and call["outcome"] == "unknown"]
+            self.assertEqual(1, len(ack_calls))
+            self.assertEqual((0, 0, 3),
+                             (ack_calls[0]["commits"], ack_calls[0]["rollbacks"], ack_calls[0]["sql_calls"]))
+            self.assertIsNone(ack_calls[0]["close_ms"])
+            # Independent native read proves COMMIT occurred despite the lost ACK.
+            before = self.store.load_document(collection, owner, "ack-loss")
+            self.assertIsNotNone(before)
+        finally:
+            for connection in connections:
+                if not connection.closed:
+                    connection.close()
+        ack_replay = deepcopy(ack_value)
+        ack_replay["document"]["created_at"] = "2030-01-02T09:00:00+09:00"
+        receipt = self.store.accept_journal_analysis_revisions([ack_replay])
+        self.assertEqual((0, 1), (receipt["inserted"], receipt["replayed"]))
+        self.assertEqual([before], receipt["documents"])
+        with patch("kiwoom_monitor.central_server.diagnostic_metrics.record_writer_transaction",
+                   side_effect=RuntimeError("controlled optional metric failure")):
+            observed = self.store.accept_journal_analysis_revisions([ack_replay])
+        self.assertEqual((0, 1), (observed["inserted"], observed["replayed"]))
+        self.assertEqual([before], observed["documents"])
+
     def test_daily_history_short_source_reuse_and_failed_storage_keep_separate_observed_commits(self):
         from kiwoom_monitor.application.daily_bar_coverage import COLLECTION, assess_daily_coverage
         from kiwoom_monitor.central_server.rest_broker import BrokerResult
@@ -155,6 +384,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        install_postgres_observation()
         url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
         if not url:
             raise unittest.SkipTest("dedicated PostgreSQL test database not configured")
@@ -281,12 +511,6 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                             MarketDatasetKind.CANDIDATE_SET.value
                             if revision_kind else kind
                         )
-                        if revision_kind:
-                            cursor.execute(
-                                "DELETE FROM central_observation_revisions "
-                                "WHERE kind=%s AND subject=%s AND observation_key=%s",
-                                (revision_kind, subject, key),
-                            )
                         cursor.execute(
                             "DELETE FROM central_dataset_snapshots "
                             "WHERE kind=%s AND subject=%s AND snapshot_key=%s",
@@ -297,6 +521,12 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                             "WHERE dataset_kind=%s AND subject=%s AND observation_key=%s",
                             (metadata_kind, subject, key),
                         )
+                        if revision_kind:
+                            cursor.execute(
+                                "DELETE FROM central_observation_revisions "
+                                "WHERE kind=%s AND subject=%s AND observation_key=%s",
+                                (revision_kind, subject, key),
+                            )
                         cursor.execute(
                             "SELECT (SELECT COUNT(*) FROM central_dataset_snapshots "
                             "WHERE kind=%s AND subject=%s AND snapshot_key=%s) + "
@@ -1123,6 +1353,106 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                             and call["sql_calls"] == 1
                             and call["backend_pid"] is not None for call in reader_calls))
 
+        self.assertTrue(self.store.acquire_execution_runtime(owner_key, owner_token, observed_at, expires_at))
+        peer = PostgresQueryStore(self.store._database_url)
+        peer_time = (now + timedelta(seconds=1)).isoformat()
+        updated = {**accepted, "last_broker_as_of": peer_time, "updated_at": peer_time}
+        peer_event = {**event, "event_id": f"peer-event-{marker}", "event_type": "BROKER_RECONCILED",
+                      "broker_as_of": peer_time, "occurred_at": peer_time, "received_at": peer_time}
+        with self.store.mock_automation_read_scope() as reader:
+            self.assertEqual(accepted, self.store.load_execution_intent(intent_id, _reader=reader))
+            self.assertTrue(peer.append_execution_event(updated, peer_event, ownership=ownership))
+            self.assertEqual([event, peer_event], self.store.load_execution_events(intent_id, _reader=reader))
+            self.assertEqual(updated, self.store.load_execution_intent(intent_id, _reader=reader))
+            self.assertEqual([updated], self.store.load_active_execution_intents(
+                "mock", account_ref, run_id, _reader=reader,
+            ))
+            self.assertEqual([], self.store.load_active_execution_intents(
+                "mock", account_ref, f"other-{run_id}", _reader=reader,
+            ))
+        from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
+        from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
+        from kiwoom_monitor.domain.order_contract import BrokerOrderSnapshot, OrderState
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+
+        clock = now + timedelta(seconds=2)
+        repository = ExecutionRepository(self.store)
+        lifecycle = OrderLifecycle(repository, None, now_provider=lambda: clock)
+        runtime = ExecutionRuntime(lifecycle, repository, account_ref=account_ref, run_id=run_id,
+                                   owner_token=marker, now_provider=lambda: clock)
+        runtime.start()
+        snapshot = BrokerOrderSnapshot(
+            marker, account_ref, "005930", OrderState.ACCEPTED, 0, 1, datetime.fromisoformat(peer_time),
+        )
+        opened = []
+        connect = self.store._connect
+
+        def count_connection():
+            connection = connect()
+            opened.append(connection)
+            return connection
+
+        with patch.object(self.store, "_connect", side_effect=count_connection):
+            with patch.object(repository, "broker_reconciliation_scope", return_value=nullcontext()):
+                self.assertEqual(OrderState.ACCEPTED, runtime.reconcile_by_broker_order(snapshot).state)
+            self.assertEqual(3, len(opened))
+            self.assertTrue(all(connection.closed for connection in opened))
+            opened.clear()
+
+            claim_runtime = self.store.acquire_execution_runtime
+            clock += timedelta(seconds=1)
+            peer_update = {**updated, "state": "CANCEL_PENDING", "updated_at": clock.isoformat()}
+            after_claim = {**peer_event, "event_id": f"after-claim-{marker}", "state": "CANCEL_PENDING",
+                           "event_type": "CANCEL_ACCEPTED", "received_at": clock.isoformat()}
+
+            def publish_between_claim_and_reread(*args, **kwargs):
+                claimed = claim_runtime(*args, **kwargs)
+                self.assertTrue(claimed)
+                self.assertEqual("IDLE", opened[0].info.transaction_status.name)
+                with peer._connect() as connection:
+                    lease_expiry, = connection.execute(
+                        "SELECT lease_expires_at FROM central_execution_runtime_leases WHERE owner_key=%s",
+                        (owner_key,),
+                    ).fetchone()
+                self.assertEqual(clock + timedelta(seconds=60), lease_expiry)
+                self.assertTrue(peer.append_execution_event(peer_update, after_claim, ownership=ownership))
+                return claimed
+
+            with patch.object(self.store, "acquire_execution_runtime", side_effect=publish_between_claim_and_reread):
+                reread = runtime.reconcile_by_broker_order(snapshot)
+            self.assertEqual(OrderState.CANCEL_PENDING, reread.state)
+            self.assertEqual(1, len(opened))
+            self.assertTrue(opened.pop().closed)
+
+            clock += timedelta(seconds=1)
+            confirmed = replace(snapshot, state=OrderState.CANCELLED, as_of=clock)
+            self.assertEqual(OrderState.CANCELLED, runtime.reconcile_by_broker_order(confirmed).state)
+            self.assertEqual("CANCELLED", peer.load_execution_intent(intent_id)["state"])
+            self.assertEqual(1, len(opened))
+            self.assertTrue(opened.pop().closed)
+
+            clock += timedelta(seconds=1)
+            execute = ObservedDBCursor.execute
+
+            def disconnect_before_lease_commit(cursor, sql, parameters=None):
+                result = execute(cursor, sql, parameters)
+                if sql.startswith("INSERT INTO central_execution_runtime_leases("):
+                    self.assertEqual(psycopg.pq.TransactionStatus.INTRANS, opened[0].info.transaction_status)
+                    opened[0].pgconn.finish()
+                    self.assertEqual(psycopg.pq.ConnStatus.BAD, opened[0].pgconn.status)
+                return result
+
+            with (patch.object(ObservedDBCursor, "execute", disconnect_before_lease_commit),
+                  patch.object(self.store, "load_execution_intent", wraps=self.store.load_execution_intent) as reread):
+                with self.assertRaises(psycopg.Error):
+                    runtime.reconcile_by_broker_order(confirmed)
+                reread.assert_not_called()
+            self.assertEqual(1, len(opened))
+            self.assertTrue(opened.pop().closed)
+            self.assertEqual("CANCELLED", peer.load_execution_intent(intent_id)["state"])
+
+        self.assertTrue(runtime.stop())
+
     def test_execution_ownership_control_fences_rollback_and_keep_peer(self) -> None:
         marker = uuid.uuid4().hex
         account_ref, run_id = f"diag-{marker}", f"run-{marker}"
@@ -1931,6 +2261,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(reader_calls[0]["backend_pid"])
 
     def test_historical_market_batch_replay_and_failure_preserve_history_and_progress(self) -> None:
+        fixed = datetime(2020, 1, 3, 10, 5, tzinfo=KST)
+        self.enterContext(patch.object(self.store, "_now_provider", lambda: fixed))
         token = uuid.uuid4().hex
         target_date = "2099-12-31"
         source_id = f"naver-stock:flash:historical:{target_date}"
@@ -1976,8 +2308,15 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         article_id = str(article_history[0]["article_revision_id"])
         self.article_revision_ids.append(article_id)
         self.assertEqual("historical_market_pc_backfill", article_history[0]["collection_scope"])
+        self.assertEqual((fixed.timestamp(), fixed.timestamp(), "2099-12-31T10:00:00+09:00"), (
+            article_history[0]["received_at"], article_history[0]["available_at"],
+            article_history[0]["published_at"],
+        ))
         diagnostics = self.store.load_news_source_diagnostics(source_id=source_id)
         self.assertEqual((1, 1), (len(diagnostics["runs"]), len(diagnostics["observations"])))
+        self.assertEqual((fixed.timestamp(), fixed.timestamp()), (
+            diagnostics["runs"][0]["checked_at"], diagnostics["runs"][0]["completed_at"],
+        ))
         self.assertEqual((1, 0), (diagnostics["runs"][0]["unique_count"],
                                  diagnostics["runs"][0]["duplicate_count"]))
 
@@ -2093,6 +2432,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ])
 
     def test_news_source_page_replay_and_failure_preserve_article_and_progress(self) -> None:
+        fixed = datetime(2020, 1, 3, 10, 5, tzinfo=KST)
+        self.enterContext(patch.object(self.store, "_now_provider", lambda: fixed))
         token = uuid.uuid4().hex
         identity = f"https://diagnostic.example/{token}"
         title = f"diagnostic source page {token}"
@@ -2112,7 +2453,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         page = {
             "source_id": query_source, "scope": "query_set", "query_text": "증권",
             "run_id": f"diagnostic-first-{token}", "page_start": 1,
-            "checked_at": time.time(), "cursor_identity": identity,
+            "checked_at": fixed.timestamp(), "cursor_identity": identity,
             "next_start": 2, "coverage": "query_set", "items": [item],
         }
         started = time.time() - 1
@@ -2150,6 +2491,10 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         article_history = self.store.load_news_history("article", target="GLOBAL",
                                                        identity=identity)
         self.assertEqual(1, len(article_history))
+        self.assertEqual((fixed.timestamp(), fixed.timestamp(), "2026-09-27T10:00:00+09:00"), (
+            article_history[0]["received_at"], article_history[0]["available_at"],
+            article_history[0]["published_at"],
+        ))
         article_id = article_history[0]["article_revision_id"]
         article_revision = self.store.load_news_article_revision(article_id)
         self.assertEqual((article_id, title), (
@@ -2167,6 +2512,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(3, self.store.load_news_source_cursor(query_source)["next_start"])
         diagnostic = self.store.load_news_source_diagnostics(source_id=query_source)
         self.assertEqual((2, 2), (len(diagnostic["runs"]), len(diagnostic["observations"])))
+        self.assertEqual({fixed.timestamp()}, {row["available_at"] for row in diagnostic["observations"]})
         self.assertEqual([title], [row["title"] for row in
                                    self.store.load_market_news_feed("flash")
                                    if row["title"] == title])
@@ -2178,10 +2524,11 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                                    if row["title"] == title])
         with self.store._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT COUNT(*) FROM central_news_jobs WHERE article_revision_id=%s AND stage='BODY'",
+                "SELECT COUNT(*),MIN(next_retry_at),MIN(updated_at) FROM central_news_jobs "
+                "WHERE article_revision_id=%s AND stage='BODY'",
                 (article_id,),
             )
-            self.assertEqual(1, cursor.fetchone()[0])
+            self.assertEqual((1, fixed.timestamp(), fixed.timestamp()), cursor.fetchone())
             cursor.execute(
                 "SELECT COUNT(*) FROM central_news_article_target_revisions "
                 "WHERE article_revision_id=%s", (article_id,),
@@ -2362,6 +2709,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         article_id = f"diagnostic-ai-article-{token}"
         body_id = f"diagnostic-ai-body-{token}"
         analysis_id = f"diagnostic-ai-revision-{token}"
+        rollback_analysis_id = f"diagnostic-ai-rollback-revision-{token}"
         document_key = f"diagnostic-ai-document-{token}"
         usage_owner = f"diagnostic-ai-usage-{token}"
         usage_keys = (f"diagnostic-ai-request-{token}",
@@ -2408,8 +2756,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             prompt_version="diagnostic-v1", schema_version=NEWS_ANALYSIS_SCHEMA_VERSION,
             input_hash=revision["input_hash"],
         ))
-        self.assertEqual("first", self.store.load_documents("news_ai", target_id, 10)[0]
-                         ["document"]["summary"])
+        first_current = self.store.load_documents("news_ai", target_id, 10)[0]
+        self.assertEqual("first", first_current["document"]["summary"])
         ai_history = self.store.load_news_history("ai", target=target_id)
         self.assertEqual([(analysis_id, article_id, body_id, "first")], [
             (row["analysis_revision_id"], row["article_revision_id"],
@@ -2419,19 +2767,67 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual([usage_keys[0]], [row["key"] for row in
                                         self.store.load_documents("news_request_usage", usage_owner, 10)])
 
-        with self.assertRaises(UniqueViolation):
-            self.store.save_news_ai_results(
-                [{**document, "document": {"summary": "must roll back"}}],
-                [revision],
-                [{"owner": usage_owner, "key": usage_keys[1],
-                  "document": {"total_tokens": 99}}],
-            )
-        self.assertEqual("first", self.store.load_documents("news_ai", target_id, 10)[0]
-                         ["document"]["summary"])
-        self.assertEqual([analysis_id], [row["analysis_revision_id"] for row in
-                                         self.store.load_news_history("ai", target=target_id)])
-        self.assertEqual([usage_keys[0]], [row["key"] for row in
-                                        self.store.load_documents("news_request_usage", usage_owner, 10)])
+        # The native owner inserts a revision before publishing its current copy.
+        # Use a valid fresh revision so the first SQL really writes a row, then
+        # reject the second (current) SQL independently and prove that row rolls back.
+        # Raw setup/cleanup connections are outside the observed writer command.
+        rollback_revision = {**revision, "analysis_revision_id": rollback_analysis_id,
+                             "output": {"summary": "must roll back"}}
+        from psycopg import sql
+
+        trigger_name = f"diag_ai_rollback_{token}"
+        function_name = f"diag_ai_rollback_fail_{token}"
+        try:
+            with closing(self.store._connect()) as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT current_database()")
+                self.assertEqual("kiwoom_monitor_diagnostic_test", cursor.fetchone()[0])
+                cursor.execute(sql.SQL(
+                    "CREATE FUNCTION public.{}() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                    "BEGIN RAISE EXCEPTION USING ERRCODE='23505', "
+                    "MESSAGE='diagnostic AI current rollback fault'; RETURN NEW; END; $$"
+                ).format(sql.Identifier(function_name)))
+                cursor.execute(sql.SQL(
+                    "CREATE TRIGGER {} BEFORE INSERT ON public.central_documents "
+                    "FOR EACH ROW WHEN (NEW.collection={} AND NEW.owner={} AND NEW.document_key={}) "
+                    "EXECUTE FUNCTION public.{}()"
+                ).format(sql.Identifier(trigger_name), sql.Literal("news_ai"),
+                         sql.Literal(target_id), sql.Literal(document_key), sql.Identifier(function_name)))
+                connection.commit()
+            with self.assertRaises(UniqueViolation) as caught:
+                self.store.save_news_ai_results(
+                    [{**document, "document": {"summary": "must roll back"}}],
+                    [rollback_revision],
+                    [{"owner": usage_owner, "key": usage_keys[1],
+                      "document": {"total_tokens": 99}}],
+                )
+            self.assertIn("diagnostic AI current rollback fault", str(caught.exception))
+        finally:
+            with closing(self.store._connect()) as connection, connection.cursor() as cursor:
+                cursor.execute(sql.SQL(
+                    "DROP TRIGGER IF EXISTS {} ON public.central_documents"
+                ).format(sql.Identifier(trigger_name)))
+                cursor.execute(sql.SQL(
+                    "DROP FUNCTION IF EXISTS public.{}()"
+                ).format(sql.Identifier(function_name)))
+                connection.commit()
+                cursor.execute("SELECT to_regprocedure(%s)", (f"public.{function_name}()",))
+                self.assertIsNone(cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT COUNT(*) FROM pg_trigger "
+                    "WHERE tgrelid='public.central_documents'::regclass AND tgname=%s",
+                    (trigger_name,),
+                )
+                self.assertEqual(0, cursor.fetchone()[0])
+        after_current = self.store.load_documents("news_ai", target_id, 10)[0]
+        self.assertEqual("first", after_current["document"]["summary"])
+        self.assertEqual(first_current, after_current)
+        after_ai_history = self.store.load_news_history("ai", target=target_id)
+        self.assertEqual([analysis_id], [row["analysis_revision_id"] for row in after_ai_history])
+        self.assertEqual(ai_history, after_ai_history)
+        self.assertNotIn(rollback_analysis_id, [row["analysis_revision_id"] for row in after_ai_history])
+        after_usage = self.store.load_documents("news_request_usage", usage_owner, 10)
+        self.assertEqual([usage_keys[0]], [row["key"] for row in after_usage])
+        self.assertNotIn(usage_keys[1], [row["key"] for row in after_usage])
 
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
@@ -2685,8 +3081,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                        "rule_result": rule_document}
         save_event = historical_news_module._save_postgres_news_event
 
-        def fail_after_event(cursor: object, value: dict[str, object]) -> str:
-            save_event(cursor, value)
+        def fail_after_event(cursor: object, value: dict[str, object], *, now=None) -> str:
+            save_event(cursor, value, now=now)
             raise RuntimeError("diagnostic failure after event membership")
 
         with patch.object(historical_news_module, "_save_postgres_news_event",
@@ -2825,8 +3221,10 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         }
         for collection, value in values.items():
             self.document_keys.append((collection, value["owner"], value["key"]))
+        ai_owner = values["news_ai"]["owner"]
         failed_key = f"failed-{suffix}"
-        self.document_keys.append(("news_ai", values["news_ai"]["owner"], failed_key))
+        peer_key = f"failed-peer-{suffix}"
+        self.document_keys.extend(("news_ai", ai_owner, key) for key in (failed_key, peer_key))
         started = time.time() - 1
         for collection, value in values.items():
             self.store.upsert_documents(collection, [value])
@@ -2835,15 +3233,39 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             self.assertEqual(first, self.store.load_document(
                 collection, value["owner"], value["key"],
             ))
-        with self.assertRaises(KeyError):
-            self.store.upsert_documents("news_ai", [
-                {"owner": values["news_ai"]["owner"], "key": failed_key,
-                 "document": {"title": "must rollback"}},
-                {"owner": values["news_ai"]["owner"], "key": f"invalid-{suffix}"},
-            ])
-        self.assertIsNone(self.store.load_document(
-            "news_ai", values["news_ai"]["owner"], failed_key,
-        ))
+        failed_value = {"owner": ai_owner, "key": failed_key, "document": {"title": "must rollback"}}
+        with patch.object(self.store, "_connect", wraps=self.store._connect) as connect:
+            with self.assertRaises(KeyError):
+                self.store.upsert_documents("news_ai", [
+                    failed_value, {"owner": ai_owner, "key": peer_key},
+                ])
+            connect.assert_not_called()
+        self.assertIsNone(self.store.load_document("news_ai", ai_owner, failed_key))
+
+        injected_call_ids = []
+        original_run = ObservedDBCursor._run
+
+        def fail_after_document_write(cursor, method, operation, args, kwargs):
+            result = original_run(cursor, method, operation, args, kwargs)
+            context = cursor._owner._context
+            if (method == "executemany" and context is not None and context.writer_kind == "document:news_ai"
+                    and args[0].startswith("INSERT INTO central_documents")):
+                injected_call_ids.append(cursor._owner.call_id)
+                cursor.execute(
+                    "SELECT count(*) FROM central_documents "
+                    "WHERE collection=%s AND owner=%s AND document_key IN (%s,%s)",
+                    ("news_ai", ai_owner, failed_key, peer_key),
+                )
+                self.assertEqual((2,), cursor.fetchone())
+                cursor.execute("SELECT 1 / 0")
+            return result
+
+        with patch.object(ObservedDBCursor, "_run", new=fail_after_document_write):
+            with self.assertRaises(psycopg.errors.DivisionByZero):
+                self.store.upsert_documents("news_ai", [failed_value, {**failed_value, "key": peer_key}])
+        self.assertEqual(1, len(injected_call_ids))
+        for key in (failed_key, peer_key):
+            self.assertIsNone(self.store.load_document("news_ai", ai_owner, key))
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
             if call["writer_kind"] in {
@@ -2853,6 +3275,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(7, len(calls))
         self.assertEqual(6, sum(call["commits"] for call in calls))
         self.assertEqual(1, sum(call["rollbacks"] for call in calls))
+        failed_call, = [call for call in calls if call["call_id"] == injected_call_ids[0]]
+        self.assertEqual((0, 1), (failed_call["commits"], failed_call["rollbacks"]))
         expected_calls = {
             "document:news_ai": 3,
             "document:news_ai_shared": 2,
@@ -3001,7 +3425,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             if identity[0] == "journal_v2_fills":
                 self.assertEqual(first, self.store.load_document(*identity))
 
-        # Every remaining journal kind uses this same PostgreSQL UPSERT path.
+        # Mutable kinds use UPSERT; immutable analysis uses its actual native
+        # acceptance command, as the authenticated content route does.
         # Exercise each explicit registration once without fabricating local journal rows.
         collections = tuple(spec.collection for spec in (*_V1_SPECS, *_V2_SPECS)) + (
             "journal_sync_states", "journal_v2_sync_states",
@@ -3019,9 +3444,17 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                 })
             identity = (collection, owner, key)
             self.document_keys.append(identity)
-            self.store.upsert_documents(collection, [{
-                "owner": owner, "key": key, "document": document,
-            }])
+            if collection == "journal_v2_analysis_revisions":
+                from tests.unit.test_central_server_database import CentralServerDatabaseTests
+                document = CentralServerDatabaseTests._journal_analysis_value(key, owner=owner)["document"]
+                document["origin_environment"] = "real"
+                self.store.accept_journal_analysis_revisions([
+                    {"owner": owner, "key": key, "document": document},
+                ])
+            else:
+                self.store.upsert_documents(collection, [{
+                    "owner": owner, "key": key, "document": document,
+                }])
             self.assertEqual(document, self.store.load_document(*identity)["document"])
 
         calls = [
@@ -3039,7 +3472,10 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(len(calls), len({call["call_id"] for call in calls}))
         self.assertTrue(all(
-            call["writer_family"] == "document.collection"
+            call["writer_family"] == (
+                "document.immutable" if call["writer_kind"] == "document:journal_v2_analysis_revisions"
+                else "document.collection"
+            )
             and call["backend_pid"] is not None for call in calls
         ))
         failed = [call for call in calls if call["writer_kind"] == "document:journal_v2_fills"
@@ -3564,6 +4000,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ))
 
     def test_market_state_dataset_replay_and_failure_preserve_reader_and_correlate_metrics(self) -> None:
+        clock = CollectorTestClock(datetime(2020, 1, 3, 10, 5, tzinfo=KST))
+        self.enterContext(patch.object(self.store, "_now_provider", clock.now))
         subject = f"DIAG-{uuid.uuid4().hex}:KRX"
         snapshot_key = "2026-09-28T09:30:00+09:00"
         failed_key = "2026-09-28T09:31:00+09:00"
@@ -3580,6 +4018,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         write = ("market_state", subject, snapshot_key, payload, observation)
         self.store.save_dataset_snapshots([write])
         before_replay = self.store.load_dataset_snapshots("market_state", subject, 10)
+        clock.offset += 1
         self.store.save_dataset_snapshots([write])
         after_replay = self.store.load_dataset_snapshots("market_state", subject, 10)
         self.assertEqual(
@@ -3632,6 +4071,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                         .issubset({sample["db_call_id"] for sample in samples}))
 
     def test_new_high_and_program_flow_dataset_replay_preserve_readers_and_correlate_metrics(self) -> None:
+        clock = CollectorTestClock(datetime(2020, 1, 3, 10, 5, tzinfo=KST))
+        self.enterContext(patch.object(self.store, "_now_provider", clock.now))
         started = time.time() - 1
         for kind in ("new_high", "program_flow"):
             with self.subTest(kind=kind):
@@ -3645,6 +4086,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
                 write = (kind, subject, snapshot_key, payload, None)
                 self.store.save_dataset_snapshots([write])
                 before_replay = self.store.load_dataset_snapshots(kind, subject, 10)
+                clock.offset += 1
                 self.store.save_dataset_snapshots([write])
                 after_replay = self.store.load_dataset_snapshots(kind, subject, 10)
                 self.assertEqual(1, len(after_replay))
@@ -3820,7 +4262,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             self.assertEqual(4, len(selected))
             self.assertEqual(["committed"] * 3 + ["rolled_back"],
                              [call["outcome"] for call in selected])
-            self.assertEqual([5, 4, 5, 6], [call["sql_calls"] for call in selected])
+            # Native ref authority needs3 sorted domains; fault row adds a fourth head domain.
+            self.assertEqual([8, 7, 8, 10], [call["sql_calls"] for call in selected])
             self.assertEqual([1, 1, 1, 0], [call["commits"] for call in selected])
             self.assertEqual([0, 0, 0, 1], [call["rollbacks"] for call in selected])
             self.assertTrue(all(call["backend_pid"] is not None for call in selected))
@@ -3948,6 +4391,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             )
 
     def test_investor_fundamental_and_nxt_dataset_writes_preserve_reader_boundaries(self) -> None:
+        clock = CollectorTestClock(datetime(2020, 1, 3, 10, 5, tzinfo=KST))
+        self.enterContext(patch.object(self.store, "_now_provider", clock.now))
         token = uuid.uuid4().hex
         code = f"DIAG{token[:12]}"
         now = datetime(2026, 9, 28, 10, 15, tzinfo=KST)
@@ -3982,6 +4427,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         for kind, (api_id, body) in sources.items():
             ingestor.ingest(api_id, body, payloads[kind])
             first = self.store.load_dataset_snapshots(kind, code, 10)
+            clock.offset += 1
             ingestor.ingest(api_id, body, payloads[kind])
             replay = self.store.load_dataset_snapshots(kind, code, 10)
             expected_key = dataset_keys[kind][1]
@@ -4220,9 +4666,10 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(first, replay)
         self.assertEqual(document["document"], replay[0]["document"])
 
-        service = object.__new__(AutonomousTop20Service)
-        service._store = self.store
-        service._minute_backfill_enabled = True
+        service = AutonomousTop20Service(
+            object(), RealtimeHub(), self.store, now_provider=self.store._now_provider,
+            capture_scope=capture_owner, workload_paused=is_paused,
+        )
         with patch.object(self.store, "load_minute_bars", return_value=[{"minute": "09:00"}]) as load_bars:
             asyncio.run(service._backfill_minutes(code, day, market))
         load_bars.assert_called_once_with(code, day, market)
@@ -4265,10 +4712,11 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(first, replay)
         self.assertEqual(document["document"], replay[0]["document"])
 
-        service = object.__new__(AutonomousTop20Service)
-        service._store = self.store
-        service._minute_backfill_enabled = True
-        service._now = lambda: datetime(2026, 9, 28, 9, 0, tzinfo=KST)
+        service = AutonomousTop20Service(
+            object(), RealtimeHub(), self.store,
+            now_provider=lambda: datetime(2026, 9, 28, 9, 0, tzinfo=KST),
+            capture_scope=capture_owner, workload_paused=is_paused,
+        )
 
         async def nxt_disabled(_code: str) -> bool:
             return False
@@ -4314,9 +4762,12 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(first, replay)
         self.assertEqual(document["document"], replay[0]["document"])
 
-        service = object.__new__(AutonomousTop20Service)
-        service._store = self.store
-        service._now = lambda: datetime(2026, 9, 28, 10, tzinfo=KST)
+        service = AutonomousTop20Service(
+            object(), RealtimeHub(), self.store,
+            now_provider=lambda: datetime(2026, 9, 28, 10, tzinfo=KST),
+            capture_scope=capture_owner, flow_input_observer=diagnostic_top20_flow_input,
+            workload_paused=is_paused,
+        )
         asyncio.run(service._capture_candidate_investor_flow(code, day))
 
         calls = [
@@ -4803,22 +5254,25 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(0, calls[0]["commits"])
 
     def test_news_original_publication_replay_preserves_reader_and_correlates_metrics(self) -> None:
-        article_revision_id = f"diagnostic-{uuid.uuid4().hex}"
+        stock_code, identity = f"DIAG{uuid.uuid4().hex[:16]}", uuid.uuid4().hex
+        self.document_keys.append(("news_article", stock_code, identity))
+        self.store.upsert_documents("news_article", [{"owner": stock_code, "key": identity, "document": {
+            "stock_code": stock_code, "identity": identity, "title": "Article title",
+            "description": "summary", "link": "https://example.test/article",
+        }}])
+        article_revision_id = self.store.load_news_history("article", target=stock_code)[0]["article_revision_id"]
+        self.article_revision_ids.append(article_revision_id)
         self.document_keys.append(("news_original_publication", article_revision_id, "published_at"))
         original_published_at = "2026-09-28T09:30:00+09:00"
         runner = NewsJobRunner(
             self.store,
             fetcher=lambda url, *, timeout_seconds: ("Article body", original_published_at),
         )
-        job = {
-            "article_revision_id": article_revision_id,
-            "payload": {"link": "https://example.test/article", "description": "summary"},
-        }
+        job = self.store.claim_news_jobs(priority_stock_code=stock_code)[0]
+        self.assertEqual(article_revision_id, job["article_revision_id"])
         started = time.time() - 1
-        with patch.object(self.store, "load_latest_news_body", return_value=None), \
-                patch.object(self.store, "save_news_body_revision", return_value="diagnostic-body-revision"):
-            body_revision_id = asyncio.run(runner._run_body(job))
-        self.assertEqual("diagnostic-body-revision", body_revision_id)
+        body_revision_id = asyncio.run(runner._run_body(job))
+        self.assertEqual("Article body", self.store.load_news_body_revision(body_revision_id)["body_text"])
 
         first = self.store.load_documents("news_original_publication", article_revision_id, 1)
         self.assertEqual(original_published_at, first[0]["document"]["published_at"])
@@ -4831,22 +5285,23 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
 
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_kind"] == "document:news_original_publication" and call["access_mode"] == "write"
+            if call["writer_kind"] in {"document:news_original_publication", "news_job_result"}
+            and call["access_mode"] == "write"
         ]
         self.assertEqual(2, len(calls))
         self.assertTrue(all(
-            call["writer_family"] == "document.collection"
-            and call["operation"] == "upsert_documents"
+            (call["writer_family"], call["operation"], call["sql_calls"]) == (
+                ("news.job_result", "accept_news_job_result", 6) if call["writer_kind"] == "news_job_result"
+                else ("document.collection", "upsert_documents", 1))
             and call["outcome"] == "committed"
             and call["rows_attempted"] == 1
-            and call["sql_calls"] == 1
             and call["commits"] == 1
             and call["backend_pid"] is not None
             for call in calls
         ))
         legacy = summarize_market_bar_saves(started, time.time() + 1)
         samples = legacy["writer_transactions"]["document:news_original_publication"]["call_samples"]
-        self.assertTrue({call["call_id"] for call in calls}.issubset(
+        self.assertTrue({call["call_id"] for call in calls if call["writer_kind"] == "document:news_original_publication"}.issubset(
             {sample["db_call_id"] for sample in samples}
         ))
 
@@ -4889,61 +5344,65 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ))
 
     def test_news_rule_assessment_replay_preserves_reader_and_correlates_metrics(self) -> None:
-        article_revision_id = f"diagnostic-{uuid.uuid4().hex}"
-        body_revision_id = f"diagnostic-body-{uuid.uuid4().hex}"
-        self.document_keys.append(("news_assessment", "GLOBAL", article_revision_id))
+        stock_code, identity = f"DIAG{uuid.uuid4().hex[:16]}", uuid.uuid4().hex
+        self.document_keys.append(("news_article", stock_code, identity))
         article = {
-            "article_revision_id": article_revision_id, "stock_code": "GLOBAL",
-            "identity": f"https://example.test/{article_revision_id}",
             "document": {
+                "stock_code": stock_code, "identity": identity,
                 "title": "Global market event", "description": "Market summary",
                 "published_at": "2026-09-28T09:30:00+09:00", "stock_name": "GLOBAL",
             },
         }
+        self.store.upsert_documents("news_article", [{"owner": stock_code, "key": identity, **article}])
+        article_revision_id = self.store.load_news_history("article", target=stock_code)[0]["article_revision_id"]
+        self.article_revision_ids.append(article_revision_id)
+        self.document_keys.append(("news_assessment", stock_code, article_revision_id))
+        self.store.claim_news_jobs(priority_stock_code=stock_code)
+        body_revision_id = self.store.save_news_body_revision({
+            "article_revision_id": article_revision_id, "body_text": "Global market conditions changed during the session.",
+            "status": "fulltext",
+        })
         body = {
             "body_revision_id": body_revision_id,
             "body_text": "Global market conditions changed during the session.",
             "status": "fulltext",
         }
         runner = NewsJobRunner(self.store)
-        job = {
-            "article_revision_id": article_revision_id, "target_id": "GLOBAL",
-            "payload": {"body_revision_id": body_revision_id, "stock_code": "GLOBAL"},
-        }
+        job = self.store.claim_news_jobs(priority_stock_code=stock_code, preferred_stage="RULE")[0]
+        self.assertEqual(article_revision_id, job["article_revision_id"])
         started = time.time() - 1
-        with patch.object(self.store, "load_news_article_revision", return_value=article), \
-                patch.object(self.store, "load_news_body_revision", return_value=body):
-            result = asyncio.run(runner._run_rule(job))
+        result = asyncio.run(runner._run_rule(job))
         self.assertEqual(f"ignored:{body_revision_id}", result)
 
-        first = self.store.load_document("news_assessment", "GLOBAL", article_revision_id)
+        first = self.store.load_document("news_assessment", stock_code, article_revision_id)
         self.assertIsNotNone(first)
         self.assertEqual(body_revision_id, first["document"]["body_revision_id"])
         self.assertEqual("2026-09-28T09:30:00+09:00", first["document"]["published_at"])
         self.store.upsert_documents("news_assessment", [{
-            "owner": "GLOBAL", "key": article_revision_id, "document": first["document"],
+            "owner": stock_code, "key": article_revision_id, "document": first["document"],
         }])
-        replay = self.store.load_document("news_assessment", "GLOBAL", article_revision_id)
+        replay = self.store.load_document("news_assessment", stock_code, article_revision_id)
         self.assertEqual(first, replay)
 
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
-            if call["writer_kind"] == "document:news_assessment"
+            if call["writer_kind"] in {"document:news_assessment", "news_job_result"}
+            and call["access_mode"] == "write"
         ]
         self.assertEqual(2, len(calls))
         self.assertTrue(all(
-            call["writer_family"] == "document.collection"
-            and call["operation"] == "upsert_documents"
+            (call["writer_family"], call["operation"], call["sql_calls"]) == (
+                ("news.job_result", "accept_news_job_result", 3) if call["writer_kind"] == "news_job_result"
+                else ("document.collection", "upsert_documents", 1))
             and call["outcome"] == "committed"
             and call["rows_attempted"] == 1
-            and call["sql_calls"] == 1
             and call["commits"] == 1
             and call["backend_pid"] is not None
             for call in calls
         ))
         legacy = summarize_market_bar_saves(started, time.time() + 1)
         samples = legacy["writer_transactions"]["document:news_assessment"]["call_samples"]
-        self.assertTrue({call["call_id"] for call in calls}.issubset(
+        self.assertTrue({call["call_id"] for call in calls if call["writer_kind"] == "document:news_assessment"}.issubset(
             {sample["db_call_id"] for sample in samples}
         ))
 
@@ -5176,6 +5635,413 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         for secret in (*credentials.values(), *conflicting_credentials.values()):
             self.assertNotIn(secret, json.dumps(reader_calls))
 
+    def _c20_native_activation_fixture(self):
+        # Reuse the existing tool's isolated recovery metadata and this class's
+        # native store, cleanup lists and actual encrypted CredentialStore.
+        from scripts.check_postgres_integration import _EphemeralVaultMetadata
+
+        account_ref, profile_id = (str(uuid.uuid4()) for _ in range(2))
+        self.account_registry_refs.append(account_ref)
+        self.account_binding_profile_ids.append(profile_id)
+        self.credential_activation_profile_ids.append(profile_id)
+        scope = {"broker": "kiwoom", "environment": "mock", "account_ref": account_ref}
+        observed = datetime(2026, 10, 30, 10, tzinfo=KST)
+        self.assertEqual(account_ref, self.store.register_account_identity({
+            **scope, "identity_fingerprint": uuid.uuid4().hex * 2,
+            "created_at": observed.isoformat(),
+        }))
+        metadata = _EphemeralVaultMetadata(self.store)
+        vault_path = Path(self.tmp.name) / "c20-activation-vault"
+        vault = CredentialStore(vault_path, metadata)
+        self.addCleanup(vault.close)
+        original_credentials = {"app_key": uuid.uuid4().hex, "secret_key": uuid.uuid4().hex}
+        activation = {
+            "operation_id": str(uuid.uuid4()), "provider": "kiwoom_mock",
+            "profile_id": profile_id, "request_id": str(uuid.uuid4()),
+            "request_digest": vault.request_digest(original_credentials),
+            "environment": "mock", "account_ref": account_ref,
+            "run_id": str(uuid.uuid4()), "committed_at": observed.isoformat(),
+        }
+        file_activation = {key: value for key, value in activation.items()
+                           if key not in {"provider", "profile_id"}}
+        original = vault.save("kiwoom_mock", profile_id, original_credentials,
+                              expected_revision=0, activation=file_activation)
+        receipt = self.store.finalize_credential_activation({
+            **activation, "credential_revision": original.revision,
+        })
+        binding = self.store.load_latest_account_binding(profile_id, "kiwoom", "mock")
+        repository = ForwardEvaluationRepository(self.store)
+        spec = MockAutomationOperatingSpec(
+            strategy_ref=f"diagnostic-strategy-{uuid.uuid4().hex}",
+            candidate_package_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            final_result_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            final_batch_id="diagnostic-final-batch", final_run_id="diagnostic-final-run",
+            forward_profile_id="diagnostic-profile",
+            account_scope=AccountScope("kiwoom", AccountEnvironment.MOCK, account_ref),
+            credential_profile_id=profile_id, binding_revision=binding["binding_revision"],
+            binding_verified_at=observed, frozen_at=observed,
+            maximum_concurrent_positions=1, maximum_capital_won=10_000_000,
+            maximum_daily_loss_won=100_000, maximum_data_gap_seconds=5,
+            maximum_submission_unknown_count=0, maximum_reconnect_count=2,
+            maximum_balance_mismatch_count=0, supported_venue="KRX",
+            session_profile="krx-regular/v1", data_path="nas",
+        )
+        admission = build_mock_automation_admission(spec, requested_at=observed)
+        self.document_keys.extend((
+            ("server_account_settings", f"kiwoom:mock:{account_ref}", "settings"),
+            (repository.MOCK_AUTOMATION_SPEC_COLLECTION, account_ref, spec.spec_id),
+            (repository.MOCK_AUTOMATION_ADMISSION_COLLECTION, account_ref, admission.admission_id),
+            (repository.MOCK_AUTOMATION_ADMISSION_BY_SPEC_COLLECTION, account_ref, spec.spec_id),
+            ("execution_mock_automation_control", account_ref, account_ref),
+        ))
+        self.store.upsert_documents(repository.MOCK_AUTOMATION_SPEC_COLLECTION, [{
+            "owner": account_ref, "key": spec.spec_id, "document": spec.to_dict(),
+        }])
+        repository.save_mock_automation_admission(admission)
+        control = MockAutomationControl(
+            version=MOCK_AUTOMATION_CONTROL_VERSION, account_ref=account_ref,
+            desired_state=MockAutomationDesiredState.RUNNING, control_revision=1,
+            active_spec_id=spec.spec_id, execution_run_id=admission.execution_run_id,
+            changed_at=observed, reason="diagnostic original AUTO control",
+        )
+        self.assertTrue(repository.save_mock_automation_control(control, expected_revision=0))
+        credentials = {"app_key": uuid.uuid4().hex, "secret_key": uuid.uuid4().hex}
+        pending = {
+            **file_activation, "operation_id": str(uuid.uuid4()), "request_id": str(uuid.uuid4()),
+            "request_digest": vault.request_digest(credentials),
+            "committed_at": (observed + timedelta(seconds=2)).isoformat(),
+            "execution_run_id": admission.execution_run_id,
+        }
+        record = vault.save("kiwoom_mock", profile_id, credentials,
+                            expected_revision=1, activation=pending)
+        return SimpleNamespace(
+            account_ref=account_ref, profile_id=profile_id, scope=scope, observed=observed,
+            vault=vault, vault_path=vault_path, metadata=metadata, record=record,
+            credentials=credentials, binding=binding, first_receipt=receipt,
+            repository=repository, spec=spec, admission=admission, control=control,
+            settings=self.store.load_account_settings(scope),
+            activation={**pending, "provider": "kiwoom_mock", "profile_id": profile_id,
+                        "credential_revision": record.revision},
+        )
+
+    def _c20_assert_native_activation_calls(self, trace, started, expected):
+        observed = [call for call in summarize_db_calls(
+            started, time.time() + 1, mode="raw",
+        )["calls"] if call["writer_kind"] == "credential_activation_finalize"
+                    and call["call_id"] in trace]
+        self.assertEqual(len(trace), len(observed))
+        self.assertEqual(len(observed), len({call["call_id"] for call in observed}))
+        calls = {call["call_id"]: call for call in observed}
+        self.assertEqual(len(expected), len(trace))
+        for (call_id, statements), (sql_calls, outcome, commits, rollbacks) in zip(
+                trace.items(), expected, strict=True):
+            self.assertIn(call_id, calls)
+            call = calls[call_id]
+            self.assertEqual((sql_calls, outcome, commits, rollbacks, 1, 1), (
+                call["sql_calls"], call["outcome"], call["commits"], call["rollbacks"],
+                call["transactions"], call["rows_attempted"],
+            ))
+            self.assertEqual(sql_calls, len(statements))
+            self.assertIsNotNone(call["backend_pid"])
+            self.assertEqual(("credential.activation", "finalize_credential_activation"), (
+                call["writer_family"], call["operation"],
+            ))
+            self.assertEqual("SELECT pg_advisory_xact_lock(hashtext(%s))", statements[0])
+        return calls
+
+    def test_auto_credential_activation_pauses_fresh_native_control_and_disabled_keeps_it(self):
+        from threading import Event
+
+        fixture = self._c20_native_activation_fixture()
+        entered, release, activation_entered = Event(), Event(), Event()
+        native_sql, activation_pids, holder_pids = {}, [], []
+        original_run = ObservedDBCursor._run
+
+        def observe_sql(cursor, method, operation, args, kwargs):
+            context = cursor._owner._context
+            statement = " ".join(str(args[0]).split())
+            if context is not None and context.writer_kind == "credential_activation_finalize":
+                native_sql.setdefault(cursor._owner.call_id, []).append(statement)
+                if (statement.startswith("SELECT document_json FROM central_documents")
+                        and statement.endswith("FOR UPDATE")
+                        and args[1][0] == "execution_mock_automation_control"):
+                    activation_pids.append(cursor._owner.backend_pid)
+                    activation_entered.set()
+            return original_run(cursor, method, operation, args, kwargs)
+
+        class HeldCommit(psycopg.Connection):
+            def commit(connection):
+                holder_pids.append(connection.info.backend_pid)
+                entered.set()
+                if not release.wait(30):
+                    raise TimeoutError("consumer native COMMIT gate timed out")
+                return super().commit()
+
+        peer = PostgresQueryStore(self.store._database_url)
+        self.addCleanup(peer.close)
+        peer._connect = lambda: HeldCommit.connect(
+            self.store._database_url, options="-c timezone=Asia/Seoul",
+        )
+        concurrent = replace(fixture.control, control_revision=2,
+            desired_state=MockAutomationDesiredState.STOPPED,
+            changed_at=fixture.observed + timedelta(seconds=1),
+            reason="diagnostic concurrent STOP must survive key activation")
+        started = time.time()
+        with patch.object(ObservedDBCursor, "_run", new=observe_sql), \
+                ThreadPoolExecutor(max_workers=2) as executor:
+            changing = executor.submit(peer.save_mock_automation_control,
+                                       concurrent.to_dict(), expected_revision=1)
+            finalizing = None
+            try:
+                self.assertTrue(entered.wait(10))
+                finalizing = executor.submit(self.store.finalize_credential_activation,
+                                             fixture.activation)
+                self.assertTrue(activation_entered.wait(10))
+                # Reuse the native activity oracle: prove the C20 SELECT is
+                # blocked by the actual peer transaction, not a Python barrier.
+                wait_row = None
+                with closing(self.store._connect()) as probe:
+                    probe.autocommit = True
+                    deadline = time.monotonic() + 10
+                    while wait_row is None and time.monotonic() < deadline:
+                        if finalizing.done():
+                            finalizing.result()
+                            self.fail("activation returned before its controlled native row wait")
+                        wait_row = probe.execute(
+                            "SELECT pid,wait_event_type,wait_event,pg_blocking_pids(pid),query "
+                            "FROM pg_stat_activity WHERE pid=%s AND %s=ANY(pg_blocking_pids(pid))",
+                            (activation_pids[0], holder_pids[0]),
+                        ).fetchone()
+                        if wait_row is None:
+                            time.sleep(0.01)
+                self.assertIsNotNone(wait_row)
+                self.assertEqual("Lock", wait_row[1])
+                self.assertNotEqual(holder_pids[0], wait_row[0])
+                self.assertIn("FOR UPDATE", wait_row[4])
+                self.assertEqual(fixture.control.to_dict(),
+                                 self.store.load_mock_automation_control(fixture.account_ref))
+                self.assertEqual([fixture.first_receipt],
+                                 self.store.load_credential_activations(fixture.profile_id))
+            finally:
+                release.set()
+            self.assertTrue(changing.result(timeout=60))
+            self.assertIsNotNone(finalizing)
+            receipt = finalizing.result(timeout=60)
+            paused = replace(concurrent, entry_resume_required=True, control_revision=3,
+                changed_at=datetime.fromisoformat(fixture.activation["committed_at"]))
+            self.assertEqual(paused, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            self.assertEqual((fixture.activation["run_id"], 2, fixture.binding["binding_revision"]), (
+                receipt["run_id"], receipt["credential_revision"], receipt["binding_revision"],
+            ))
+            self.assertEqual(fixture.binding, self.store.load_latest_account_binding(
+                fixture.profile_id, "kiwoom", "mock"))
+            self.assertEqual(fixture.settings, self.store.load_account_settings(fixture.scope))
+            self.assertFalse(self.store.save_mock_automation_control(
+                replace(concurrent, control_revision=3).to_dict(), expected_revision=2))
+            disabled = {key: value for key, value in fixture.activation.items()
+                        if key not in {"provider", "profile_id", "credential_revision"}}
+            disabled.update(operation_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()),
+                request_digest=fixture.vault.request_digest({}), disabled=True,
+                committed_at=(fixture.observed + timedelta(seconds=4)).isoformat())
+            record = fixture.vault.save("kiwoom_mock", fixture.profile_id, {},
+                expected_revision=2, disabled=True, activation=disabled)
+            command = {**disabled, "provider": "kiwoom_mock", "profile_id": fixture.profile_id,
+                       "credential_revision": record.revision}
+            disabled_receipt = self.store.finalize_credential_activation(command)
+            self.assertEqual(paused, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            self.assertEqual(disabled_receipt, self.store.finalize_credential_activation(command))
+            self.assertEqual(paused, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            self.assertEqual(fixture.binding, self.store.load_latest_account_binding(
+                fixture.profile_id, "kiwoom", "mock"))
+            settings = self.store.load_account_settings(fixture.scope)
+            self.assertEqual((None, False, False), (
+                settings["active_profile_id"], settings["monitor_enabled"], settings["mock_order_enabled"],
+            ))
+        self._c20_assert_native_activation_calls(native_sql, started, [
+            (16, "committed", 1, 0), (14, "committed", 1, 0), (4, "committed", 1, 0),
+        ])
+        first_statements, disabled_statements, replay_statements = native_sql.values()
+        self.assertEqual(2, sum(statement.endswith("FOR UPDATE") for statement in first_statements))
+        self.assertEqual(1, sum(statement.startswith("UPDATE central_documents SET")
+                                for statement in first_statements))
+        self.assertEqual(2, sum(statement.endswith("FOR UPDATE") for statement in disabled_statements))
+        self.assertFalse(any(statement.startswith("UPDATE central_documents SET")
+                             for statement in disabled_statements))
+        self.assertTrue(all(statement.startswith("SELECT") for statement in replay_statements))
+
+    def test_auto_credential_activation_native_failure_rolls_back_pause_and_keeps_pending_vault(self):
+        fixture = self._c20_native_activation_fixture()
+        envelope = (fixture.vault_path / f"kiwoom_mock--{fixture.profile_id}.json").read_bytes()
+        native_sql, injected = {}, []
+        original_run = ObservedDBCursor._run
+
+        def fail_after_receipt_insert(cursor, method, operation, args, kwargs):
+            context = cursor._owner._context
+            target = context is not None and context.writer_kind == "credential_activation_finalize"
+            statement = " ".join(str(args[0]).split())
+            if target:
+                native_sql.setdefault(cursor._owner.call_id, []).append(statement)
+            result = original_run(cursor, method, operation, args, kwargs)
+            if target and statement.startswith("INSERT INTO central_credential_activations") and not injected:
+                injected.append(cursor._owner.call_id)
+                native_sql[cursor._owner.call_id].append("SELECT 1 / 0")
+                # Real PostgreSQL marks this transaction failed after control
+                # UPDATE and receipt INSERT. No driver result is fabricated.
+                return original_run(cursor, "execute", cursor._raw.execute, ("SELECT 1 / 0",), {})
+            return result
+
+        started = time.time()
+        with patch.object(ObservedDBCursor, "_run", new=fail_after_receipt_insert):
+            with self.assertRaises(psycopg.errors.DivisionByZero):
+                self.store.finalize_credential_activation(fixture.activation)
+            self.assertEqual(1, len(injected))
+            self.assertEqual(fixture.control, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            self.assertEqual([fixture.first_receipt],
+                             self.store.load_credential_activations(fixture.profile_id))
+            self.assertIsNone(self.store.find_credential_activation(
+                operation_id=fixture.activation["operation_id"]))
+            self.assertEqual(fixture.binding, self.store.load_latest_account_binding(
+                fixture.profile_id, "kiwoom", "mock"))
+            self.assertEqual(fixture.settings, self.store.load_account_settings(fixture.scope))
+            self.assertEqual(envelope,
+                (fixture.vault_path / f"kiwoom_mock--{fixture.profile_id}.json").read_bytes())
+            fixture.vault.close()
+            reopened = CredentialStore(fixture.vault_path, fixture.metadata)
+            self.addCleanup(reopened.close)
+            pending = reopened.load("kiwoom_mock", fixture.profile_id)
+            self.assertEqual(2, pending.revision)
+            self.assertEqual(fixture.record.payload["activation"], pending.payload["activation"])
+            self.assertTrue(pending.payload["credentials"] == fixture.credentials,
+                            "the durable new-key file remains pending, not rolled back or published")
+            recovered = self.store.finalize_credential_activation({
+                **pending.payload["activation"], "provider": pending.provider,
+                "profile_id": pending.profile_id, "credential_revision": pending.revision,
+            })
+            paused = replace(fixture.control, control_revision=2, entry_resume_required=True,
+                changed_at=datetime.fromisoformat(fixture.activation["committed_at"]))
+            self.assertEqual(paused, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            self.assertEqual([fixture.first_receipt, recovered],
+                             self.store.load_credential_activations(fixture.profile_id))
+            self.assertEqual(fixture.binding, self.store.load_latest_account_binding(
+                fixture.profile_id, "kiwoom", "mock"))
+        calls = self._c20_assert_native_activation_calls(native_sql, started, [
+            (11, "rolled_back", 0, 1), (16, "committed", 1, 0),
+        ])
+        self.assertIn({"stage": "execute", "exception_type": "DivisionByZero"}, calls[injected[0]]["errors"])
+        self.assertTrue(any(statement.startswith("UPDATE central_documents SET")
+                            for statement in native_sql[injected[0]]))
+        self.assertEqual("SELECT 1 / 0", native_sql[injected[0]][-1])
+
+    def test_auto_credential_activation_lost_native_commit_ack_replays_first_receipt_without_repause(self):
+        fixture = self._c20_native_activation_fixture()
+        native_connect = self.store._connect
+        connections, handles, native_sql = [], [], {}
+        ack_error = OSError("controlled committed ACK loss")
+        original_run = ObservedDBCursor._run
+
+        def observe_sql(cursor, method, operation, args, kwargs):
+            context = cursor._owner._context
+            if context is not None and context.writer_kind == "credential_activation_finalize":
+                native_sql.setdefault(cursor._owner.call_id, []).append(" ".join(str(args[0]).split()))
+            return original_run(cursor, method, operation, args, kwargs)
+
+        # Same actual-commit/unknown-ACK fixture as the existing journal native
+        # receipt test; keep psycopg's real context/commit/close order.
+        class LostAckConnection:
+            __exit__ = psycopg.Connection.__exit__
+            def __init__(self, raw):
+                self.raw = raw
+                self.commits = self.rollbacks = self.closes = 0
+            def __getattr__(self, name): return getattr(self.raw, name)
+            def __enter__(self): self.raw.__enter__(); return self
+            def commit(self):
+                self.commits += 1
+                self.raw.commit()
+                raise ack_error
+            def rollback(self):
+                self.rollbacks += 1
+                self.raw.rollback()
+            def close(self):
+                self.closes += 1
+                self.raw.close()
+
+        def lost_ack_connect():
+            raw = native_connect()
+            connections.append(raw)
+            handle = LostAckConnection(raw)
+            handles.append(handle)
+            return handle
+
+        started = time.time()
+        with patch.object(ObservedDBCursor, "_run", new=observe_sql):
+            try:
+                with patch.object(self.store, "_connect", side_effect=lost_ack_connect) as factory:
+                    with self.assertRaisesRegex(OSError, "committed ACK loss") as caught:
+                        self.store.finalize_credential_activation(fixture.activation)
+                self.assertIs(ack_error, caught.exception)
+                factory.assert_called_once_with()
+                self.assertEqual(1, len(handles))
+                self.assertEqual((1, 0, 1), (handles[0].commits, handles[0].rollbacks, handles[0].closes))
+                self.assertTrue(connections[0].closed)
+                first = self.store.find_credential_activation(operation_id=fixture.activation["operation_id"])
+                self.assertIsNotNone(first)  # Independent actual native read proves COMMIT.
+                paused = replace(fixture.control, control_revision=2, entry_resume_required=True,
+                    changed_at=datetime.fromisoformat(fixture.activation["committed_at"]))
+                self.assertEqual(paused, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            finally:
+                for connection in connections:
+                    if not connection.closed:
+                        connection.close()
+            resumed = replace(paused, control_revision=3, entry_resume_required=False,
+                changed_at=fixture.observed + timedelta(seconds=3), reason="diagnostic explicit resume")
+            self.assertTrue(fixture.repository.save_mock_automation_control(resumed, expected_revision=2))
+            fixture.vault.close()
+            reopened = CredentialStore(fixture.vault_path, fixture.metadata)
+            self.addCleanup(reopened.close)
+            pending = reopened.load("kiwoom_mock", fixture.profile_id)
+            retry = {**pending.payload["activation"], "provider": pending.provider,
+                     "profile_id": pending.profile_id, "credential_revision": pending.revision}
+            self.assertEqual(first, self.store.finalize_credential_activation(retry))
+            self.assertEqual(first, self.store.finalize_credential_activation({
+                **retry, "committed_at": (fixture.observed + timedelta(days=1)).isoformat(),
+            }))
+            self.assertEqual(resumed, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            self.assertEqual([fixture.first_receipt, first],
+                             self.store.load_credential_activations(fixture.profile_id))
+            self.assertEqual(fixture.binding, self.store.load_latest_account_binding(
+                fixture.profile_id, "kiwoom", "mock"))
+            self.assertEqual(fixture.settings, self.store.load_account_settings(fixture.scope))
+            self.assertEqual(fixture.activation["run_id"], first["run_id"])
+            self.assertTrue(pending.payload["credentials"] == fixture.credentials,
+                            "ACK loss retains the actual pending encrypted new-key record")
+            # The first native test preserves an already-paused STOPPED control
+            # on disable. Here disable must also leave a resumed control clear.
+            disabled = dict(pending.payload["activation"])
+            disabled.update(operation_id=str(uuid.uuid4()), request_id=str(uuid.uuid4()),
+                request_digest=reopened.request_digest({}), disabled=True,
+                committed_at=(fixture.observed + timedelta(seconds=4)).isoformat())
+            disabled_record = reopened.save("kiwoom_mock", fixture.profile_id, {},
+                expected_revision=2, disabled=True, activation=disabled)
+            disabled_receipt = self.store.finalize_credential_activation({
+                **disabled, "provider": disabled_record.provider, "profile_id": disabled_record.profile_id,
+                "credential_revision": disabled_record.revision,
+            })
+            self.assertEqual(3, disabled_receipt["credential_revision"])
+            self.assertEqual(resumed, fixture.repository.load_mock_automation_control(fixture.account_ref))
+            self.assertEqual(fixture.binding, self.store.load_latest_account_binding(
+                fixture.profile_id, "kiwoom", "mock"))
+        calls = self._c20_assert_native_activation_calls(native_sql, started, [
+            (16, "unknown", 0, 0), (4, "committed", 1, 0), (4, "committed", 1, 0),
+            (14, "committed", 1, 0),
+        ])
+        unknown = calls[next(iter(native_sql))]
+        self.assertIn({"stage": "commit", "exception_type": "OSError"}, unknown["errors"])
+        self.assertIsNone(unknown["close_ms"])
+        for statements in list(native_sql.values())[1:3]:
+            self.assertTrue(all(statement.startswith("SELECT") for statement in statements))
+        self.assertFalse(any(statement.startswith("UPDATE central_documents SET")
+                             for statement in list(native_sql.values())[3]))
+
     def test_credential_vault_state_preserves_file_commit_and_recovers_fence(self) -> None:
         self.assertEqual([], self.store.load_documents("credential_vault_state", "", 1))
         vault = CredentialStore(Path(self.tmp.name) / "vault", self.store)
@@ -5281,18 +6147,14 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ])
         started = time.time() - 1
         self.assertTrue(repository.save_mock_automation_risk_snapshot(first))
-        self.assertFalse(repository.save_mock_automation_risk_snapshot(first))
+        with patch.object(self.store, "_mock_automation_risk_write_scope",
+                          side_effect=AssertionError("already-current Risk does not need a shared handle")):
+            self.assertFalse(repository.save_mock_automation_risk_snapshot(first))
         self.assertEqual(first, repository.load_latest_mock_automation_risk(account_ref))
         self.assertEqual((first,), repository.load_mock_automation_risk_snapshots(account_ref))
 
-        original_upsert = self.store.upsert_documents
-
-        def fail_current(collection, values):
-            if collection == repository.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION:
-                raise RuntimeError("injected current risk write failure")
-            return original_upsert(collection, values)
-
-        with patch.object(self.store, "upsert_documents", side_effect=fail_current):
+        with patch.object(self.store, "publish_mock_automation_current_risk",
+                          side_effect=RuntimeError("injected current risk write failure")):
             with self.assertRaises(RuntimeError):
                 repository.save_mock_automation_risk_snapshot(second)
         self.assertEqual(first, repository.load_latest_mock_automation_risk(account_ref))
@@ -5327,12 +6189,12 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ])
         self.assertEqual([
             ["SELECT", "INSERT"], ["INSERT"], ["SELECT"],
-            ["SELECT", "INSERT"], ["SELECT"], ["INSERT"],
+            ["SELECT", "INSERT"], ["SELECT"], ["UPDATE"],
         ], [native_sql[call["call_id"]] for call in calls])
         self.assertEqual(len(expected), len({call["call_id"] for call in calls}))
         for call in calls:
             operation = ("insert_immutable_document" if call["writer_family"] == "document.immutable"
-                         else "upsert_documents")
+                         else "publish_mock_automation_current_risk")
             self.assertEqual((operation, "committed", 1, 1, 1, 0), (
                 call["operation"], call["outcome"], call["rows_attempted"],
                 call["transactions"], call["commits"], call["rollbacks"],
@@ -5345,6 +6207,355 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         self.assertTrue({call["call_id"] for call in current_calls}.issubset(
             {sample["db_call_id"] for sample in samples}
         ))
+
+        delayed = snapshot(3, observed + timedelta(seconds=2))
+        newer = snapshot(4, observed + timedelta(seconds=3))
+        self.document_keys.extend([
+            (repository.MOCK_AUTOMATION_RISK_COLLECTION, account_ref, delayed.snapshot_id),
+            (repository.MOCK_AUTOMATION_RISK_COLLECTION, account_ref, newer.snapshot_id),
+        ])
+        publish = self.store.publish_mock_automation_current_risk
+
+        def publish_newer_before_delayed(account, document, *, expected, **options):
+            if document == delayed.to_dict():
+                self.assertTrue(repository.save_mock_automation_risk_snapshot(newer))
+            return publish(account, document, expected=expected, **options)
+
+        with patch.object(self.store, "publish_mock_automation_current_risk",
+                          side_effect=publish_newer_before_delayed):
+            with self.assertRaisesRegex(ValueError, "monotonically"):
+                repository.save_mock_automation_risk_snapshot(delayed)
+        self.assertEqual(newer, repository.load_latest_mock_automation_risk(account_ref))
+        self.assertEqual((first, second, delayed, newer),
+                         repository.load_mock_automation_risk_snapshots(account_ref))
+
+    def test_mock_automation_risk_reuses_one_backend_for_two_separately_committed_writes(self) -> None:
+        repository = ForwardEvaluationRepository(self.store)
+        peer_store = PostgresQueryStore(self.store._database_url)
+        peer = ForwardEvaluationRepository(peer_store)
+        self.addCleanup(peer_store.close)
+        history_collection = repository.MOCK_AUTOMATION_RISK_COLLECTION
+        current_collection = repository.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION
+        history_kind, current_kind = f"document:{history_collection}", f"document:{current_collection}"
+        now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+        connect = self.store._connect
+        publish = self.store.publish_mock_automation_current_risk
+        execute = ObservedDBCursor._run
+        connections = []
+        sql = {}
+
+        def capture_connection():
+            connection = connect()
+            connections.append(connection)
+            return connection
+
+        def capture_sql(cursor, method, operation, args, kwargs):
+            context = cursor._owner._context
+            if (context is not None and context.access_mode == "write"
+                    and context.writer_kind in (history_kind, current_kind)):
+                sql.setdefault(context.writer_kind, []).append((
+                    str(args[0]).split(None, 1)[0].upper(), cursor._owner.backend_pid,
+                ))
+            return execute(cursor, method, operation, args, kwargs)
+
+        for share, connections_per_save in ((False, 3), (True, 2)):
+            with self.subTest(share=share):
+                account_ref = f"diagnostic-{uuid.uuid4().hex}"
+                self.document_keys.append((current_collection, account_ref, account_ref))
+                previous = None
+                for revision in (1, 2):
+                    observed = now + timedelta(seconds=revision)
+                    recovery = MockAccountRecovery(AccountSnapshot(account_ref, 1_000_000, 0, {}, observed), ())
+                    snapshot = build_mock_automation_risk_snapshot(
+                        recovery, (), (), (), execution_run_id="diagnostic-run",
+                        binding_revision=1, reconciliation_revision=revision,
+                        observed_at=observed, broker_query_started_at=observed, broker_query_completed_at=observed,
+                    )
+                    self.document_keys.append((history_collection, account_ref, snapshot.snapshot_id))
+                    connections.clear()
+                    sql.clear()
+
+                    def check_before_current(account, document, *, expected, **options):
+                        borrowed = options.get("_connection")
+                        self.assertEqual(share, borrowed is not None)
+                        if borrowed is not None:
+                            self.assertIs(borrowed, connections[-1])
+                            self.assertEqual(psycopg.pq.TransactionStatus.IDLE, borrowed.info.transaction_status)
+                        # The peer observes the immutable commit while the current row is still old.
+                        self.assertIn(snapshot, peer.load_mock_automation_risk_snapshots(account_ref))
+                        self.assertEqual(previous, peer.load_latest_mock_automation_risk(account_ref))
+                        return publish(account, document, expected=expected, **options)
+
+                    mode = (nullcontext() if share else
+                            patch.object(self.store, "_mock_automation_risk_write_scope", None))
+                    started = time.time()
+                    with (
+                        mode,
+                        patch.object(self.store, "_connect", side_effect=capture_connection),
+                        patch.object(self.store, "publish_mock_automation_current_risk", side_effect=check_before_current),
+                        patch.object(ObservedDBCursor, "_run", new=capture_sql),
+                    ):
+                        self.assertTrue(repository.save_mock_automation_risk_snapshot(snapshot))
+                    self.assertEqual(connections_per_save, len(connections))
+                    self.assertTrue(all(connection.closed for connection in connections))
+                    self.assertEqual(["SELECT", "INSERT"], [operation for operation, _ in sql[history_kind]])
+                    self.assertEqual(["INSERT" if revision == 1 else "UPDATE"],
+                                     [operation for operation, _ in sql[current_kind]])
+                    self.assertEqual(share, sql[history_kind][0][1] == sql[current_kind][0][1])
+                    ended = time.time()
+                    report = summarize_db_calls(started, ended, mode="raw")
+                    scope_key = "infrastructure.connection/mock_automation_risk"
+                    self.assertNotIn(scope_key, report["writers"])
+                    self.assertNotIn(scope_key, report["readers"])
+                    scopes = [
+                        call for call in report["calls"]
+                        if call["operation"] == "mock_automation_risk_write_scope"
+                    ]
+                    self.assertEqual(int(share), len(scopes))
+                    if scopes:
+                        scope = scopes[0]
+                        self.assertEqual(scope_key, f"{scope['writer_family']}/{scope['writer_kind']}")
+                        self.assertEqual(("connection", sql[history_kind][0][1], 0, 0, 0), (
+                            scope["access_mode"], scope["backend_pid"], scope["transactions"],
+                            scope["commits"], scope["sql_calls"],
+                        ))
+                        self.assertEqual(("closed", []), (scope["outcome"], scope["errors"]))
+                        self.assertIsNotNone(scope["connection_acquire_ms"])
+                        self.assertIsNotNone(scope["close_ms"])
+                    self.assertEqual(snapshot, peer.load_latest_mock_automation_risk(account_ref))
+                    with peer_store._connect() as connection, connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT collection,xmin::text FROM central_documents WHERE owner=%s AND "
+                            "((collection=%s AND document_key=%s) OR (collection=%s AND document_key=%s))",
+                            (account_ref, history_collection, snapshot.snapshot_id, current_collection, account_ref),
+                        )
+                        write_xids = dict(cursor.fetchall())
+                    self.assertNotEqual(write_xids[history_collection], write_xids[current_collection])
+                    previous = snapshot
+
+    def test_mock_automation_risk_lost_ack_preserves_native_commit_and_close_boundaries(self) -> None:
+        repository = ForwardEvaluationRepository(self.store)
+        peer_store = PostgresQueryStore(self.store._database_url)
+        peer = ForwardEvaluationRepository(peer_store)
+        self.addCleanup(peer_store.close)
+        history_collection = repository.MOCK_AUTOMATION_RISK_COLLECTION
+        current_collection = repository.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION
+        now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+        native_connect = self.store._connect
+        native_exit = psycopg.Transaction.__exit__
+        native_close = psycopg.Connection.close
+
+        for fault in ("history COMMIT", "current COMMIT", "scope close"):
+            with self.subTest(fault=fault):
+                account = f"diagnostic-{uuid.uuid4().hex}"
+
+                def snapshot(revision: int):
+                    observed = now + timedelta(seconds=revision)
+                    recovery = MockAccountRecovery(AccountSnapshot(account, 1_000_000, 0, {}, observed), ())
+                    return build_mock_automation_risk_snapshot(
+                        recovery, (), (), (), execution_run_id="diagnostic-run",
+                        binding_revision=1, reconciliation_revision=revision,
+                        observed_at=observed, broker_query_started_at=observed,
+                        broker_query_completed_at=observed,
+                    )
+
+                previous, candidate = snapshot(1), snapshot(2)
+                self.document_keys.extend([
+                    (history_collection, account, previous.snapshot_id),
+                    (history_collection, account, candidate.snapshot_id),
+                    (current_collection, account, account),
+                ])
+                self.assertTrue(repository.save_mock_automation_risk_snapshot(previous))
+                connections, events, peer_cuts = [], [], []
+                lost_ack = OSError(f"controlled Risk {fault} ACK loss")
+
+                def read_peer_cut():
+                    with peer_store._connect() as connection, connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT collection,document_json->>'snapshot_id',xmin::text "
+                            "FROM central_documents WHERE owner=%s AND "
+                            "((collection=%s AND document_key=%s) OR (collection=%s AND document_key=%s))",
+                            (account, history_collection, candidate.snapshot_id, current_collection, account),
+                        )
+                        return {collection: (snapshot_id, xid) for collection, snapshot_id, xid in cursor}
+
+                def capture_connection():
+                    connection = native_connect()
+                    connections.append(connection)
+                    self.addCleanup(native_close, connection)
+                    return connection
+
+                def exit_transaction(transaction, exc_type, exc, traceback):
+                    connection = transaction.connection
+                    if not any(connection is opened for opened in connections):
+                        return native_exit(transaction, exc_type, exc, traceback)
+                    self.assertEqual(2, len(connections))
+                    self.assertIs(connection, connections[1])
+                    self.assertIsNone(exc_type)
+                    self.assertEqual(psycopg.pq.TransactionStatus.INTRANS, connection.info.transaction_status)
+                    result = native_exit(transaction, exc_type, exc, traceback)
+                    self.assertEqual(psycopg.pq.TransactionStatus.IDLE, connection.info.transaction_status)
+                    phase = "history COMMIT" if not events else "current COMMIT"
+                    events.append(phase)
+                    peer_cuts.append(read_peer_cut())
+                    if fault == phase:
+                        raise lost_ack
+                    return result
+
+                def close_connection(connection):
+                    if len(connections) < 2 or connection is not connections[1]:
+                        return native_close(connection)
+                    self.assertEqual(psycopg.pq.TransactionStatus.IDLE, connection.info.transaction_status)
+                    native_close(connection)
+                    self.assertTrue(connection.closed)
+                    events.append("scope close")
+                    if fault == "scope close":
+                        raise lost_ack
+
+                with (
+                    patch.object(self.store, "_connect", side_effect=capture_connection),
+                    patch.object(psycopg.Transaction, "__exit__", new=exit_transaction),
+                    patch.object(psycopg.Connection, "close", new=close_connection),
+                ):
+                    with self.assertRaises(OSError) as caught:
+                        repository.save_mock_automation_risk_snapshot(candidate)
+                self.assertIs(lost_ack, caught.exception)
+                history_only = fault == "history COMMIT"
+                expected_events = (
+                    ["history COMMIT", "scope close"] if history_only
+                    else ["history COMMIT", "current COMMIT", "scope close"]
+                )
+                self.assertEqual(expected_events, events)
+                self.assertEqual(2, len(connections))
+                self.assertTrue(all(connection.closed for connection in connections))
+
+                first_cut = peer_cuts[0]
+                self.assertEqual(candidate.snapshot_id, first_cut[history_collection][0])
+                self.assertEqual(previous.snapshot_id, first_cut[current_collection][0])
+                if not history_only:
+                    second_cut = peer_cuts[1]
+                    self.assertEqual(first_cut[history_collection], second_cut[history_collection])
+                    self.assertEqual(candidate.snapshot_id, second_cut[current_collection][0])
+                    self.assertNotEqual(second_cut[history_collection][1], second_cut[current_collection][1])
+                self.assertEqual(peer_cuts[-1], read_peer_cut())
+                self.assertEqual((previous, candidate), peer.load_mock_automation_risk_snapshots(account))
+                self.assertEqual(
+                    previous if history_only else candidate, peer.load_latest_mock_automation_risk(account),
+                )
+
+                # Only the caller's explicit repeat can repair the projection after history ACK loss.
+                self.assertFalse(repository.save_mock_automation_risk_snapshot(candidate))
+                repaired_cut = read_peer_cut()
+                self.assertEqual(first_cut[history_collection], repaired_cut[history_collection])
+                if not history_only:
+                    self.assertEqual(peer_cuts[-1], repaired_cut)
+                self.assertEqual((previous, candidate), peer.load_mock_automation_risk_snapshots(account))
+                self.assertEqual(candidate, peer.load_latest_mock_automation_risk(account))
+
+    def test_mock_automation_risk_bad_connection_and_native_sql_errors_do_not_publish(self) -> None:
+        repository = ForwardEvaluationRepository(self.store)
+        peer_store = PostgresQueryStore(self.store._database_url)
+        peer = ForwardEvaluationRepository(peer_store)
+        self.addCleanup(peer_store.close)
+        history = repository.MOCK_AUTOMATION_RISK_COLLECTION
+        current = repository.MOCK_AUTOMATION_CURRENT_RISK_COLLECTION
+        native_connect = self.store._connect
+        native_exit = psycopg.Transaction.__exit__
+        native_run = ObservedDBCursor._run
+        now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+
+        for target, sql in ((history, "INSERT"), (current, "UPDATE")):
+            for bad_connection in (True, False):
+                with self.subTest(target=target, bad_connection=bad_connection):
+                    account = f"diagnostic-{uuid.uuid4().hex}"
+
+                    def snapshot(revision):
+                        observed = now + timedelta(seconds=revision)
+                        recovery = MockAccountRecovery(AccountSnapshot(account, 1_000_000, 0, {}, observed), ())
+                        return build_mock_automation_risk_snapshot(
+                            recovery, (), (), (), execution_run_id="diagnostic-run",
+                            binding_revision=1, reconciliation_revision=revision,
+                            observed_at=observed, broker_query_started_at=observed,
+                            broker_query_completed_at=observed,
+                        )
+
+                    previous, candidate = snapshot(1), snapshot(2)
+                    self.document_keys.extend([
+                        (history, account, previous.snapshot_id),
+                        (history, account, candidate.snapshot_id),
+                        (current, account, account),
+                    ])
+                    self.assertTrue(repository.save_mock_automation_risk_snapshot(previous))
+                    connections, cursors, exits, body_errors = [], {}, [], []
+
+                    def capture_connection():
+                        connection = native_connect()
+                        connections.append(connection)
+                        self.addCleanup(connection.close)
+                        return connection
+
+                    def observe_sql(cursor, method, operation, args, kwargs):
+                        result = native_run(cursor, method, operation, args, kwargs)
+                        context = cursor._owner._context
+                        if (context is not None and context.writer_kind == f"document:{target}"
+                                and str(args[0]).split(None, 1)[0].upper() == sql):
+                            cursors[cursor._owner.call_id] = cursor
+                            if not bad_connection:
+                                try:
+                                    cursor.execute("SELECT 1 / 0")
+                                except psycopg.errors.DivisionByZero as error:
+                                    body_errors.append(error)
+                                    raise
+                        return result
+
+                    def exit_transaction(transaction, exc_type, exc, traceback):
+                        connection = transaction.connection
+                        if len(connections) == 2 and connection is connections[1]:
+                            exits.append(connection.info.transaction_status)
+                            if len(exits) == (1 if target == history else 2):
+                                self.assertEqual(1, len(cursors))
+                                self.assertTrue(next(iter(cursors.values())).closed)
+                                if bad_connection:
+                                    self.assertIsNone(exc)
+                                    self.assertEqual(psycopg.pq.TransactionStatus.INTRANS, exits[-1])
+                                    connection.pgconn.finish()
+                                    self.assertEqual(psycopg.pq.ConnStatus.BAD, connection.pgconn.status)
+                                    return native_exit(transaction, exc_type, exc, traceback)
+                                self.assertIs(body_errors[0], exc)
+                                self.assertEqual(psycopg.pq.TransactionStatus.INERROR, exits[-1])
+                                result = native_exit(transaction, exc_type, exc, traceback)
+                                self.assertEqual(psycopg.pq.TransactionStatus.IDLE, connection.info.transaction_status)
+                                return result
+                        return native_exit(transaction, exc_type, exc, traceback)
+
+                    started = time.time()
+                    expected_error = psycopg.OperationalError if bad_connection else psycopg.errors.DivisionByZero
+                    with (
+                        patch.object(self.store, "_connect", side_effect=capture_connection),
+                        patch.object(self.store, "publish_mock_automation_current_risk",
+                                     wraps=self.store.publish_mock_automation_current_risk) as publish,
+                        patch.object(ObservedDBCursor, "_run", new=observe_sql),
+                        patch.object(psycopg.Transaction, "__exit__", new=exit_transaction),
+                        self.assertRaises(expected_error) as caught,
+                    ):
+                        repository.save_mock_automation_risk_snapshot(candidate)
+                    if not bad_connection:
+                        self.assertIs(body_errors[0], caught.exception)
+                    self.assertEqual(0 if target == history else 1, publish.call_count)
+                    self.assertEqual(1 if target == history else 2, len(exits))
+                    self.assertEqual(2, len(connections))
+                    self.assertTrue(all(connection.closed for connection in connections))
+                    self.assertEqual(previous, peer.load_latest_mock_automation_risk(account))
+                    self.assertEqual(
+                        (previous,) if target == history else (previous, candidate),
+                        peer.load_mock_automation_risk_snapshots(account),
+                    )
+                    calls = [call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
+                             if call["call_id"] in cursors]
+                    self.assertEqual(1, len(calls))
+                    self.assertEqual(0, calls[0]["commits"])
+                    self.assertEqual("unknown" if bad_connection else "rolled_back", calls[0]["outcome"])
+                    self.assertEqual(0 if bad_connection else 1, calls[0]["rollbacks"])
 
     def test_mock_automation_recovery_preserves_lineage_and_separate_projection(self) -> None:
         native_sql = {}
@@ -5445,10 +6656,23 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         ])
         started = time.time() - 1
         repository.save_mock_automation_risk_snapshot(first_risk)
-        first = record_mock_automation_recovery_from_risk(
-            repository, runtime, recovery, first_risk,
-            account_ref=account_ref, spec_id=spec.spec_id,
-        )
+        physical_connections = []
+        original_connect = self.store._connect
+
+        def track_connection():
+            connection = original_connect()
+            physical_connections.append((connection, connection.info.backend_pid))
+            return connection
+
+        with patch.object(self.store, "_connect", side_effect=track_connection):
+            first = record_mock_automation_recovery_from_risk(
+                repository, runtime, recovery, first_risk,
+                account_ref=account_ref, spec_id=spec.spec_id,
+            )
+        # The application precheck has its own connection. The repository owns
+        # one other backend for both reads and both separately committed writes.
+        self.assertEqual(2, len(physical_connections))
+        self.assertTrue(all(connection.closed for connection, _ in physical_connections))
         replay = record_mock_automation_recovery_from_risk(
             repository, runtime, recovery, first_risk,
             account_ref=account_ref, spec_id=spec.spec_id,
@@ -5461,13 +6685,13 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
         repository.save_mock_automation_risk_snapshot(second_risk)
         original_upsert = self.store.upsert_documents
 
-        def fail_current(collection, values):
+        def fail_current(collection, values, **kwargs):
             if collection == repository.MOCK_AUTOMATION_CURRENT_RECOVERY_COLLECTION:
                 raise RuntimeError("injected current recovery write failure")
-            return original_upsert(collection, values)
+            return original_upsert(collection, values, **kwargs)
 
         with patch.object(self.store, "upsert_documents", side_effect=fail_current):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaisesRegex(RuntimeError, "injected current recovery write failure"):
                 record_mock_automation_recovery_from_risk(
                     repository, runtime, recovery, second_risk,
                     account_ref=account_ref, spec_id=spec.spec_id,
@@ -5516,6 +6740,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             (call["writer_kind"], call["writer_family"], call["sql_calls"])
             for call in calls
         ])
+        self.assertEqual([physical_connections[1][1]] * 2, [call["backend_pid"] for call in calls[:2]])
         self.assertEqual([
             ["SELECT", "INSERT"], ["INSERT"], ["SELECT"], ["INSERT"],
             ["SELECT", "INSERT"], ["SELECT"], ["INSERT"],
@@ -6118,6 +7343,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             account_ref=account_ref,
             run_id=run_id,
             automation_context=SimpleNamespace(execution_run_id=run_id, spec_id=spec_id),
+            repository=None,  # This fixture patches the entire FILL owner operation.
         )
         spec = SimpleNamespace(
             account_scope=SimpleNamespace(account_ref=account_ref),
@@ -6138,21 +7364,21 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             ForwardEvaluationRepository, "load_mock_automation_candidate_package",
             return_value=candidate_package,
         ), patch.object(PostgresQueryStore, "load_observation_revisions", return_value=[]), \
-                patch.object(MockAutomationRunner, "_apply_new_fills"):
-            runner = MockAutomationRunner(self.store, bundle, spec)
-            self.assertEqual("WARMUP", runner.status["state"])
-            runner._cursor = 42
-            runner._fill_cursor = 7
-            runner._seen_fill_ids = {"fill-diagnostic-1"}
-            runner._state = StrategyState(
+                patch.object(MockAutomationEpisodePosition, "apply_new_fills"):
+            runner = _prepared_runner(self.store, bundle, spec)
+            self.assertEqual("WARMUP", runner.episode.status["state"])
+            runner.episode._input_progress._cursor = 42
+            runner.episode._episode_position._fill_cursor = 7
+            runner.episode._episode_position._seen_fill_ids = {"fill-diagnostic-1"}
+            runner.episode._episode_position._state = StrategyState(
                 status="candidate", symbol="005930", candidate_key="candidate-diagnostic",
                 emitted_candidate_keys=("candidate-diagnostic",),
             )
-            runner._status = {
+            runner.episode._status = {
                 "state": "STOPPED", "reason": "user_stopped", "orders_enabled": False,
                 "pending_intent_id": "intent-diagnostic-1",
             }
-            runner._save_checkpoint()
+            runner.episode._save_checkpoint()
 
             stored = self.store.load_document(
                 "execution_mock_automation_runner_current", account_ref, "current",
@@ -6161,15 +7387,15 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             self.assertEqual(7, stored["document"]["fill_cursor"])
             self.assertEqual("intent-diagnostic-1", stored["document"]["pending_intent_id"])
 
-            restarted = MockAutomationRunner(self.store, bundle, spec)
+            restarted = _prepared_runner(self.store, bundle, spec)
 
-        self.assertEqual(42, restarted.status["input_cursor"])
-        self.assertEqual(7, restarted._fill_cursor)
-        self.assertEqual("candidate", restarted._state.status)
-        self.assertEqual(("candidate-diagnostic",), restarted._state.emitted_candidate_keys)
-        self.assertEqual({"fill-diagnostic-1"}, restarted._seen_fill_ids)
-        self.assertEqual("intent-diagnostic-1", restarted._status["pending_intent_id"])
-        self.assertEqual("STOPPED", restarted.status["state"])
+        self.assertEqual(42, restarted.episode.status["input_cursor"])
+        self.assertEqual(7, restarted.episode._episode_position._fill_cursor)
+        self.assertEqual("candidate", restarted.episode._episode_position._state.status)
+        self.assertEqual(("candidate-diagnostic",), restarted.episode._episode_position._state.emitted_candidate_keys)
+        self.assertEqual({"fill-diagnostic-1"}, restarted.episode._episode_position._seen_fill_ids)
+        self.assertEqual("intent-diagnostic-1", restarted.episode._status["pending_intent_id"])
+        self.assertEqual("STOPPED", restarted.episode.status["state"])
 
         calls = [
             call for call in summarize_db_calls(started, time.time() + 1, mode="raw")["calls"]
@@ -6508,17 +7734,20 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             )
 
     def test_query_cache_reader_keeps_native_context_and_separates_metrics(self) -> None:
+        clock = CollectorTestClock(datetime(2020, 1, 3, 10, 5, tzinfo=KST))
+        self.enterContext(patch.object(self.store, "_now_provider", clock.now))
         hit_key, expired_key, missing_key = self._key(), self._key(), self._key()
         value = StoredQuery({"rows": ["reader"]}, True, "next")
-        self.store.save_query(hit_key, "ka10081", time.time() + 60, value)
+        self.store.save_query(hit_key, "ka10081", clock.now().timestamp() + 60, value)
         with self.store._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO central_api_query_cache"
                 "(cache_key,api_id,expires_at,payload_json,has_next,next_key) "
                 "VALUES(%s,%s,%s,%s,%s,%s)",
-                (expired_key, "ka10081", time.time() - 60, "{}", False, ""),
+                (expired_key, "ka10081", clock.now().timestamp(), "{}", False, ""),
             )
 
+        clock.offset += 1
         started = time.time()
         self.assertEqual(value, self.store.load_query(hit_key))
         self.assertIsNone(self.store.load_query(expired_key))
@@ -6943,6 +8172,80 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             cursor.execute("SELECT cache_key FROM central_api_query_cache WHERE cache_key=ANY(%s)",
                            ([committed_key, discarded_key],))
             self.assertEqual([(committed_key,)], cursor.fetchall())
+
+
+class NewsJobResultPostgresTests(_news_job_contracts.NewsJobResultNativeTests):
+    postgres = True
+
+    @classmethod
+    def setUpClass(cls):
+        cls.test_url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
+        if not cls.test_url:
+            raise unittest.SkipTest("dedicated PostgreSQL test database not configured")
+        if urlsplit(cls.test_url).path.lstrip("/") != "kiwoom_monitor_diagnostic_test":
+            raise RuntimeError("refusing news result tests outside dedicated diagnostic DB")
+
+    def _make_store(self, path):
+        from psycopg import sql
+        from psycopg.conninfo import make_conninfo
+
+        schema = "ar04_" + uuid.uuid4().hex
+        with psycopg.connect(self.test_url) as connection:
+            self.assertEqual("kiwoom_monitor_diagnostic_test", connection.execute("SELECT current_database()").fetchone()[0])
+            connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        def drop_schema():
+            with psycopg.connect(self.test_url) as connection:
+                connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+                self.assertEqual((None,), connection.execute("SELECT to_regnamespace(%s)", (schema,)).fetchone())
+        self.addCleanup(drop_schema)
+        return PostgresQueryStore(make_conninfo(self.test_url, options=f"-c search_path={schema}"), now_provider=self._now)
+
+
+from tests.unit import test_news_body_processor as _news_body_contracts
+
+
+class NewsBodyProcessorPostgresTests(_news_body_contracts.NewsBodyNativeTests):
+    postgres=True
+
+    def make_store(self, path):
+        from psycopg import sql
+        from psycopg.conninfo import make_conninfo
+        from kiwoom_monitor.infrastructure.persistence.postgres_test_target import explicit_dedicated_url
+        target=explicit_dedicated_url(os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL',''))
+        schema='news_body_'+uuid.uuid4().hex
+        with psycopg.connect(target) as connection:
+            self.assertEqual('kiwoom_monitor_diagnostic_test',connection.execute('SELECT current_database()').fetchone()[0])
+            connection.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
+        def cleanup():
+            with psycopg.connect(target) as connection:
+                connection.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
+                self.assertEqual((None,),connection.execute('SELECT to_regnamespace(%s)',(schema,)).fetchone())
+        self.addCleanup(cleanup)
+        return PostgresQueryStore(make_conninfo(target,options=f'-c search_path={schema}'),now_provider=self._now)
+
+
+
+from tests.unit import test_historical_news_pc_jobs as _historical_clock_contracts
+
+
+class HistoricalSourceClockPostgresTests(_historical_clock_contracts.HistoricalSourceClockNativeTests):
+    postgres = True
+
+    def _make_store(self, path):
+        from psycopg import sql
+        from psycopg.conninfo import make_conninfo
+        from kiwoom_monitor.infrastructure.persistence.postgres_test_target import explicit_dedicated_url
+        target = explicit_dedicated_url(os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", ""))
+        schema = "historical_clock_" + uuid.uuid4().hex
+        with psycopg.connect(target) as connection:
+            self.assertEqual("kiwoom_monitor_diagnostic_test", connection.execute("SELECT current_database()").fetchone()[0])
+            connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        def cleanup():
+            with psycopg.connect(target) as connection:
+                connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+                self.assertEqual((None,), connection.execute("SELECT to_regnamespace(%s)", (schema,)).fetchone())
+        self.addCleanup(cleanup)
+        return PostgresQueryStore(make_conninfo(target, options=f"-c search_path={schema}"), now_provider=lambda: self.clock[0])
 
 
 if __name__ == "__main__":

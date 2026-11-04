@@ -28,6 +28,7 @@ class ValidatedCredential:
     account_ref: str | None = None
     run_id: str | None = None
     prepared: Any = field(default=None, repr=False)
+    execution_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -304,6 +305,10 @@ class CredentialRuntime:
                     raise ValueError
                 uuid.UUID(candidate.account_ref)
                 uuid.UUID(candidate.run_id)
+                if candidate.execution_run_id is not None and (
+                        op.provider != "kiwoom_mock"
+                        or not candidate.execution_run_id.startswith("mock_auto_run_")):
+                    raise ValueError
                 scope = await asyncio.to_thread(self.store.resolve_account_scope, "kiwoom",
                                                 op.provider.removeprefix("kiwoom_"), candidate.account_ref)
                 if not scope["verified"] or scope["canonical_account_ref"] != candidate.account_ref:
@@ -313,7 +318,8 @@ class CredentialRuntime:
                 if old and old[-1]["account_ref"] != candidate.account_ref:
                     op.state, op.error_code = "FAILED", "ACCOUNT_CHANGED"
                     return
-            elif candidate.account_ref is not None or candidate.run_id is not None:
+            elif (candidate.account_ref is not None or candidate.run_id is not None
+                    or candidate.execution_run_id is not None):
                 raise ValueError
             op.candidate, op.state = candidate, "READY"
         except Exception as error:
@@ -408,6 +414,8 @@ class CredentialRuntime:
                           "account_ref": op.candidate.account_ref, "run_id": op.candidate.run_id,
                           "environment": op.provider.removeprefix("kiwoom_") if op.provider.startswith("kiwoom_") else None,
                           "committed_at": self._wall_now().isoformat(), "disabled": op.disabled}
+            if op.candidate.execution_run_id is not None:
+                activation["execution_run_id"] = op.candidate.execution_run_id
             op.state, commit_started = "COMMITTING", True
             hooks.begin_commit(op.profile_id, op.candidate)
             record = await asyncio.to_thread(self.vault.save, op.provider, op.profile_id, op.credentials,

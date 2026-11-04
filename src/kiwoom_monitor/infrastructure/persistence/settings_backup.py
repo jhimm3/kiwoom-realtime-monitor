@@ -13,13 +13,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from kiwoom_monitor.infrastructure.naver_news import (
-    LocalNaverNewsConfig,
-    NewsAISettings,
-    NewsFilterSettings,
-    OfficialNewsSettings,
-)
-
 from .database import DEFAULT_COLUMNS, DEFAULT_SETTINGS
 from .backup_file import write_json_backup
 from .theme_backup import ThemeBackupError, ThemeBackupService
@@ -51,12 +44,142 @@ class SettingsBackupService:
         # timestamps are not rewritten; startup restores have no API clock yet.
         self._now_provider = now_provider or kst_now
 
+    def accept_preserved_current_settings(
+        self, *, rows: dict[str, list[tuple]], ownership: dict, receipt_at: Callable[[], str],
+    ) -> tuple[dict, bool, dict]:
+        """Accept selected raw rows into an explicitly owned offline target only.
+
+        This is separate from normal backup restore: no defaults, coercion, assets,
+        sync, cache publication or live runtime activation. The first receipt and
+        data share the same native transaction. Original versions remain original.
+        """
+        import math
+        import re
+
+        columns = {
+            "settings": ("key", "value"),
+            "column_settings": ("column_name", "visible", "position", "width"),
+            "central_setting_versions": ("setting_key", "updated_at"),
+            "central_column_setting_versions": ("column_name", "updated_at"),
+        }
+        if set(rows) != set(columns) or any(
+            not isinstance(row, tuple) or len(row) != len(columns[table])
+            or any(type(value) not in (type(None), int, float, str, bytes)
+                   or type(value) is int and not -(2**63) <= value < 2**63
+                   or type(value) is float and math.isnan(value) for value in row)
+            for table, values in rows.items() for row in values
+        ):
+            raise SettingsBackupError("unsupported raw settings row")
+        count = sum(map(len, rows.values()))
+        owner_keys = {"format", "operation_id", "target_id", "source_instance", "source_owner",
+                      "manifest_sha256", "selection_sha256", "target_role", "counts"}
+        counts = ownership.get("counts", {})
+        if (set(ownership) != owner_keys or ownership.get("format") != "offline-settings-target/v1"
+                or any(not isinstance(ownership[key], str)
+                       or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", ownership[key])
+                       for key in ("operation_id", "target_id", "source_instance", "source_owner", "target_role"))
+                or any(not isinstance(ownership[key], str) or not re.fullmatch(r"[0-9a-f]{64}", ownership[key])
+                       for key in ("manifest_sha256", "selection_sha256"))
+                or set(counts) != {"captured", "selected", "unselected", "unresolved", "reference_pending"}
+                or any(type(value) is not int or value < 0 for value in counts.values())
+                or counts.get("selected") != count or not count
+                or counts.get("captured") != count + counts.get("unselected", -1)
+                or counts.get("unresolved") != counts.get("unselected")
+                or counts.get("reference_pending", 0) > counts.get("unselected", -1)):
+            raise SettingsBackupError("invalid offline settings ownership")
+        expected = {**ownership, "format": "offline-current-settings-receipt/v1",
+                    "state": "selected_raw_settings_accepted_only", "runtime_state": "OFFLINE_UNBOUND",
+                    "order_authority": False, "overall_P2_complete": False}
+        path = self._database_path.absolute()
+        if path.resolve() != path or path.is_symlink() or path.name != "offline.sqlite3":
+            raise SettingsBackupError("redirected or unexpected offline target")
+        marker = path.parent / "settings-target-owner.json"
+        owns_preaccept = False
+        if marker.exists():
+            if marker.is_symlink() or json.loads(marker.read_text(encoding="utf-8")) != ownership:
+                raise SettingsBackupError("offline target ownership conflict")
+            owns_preaccept = True
+        if not path.exists():
+            if not owns_preaccept:
+                raise SettingsBackupError("offline target ownership is required")
+            with path.open("xb"):
+                pass
+        metrics = dict(connections=1, begin=0, commit=0, rollback=0, selects=0,
+                       ddl_statements=0, data_insert_rows=0, receipt_insert_rows=0)
+        connection = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)
+
+        def select(sql, parameters=()):
+            metrics["selects"] += 1
+            return connection.execute(sql, parameters).fetchall()
+
+        def verify_rows():
+            for table, names in columns.items():
+                actual = select(f"SELECT {','.join(names)} FROM {table} ORDER BY rowid")
+                if len(actual) != len(rows[table]) or any(
+                    type(left) is not type(right)
+                    or (left.hex() != right.hex() if type(left) is float else left != right)
+                    for a, b in zip(actual, rows[table], strict=True) for left, right in zip(a, b, strict=True)
+                ):
+                    raise SettingsBackupError("offline target raw data conflict")
+
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("BEGIN IMMEDIATE")
+            metrics["begin"] = 1
+            native_objects = select("SELECT name,type FROM sqlite_master WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%'")
+            objects = {row[0] for row in native_objects}
+            allowed = {*columns, "settings_transition_receipts"}
+            if objects - allowed or any(row[1] != "table" for row in native_objects):
+                raise SettingsBackupError("offline target contains unrelated objects")
+            existing = select("SELECT receipt_json FROM settings_transition_receipts WHERE operation_id=?",
+                              (ownership["operation_id"],)) if "settings_transition_receipts" in objects else []
+            if existing:
+                receipt = json.loads(existing[0][0])
+                if {key: value for key, value in receipt.items() if key != "accepted_at"} != expected:
+                    raise SettingsBackupError("immutable settings receipt conflict")
+                verify_rows()
+                connection.rollback()
+                metrics["rollback"] = 1
+                return receipt, True, metrics
+            if not owns_preaccept or objects:
+                raise SettingsBackupError("not an empty owned settings target")
+            # No affinity is intentional in this offline carrier: original NULL,
+            # BLOB and SQLite primitive types must survive, including legacy rows.
+            # Existing repository readers retain their own current conversions.
+            for table, names in columns.items():
+                declaration = ",".join(name + (" PRIMARY KEY" if index == 0 else "")
+                                       for index, name in enumerate(names))
+                connection.execute(f"CREATE TABLE {table} ({declaration})")
+                metrics["ddl_statements"] += 1
+                connection.executemany(f"INSERT INTO {table} VALUES ({','.join('?' for _ in names)})", rows[table])
+                metrics["data_insert_rows"] += len(rows[table])
+            connection.execute("CREATE TABLE settings_transition_receipts (operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)")
+            metrics["ddl_statements"] += 1
+            verify_rows()
+            accepted_clock = datetime.fromisoformat(receipt_at())
+            if accepted_clock.utcoffset() is None:
+                raise SettingsBackupError("settings transition receipt clock must be aware")
+            accepted_at = as_kst(accepted_clock).isoformat()
+            receipt = {**expected, "accepted_at": accepted_at}
+            connection.execute("INSERT INTO settings_transition_receipts VALUES (?,?)",
+                               (ownership["operation_id"], json.dumps(receipt, ensure_ascii=False, sort_keys=True, allow_nan=False)))
+            metrics["receipt_insert_rows"] = 1
+            connection.commit()
+            metrics["commit"] = 1
+            return receipt, False, metrics
+        except BaseException:
+            connection.rollback()
+            metrics["rollback"] = 1
+            raise
+        finally:
+            connection.close()
+
     def export_to(self, path: Path, include_settings: bool = True, include_themes: bool = True, excluded_setting_keys: frozenset[str] = frozenset(), include_column_widths: bool = True, *, connection: sqlite3.Connection | None = None) -> None:
         owns_connection = connection is None
         if connection is None:
             connection = sqlite3.connect(self._database_path)
         try:
-            settings = {key: value for key, value in connection.execute("SELECT key, value FROM settings").fetchall() if key not in excluded_setting_keys}
+            settings = {key: value for key, value in connection.execute("SELECT key, value FROM settings").fetchall() if key not in excluded_setting_keys and (include_themes or key != ThemeBackupService.SYNC_STATE_KEY)}
             columns = [
                 {
                     "name": name,
@@ -74,6 +197,7 @@ class SettingsBackupService:
                 "created_at": kst_wall_now().isoformat(timespec="seconds"),
             }
             if include_settings:
+                from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
                 news_config = LocalNaverNewsConfig(self._database_path.parent / "naver_news.dat")
                 news_filter = news_config.load_filter()
                 news_ai = news_config.load_ai()
@@ -123,7 +247,7 @@ class SettingsBackupService:
                 connection.close()
 
     def _export_assets(self, settings: dict[str, str]) -> list[dict[str, str]]:
-        root = self._database_path.parent.parent
+        data_dir = self._database_path.parent
         paths = {
             settings.get(f"strength_icon_{level}_image", "") for level in ("interest", "caution", "fire")
         } | {
@@ -134,7 +258,7 @@ class SettingsBackupService:
         assets: list[dict[str, str]] = []
         total_size = 0
         for stored in sorted(value for value in paths if value):
-            resolved = self._resolve_asset_path(root, stored)
+            resolved = self._resolve_asset_path(data_dir, stored)
             if resolved is None:
                 continue
             source, maximum_size = resolved
@@ -273,7 +397,8 @@ class SettingsBackupService:
                 "INSERT INTO settings(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [(key, str(value)) for key, value in settings.items()
-                 if key in DEFAULT_SETTINGS and key not in excluded_setting_keys],
+                 if (key in DEFAULT_SETTINGS or include_themes and key == ThemeBackupService.SYNC_STATE_KEY)
+                 and key not in excluded_setting_keys],
             )
             if include_column_widths:
                 connection.executemany(
@@ -360,6 +485,9 @@ class SettingsBackupService:
     def _import_news_settings(self, raw_settings: Any, raw_shortcuts: Any) -> None:
         if not isinstance(raw_settings, dict) and not isinstance(raw_shortcuts, list):
             return
+        from kiwoom_monitor.infrastructure.naver_news import (
+            LocalNaverNewsConfig, NewsAISettings, NewsFilterSettings, OfficialNewsSettings,
+        )
         shortcuts: list[tuple[str, str]] = []
         for item in raw_shortcuts[:5] if isinstance(raw_shortcuts, list) else ():
             if not isinstance(item, dict):
@@ -441,7 +569,7 @@ class SettingsBackupService:
     def _validate_assets(self, assets: Any) -> list[tuple[Path, bytes]]:
         if not isinstance(assets, list):
             raise SettingsBackupError("설정 백업의 자산 목록 형식이 올바르지 않습니다.")
-        root = self._database_path.parent.parent
+        data_dir = self._database_path.parent
         total_size = 0
         prepared: list[tuple[Path, bytes]] = []
         seen: set[Path] = set()
@@ -451,7 +579,7 @@ class SettingsBackupService:
             stored, content = item.get("path"), item.get("content")
             if not isinstance(stored, str) or not isinstance(content, str):
                 raise SettingsBackupError("설정 백업의 자산 경로 또는 자료가 올바르지 않습니다.")
-            resolved = self._resolve_asset_path(root, stored)
+            resolved = self._resolve_asset_path(data_dir, stored)
             if resolved is None:
                 raise SettingsBackupError("설정 백업에 허용되지 않은 자산 경로가 있습니다.")
             destination, maximum_size = resolved
@@ -493,20 +621,22 @@ class SettingsBackupService:
                     temporary.unlink(missing_ok=True)
 
     @classmethod
-    def _resolve_asset_path(cls, root: Path, stored: str) -> tuple[Path, int] | None:
-        """백업 자산의 실제 대상 경로와 허용 크기를 안전하게 반환한다."""
+    def _resolve_asset_path(cls, data_dir: Path, stored: str) -> tuple[Path, int] | None:
+        """저장된 논리 data/ 경로를 실제 DB 폴더의 허용 자산으로 해석한다."""
         relative = Path(stored)
         if not stored or relative.is_absolute():
             return None
         normalized = relative.as_posix()
-        root = root.resolve()
-        candidate = (root / relative).resolve()
+        data_dir = data_dir.resolve()
         for directory, extensions, maximum_size in cls._ASSET_RULES:
-            allowed_directory = (root / directory).resolve()
+            if not normalized.startswith(f"{directory}/"):
+                continue
+            candidate = (data_dir / relative.relative_to("data")).resolve()
+            allowed_directory = (data_dir / Path(directory).relative_to("data")).resolve()
             try:
                 candidate.relative_to(allowed_directory)
             except ValueError:
                 continue
-            if normalized.startswith(f"{directory}/") and candidate.suffix.casefold() in extensions:
+            if candidate.suffix.casefold() in extensions:
                 return candidate, maximum_size
         return None

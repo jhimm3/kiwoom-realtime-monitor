@@ -5,154 +5,24 @@ size an order, or simulate fills. Missing policy/evidence blocks new candidates.
 """
 from __future__ import annotations
 
+from kiwoom_monitor.domain.strategy_contract import (
+    POLICY_ID, _time, _id, LeaderBreakoutContext, LeaderBreakoutPolicy,
+    document_leader_breakout_policy, LeaderBreakoutExecutionContract, LeaderBreakoutConfig,
+)
+
+from collections import deque
+from copy import deepcopy
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta
 import hashlib
 import json
 from functools import cached_property
+from threading import Lock
 from typing import Any, Mapping
 
+from kiwoom_monitor.application.research_replay import CandidateUniverseFrame, KrxMinuteBarFrame
+
 from kiwoom_monitor.domain.time_basis import as_kst
-
-POLICY_ID = "leader_breakout/v1"
-
-
-def _time(value):
-    at = value if isinstance(value, datetime) else datetime.fromisoformat(value)
-    if at.tzinfo is None or at.utcoffset() is None:
-        raise ValueError("leader breakout requires aware timestamps")
-    return as_kst(at)
-
-
-def _id(prefix, value):
-    return prefix + ":" + hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
-        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-
-
-@dataclass(frozen=True)
-class LeaderBreakoutContext:
-    symbol: str
-    evidence_ref: str
-    available_at: str
-    valid_until: str
-    leader_eligible: bool | None = None
-    leader_rule_ref: str | None = None
-    reference_price: int | None = None
-    structure_rule_ref: str | None = None
-    invalidation_price: int | None = None
-    hard_stop_price: int | None = None
-
-    def __post_init__(self):
-        if len(self.symbol) != 6 or not self.symbol.isdigit() or not self.evidence_ref:
-            raise ValueError("symbol and original leader/structure evidence reference required")
-        if _time(self.valid_until) <= _time(self.available_at):
-            raise ValueError("context validity must follow its availability")
-        if self.leader_eligible is not None and type(self.leader_eligible) is not bool:
-            raise ValueError("leader eligibility must be explicit boolean or null")
-        for name in ("leader_rule_ref", "structure_rule_ref"):
-            value = getattr(self, name)
-            if value is not None and (not isinstance(value, str) or not value.strip()):
-                raise ValueError(name + " requires an explicit nonempty reference or null")
-        for name in ("reference_price", "invalidation_price", "hard_stop_price"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not int or value <= 0):
-                raise ValueError(name + " must be a positive integer or null")
-
-
-@dataclass(frozen=True)
-class LeaderBreakoutPolicy:
-    policy_id: str = POLICY_ID
-    live_confirmation: str | None = None
-    research_confirmation: str | None = None
-    minimum_confirmation_observations: int | None = None
-    persistence_seconds: int | None = None
-    breakout_buffer_bps: int | None = None
-    max_data_age_seconds: int | None = None
-    signal_valid_seconds: int | None = None
-    minimum_turnover_won: int | None = None
-    live_turnover_basis: str | None = None
-    research_turnover_basis: str | None = None
-    research_turnover_lookback_bars: int | None = None
-    structural_exit_rule: str | None = None
-    hard_risk_profile_ref: str | None = None
-    contexts: tuple[LeaderBreakoutContext, ...] = ()
-    reference_level: Mapping[str, Any] | None = None
-
-    def __post_init__(self):
-        if self.policy_id != POLICY_ID:
-            raise ValueError("unknown leader breakout policy")
-        if self.reference_level is not None:
-            level = dict(self.reference_level)
-            if (set(level) != {'type', 'window_seconds', 'exclude_current_interval'}
-                    or level['type'] != 'prior_window_high' or level['exclude_current_interval'] is not True
-                    or level['window_seconds'] is not None and
-                    (type(level['window_seconds']) is not int or not 0 < level['window_seconds'] <= 86400)):
-                raise ValueError('explicit prior_window_high reference contract required')
-            object.__setattr__(self, 'reference_level', level)
-        if self.hard_risk_profile_ref is not None and (not isinstance(self.hard_risk_profile_ref, str)
-                or not self.hard_risk_profile_ref.strip()):
-            raise ValueError("hard risk profile reference must be nonempty or null")
-        for name, allowed in (("live_confirmation", "observed_price_cross"),
-                ("research_confirmation", "completed_minute_close_cross"),
-                ("live_turnover_basis", "0B_session_cumulative"),
-                ("research_turnover_basis", "completed_minute_window"),
-                ("structural_exit_rule", "price_below_invalidation")):
-            if getattr(self, name) not in (None, allowed):
-                raise ValueError("unsupported explicit rule: " + name)
-        for name in ("minimum_confirmation_observations", "max_data_age_seconds", "signal_valid_seconds", "minimum_turnover_won",
-                     "research_turnover_lookback_bars"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not int or value <= 0):
-                raise ValueError(name + " must be positive or null")
-        if self.persistence_seconds is not None and (type(self.persistence_seconds) is not int or self.persistence_seconds < 0):
-            raise ValueError("persistence_seconds must be an explicit nonnegative integer or null")
-        if self.breakout_buffer_bps is not None and (type(self.breakout_buffer_bps) is not int or self.breakout_buffer_bps < 0):
-            raise ValueError("breakout_buffer_bps must be explicit nonnegative integer or null")
-        if not isinstance(self.contexts, tuple) or any(not isinstance(c, LeaderBreakoutContext) for c in self.contexts):
-            raise ValueError("typed immutable contexts required")
-        if len(self.contexts) > 1000 or len({c.symbol for c in self.contexts}) > 200:
-            raise ValueError("leader context scope exceeds input budget")
-        if len({c.evidence_ref for c in self.contexts}) != len(self.contexts):
-            raise ValueError("duplicate evidence references")
-        if len({(c.symbol, _time(c.available_at)) for c in self.contexts}) != len(self.contexts):
-            raise ValueError("ambiguous leader contexts at the same cut")
-
-    @classmethod
-    def from_dict(cls, value):
-        raw = dict(value)
-        raw["contexts"] = tuple(LeaderBreakoutContext(**dict(c)) for c in raw.get("contexts", ()))
-        return cls(**raw)
-
-    def to_dict(self):
-        value = asdict(self)
-        if self.reference_level is None:
-            value.pop('reference_level')
-        return value
-
-    @cached_property
-    def fingerprint(self):
-        return _id("leader-breakout-policy", self.to_dict())
-
-    def missing(self, mode):
-        if mode not in {"0B", "1m"}:
-            raise ValueError("expected 0B or 1m input mode")
-        names = ["max_data_age_seconds", "signal_valid_seconds", "minimum_turnover_won",
-                 "structural_exit_rule", "hard_risk_profile_ref", "minimum_confirmation_observations", "persistence_seconds", "breakout_buffer_bps"]
-        names += (["live_confirmation", "live_turnover_basis"] if mode == "0B" else
-                  ["research_confirmation", "research_turnover_basis", "research_turnover_lookback_bars"])
-        missing = [name for name in names if getattr(self, name) in (None, "")]
-        if not self.contexts:
-            missing.append("leader_structure_context")
-        if self.reference_level is not None and self.reference_level['window_seconds'] is None:
-            missing.append('reference_level.window_seconds')
-        return tuple(missing)
-
-
-def document_leader_breakout_policy():
-    """00 section 10's observation draft, with no invented numeric trading values."""
-    return LeaderBreakoutPolicy(live_confirmation='observed_price_cross',
-        research_confirmation='completed_minute_close_cross', reference_level={
-            'type':'prior_window_high', 'window_seconds':None, 'exclude_current_interval':True})
 
 
 def document_baseline_missing(policy,mode):
@@ -281,141 +151,6 @@ class LeaderBreakoutState:
     episode_id: str = ""
     crossed_at: str = ""
     confirmation_count: int = 0
-
-
-@dataclass(frozen=True)
-class LeaderBreakoutExecutionContract:
-    """Operator-supplied execution terms; absent terms never acquire defaults."""
-    version: str = "leader_breakout_execution/v1"
-    sizing_mode: str | None = None
-    quantity: int | None = None
-    capital_won: int | None = None
-    order_type: str | None = None
-    session_exit_policy: str | None = None
-    session_exit_buffer_seconds: int | None = None
-    exit_quantity_rule: str | None = None
-    research_exit_observation: str | None = None
-    leader_rule_ref: str | None = None
-    structure_rule_ref: str | None = None
-    hard_risk_profile: Mapping[str, Any] | None = None
-
-    def __post_init__(self):
-        if self.version != "leader_breakout_execution/v1":
-            raise ValueError("unsupported leader execution contract")
-        for name, allowed in (("sizing_mode", "fixed_quantity"), ("order_type", "LIMIT"),
-                ("exit_quantity_rule", "all_owned"), ("research_exit_observation", "completed_minute_close")):
-            if getattr(self, name) not in (None, allowed):
-                raise ValueError("unsupported explicit execution term: " + name)
-        for name in ("quantity", "capital_won"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not int or value <= 0):
-                raise ValueError(name + " must be positive or null")
-        from .breakout_strategy import REGULAR_SESSION_EXIT_POLICY, validate_session_exit_policy
-        if self.session_exit_policy not in (None, "hold_across_sessions", REGULAR_SESSION_EXIT_POLICY):
-            raise ValueError("unsupported explicit leader session exit policy")
-        if self.session_exit_buffer_seconds is not None:
-            if self.session_exit_policy == REGULAR_SESSION_EXIT_POLICY:
-                validate_session_exit_policy(self.session_exit_policy, self.session_exit_buffer_seconds)
-            elif type(self.session_exit_buffer_seconds) is not int or self.session_exit_buffer_seconds != 0:
-                raise ValueError("hold-across-sessions requires an explicit zero exit buffer")
-        for name in ("leader_rule_ref", "structure_rule_ref"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not str or not value.strip()):
-                raise ValueError("explicit rule reference or null required")
-        if self.hard_risk_profile is not None:
-            raw = dict(self.hard_risk_profile)
-            if set(raw) != {"version", "profile_ref", "rule"} or raw["version"] != "leader_hard_risk/v1" or raw["rule"] != "pinned_absolute_price" or not raw["profile_ref"]:
-                raise ValueError("explicit pinned absolute-price hard risk document required")
-            object.__setattr__(self, "hard_risk_profile", raw)
-
-    def to_dict(self):
-        return asdict(self)
-
-    @property
-    def fingerprint(self):
-        return _id("leader-execution/v1", self.to_dict())
-
-    def missing(self, mode):
-        names = [f.name for f in fields(self) if f.name != "version" and
-                 (mode == "1m" or f.name != "research_exit_observation")]
-        return tuple("execution." + name for name in names if getattr(self, name) is None)
-
-
-@dataclass(frozen=True)
-class LeaderBreakoutConfig(LeaderBreakoutPolicy):
-    """Registered Family config. Original orderless policy serialization is unchanged."""
-    execution_contract: LeaderBreakoutExecutionContract | None = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.execution_contract is not None and not isinstance(self.execution_contract, LeaderBreakoutExecutionContract):
-            raise ValueError("typed leader execution contract required")
-
-    @classmethod
-    def from_dict(cls, value):
-        raw = dict(value)
-        contract = raw.pop("execution_contract", None)
-        policy = LeaderBreakoutPolicy.from_dict(raw)
-        return cls(**{f.name: getattr(policy, f.name) for f in fields(LeaderBreakoutPolicy)},
-                   execution_contract=LeaderBreakoutExecutionContract(**contract) if contract is not None else None)
-
-    def to_dict(self):
-        # Canonical JSON arrays, including nested contexts, roundtrip through files/API.
-        value = asdict(self)
-        if self.reference_level is None:
-            value.pop('reference_level')
-        return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
-
-    @property
-    def policy(self):
-        return LeaderBreakoutPolicy(**{f.name: getattr(self, f.name) for f in fields(LeaderBreakoutPolicy)})
-
-    @property
-    def rules_document(self):
-        return {k: v for k, v in self.policy.to_dict().items() if k != "contexts"}
-
-    @property
-    def rules_hash(self):
-        return _id("leader-rules/v1", self.rules_document)
-
-    def execution_missing(self, mode, *, require_contexts=True):
-        reasons = list(self.policy.missing(mode))
-        if self.reference_level is not None:
-            reasons.append('document_baseline_observation_only')
-        if not require_contexts:
-            reasons = [r for r in reasons if r != "leader_structure_context"]
-        contract = self.execution_contract
-        if contract is None:
-            return tuple(reasons + ["execution_contract"])
-        reasons += list(contract.missing(mode))
-        risk = contract.hard_risk_profile
-        if risk is not None and risk["profile_ref"] != self.hard_risk_profile_ref:
-            reasons.append("execution.hard_risk_profile_mismatch")
-        for context in self.contexts:
-            if context.leader_rule_ref != contract.leader_rule_ref or context.structure_rule_ref != contract.structure_rule_ref:
-                reasons.append("execution.context_rule_mismatch")
-        return tuple(dict.fromkeys(reasons))
-
-    @property
-    def strategy_version(self):
-        return "v1"
-
-    @property
-    def session_exit_policy(self):
-        value = self.execution_contract.session_exit_policy if self.execution_contract else None
-        return "" if value in (None, "hold_across_sessions") else value
-
-    @property
-    def session_exit_buffer_seconds(self):
-        return self.execution_contract.session_exit_buffer_seconds if self.execution_contract else None
-
-    @property
-    def quantity(self):
-        return self.execution_contract.quantity if self.execution_contract else None
-
-    @property
-    def capital_won(self):
-        return self.execution_contract.capital_won if self.execution_contract else None
 
 
 def leader_session_entry_rejection(config, at):
@@ -849,3 +584,120 @@ def evaluate_leader_breakout_minutes(policy, observations, *, session_profile, c
         "candidate_count": sum(d["new_candidate"] for d in decisions), "bar_count": len(decisions),
         "blocked_count": sum(d["status"] == "BLOCKED" for d in decisions),
         "fills_simulated": False, "performance_verified": False, "order_authorized": False}
+
+
+class LeaderTradeInputs:
+    """Own bounded actual-0B delivery and continuity, without native authority."""
+
+    def __init__(self):
+        self._queue = deque()
+        self._queue_lock = Lock()
+        self._observations = {}
+        self._source = None
+        self._discontinuity = ""
+        self._stop_quote = None
+        # Legacy leader checkpoints may contain decoded minute documents. They
+        # are opaque compatibility inputs here, never a live leader price feed.
+        self._restored_bars = {}
+        self._restored_universes = []
+
+    def reset(self, reason):
+        with self._queue_lock:
+            self._queue.clear()
+            self._discontinuity = reason
+            self._stop_quote = None
+
+    def offer(self, payload, received_at, *, source, approved):
+        if payload.get("market", "KRX") != "KRX":
+            return None
+        if approved is not True or not source:
+            self.reset("0B_source_unapproved")
+            return None
+        envelope = (deepcopy(payload), as_kst(received_at), source)
+        generation = (source, envelope[1].date())
+        with self._queue_lock:
+            if self._source != generation:
+                self._queue.clear()
+                self._discontinuity = "0B_source_generation_changed"
+                self._source = generation
+                self._stop_quote = None
+            if len(self._queue) >= 1000:
+                self._queue.clear()
+                self._discontinuity = "0B_input_overflow_no_cross_bridge"
+                self._stop_quote = None
+                return None
+            self._queue.append(envelope)
+        return envelope
+
+    def take_discontinuity(self):
+        with self._queue_lock:
+            reason = self._discontinuity
+            self._discontinuity = ""
+        if reason:
+            self._observations.clear()
+        return reason
+
+    def take(self):
+        with self._queue_lock:
+            if self._discontinuity:
+                self._observations.clear()
+                self._discontinuity = ""
+            return self._queue.popleft() if self._queue else None
+
+    def reset_evaluations(self):
+        self._observations.clear()
+
+    @staticmethod
+    def resolve_config(admitted, current, *, position_open):
+        if position_open:
+            # An actual position retains admitted rules and pinned thesis.
+            return admitted
+        if not isinstance(current, Mapping) or type(current.get("revision")) is not int:
+            raise ValueError("current_leader_context_unavailable")
+        policy = LeaderBreakoutPolicy.from_dict(current["policy"])
+        config = replace(admitted, contexts=policy.contexts)
+        if LeaderBreakoutConfig.from_dict(policy.to_dict()).rules_hash != config.rules_hash:
+            raise ValueError("current_leader_rules_require_new_approval")
+        return config
+
+    def evaluate_trade(self, config, payload, *, received_at, source, decision_time,
+                       position_open, position_context):
+        symbol = str(payload.get("code", ""))
+        if symbol not in self._observations and len(self._observations) >= 200:
+            raise ValueError("leader_symbol_input_budget_exceeded")
+        raw, after = evaluate_leader_breakout_trade(config.policy, payload, received_at=received_at,
+            source=source, decision_time=decision_time, state=self._observations.get(symbol),
+            position_open=position_open, position_context=position_context)
+        self._observations[symbol] = after
+        if position_context is None:
+            position_context = next((c for c in config.contexts if c.evidence_ref == raw["context_ref"]), None)
+        return raw, position_context
+
+    def capture_stop_quote(self, config, payload, *, received_at, source, decision_time, position_context):
+        raw, _ = evaluate_leader_breakout_trade(config.policy, payload, received_at=received_at,
+            source=source, decision_time=decision_time, position_open=True, position_context=position_context)
+        previous = self._stop_quote
+        if not any(r in raw["reasons"] for r in ("input_stale", "input_from_future", "price_unavailable")) and (
+                previous is None or datetime.fromisoformat(raw["available_at"]) > datetime.fromisoformat(previous["available_at"])):
+            self._stop_quote = raw
+            return raw
+        return None
+
+    @property
+    def latest_stop_quote(self):
+        return self._stop_quote
+
+    def clear_stop_quote(self):
+        self._stop_quote = None
+
+    def restore_bars(self, values):
+        self._restored_bars = {
+            (frame.code, frame.observation_key): frame
+            for frame in (KrxMinuteBarFrame(**value) for value in values)
+        }
+
+    def restore_universes(self, values):
+        self._restored_universes = [CandidateUniverseFrame(**value) for value in values]
+
+    def frames_for_checkpoint(self):
+        return self._restored_bars.values(), self._restored_universes

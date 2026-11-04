@@ -6,7 +6,7 @@ import asyncio
 import hmac
 import inspect
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Callable
@@ -91,10 +91,11 @@ class MockCredentialOwner:
 
     def __init__(self, store: Any, vault: Any, *, hmac_key: bytes,
                  legacy_bundle: Any = None, legacy_monitor_enabled: bool = False, on_change: Any = None,
-                 now_provider: Callable[[], datetime] | None = None):
+                 now_provider: Callable[[], datetime] | None = None, capture_scope=None):
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
         self.store, self.vault, self.hmac_key = store, vault, hmac_key
         self._now_provider = now_provider
+        self._capture_scope = capture_scope
         self._legacy_monitor_enabled = legacy_monitor_enabled
         self._bundles: dict[str, MockAccountBundle] = {}
         self._contexts = {"nas-mock-default": legacy_bundle} if legacy_bundle is not None else {}
@@ -272,7 +273,12 @@ class MockCredentialOwner:
         previous = self._contexts.get(profile_id)
         activation = current.payload.get("activation", {}) if current else {}
         account_ref = previous.account_ref if previous else activation.get("account_ref")
-        run_id = previous.run_id if previous else activation.get("run_id")
+        execution_run_id = (
+            previous.run_id if previous is not None and previous.runtime_mode is MockAccountRuntimeMode.AUTOMATIC
+            else activation.get("execution_run_id")
+        )
+        run_id = (activation.get("run_id") or
+                  (previous.run_id if previous is not None and execution_run_id is None else None))
         if current is None:
             raise CredentialOperationError("ACCOUNT_IDENTITY_UNVERIFIED")
         if not account_ref:
@@ -322,7 +328,8 @@ class MockCredentialOwner:
             configuration["revision"], lock, self._revisions.get(profile_id),
             self._settings_revisions.get(profile_id), bool(previous and previous.monitor.is_started))
         plan.previous_disabled = current.disabled
-        return ValidatedCredential(account_ref=account_ref, run_id=run_id, prepared=plan)
+        return ValidatedCredential(account_ref=account_ref, run_id=run_id, prepared=plan,
+                                   execution_run_id=execution_run_id)
 
     async def _prepare(self, profile_id, current, credentials, *, bootstrap=False):
         if profile_id in self.reserved_profiles:
@@ -385,15 +392,35 @@ class MockCredentialOwner:
                     client = source._client.fork_verified_candidate(prepared)
                     broker = CentralRestBroker(client, allowed_endpoints=MOCK_ACCOUNT_ENDPOINTS,
                                                namespace=f"mock-account:{account_ref}")
-                run_id = (previous.run_id if previous else
-                          (current.payload.get("activation", {}).get("run_id") if current else None)) or str(uuid.uuid4())
+                # Credential activation UUID and the immutable AUTO order run
+                # identify different lifetimes. Preserve both at this boundary.
+                activation = current.payload.get("activation", {}) if current else {}
+                execution_run_id = (
+                    previous.run_id if previous is not None and previous.run_id.startswith("mock_auto_run_")
+                    else activation.get("execution_run_id")
+                )
+                run_id = (activation.get("run_id")
+                          or (previous.run_id if previous is not None and execution_run_id is None else None)
+                          or str(uuid.uuid4()))
                 uuid.UUID(run_id)
+                if execution_run_id is not None:
+                    repository = ForwardEvaluationRepository(self.store)
+                    control = await drain_thread_call(repository.load_mock_automation_control, account_ref)
+                    spec = (await drain_thread_call(repository.load_mock_automation_spec, account_ref, control.active_spec_id)
+                            if control is not None else None)
+                    admission = (await drain_thread_call(repository.load_mock_automation_admission_for_spec,
+                        account_ref, control.active_spec_id) if control is not None else None)
+                    if (control is None or control.execution_run_id != execution_run_id or spec is None
+                            or spec.credential_profile_id != profile_id or admission is None
+                            or admission.execution_run_id != execution_run_id):
+                        raise CredentialOperationError("PROFILE_RUNTIME_NOT_READY", 503)
                 plan = _MockCredentialPlan(client, broker, prepared, identity, previous,
                     account_ref, run_id, configuration["revision"], lock,
                     self._revisions.get(profile_id), self._settings_revisions.get(profile_id),
                     bool(previous and previous.monitor.is_started))
                 plan.previous_disabled = bool(current and current.disabled)
-                return ValidatedCredential(account_ref=account_ref, run_id=run_id, prepared=plan)
+                return ValidatedCredential(account_ref=account_ref, run_id=run_id, prepared=plan,
+                                           execution_run_id=execution_run_id)
             except Exception:
                 lock.release()
                 if not any(b.account_ref == account_ref for b in self._bundles.values()):
@@ -440,11 +467,28 @@ class MockCredentialOwner:
         configuration = await asyncio.to_thread(self.store.load_account_settings, binding.scope.to_dict())
         if configuration["active_profile_id"] not in {None, profile_id}:
             raise RuntimeError("ACCOUNT_PROFILE_CONFLICT")
+        context = None
+        if candidate.execution_run_id is not None:
+            repository = ForwardEvaluationRepository(self.store)
+            control = await drain_thread_call(repository.load_mock_automation_control, plan.account_ref)
+            admission = (await drain_thread_call(repository.load_mock_automation_admission_for_spec,
+                plan.account_ref, control.active_spec_id) if control is not None else None)
+            if (control is None or admission is None
+                    or control.execution_run_id != candidate.execution_run_id
+                    or admission.execution_run_id != candidate.execution_run_id):
+                raise RuntimeError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
+            context = MockAutomationRuntimeContext(MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION,
+                plan.account_ref, candidate.execution_run_id, control.active_spec_id,
+                admission.admission_id, control.control_revision, record.revision)
         bundle = MockAccountBundle(self.store, settings=plan.prepared.settings,
-            account_ref=plan.account_ref, run_id=plan.run_id, credential_profile_id=profile_id,
+            account_ref=plan.account_ref, run_id=candidate.execution_run_id or plan.run_id,
+            credential_profile_id=profile_id,
             identity_hmac_key=self.hmac_key, order_transport_enabled=configuration["mock_order_enabled"],
             client=plan.client, broker=plan.broker, identity=plan.identity, binding=binding,
-            require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider)
+            require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider,
+            capture_scope=self._capture_scope,
+            runtime_mode=MockAccountRuntimeMode.AUTOMATIC if context is not None else MockAccountRuntimeMode.MANUAL,
+            automation_context=context)
         self._contexts[profile_id] = bundle  # Retain failed committed transport for explicit recovery.
         try:
             if self._closing: raise RuntimeError("MOCK_OWNER_CLOSED")
@@ -486,7 +530,9 @@ class MockCredentialOwner:
                 account_ref=previous.account_ref, run_id=previous.run_id, credential_profile_id=profile_id,
                 identity_hmac_key=self.hmac_key, order_transport_enabled=previous.gateway is not None,
                 client=plan.client, broker=plan.broker, identity=previous._identity, binding=previous.binding,
-                require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider)
+                require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider,
+                capture_scope=self._capture_scope, runtime_mode=previous.runtime_mode,
+                automation_context=previous.automation_context)
             try:
                 if plan.previous_monitor_enabled:
                     restored.set_position_order_observation_account(self._position_order_observation_account)
@@ -607,7 +653,8 @@ class MockCredentialOwner:
                 run_id=old.run_id, credential_profile_id=profile_id, identity_hmac_key=self.hmac_key,
                 order_transport_enabled=saved["mock_order_enabled"], client=old.client, broker=old.broker,
                 identity=old._identity, binding=old.binding, require_initial_read=True, read_limiter=self._slots,
-                now_provider=self._now_provider)
+                now_provider=self._now_provider, capture_scope=self._capture_scope,
+                runtime_mode=old.runtime_mode, automation_context=old.automation_context)
             self._contexts[profile_id] = new
             new.set_position_order_observation_account(self._position_order_observation_account)
             if saved["monitor_enabled"]: await new.start()
@@ -640,6 +687,20 @@ class MockCredentialOwner:
             self._pending_profiles.discard(profile_id)
             lock.release()
 
+    async def require_execution_settings(self, profile_id, *, expected_settings_revision, credential_revision):
+        """Keep the existing saved/applied settings fence for either runtime mode."""
+        bundle = self._bundles.get(profile_id)
+        if bundle is None or bundle.binding is None or self._closing:
+            raise CredentialOperationError("PROFILE_RUNTIME_NOT_READY", 503)
+        settings = await drain_thread_call(self.store.load_account_settings, self._scope(bundle.account_ref))
+        if (settings["revision"] != expected_settings_revision
+                or self._settings_revisions.get(profile_id) != expected_settings_revision
+                or self._revisions.get(profile_id) != credential_revision):
+            raise CredentialOperationError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
+        if not settings["monitor_enabled"] or not settings["mock_order_enabled"]:
+            raise CredentialOperationError("MOCK_ORDER_TRANSPORT_DISABLED", 409)
+        return settings
+
     async def switch_execution_mode(
         self,
         profile_id: str,
@@ -661,15 +722,8 @@ class MockCredentialOwner:
         ):
             raise CredentialOperationError("ACCOUNT_RUNTIME_CONTEXT_MISMATCH", 409)
         scope = self._scope(old.account_ref)
-        settings = await drain_thread_call(self.store.load_account_settings, scope)
-        if (
-            settings["revision"] != expected_settings_revision
-            or self._settings_revisions.get(profile_id) != expected_settings_revision
-            or self._revisions.get(profile_id) != credential_revision
-        ):
-            raise CredentialOperationError("ACCOUNT_SETTINGS_REVISION_CONFLICT")
-        if not settings["monitor_enabled"] or not settings["mock_order_enabled"]:
-            raise CredentialOperationError("MOCK_ORDER_TRANSPORT_DISABLED", 409)
+        settings = await self.require_execution_settings(profile_id,
+            expected_settings_revision=expected_settings_revision, credential_revision=credential_revision)
         lock = self._account_locks.setdefault(old.account_ref, asyncio.Lock())
         if lock.locked() or profile_id in self._pending_profiles or profile_id in self._booting:
             raise CredentialOperationError("PROFILE_BUSY")
@@ -710,6 +764,7 @@ class MockCredentialOwner:
                 runtime_mode=mode,
                 automation_context=automation_context,
                 now_provider=self._now_provider,
+                capture_scope=self._capture_scope,
             )
             self._contexts[profile_id] = new
             new.set_position_order_observation_account(self._position_order_observation_account)
@@ -752,6 +807,7 @@ class MockAccountBundle:
         runtime_mode: MockAccountRuntimeMode = MockAccountRuntimeMode.MANUAL,
         automation_context: MockAutomationRuntimeContext | None = None,
         now_provider: Callable[[], datetime] | None = None,
+        capture_scope=None,
     ) -> None:
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
 
@@ -803,6 +859,8 @@ class MockAccountBundle:
             account_ref=account_ref, run_id=run_id, owner_token=uuid.uuid4().hex,
             now_provider=now if now_provider is not None else (lambda: datetime.now(KST)),
         )
+        if runtime_mode is MockAccountRuntimeMode.AUTOMATIC:
+            self.runtime.set_new_orders_enabled(False)
         self.monitor = MockAccountMonitor(
             KiwoomMockAccountReader(
                 self.broker, environment="mock", account_ref=account_ref, now_provider=now,
@@ -814,6 +872,7 @@ class MockAccountBundle:
             automation_binding_revision=(binding.binding_revision if binding is not None else 0),
             automation_account_scope=(binding.scope if binding is not None else None),
             new_orders_enabled_on_start=(runtime_mode is MockAccountRuntimeMode.MANUAL),
+            capture_scope=capture_scope,
         )
         async def token_with_limit():
             async with read_limiter:
@@ -854,6 +913,15 @@ class MockAccountBundle:
     @property
     def automation_context(self) -> MockAutomationRuntimeContext | None:
         return self._automation_context
+
+    def refresh_automation_control(self, control) -> None:
+        """Reflect an acknowledged control CAS in this bundle's existing fence."""
+        context = self._automation_context
+        if (context is None or control.account_ref != self.account_ref
+                or control.execution_run_id != self.run_id or control.active_spec_id != context.spec_id
+                or control.control_revision < context.control_revision):
+            raise RuntimeError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
+        self._automation_context = replace(context, control_revision=control.control_revision)
 
     @property
     def binding(self):

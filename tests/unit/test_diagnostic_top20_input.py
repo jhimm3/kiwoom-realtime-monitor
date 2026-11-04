@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+
 import asyncio
 import copy
 import tempfile
@@ -59,7 +66,9 @@ class Top20InputTests(unittest.IsolatedAsyncioTestCase):
         store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3")
         store.initialize()
         service = AutonomousTop20Service(broker, RealtimeHub(), store, now_provider=lambda: NOW,
-            catalog_loader=lambda: tuple((row["stk_cd"], row["stk_nm"], "KOSPI") for row in rows()))
+            catalog_loader=lambda: tuple((row["stk_cd"], row["stk_nm"], "KOSPI") for row in rows()),
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         try:
             codes = await service.refresh_ranking_once()
             if service._fundamentals_tasks:
@@ -147,13 +156,27 @@ class Top20InputTests(unittest.IsolatedAsyncioTestCase):
             @captured_workload("top20", "autonomous_top20")
             async def child(self):
                 return operation_identity()
+        class Workflow:
+            def __init__(self, identity):
+                self.identity = identity
+
+            @captured_workload("top20", "autonomous_top20",
+                               producer_identity=lambda owner: owner.identity)
+            async def child(self):
+                return operation_identity()
         first, peer = Owner(), Owner()
+        identity = f"autonomous_top20:{id(first):x}"
+        workflow = Workflow(identity)
         with patch.object(trace, "input_token", return_value=None):
-            with capture_owner("top20", f"autonomous_top20:{id(first):x}", "root", cause_input_id="cause"):
+            with capture_owner("top20", identity, "root", cause_input_id="cause"):
                 child = await asyncio.create_task(first.child())
                 other = await asyncio.create_task(peer.child())
+                moved = await asyncio.create_task(workflow.child())
         self.assertEqual("cause", child["cause_input_id"])
         self.assertEqual("", other["cause_input_id"])
+        self.assertEqual("cause", moved["cause_input_id"])
+        self.assertEqual(identity, moved["producer_component"])
+        self.assertTrue(moved["actor_id"].startswith(identity + ":"))
 
     async def test_replay_rejects_unused_response_and_does_not_execute_descendants(self):
         events = []

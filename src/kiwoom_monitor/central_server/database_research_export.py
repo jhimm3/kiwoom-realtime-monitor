@@ -4,12 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from kiwoom_monitor.domain.research_contract import RESEARCH_OBSERVATION_KINDS
 
 from .database_codec import (
+    _instant_time_key,
     _observation_revision_columns,
     bounded_limit,
     json_mapping,
@@ -24,17 +25,27 @@ class SQLiteResearchExportStoreMixin:
             normalized_start, normalized_end, normalized_kinds = _observation_export_inputs(
                 start, end, kinds,
             )
+            # Keep the existing BINARY range index as a conservative candidate
+            # filter; final eligibility/order uses exact instants, not raw offsets.
+            lower = (normalized_start - timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="microseconds")
+            upper = (normalized_end + timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="microseconds")
             placeholders = ",".join("?" for _ in normalized_kinds)
             sql = (
                 "SELECT revision_id,source_id,available_at FROM central_observation_revisions "
-                f"WHERE kind IN ({placeholders}) AND available_at>=? AND available_at<?"
+                f"WHERE kind IN ({placeholders}) AND available_at>=? AND available_at<? "
+                "AND research_time_key(available_at)>=? AND research_time_key(available_at)<?"
             )
-            parameters: list[object] = [*normalized_kinds, normalized_start.isoformat(), normalized_end.isoformat()]
+            parameters: list[object] = [*normalized_kinds, lower, upper,
+                                      _instant_time_key(normalized_start, require_aware=True),
+                                      _instant_time_key(normalized_end, require_aware=True)]
             if subject:
                 sql += " AND subject=?"
                 parameters.append(subject)
-            sql += " ORDER BY available_at,accepted_sequence,revision_id"
+            sql += " ORDER BY research_time_key(available_at),accepted_sequence,revision_id"
             with self._lock, self._connection() as connection:
+                connection.create_function("research_time_key", 1,
+                                           lambda value: _instant_time_key(value, require_aware=True),
+                                           deterministic=True)
                 selected = connection.execute(sql, parameters).fetchall()
                 manifest = _observation_export_manifest(
                     normalized_start, normalized_end, normalized_kinds, subject, selected,

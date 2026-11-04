@@ -331,5 +331,74 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
         self.assertEqual("https://nas.example.test/api/v2/kiwoom/account-query", requests[0][0])
 
 
+
+class RemoteOperationContextTests(unittest.TestCase):
+    def test_three_single_opener_boundaries_bind_header_context_and_preserve_results(self):
+        from kiwoom_monitor.domain import operation_context as c
+        calls = []
+        documents = [{"payload": {"value": 1}, "has_next": True, "next_key": "next"},
+                     {"bars": [{"close": 10}], "coverage": {"complete": True}},
+                     {"snapshots": []}]
+        def opener(request, **kwargs):
+            calls.append((request, c.snapshot_operation_context(), kwargs))
+            return Response(documents.pop(0))
+        client = RemoteKiwoomRestClient("https://nas.test", "private-bearer", opener=opener, timeout_seconds=9)
+        parent = c.OperationContextSnapshot("pc.ranking", "query-42")
+        with c.operation_context_scope(parent):
+            self.assertEqual(({"value": 1}, True, "next"), client.request_with_continuation("ka00198", "/rank", {}))
+            self.assertEqual((({"close": 10},), True), client.load_stored_minute_bars_with_coverage("005930", "2026-10-24"))
+            self.assertEqual({"item_inq_rank": []}, client.load_stored_ranking("5"))
+            self.assertEqual(parent, c.snapshot_operation_context())
+        self.assertEqual(3, len(calls))
+        for request, actual, kwargs in calls:
+            self.assertEqual(parent, actual)
+            self.assertEqual("query-42", request.get_header("X-request-id"))
+            self.assertEqual("Bearer private-bearer", request.get_header("Authorization"))
+            self.assertEqual("1", request.get_header("X-kiwoom-clock"))
+            self.assertEqual(9, kwargs["timeout"])
+        self.assertEqual(c.OperationContextSnapshot(), c.snapshot_operation_context())
+
+    def test_account_pages_use_one_generated_id_and_preserve_cursor_batch_context(self):
+        from kiwoom_monitor.domain import operation_context as c
+        calls = []
+        def opener(request, **kwargs):
+            body = json.loads(request.data)
+            calls.append((request.get_header("X-request-id"), c.snapshot_operation_context(), body))
+            page = body["page_index"]
+            return Response({"payload": {"page": page}, "batch_id": "original-batch", "page_index": page,
+                "complete": page == 1, "next_key": "original-cursor" if page == 0 else "",
+                "context": {"broker": "kiwoom", "environment": "real",
+                    "account_ref": "11111111-1111-1111-1111-111111111111",
+                    "credential_profile_id": "nas-real-default", "binding_revision": 2}})
+        client = RemoteKiwoomRestClient("https://nas.test", "private-bearer", opener=opener)
+        result = client.query_account_pages("kt00007", "/account", {"original": "body"})
+        self.assertEqual(({"page": 0}, {"page": 1}), result.pages)
+        self.assertEqual(2, len(calls))
+        self.assertEqual(calls[0][0], calls[1][0])
+        self.assertEqual(c.OperationContextSnapshot("pc.central_http", calls[0][0]), calls[1][1])
+        self.assertEqual("original-batch", calls[1][2]["batch_id"])
+        self.assertEqual("original-cursor", calls[1][2]["next_key"])
+        self.assertNotIn("request_id", calls[0][2])
+        self.assertEqual(c.OperationContextSnapshot(), c.snapshot_operation_context())
+
+    def test_all_four_opener_errors_restore_parent_context(self):
+        from kiwoom_monitor.domain import operation_context as c
+        from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import InterruptedAccountQueryError
+        calls = []
+        def opener(request, **kwargs):
+            calls.append((request.get_header("X-request-id"), c.snapshot_operation_context()))
+            raise TimeoutError("private-bearer")
+        client = RemoteKiwoomRestClient("https://nas.test", "private-bearer", opener=opener)
+        parent = c.OperationContextSnapshot("pc.owner", "safe-parent")
+        for action, expected in ((lambda: client.request_with_continuation("ka00198", "/rank", {}), CentralServerUnavailable),
+                                 (lambda: client.load_stored_minute_bars_with_coverage("005930", "2026-10-24"), CentralServerUnavailable),
+                                 (lambda: client.load_stored_ranking("5"), CentralServerUnavailable),
+                                 (lambda: client.query_account_pages("kt00007", "/account", {}), InterruptedAccountQueryError)):
+            with c.operation_context_scope(parent):
+                with self.assertRaises(expected):
+                    action()
+                self.assertEqual(parent, c.snapshot_operation_context())
+        self.assertEqual([("safe-parent", parent)] * 4, calls)
+
 if __name__ == "__main__":
     unittest.main()

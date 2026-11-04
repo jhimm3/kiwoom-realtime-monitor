@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from kiwoom_monitor.domain.news_ai_contract import decode_news_input_source
+
 from datetime import UTC, datetime
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 from urllib.parse import quote, urlencode
 
-from kiwoom_monitor.application.news_analysis import NewsAssessment
+from kiwoom_monitor.domain.news_ai_contract import NewsAssessment, StockNewsItem
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
-from kiwoom_monitor.infrastructure.naver_news import NewsAISettings, StockNewsItem
+
+if TYPE_CHECKING:
+    from kiwoom_monitor.infrastructure.naver_news import NewsAISettings
 
 
 class CentralNewsClient(CentralContentClient):
@@ -141,4 +145,5 @@ def _deserialize(value: dict[str, Any]) -> StockNewsItem:
             str(value.get("outlook", "")), str(value.get("reason", "")),
             int(value.get("relevance_score", 0)), int(value.get("outlook_score", 0)),
         ),
+        input_source=decode_news_input_source(value.get("input_source")),
     )

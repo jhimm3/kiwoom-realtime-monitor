@@ -91,6 +91,15 @@ class SelectiveTestToolsTests(unittest.TestCase):
         result = selector.test_impact(['src/sample/value.py'], self.root, old)
         self.assertIn('tests.unit.test_indirect', result['selected_modules'])
 
+    def test_file_resource_edges_select_consumers_without_dotted_string_imports(self):
+        self.write('src/sample/reader.py', 'VALUE = "src/sample/value.py"\n')
+        self.write('tests/unit/test_other.py', 'MODULE_NAME = "sample.value"\n')
+        result = selector.test_impact(['src/sample/value.py'], self.root)
+        self.assertEqual(['tests.unit.test_direct', 'tests.unit.test_indirect', 'tests.unit.test_linux'],
+                         result['selected_modules'])
+        self.assertIn('sample.reader', result['reasons']['tests.unit.test_indirect'][0])
+        self.assertEqual('selected', result['status'])
+
     def test_unknown_dynamic_import_expands_existing_profile_without_unrelated_profile(self):
         self.write('tests/unit/test_direct.py', 'from sample.value import VALUE\nimport importlib\nimportlib.import_module(VALUE)\n')
         result = selector.test_impact(['tests/unit/test_direct.py'], self.root)

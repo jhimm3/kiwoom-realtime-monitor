@@ -4,6 +4,8 @@ import unittest
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from kiwoom_monitor.application.mock_automation_risk import (
     VERIFIED_DAILY_PNL_SOURCE,
@@ -41,13 +43,13 @@ def cost(day, side, gross, total):
 
 
 class MockAutomationRiskTests(unittest.TestCase):
-    def snapshot(self, events, costs, *, positions, observed, cost_query_complete=True):
+    def snapshot(self, events, costs, *, positions, observed, cost_query_complete=True, revision=1):
         recovery = MockAccountRecovery(AccountSnapshot(
             ACCOUNT, 1_000_000, 0, positions, observed,
         ), ())
         return build_mock_automation_risk_snapshot(
             recovery, events, costs, (), execution_run_id="run-a", binding_revision=3,
-            reconciliation_revision=1, observed_at=observed,
+            reconciliation_revision=revision, observed_at=observed,
             broker_query_started_at=observed, broker_query_completed_at=observed,
             cost_query_complete=cost_query_complete,
         )
@@ -159,6 +161,44 @@ class MockAutomationRiskTests(unittest.TestCase):
                 repository.save_mock_automation_risk_snapshot(older)
         finally:
             store.close()
+
+    def test_overlapping_publishers_cannot_move_current_risk_backwards(self):
+        now = datetime(2026, 9, 21, 1, tzinfo=UTC)
+        first = self.snapshot((), (), positions={}, observed=now)
+        for delayed_revision, competing_revision in ((2, 2), (2, 3), (3, 2)):
+            with self.subTest(delayed=delayed_revision, competing=competing_revision), TemporaryDirectory() as directory:
+                path = Path(directory) / "risk.sqlite3"
+                store = SQLiteQueryStore(path)
+                peer_store = SQLiteQueryStore(path)
+                try:
+                    store.initialize()
+                    repository = ForwardEvaluationRepository(store)
+                    peer = ForwardEvaluationRepository(peer_store)
+                    repository.save_mock_automation_risk_snapshot(first)
+                    delayed = self.snapshot((), (), positions={}, observed=now.replace(second=1),
+                                            revision=delayed_revision)
+                    competing = self.snapshot((), (), positions={}, observed=now.replace(second=2),
+                                              revision=competing_revision)
+                    insert = store.insert_immutable_document
+
+                    def publish_peer_after_history(*args):
+                        result = insert(*args)
+                        self.assertTrue(peer.save_mock_automation_risk_snapshot(competing))
+                        return result
+
+                    with patch.object(store, "insert_immutable_document", side_effect=publish_peer_after_history):
+                        if delayed_revision > competing_revision:
+                            self.assertTrue(repository.save_mock_automation_risk_snapshot(delayed))
+                        else:
+                            with self.assertRaisesRegex(ValueError, "monotonically"):
+                                repository.save_mock_automation_risk_snapshot(delayed)
+                    latest = delayed if delayed_revision > competing_revision else competing
+                    self.assertEqual(latest, repository.load_latest_mock_automation_risk(ACCOUNT))
+                    self.assertCountEqual((first, delayed, competing),
+                                          repository.load_mock_automation_risk_snapshots(ACCOUNT))
+                finally:
+                    peer_store.close()
+                    store.close()
 
 
 if __name__ == "__main__":

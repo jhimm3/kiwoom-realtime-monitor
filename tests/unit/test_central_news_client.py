@@ -85,6 +85,27 @@ class CentralNewsClientTests(unittest.TestCase):
         self.assertIn(b'"stock_code": "005930"', requests[0].data)
         self.assertIn(b'"ai_auto_recent_limit": 20', requests[0].data)
 
+    def test_stored_page_preserves_source_references_without_changing_original_values(self):
+        source = {"version": 1, "article_revision_id": "article-original", "article_content_hash": "article-hash",
+                  "article_available_at": 100.5, "article_published_at": "2026-10-28T08:00:00+09:00",
+                  "body_revision_id": "body-original", "body_content_hash": "raw-hash", "body_status": "summary_only",
+                  "body_fetched_at": 101.25, "body_available_at": 102.75}
+        article = {"title": "title", "description": "summary", "link": "https://portal/1", "original_link": "https://origin/1",
+                   "published_at": "2026-10-28T08:00:00+09:00", "relevant": 1, "input_source": source}
+        requests = []
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return _Response(json.dumps({"items": [article], "next_offset": None}).encode())
+        client = CentralNewsClient("https://fixture.invalid", "token", opener=opener)
+        items, cursor = client.stored_page("005930", "company")
+        self.assertIsNone(cursor)
+        self.assertEqual(1, len(requests))
+        self.assertEqual("title", items[0].title)
+        self.assertEqual("https://origin/1", items[0].original_link)
+        self.assertEqual({**source, "status": "REFERENCE"}, items[0].input_source)
+        article.pop("input_source")
+        self.assertIsNone(client.stored_page("005930", "company")[0][0].input_source)
+
 
 if __name__ == "__main__":
     unittest.main()

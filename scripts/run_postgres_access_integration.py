@@ -9,39 +9,6 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
-
-
-TEST_DATABASE_NAME = "kiwoom_monitor_diagnostic_test"
-
-
-def _dedicated_url(live_url: str) -> str:
-    parts = urlsplit(live_url)
-    if parts.scheme not in {"postgres", "postgresql"} or not parts.netloc or not parts.path:
-        raise RuntimeError("KIWOOM_SERVER_DATABASE_URL is not a PostgreSQL URL")
-    if parts.path.lstrip("/") == TEST_DATABASE_NAME:
-        raise RuntimeError("KIWOOM_SERVER_DATABASE_URL points at the diagnostic test DB")
-    return urlunsplit((parts.scheme, parts.netloc, f"/{TEST_DATABASE_NAME}",
-                       parts.query, parts.fragment))
-
-
-def _explicit_dedicated_url(database_url: str) -> str:
-    parts = urlsplit(database_url)
-    if parts.scheme not in {"postgres", "postgresql"} or not parts.netloc or not parts.path:
-        raise RuntimeError("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL is not a PostgreSQL URL")
-    if parts.path.lstrip("/") != TEST_DATABASE_NAME:
-        raise RuntimeError("diagnostic DB URL must target kiwoom_monitor_diagnostic_test")
-    return database_url
-
-
-def _resolve_target_url(live_url: str, explicit_url: str) -> str:
-    if explicit_url:
-        return _explicit_dedicated_url(explicit_url)
-    if not live_url:
-        raise RuntimeError(
-            "KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL or KIWOOM_SERVER_DATABASE_URL is required"
-        )
-    return _dedicated_url(live_url)
 
 
 def _install_project_import_paths(root: Path) -> None:
@@ -52,6 +19,16 @@ def _install_project_import_paths(root: Path) -> None:
         while entry in sys.path:
             sys.path.remove(entry)
     sys.path[:0] = [source, project]
+
+
+# The shared safety policy must come from this candidate, including when this
+# file is invoked directly with an interpreter that has another checkout installed.
+_install_project_import_paths(Path(__file__).resolve().parents[1])
+from kiwoom_monitor.infrastructure.persistence.postgres_test_target import (
+    TEST_DATABASE_NAME, dedicated_url as _dedicated_url,
+    explicit_dedicated_url as _explicit_dedicated_url,
+    resolve_target_url as _resolve_target_url,
+)
 
 
 def main() -> int:
@@ -106,7 +83,6 @@ def main() -> int:
     os.environ["KIWOOM_DIAGNOSTIC_REQUIRE_EXISTING_CACHE_SCHEMA"] = "1"
 
     root = Path(__file__).resolve().parents[1]
-    _install_project_import_paths(root)
     from scripts.run_regression import _code_tree_identity, _IdentityTestResult, _suite_test_ids
 
     source_start = _code_tree_identity()

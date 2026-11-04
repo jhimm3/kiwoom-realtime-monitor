@@ -9,6 +9,9 @@ import asyncio
 import json
 import re
 import time
+from .diagnostic_replay_contract import validate_collector_message
+from .diagnostic_top20_lifecycle_input import CollectorInputRecorder
+
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -197,11 +200,14 @@ async def _exercise_fixture(measured, fixture, stop, clock):
     def no_token():
         raise AssertionError("collector replay attempted a Kiwoom token request")
 
-    collector = CentralRealtimeCollector(no_token, "real", RealtimeHub(), clock.now,
-                                         measured, snapshot_sleep=clock.sleep)
+    from . import diagnostic_top20_lifecycle_input as hub_capture
+    hub_observer = hub_capture.HubInputRecorder()
+    hub = RealtimeHub(now_provider=clock.now, observer=hub_observer)
+    collector = CentralRealtimeCollector(no_token, "real", hub, clock.now,
+                                         measured, snapshot_sleep=clock.sleep, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
     inputs, lags, pending_peak = 0, [], 0
     with db_call_source("diagnostic.collector_replay"), db_call_request_id(fixture.code):
-        await collector.start_input_replay()
+        await collector.start_input_replay(message_validator=validate_collector_message)
         collector.accept_replay_sources({(fixture.code, market) for market in _MARKETS}, reset_all=True)
         try:
             for offset, message in fixture.messages:

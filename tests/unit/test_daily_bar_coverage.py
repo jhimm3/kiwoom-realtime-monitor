@@ -4,11 +4,11 @@ import asyncio
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from kiwoom_monitor.application.daily_bar_coverage import (
-    COLLECTION, DailySourceWindow, assess_daily_coverage,
+    COLLECTION, DailySourceWindow, assess_daily_coverage, daily_query_date,
 )
 from kiwoom_monitor.application.daily_high_service import DailyHighService
 from kiwoom_monitor.application.historical_high_service import HistoricalHighTarget
@@ -32,6 +32,14 @@ def window_with(count, *, end=date(2026, 9, 30), exhausted=True):
 
 
 class DailyCoverageTests(unittest.TestCase):
+    def test_query_date_uses_explicit_kst_instead_of_input_or_host_calendar(self):
+        for value in (datetime(2031, 1, 2, 0, 5),
+                      datetime(2031, 1, 1, 15, 5, tzinfo=timezone.utc),
+                      datetime(2031, 1, 1, 23, 55, tzinfo=timezone(-timedelta(hours=8))),
+                      datetime(2031, 1, 2, 12, 30)):
+            with self.subTest(value=value):
+                self.assertEqual(date(2031, 1, 2), daily_query_date(value))
+
     def test_independent_periods_and_provisional_bars(self):
         for count in (3, 20, 249, 250):
             with self.subTest(count=count):
@@ -183,7 +191,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.broker = Broker()
         self.broker.calls = []
         self.service = AutonomousTop20Service(self.broker, RealtimeHub(), self.store, now_provider=lambda: self.now)
-        self.broker.on_daily_change = self.service.notify_daily_bars_changed
+        self.broker.on_daily_change = self.service.daily_reference.invalidate
 
     def tearDown(self):
         self.store.close()
@@ -192,7 +200,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
     def _mark_entry_ready(self, code="005930"):
         for stage in ("basic", "minutes", "daily", "daily:KRX", "flow", "high"):
             self.service._entry_stage_ready[(code, stage)] = self.service._entry_stage_token(stage, "2026-09-30")
-        self.service._daily_stage_versions[(code, "high")] = self.service._daily_versions(code)
+        self.service.daily_reference.accept_high(code, self.service.daily_reference.source_versions(code))
 
     async def test_changed_daily_input_reopens_only_daily_and_high_preparation(self):
         self.service._nxt_enabled = AsyncMock(return_value=False)
@@ -200,7 +208,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         self._mark_entry_ready()
         self._mark_entry_ready("000660")
         changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
-        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.daily_reference.invalidate)
         await asyncio.to_thread(ingestor.ingest, "ka10081", {"stk_cd": "005930"},
                                 {"stk_dt_pole_chart_qry": [changed]})
         self.assertFalse(self.service._entry_data_complete("005930", "2026-09-30"))
@@ -224,7 +232,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         await self.service._ensure_entry_daily_history("005930", "2026-09-30")
         self._mark_entry_ready()
         before = self.store.load_daily_bars("005930", "KRX", 1)[0]
-        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.daily_reference.invalidate)
         await asyncio.to_thread(ingestor.ingest, "ka10081", {"stk_cd": "005930"},
                                 {"stk_dt_pole_chart_qry": source_rows(1, end=date(2026, 9, 29))})
         self.assertTrue(self.service._entry_data_complete("005930", "2026-09-30"))
@@ -253,7 +261,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.service._nxt_enabled = AsyncMock(return_value=True)
         await self.service._ensure_entry_daily_history("005930", "2026-09-30")
         self.broker.calls.clear()
-        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.daily_reference.invalidate)
         changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
         ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
         await self.service._ensure_entry_daily_history("005930", "2026-09-30")
@@ -262,7 +270,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_change_during_coverage_publication_cannot_mark_stage_complete(self):
         self.service._nxt_enabled = AsyncMock(return_value=False)
         original = self.store.upsert_documents
-        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.daily_reference.invalidate)
         fired = False
 
         def publish_and_change(collection, *args, **kwargs):
@@ -284,7 +292,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_change_during_historical_calculation_keeps_retry_open(self):
         self.service._nxt_enabled = AsyncMock(return_value=False)
         await self.service._ensure_entry_daily_history("005930", "2026-09-30")
-        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.daily_reference.invalidate)
 
         def calculate(code, *, as_of):
             self.assertEqual("005930", code)
@@ -304,7 +312,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.service._nxt_enabled = AsyncMock(return_value=False)
         await self.service._ensure_entry_daily_history("005930", "2026-09-30")
         self._mark_entry_ready()
-        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.notify_daily_bars_changed)
+        ingestor = MarketDataIngestor(self.store, on_daily_change=self.service.daily_reference.invalidate)
         original = self.store.replace_daily_bars
         changed = {**source_rows(1, end=date(2026, 9, 29))[0], "high_pric": "999"}
         before_calls = len(self.broker.calls)
@@ -327,9 +335,9 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OSError, "COMMIT"):
             ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
         self.store.replace_daily_bars = original
-        version = self.service._daily_versions("005930")
+        version = self.service.daily_reference.source_versions("005930")
         ingestor.ingest("ka10081", {"stk_cd": "005930"}, {"stk_dt_pole_chart_qry": [changed]})
-        self.assertEqual(version, self.service._daily_versions("005930"))  # No-op retry.
+        self.assertEqual(version, self.service.daily_reference.source_versions("005930"))  # No-op retry.
         self.assertFalse(self.service._entry_data_complete("005930", "2026-09-30"))
         await self.service._ensure_entry_daily_history("005930", "2026-09-30")
         self.assertEqual(before_calls + 2, len(self.broker.calls))
@@ -376,7 +384,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("initial", "final"), (first["scope"], second["scope"]))
         self.assertEqual(4, len(self.broker.calls))
         self.assertEqual(2, len(self.store.load_documents(COLLECTION, "005930:KRX", 2)))
-        self.assertEqual({}, self.service._daily_history_locks)
+        self.assertEqual({}, self.service.daily_reference._daily_history_locks)
 
     async def test_concurrent_waiter_cancellation_keeps_owner_lock_and_reuses(self):
         self.broker.started, self.broker.release = asyncio.Event(), asyncio.Event()
@@ -391,7 +399,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.broker.release.set()
         await asyncio.gather(owner, peer)
         self.assertEqual(2, len(self.broker.calls))
-        self.assertEqual({}, self.service._daily_history_locks)
+        self.assertEqual({}, self.service.daily_reference._daily_history_locks)
 
     async def test_final_scope_requires_trading_evidence_and_target_day(self):
         self.now = datetime(2026, 9, 30, 21, 0, tzinfo=KST)
@@ -412,7 +420,7 @@ class DailyCollectorTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertEqual({}, self.service._daily_history_locks)
+        self.assertEqual({}, self.service.daily_reference._daily_history_locks)
         self.assertEqual([], self.store.load_documents(COLLECTION, "005930:KRX", 2))
         self.broker.release.set()
         original = self.store.upsert_documents

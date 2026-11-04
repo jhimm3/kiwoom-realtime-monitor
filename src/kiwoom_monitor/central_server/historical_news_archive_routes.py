@@ -15,14 +15,14 @@ from .historical_news_archive import (
 def create_historical_news_archive_router(
     historical_archive: HistoricalNewsArchiveReader | None,
     authorize: Callable[..., None],
+    *, workload_paused: Callable[[str], bool] | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
     def archive_reader() -> HistoricalNewsArchiveReader:
         if historical_archive is None:
             raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_UNAVAILABLE")
-        from .diagnostic_workloads import is_paused
-        if is_paused("historical_news_archive"):
+        if workload_paused is not None and workload_paused("historical_news_archive"):
             raise HTTPException(status_code=503, detail="HISTORICAL_NEWS_ARCHIVE_PAUSED")
         return historical_archive
 

@@ -18,6 +18,49 @@ from scripts.check_postgres_integration import (
 )
 
 class CheckPostgresIntegrationTests(unittest.TestCase):
+    def test_cleanup_keeps_exact_child_scope_and_reports_failure_without_masking_primary(self) -> None:
+        import io
+        from unittest.mock import MagicMock
+        from scripts import check_postgres_integration as check
+        primary = ValueError("owned initialization failure")
+        cleanup = RuntimeError("fixture cleanup detail must not be printed")
+        statements = []
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        def execute(query, parameters=()):
+            statements.append((query, parameters))
+            if query.startswith("DELETE FROM central_observation_revisions"):
+                raise cleanup
+        cursor.execute.side_effect = execute
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        store = MagicMock()
+        store.initialize.side_effect = primary
+        store._connect.return_value = connection
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.dict("os.environ", {"KIWOOM_SERVER_DATABASE_URL": "postgresql://unused"}), patch.object(
+                check, "PostgresQueryStore", return_value=store), patch.object(check.sys, "stdout", stdout), patch.object(
+                check.sys, "stderr", stderr):
+            with self.assertRaises(ValueError) as caught:
+                check.main()
+        self.assertIs(primary, caught.exception)
+        child = next(index for index, (query, _) in enumerate(statements)
+                     if query.startswith("DELETE FROM central_market_data_observation_meta WHERE dataset_kind="))
+        parent = next(index for index, (query, _) in enumerate(statements)
+                      if query.startswith("DELETE FROM central_observation_revisions"))
+        self.assertLess(child, parent)
+        self.assertTrue(any(query.startswith("DELETE FROM central_dataset_snapshots") for query, _ in statements[:child]))
+        meta_scope, parent_scope = statements[child][1], statements[parent][1]
+        self.assertEqual(("candidate_set", *parent_scope[:2]), meta_scope)
+        self.assertTrue(parent_scope[0].startswith("integration-"))
+        self.assertTrue(parent_scope[1].startswith("rollback-"))
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual({"status": "cleanup_failed", "reason": "RuntimeError"}, json.loads(stderr.getvalue()))
+        self.assertEqual(["integration cleanup failed: RuntimeError"], primary.__notes__)
+        self.assertNotIn("fixture cleanup detail", stderr.getvalue())
+        store.close.assert_called_once_with()
+
     def test_temporary_vault_metadata_does_not_read_or_write_live_fence(self) -> None:
         class LiveStore:
             def __init__(self):

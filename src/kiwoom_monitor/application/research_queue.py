@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Iterable, Mapping
 
-from kiwoom_monitor.application.research_families import get_research_family
+from kiwoom_monitor.domain.strategy_contract import get_research_family
 from kiwoom_monitor.application.research_hypotheses import ResearchHypothesis
 from kiwoom_monitor.application.research_search import ExperimentSpec
 
@@ -29,7 +29,7 @@ class LeaderDecisionCampaignSpec:
     research_context: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        from .leader_breakout import LeaderBreakoutPolicy
+        from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutPolicy
         from .market_session_schedule import SUPPORTED_RESEARCH_SESSION_PROFILES
         import json
         if self.version != "leader_breakout_decision_campaign/v1" or not self.dataset_id or not self.dataset_hash:

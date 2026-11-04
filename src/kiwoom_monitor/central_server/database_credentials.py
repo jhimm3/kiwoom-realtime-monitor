@@ -13,6 +13,7 @@ from time import time
 from typing import Any, Callable
 
 from .market_observations import KST, as_kst
+from .database_codec import _event_document, _json_document
 
 from kiwoom_monitor.central_server.database_account_identity import (
     _account_binding_document, _account_binding_values, _canonical_account_ref, _stable_id,
@@ -171,7 +172,9 @@ def _finalize_credential_activation(cursor: Any, value: dict[str, Any], p: str) 
     """Binding and activation in one transaction, reusable by both database dialects."""
     from kiwoom_monitor.domain.credential_contract import PROVIDER_FIELDS
     import re
-    allowed = set(_CREDENTIAL_ACTIVATION_COLUMNS) | {"environment", "label", "verification_method", "disabled"}
+    allowed = set(_CREDENTIAL_ACTIVATION_COLUMNS) | {
+        "environment", "label", "verification_method", "disabled", "execution_run_id",
+    }
     if set(value) - allowed or value.get("provider") not in PROVIDER_FIELDS:
         raise ValueError("invalid credential activation fields")
     document = {key: value.get(key) for key in _CREDENTIAL_ACTIVATION_COLUMNS}
@@ -187,6 +190,11 @@ def _finalize_credential_activation(cursor: Any, value: dict[str, Any], p: str) 
     disabled = value.get("disabled", False)
     if type(disabled) is not bool:
         raise ValueError("invalid credential disabled flag")
+    execution_run_id = value.get("execution_run_id")
+    if execution_run_id is not None and (
+            provider != "kiwoom_mock"
+            or not isinstance(execution_run_id, str) or not execution_run_id.startswith("mock_auto_run_")):
+        raise ValueError("invalid credential execution run")
     environment = value.get("environment")
     account_provider = provider in {"kiwoom_real", "kiwoom_mock"}
     if environment != (provider.removeprefix("kiwoom_") if account_provider else None):
@@ -231,11 +239,45 @@ def _finalize_credential_activation(cursor: Any, value: dict[str, Any], p: str) 
         })
         binding["binding_revision"] = int(latest[0]) + 1 if latest else 1
         binding["binding_id"] = _stable_id("account_binding", binding)
-        if not disabled:
+        # Binding describes verified account identity, not a transport key
+        # epoch. Every key activation still gets its own revision and receipt.
+        preserve_binding = latest is not None
+        if not disabled and not preserve_binding:
             cursor.execute("INSERT INTO central_account_binding_revisions(binding_id,credential_profile_id,broker,"
                            "environment,account_ref,binding_revision,verified_at,verification_method) "
                            f"VALUES({','.join([p] * 8)})", _account_binding_values(binding))
-        document["binding_revision"] = int(latest[0]) if disabled else binding["binding_revision"]
+        document["binding_revision"] = (int(latest[0]) if disabled or preserve_binding
+                                        else binding["binding_revision"])
+    if execution_run_id is not None:
+        # This is an entry-authority change, not a new execution run. Persist it
+        # with the activation receipt; replay must not pause an explicitly
+        # resumed run a second time after a lost commit acknowledgement.
+        from dataclasses import replace
+        from kiwoom_monitor.application.mock_automation_admission import mock_automation_control_from_dict
+        lock = " FOR UPDATE" if p == "%s" else ""
+        cursor.execute("SELECT document_json FROM central_documents WHERE collection=" + p
+            + " AND owner=" + p + " AND document_key=" + p + lock,
+            ("execution_mock_automation_control", document["account_ref"], document["account_ref"]))
+        row = cursor.fetchone()
+        control = mock_automation_control_from_dict(_json_document(row[0])) if row else None
+        if control is None or control.execution_run_id != execution_run_id:
+            raise ValueError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
+        cursor.execute("SELECT document_json FROM central_documents WHERE collection=" + p
+            + " AND owner=" + p + " AND document_key=" + p + lock,
+            ("execution_mock_automation_specs", document["account_ref"], control.active_spec_id))
+        row = cursor.fetchone()
+        spec = _json_document(row[0]) if row else {}
+        if (spec.get("credential_profile_id") != profile_id
+                or spec.get("account_scope", {}).get("account_ref") != document["account_ref"]):
+            raise ValueError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
+        if not disabled:
+            paused = replace(control, entry_resume_required=True,
+                control_revision=control.control_revision + 1,
+                changed_at=as_kst(datetime.fromisoformat(document["committed_at"])))
+            cursor.execute("UPDATE central_documents SET updated_at=" + p + ",document_json=" + p
+                + " WHERE collection=" + p + " AND owner=" + p + " AND document_key=" + p,
+                (paused.changed_at.timestamp(), _event_document(paused.to_dict()),
+                 "execution_mock_automation_control", document["account_ref"], document["account_ref"]))
     if profile is None:
         cursor.execute("INSERT INTO central_credential_profiles(profile_id,provider,environment,label,lifecycle_state,created_at) "
                        f"VALUES({','.join([p] * 6)})", (profile_id, provider, environment, str(value.get("label", ""))[:120],
@@ -354,13 +396,13 @@ class PostgresCredentialStoreMixin:
             _register_credential_profile(cursor, provider, profile_id, created_at, "%s")
 
     def finalize_credential_activation(self, value: dict[str, Any]) -> dict[str, Any]:
-        from .postgres_access import DBWriterContext, open_observed_connection
+        from .postgres_access import DBWriterContext, owned_connection_scope
 
         writer = DBWriterContext(
             writer_family="credential.activation", writer_kind="credential_activation_finalize",
             operation="finalize_credential_activation", rows_attempted=1,
         )
-        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+        with owned_connection_scope(self._connect, writer) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
             return _finalize_credential_activation(cursor, value, "%s")
 

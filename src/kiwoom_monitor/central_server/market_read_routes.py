@@ -185,13 +185,14 @@ def create_market_event_read_router(
 def create_market_archive_read_router(
     store: MarketReadStore, authorize: Callable[..., None],
     *, now_provider: Callable[[], datetime] | None = None,
+    read_authorize: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """Keep separate registration around the app-owned market-events route."""
     from fastapi import APIRouter, Depends, HTTPException, Query
 
     router = APIRouter()
 
-    @router.get("/api/v1/market/daily-bars", dependencies=[Depends(authorize)])
+    @router.get("/api/v1/market/daily-bars", dependencies=[Depends(read_authorize or authorize)])
     async def daily_bars(
         code: str = Query(min_length=6, max_length=12),
         market: str = Query(default="", max_length=8),
@@ -270,7 +271,7 @@ def create_market_archive_read_router(
             **report.as_document(),
         }
 
-    @router.get("/api/v1/market/external-bars", dependencies=[Depends(authorize)])
+    @router.get("/api/v1/market/external-bars", dependencies=[Depends(read_authorize or authorize)])
     async def external_bars(
         instrument: str = Query(min_length=1, max_length=40),
         timeframe: str = Query(pattern=r"^(5m|1d)$"),

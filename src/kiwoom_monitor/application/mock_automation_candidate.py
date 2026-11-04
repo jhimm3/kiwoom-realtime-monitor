@@ -10,12 +10,12 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
-from kiwoom_monitor.application.research_execution import (
+from kiwoom_monitor.domain.simulation_contract import (
     SimulationCostModel,
     SimulationExecutionConfig,
 )
 from kiwoom_monitor.application.market_session_schedule import research_session_profile_contract_matches
-from kiwoom_monitor.application.research_families import parse_strategy_config
+from kiwoom_monitor.domain.strategy_contract import parse_strategy_config
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec
 
 
@@ -328,7 +328,7 @@ def _validate_candidate_spec(value: Mapping[str, Any], expected_hash: str) -> No
     family = str(value.get("family", ""))
     parameters = _mapping(value.get("parameters"), "candidate parameters")
     config = parse_strategy_config(family, parameters)
-    from .leader_breakout import LeaderBreakoutConfig
+    from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutConfig
     if isinstance(config, LeaderBreakoutConfig):
         if value["version"] != "final_candidate/v2" or config.contexts or config.execution_missing("0B", require_contexts=False):
             raise ValueError("leader publication requires explicit v2 execution terms and separate live evidence")

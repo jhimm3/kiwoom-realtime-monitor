@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
@@ -25,7 +26,7 @@ class UpdateWorkerController(QObject):
         self,
         parent: QObject | None = None,
         check_factory: Callable[[], UpdateCheckWorker] = UpdateCheckWorker,
-        download_factory: Callable[[tuple[UpdateStep, ...]], UpdateDownloadWorker] = UpdateDownloadWorker,
+        download_factory: Callable[..., UpdateDownloadWorker] = UpdateDownloadWorker,
     ) -> None:
         super().__init__(parent)
         self._check_factory = check_factory
@@ -68,10 +69,10 @@ class UpdateWorkerController(QObject):
         worker.start()
         return True
 
-    def start_download(self, steps: tuple[UpdateStep, ...]) -> bool:
+    def start_download(self, steps: tuple[UpdateStep, ...], *, download_dir: Path | None = None) -> bool:
         if self.is_download_running:
             return False
-        worker = self._download_factory(steps)
+        worker = self._download_factory(steps) if download_dir is None else self._download_factory(steps, download_dir=download_dir)
         worker.setParent(self)
         if not isinstance(worker, UpdateDownloadWorker):
             self.download_failed.emit(

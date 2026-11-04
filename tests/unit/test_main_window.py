@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+
+from kiwoom_monitor.application.pc_market_session import PcMarketSession
+
+
+def market_session_with_source(route):
+    from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import RealtimeSourceTransition, RealtimeSourceRoute
+    session = PcMarketSession()
+    session.source_changed(RealtimeSourceTransition(RealtimeSourceRoute(route), 0, True))
+    return session
+
 import gc
 import json
 import threading
@@ -27,7 +37,7 @@ from kiwoom_monitor.infrastructure.persistence.database import Database
 from kiwoom_monitor.presentation.app_controller import AppController
 from kiwoom_monitor.presentation.main_window import MainWindow, NxtMarkerDelegate, selected_high_cycle_periods
 from kiwoom_monitor.presentation.theme_dialogs import ThemeEditDialog
-from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import RealtimeSourceRoute, RealtimeSourceTransition, TradeTick
 from kiwoom_monitor.application.daily_high_service import DailyHighTargets
 from kiwoom_monitor.application.trade_strength import StockFundamentals
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
@@ -47,6 +57,650 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_explicit_full_native_window_keeps_all_local_owners_under_selected_root(self) -> None:
+        from qt_settings_test_support import wait_until
+        from kiwoom_monitor.infrastructure.app_paths import AppPaths
+        from kiwoom_monitor.presentation.process_control import AuxiliaryProcessManager
+        from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        with tempfile.TemporaryDirectory() as directory:
+            paths = AppPaths.for_full_role(Path(directory) / "선택 전체 실행")
+            role = "fixture-full-window"
+            Database(paths.database_path).initialize_full_role(role=role)
+            settings = SettingsRepository(paths.database_path, strict_text=True)
+            columns = ColumnSettingsRepository(paths.database_path, column_names=tuple(name for name, _ in MainWindow.COLUMNS), strict_values=True)
+            themes = ThemeRepository.open_existing(paths.database_path, settings.get("theme_active_profile"))
+            loader = FakeRankingLoader()
+            loader.server_now = lambda: datetime.fromisoformat("2026-11-02T10:00:00+09:00")
+            with patch.object(AppPaths, "for_current_user", side_effect=AssertionError("explicit full must not resolve default user data")), \
+                 patch.object(AuxiliaryProcessManager, "start", side_effect=AssertionError("fixture must not launch a child process")) as child, \
+                 patch.object(MainWindow, "_open_api_settings", side_effect=AssertionError("fixture must not open an external API")), \
+                 patch.object(MainWindow, "_check_for_updates", side_effect=AssertionError("fixture must not check external updates")), \
+                 patch.object(MainWindow, "_start_top20_market_repair"):
+                window = MainWindow(settings, loader, columns=columns, theme_store=themes,
+                    monitor_database_path=paths.database_path, news_config_path=paths.data_dir / "news.json",
+                    news_database_path=paths.news_database_path, journal_database_path=paths.journal_database_path,
+                    research_data_dir=paths.data_dir / "research", query_only=False,
+                    data_dir=paths.data_dir, settings_role=role)
+                try:
+                    self.assertFalse(window._query_only)
+                    self.assertEqual((paths.data_dir, role), (window._data_dir, window._settings_role))
+                    self.assertIs(settings, window._settings)
+                    self.assertIs(columns, window._columns)
+                    self.assertEqual(paths.data_dir / "api.env", window._api_config_path())
+                    self.assertEqual(paths.data_dir / "near_high_icons" / "interest.png",
+                                     window._local_asset_path("data/near_high_icons/interest.png"))
+                    self.assertEqual(paths.data_dir / "updates", window._updates_directory())
+                    self.assertEqual(paths.database_path, window._monitor_database_path)
+                    self.assertEqual(paths.database_path, window._app_controller.market_cache_writer._database_path)
+                    self.assertEqual(paths.journal_database_path, window._journal_database_path)
+                    self.assertEqual(paths.journal_database_path, window._app_controller.entry_snapshot_writer._database_path)
+                    self.assertEqual(paths.news_database_path, window._app_controller.entry_snapshot_writer._news_database_path)
+                    self.assertEqual(paths.data_dir / "news.json", window._news_window.config_path)
+                    self.assertEqual(paths.news_database_path, window._news_window.database_path)
+                    self.assertEqual(paths.data_dir / "news_command.json", window._news_window._command_path)
+                    self.assertEqual(paths.data_dir / "journal_command.json", window._journal_command_path)
+                    self.assertEqual(paths.data_dir / "research", window._research_dialog._state_dir)
+                    window._research_dialog._request_path.clear()
+                    window.activate_startup()
+                    wait_until(lambda: window._table.rowCount() == 1 and not window._app_controller.ranking.is_running
+                               and window._table.item(0, 1) is not None
+                               and window._table.item(0, 1).data(Qt.ItemDataRole.UserRole) == "005930")
+                    self.assertEqual("삼성전자", window._table.item(0, 1).text())
+                    child.assert_not_called()
+                finally:
+                    window.close()
+                    wait_until(lambda: window._app_controller._shutdown_stage == "ready")
+                    window.deleteLater()
+                    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_durable_select_full_and_query_failures_preserve_rollback_or_deactivate_committed_projection(self):
+        import sqlite3
+        from contextlib import closing
+        from qt_settings_test_support import wait_until
+        for query in (False,True):
+            for phase in ("rollback","ack","cache","notify","rows"):
+                with self.subTest(query=query,phase=phase):
+                    root,path,settings,store,window = self.selection_fixture(query)
+                    source = store.active_profile
+                    store.replace_for_stock("005930",("A theme",))
+                    store.create_profile("B")
+                    window._on_themes_changed()
+                    window._open_theme_manager()
+                    editor = window._theme_manager_dialog
+                    native = sqlite3.connect
+                    class Ack(sqlite3.Connection):
+                        writing = False
+                        def execute(connection,sql,*args):
+                            if sql=="BEGIN IMMEDIATE": connection.writing=True
+                            return super().execute(sql,*args)
+                        def __exit__(connection,kind,error,tb):
+                            result=super().__exit__(kind,error,tb)
+                            if connection.writing and kind is None:
+                                raise sqlite3.OperationalError("controlled selection ACK loss")
+                            return result
+                    try:
+                        with ExitStack() as stack:
+                            warning=stack.enter_context(patch.object(QMessageBox,"warning"))
+                            if phase=="rollback": stack.enter_context(patch.object(settings,"write_many_in_transaction",side_effect=sqlite3.OperationalError("controlled selection rollback")))
+                            elif phase=="ack": stack.enter_context(patch("kiwoom_monitor.infrastructure.persistence.settings_repository.sqlite3.connect",side_effect=lambda *a,**k:native(*a,**k,factory=Ack)))
+                            elif phase=="cache": stack.enter_context(patch.object(settings,"clear_cache",side_effect=RuntimeError("controlled selection cache failure")))
+                            elif phase=="notify": stack.enter_context(patch.object(store,"notify_changed",side_effect=RuntimeError("controlled selection notify failure")))
+                            elif phase=="rows": stack.enter_context(patch.object(store,"search",side_effect=RuntimeError("controlled selection row publication failure")))
+                            editor._theme_profile.setCurrentText("B")
+                        warning.assert_called_once()
+                        with closing(native(path)) as connection:
+                            self.assertEqual((source if phase=="rollback" else "B",),connection.execute("SELECT value FROM settings WHERE key='theme_active_profile'").fetchone())
+                            self.assertEqual(2,connection.execute("SELECT COUNT(*) FROM theme_profiles").fetchone()[0])
+                        if phase=="rollback":
+                            self.assertIs(store,window._theme_store)
+                            self.assertFalse(window._theme_unapplied)
+                            self.assertEqual(source,editor._theme_profile.currentText())
+                            self.assertEqual({"삼성전자":"A theme"},window._themes)
+                        else:
+                            self.assertIsNone(window._theme_store)
+                            self.assertTrue(window._theme_unapplied)
+                            self.assertFalse(editor.isEnabled())
+                            window._refresh_theme_trade_summary()
+                            self.assertIn("변경 후 화면 미적용",window._theme_trade_summary.text())
+                        self.assertFalse(window._app_controller.closing)
+                    finally:
+                        window.close()
+                        wait_until(lambda: window._app_controller._shutdown_stage=="ready")
+
+    def selection_fixture(self, query_only=False):
+        if not query_only:
+            return self.full_rename_fixture()
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        path = root / "query-role.sqlite3"
+        Database(path).initialize_query_role(role="selection-fixture")
+        settings = SettingsRepository(path, strict_text=True)
+        stocks = StockRepository(path)
+        stocks.upsert("005930","삼성전자","KOSPI")
+        stocks.upsert("000660","SK하이닉스","KOSPI")
+        store = ThemeRepository.open_existing(path, settings.get("theme_active_profile"))
+        window = MainWindow(settings,FakeRankingLoader(),theme_store=store,stock_lookup=stocks,query_only=True,data_dir=root)
+        window.activate_startup()
+        return root,path,settings,store,window
+
+    def test_durable_select_publishes_each_distinct_native_filter_once_to_all_full_and_query_editors(self):
+        from qt_settings_test_support import wait_until
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        for query, action in ((False,"select"),(True,"select"),(False,"delete"),(True,"delete")):
+            with self.subTest(query=query,action=action):
+                root,path,settings,store,window = self.selection_fixture(query)
+                try:
+                    source = store.active_profile
+                    store.replace_for_stock("005930",("A theme",))
+                    store.create_profile("B")
+                    store.select_profile("B")
+                    store.replace_for_stock("005930",("B theme",))
+                    store.select_profile(source)
+                    window._on_themes_changed()
+                    window._open_settings()
+                    embedded = window._settings_dialog.findChild(ThemeManagerDialog)
+                    embedded._search.setText("삼%")
+                    window._open_theme_manager()
+                    hidden = window._theme_manager_dialog
+                    hidden.hide()
+                    window._open_theme_manager()
+                    selector = window._theme_manager_dialog
+                    notifications = []
+                    store.set_change_callback(lambda: notifications.append(settings.get("theme_active_profile")))
+                    with patch.object(store,"search",wraps=store.search) as searches, patch.object(store,"list_profiles",wraps=store.list_profiles) as names, patch.object(settings,"set",wraps=settings.set) as separate, patch.object(QMessageBox,"question",return_value=QMessageBox.StandardButton.Yes):
+                        if action == "select":
+                            selector._theme_profile.setCurrentText("B")
+                        else:
+                            selector._delete_current_theme_profile()
+                    self.assertEqual(["B"],notifications)
+                    self.assertEqual(["","삼%"],sorted(call.args[0] for call in searches.call_args_list))
+                    names.assert_called_once_with()
+                    separate.assert_not_called()
+                    self.assertIs(hidden._rows, selector._rows)
+                    for editor in (embedded,hidden,selector):
+                        self.assertEqual("B",editor._theme_profile.currentText())
+                        self.assertEqual(["B",source] if action=="select" else ["B"], [editor._theme_profile.itemText(i) for i in range(editor._theme_profile.count())])
+                        self.assertEqual("B theme",next(row[2] for row in editor._rows if row[0]=="005930"))
+                    self.assertEqual(1,len(embedded._rows))
+                    self.assertEqual({"삼성전자":"B theme"},window._themes)
+                    self.assertFalse(window._theme_unapplied)
+                finally:
+                    window.close()
+                    wait_until(lambda: window._app_controller._shutdown_stage=="ready")
+
+    def test_durable_select_create_survives_pending_decline_and_delete_checks_before_native_then_falls_back(self):
+        from qt_settings_test_support import wait_until
+        root,path,settings,store,window = self.full_rename_fixture()
+        entered,release = threading.Event(),threading.Event()
+        request = None
+        def accepted():
+            entered.set()
+            if not release.wait(5): raise AssertionError("accepted save was not released")
+            store.replace_for_stock("005930",("A accepted",))
+        try:
+            source = store.active_profile
+            window._open_theme_manager()
+            editor = window._theme_manager_dialog
+            self.assertTrue(window._submit_main_theme_change(accepted))
+            request = window._theme_save_request
+            self.assertTrue(entered.wait(5))
+            with patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText",return_value=("B",True)),patch.object(QMessageBox,"warning"),patch.object(QMessageBox,"information") as info,patch.object(store,"create_profile",wraps=store.create_profile) as create:
+                editor._create_theme_profile(False)
+            create.assert_called_once_with("B",copy_current=False)
+            self.assertIn("B",store.list_profiles())
+            self.assertEqual(source,store.active_profile)
+            self.assertEqual(source,settings.get("theme_active_profile"))
+            info.assert_called_once()
+            with patch.object(QMessageBox,"question",return_value=QMessageBox.StandardButton.Yes),patch.object(QMessageBox,"warning"),patch.object(store,"delete_profile",wraps=store.delete_profile) as delete:
+                editor._delete_current_theme_profile()
+            delete.assert_not_called()
+            release.set()
+            self.assertTrue(request.wait(5000))
+            request = None
+            QCoreApplication.processEvents()
+            wait_until(lambda: not window._has_pending_theme_save())
+            with patch.object(QMessageBox,"question",return_value=QMessageBox.StandardButton.Yes):
+                editor._delete_current_theme_profile()
+            self.assertEqual(("B",),store.list_profiles())
+            self.assertEqual("B",settings.get("theme_active_profile"))
+            self.assertEqual("B",store.active_profile)
+        finally:
+            release.set()
+            if request is not None: request.wait(5000)
+            window.close()
+            wait_until(lambda: window._app_controller._shutdown_stage=="ready")
+
+    def test_durable_delete_atomic_failure_preserves_source_and_committed_publication_failure_marks_full_unapplied(self):
+        import sqlite3
+        from contextlib import closing
+        from qt_settings_test_support import wait_until
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        for phase in ("list-read", "names-render", "active-write"):
+            with self.subTest(phase=phase):
+                root,path,settings,store,window = self.full_rename_fixture()
+                try:
+                    source = store.active_profile
+                    store.replace_for_stock("005930",("source preserved",))
+                    store.create_profile("B")
+                    store.select_profile("B")
+                    store.replace_for_stock("005930",("B preserved",))
+                    store.select_profile(source)
+                    window._on_themes_changed()
+                    window._open_settings()
+                    embedded = window._settings_dialog.findChild(ThemeManagerDialog)
+                    window._open_theme_manager()
+                    editor = window._theme_manager_dialog
+                    fault = (RuntimeError if phase == "names-render" else sqlite3.OperationalError)("controlled post-delete " + phase)
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(QMessageBox,"question",return_value=QMessageBox.StandardButton.Yes))
+                        warning = stack.enter_context(patch.object(QMessageBox,"warning"))
+                        deleted = stack.enter_context(patch.object(store,"delete_profile",wraps=store.delete_profile))
+                        failure = stack.enter_context(patch.object(editor,"_profile_change_failed",wraps=editor._profile_change_failed))
+                        if phase == "list-read":
+                            stack.enter_context(patch.object(store,"list_profiles",side_effect=fault))
+                        elif phase == "names-render":
+                            stack.enter_context(patch.object(editor,"show_profile_names",side_effect=fault))
+                        else:
+                            stack.enter_context(patch.object(settings,"write_many_in_transaction",side_effect=fault))
+                        editor._delete_current_theme_profile()
+                    deleted.assert_called_once_with(source,settings=settings)
+                    failure.assert_called_once()
+                    caught = failure.call_args.args[0]
+                    self.assertIs(fault,caught.__cause__)
+                    if phase == "active-write":
+                        self.assertIs(False,caught.native_committed)
+                        self.assertIn("COMMIT 전 변경은 되돌렸습니다",warning.call_args.args[2])
+                        self.assertFalse(window._theme_unapplied)
+                        self.assertIs(store,window._theme_store)
+                        self.assertEqual(("source preserved",),store.themes_for_stock("005930"))
+                        self.assertTrue(editor.isEnabled())
+                        self.assertTrue(embedded.isEnabled())
+                    else:
+                        self.assertIs(True,caught.native_committed)
+                        self.assertIn("DB에 저장됐지만",warning.call_args.args[2])
+                        self.assertTrue(window._theme_unapplied)
+                        self.assertIsNone(window._theme_store)
+                        self.assertEqual({},window._themes)
+                        self.assertFalse(editor.isEnabled())
+                        self.assertFalse(embedded.isEnabled())
+                    warning.assert_called_once()
+                    self.assertFalse(window._app_controller.closing)
+                    with closing(sqlite3.connect(path)) as connection:
+                        expected_profiles = [("B",),(source,)] if phase == "active-write" else [("B",)]
+                        self.assertEqual(expected_profiles,connection.execute("SELECT profile_name FROM theme_profiles ORDER BY profile_name COLLATE NOCASE").fetchall())
+                        self.assertEqual((source if phase == "active-write" else "B",),connection.execute("SELECT value FROM settings WHERE key='theme_active_profile'").fetchone())
+                        self.assertEqual([("B preserved",)],connection.execute("SELECT st.theme_name FROM profile_stock_themes st JOIN theme_profiles p ON p.profile_id=st.profile_id WHERE p.profile_name='B' AND st.stock_code='005930'").fetchall())
+                finally:
+                    window.close()
+                    wait_until(lambda: window._app_controller._shutdown_stage=="ready")
+
+    def full_rename_fixture(self, *, with_store=True):
+        from kiwoom_monitor.infrastructure.app_paths import AppPaths
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        path = root / "monitor.sqlite3"
+        database = Database(path)
+        database.initialize()
+        database.settings.set_many({"theme_trade_summary_enabled": "0", "theme_trade_summary_excluded_enabled": "0"})
+        stocks = StockRepository(path)
+        stocks.upsert("005930", "삼성전자", "KOSPI")
+        stocks.upsert("000660", "SK하이닉스", "KOSPI")
+        paths = AppPaths(root, root / "logs", path)
+        self.enterContext(patch("kiwoom_monitor.presentation.main_window.AppPaths.for_current_user", return_value=paths))
+        loader = FakeRankingLoader()
+        loader.server_now = lambda: datetime(2026, 9, 9, 9, 0, 10)
+        store = ThemeRepository(path) if with_store else None
+        window = MainWindow(database.settings, loader, theme_store=store, stock_lookup=stocks,
+            monitor_database_path=path, news_config_path=root / "news.json",
+            news_database_path=root / "news.sqlite3", journal_database_path=None,
+            query_only=False, data_dir=None)
+        window.activate_startup()
+        self.assertIsNone(window._data_dir)
+        self.assertFalse(window._query_only)
+        self.assertEqual(root / "api.env", window._api_config_path())
+        self.assertEqual(path, window._monitor_database_path)
+        return root, path, database.settings, store, window
+
+    def test_full_rename_unknown_and_committed_failure_reaches_all_consumers_and_preserves_ranking_chart(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        from qt_settings_test_support import wait_until
+        label = "테마 변경 후 화면 미적용: DB 결과를 확인하고 다시 여세요."
+        for phase in ("unknown", "committed"):
+            with self.subTest(phase=phase):
+                root, path, settings, store, window = self.full_rename_fixture()
+                controller = window._app_controller
+                chart = window._top20_trade_value_chart
+                native = sqlite3.connect
+                commits = []
+                class LostAck(sqlite3.Connection):
+                    writing = False
+                    def execute(connection, sql, *args):
+                        if sql == "BEGIN IMMEDIATE":
+                            connection.writing = True
+                        return super().execute(sql, *args)
+                    def __exit__(connection, kind, error, traceback):
+                        result = super().__exit__(kind, error, traceback)
+                        if connection.writing and kind is None:
+                            commits.append("real native commit")
+                            raise sqlite3.OperationalError("controlled full COMMIT ACK loss")
+                        return result
+                try:
+                    window._open_theme_manager()
+                    editor = window._theme_manager_dialog
+                    with ExitStack() as stack:
+                        stack.enter_context(patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", return_value=("User", True)))
+                        warning = stack.enter_context(patch.object(QMessageBox, "warning"))
+                        if phase == "unknown":
+                            stack.enter_context(patch("kiwoom_monitor.infrastructure.persistence.settings_repository.sqlite3.connect", side_effect=lambda *a, **k: native(*a, **k, factory=LostAck)))
+                        else:
+                            stack.enter_context(patch.object(settings, "clear_cache", side_effect=RuntimeError("controlled full cache failure")))
+                        editor._rename_current_theme_profile()
+                    warning.assert_called_once()
+                    self.assertIn("COMMIT 결과" if phase == "unknown" else "DB에 저장", warning.call_args.args[2])
+                    if phase == "unknown":
+                        self.assertEqual(["real native commit"], commits)
+                    self.assertIsNone(window._theme_store)
+                    self.assertTrue(window._theme_unapplied)
+                    self.assertFalse(editor.isEnabled())
+                    with closing(native(path)) as connection:
+                        self.assertEqual([("User",)], connection.execute("SELECT profile_name FROM theme_profiles").fetchall())
+                        self.assertEqual(("User",), connection.execute("SELECT value FROM settings WHERE key='theme_active_profile'").fetchone())
+                    # 1: real standalone follow-up consumes the unapplied label.
+                    window._open_theme_manager()
+                    self.assertEqual(label, window.statusBar().currentMessage())
+                    # 2: real full SettingsDialog factory creates the label,
+                    # with no default-user path and no stale editor recreation.
+                    window._open_settings()
+                    labels = [widget.text() for widget in window._settings_dialog.findChildren(QLabel)]
+                    self.assertIn(label, labels)
+                    self.assertEqual([], window._settings_dialog.findChildren(ThemeManagerDialog))
+                    # 3: backup does not even select a file while unapplied.
+                    with patch("kiwoom_monitor.presentation.main_window.QFileDialog.getSaveFileName", side_effect=AssertionError("unapplied full backup must precede file selection")), patch.object(QMessageBox, "warning") as backup_warning:
+                        window._export_theme_backup()
+                    backup_warning.assert_called_once()
+                    self.assertIn("테마 변경 후 화면 미적용", backup_warning.call_args.args[2])
+                    # 4: even normally disabled summaries must show this state.
+                    window._refresh_theme_trade_summary()
+                    self.assertEqual(label, window._theme_trade_summary.text())
+                    self.assertFalse(window._theme_trade_summary.isHidden())
+                    self.assertTrue(window._theme_trade_excluded_summary.isHidden())
+                    # Real unrelated ranking worker and the existing chart
+                    # collector remain live; no theme failure closes the app.
+                    # A genuinely new supplied result proves the worker/table
+                    # path still runs even if initial ranking already finished.
+                    controller.ranking_loader.load_top_stocks = lambda: (
+                        FakeRankingLoader().load_top_stocks()[0],
+                        SimpleNamespace(rank=2, code="000660", name="SK하이닉스", new_high_label="5일", change_rate="+2.34"),
+                    )
+                    window._refresh_rankings()
+                    wait_until(lambda: window._table.rowCount() == 2 and not controller.ranking.is_running)
+                    self.assertIn("SK하이닉스", [window._table.item(row, i).text() for row in range(2) for i in range(window._table.columnCount()) if window._table.item(row, i) is not None])
+                    window._top20_index_timer.stop()
+                    current = datetime(2026, 9, 9, 9, 0, 10)
+                    window._top20_view_date = current.date()
+                    window._top20_view_mode = "5m"
+                    collector = window._top20_collector
+                    collector.minute = current.replace(second=0)
+                    collector.active_codes = ("005930",)
+                    collector.minute_codes = {"005930"}
+                    collector.cohort_segments = [("2026-09-09T09:00:00", ("005930",))]
+                    collector.samples.clear()
+                    window._stock_markets["005930"] = "KOSPI"
+                    window._pc_market_session.minute_aggregator.bucket_trade_value_eok = lambda *_args, **_kwargs: 1.0
+                    window._update_top20_trade_value_index()
+                    self.assertEqual([(10, 1.0)], collector.samples)
+                    self.assertIs(chart, window._top20_trade_value_chart)
+                    self.assertIs(controller, window._app_controller)
+                    self.assertFalse(controller.closing)
+                finally:
+                    window.close()
+                    wait_until(lambda: controller._shutdown_stage == "ready")
+
+    def test_full_initial_missing_theme_store_preserves_existing_normal_consumers(self):
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        from qt_settings_test_support import wait_until
+        root, path, settings, store, window = self.full_rename_fixture(with_store=False)
+        controller = window._app_controller
+        try:
+            self.assertFalse(window._theme_unapplied)
+            status = window.statusBar().currentMessage()
+            window._open_theme_manager()
+            self.assertEqual(status, window.statusBar().currentMessage())
+            window._open_settings()
+            labels = [widget.text() for widget in window._settings_dialog.findChildren(QLabel)]
+            self.assertFalse(any("테마 변경 후 화면 미적용" in text for text in labels))
+            self.assertEqual([], window._settings_dialog.findChildren(ThemeManagerDialog))
+            window._refresh_theme_trade_summary()
+            self.assertTrue(window._theme_trade_summary.isHidden())
+            self.assertTrue(window._theme_trade_excluded_summary.isHidden())
+            with patch("kiwoom_monitor.presentation.main_window.QFileDialog.getSaveFileName", return_value=("", "")) as choose, patch.object(QMessageBox, "warning") as warning:
+                window._export_theme_backup()
+            choose.assert_called_once()
+            warning.assert_not_called()
+            self.assertFalse(controller.closing)
+        finally:
+            window.close()
+            wait_until(lambda: controller._shutdown_stage == "ready")
+
+    def test_current_rename_real_native_failures_deactivate_all_existing_editors_without_retry(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        for phase in ("success", "rollback", "commit-ack", "close-ack", "cache", "RAM", "notify", "refresh", "deactivate"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "query-role.sqlite3"
+                Database(path).initialize_query_role(role="rename-fixture")
+                settings = SettingsRepository(path, strict_text=True)
+                class Store(ThemeRepository):
+                    fail_name_publication = False
+                    def __setattr__(instance, name, value):
+                        if instance.fail_name_publication and name == "_profile_name":
+                            raise RuntimeError("controlled RAM publication failure")
+                        super().__setattr__(name, value)
+                store = Store.open_existing(path, settings.get("theme_active_profile"))
+                window = MainWindow(settings, FakeRankingLoader(), theme_store=store, query_only=True, data_dir=root)
+                window.activate_startup()
+                native = sqlite3.connect
+                commits = []
+                class Fault(sqlite3.Connection):
+                    writing = False
+                    def execute(connection, sql, *args):
+                        if sql == "BEGIN IMMEDIATE":
+                            connection.writing = True
+                        return super().execute(sql, *args)
+                    def __exit__(connection, kind, error, traceback):
+                        result = super().__exit__(kind, error, traceback)
+                        if connection.writing and kind is None:
+                            commits.append("native committed")
+                            if phase == "commit-ack":
+                                raise sqlite3.OperationalError("controlled native ACK loss")
+                        return result
+                    def close(connection):
+                        super().close()
+                        if connection.writing and phase == "close-ack":
+                            raise sqlite3.OperationalError("controlled native close loss")
+                try:
+                    window._open_settings()
+                    embedded = window._settings_dialog.findChild(ThemeManagerDialog)
+                    window._open_theme_manager()
+                    hidden = window._theme_manager_dialog
+                    hidden.hide()
+                    before = path.read_bytes()
+                    store.fail_name_publication = phase == "RAM"
+                    with ExitStack() as stack:
+                        stack.enter_context(patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", return_value=("User", True)))
+                        warning = stack.enter_context(patch.object(QMessageBox, "warning"))
+                        profiles = stack.enter_context(patch.object(store, "list_profiles", wraps=store.list_profiles))
+                        select = stack.enter_context(patch.object(store, "select_profile", wraps=store.select_profile))
+                        separate_save = stack.enter_context(patch.object(settings, "set", wraps=settings.set))
+                        embedded_reload = stack.enter_context(patch.object(embedded, "_reload", wraps=embedded._reload))
+                        hidden_reload = stack.enter_context(patch.object(hidden, "_reload", wraps=hidden._reload))
+                        stack.enter_context(patch("kiwoom_monitor.infrastructure.persistence.settings_repository.sqlite3.connect", side_effect=lambda *a, **k: native(*a, **k, factory=Fault)))
+                        if phase == "rollback":
+                            stack.enter_context(patch.object(settings, "write_many_in_transaction", side_effect=sqlite3.OperationalError("controlled precommit failure")))
+                        elif phase == "cache":
+                            stack.enter_context(patch.object(settings, "clear_cache", side_effect=RuntimeError("controlled cache publication failure")))
+                        elif phase in ("notify", "deactivate"):
+                            stack.enter_context(patch.object(store, "notify_changed", side_effect=RuntimeError("controlled notify failure")))
+                        elif phase == "refresh":
+                            stack.enter_context(patch.object(embedded, "show_profile_names", side_effect=RuntimeError("controlled UI publication failure")))
+                        if phase == "deactivate":
+                            stack.enter_context(patch.object(window, "_refresh_theme_badges", side_effect=RuntimeError("controlled deactivation publication failure")))
+                        embedded._rename_current_theme_profile()
+                    select.assert_not_called()
+                    separate_save.assert_not_called()
+                    embedded_reload.assert_not_called()
+                    hidden_reload.assert_not_called()
+                    if phase == "success":
+                        warning.assert_not_called()
+                        profiles.assert_called_once_with()
+                        self.assertEqual(["native committed"], commits)
+                        self.assertIs(store, window._theme_store)
+                        self.assertFalse(window._theme_unapplied)
+                        self.assertEqual("User", settings.get("theme_active_profile"))
+                        for editor in (embedded, hidden):
+                            self.assertEqual("User", editor._theme_profile.currentText())
+                            self.assertEqual(["User"], [editor._theme_profile.itemText(i) for i in range(editor._theme_profile.count())])
+                            self.assertTrue(editor.isEnabled())
+                    elif phase == "rollback":
+                        warning.assert_called_once()
+                        self.assertEqual([], commits)
+                        self.assertEqual(before, path.read_bytes())
+                        self.assertIs(store, window._theme_store)
+                        self.assertFalse(window._theme_unapplied)
+                        self.assertTrue(embedded.isEnabled())
+                    else:
+                        warning.assert_called_once()
+                        if phase == "deactivate":
+                            self.assertIn("DB에 저장", warning.call_args.args[2])
+                            self.assertIn("적용 해제 중에도 오류", warning.call_args.args[2])
+                        self.assertEqual(["native committed"], commits)
+                        self.assertIsNone(window._theme_store)
+                        self.assertEqual({}, window._themes)
+                        self.assertTrue(window._theme_unapplied)
+                        self.assertFalse(embedded.isEnabled())
+                        self.assertFalse(hidden.isEnabled())
+                        self.assertFalse(hidden.isVisible())
+                        window._refresh_theme_trade_summary()
+                        self.assertIn("변경 후 화면 미적용", window._theme_trade_summary.text())
+                        with closing(native(path)) as connection:
+                            self.assertEqual([("User",)], connection.execute("SELECT profile_name FROM theme_profiles").fetchall())
+                            self.assertEqual(("User",), connection.execute("SELECT value FROM settings WHERE key='theme_active_profile'").fetchone())
+                    self.assertFalse(window._app_controller.closing)
+                finally:
+                    window.close()
+                    window.finish_shutdown()
+
+    def test_current_rename_refuses_main_embedded_hidden_and_queued_work_then_saves_after_publication(self):
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        for owner in ("main", "embedded", "hidden-nonmodal"):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "query-role.sqlite3"
+                Database(path).initialize_query_role(role="rename-fixture")
+                settings = SettingsRepository(path, strict_text=True)
+                StockRepository(path).upsert("005930", "삼성전자")
+                store = ThemeRepository.open_existing(path, settings.get("theme_active_profile"))
+                window = MainWindow(settings, FakeRankingLoader(), theme_store=store, query_only=True, data_dir=root)
+                window.activate_startup()
+                entered, release = threading.Event(), threading.Event()
+                request = None
+                def accepted_save():
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("accepted theme write was not released")
+                    store.replace_for_stock("005930", ("기존저장",))
+                try:
+                    window._open_settings()
+                    target = window._settings_dialog.findChild(ThemeManagerDialog)
+                    if owner == "main":
+                        self.assertTrue(window._submit_main_theme_change(accepted_save))
+                        request = window._theme_save_request
+                    else:
+                        editor = target
+                        if owner == "hidden-nonmodal":
+                            window._open_theme_manager()
+                            editor = window._theme_manager_dialog
+                            editor.hide()
+                        editor._submit_theme_change(accepted_save)
+                        request = editor._save_request
+                    self.assertTrue(entered.wait(5))
+                    with patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", return_value=("User", True)), patch.object(QMessageBox, "warning") as warning, patch.object(store, "rename_profile", wraps=store.rename_profile) as rename:
+                        before, projection = path.read_bytes(), dict(window._themes)
+                        target._rename_current_theme_profile()
+                        rename.assert_not_called()
+                        self.assertEqual(before, path.read_bytes())
+                        self.assertEqual(projection, window._themes)
+                        release.set()
+                        self.assertTrue(request.wait(5000))
+                        request = None
+                        # Native completion alone does not publish the queued
+                        # worker result: rename must still decline here.
+                        before, projection = path.read_bytes(), dict(window._themes)
+                        target._rename_current_theme_profile()
+                        rename.assert_not_called()
+                        self.assertEqual(before, path.read_bytes())
+                        self.assertEqual(projection, window._themes)
+                        self.assertEqual(2, warning.call_count)
+                    QCoreApplication.processEvents()
+                    self.assertFalse(window._has_pending_theme_save())
+                    with patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", return_value=("User", True)), patch.object(QMessageBox, "warning") as warning:
+                        target._rename_current_theme_profile()
+                    warning.assert_not_called()
+                    QCoreApplication.processEvents()
+                    self.assertEqual("User", settings.get("theme_active_profile"))
+                    self.assertEqual("User", window._theme_store.active_profile)
+                    self.assertEqual({"삼성전자": "기존저장"}, window._themes)
+                    self.assertEqual(("기존저장",), store.themes_for_stock("005930"))
+                    self.assertFalse(window._theme_unapplied)
+                finally:
+                    release.set()
+                    if request is not None:
+                        request.wait(5000)
+                    window.close()
+                    window.finish_shutdown()
+
+    def test_current_rename_modal_selection_change_is_rejected_without_overwriting_new_choice(self):
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            store = ThemeRepository(path)
+            store.create_profile("Other")
+            window = MainWindow(database.settings, FakeRankingLoader(), theme_store=store)
+            window.activate_startup()
+            try:
+                window._open_theme_manager()
+                target = window._theme_manager_dialog
+                def nested_input(*args, **kwargs):
+                    target._theme_profile.setCurrentText("Other")
+                    return "User", True
+                with patch("kiwoom_monitor.presentation.theme_dialogs.QInputDialog.getText", side_effect=nested_input), patch.object(QMessageBox, "warning") as warning:
+                    target._rename_current_theme_profile()
+                warning.assert_called_once()
+                self.assertEqual("Other", database.settings.get("theme_active_profile"))
+                self.assertEqual("Other", store.active_profile)
+                self.assertEqual("Other", target._theme_profile.currentText())
+                self.assertEqual(("Other", "기본 테마"), store.list_profiles())
+                self.assertFalse(window._theme_unapplied)
+            finally:
+                window.close()
+
     def test_dated_high_warm_cache_rollover_and_late_history_keep_gui_retention_off_thread(self):
         import sqlite3
         from threading import get_ident
@@ -68,13 +722,14 @@ class MainWindowTest(unittest.TestCase):
         with patch.object(AppController, "start_initial_ranking"):
             window = MainWindow(database.settings, loader, stock_lookup=stocks,
                 minute_bar_repository=minutes, monitor_database_path=path)
+            window.activate_startup()
         controller = window._app_controller
         controller.ranking.completed.emit(loader.load_top_stocks())
         window._historical_high_prices["005930"] = 999
-        self.assertEqual(100, window._today_high_prices["005930"])
-        self.assertEqual(now[0].date(), window._today_high_prices_date)
+        self.assertEqual(100, window._pc_market_session.current_high("005930"))
+        self.assertEqual(now[0].date(), window._pc_market_session.high_date)
         # Storage has not seen its first tick, but the source-dated warm high is valid.
-        self.assertIsNone(window._minute_bar_storage_date)
+        self.assertIsNone(window._pc_market_session.minute_storage_date)
         gui_thread, statements = get_ident(), []
         original_connect = sqlite3.connect
 
@@ -85,11 +740,11 @@ class MainWindowTest(unittest.TestCase):
 
         with patch("sqlite3.connect", side_effect=connect):
             controller.realtime.trade_received.emit(TradeTick("005930", 90, 100, None, None, 90, "100000"))
-            self.assertEqual(100, window._today_high_prices["005930"])
+            self.assertEqual(100, window._pc_market_session.current_high("005930"))
             self.assertEqual({}, controller.pending_highs)
             now[0] += timedelta(days=1)
             controller.realtime.trade_received.emit(TradeTick("005930", 50, 100, None, None, 50, "100000"))
-            self.assertEqual(50, window._today_high_prices["005930"])
+            self.assertEqual(50, window._pc_market_session.current_high("005930"))
             self.assertEqual({(now[0].date(), "005930"): 50}, controller.pending_highs)
             self.assertEqual(999, window._historical_high_prices["005930"])
             # A queued old-day history payload uses the current receiver clock;
@@ -97,7 +752,7 @@ class MainWindowTest(unittest.TestCase):
             old = now[0] - timedelta(days=1)
             window._on_history_received("005930", (MinuteOhlcv(old, 90, 200, 90, 100, 1),))
             self.assertEqual((now[0].date(), 50),
-                (window._today_high_prices_date, window._today_high_prices["005930"]))
+                (window._pc_market_session.high_date, window._pc_market_session.current_high("005930")))
             current = now[0] - timedelta(minutes=1)
             window._on_history_received("005930", (MinuteOhlcv(current, 50, 60, 50, 55, 1),))
             self.assertEqual({(now[0].date(), "005930"): 60}, controller.pending_highs)
@@ -114,9 +769,10 @@ class MainWindowTest(unittest.TestCase):
         with patch.object(AppController, "start_initial_ranking"):
             reopened = MainWindow(database.settings, loader, stock_lookup=stocks,
                 minute_bar_repository=minutes, monitor_database_path=path)
+            reopened.activate_startup()
         reopened._app_controller.ranking.completed.emit(loader.load_top_stocks())
         reopened._app_controller.realtime.trade_received.emit(TradeTick("005930", 55, 100, None, None, 55, "100000"))
-        self.assertEqual(60, reopened._today_high_prices["005930"])
+        self.assertEqual(60, reopened._pc_market_session.current_high("005930"))
         self.assertEqual({}, reopened._app_controller.pending_highs)
         reopened._app_controller.flush_price_cache()
         reopened._app_controller.flush_minute_cache()
@@ -158,6 +814,7 @@ class MainWindowTest(unittest.TestCase):
         with patch.object(AppController, "start_initial_ranking"), patch.object(MainWindow, "_start_top20_market_repair"):
             window = MainWindow(database.settings, loader, stock_lookup=stocks,
                 minute_bar_repository=repository, monitor_database_path=path)
+            window.activate_startup()
         controller, writer = window._app_controller, window._market_cache_writer
 
         def wait_until(predicate):
@@ -167,7 +824,7 @@ class MainWindowTest(unittest.TestCase):
                 time.sleep(.005)
             self.assertTrue(predicate(), "late-history native/Qt boundary did not settle")
 
-        window._ensure_today_minute_bar_storage(now)
+        window._pc_market_session.ensure_minute_day(now, flush=window._app_controller.flush_minute_cache, retain=window._app_controller.queue_minute_retention if window._minute_bar_repository is not None else None)
         wait_until(lambda: writer._minute_retention_cutoff == kept.date())
         window._historical_high_prices["005930"] = 9999
         bars = (MinuteOhlcv(old, 100, 999, 90, 110, 3), MinuteOhlcv(kept, 100, 888, 90, 110, 3),
@@ -186,7 +843,7 @@ class MainWindowTest(unittest.TestCase):
         writer.retention_failed.connect(lambda *args: failures.append(args), Qt.ConnectionType.DirectConnection)
         with patch.object(writer, "enqueue_history_bars", wraps=writer.enqueue_history_bars) as enqueue:
             controller.minute_history.history_received.emit("005930", bars)
-            wait_until(lambda: len(acks) == 1 and len(quality) == 1 and "005930" in window._minute_history_codes)
+            wait_until(lambda: len(acks) == 1 and len(quality) == 1 and "005930" in window._pc_market_session.history_codes)
         received = enqueue.call_args.args[1]
         self.assertEqual(bars, received)
         self.assertTrue(all(left is right for left, right in zip(bars, received)))
@@ -196,9 +853,9 @@ class MainWindowTest(unittest.TestCase):
         self.assertTrue(all(row[1:4] == ("kiwoom-ka10080", "query", "complete") for row in acks[0][2]))
         self.assertTrue(all(datetime.fromisoformat(row[5]) == now for row in acks[0][2]))
         self.assertEqual(3, acks[0][3][0][-1])  # Receipt keeps original response count.
-        self.assertEqual(60, window._today_high_prices["005930"])
+        self.assertEqual(60, window._pc_market_session.current_high("005930"))
         self.assertEqual(9999, window._historical_high_prices["005930"])
-        self.assertEqual({current}, {bar.minute for bar in window._minute_aggregator.bars("005930")})
+        self.assertEqual({current}, {bar.minute for bar in window._pc_market_session.minute_aggregator.bars("005930")})
         controller.flush_price_cache()
         controller.flush_minute_cache()
         self.assertTrue(writer.stop_and_drain())
@@ -349,6 +1006,7 @@ class MainWindowTest(unittest.TestCase):
             loader = FakeRankingLoader()
             loader.server_now = lambda: datetime.fromisoformat("2030-01-02T09:00:00+09:00")
             window = MainWindow(database.settings, loader, theme_store=themes, google_drive_sync=service)
+            window.activate_startup()
             window._google_drive_timestamp_now = lambda: "2030-01-02T09:00:00+09:00"
             worker = None
             try:
@@ -408,6 +1066,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             try:
                 window.show()
                 QTest.qWait(30)
@@ -441,6 +1100,7 @@ class MainWindowTest(unittest.TestCase):
                 database.settings.clear_cache()
                 self.assertEqual(expected, {key: database.settings.get(key) for key in expected})
                 restored = MainWindow(database.settings, FakeRankingLoader())
+                restored.activate_startup()
                 try:
                     QApplication.processEvents()
                     self.assertEqual((816, 518), (restored.width(), restored.height()))
@@ -461,6 +1121,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             dialog = AlertSettingsDialog(database.settings, window)
             keys = ("near_high_alert_enabled", "near_high_interest_percent",
                     "near_high_caution_percent", "near_high_fire_percent")
@@ -533,6 +1194,7 @@ class MainWindowTest(unittest.TestCase):
             database.initialize()
             drive = GoogleDriveSyncService(database.settings.database_path)
             window = MainWindow(database.settings, loader, google_drive_sync=drive)
+            window.activate_startup()
             try:
                 self.assertEqual(as_kst(current[0]), drive._now_provider())
                 current[0] = datetime.fromisoformat("2030-01-01T18:06:07+00:00")
@@ -554,6 +1216,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, loader)
+            window.activate_startup()
             snapshots = []
             writer = SimpleNamespace(isRunning=lambda: True, enqueue=snapshots.append)
             execution = OrderExecution("order", "fill", "005930", "삼성전자", "매수", 110, 1, "101510")
@@ -565,7 +1228,7 @@ class MainWindowTest(unittest.TestCase):
                     self.assertEqual(now, snapshots[-1].executed_at)
                     self.assertEqual(0, snapshots[-1].orderbook["buy_execution_volume"])
                     self.assertIsNone(snapshots[-1].orderbook["buy_share_percent"])
-                    window._realtime_pressure[execution.code] = deque((
+                    window._pc_market_session._realtime_pressure[execution.code] = deque((
                         (now - timedelta(seconds=61), 999),
                         ((now - timedelta(seconds=60)).replace(tzinfo=None), 10),
                         (now - timedelta(seconds=30), -5),
@@ -579,7 +1242,7 @@ class MainWindowTest(unittest.TestCase):
                     for recovery_until in (deadline, deadline.replace(tzinfo=None),
                                            deadline.astimezone(timezone.utc)):
                         current[0] = deadline - timedelta(microseconds=1)
-                        window._pressure_gap_until[execution.code] = recovery_until
+                        window._pc_market_session._pressure_gap_until[execution.code] = recovery_until
                         window._realtime_worker_controller.order_executed.emit(execution)
                         self.assertFalse(snapshots[-1].orderbook["available"])
                         self.assertIsNone(snapshots[-1].orderbook["buy_execution_volume"])
@@ -591,6 +1254,242 @@ class MainWindowTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_explicit_role_unrepresentable_settings_warn_without_saving_or_closing_query(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'query-settings.sqlite3'
+            Database(target).initialize(settings_role='fixture-query')
+            with closing(sqlite3.connect(target)) as connection, connection:
+                connection.execute("UPDATE settings SET value='inf' WHERE key='near_high_sound_cooldown_seconds'")
+            settings = SettingsRepository(target, strict_text=True)
+            window = MainWindow(settings, FakeRankingLoader(), query_only=True, data_dir=root)
+            window.activate_startup()
+            try:
+                before = target.read_bytes()
+                with patch.object(QMessageBox, 'warning') as warning:
+                    window._open_settings()
+                warning.assert_called_once()
+                self.assertIn('near_high_sound_cooldown_seconds', warning.call_args.args[2])
+                self.assertIsNone(window._settings_dialog)
+                self.assertFalse(window._app_controller.closing)
+                self.assertEqual(before, target.read_bytes())
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            finally:
+                window.close()
+            with closing(sqlite3.connect(target)) as connection:
+                self.assertEqual([('inf',)], connection.execute("SELECT value FROM settings WHERE key='near_high_sound_cooldown_seconds'").fetchall())
+
+    def test_explicit_role_missing_theme_stays_unprepared_until_current_native_restore_and_reopens(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'query-role.sqlite3'
+            Database(path).initialize_query_role(role='fixture-query')
+            settings = SettingsRepository(path, strict_text=True)
+            service = ThemeBackupService(path, settings=settings)
+            document = service.export_document()
+            document['active_profile'] = document['profiles'][0]['name'] = '복원된 프로필'
+            backup = root / 'theme.json'
+            backup.write_text(json.dumps(document), encoding='utf-8')
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute('DELETE FROM theme_profiles')
+            loader = FakeRankingLoader()
+            stamp = datetime.fromisoformat('2031-01-02T03:04:05+09:00')
+            loader.server_now = lambda: stamp
+            window = MainWindow(settings, loader, query_only=True, data_dir=root)
+            window.activate_startup()
+            try:
+                self.assertIsNone(window._theme_store)
+                self.assertIn('미준비', window._theme_trade_summary.text())
+                window._open_settings()
+                self.assertIsNotNone(window._settings_dialog._theme_backup_importer)
+                self.assertIsNone(window._settings_dialog._drive_connector)
+                window._settings_dialog.close()
+                before = path.read_bytes()
+                with patch.object(QMessageBox, 'warning') as warning, patch('kiwoom_monitor.presentation.main_window.QFileDialog.getSaveFileName', side_effect=AssertionError('unprepared export should not choose target')):
+                    window._export_theme_backup()
+                warning.assert_called_once()
+                self.assertEqual(before, path.read_bytes())
+                with patch('kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName', return_value=(str(backup), '')), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information') as information:
+                    window._import_theme_backup()
+                information.assert_called_once()
+                self.assertEqual('복원된 프로필', settings.get('theme_active_profile'))
+                self.assertEqual('복원된 프로필', window._theme_store.active_profile)
+                self.assertFalse(window._app_controller.closing)
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual((stamp.isoformat(),), connection.execute("SELECT updated_at FROM central_setting_versions WHERE setting_key='theme_active_profile'").fetchone())
+            finally:
+                window.close()
+            Database(path).initialize_query_role(role='fixture-query')
+            self.assertIsNotNone(ThemeRepository.open_existing(path, '복원된 프로필'))
+
+    def test_explicit_role_restore_publication_failure_preserves_native_save_without_false_applied_message(self):
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'query-role.sqlite3'
+            Database(path).initialize_query_role(role='fixture-query')
+            settings = SettingsRepository(path, strict_text=True)
+            service = ThemeBackupService(path, settings=settings)
+            document = service.export_document()
+            document['active_profile'] = document['profiles'][0]['name'] = '복원된 프로필'
+            backup = root / 'theme.json'
+            backup.write_text(json.dumps(document), encoding='utf-8')
+            window = MainWindow(settings, FakeRankingLoader(), query_only=True, data_dir=root)
+            window.activate_startup()
+            try:
+                with patch('kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName', return_value=(str(backup), '')), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'warning') as warning, patch.object(QMessageBox, 'information') as information, patch.object(settings, 'clear_cache', side_effect=RuntimeError('controlled publication failure')):
+                    window._import_theme_backup()
+                warning.assert_called_once()
+                self.assertIn('DB에 저장', warning.call_args.args[2])
+                information.assert_not_called()
+                self.assertIsNone(window._theme_store)
+                self.assertFalse(window._app_controller.closing)
+                self.assertEqual('복원된 프로필', Database(path).settings.get('theme_active_profile'))
+            finally:
+                window.close()
+
+    def test_explicit_role_native_commit_ack_or_close_failure_deactivates_old_cache_projection_without_retry(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        for phase in ('commit-ack', 'close-ack'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'query-role.sqlite3'
+                Database(path).initialize_query_role(role='fixture-query')
+                settings = SettingsRepository(path, strict_text=True)
+                settings.get('theme_active_profile')
+                document = ThemeBackupService(path, settings=settings).export_document()
+                document['active_profile'] = document['profiles'][0]['name'] = '복원된 프로필'
+                backup = root / 'theme.json'
+                backup.write_text(json.dumps(document), encoding='utf-8')
+                store = ThemeRepository.open_existing(path, '기본 테마')
+                window = MainWindow(settings, FakeRankingLoader(), theme_store=store, query_only=True, data_dir=root)
+                window.activate_startup()
+                native = sqlite3.connect
+                commits = []
+                class Fault(sqlite3.Connection):
+                    write = False
+                    def execute(connection, sql, *args):
+                        if sql == 'BEGIN IMMEDIATE':
+                            connection.write = True
+                        return super().execute(sql, *args)
+                    def __exit__(connection, kind, error, traceback):
+                        result = super().__exit__(kind, error, traceback)
+                        if connection.write and kind is None:
+                            commits.append('real native commit')
+                            if phase == 'commit-ack':
+                                raise sqlite3.OperationalError('controlled COMMIT ACK loss')
+                        return result
+                    def close(connection):
+                        super().close()
+                        if connection.write and phase == 'close-ack':
+                            raise sqlite3.OperationalError('controlled close ACK loss')
+                try:
+                    with patch('kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName', return_value=(str(backup), '')), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'warning') as warning, patch.object(QMessageBox, 'information') as information, patch('kiwoom_monitor.infrastructure.persistence.theme_backup.sqlite3.connect', side_effect=lambda *a, **k: native(*a, **k, factory=Fault)):
+                        window._import_theme_backup()
+                    warning.assert_called_once()
+                    information.assert_not_called()
+                    self.assertIn('COMMIT 결과' if phase == 'commit-ack' else 'DB에 저장', warning.call_args.args[2])
+                    self.assertEqual(['real native commit'], commits)
+                    self.assertIsNone(window._theme_store)
+                    self.assertEqual({}, window._themes)
+                    self.assertTrue(window._theme_unapplied)
+                    window._refresh_theme_trade_summary()
+                    self.assertIn("변경 후 화면 미적용", window._theme_trade_summary.text())
+                    self.assertFalse(window._app_controller.closing)
+                    self.assertEqual('복원된 프로필', settings.get('theme_active_profile'))
+                    with closing(native(path)) as connection:
+                        self.assertEqual([('복원된 프로필',)], connection.execute('SELECT profile_name FROM theme_profiles').fetchall())
+                finally:
+                    window.close()
+
+    def test_explicit_restore_refuses_pending_main_embedded_and_hidden_editor_then_restores_after_publication(self):
+        import sqlite3
+        from contextlib import closing
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+        from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupService
+        from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+        from kiwoom_monitor.presentation.theme_dialogs import ThemeManagerDialog
+        for owner in ('main', 'embedded', 'hidden-nonmodal'):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'query-role.sqlite3'
+                Database(path).initialize_query_role(role='fixture-query')
+                settings = SettingsRepository(path, strict_text=True)
+                StockRepository(path).upsert('005930', '삼성전자', 'KOSPI')
+                store = ThemeRepository.open_existing(path, '기본 테마')
+                document = ThemeBackupService(path, settings=settings).export_document()
+                document['active_profile'] = document['profiles'][0]['name'] = '복원된 프로필'
+                document['profiles'][0]['themes'] = [{'name': '복원테마', 'color': '#123456'}]
+                document['profiles'][0]['stock_themes'] = [{'code': '005930', 'theme': '복원테마', 'color': None}]
+                backup = root / 'theme.json'
+                backup.write_text(json.dumps(document), encoding='utf-8')
+                window = MainWindow(settings, FakeRankingLoader(), theme_store=store, query_only=True, data_dir=root)
+                window.activate_startup()
+                entered, release = threading.Event(), threading.Event()
+                request = None
+                def accepted_save():
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError('accepted theme write was not released')
+                    store.replace_for_stock('005930', ('이전저장',))
+                try:
+                    if owner == 'main':
+                        self.assertTrue(window._submit_main_theme_change(accepted_save))
+                        request = window._theme_save_request
+                    else:
+                        if owner == 'embedded':
+                            window._open_settings()
+                            editor = window._settings_dialog.findChild(ThemeManagerDialog)
+                        else:
+                            window._open_theme_manager()
+                            editor = window._theme_manager_dialog
+                            editor.hide()
+                        editor._submit_theme_change(accepted_save)
+                        self.assertTrue(editor.has_pending_theme_save)
+                        request = editor._save_request
+                    self.assertTrue(entered.wait(5))
+                    before, projection = path.read_bytes(), dict(window._themes)
+                    with patch('kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName', return_value=(str(backup), '')), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'warning') as warning, patch('kiwoom_monitor.presentation.main_window.ThemeBackupService', side_effect=AssertionError('pending save must precede native import')):
+                        window._import_theme_backup()
+                    warning.assert_called_once()
+                    self.assertEqual(before, path.read_bytes())
+                    self.assertEqual(projection, window._themes)
+                    self.assertIs(store, window._theme_store)
+                    release.set()
+                    self.assertTrue(request.wait(5000))
+                    request = None
+                    QCoreApplication.processEvents()
+                    self.assertIsNone(window._theme_save_request if owner == 'main' else editor._save_request)
+                    self.assertEqual(('이전저장',), store.themes_for_stock('005930'))
+                    with patch('kiwoom_monitor.presentation.main_window.QFileDialog.getOpenFileName', return_value=(str(backup), '')), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information') as information:
+                        window._import_theme_backup()
+                    information.assert_called_once()
+                    QCoreApplication.processEvents()
+                    self.assertEqual('복원된 프로필', window._theme_store.active_profile)
+                    self.assertEqual({'삼성전자': '복원테마'}, window._themes)
+                    self.assertFalse(window._theme_unapplied)
+                    with closing(sqlite3.connect(path)) as connection:
+                        self.assertEqual(('복원된 프로필',), connection.execute("SELECT value FROM settings WHERE key='theme_active_profile'").fetchone())
+                finally:
+                    release.set()
+                    if request is not None:
+                        request.wait(5000)
+                    window.close()
+
     def test_repository_receipts_follow_current_runtime_clock(self) -> None:
         import sqlite3
         from contextlib import closing
@@ -598,16 +1497,19 @@ class MainWindowTest(unittest.TestCase):
         from kiwoom_monitor.infrastructure.persistence.minute_bar_repository import MinuteBarRepository
         from kiwoom_monitor.infrastructure.persistence.daily_bar_repository import DailyBarRepository
         from kiwoom_monitor.infrastructure.persistence.theme_repository import ThemeRepository
+        from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSetting, ColumnSettingsRepository
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.sqlite3"
             database = Database(path)
             database.initialize()
             minute, daily, theme = MinuteBarRepository(path), DailyBarRepository(path), ThemeRepository(path)
+            columns = ColumnSettingsRepository(path)
             first = datetime(2030, 1, 2, 10, 0, tzinfo=KST)
             loader = FakeRankingLoader()
             loader.server_now = lambda: first
             window = MainWindow(database.settings, loader, minute_bar_repository=minute,
-                                daily_bar_repository=daily, theme_store=theme)
+                                daily_bar_repository=daily, theme_store=theme, columns=columns)
+            window.activate_startup()
             try:
                 for observed in (first, first + timedelta(days=1)):
                     # API reload replaces this same controller-owned loader.
@@ -615,11 +1517,15 @@ class MainWindowTest(unittest.TestCase):
                     minute.upsert_top20_trade_value_index(observed.replace(tzinfo=None), 12., ("005930",))
                     daily.mark_finalized(("005930",), observed.date())
                     theme.set_theme_alias("구이름", "새이름")
+                    database.settings.set("fixture_current_clock", observed.isoformat())
+                    columns.save((ColumnSetting("rank", True, 0, 91 + observed.day),))
                     with closing(sqlite3.connect(path)) as connection:
                         stored = connection.execute("SELECT updated_at FROM top20_trade_value_index WHERE trade_date=?", (observed.date().isoformat(),)).fetchone()[0]
                         finalized = connection.execute("SELECT finalized_at FROM market_data_finalization_log WHERE trade_date=?", (observed.date().isoformat(),)).fetchone()[0]
                         alias = connection.execute("SELECT updated_at FROM profile_theme_name_decisions WHERE source_name='구이름'").fetchone()[0]
-                    self.assertEqual((observed.isoformat(),) * 3, (stored, finalized, alias))
+                        setting_clock = connection.execute("SELECT updated_at FROM central_setting_versions WHERE setting_key='fixture_current_clock'").fetchone()[0]
+                        column_clock = connection.execute("SELECT updated_at FROM central_column_setting_versions WHERE column_name='rank'").fetchone()[0]
+                    self.assertEqual((observed.isoformat(),) * 5, (stored, finalized, alias, setting_clock, column_clock))
             finally:
                 window.close()
 
@@ -636,6 +1542,7 @@ class MainWindowTest(unittest.TestCase):
         repository.update_intraday_highs({"005930": 71000}, now.date())
         repository.update_fundamentals("005930", 2000000, 55.5, 72000, 500, 91000)
         window = MainWindow(database.settings, FakeRankingLoader(), stock_lookup=repository)
+        window.activate_startup()
         window._ranking_now = lambda: now
         with patch.object(repository, "load_ranking_cache", wraps=repository.load_ranking_cache) as load:
             window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
@@ -643,7 +1550,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(now.date(), load.call_args.args[2])
         self.assertEqual("KOSPI", window._stock_markets["005930"])
         self.assertEqual(70000, window._current_prices["005930"])
-        self.assertEqual(71000, window._today_high_prices["005930"])
+        self.assertEqual(71000, window._pc_market_session.current_high("005930"))
         self.assertEqual(55.5, window._fundamentals["005930"].float_ratio_percent)
         self.assertNotIn("005930", window._nxt_checked_codes)
         for enabled in (True, False):
@@ -655,15 +1562,23 @@ class MainWindowTest(unittest.TestCase):
         window.close()
 
     def test_google_drive_dirty_comparison_preserves_mixed_offset_instants(self):
-        for local, uploaded, expected in (
-            ('2026-10-16T14:00:00+09:00', '2026-10-16T06:00:00Z', False),
-            ('2026-10-16T06:00:00Z', '2026-10-16T14:00:00+09:00', True),
-            ('2026-10-16T14:00:00+09:00', '2026-10-16T05:00:00Z', False),
+        for local, uploaded, dirty, expected in (
+            ('2026-10-16T14:00:00+09:00', '2026-10-16T06:00:00Z', '0', False),
+            ('2026-10-16T06:00:00Z', '2026-10-16T14:00:00+09:00', '0', True),
+            ('2026-10-16T14:00:00+09:00', '2026-10-16T05:00:00Z', '0', False),
+            ('2026-10-16T06:00:00+00:00', '2026-10-16T14:00:00+09:00', '0', True),
+            (None, None, '0', False),
+            ('2026-10-16T14:00:00+09:00', '', '0', True),
+            ('', '2026-10-16T14:00:00+09:00', '0', False),
+            ('legacy-b', 'legacy-a', '0', True),
+            ('2026-10-16T14:00:00', '2026-10-16T13:00:00', '0', True),
+            ('2026-10-16T14:00:00', '2026-10-16T15:00:00+09:00', '0', False),
+            ('', '', '1', True),
         ):
-            with self.subTest(local=local, uploaded=uploaded):
+            with self.subTest(local=local, uploaded=uploaded, dirty=dirty):
                 values = {'google_drive_local_changed_at': local,
                           'google_drive_last_upload_success_at': uploaded,
-                          'google_drive_unsynced_changes': '0'}
+                          'google_drive_unsynced_changes': dirty}
                 owner = SimpleNamespace(_settings=SimpleNamespace(get=values.get))
                 self.assertEqual(MainWindow._has_newer_local_google_drive_changes(owner), expected)
 
@@ -673,6 +1588,90 @@ class MainWindowTest(unittest.TestCase):
         value = as_kst(datetime(2026, 10, 16, 5, tzinfo=timezone.utc))
         with patch('kiwoom_monitor.presentation.main_window.kst_now', return_value=value):
             self.assertEqual(MainWindow._google_drive_timestamp_now(), '2026-10-16T14:00:00+09:00')
+
+    def test_missing_cache_success_markers_request_fresh_work_without_inserting_defaults(self):
+        import sqlite3
+        from contextlib import closing
+        from types import SimpleNamespace
+        from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
+
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "query-role.sqlite3"
+        Database(path).initialize_query_role(role="fixture-query")
+        keys = ("daily_high_adjusted_basis_version", "historical_high_adjusted_basis_version",
+                "krx_stock_catalog_date", "kind_name_history_sync_date")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.executemany("DELETE FROM settings WHERE key=?", [(key,) for key in keys])
+        settings = SettingsRepository(path, strict_text=True)
+        before = path.read_bytes()
+        codes = ("000001",)
+        fixed = datetime.fromisoformat("2026-10-25T10:00:00+09:00")
+        daily = SimpleNamespace(available=True, is_running=False, start=Mock(return_value=True))
+        historical = SimpleNamespace(available=True, is_running=False, start=Mock(return_value=True))
+        catalog = SimpleNamespace(is_running=False, start=Mock(return_value=True))
+        owner = SimpleNamespace(
+            _closing=False, _query_only=False, _ranking_execution=SimpleNamespace(priority_preparing=False),
+            _settings=settings, _ranking_now=lambda: fixed,
+            _daily_high_worker_controller=daily, _daily_high_cache_date=None,
+            _daily_bar_repository=None, _daily_highs={},
+            _daily_high_basis_refresh_received=set(),
+            _historical_high_worker_controller=historical, _stock_lookup=None,
+            _historical_high_refresh_received=set(),
+        )
+        self.assertTrue(MainWindow._start_daily_high_loading(owner, codes))
+        daily.start.assert_called_once_with(codes, followup_codes=codes)
+        self.assertEqual(set(codes), owner._daily_high_basis_refresh_expected)
+        self.assertTrue(MainWindow._start_historical_high_loading(owner, codes))
+        historical.start.assert_called_once_with(codes)
+        self.assertEqual(set(codes), owner._historical_high_refresh_expected)
+        owner._stock_lookup = SimpleNamespace(upsert_many=Mock())
+        owner._krx_stock_catalog_worker_controller = catalog
+        owner._row_by_code = {codes[0]: 0}
+        status = SimpleNamespace(showMessage=Mock())
+        owner.statusBar = lambda: status
+        MainWindow._start_daily_krx_catalog_sync(owner)
+        catalog.start.assert_called_once()
+        self.assertIs(owner._stock_lookup, catalog.start.call_args.args[0])
+        self.assertIs(settings, catalog.start.call_args.args[1])
+        for key in keys:
+            with self.subTest(key=key), self.assertRaises(KeyError):
+                settings.get(key)
+        self.assertEqual(before, path.read_bytes())
+
+    def test_query_auto_catalog_preserves_read_followups_and_skips_local_collection(self):
+        from types import SimpleNamespace
+        from kiwoom_monitor.presentation.krx_stock_catalog_worker_controller import KrxStockCatalogWorkerController
+
+        codes = ("000001", "000002")
+        for closing, priority, after_hours, expected_high in (
+            (False, False, True, 0), (False, False, False, 1),
+            (True, False, False, 0), (False, True, False, 0),
+        ):
+            with self.subTest(closing=closing, priority=priority, after_hours=after_hours):
+                catalog = KrxStockCatalogWorkerController()
+                settings_get = Mock(side_effect=AssertionError("query auto catalog read a local success date"))
+                current_time = Mock(side_effect=AssertionError("query auto catalog requested a date"))
+                status = SimpleNamespace(showMessage=Mock())
+                owner = SimpleNamespace(
+                    _closing=closing, _query_only=True,
+                    _ranking_execution=SimpleNamespace(priority_preparing=priority),
+                    _stock_lookup=SimpleNamespace(upsert_many=Mock()),
+                    _krx_stock_catalog_worker_controller=catalog,
+                    _settings=SimpleNamespace(get=settings_get), _ranking_now=current_time,
+                    _row_by_code=dict.fromkeys(codes),
+                    _is_after_hours_data_pause=Mock(return_value=after_hours),
+                    _start_historical_high_loading=Mock(return_value=True), statusBar=lambda: status,
+                )
+                MainWindow._start_daily_krx_catalog_sync(owner)
+                self.assertIsNone(catalog.worker)
+                self.assertFalse(catalog.is_running)
+                settings_get.assert_not_called()
+                current_time.assert_not_called()
+                status.showMessage.assert_not_called()
+                owner._stock_lookup.upsert_many.assert_not_called()
+                self.assertEqual(expected_high, owner._start_historical_high_loading.call_count)
+                if expected_high:
+                    owner._start_historical_high_loading.assert_called_once_with(codes)
 
     def test_saved_high_is_visible_on_ranking_and_blue_dot_tracks_daily_refresh(self):
         from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
@@ -686,6 +1685,7 @@ class MainWindowTest(unittest.TestCase):
         stocks.update_fundamentals("005930",1000,50,70000)
         daily = DailyBarRepository(path)
         window = MainWindow(database.settings,FakeRankingLoader(),stock_lookup=stocks,daily_bar_repository=daily)
+        window.activate_startup()
         now = datetime(2026,10,16,10,0,10)
         window._ranking_now = lambda: now
         window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
@@ -729,6 +1729,7 @@ class MainWindowTest(unittest.TestCase):
         bars = tuple(DailyBar((now-timedelta(days=n+1)).strftime("%Y%m%d"),100+n,None) for n in range(20))
         daily.upsert_targets("005930",DailyHighTargets(None,None,None,daily_bars=bars),now.date())
         window = MainWindow(database.settings,FakeRankingLoader(),daily_bar_repository=daily)
+        window.activate_startup()
         window._ranking_now = lambda: now
         window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
         role = NxtMarkerDelegate.HIGH_REFRESH_PENDING_ROLE
@@ -759,6 +1760,7 @@ class MainWindowTest(unittest.TestCase):
         stocks = StockRepository(path); stocks.upsert("005930","삼성전자","KOSPI")
         stocks.update_historical_high_price("005930",70000,1980,2026,"2026-10-15")
         window = MainWindow(database.settings,FakeRankingLoader(),stock_lookup=stocks)
+        window.activate_startup()
         now = datetime(2026,10,16,10,0)
         window._ranking_now = lambda: now
         window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
@@ -815,6 +1817,7 @@ class MainWindowTest(unittest.TestCase):
             database.settings.set("trade_value_1m_alert_eok", "1")
             database.settings.set("strength_show_icon", "0")
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             now = datetime(2026, 10, 9, 10, 15, 10)
             window._ranking_now = lambda: now
             window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
@@ -834,7 +1837,7 @@ class MainWindowTest(unittest.TestCase):
             self.assertAlmostEqual(0.5, float(window._table.item(0, 4).text().rstrip("%")))
             self.assertIn("부분", window._table.item(0, 4).toolTip())
             self.assertTrue(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
-            state = window._entry_market_state()
+            state = window._pc_market_session.entry_market_state(window._ranking_execution.rank_by_code, window._ranked_stock_names, getattr(window, "_visible_theme_frequency", {}), window._ranking_now())
             self.assertEqual(2.5, state["ranking_table"]["visible_trade_value_1m_eok"])
             self.assertEqual("partial", state["input_quality"]["005930"]["1"])
             from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import OrderExecution
@@ -846,12 +1849,12 @@ class MainWindowTest(unittest.TestCase):
             self.assertEqual(2.5, snapshots[0].trade_value_1m_eok)
             self.assertEqual(2.5, snapshots[0].trade_value_5m_eok)
             self.assertEqual("partial", snapshots[0].market_state["input_quality"]["005930"]["1"])
-            pressure = window._execution_pressure_at_entry("005930", now)
+            pressure = window._pc_market_session.execution_pressure_at_entry("005930", now)
             self.assertFalse(pressure["available"])
             self.assertIsNone(pressure["buy_share_percent"])
             now += timedelta(seconds=61)
             window._on_trade_tick(replace(first, trade_time=now.strftime("%H%M%S"), cumulative_trade_value=1400))
-            recovered = window._execution_pressure_at_entry("005930", now)
+            recovered = window._pc_market_session.execution_pressure_at_entry("005930", now)
             self.assertTrue(recovered.get("available", True))
             self.assertEqual(100.0, recovered["buy_share_percent"])
             self.assertFalse(pressure["available"])  # Historical snapshot stays partial.
@@ -873,10 +1876,11 @@ class MainWindowTest(unittest.TestCase):
             database.settings.set("theme_trade_summary_excluded_stocks", "제외종목")
             database.settings.set("theme_trade_summary_period", "1m")
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             now = datetime(2026, 10, 9, 10, 15, 10)
             window._ranking_now = lambda: now
             window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
-            window._minute_aggregator = type(window._minute_aggregator)()
+            window._pc_market_session.apply_runtime("local")
             window._fundamentals["005930"] = StockFundamentals(1000, 50)
             window._themes["삼성전자"] = "반도체"
             minute = now.replace(second=0)
@@ -885,11 +1889,11 @@ class MainWindowTest(unittest.TestCase):
                 origin=ObservationOrigin.REALTIME, source="NAS:kiwoom-websocket-0B",
             )
             bar = MinuteOhlcv(minute, 100, 100, 100, 100, 10, 2.5, metadata)
-            window._minute_aggregator.seed("005930", (bar,), now,
+            window._pc_market_session.minute_aggregator.seed("005930", (bar,), now,
                 include_current_snapshot=True, query_authoritative=False)
             window._on_trade_tick(TradeTick("005930", 100, None, 1000, 10, None, "101510"))
             window._on_trade_tick(TradeTick("005930", 110, None, 1250, 10, None, "101511"))
-            window._minute_history_codes.add("005930")
+            window._pc_market_session.history_cache_saved("005930")
             window._flush_trade_tick_updates()
             for column in (6, 7, 8, 9):
                 self.assertEqual(5.0, float(window._table.item(0, column).text()))
@@ -911,7 +1915,7 @@ class MainWindowTest(unittest.TestCase):
             self.assertAlmostEqual(1.0, float(window._table.item(0, 4).text().rstrip("%")))
             self.assertTrue(window._table.item(0, 6).data(window.TRADE_VALUE_ALERT_ROLE))
             self.assertEqual(DataCompleteness.UNCONFIRMED,
-                window._minute_aggregator.bucket_quality("005930", 1, now, previous=True))
+                window._pc_market_session.minute_aggregator.bucket_quality("005930", 1, now, previous=True))
             # Disabling the existing alert setting still takes effect.
             database.settings.set("trade_value_alert_enabled", "0")
             window._render_trade_values("005930")
@@ -932,10 +1936,11 @@ class MainWindowTest(unittest.TestCase):
                 "trade_value_alert_enabled": "1", "trade_value_1m_alert_eok": "25",
             })
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             now = datetime(2026, 10, 9, 10, 7, 10)
             window._ranking_now = lambda: now
             window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
-            window._minute_aggregator = type(window._minute_aggregator)()
+            window._pc_market_session.apply_runtime("local")
             window._fundamentals["005930"] = StockFundamentals(1000, 50, float_shares=100_000_000)
             window._current_prices["005930"] = 100
             window._previous_day_close_prices["005930"] = 50
@@ -948,7 +1953,7 @@ class MainWindowTest(unittest.TestCase):
                 for hour, minute, value in ((9, 5, 7), (9, 59, 11), (10, 0, 13),
                     (10, 4, 17), (10, 5, 19), (10, 6, 23), (10, 7, 29))
             )
-            aggregator = window._minute_aggregator
+            aggregator = window._pc_market_session.minute_aggregator
             aggregator.seed("005930", bars, now, include_current_snapshot=True)
             periods = ("1m", "5m", "60m", "day")
             # Independent arithmetic: aligned buckets, not rolling last-N bars.
@@ -1003,12 +2008,13 @@ class MainWindowTest(unittest.TestCase):
             window._render_trade_values("005930")
             self.assertEqual(30, float(window._table.item(0, 6).text()))
             generation = aggregator.gap_generation("005930")
-            window._minute_recovery_requests["005930"] = generation
+            window._pc_market_session.prepare_history(("005930",), now, force=True)
             window._minute_bar_repository = SimpleNamespace()
+            window._app_controller.minute_bar_repository = window._minute_bar_repository
             writer = SimpleNamespace(enqueue_history_bars=Mock())
             restored = replace(bars[-1], trade_value_eok_override=37,
                 metadata=replace(bars[-1].metadata, available_at=now, origin=ObservationOrigin.QUERY, source="kiwoom-ka10080"))
-            with patch.object(MainWindow, "_market_cache_writer", PropertyMock(return_value=writer)):
+            with patch.object(window._app_controller, "market_cache_writer", writer):
                 window._on_history_received("005930", (restored,))
             self.assertEqual(generation, writer.enqueue_history_bars.call_args.kwargs["recovery_generation"])
             self.assertEqual(37, float(window._table.item(0, 6).text()))
@@ -1020,6 +2026,7 @@ class MainWindowTest(unittest.TestCase):
             self.assertIn("complete", window._table.item(0, 6).toolTip())
             self.assertIn("recovered", window._table.item(0, 6).toolTip())
             window._minute_bar_repository = None
+            window._app_controller.minute_bar_repository = None
             window._fundamentals.clear()
             with patch.object(window, "_trade_value_quality", wraps=window._trade_value_quality) as quality, \
                     patch.object(window._table, "setItem", wraps=window._table.setItem) as set_item:
@@ -1038,11 +2045,12 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             now = datetime(2026, 10, 9, 10, 7, 10)
             window._ranking_now = lambda: now
             window._ranked_stock_names = {"005930": "삼성전자", "000660": "SK하이닉스", "000001": "원전주"}
             window._themes = {"삼성전자": "반도체", "SK하이닉스": "반도체", "원전주": "원전"}
-            aggregator = window._minute_aggregator
+            aggregator = window._pc_market_session.minute_aggregator
             for code, value in (("005930", 29), ("000660", 41), ("000001", 17)):
                 bars = tuple(MinuteOhlcv(minute, 100, 100, 100, 100, 1, amount,
                     MarketDataMetadata(effective_at=minute, available_at=now, completeness=DataCompleteness.COMPLETE,
@@ -1112,6 +2120,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             window._daily_bar_repository = None
             window._stock_lookup = None
             window._after_close_finalization_date = date(2026, 9, 29)
@@ -1263,7 +2272,7 @@ class MainWindowTest(unittest.TestCase):
     def test_api_label_prioritizes_actual_ranking_local_fallback(self) -> None:
         shown = []
         owner = SimpleNamespace(
-            _active_api_route="central",
+            _pc_market_session=market_session_with_source("central"),
             _ranking_uses_local_fallback=True,
             _set_api_status=lambda text, color: shown.append((text, color)),
         )
@@ -1275,7 +2284,7 @@ class MainWindowTest(unittest.TestCase):
     def test_api_label_keeps_nas_source_while_realtime_is_waiting(self) -> None:
         shown = []
         owner = SimpleNamespace(
-            _active_api_route="central_waiting",
+            _pc_market_session=market_session_with_source("central_waiting"),
             _ranking_uses_local_fallback=False,
             _set_api_status=lambda text, color: shown.append((text, color)),
         )
@@ -1334,6 +2343,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
 
             self.assertEqual(Qt.TimerType.PreciseTimer, window._ranking_timer.timerType())
             controller = window._app_controller
@@ -1359,6 +2369,7 @@ class MainWindowTest(unittest.TestCase):
         )
         calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
         owner = SimpleNamespace(
+            _query_only=False,
             _journal_news_inbox=SimpleNamespace(read_new=lambda: {
                 "code": "005930", "name": "삼성전자", "group_id": "group-1",
                 "trade_date": "2026-09-13", "origin_scope": requested.to_dict(),
@@ -1386,6 +2397,7 @@ class MainWindowTest(unittest.TestCase):
             },
         ))
         owner = SimpleNamespace(
+            _query_only=False,
             _journal_news_inbox=SimpleNamespace(read_new=lambda: next(documents)),
             _news_window=SimpleNamespace(
                 ensure_started=lambda: None,
@@ -1401,11 +2413,12 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(LEGACY_ACCOUNT_SCOPE, sent[0]["account_scope"])
 
     def test_theme_change_forces_google_settings_and_theme_backup(self) -> None:
+        notified = []
         scheduled: list[str] = []
         refreshed: list[bool] = []
         badge_refreshes: list[bool] = []
         owner = SimpleNamespace(
-            _theme_store=SimpleNamespace(all_by_name=lambda: {"005930": ("반도체",)}),
+            _theme_store=SimpleNamespace(all_by_name=lambda: {"005930": ("반도체",)}, notify_changed=lambda: notified.append(True)),
             _refresh_theme_badges=lambda: badge_refreshes.append(True),
             _refresh_rankings=lambda: refreshed.append(True),
             _schedule_google_drive_upload=scheduled.append,
@@ -1417,6 +2430,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual([True], badge_refreshes)
         self.assertEqual([True], refreshed)
         self.assertEqual(["both"], scheduled)
+        self.assertEqual([True], notified)
 
     def test_offline_google_change_remains_marked_for_later_upload(self) -> None:
         saved: dict[str, str] = {}
@@ -1505,6 +2519,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
 
             self.assertEqual(window.windowTitle(), "키움 실시간 모니터 (테스트)")
             table = window.centralWidget().findChild(type(window._table))
@@ -1548,6 +2563,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
 
             self.assertEqual("", window._google_drive_pending_target)
             self.assertEqual("", window._google_drive_active_target)
@@ -1558,6 +2574,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             window._refresh_rankings()
             window._ranking_worker.wait()
             QApplication.processEvents()
@@ -1566,8 +2583,8 @@ class MainWindowTest(unittest.TestCase):
                 1_000, 50, upper_limit_price=91_900,
             )
             window._current_prices["005930"] = 91_900
-            window._today_high_prices["005930"] = 91_900
-            window._last_change_rates["005930"] = 29.97
+            window._pc_market_session.restore_highs({"005930": 91_900})
+            window._pc_market_session.accept_ranking_rate("005930", 29.97)
             window._render_change_rate("005930")
 
             item = window._table.item(0, 3)
@@ -1576,7 +2593,7 @@ class MainWindowTest(unittest.TestCase):
             self.assertTrue(item.font().bold())
             self.assertIsNone(window._table.cellWidget(0, 3))
 
-            window._last_change_rates["005930"] = 0.0
+            window._pc_market_session.accept_ranking_rate("005930", 0.0)
             window._render_change_rate("005930")
             self.assertFalse(window._table.item(0, 3).font().bold())
             self.assertNotEqual(
@@ -1585,7 +2602,7 @@ class MainWindowTest(unittest.TestCase):
             )
 
             window._current_prices["005930"] = 90_000
-            window._last_change_rates["005930"] = 27.28
+            window._pc_market_session.accept_ranking_rate("005930", 27.28)
             window._render_change_rate("005930")
             self.assertEqual("+27.28%", window._table.item(0, 3).text())
             self.assertFalse(window._table.item(0, 3).font().bold())
@@ -1606,6 +2623,7 @@ class MainWindowTest(unittest.TestCase):
             database.settings.set("high_header_cycle_periods", "250,historical")
             database.settings.set("high_distance_period", "250")
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
 
             window._toggle_table_header_mode(13)
             self.assertEqual("historical", database.settings.get("high_distance_period"))
@@ -1625,6 +2643,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             minute = datetime(2026, 9, 10, 10, 15)
             bar = MinuteOhlcv(minute, 100, 102, 99, 101, 10, 0.5)
             window._app_controller.minute_bar_repository = FailingRepository()
@@ -1721,6 +2740,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             window._minute_bar_repository = FailingRepository()
             window._app_controller.minute_bar_repository = window._minute_bar_repository
             now = window._ranking_now()
@@ -1728,7 +2748,7 @@ class MainWindowTest(unittest.TestCase):
 
             window._on_history_received("005930", bars)
 
-            self.assertNotIn("005930", window._minute_history_codes)
+            self.assertNotIn("005930", window._pc_market_session.history_codes)
             window.close()
 
     def test_fundamentals_refresh_keeps_combined_adjusted_high_in_memory(self) -> None:
@@ -1736,6 +2756,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             window._fundamentals["000660"] = StockFundamentals(1_000, 50, 3_002_000)
             window._daily_highs["000660"] = DailyHighTargets(None, None, None)
 
@@ -1752,6 +2773,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             window._fundamentals["000660"] = StockFundamentals(1_000, 50, 3_100_000)
             window._daily_highs["000660"] = DailyHighTargets(None, None, 3_002_000, period_statuses=(("250", "ready"),))
 
@@ -1767,6 +2789,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, themes={"가": "AI", "나": "AI", "다": "바이오"})
+            window.activate_startup()
 
             class Stock:
                 new_high_periods = ()
@@ -1792,6 +2815,7 @@ class MainWindowTest(unittest.TestCase):
             database.initialize()
             database.settings.set("theme_trade_summary_period", "day")
             window = MainWindow(database.settings, themes={"가": "반도체", "나": "반도체", "다": "원전", "라": "원전"})
+            window.activate_startup()
 
             class Stock:
                 new_high_periods = ()
@@ -1801,7 +2825,7 @@ class MainWindowTest(unittest.TestCase):
                     self.rank, self.code, self.name, self.change_rate = rank, code, name, change
 
             trade_values = {"000001": 3.0, "000002": 2.0, "000003": 12.0, "000004": 8.0}
-            window._minute_aggregator.today_trade_value_eok = lambda code, _now=None: trade_values[code]
+            window._pc_market_session.minute_aggregator.today_trade_value_eok = lambda code, _now=None: trade_values[code]
             window._app_controller.ranking.completed.emit((
                 Stock(1, "000001", "가", "+4.00"),
                 Stock(2, "000002", "나", "+2.00"),
@@ -1836,12 +2860,12 @@ class MainWindowTest(unittest.TestCase):
 
     def test_nas_market_data_is_available_before_realtime_subscription_opens(self) -> None:
         owner = SimpleNamespace(
-            _active_api_route="central_waiting",
+            _pc_market_session=market_session_with_source("central_waiting"),
             _market_data_client=SimpleNamespace(load_stored_minute_bars=lambda *_args: ()),
         )
 
         self.assertTrue(MainWindow._uses_nas_market_data_source(owner))
-        owner._active_api_route = "local_fallback"
+        owner._pc_market_session.source_changed(RealtimeSourceTransition(RealtimeSourceRoute.LOCAL_FALLBACK, 0, True))
         self.assertFalse(MainWindow._uses_nas_market_data_source(owner))
 
     def test_nas_recovery_forces_current_top20_minute_history_reload(self) -> None:
@@ -1851,25 +2875,63 @@ class MainWindowTest(unittest.TestCase):
 
         requests = []
         owner = SimpleNamespace(
-            _active_api_route="local_fallback",
-            _minute_history_codes={"005930"},
+            _pc_market_session=market_session_with_source("local_fallback"),
             _row_by_code={"005930": 0, "000660": 1},
             statusBar=lambda: StatusBar(),
             _set_connected_api_status=lambda: None,
             _start_minute_history_loading=lambda codes, force=False: requests.append((codes, force)),
         )
 
+        owner._pc_market_session.history_cache_saved("005930")
         MainWindow._on_realtime_status_changed(owner, "나스 실시간 체결 구독 중 · 2종목")
+        self.assertEqual("local_fallback", owner._pc_market_session.source_route)
+        self.assertEqual({"005930"}, owner._pc_market_session.history_codes)
+        self.assertEqual([], requests)
+        MainWindow._on_realtime_source_changed(
+            owner, RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL, 3, True),
+        )
+        MainWindow._on_realtime_status_changed(owner, "표시 문구를 교체해도 같은 업무 source")
 
-        self.assertEqual("central", owner._active_api_route)
-        self.assertEqual(set(), owner._minute_history_codes)
+        self.assertEqual("central", owner._pc_market_session.source_route)
+        self.assertEqual(set(), owner._pc_market_session.history_codes)
         self.assertEqual([(("005930", "000660"), True)], requests)
+
+    def test_runtime_source_activation_resets_current_aggregator_and_restored_owner(self) -> None:
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import MarketIndexTick
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "monitor.sqlite3")
+            database.initialize()
+            window = MainWindow(database.settings)
+            window.activate_startup()
+            session = window._pc_market_session
+            observed_at = datetime(2026, 10, 16, 10, 15, 10)
+            session.accept_market_index(MarketIndexTick("KOSPI", "101510", 2500.), observed_at)
+            original = window._pc_market_session.minute_aggregator
+            original._last_cumulative_trade_value = {("A", "KRX"): 10, ("A", "NXT"): 20}
+            restore = window._capture_api_runtime_view()
+            window._apply_api_runtime_view({"source_mode": "personal_server"})
+            self.assertIs(session, window._pc_market_session)
+            self.assertEqual(2500., session.market_state_at_entry()["KOSPI"]["index"])
+            current = window._pc_market_session.minute_aggregator
+            current._last_cumulative_trade_value = {("A", "KRX"): 30, ("A", "NXT"): 40}
+            window._realtime_worker_controller.sources_activated.emit((("A", "NXT"),))
+            self.assertEqual({("A", "KRX"): 30}, current._last_cumulative_trade_value)
+            self.assertEqual({("A", "KRX"): 10, ("A", "NXT"): 20}, original._last_cumulative_trade_value)
+            restore()
+            window._realtime_worker_controller.sources_activated.emit((("A", "NXT"),))
+            self.assertIs(session, window._pc_market_session)
+            self.assertEqual(2500., session.market_state_at_entry()["KOSPI"]["index"])
+            self.assertIs(original, window._pc_market_session.minute_aggregator)
+            self.assertEqual({("A", "KRX"): 10}, original._last_cumulative_trade_value)
+            self.assertEqual({("A", "KRX"): 30}, current._last_cumulative_trade_value)
+            window.close()
 
     def test_top20_collection_continues_while_five_minute_chart_is_selected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings)
+            window.activate_startup()
             window._top20_index_timer.stop()
             current = [datetime(2026, 9, 9, 9, 0, 10)]
             window._ranking_now = lambda: current[0]
@@ -1881,9 +2943,9 @@ class MainWindowTest(unittest.TestCase):
             collector.minute_codes = {"005930"}
             collector.cohort_segments = [("2026-09-09T09:00:00", ("005930",))]
             window._stock_markets["005930"] = "KOSPI"
-            window._minute_aggregator.bucket_trade_value_eok = lambda *_args, **_kwargs: 1.0
+            window._pc_market_session.minute_aggregator.bucket_trade_value_eok = lambda *_args, **_kwargs: 1.0
             saved: list[datetime] = []
-            window._save_top20_trade_value_index = lambda minute, *_args: saved.append(minute)
+            window._app_controller.store_top20_record = lambda record: saved.append(record.minute)
 
             window._update_top20_trade_value_index()
             self.assertEqual([(10, 1.0)], collector.samples)
@@ -1907,6 +2969,7 @@ class MainWindowTest(unittest.TestCase):
             # The unrelated zero-delay repair worker is not part of this live collection path.
             with patch.object(MainWindow, "_start_top20_market_repair"):
                 window = MainWindow(database.settings, loader, minute_bar_repository=repository)
+                window.activate_startup()
                 try:
                     window._top20_index_timer.stop()
                     window._app_controller._initial_ranking_timer.stop()
@@ -1924,7 +2987,7 @@ class MainWindowTest(unittest.TestCase):
                     )
                     window._row_by_code = {"005930": 0}
                     window._stock_markets.update({"005930": "KOSPI", "000660": "KOSDAQ"})
-                    window._minute_aggregator.bucket_trade_value_eok = (
+                    window._pc_market_session.minute_aggregator.bucket_trade_value_eok = (
                         lambda code, _interval, minute:
                         (1.0 if code == "005930" else 2.0) + (current[0] - minute).total_seconds()
                     )
@@ -1983,16 +3046,17 @@ class MainWindowTest(unittest.TestCase):
             loader = FakeRankingLoader()
             loader.server_now = lambda: now
             window = MainWindow(database.settings, loader, market_data_client=client)
+            window.activate_startup()
             try:
                 window._top20_index_timer.stop()
                 window._app_controller._initial_ranking_timer.stop()
                 window._ranking_now = lambda: now
-                window._active_api_route = "central"
+                window._pc_market_session.source_changed(RealtimeSourceTransition(RealtimeSourceRoute.CENTRAL, 0, True))
                 window._top20_view_date = now.date()
                 window._top20_view_mode = "minute"
                 window._top20_collector.active_codes = ("005930",)
                 window._stock_markets["005930"] = "KOSPI"
-                window._minute_aggregator.bucket_trade_value_eok = lambda *_args: 3.0
+                window._pc_market_session.minute_aggregator.bucket_trade_value_eok = lambda *_args: 3.0
                 payload = {
                     "trading_date": now.date().isoformat(), "basis": "realtime",
                     "rows": [{"minute": "2026-09-09T11:00:00", "status": "complete", "market_values": [5.0, 0.0, 0.0]}],
@@ -2038,6 +3102,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             window._refresh_rankings()
             window._ranking_worker.wait()
             QApplication.processEvents()
@@ -2057,6 +3122,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             window._selected_table_code = "005930"
 
             self.assertEqual("#ddebf7", window._row_background_color("005930", 0).name())
@@ -2108,6 +3174,7 @@ class MainWindowTest(unittest.TestCase):
             database = Database(Path(temporary_directory) / "monitor.sqlite3")
             database.initialize()
             window = MainWindow(database.settings, FakeRankingLoader())
+            window.activate_startup()
             window._app_controller.ranking.completed.emit(FakeRankingLoader().load_top_stocks())
             item = window._table.item(0, 6)
             item.setData(window.TRADE_VALUE_ALERT_ROLE, True)
@@ -2119,6 +3186,133 @@ class MainWindowTest(unittest.TestCase):
             self.assertEqual("#fde9e7", window._table.item(0, 5).background().color().name())
             window._theme_trade_summary_timer.stop()
             window.close()
+
+
+class MainWindowUpdateRoleTest(unittest.TestCase):
+    def test_update_request_preserves_persistent_role_and_default_request(self) -> None:
+        import ctypes
+        import subprocess
+        from kiwoom_monitor.presentation import main_window as module
+        from kiwoom_monitor.infrastructure.app_paths import AppPaths
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "KiwoomMonitor"
+            normal_data = base / "data"
+            unchosen_parent_updates = normal_data / "updates"
+            unchosen_parent_updates.mkdir(parents=True)
+            (unchosen_parent_updates / "keep.txt").write_bytes(b"existing parent data")
+            cases = ((False, None, "updates"), (True, None, "updates"),
+                     (True, "query-a", "query-a/updates"), (True, "query-b", "query-b/updates"),
+                     (True, "data/query-a", "data/query-a/updates"))
+            destinations = []
+            for index, (query, selected, expected_relative) in enumerate(cases):
+                with self.subTest(query=query, selected=selected):
+                    app = root / "설치 앱"
+                    helper = app / "_internal" / "update_helper" / "UpdateHelper.exe"
+                    helper.parent.mkdir(parents=True, exist_ok=True)
+                    content = f"fixture helper {index}".encode()
+                    helper.write_bytes(content)
+                    selected_data = AppPaths.for_query_role(base / selected).data_dir if selected else None
+                    expected_folder = base / expected_relative
+                    normal_updates = base / "updates"
+                    before_normal = {p.relative_to(normal_updates):p.read_bytes() for p in normal_updates.rglob("*") if p.is_file()}
+                    before_parent = {p.relative_to(unchosen_parent_updates):p.read_bytes() for p in unchosen_parent_updates.rglob("*") if p.is_file()}
+                    shell = Mock(return_value=33)
+                    window = SimpleNamespace(_query_only=query, _data_dir=selected_data,
+                        _settings_role="fixture-query" if selected else None, _api_config_path=lambda: normal_data / "api.env",
+                        statusBar=Mock(), close=Mock())
+                    window._updates_directory = MethodType(MainWindow._updates_directory, window)
+                    archive = root / "update.zip"
+                    with patch.object(module.sys, "executable", str(app / "앱.exe")), \
+                         patch.object(module.sys, "argv", ["app", "--token", "secret", "--restore-once"]), \
+                         patch.object(ctypes, "windll", SimpleNamespace(shell32=SimpleNamespace(ShellExecuteW=shell)), create=True), \
+                         patch.object(module.QTimer, "singleShot") as close, patch.object(module.QMessageBox, "critical") as error:
+                        MainWindow._apply_downloaded_updates(window, (str(archive),))
+                    error.assert_not_called()
+                    expected = ["--wait-pid", str(os.getpid()), "--target", str(app), "--exe", str(app / "앱.exe"),
+                        "--log", str(expected_folder / "apply_update.log")]
+                    if query:
+                        expected.append("--query-only")
+                        if selected:
+                            expected.extend(("--query-data-dir", str(selected_data), "--query-settings-role", "fixture-query"))
+                    expected.extend(("--archive", str(archive)))
+                    shell.assert_called_once_with(None, "runas", str(expected_folder / "UpdateHelper.exe"),
+                        subprocess.list2cmdline(expected), None, 0)
+                    self.assertEqual(content, (expected_folder / "UpdateHelper.exe").read_bytes())
+                    if selected:
+                        self.assertTrue(expected_folder.is_relative_to(selected_data))
+                        self.assertEqual(before_normal, {p.relative_to(normal_updates):p.read_bytes() for p in normal_updates.rglob("*") if p.is_file()})
+                        self.assertEqual(before_parent, {p.relative_to(unchosen_parent_updates):p.read_bytes() for p in unchosen_parent_updates.rglob("*") if p.is_file()})
+                        self.assertNotEqual(normal_updates, expected_folder)
+                        self.assertFalse((selected_data.parent / "updates").is_relative_to(selected_data))
+                        destinations.append(expected_folder)
+                    close.assert_called_once_with(300, window.close)
+            self.assertEqual(3, len(set(destinations)))
+
+    def test_update_request_preserves_explicit_full_root_and_role(self) -> None:
+        import ctypes
+        import subprocess
+        from kiwoom_monitor.presentation import main_window as module
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "설치 앱"
+            helper = app / "_internal" / "update_helper" / "UpdateHelper.exe"
+            helper.parent.mkdir(parents=True)
+            helper.write_bytes(b"fixture helper")
+            normal_data = root / "normal" / "data"
+            normal_data.mkdir(parents=True)
+            (normal_data / "keep.txt").write_bytes(b"existing normal data")
+            before_normal = {p.relative_to(normal_data): p.read_bytes() for p in normal_data.rglob("*") if p.is_file()}
+            for selected in ("전체 실행 A", "전체 실행 B", "data/전체 실행 A"):
+                with self.subTest(selected=selected):
+                    data = root / selected
+                    updates = data / "updates"
+                    shell = Mock(return_value=33)
+                    window = SimpleNamespace(_query_only=False, _data_dir=data, _settings_role="fixture-full",
+                        _api_config_path=lambda: normal_data / "api.env", statusBar=Mock(), close=Mock())
+                    window._updates_directory = MethodType(MainWindow._updates_directory, window)
+                    archive = root / "update.zip"
+                    with patch.object(module.sys, "executable", str(app / "앱.exe")), \
+                         patch.object(module.sys, "argv", ["app", "--token", "secret", "--restore-once"]), \
+                         patch.object(ctypes, "windll", SimpleNamespace(shell32=SimpleNamespace(ShellExecuteW=shell)), create=True), \
+                         patch.object(module.QTimer, "singleShot") as close, patch.object(module.QMessageBox, "critical") as error:
+                        MainWindow._apply_downloaded_updates(window, (str(archive),))
+                    error.assert_not_called()
+                    expected = ["--wait-pid", str(os.getpid()), "--target", str(app), "--exe", str(app / "앱.exe"),
+                        "--log", str(updates / "apply_update.log"), "--full-data-dir", str(data),
+                        "--full-settings-role", "fixture-full", "--archive", str(archive)]
+                    shell.assert_called_once_with(None, "runas", str(updates / "UpdateHelper.exe"),
+                        subprocess.list2cmdline(expected), None, 0)
+                    self.assertEqual(b"fixture helper", (updates / "UpdateHelper.exe").read_bytes())
+                    self.assertEqual(before_normal, {p.relative_to(normal_data): p.read_bytes() for p in normal_data.rglob("*") if p.is_file()})
+                    close.assert_called_once_with(300, window.close)
+
+    def test_download_request_uses_selected_data_owner_and_preserves_default_factory(self) -> None:
+        from kiwoom_monitor.presentation import main_window as module
+        from kiwoom_monitor.infrastructure.app_paths import AppPaths
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "KiwoomMonitor"
+            cases = ((None, None), ("query-a", "query-a/updates"),
+                     ("query-b", "query-b/updates"), ("data/query-a", "data/query-a/updates"))
+            destinations = []
+            for selected, expected_relative in cases:
+                with self.subTest(selected=selected):
+                    data = AppPaths.for_query_role(base / selected).data_dir if selected else None
+                    controller = SimpleNamespace(is_download_running=False, request_download_interruption=Mock(), start_download=Mock(return_value=True))
+                    window = SimpleNamespace(_closing=False, _data_dir=data,
+                        _update_worker_controller=controller, statusBar=Mock(), _close_update_progress=Mock())
+                    window._updates_directory = MethodType(MainWindow._updates_directory, window)
+                    with patch.object(module, "QProgressDialog"):
+                        MainWindow._download_updates(window, ())
+                    if selected:
+                        expected = base / expected_relative
+                        controller.start_download.assert_called_once_with((), download_dir=expected)
+                        self.assertTrue(expected.is_relative_to(data))
+                        self.assertNotEqual(base / "updates", expected)
+                        destinations.append(expected)
+                    else:
+                        controller.start_download.assert_called_once_with(())
+            self.assertEqual(3, len(set(destinations)))
 
 
 if __name__ == "__main__":

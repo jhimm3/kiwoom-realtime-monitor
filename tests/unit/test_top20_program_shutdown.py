@@ -82,7 +82,8 @@ class Top20ProgramShutdownTests(unittest.IsolatedAsyncioTestCase):
         blocked = _ControlledStore(self.store)
         service = self._service(blocked)
         service._program_snapshots._pending["005930"] = _snapshot()
-        service._tasks = [asyncio.create_task(service._index_loop())]
+        service._tasks = [asyncio.create_task(service._index_loop()),
+                          asyncio.create_task(service._persistence_loop())]
         self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 2))
         service._program_snapshots._pending["000660"] = _snapshot("000660")
         closing = asyncio.create_task(service.close())
@@ -102,7 +103,8 @@ class Top20ProgramShutdownTests(unittest.IsolatedAsyncioTestCase):
         blocked = _ControlledStore(self.store, failure="after_commit")
         service = self._service(blocked)
         service._program_snapshots._pending["005930"] = _snapshot()
-        service._tasks = [asyncio.create_task(service._index_loop())]
+        service._tasks = [asyncio.create_task(service._index_loop()),
+                          asyncio.create_task(service._persistence_loop())]
         self.assertTrue(await asyncio.to_thread(blocked.entered.wait, 2))
         closing = asyncio.create_task(service.close())
         await asyncio.sleep(0.05)

@@ -2,7 +2,12 @@
 # Hosted, disposable replay-cache gate. No production network, credentials or mounts.
 set -eu
 umask 077
-[ "$#" -eq 2 ] || { echo 'Usage: run_ci_replay_cache.sh IMAGE_ID POSTGRES_IMAGE_ID' >&2; exit 2; }
+REPORT=''
+case "$#:${3-}" in
+    '2:') ;;
+    '4:--report') REPORT=$4; [ -n "$REPORT" ] || exit 2 ;;
+    *) echo 'Usage: run_ci_replay_cache.sh IMAGE_ID POSTGRES_IMAGE_ID [--report PATH]' >&2; exit 2 ;;
+esac
 IMAGE=$1
 PG_IMAGE=$2
 case "$IMAGE:$PG_IMAGE" in
@@ -17,6 +22,7 @@ TEMP_DIR=''
 FIXTURE_ID=''
 PG_NAME=''
 PY_NAME=''
+REPORT_TEMP=''
 cleanup() {
     failed=0
     for container in "$PY_NAME" "$PG_NAME"; do
@@ -40,8 +46,26 @@ cleanup() {
     esac
     return "$failed"
 }
-trap 'code=$?; trap - EXIT; if ! cleanup; then code=1; fi; exit "$code"' EXIT
+finish() {
+    code=$?
+    trap - EXIT
+    if ! cleanup; then code=1; fi
+    if [ -n "$REPORT_TEMP" ] && ! rm -f -- "$REPORT_TEMP"; then code=1; fi
+    exit "$code"
+}
+trap finish EXIT
 trap 'exit 130' HUP INT TERM
+set --
+if [ -n "$REPORT" ]; then
+    case "$REPORT" in /*) ;; *) REPORT="$ROOT/$REPORT" ;; esac
+    if [ -e "$REPORT" ] || [ -L "$REPORT" ]; then
+        echo 'Replay execution receipt already exists.' >&2; exit 2
+    fi
+    # A private staged file beside the final report can be published atomically
+    # after cleanup. The secret directory remains a separate read-only mount.
+    REPORT_TEMP=$(mktemp -- "$REPORT.tmp.XXXXXX")
+    set -- --mount "type=bind,src=$REPORT_TEMP,dst=/run/replay-execution.json"
+fi
 TEMP_DIR=$(mktemp -d "$ROOT/tmp/regression/replay-ci/secret.XXXXXX")
 chmod 700 "$TEMP_DIR"
 OWNER="$(id -u):$(id -g)"
@@ -66,7 +90,7 @@ docker run --detach --rm --name "$PG_NAME" --network none \
 [ "$(docker inspect -f '{{index .Config.Labels "com.kiwoom.replay-fixture"}}' "$PG_NAME")" = "$FIXTURE_ID" ] || exit 1
 ready=false
 for attempt in $(seq 1 60); do
-    if docker exec "$PG_NAME" pg_isready -U kiwoom_replay_fixture_admin -d postgres >/dev/null 2>&1; then
+    if docker exec "$PG_NAME" pg_isready -h 127.0.0.1 -U kiwoom_replay_fixture_admin -d postgres >/dev/null 2>&1; then
         ready=true; break
     fi
     sleep 1
@@ -80,11 +104,19 @@ docker run --rm --name "$PY_NAME" --network "container:$PG_NAME" \
     --security-opt no-new-privileges --cap-drop ALL --entrypoint python \
     --mount "type=bind,src=$ROOT,dst=/app/candidate,readonly" \
     --mount "type=bind,src=$TEMP_DIR,dst=/run/replay-fixture,readonly" \
+    "$@" \
     -e PYTHONDONTWRITEBYTECODE=1 "$IMAGE" \
     /app/candidate/scripts/check_replay_cache_baseline.py \
-    --secrets-file /run/replay-fixture/fixture.json --top20-lifecycle
+    --secrets-file /run/replay-fixture/fixture.json --top20-lifecycle \
+    ${REPORT_TEMP:+--report} ${REPORT_TEMP:+/run/replay-execution.json}
 cleanup
 TEMP_DIR=''
 PG_NAME=''
 PY_NAME=''
+if [ -n "$REPORT_TEMP" ]; then
+    [ -s "$REPORT_TEMP" ] || { echo 'Replay execution receipt is missing.' >&2; exit 1; }
+    remaining=$(docker ps -aq --filter "label=com.kiwoom.replay-fixture=$FIXTURE_ID")
+    [ -z "$remaining" ] || { echo 'Temporary replay containers remain.' >&2; exit 1; }
+    ln -T -- "$REPORT_TEMP" "$REPORT"
+fi
 echo 'Temporary replay cluster and Python container exited and were removed.'

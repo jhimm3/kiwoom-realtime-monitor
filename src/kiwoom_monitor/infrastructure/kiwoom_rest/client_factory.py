@@ -10,7 +10,6 @@ from .local_config import LocalApiConfig
 from .settings import KiwoomSettings
 from .remote_client import RemoteKiwoomRestClient
 from .failover_client import FailoverKiwoomRestClient
-from .validation_client import ParallelValidationClient
 from .account_query import BoundDirectAccountQueryAdapter
 from .local_account_binding import LocalAccountBindingConfig
 
@@ -53,6 +52,7 @@ def create_query_client(
                 account_local = _with_verified_local_account(local, local_settings, api_config_path)
                 if not source.parallel_validation_enabled:
                     return FailoverKiwoomRestClient(remote, account_local)
+                from .validation_client import ParallelValidationClient
                 return ParallelValidationClient(
                     remote, account_local,
                     api_config_path.with_name("central_local_validation.jsonl"),

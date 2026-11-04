@@ -15,9 +15,13 @@ class SettingsRequestWorker(QThread):
     succeeded = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, task: Callable[[], object], parent: QObject | None = None) -> None:
+    def __init__(
+        self, task: Callable[[], object], parent: QObject | None = None, *,
+        retain_until_joined: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._task = task
+        self._retain_until_joined = retain_until_joined
         self.finished.connect(self._release)
 
     def start(self) -> None:
@@ -36,8 +40,25 @@ class SettingsRequestWorker(QThread):
 
     @Slot()
     def _release(self) -> None:
+        if self._retain_until_joined:
+            return
         _running_requests.discard(self)
         self.deleteLater()
+
+    def release_after_join(self, *, wait: bool = False) -> bool:
+        """Release an explicitly retained request only after actual native join.
+
+        A false result keeps this object's owner and Qt lifetime intact. Owners
+        also retain the task result before calling this nonblocking release.
+        An explicit finished-owner callback may request the same exact blocking
+        native join. The default and the ordinary finished slot stay unchanged.
+        """
+        joined = self.wait() if wait else self.wait(0)
+        if not joined:
+            return False
+        _running_requests.discard(self)
+        self.deleteLater()
+        return True
 
 
 @atexit.register

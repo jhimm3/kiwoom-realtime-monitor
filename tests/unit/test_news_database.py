@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,9 @@ from kiwoom_monitor.infrastructure.persistence.news_schema import (
     NEWS_ACCOUNT_SCOPE_NAME,
     NEWS_LINK_TOMBSTONE_NAME,
     NEWS_AI_THEME_CANDIDATES_NAME,
+    NEWS_AI_PROVENANCE_NAME,
+    NEWS_INPUT_SOURCE_NAME,
+    NEWS_AI_INFERENCE_NAME,
     NEWS_SCHEMA_BASELINE_NAME,
     NEWS_SCHEMA_VERSION,
 )
@@ -89,7 +93,10 @@ class NewsDatabaseTests(unittest.TestCase):
                 [
                     (1, NEWS_SCHEMA_BASELINE_NAME), (2, NEWS_ACCOUNT_SCOPE_NAME),
                     (3, NEWS_LINK_TOMBSTONE_NAME),
-                    (NEWS_SCHEMA_VERSION, NEWS_AI_THEME_CANDIDATES_NAME),
+                    (4, NEWS_AI_THEME_CANDIDATES_NAME),
+                    (5, NEWS_AI_PROVENANCE_NAME),
+                    (6, NEWS_INPUT_SOURCE_NAME),
+                    (NEWS_SCHEMA_VERSION, NEWS_AI_INFERENCE_NAME),
                 ],
                 versions,
             )
@@ -104,7 +111,7 @@ class NewsDatabaseTests(unittest.TestCase):
                 with connection:
                     connection.execute(
                         "INSERT INTO news_schema_migrations(version,name,applied_at) "
-                        "VALUES(5,'future','2026-09-10T00:00:00+00:00')"
+                        "VALUES(8,'future','2026-09-10T00:00:00+00:00')"
                     )
 
             with self.assertRaisesRegex(SchemaMigrationError, "newer"):
@@ -196,9 +203,16 @@ class NewsDatabaseTests(unittest.TestCase):
                 (AICompanyImpact("회사", "긍정", 80, "이유"),),
                 (AIThemeCandidate("신규 산업", 84, "계약 근거"),),
             )
+            provenance = {"version": 1, "status": "ACCEPTED", "origin": "native_accepted", "analysis_revision_id": "analysis-original",
+                          "target_id": "000001", "article_revision_id": "article-original",
+                          "body_revision_id": "body-original", "available_at": 105.0,
+                          "computed_at": 100.0, "input_hash": "hash", "output_hash": "original-output-hash",
+                          "provider": "gemini", "model": "model", "prompt_version": "original-prompt",
+                          "schema_version": "original-schema", "requester": {"kind": "direct"},
+                          "inference_ref": {"inference_id": "inference-original", "content_hash": "input-original", "input_index": 0}}
             NewsAIRepository(source).save(
                 "000001", item, "gemini", "model", "hash",
-                analysis,
+                analysis, provenance=provenance,
             )
             expected = NewsAIRepository(source).load("000001", item)
 
@@ -207,6 +221,8 @@ class NewsDatabaseTests(unittest.TestCase):
 
             self.assertEqual(2, restored)  # Stock analysis and shared company impacts.
             self.assertEqual(expected, NewsAIRepository(target).load("000001", item))
+            self.assertEqual(provenance, NewsAIRepository(target).load("000001", item).provenance)
+            self.assertEqual(provenance, NewsAIRepository(target).load_many("000002", (item,), "회사")[news_identity(item)].provenance)
             self.assertEqual(
                 NewsAIRepository(source).list_theme_suggestions(),
                 NewsAIRepository(target).list_theme_suggestions(),
@@ -222,12 +238,86 @@ class NewsDatabaseTests(unittest.TestCase):
             legacy = json.loads(backup.read_text(encoding="utf-8"))
             for value in legacy["analyses"]:
                 value.pop("theme_candidates", None)
-            for version in (1, 2):
+                value.pop("provenance_json", None)
+            for value in legacy["shared_analyses"]:
+                value.pop("provenance_json", None)
+            for version in (1, 2, 3):
                 with self.subTest(legacy_version=version):
                     legacy["version"] = version
                     backup.write_text(json.dumps(legacy), encoding="utf-8")
                     NewsAIBackupService(target).import_from(backup)
-                    self.assertEqual(expected, NewsAIRepository(target).load("000001", item))
+                    self.assertEqual(replace(expected, provenance={"status": "UNKNOWN"}),
+                                     NewsAIRepository(target).load("000001", item))
+
+    def test_accepted_metadata_migration_keeps_legacy_values_and_rolls_back_partial_alter(self) -> None:
+        from kiwoom_monitor.infrastructure.persistence import news_schema as schema
+        from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigration, SQLiteMigrationRunner
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old-v4.sqlite3"
+            with closing(sqlite3.connect(path)) as connection:
+                SQLiteMigrationRunner(connection, "news_schema_migrations").apply((
+                    SQLiteMigration(1, schema.NEWS_SCHEMA_BASELINE_NAME, schema._apply_v1_baseline),
+                    SQLiteMigration(2, schema.NEWS_ACCOUNT_SCOPE_NAME, schema._apply_v2_account_scope),
+                    SQLiteMigration(3, schema.NEWS_LINK_TOMBSTONE_NAME, schema._apply_v3_link_tombstones),
+                    SQLiteMigration(4, schema.NEWS_AI_THEME_CANDIDATES_NAME, schema._apply_v4_ai_theme_candidates),
+                ))
+                connection.execute("INSERT INTO stock_news_ai(stock_code,identity,provider,model,summary,outlook,confidence,reason,body_hash,analyzed_at) "
+                                   "VALUES('005930','legacy','provider','model','original','중립',50,'original','original-hash','2026-10-20T10:00:00+09:00')")
+                before = connection.execute("SELECT * FROM stock_news_ai").fetchone()
+                connection.execute("DROP TABLE news_ai_shared")
+                connection.commit()
+            with self.assertRaises(sqlite3.OperationalError):
+                schema.initialize_news_schema(path)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertNotIn("provenance_json", {row[1] for row in connection.execute("PRAGMA table_info(stock_news_ai)")})
+                self.assertEqual(before, connection.execute("SELECT * FROM stock_news_ai").fetchone())
+                self.assertEqual(4, connection.execute("SELECT MAX(version) FROM news_schema_migrations").fetchone()[0])
+                schema._apply_v1_baseline(connection)
+                schema._apply_v4_ai_theme_candidates(connection)
+                connection.commit()
+            schema.initialize_news_schema(path)
+            schema.initialize_news_schema(path)
+            with closing(sqlite3.connect(path)) as connection:
+                after = connection.execute("SELECT * FROM stock_news_ai").fetchone()
+                self.assertEqual(before, after[:-1])
+                self.assertIsNone(after[-1])
+                item = StockNewsItem("legacy", "", "legacy", "", None,
+                                     assess_stock_news("fixture", "legacy", ""))
+                self.assertEqual({"status": "UNKNOWN"}, NewsAIRepository(path).load("005930", item).provenance)
+                self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM news_schema_migrations WHERE version=5").fetchone()[0])
+
+    def test_input_source_migration_keeps_null_legacy_and_rolls_back_alter_with_ledger_failure(self):
+        from kiwoom_monitor.infrastructure.persistence import news_schema as schema
+        from kiwoom_monitor.infrastructure.persistence.schema_migrations import SQLiteMigration, SQLiteMigrationRunner
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source-v5.sqlite3"
+            with closing(sqlite3.connect(path)) as connection:
+                SQLiteMigrationRunner(connection, "news_schema_migrations").apply((
+                    SQLiteMigration(1, schema.NEWS_SCHEMA_BASELINE_NAME, schema._apply_v1_baseline),
+                    SQLiteMigration(2, schema.NEWS_ACCOUNT_SCOPE_NAME, schema._apply_v2_account_scope),
+                    SQLiteMigration(3, schema.NEWS_LINK_TOMBSTONE_NAME, schema._apply_v3_link_tombstones),
+                    SQLiteMigration(4, schema.NEWS_AI_THEME_CANDIDATES_NAME, schema._apply_v4_ai_theme_candidates),
+                    SQLiteMigration(5, schema.NEWS_AI_PROVENANCE_NAME, schema._apply_v5_ai_provenance),
+                ))
+                connection.execute("INSERT INTO stock_news(stock_code,identity,title,published_at) VALUES('005930','legacy','original','2026-10-28T08:00:00+09:00')")
+                before = connection.execute("SELECT * FROM stock_news").fetchone()
+                connection.execute("CREATE TRIGGER reject_source_migration BEFORE INSERT ON news_schema_migrations WHEN NEW.version=6 BEGIN SELECT RAISE(ABORT,'source ledger rejected'); END")
+                connection.commit()
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "source ledger rejected"):
+                schema.initialize_news_schema(path)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertNotIn("input_source_json", {row[1] for row in connection.execute("PRAGMA table_info(stock_news)")})
+                self.assertEqual(before, connection.execute("SELECT * FROM stock_news").fetchone())
+                self.assertEqual(5, connection.execute("SELECT MAX(version) FROM news_schema_migrations").fetchone()[0])
+                connection.execute("DROP TRIGGER reject_source_migration")
+                connection.commit()
+            schema.initialize_news_schema(path)
+            schema.initialize_news_schema(path)
+            with closing(sqlite3.connect(path)) as connection:
+                after = connection.execute("SELECT * FROM stock_news").fetchone()
+                self.assertEqual(before, after[:-1])
+                self.assertIsNone(after[-1])
+            self.assertIsNone(StockNewsRepository(path).load("005930")[0].input_source)
 
 
 if __name__ == "__main__":

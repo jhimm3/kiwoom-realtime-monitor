@@ -4,11 +4,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, QSettings
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QPushButton,
     QTableWidget,
 )
 
@@ -46,6 +47,7 @@ class CampaignDialogTests(unittest.TestCase):
 
     def dialog(self):
         dialog = ResearchDialog(self.root / 'state')
+        dialog.activate_startup()
         self.dialogs.append(dialog)
         dialog._request_path.setText(str(self.path))
         return dialog
@@ -150,6 +152,8 @@ class CampaignDialogTests(unittest.TestCase):
         self.assertEqual(str(watch.resolve()), source['root'])
         self.assertFalse(source['enabled'])
         self.assertEqual('', source['scope_json'])
+        self.assertFalse(source['nas_auto_prepare'])
+        self.assertEqual('', source['nas_config_path'])
 
     def test_running_campaign_input_editor_is_disabled_and_does_not_open(self):
         dialog = self.register()
@@ -162,18 +166,23 @@ class CampaignDialogTests(unittest.TestCase):
     def test_nas_prepare_editor_uses_existing_connection_config_reference(self):
         from PySide6.QtWidgets import QSpinBox
         dialog = self.register()
+        selected_connection = self.root / 'explicit-research-input.json'
         def save_nas(editor):
             editor.findChild(QLineEdit).setText(str(self.root / 'prepared'))
             next(box for box in editor.findChildren(QCheckBox) if box.text() == 'NAS에서 새 자료 자동 준비').setChecked(True)
+            self.assertEqual('', editor.findChild(QLineEdit, 'research_input_connection').text())
+            next(button for button in editor.findChildren(QPushButton) if button.text() == '연구 입력 연결 파일 선택').click()
             editor.findChild(QSpinBox).setValue(2)
             editor.findChild(QDialogButtonBox).accepted.emit()
             return 1
-        with patch.object(QDialog, 'exec', new=save_nas):
+        with patch.object(QDialog, 'exec', new=save_nas), \
+             patch('kiwoom_monitor.presentation.research_dialog.QFileDialog.getOpenFileName', return_value=(str(selected_connection), '')) as choose:
             dialog._edit_campaign_inputs()
+        choose.assert_called_once()
         source = dialog._campaign_repository().load_campaign_input_sources(dialog._campaign_selection['campaign_id'])[0]
         self.assertEqual(1, source['nas_auto_prepare'])
         self.assertEqual(2 * 1024 ** 3, source['storage_cap_bytes'])
-        self.assertEqual(str((dialog._state_dir.parent / 'data_source.json').resolve()), source['nas_config_path'])
+        self.assertEqual(str(selected_connection.resolve()), source['nas_config_path'])
 
     def test_rolling_daily_editor_can_combine_nas_preparation(self):
         dialog = self.register()
@@ -183,6 +192,7 @@ class CampaignDialogTests(unittest.TestCase):
             boxes['새 거래일의 TRAIN/VALIDATION 평가 기간 확장'].setChecked(True)
             self.assertTrue(boxes['NAS에서 새 자료 자동 준비'].isEnabled())
             boxes['NAS에서 새 자료 자동 준비'].setChecked(True)
+            editor.findChild(QLineEdit, 'research_input_connection').setText(str(self.root / 'rolling-input.json'))
             editor.findChild(QDialogButtonBox).accepted.emit()
             return 1
         with patch.object(QDialog, 'exec', new=save_rolling):
@@ -191,14 +201,89 @@ class CampaignDialogTests(unittest.TestCase):
         self.assertEqual(1, source['rolling_daily'])
         self.assertEqual(1, source['nas_auto_prepare'])
 
+    def test_nas_prepare_editor_preserves_saved_connection_after_restart_and_disable(self):
+        dialog = self.register()
+        repository = dialog._campaign_repository()
+        campaign_id = dialog._campaign_selection['campaign_id']
+        job = repository.load_campaign_jobs(campaign_id)[0]
+        selected_connection = self.root / 'operator-full-connection.json'
+        repository.save_campaign_input_source(
+            campaign_id, job['job_id'], self.root / 'prepared',
+            nas_auto_prepare=True, nas_config_path=selected_connection,
+        )
+        restored = self.dialog()
+        restored._restore_campaign()
+        for enabled in (True, False, True):
+            with self.subTest(nas_auto_prepare=enabled):
+                def save_existing(editor):
+                    self.assertEqual(str(selected_connection.resolve()), editor.findChild(QLineEdit, 'research_input_connection').text())
+                    next(box for box in editor.findChildren(QCheckBox) if box.text() == 'NAS에서 새 자료 자동 준비').setChecked(enabled)
+                    editor.findChild(QDialogButtonBox).accepted.emit()
+                    return 1
+                with patch.object(QDialog, 'exec', new=save_existing), \
+                     patch('kiwoom_monitor.presentation.research_dialog.QFileDialog.getOpenFileName') as choose:
+                    restored._edit_campaign_inputs()
+                choose.assert_not_called()
+                source = repository.load_campaign_input_sources(campaign_id)[0]
+                self.assertEqual(enabled, bool(source['nas_auto_prepare']))
+                self.assertEqual(str(selected_connection.resolve()), source['nas_config_path'])
+        other_connection = self.root / 'other-template-input.json'
+        other_source = {**source, 'template_job_id': 'other-template', 'nas_config_path': str(other_connection.resolve())}
+        def switch_template(editor):
+            self.assertEqual(str(selected_connection.resolve()), editor.findChild(QLineEdit, 'research_input_connection').text())
+            editor.findChild(QComboBox).setCurrentIndex(1)
+            self.assertEqual(str(other_connection.resolve()), editor.findChild(QLineEdit, 'research_input_connection').text())
+            editor.findChild(QDialogButtonBox).accepted.emit()
+            return 1
+        with patch.object(restored, '_campaign_repository', return_value=repository), \
+             patch.object(repository, 'load_campaign_jobs', return_value=[job, {'job_id': 'other-template'}]), \
+             patch.object(repository, 'load_campaign_input_sources', return_value=[source, other_source]), \
+             patch.object(repository, 'save_campaign_input_source') as save_source, \
+             patch.object(QDialog, 'exec', new=switch_template):
+            restored._edit_campaign_inputs()
+        self.assertEqual('other-template', save_source.call_args.args[1])
+        self.assertEqual(other_connection.resolve(), save_source.call_args.kwargs['nas_config_path'])
+
+    def test_nas_prepare_editor_requires_explicit_connection_and_cancel_preserves_source(self):
+        dialog = self.register()
+        repository = dialog._campaign_repository()
+        campaign_id = dialog._campaign_selection['campaign_id']
+        def missing_connection(editor):
+            editor.findChild(QLineEdit).setText(str(self.root / 'prepared'))
+            next(box for box in editor.findChildren(QCheckBox) if box.text() == 'NAS에서 새 자료 자동 준비').setChecked(True)
+            editor.findChild(QDialogButtonBox).accepted.emit()
+            self.assertIn('연구 입력 연결 파일을 선택해 주세요', [label.text() for label in editor.findChildren(QLabel)])
+            return 0
+        with patch.object(QDialog, 'exec', new=missing_connection):
+            dialog._edit_campaign_inputs()
+        self.assertEqual((), repository.load_campaign_input_sources(campaign_id))
+        job = repository.load_campaign_jobs(campaign_id)[0]
+        selected_connection = self.root / 'retained-input.json'
+        repository.save_campaign_input_source(campaign_id, job['job_id'], self.root / 'prepared',
+                                             nas_auto_prepare=True, nas_config_path=selected_connection)
+        before = repository.load_campaign_input_sources(campaign_id)
+        def cancel_selection(editor):
+            next(button for button in editor.findChildren(QPushButton) if button.text() == '연구 입력 연결 파일 선택').click()
+            self.assertEqual(str(selected_connection.resolve()), editor.findChild(QLineEdit, 'research_input_connection').text())
+            editor.findChild(QDialogButtonBox).rejected.emit()
+            return 0
+        with patch.object(QDialog, 'exec', new=cancel_selection), \
+             patch('kiwoom_monitor.presentation.research_dialog.QFileDialog.getOpenFileName', return_value=('', '')):
+            dialog._edit_campaign_inputs()
+        self.assertEqual(before, repository.load_campaign_input_sources(campaign_id))
+
     def test_start_uses_database_campaign_arguments_not_external_request(self):
         dialog = self.register()
-        with patch.object(dialog._manager, 'start') as start:
+        selected_environment = {'PATH': 'fixture-runtime', 'TEMP': 'fixture-temp'}
+        with patch.object(dialog._manager, 'start') as start, \
+             patch('kiwoom_monitor.presentation.research_dialog.os', SimpleNamespace(environ={'fixture': 'source'})), \
+             patch('kiwoom_monitor.presentation.research_dialog._research_process_environment', return_value=selected_environment):
             dialog._start_campaign()
         command = start.call_args.args[0]
         self.assertIn('--campaign', command)
         self.assertNotIn('--request', command)
         self.assertTrue(start.call_args.kwargs['below_normal_priority'])
+        self.assertIs(selected_environment, start.call_args.kwargs['env'])
         self.assertEqual('RUNNING', dialog._campaign_repository().load_campaign(dialog._campaign_selection['campaign_id'])['desired_state'])
 
     def test_launch_error_is_saved_and_scheduled_with_backoff(self):

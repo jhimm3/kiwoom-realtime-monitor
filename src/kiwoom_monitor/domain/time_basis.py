@@ -31,3 +31,13 @@ def aware_iso_kst(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must include its timezone")
     return parsed.astimezone(KST)
+
+
+def same_aware_instant(value: str, expected: datetime) -> bool:
+    """Compare an explicit timestamp without changing its stored representation."""
+    if not isinstance(value, str) or not isinstance(expected, datetime):
+        return False
+    try:
+        return aware_iso_kst(value) == aware_iso_kst(expected.isoformat())
+    except (TypeError, ValueError, OverflowError):
+        return False

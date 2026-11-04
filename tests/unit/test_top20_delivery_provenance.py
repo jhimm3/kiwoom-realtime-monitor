@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from kiwoom_monitor.central_server import diagnostic_top20_input as top20_inputs
+from kiwoom_monitor.central_server import diagnostic_top20_flow_input as flow_inputs
+from kiwoom_monitor.central_server import diagnostic_rest_input as catalog_inputs
+from kiwoom_monitor.central_server.diagnostic_replay_contract import captured_workload_scope
+from kiwoom_monitor.central_server.diagnostic_workloads import is_paused
+
+
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder
+
 import asyncio
 import copy
 import hashlib
 import json
 import tempfile
 import unittest
+from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from contextlib import ExitStack
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -47,8 +57,9 @@ class Top20DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(trace, "reject_input", side_effect=lambda token, fields:
             self.scalar(token, "input_rejected", fields)))
         self.addCleanup(self.stack.close)
-        self.hub = RealtimeHub()
-        self.collector = CentralRealtimeCollector(lambda: "", "real", self.hub, lambda: NOW)
+        self.hub_observer = hub_capture.HubInputRecorder()
+        self.hub = RealtimeHub(now_provider=lambda: NOW, observer=self.hub_observer)
+        self.collector = CentralRealtimeCollector(lambda: "", "real", self.hub, lambda: NOW, input_observer=CollectorInputRecorder(hub_observer=self.hub_observer))
         self.collector._realtime_tape_version = self.collector._hub._realtime_tape_version = "top20-realtime-tape/v1"
         self.component = "autonomous_top20:selected"
         self.subscriber = self.hub.connect(capture_component=self.component)
@@ -212,7 +223,9 @@ class Top20DeliveryTests(unittest.IsolatedAsyncioTestCase):
         store = Store()
         now = [NOW + timedelta(seconds=59)]
         self.collector._now_provider = lambda: now[0]
-        service = AutonomousTop20Service(None, self.hub, store, now_provider=lambda: now[0])
+        service = AutonomousTop20Service(None, self.hub, store, now_provider=lambda: now[0],
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         service._subscriber = self.subscriber
         task = asyncio.create_task(service._event_loop())
         try:
@@ -251,7 +264,9 @@ class Top20DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([1, 2], [row["payload"]["cumulative_volume"] for row in values])
 
     async def test_real_event_loop_consumes_trade_and_program_without_payload_changes(self):
-        service = AutonomousTop20Service(None, self.hub, None, now_provider=lambda: NOW)
+        service = AutonomousTop20Service(None, self.hub, None, now_provider=lambda: NOW,
+            capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+            flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
         service._subscriber = self.subscriber
         native = message()
         native["data"].append({"type": "0w", "item": "005930_AL",
@@ -555,7 +570,9 @@ class Top20DeliveryTests(unittest.IsolatedAsyncioTestCase):
             # Bare resources intentionally offer no database/network methods.
             store = object()
             broker = CentralRestBroker(object(), store, ranking_reservation=True)
-            service = AutonomousTop20Service(broker, RealtimeHub(), store, now_provider=clock.now)
+            service = AutonomousTop20Service(broker, RealtimeHub(now_provider=clock.now, observer=hub_capture.HubInputRecorder()), store, now_provider=clock.now,
+                capture_scope=captured_workload_scope, ranking_input_observer=top20_inputs,
+                flow_input_observer=flow_inputs, catalog_input_observer=catalog_inputs, workload_paused=is_paused)
             seed = seal_top20_cold_fixture(service, clock, baseline=baseline, source_manifest=manifest)
             result = recorded_top20_cold_fixture_preflight(self.epoch, seed, service, clock,
                 baseline=baseline, component=self.component, window_start_seconds=300,

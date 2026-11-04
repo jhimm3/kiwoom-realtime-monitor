@@ -4,6 +4,9 @@ import asyncio
 import threading
 import time
 import unittest
+import tempfile
+from pathlib import Path
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
 from unittest.mock import patch
@@ -11,6 +14,10 @@ from unittest.mock import patch
 from kiwoom_monitor.central_server.rest_broker import (
     CentralRestBroker, BrokerResult, MAX_MEMORY_CACHE_ENTRIES, MOCK_ACCOUNT_ENDPOINTS,
     ranking_reservation_delay,
+)
+
+from kiwoom_monitor.domain.operation_context import (
+    OperationContextSnapshot, operation_context_scope, snapshot_operation_context,
 )
 
 
@@ -514,6 +521,436 @@ class CentralRestBrokerTests(unittest.TestCase):
             self.assertTrue(any("recording_gap" in line for line in captured.output))
 
         asyncio.run(scenario())
+
+
+
+
+class BrokerOperationContextTests(unittest.TestCase):
+    def test_shared_waiter_cancel_keeps_first_origin_through_real_cache_and_persistence(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        async def scenario(directory):
+            observed = []
+            entered, release = threading.Event(), threading.Event()
+            main_thread = threading.get_ident()
+
+            class Store(SQLiteQueryStore):
+                def load_query(inner, key):
+                    observed.append(("lookup", snapshot_operation_context(), threading.get_ident()))
+                    entered.set()
+                    if not release.wait(3):
+                        raise AssertionError("lookup barrier not released")
+                    return super().load_query(key)
+
+                def save_query(inner, *args):
+                    observed.append(("cache_write", snapshot_operation_context(), threading.get_ident()))
+                    return super().save_query(*args)
+
+            class Client(FakeClient):
+                def request_with_continuation(inner, *args, **kwargs):
+                    observed.append(("transport", snapshot_operation_context(), threading.get_ident()))
+                    return super().request_with_continuation(*args, **kwargs)
+
+            def record(*_):
+                observed.append(("ingest", snapshot_operation_context(), threading.get_ident()))
+
+            store, client = Store(Path(directory) / "cache.db"), Client()
+            store.initialize()
+            broker = CentralRestBroker(client, store, record)
+            origin = OperationContextSnapshot("first-owner", "first-native-id")
+            waiter = OperationContextSnapshot("second-owner", "second-waiter-id")
+            returned_contexts = []
+
+            async def request(context):
+                with operation_context_scope(context):
+                    try:
+                        return await broker.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"})
+                    finally:
+                        returned_contexts.append(snapshot_operation_context())
+
+            first = asyncio.create_task(request(origin))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            try:
+                with self.assertLogs("kiwoom_monitor.central_server.rest_broker", level="INFO") as logs:
+                    second = asyncio.create_task(request(waiter))
+                    await asyncio.sleep(0)
+                    first.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await first
+                    release.set()
+                    result = await second
+                self.assertEqual([
+                    "INFO:kiwoom_monitor.central_server.rest_broker:shared broker request "
+                    "request_id=second-waiter-id origin_request_id=first-native-id relation=shared_inflight"
+                ], logs.output)
+                self.assertEqual(["lookup", "transport", "ingest", "cache_write"], [row[0] for row in observed])
+                self.assertTrue(all(row[1] == origin for row in observed))
+                self.assertTrue(all(row[2] != main_thread for row in observed))
+                self.assertEqual([origin, waiter], returned_contexts)
+                self.assertEqual(1, len(client.calls))
+                self.assertTrue(result.recording_succeeded)
+                self.assertEqual({"return_code": 0, "api_id": "ka10081"}, result.payload)
+                key = broker._fingerprint("ka10081", "/api/dostk/chart", {"stk_cd": "005930"}, "N", "")
+                stored = SQLiteQueryStore.load_query(store, key)
+                self.assertEqual(result.payload, stored.payload)
+                self.assertEqual({}, broker._inflight)
+            finally:
+                release.set()
+                await broker.close()
+                store.close()
+            self.assertEqual(OperationContextSnapshot(), snapshot_operation_context())
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(directory))
+
+    def test_lazy_workers_reset_between_jobs_credentials_and_service_calls(self):
+        async def scenario():
+            actor = ContextVar("existing-replay-actor-test", default=None)
+            marker = object()
+            observed, bases = [], []
+
+            def capture(stage):
+                observed.append((stage, snapshot_operation_context(), actor.get()))
+
+            class Client(FakeClient):
+                def request_with_continuation(inner, *args, **kwargs):
+                    capture("transport")
+                    return super().request_with_continuation(*args, **kwargs)
+
+                def prepare_credential_token(inner, settings):
+                    capture("token")
+                    return settings
+
+                def verify_prepared_credentials(inner, settings):
+                    capture("identity")
+                    return settings
+
+                def prepare_drained_credentials(inner, settings):
+                    capture("drained")
+                    return settings
+
+                def begin_credential_change(inner):
+                    capture("drain")
+
+                def end_credential_change(inner):
+                    capture("resume")
+
+            client = Client()
+            broker = CentralRestBroker(client, response_handler=lambda *_: capture("ingest"))
+            for queue in (broker._queue, broker._persist_queue):
+                original = queue.get
+
+                async def get(original=original):
+                    bases.append((snapshot_operation_context(), actor.get()))
+                    return await original()
+
+                queue.get = get
+
+            actor_token = actor.set(marker)
+            try:
+                with operation_context_scope(OperationContextSnapshot("first", "first-id")):
+                    await broker.request("ka00198", "/api/dostk/stkinfo", {"seq": 1})
+                with operation_context_scope(OperationContextSnapshot("second", "second-id")):
+                    await broker.request("ka00198", "/api/dostk/stkinfo", {"seq": 2})
+                with operation_context_scope(OperationContextSnapshot("credential", "credential-id")):
+                    self.assertEqual("settings", await broker.prepare_credentials("settings"))
+                # A context-free management operation gets one origin for both phases.
+                await broker.prepare_credentials("service-settings")
+                with operation_context_scope(OperationContextSnapshot("rotation", "rotation-id")):
+                    await broker.begin_credential_change()
+                    self.assertEqual("candidate", await broker.prepare_drained_credentials("candidate"))
+                    await broker.end_credential_change()
+                await broker.request("ka00198", "/api/dostk/stkinfo", {"seq": 3})
+                await broker.close()
+            finally:
+                actor.reset(actor_token)
+                await broker.close()
+            first, second, credential, rotation = (
+                OperationContextSnapshot("first", "first-id"), OperationContextSnapshot("second", "second-id"),
+                OperationContextSnapshot("credential", "credential-id"), OperationContextSnapshot("rotation", "rotation-id"),
+            )
+            self.assertEqual(["transport", "ingest", "transport", "ingest", "token", "identity", "token", "identity",
+                              "drain", "drained", "resume", "transport", "ingest"], [row[0] for row in observed])
+            self.assertEqual([first, first, second, second, credential, credential], [row[1] for row in observed[:6]])
+            service_credential = observed[6][1]
+            self.assertEqual(service_credential, observed[7][1])
+            self.assertEqual("central.rest_broker", service_credential.source)
+            self.assertRegex(service_credential.request_id, r"^[0-9a-f]{32}$")
+            self.assertEqual([rotation] * 3, [row[1] for row in observed[8:11]])
+            service_query = observed[11][1]
+            self.assertEqual(service_query, observed[12][1])
+            self.assertEqual("central.rest_broker", service_query.source)
+            self.assertRegex(service_query.request_id, r"^[0-9a-f]{32}$")
+            self.assertNotEqual(service_credential.request_id, service_query.request_id)
+            self.assertTrue(bases)
+            self.assertTrue(all(context == OperationContextSnapshot() for context, _ in bases))
+            self.assertTrue(all(value is marker for _, _, value in observed))
+            self.assertTrue(all(value is marker for _, value in bases))
+            self.assertEqual(3, len(client.calls))
+            self.assertEqual({}, broker._inflight)
+            self.assertFalse(broker._lookup_tasks)
+            self.assertEqual(0, broker._queue._unfinished_tasks)
+            self.assertEqual(0, broker._persist_queue._unfinished_tasks)
+            self.assertEqual(OperationContextSnapshot(), snapshot_operation_context())
+
+        asyncio.run(scenario())
+
+    def test_lookup_native_credential_and_recording_failures_leave_no_prior_origin(self):
+        async def scenario():
+            observed, bases = [], []
+            original_error = OSError("native failure")
+
+            class Store:
+                def load_query(inner, key):
+                    observed.append(("lookup", snapshot_operation_context()))
+                    raise LookupError("cache lookup failed")
+
+            class Client(FakeClient):
+                def request_with_continuation(inner, *args, **kwargs):
+                    observed.append(("transport", snapshot_operation_context()))
+                    if args[2].get("fail"):
+                        raise original_error
+                    return super().request_with_continuation(*args, **kwargs)
+
+                def prepare_credential_token(inner, _):
+                    observed.append(("credential", snapshot_operation_context()))
+                    raise ValueError("credential failure")
+
+            def record(*_):
+                observed.append(("ingest", snapshot_operation_context()))
+                raise OSError("recording failure")
+
+            broker = CentralRestBroker(Client(), Store(), record)
+            for queue in (broker._queue, broker._persist_queue):
+                original = queue.get
+
+                async def get(original=original):
+                    bases.append(snapshot_operation_context())
+                    return await original()
+
+                queue.get = get
+            try:
+                with operation_context_scope(OperationContextSnapshot("lookup", "lookup-id")):
+                    with self.assertRaises(LookupError):
+                        await broker.request("ka10081", "/api/dostk/chart", {})
+                with operation_context_scope(OperationContextSnapshot("native", "native-id")):
+                    with self.assertRaises(OSError) as raised:
+                        await broker.request("ka00198", "/api/dostk/stkinfo", {"fail": True})
+                    self.assertIs(original_error, raised.exception)
+                with operation_context_scope(OperationContextSnapshot("credential", "credential-id")):
+                    with self.assertRaisesRegex(RuntimeError, "^CANDIDATE_VALIDATION_FAILED$"):
+                        await broker.prepare_credentials("settings")
+                with operation_context_scope(OperationContextSnapshot("persist", "persist-id")):
+                    with self.assertLogs("kiwoom_monitor.central_server.rest_broker", level="ERROR"):
+                        result = await broker.request("ka00198", "/api/dostk/stkinfo", {"seq": 1})
+                    self.assertFalse(result.recording_succeeded)
+                with self.assertLogs("kiwoom_monitor.central_server.rest_broker", level="ERROR"):
+                    await broker.request("ka00198", "/api/dostk/stkinfo", {"seq": 2})
+            finally:
+                await broker.close()
+            self.assertEqual([
+                ("lookup", OperationContextSnapshot("lookup", "lookup-id")),
+                ("transport", OperationContextSnapshot("native", "native-id")),
+                ("credential", OperationContextSnapshot("credential", "credential-id")),
+                ("transport", OperationContextSnapshot("persist", "persist-id")),
+                ("ingest", OperationContextSnapshot("persist", "persist-id")),
+            ], observed[:5])
+            self.assertEqual(observed[5][1], observed[6][1])
+            self.assertEqual("central.rest_broker", observed[5][1].source)
+            self.assertRegex(observed[5][1].request_id, r"^[0-9a-f]{32}$")
+            self.assertTrue(all(context == OperationContextSnapshot() for context in bases))
+            self.assertEqual({}, broker._inflight)
+            self.assertEqual(OperationContextSnapshot(), snapshot_operation_context())
+
+        asyncio.run(scenario())
+
+    def test_persistent_cache_hit_ingests_under_current_origin_without_transport_or_write(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        from kiwoom_monitor.central_server.database_query_cache import StoredQuery
+
+        async def scenario(directory):
+            observed = []
+
+            class Store(SQLiteQueryStore):
+                def load_query(inner, key):
+                    observed.append(("lookup", snapshot_operation_context()))
+                    return super().load_query(key)
+
+                def save_query(inner, *args):
+                    raise AssertionError("cache hit must not rewrite persistent cache")
+
+            store, client = Store(Path(directory) / "cache.db"), FakeClient()
+            store.initialize()
+            broker = CentralRestBroker(client, store, lambda *_: observed.append(("ingest", snapshot_operation_context())))
+            key = broker._fingerprint("ka10081", "/api/dostk/chart", {}, "N", "")
+            SQLiteQueryStore.save_query(store, key, "ka10081", broker._wall_time() + 30, StoredQuery({"value": 7}, False, ""))
+            origin = OperationContextSnapshot("cache-caller", "cache-caller-id")
+            try:
+                with operation_context_scope(origin):
+                    result = await broker.request("ka10081", "/api/dostk/chart", {})
+                self.assertTrue(result.cache_hit)
+                self.assertTrue(result.recording_succeeded)
+                self.assertEqual({"value": 7}, result.payload)
+                self.assertEqual([("lookup", origin), ("ingest", origin)], observed)
+                self.assertEqual([], client.calls)
+            finally:
+                await broker.close()
+                store.close()
+            self.assertEqual(OperationContextSnapshot(), snapshot_operation_context())
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(directory))
+
+
+    def test_shared_join_log_sink_failure_does_not_change_native_result_or_ownership(self):
+        async def scenario():
+            entered, release = threading.Event(), threading.Event()
+            observed = []
+
+            class Client(FakeClient):
+                def request_with_continuation(inner, *args, **kwargs):
+                    observed.append(snapshot_operation_context())
+                    entered.set()
+                    if not release.wait(3):
+                        raise AssertionError("transport barrier not released")
+                    return super().request_with_continuation(*args, **kwargs)
+
+            client = Client()
+            broker = CentralRestBroker(client)
+            first = OperationContextSnapshot("first", "first-id")
+            second = OperationContextSnapshot("second", "second-id")
+
+            async def request(context):
+                with operation_context_scope(context):
+                    result = await broker.request("ka00001", "/api/dostk/acnt", {})
+                    self.assertEqual(context, snapshot_operation_context())
+                    return result
+
+            task = asyncio.create_task(request(first))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            try:
+                with patch("kiwoom_monitor.central_server.rest_broker.logger.info", side_effect=OSError("sink unavailable")) as sink:
+                    waiter = asyncio.create_task(request(second))
+                    await asyncio.sleep(0)
+                    release.set()
+                    results = await asyncio.gather(task, waiter)
+                self.assertEqual(1, sink.call_count)
+                self.assertEqual([first], observed)
+                self.assertEqual(1, len(client.calls))
+                self.assertEqual(results[0], results[1])
+                self.assertEqual({}, broker._inflight)
+            finally:
+                release.set()
+                await broker.close()
+            self.assertEqual(OperationContextSnapshot(), snapshot_operation_context())
+
+        asyncio.run(scenario())
+
+
+class RestBrokerOptionalInputBoundaryTests(unittest.TestCase):
+    def test_actual_full_source_broker_runs_with_all_diagnostic_modules_physically_absent(self):
+        import importlib.util
+        import json
+        import shutil
+        import subprocess
+        import sys
+        import textwrap
+        with tempfile.TemporaryDirectory(prefix="rest-tools-absent-") as directory:
+            root = Path(directory).resolve()
+            source = root / "src"
+            package = source / "kiwoom_monitor"
+            original = Path(__file__).resolve().parents[2] / "src" / "kiwoom_monitor"
+            shutil.copytree(original, package, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            removed = []
+            for path in package.rglob("diagnostic*.py"):
+                resolved = path.resolve()
+                self.assertTrue(resolved.is_relative_to(package.resolve()))
+                removed.append(path.relative_to(source).as_posix())
+                path.unlink()
+            self.assertGreater(len(removed), 10)
+            self.assertTrue((package / "central_server" / "rest_broker.py").is_file())
+            self.assertTrue((package / "infrastructure" / "kiwoom_rest" / "client.py").is_file())
+            program = r'''
+import asyncio, importlib.util, json, sys, threading
+from datetime import datetime
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import kiwoom_monitor.central_server.rest_broker as module
+from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
+root = Path(sys.argv[1]).resolve()
+assert Path(module.__file__).resolve() == root/'kiwoom_monitor/central_server/rest_broker.py'
+assert importlib.util.find_spec('kiwoom_monitor.central_server.diagnostic_rest_input') is None
+assert not list((root/'kiwoom_monitor').rglob('diagnostic*.py'))
+entered, release = threading.Event(), threading.Event()
+calls, effects = [], []
+main_thread = threading.get_ident()
+class Client:
+    def request_with_continuation(self, api_id, path, body, **continuation):
+        assert threading.get_ident() != main_thread
+        calls.append((api_id, body.copy(), continuation))
+        entered.set()
+        assert release.wait(3)
+        return {'code': body.get('stk_cd'), 'return_code': 0}, False, 'source-next'
+class Store:
+    def __init__(self): self.values = {}; self.fail = False
+    def load_query(self, key): return self.values.get(key)
+    def save_query(self, key, api, expiry, result):
+        effects.append('cache')
+        if self.fail: raise OSError('fixture cache failure')
+        self.values[key] = result
+store = Store()
+fail = [False]
+def ingest(*args):
+    effects.append('ingest')
+    if fail[0]: raise OSError('fixture native handler failure')
+broker = CentralRestBroker(Client(), store, ingest, wall_time=lambda: datetime.fromisoformat('2001-04-03T09:00:02+09:00').timestamp())
+async def exercise():
+    first = second = None
+    try:
+        first = asyncio.create_task(broker.request('ka10001','/api/dostk/stkinfo',{'stk_cd':'005930'}))
+        assert await asyncio.to_thread(entered.wait, 2)
+        second = asyncio.create_task(broker.request('ka10001','/api/dostk/stkinfo',{'stk_cd':'005930'}))
+        await asyncio.sleep(0)
+        first.cancel()
+        try: await first
+        except asyncio.CancelledError: pass
+        else: raise AssertionError('waiter cancellation swallowed')
+        assert len(broker._inflight) == 1
+        release.set()
+        result = await second
+        assert result.payload == {'code':'005930','return_code':0}
+        assert (result.has_next,result.next_key,result.recording_succeeded) == (False,'source-next',True)
+        assert len(calls) == 1 and effects == ['ingest','cache']
+        fail[0] = True
+        result = await broker.request('ka10001','/api/dostk/stkinfo',{'stk_cd':'000660'})
+        assert result.recording_succeeded is False and result.payload['code'] == '000660'
+        fail[0] = False; store.fail = True
+        result = await broker.request('ka10001','/api/dostk/stkinfo',{'stk_cd':'000270'})
+        assert result.recording_succeeded is True
+        await broker.close()
+        assert not broker._inflight and not broker._lookup_tasks
+        assert broker._worker is None and broker._persist_worker is None
+        assert all(q.empty() and q._unfinished_tasks == 0 for q in (broker._queue,broker._persist_queue))
+        result = await broker.request_unrecorded('ka10001','/api/dostk/stkinfo',{'stk_cd':'035420'})
+        assert result.recording_succeeded is None and result.payload['code'] == '035420'
+        await broker.close()
+        assert len(calls) == 4
+    finally:
+        release.set()
+        await asyncio.gather(*(t for t in (first,second) if t is not None),return_exceptions=True)
+        await broker.close()
+asyncio.run(exercise())
+assert not any(name.startswith('kiwoom_monitor.') and '.diagnostic' in name for name in sys.modules)
+print(json.dumps({'actual_broker_origin':module.__file__,'tools_physically_absent':True,'native_transport_ingest_cache_cancel_restart':True}))
+'''
+            result = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", "-c", textwrap.dedent(program), str(source)],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            proof = json.loads(result.stdout.strip())
+            self.assertTrue(proof["tools_physically_absent"])
+            self.assertTrue(proof["native_transport_ingest_cache_cancel_restart"])
+            self.assertEqual(package / "central_server" / "rest_broker.py", Path(proof["actual_broker_origin"]))
+
 
 
 if __name__ == "__main__":

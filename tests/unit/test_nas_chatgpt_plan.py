@@ -129,8 +129,8 @@ class NASChatGPTServiceTests(unittest.IsolatedAsyncioTestCase):
             time.sleep(.04)
             return ((AINewsAnalysis("summary", "긍정", 80, "reason"),), AIRequestUsage(1, 2, 3))
         with patch("kiwoom_monitor.central_server.ai_service.analyze_articles", side_effect=delayed) as invoke:
-            value = await self.service.analyze_job("005930", "삼성전자", "gemini", "fallback", [{
-                "identity": "slow", "title": "title", "body": "body", "body_hash": "slow"}], 1, timeout_seconds=.001)
+            value = await self.service.analyze("005930", "삼성전자", "gemini", "fallback", [{
+                "identity": "slow", "title": "title", "body": "body", "body_hash": "slow"}], 1, job_timeout=.001)
         self.assertFalse(value["cache_hit"])
         self.assertEqual(invoke.call_count, 1)
 
@@ -143,8 +143,8 @@ class NASChatGPTServiceTests(unittest.IsolatedAsyncioTestCase):
             return ((AINewsAnalysis("summary", "긍정", 80, "reason"),), AIRequestUsage())
         with patch("kiwoom_monitor.central_server.ai_service.analyze_articles", side_effect=delayed):
             with self.assertRaises(TimeoutError):
-                await self.service.analyze_job("005930", "삼성전자", "gemini", "model", [{
-                    "identity": "paid", "title": "title", "body": "body", "body_hash": "paid"}], 1, timeout_seconds=.001)
+                await self.service.analyze("005930", "삼성전자", "gemini", "model", [{
+                    "identity": "paid", "title": "title", "body": "body", "body_hash": "paid"}], 1, job_timeout=.001)
             await self.service.close()
 
     async def test_routes_require_auth_offer_no_http_token_import_and_resume_explicitly(self):

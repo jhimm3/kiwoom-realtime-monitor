@@ -27,6 +27,7 @@ from kiwoom_monitor.central_server.app import (
     create_app,
 )
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server.credential_store import CredentialStore, CredentialStoreError
 from kiwoom_monitor.central_server.config import CentralServerSettings
 from kiwoom_monitor.central_server.market_observations import KST, ranking_observation
 from kiwoom_monitor.application.breakout_strategy import default_shadow_breakout_config
@@ -70,6 +71,24 @@ LIFESPAN_CASES = (
         "supervisor.start", "credentials.close", "real.close")]
 )
 
+
+
+def _contract_headers(response):
+    """Verify the additive observation header while retaining every golden header."""
+    headers = dict(response.headers)
+    request_id = headers.pop("x-request-id", None)
+    if request_id is None:
+        # These golden captures are handled responses inside the middleware.
+        # Outer framework500 is checked separately without this capture helper.
+        raise AssertionError("HTTP correlation header missing")
+    else:
+        sent_request_id = response.request.headers.get("x-request-id")
+        if sent_request_id:
+            if request_id != sent_request_id:
+                raise AssertionError("HTTP correlation header changed")
+        elif uuid.UUID(request_id).hex != request_id:
+            raise AssertionError("Generated HTTP correlation is not an opaque UUID")
+    return headers
 
 async def capture_server_lifespan_contract(app_factory, database_path, mode, failure="", *, probe_vault=False,
                                          original_behavior=False, also_fail=""):
@@ -447,7 +466,7 @@ def capture_diagnostic_run_http_contract(client, app, state, database_path, cont
         assert files() == before, (name, "HTTP mutated report or history files")
         with closing(sqlite3.connect(database_path)) as connection:
             assert storage == hashlib.sha256("\n".join(connection.iterdump()).encode()).hexdigest(), (name, "HTTP mutated application DB")
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
                       "files": before, "storage_hash": contract_storage_hash(database_path), "calls": list(state["calls"])})
         return response.json()
     paths = (("GET", "snapshot"), ("POST", "runs"), ("GET", "runs/missing"), ("POST", "runs/missing/cancel"),
@@ -572,7 +591,7 @@ def capture_diagnostic_control_http_contract(client, app, control_path, state, d
             assert before == hashlib.sha256("\n".join(connection.iterdump()).encode()).hexdigest(), (name, "control API changed application DB")
         if method == "GET" or status in {401, 422, 501}:
             assert previous == files(), (name, "read/rejected request changed native control")
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response),
                       "body": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
                       "control_and_history": files(), "trace_calls": list(state["calls"]), "storage_hash": contract_storage_hash(database_path)})
         return response
@@ -657,9 +676,8 @@ def diagnostic_read_contract_app(app_factory, database_path, configured):
         def host(path, size): return {"host_input": "controlled-host", "database_size_bytes": size}
         stack.enter_context(patch("kiwoom_monitor.central_server.resource_usage.resource_usage", side_effect=host))
         stack.enter_context(patch.dict(app_factory.__globals__, {"resource_usage": host}))
-        with operations_contract_app(app_factory, database_path, configured) as (app, store, request_store, services, events, monitors, condition):
+        with operations_contract_app(app_factory, database_path, configured, news_jobs_enabled=configured) as (app, store, request_store, services, events, monitors, condition):
             news = services["news"]
-            news._job_runner = configured
             news._naver_api_enabled, news._naver_stock_enabled, news._dart_enabled = False, configured, False
             news._query_collector = SimpleNamespace(_enabled=False)
             news._market_collector = SimpleNamespace(_enabled=False)
@@ -685,7 +703,7 @@ def capture_diagnostic_read_http_contract(client, app, store, request_store, con
         response = client.get(prefix + path, headers={"Authorization": "Bearer private-token"} if authenticated else {}, **kwargs)
         assert status == response.status_code, (name, status, response.status_code, response.text)
         assert before == snapshot(), (name, "diagnostic read changed application database")
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response),
                       "body": response.json(), "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0))})
         return response.json()
     paths = ("resources", "workloads", "market-bar-saves", "writers", "db-calls",
@@ -819,7 +837,7 @@ def capture_mock_orders_http_contract(client, app, store, bundles, transports, p
         if method == "GET" or status in {401, 404, 422}:
             assert before == after, (name, "read/rejected request changed native ledger")
         assert all(not gateway._commands for gateway in owned_gateways), "owned command still running after response"
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
             "storage_hash": contract_storage_hash(database_path), "transport_calls": {profile: list(transport.calls) for profile, transport in transports.items()}})
         return response.json()
     events = "/api/v2/mock/accounts/" + a.account_ref + "/execution-events"
@@ -890,13 +908,14 @@ def capture_mock_orders_http_contract(client, app, store, bundles, transports, p
 
 
 @contextmanager
-def operations_contract_app(app_factory, database_path, configured):
+def operations_contract_app(app_factory, database_path, configured, *, news_jobs_enabled=False):
     """Native settings writes and candidate construction; isolate network/task startup."""
     from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
     from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
     from kiwoom_monitor.central_server.market_events import MarketEventService
     from kiwoom_monitor.central_server.external_market_collector import YahooDelayedMarketCollector
     from kiwoom_monitor.central_server.news_service import CentralNewsService
+    from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
     from kiwoom_monitor.central_server.ai_service import CentralAIService
     class FixedNow(datetime):
         @classmethod
@@ -913,6 +932,8 @@ def operations_contract_app(app_factory, database_path, configured):
         def update(*args, name=name, **kwargs):
             events.append({"action": name + "-apply", "args": args, "kwargs": kwargs})
         service.update_operational_settings = AsyncMock(side_effect=update) if name == "external" else MagicMock(side_effect=update)
+    runner = MagicMock(spec=NewsJobRunner)
+    runner.start, runner.close = AsyncMock(), AsyncMock()
     condition = {"apply_status": "ACTIVE"}
     broker = MagicMock(spec=CentralRestBroker)
     broker.start, broker.close = AsyncMock(), AsyncMock()
@@ -941,6 +962,7 @@ def operations_contract_app(app_factory, database_path, configured):
                 "CentralRestBroker": MagicMock(return_value=broker), "MarketEventService": MagicMock(return_value=services["condition"]),
                 "YahooDelayedMarketCollector": MagicMock(return_value=services["external"])}))
             stack.enter_context(patch("kiwoom_monitor.central_server.news_service.CentralNewsService", return_value=services["news"]))
+            stack.enter_context(patch("kiwoom_monitor.central_server.news_jobs.NewsJobRunner", return_value=runner))
             stack.enter_context(patch("kiwoom_monitor.central_server.ai_service.CentralAIService", return_value=services["ai"]))
             stack.enter_context(patch("kiwoom_monitor.central_server.realtime_collector.CentralRealtimeCollector.start", new_callable=AsyncMock))
             stack.enter_context(patch.object(CandidateMonitor, "from_json", side_effect=candidate))
@@ -949,7 +971,7 @@ def operations_contract_app(app_factory, database_path, configured):
                 kiwoom_app_key="contract-key" if configured else "", kiwoom_secret_key="contract-secret" if configured else "",
                 openai_api_key="contract-ai" if configured else "", autonomous_top20_enabled=False,
                 market_event_collection_enabled=configured, external_market_symbols="TEST:TEST.CME" if configured else "",
-                news_history_jobs_enabled=False, news_naver_stock_enabled=configured, news_query_set_enabled=False,
+                news_history_jobs_enabled=news_jobs_enabled, news_naver_stock_enabled=configured, news_query_set_enabled=False,
                 # This frozen v1 fixture explicitly exercises the old comparison
                 # profile. Fresh installations now use the unconfigured 0B policy.
                 shadow_candidate_config_json=json.dumps(default_shadow_breakout_config().to_dict())))
@@ -991,7 +1013,7 @@ def capture_operations_http_contract(client, app, store, request_store, services
         for value in stored:
             assert value["updated_at"] == receipt_now, (name, value["updated_at"], receipt_now)
             value["updated_at"] = 2000.0
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
             "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(receipt_now, 2000.0)), "stored": stored,
             "events": list(events), "candidate_index": next((i for i, monitor in enumerate(monitors) if monitor is current), None)})
         return response.json()
@@ -1116,7 +1138,7 @@ def capture_account_query_http_contract(client, app, store, request_store, conte
         calls = {profile: [(call.args, call.kwargs) for call in broker.request.await_args_list] for profile, broker in brokers.items()}
         if any(manager._tasks for manager in managers.values()):
             raise AssertionError((name, "native query task still running after response"))
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
                       "storage_hash": contract_storage_hash(database_path), "profile_reads": [(call.args, call.kwargs) for call in reads.call_args_list], "broker_calls": calls})
         return response.json()
 
@@ -1272,7 +1294,7 @@ def capture_market_query_http_contract(client, app, store, broker, request_store
             raise AssertionError((name, response.status_code, response.text))
         if stored_hash() != before:
             raise AssertionError((name, "HTTP query changed native archive"))
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers), "body": response.json(),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
             "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0)), "store_calls": {key: [(call.args, call.kwargs) for call in spy.call_args_list]
                                                        for key, spy in spies.items()},
             "broker_calls": [(call.args, call.kwargs) for call in broker.request.call_args_list] if broker is not None else []})
@@ -1527,7 +1549,7 @@ def capture_market_read_http_contract(client, app, store, collectors, database_p
         response = client.get("/api/v1/market/" + path, params=params,
             headers={"Authorization": "Bearer private-token"} if authenticated else {})
         assert before == stored_hash(), (name, "market read changed native storage")
-        cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
+        cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response),
                       "body": response.json(), "stored_before": normalized_before,
                       "stored_after": contract_storage_hash(database_path,
                           document_receipt_clock=(receipt_clock.timestamp(), receipt_clock.timestamp()),
@@ -1648,7 +1670,7 @@ def capture_market_dataset_http_contract(client, store, service, request_store):
             if service is not None:
                 service.latest_membership_snapshot.reset_mock()
             response = client.get(path, params=params, headers={"Authorization": "Bearer private-token"} if authenticated else {})
-            cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
+            cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response),
                           "body": response.json(), "snapshot_reads": [list(call.args) for call in snapshots.call_args_list],
                           "statistics_reads": [list(call.args) for call in statistics.call_args_list],
                           "live_reads": [list(call.args) for call in service.latest_membership_snapshot.call_args_list] if service else []})
@@ -1725,9 +1747,10 @@ def content_contract_app(app_factory, database_path):
             value = datetime.fromtimestamp(clock[0], KST)
             return value.astimezone(tz) if tz else value
     try:
-        with patch.dict(app_factory.__globals__, {"datetime": ContentClock}), \
-                patch("uuid.uuid4", side_effect=lambda: uuid.UUID(int=next(ids))):
-            yield app_factory(settings), store, clock
+        with patch.dict(app_factory.__globals__, {"datetime": ContentClock}):
+            app = app_factory(settings)
+            with patch("uuid.uuid4", side_effect=lambda: uuid.UUID(int=next(ids))):
+                yield app, store, clock
     finally:
         store.close()
 
@@ -1741,7 +1764,7 @@ def capture_content_http_contract(client, store, clock):
         clock[0] += 10.0
         response = client.request(method, path, headers=headers if authenticated else {}, **kwargs)
         cases.append({"name": name, "status": response.status_code,
-                      "headers": dict(response.headers), "body": response.json()})
+                      "headers": _contract_headers(response), "body": response.json()})
         return response
 
     def document(owner, key, value):
@@ -1841,6 +1864,7 @@ def capture_content_http_contract(client, store, clock):
 @contextmanager
 def research_contract_app(app_factory, database_path):
     """Use real observation/candidate storage; isolate monitor tasks at their owner boundary."""
+    from types import SimpleNamespace
     from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
 
     class FixedObservationClock(datetime):
@@ -1849,6 +1873,7 @@ def research_contract_app(app_factory, database_path):
             return datetime(2026, 10, 10, tzinfo=timezone.utc).astimezone(tz)
 
     ids = itertools.count(1)
+    deterministic_uuid = SimpleNamespace(uuid4=lambda: uuid.UUID(int=next(ids)))
     monitors = [MagicMock(spec=CandidateMonitor), MagicMock(spec=CandidateMonitor)]
     for index, monitor in enumerate(monitors, 1):
         monitor.quality = {"status": "WARMUP", "reason": f"fixture-generation-{index}", "monitor_id": f"monitor-{index}"}
@@ -1857,7 +1882,8 @@ def research_contract_app(app_factory, database_path):
     store.initialize()
     try:
         with fixed_contract_clock(app_factory, FixedObservationClock), \
-                patch("uuid.uuid4", side_effect=lambda: uuid.UUID(int=next(ids))), \
+                patch("kiwoom_monitor.central_server.database_observation_writes.uuid", deterministic_uuid), \
+                patch("kiwoom_monitor.central_server.database_research_export.uuid", deterministic_uuid), \
                 patch("kiwoom_monitor.central_server.database_observation_writes.datetime", FixedObservationClock), \
                 patch("kiwoom_monitor.central_server.database_research_export.datetime", FixedObservationClock), \
                 patch.object(CandidateMonitor, "from_json", side_effect=monitors):
@@ -1892,7 +1918,7 @@ def capture_research_read_http_contract(client, store, monitors):
     def request(name, path, *, authenticated=True, **kwargs):
         response = client.get(path, headers=headers if authenticated else {}, **kwargs)
         cases.append({"name": name, "status": response.status_code,
-                      "headers": dict(response.headers), "body": response.json()})
+                      "headers": _contract_headers(response), "body": response.json()})
         return response
 
     observations = "/api/v1/research/observations"
@@ -1948,6 +1974,44 @@ def capture_research_read_http_contract(client, store, monitors):
 
 
 class CentralServerAppTests(unittest.TestCase):
+
+    def test_journal_analysis_http_batch_keeps_first_receipt_and_returns_conflict_without_generic_overwrite(self):
+        from copy import deepcopy
+        from tests.unit.test_central_server_database import CentralServerDatabaseTests
+        with tempfile.TemporaryDirectory() as directory:
+            settings = CentralServerSettings(f"sqlite:///{Path(directory) / 'central.db'}", "private-token")
+            headers = {"Authorization": "Bearer private-token"}
+            path = "/api/v1/content/journal_v2_analysis_revisions"
+            first = CentralServerDatabaseTests._journal_analysis_value()
+            with TestClient(create_app(settings)) as client:
+                self.assertEqual(401, client.post(path, json={"documents": [first]}).status_code)
+                self.assertEqual(422, client.post(path, headers=headers, json={"documents": [{**first, "key": "wrong"}]}).status_code)
+                response = client.post(path, headers=headers, json={"documents": [first]})
+                self.assertEqual(200, response.status_code)
+                self.assertEqual({"collection": "journal_v2_analysis_revisions", "saved": 1}, response.json())
+                before = client.get(path, headers=headers).json()["documents"]
+                replay = deepcopy(first)
+                replay["document"].update(created_at="2030-01-02T09:00:00+09:00", content_json='{"selected_types":["돌파"]}')
+                self.assertEqual(1, client.post(path, headers=headers, json={"documents": [replay]}).json()["saved"])
+                self.assertEqual(before, client.get(path, headers=headers).json()["documents"])
+                changed = deepcopy(first)
+                changed["document"]["input_fingerprint"] = "changed-input"
+                new = CentralServerDatabaseTests._journal_analysis_value("0-new")
+                self.assertEqual(409, client.post(path, headers=headers, json={"documents": [new, changed]}).status_code)
+                self.assertEqual(before, client.get(path, headers=headers).json()["documents"])
+                self.assertEqual(405, client.put(path, headers=headers, json={"documents": []}).status_code)
+                state = {**first, "document": {
+                    **first["document"], "collection": "journal_v2_analysis_revisions", "owner": first["owner"],
+                    "document_key": first["key"], "is_deleted": True, "updated_at": "2030-01-02T10:00:00+09:00",
+                }}
+                states_path = "/api/v1/content/journal_v2_sync_states"
+                self.assertEqual(200, client.post(states_path, headers=headers, json={"documents": [state]}).status_code)
+                self.assertEqual(state["document"], client.get(states_path, headers=headers).json()["documents"][0]["document"])
+                state["document"]["is_deleted"] = False
+                self.assertEqual(200, client.post(states_path, headers=headers, json={"documents": [state]}).status_code)
+                state["document"].update(collection="journal_v2_reviews", is_deleted=True)
+                self.assertEqual(200, client.post(states_path, headers=headers, json={"documents": [state]}).status_code)
+                self.assertEqual(before, client.get(path, headers=headers).json()["documents"])
 
     def setUp(self):
         # These HTTP/storage tests use stored news. Collection itself is covered
@@ -2375,6 +2439,132 @@ class CentralServerAppTests(unittest.TestCase):
                 "name": "before_revision_id", "in": "query", "required": False,
                 "schema": {"type": "string", "maxLength": 200, "default": "", "title": "Before Revision Id"},
             })
+            # Reviewed additive AR05 contract. Preserve every old route, frame,
+            # schema and task expectation; the new current reader precedes history.
+            import copy
+            current = copy.deepcopy(case["schema"]["paths"]["/api/v1/themes/history"]["get"])
+            current.update(summary="Current Theme Snapshot",
+                           operationId="current_theme_snapshot_api_v1_themes_current_snapshot_get")
+            current["parameters"] = [value for value in current["parameters"] if value["in"] == "header"]
+            current["responses"]["200"]["content"]["application/json"]["schema"] = {
+                "additionalProperties": True, "type": "object",
+                "title": "Response Current Theme Snapshot Api V1 Themes Current Snapshot Get",
+            }
+            case["schema"]["paths"]["/api/v1/themes/current-snapshot"] = {"get": current}
+            case["route_order"].insert(case["route_order"].index("/api/v1/themes/history"),
+                                        "/api/v1/themes/current-snapshot")
+            # Reviewed AR05 generation command/receipt API. This is an
+            # independent literal extension to the released full-schema oracle;
+            # no actual OpenAPI dump or model-generated expectation is used.
+            case["schema"]["components"]["schemas"]["ThemePublication"] = {
+                "properties": {
+                    "document": {"additionalProperties": True, "type": "object", "title": "Document"},
+                    "publication_id": {"type": "string", "title": "Publication Id"},
+                    "expected_snapshot_id": {"anyOf": [{"type": "string"}, {"type": "null"}],
+                                             "title": "Expected Snapshot Id"},
+                    "effective_at": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Effective At"},
+                    "origin_device": {"type": "string", "title": "Origin Device", "default": "unknown"},
+                },
+                "type": "object", "required": ["document", "publication_id", "expected_snapshot_id"],
+                "title": "ThemePublication",
+            }
+            publication = {
+                "summary": "Publish Theme Snapshot",
+                "operationId": "publish_theme_snapshot_api_v1_themes_snapshot_put",
+                "parameters": copy.deepcopy(current["parameters"]),
+                "requestBody": {"content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/ThemePublication"}}}, "required": True},
+                "responses": {
+                    "200": {"description": "Successful Response", "content": {"application/json": {"schema": {
+                        "additionalProperties": True, "type": "object",
+                        "title": "Response Publish Theme Snapshot Api V1 Themes Snapshot Put"}}}},
+                    "422": copy.deepcopy(current["responses"]["422"]),
+                },
+            }
+            accepted = {
+                "summary": "Accepted Theme Snapshot",
+                "operationId": "accepted_theme_snapshot_api_v1_themes_snapshot_get",
+                "parameters": [{"name": "snapshot_id", "in": "query", "required": False,
+                                "schema": {"anyOf": [{"type": "string"}, {"type": "null"}],
+                                           "title": "Snapshot Id"}}] + copy.deepcopy(current["parameters"]),
+                "responses": {
+                    "200": {"description": "Successful Response", "content": {"application/json": {"schema": {
+                        "additionalProperties": True, "type": "object",
+                        "title": "Response Accepted Theme Snapshot Api V1 Themes Snapshot Get"}}}},
+                    "422": copy.deepcopy(current["responses"]["422"]),
+                },
+            }
+            case["schema"]["paths"]["/api/v1/themes/snapshot"] = {"put": publication, "get": accepted}
+            position = case["route_order"].index("/api/v1/themes/current-snapshot")
+            case["route_order"][position:position] = ["/api/v1/themes/snapshot"]
+            # Approved AR08 result-only API: extend the independent oracle by
+            # these two paths; keep every existing schema/frame/task assertion.
+            result_headers = [
+                {"name": "authorization", "in": "header", "required": False,
+                 "schema": {"type": "string", "default": "", "title": "Authorization"}},
+                {"name": "x-kiwoom-expected-result-owner", "in": "header", "required": False,
+                 "schema": {"type": "string", "default": "", "title": "X-Kiwoom-Expected-Result-Owner"}},
+            ]
+            result_post = {
+                "summary": "Accept Reported Research Result",
+                "operationId": "accept_reported_research_result_api_v1_research_reported_results_post",
+                "parameters": copy.deepcopy(result_headers),
+                "responses": {
+                    "200": {"description": "Successful Response", "content": {"application/json": {"schema": {
+                        "additionalProperties": True, "type": "object",
+                        "title": "Response Accept Reported Research Result Api V1 Research Reported Results Post"}}}},
+                    "422": copy.deepcopy(current["responses"]["422"]),
+                },
+            }
+            result_get = {
+                "summary": "Load Reported Research Result",
+                "operationId": "load_reported_research_result_api_v1_research_reported_results__result_id__get",
+                "parameters": [{"name": "result_id", "in": "path", "required": True,
+                                "schema": {"type": "string", "title": "Result Id"}}] + copy.deepcopy(result_headers),
+                "responses": {
+                    "200": {"description": "Successful Response", "content": {"application/json": {"schema": {
+                        "additionalProperties": True, "type": "object",
+                        "title": "Response Load Reported Research Result Api V1 Research Reported Results  Result Id  Get"}}}},
+                    "422": copy.deepcopy(current["responses"]["422"]),
+                },
+            }
+            case["schema"]["paths"]["/api/v1/research/reported-results"] = {"post": result_post}
+            case["schema"]["paths"]["/api/v1/research/reported-results/{result_id}"] = {"get": result_get}
+            position = case["route_order"].index("/api/v1/research/ram-shadow/source-check")
+            case["route_order"][position:position] = [
+                "/api/v1/research/reported-results", "/api/v1/research/reported-results/{result_id}"]
+            # Reviewed AR09 basic operator-state contract and AR06 reported
+            # input provenance. Extend only these exact additive fields/routes;
+            # keep the released oracle and the full final comparison intact.
+            case["schema"]["paths"]["/api/v1/operator/state"] = {"get": {
+                "summary": "Operator State",
+                "operationId": "operator_state_api_v1_operator_state_get",
+                "parameters": [{"name": "authorization", "in": "header", "required": False,
+                                "schema": {"type": "string", "default": "", "title": "Authorization"}}],
+                "responses": {
+                    "200": {"description": "Successful Response", "content": {"application/json": {"schema": {
+                        "type": "object", "additionalProperties": True,
+                        "title": "Response Operator State Api V1 Operator State Get"}}}},
+                    "422": copy.deepcopy(current["responses"]["422"]),
+                },
+            }}
+            case["route_order"].insert(case["route_order"].index("/api/v1/capabilities"),
+                                        "/api/v1/operator/state")
+            ai_properties = case["schema"]["components"]["schemas"]["AIEventInput"]["properties"]
+            ai_properties.update({
+                "body_status": {"type": "string", "title": "Body Status", "default": ""},
+                "description": {"type": "string", "title": "Description", "default": ""},
+                "link": {"type": "string", "title": "Link", "default": ""},
+                "original_link": {"type": "string", "title": "Original Link", "default": ""},
+                "published_at": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Published At"},
+                "article_revision_id": {"type": "string", "title": "Article Revision Id", "default": ""},
+                "body_revision_id": {"type": "string", "title": "Body Revision Id", "default": ""},
+                "input_source": {"anyOf": [{"additionalProperties": True, "type": "object"}, {"type": "null"}],
+                                 "title": "Input Source"},
+            })
+            # Reported article members carry nested JSON source evidence, while
+            # native article/BODY/job authority stays with the existing owner.
+            ai_properties["articles"]["items"]["additionalProperties"] = True
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -2472,6 +2662,10 @@ class CentralServerAppTests(unittest.TestCase):
         for cases in expected:
             for case in cases:
                 body = case["body"]
+                if case["name"] == "resources":
+                    other = next(row for row in body["storage_categories"] if row["category"] == "other")
+                    self.assertEqual({"category": "other", "label": "설정·기타", "estimated_bytes": 0,
+                                      "rows": 24, "tables": 5}, other)
                 if isinstance(body, dict) and "workloads" in body:
                     morning = json.loads(NEWS_MORNING_CONTRACT.read_text(encoding="utf-8"))["morning_workload"]
                     morning["diagnostic_switch_available"] = case["name"] != "workloads-disabled"
@@ -3170,44 +3364,190 @@ class CentralServerAppTests(unittest.TestCase):
                     store.close()
 
     def test_live_top20_endpoint_does_not_wait_for_database_projection(self) -> None:
+        import threading
+        from datetime import UTC
+        from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
+        import httpx
+        from kiwoom_monitor.central_server.rest_broker import BrokerResult
+        from kiwoom_monitor.infrastructure.kiwoom_rest.remote_client import RemoteKiwoomRestClient
+
         with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
             settings = CentralServerSettings(
-                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+                f"sqlite:///{path}", "private-token",
                 kiwoom_app_key="app-key", kiwoom_secret_key="secret-key",
                 autonomous_top20_enabled=True, market_event_collection_enabled=False,
+                research_observation_history_enabled=True,
                 top20_outbox_path=str(Path(directory) / "top20-outbox.json"),
             )
-            app = create_app(settings)
-            service = app.state.autonomous_top20_service
-            self.assertIsNotNone(service)
-            service._latest_membership_snapshot = {
-                "subject": "2026-09-22",
-                "snapshot_key": "2026-09-22T18:00:00",
-                "saved_at": 1.0,
-                "payload": {"observed_at": "2026-09-22T18:00:00", "codes": ["005930"],
-                            "items": [{"stk_cd": "005930", "stk_nm": "삼성전자"}] * 20},
-                "persistence_state": "pending",
-            }
-            async def read_snapshots():
-                import httpx
-                # As before, inspect the already-created real service without
-                # starting network producers; use the public HTTP contract.
-                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-                    results = []
-                    for prefer_live in (True, False):
-                        response = await client.get(
-                            "/api/v1/market/snapshots/top20_membership",
-                            params={"subject": "2026-09-22", "limit": 1, "prefer_live": prefer_live},
-                            headers={"Authorization": "Bearer private-token"},
-                        )
-                        self.assertEqual(200, response.status_code)
-                        results.append(response.json())
-                    return results
+            clock = datetime.fromisoformat("2026-09-22T18:00:00+09:00")
+            day, key = "2026-09-22", "2026-09-22T18:00:00"
+            rows = [{"dt": "20260922", "tm": "180000", "stk_cd": f"{100000 + rank:06d}",
+                     "stk_nm": f"fixture-{rank}", "bigd_rank": str(rank)} for rank in range(1, 21)]
+            expected_payload = {"observed_at": key, "codes": [row["stk_cd"] for row in rows], "items": rows}
+            with patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now",
+                       return_value=clock), patch(
+                    "kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.get_access_token",
+                    side_effect=AssertionError("composition_must_not_request_kiwoom")):
+                app = create_app(settings)
+                service = app.state.autonomous_top20_service
+                self.assertIsNotNone(service)
+                store = service._store
+                entered, release, completed = threading.Event(), threading.Event(), threading.Event()
+                writer_context = threading.local()
+                actual_connection, actual_save = store._connection, store.save_dataset_snapshot
+                staged_rows = []
 
-            live, persisted = asyncio.run(read_snapshots())
+                @contextmanager
+                def observed_connection():
+                    # Pause after the real writer SQL, before the real native COMMIT.
+                    # Other reader connections retain their original implementation.
+                    with actual_connection() as connection:
+                        yield connection
+                        if getattr(writer_context, "membership", False):
+                            staged_rows.append(read_native(connection))
+                            entered.set()
+                            if not release.wait(timeout=2):
+                                raise TimeoutError("test did not release dataset save")
+
+                def observed_save(*args, **kwargs):
+                    selected = args[:3] == ("top20_membership", day, key)
+                    writer_context.membership = selected
+                    try:
+                        return actual_save(*args, **kwargs)
+                    finally:
+                        writer_context.membership = False
+                        if selected:
+                            completed.set()
+
+                def read_native(connection):
+                    self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
+                    return {
+                            "snapshots": connection.execute(
+                                "SELECT snapshot_key,payload_json,revision_id,slot_order_key FROM central_dataset_snapshots "
+                                "WHERE kind='top20_membership' AND subject=?", (day,)).fetchall(),
+                            "metadata": connection.execute(
+                                "SELECT observation_key,effective_at,available_at,source,revision_id "
+                                "FROM central_market_data_observation_meta "
+                                "WHERE dataset_kind='candidate_set' AND subject=?", (day,)).fetchall(),
+                            "revisions": connection.execute(
+                                "SELECT revision_id,observation_key,payload_hash,revision_of,payload_json,source_id,"
+                                "venue,unit,value_kind,completeness,origin,candidate_universe,effective_at,received_at,available_at "
+                                "FROM central_observation_revisions "
+                                "WHERE kind='top20_membership' AND subject=?", (day,)).fetchall(),
+                    }
+
+                def native_rows():
+                    # A separate native connection observes visibility, not the writer's uncommitted rows.
+                    with closing(sqlite3.connect(path)) as connection:
+                        return read_native(connection)
+
+                async def read_snapshots():
+                    refresh = None
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                        async def read(prefer_live):
+                            response = await client.get(
+                                "/api/v1/market/snapshots/top20_membership",
+                                params={"subject": day, "limit": 1, "prefer_live": prefer_live},
+                                headers={"Authorization": "Bearer private-token"},
+                            )
+                            self.assertEqual(200, response.status_code)
+                            return response.json(), response.headers
+
+                        try:
+                            persisted, _ = await read(False)
+                            with patch.object(store, "_connection", observed_connection), patch.object(
+                                    store, "save_dataset_snapshot", observed_save), patch.object(
+                                    service._broker, "request_unrecorded", new=AsyncMock(
+                                        return_value=BrokerResult({"item_inq_rank": rows}, False, ""))), patch.object(
+                                    service, "_schedule_market_catalog"), patch.object(service, "_schedule_subscription_update"):
+                                refresh = asyncio.create_task(service.refresh_ranking_once(clock))
+                                try:
+                                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                                    live, _ = await read(True)
+                                    self.assertEqual({"snapshots": [], "metadata": [], "revisions": []}, native_rows())
+                                    self.assertEqual(1, len(staged_rows))
+                                    self.assertEqual({"snapshots": 1, "metadata": 1, "revisions": 1},
+                                                     {name: len(values) for name, values in staged_rows[0].items()})
+                                    self.assertFalse(refresh.done())
+                                    self.assertFalse(completed.is_set())
+                                finally:
+                                    release.set()
+                                codes = await refresh
+                                self.assertTrue(completed.is_set())
+                                committed_live, _ = await read(True)
+                                committed_stored, _ = await read(False)
+                                decoded_metadata = await asyncio.to_thread(store.load_market_data_metadata,
+                                    MarketDatasetKind.CANDIDATE_SET, day, key)
+                                self.assertEqual("nas-autonomous-ka00198", decoded_metadata.source)
+                                self.assertEqual(clock, decoded_metadata.effective_at)
+                                self.assertEqual(clock, decoded_metadata.available_at)
+                                original_native = native_rows()
+                                loop = asyncio.get_running_loop()
+                                requests = []
+
+                                def opener(request, **kwargs):
+                                    target = urlsplit(request.full_url)
+                                    requests.append(target.path + "?" + target.query)
+                                    pending = asyncio.run_coroutine_threadsafe(client.request(
+                                        request.get_method(), target.path + "?" + target.query,
+                                        headers=dict(request.header_items()), content=request.data,
+                                    ), loop)
+                                    try:
+                                        response = pending.result(timeout=kwargs["timeout"])
+                                    except BaseException:
+                                        pending.cancel()
+                                        raise
+                                    self.assertEqual(200, response.status_code)
+                                    body = io.BytesIO(response.content)
+                                    body.headers = response.headers
+                                    return body
+
+                                remote = RemoteKiwoomRestClient("http://test", "private-token", opener=opener)
+                                # Inject the same known KST business clock at the existing client boundary.
+                                # The response still carries and updates the real server clock header.
+                                with patch.object(remote, "server_now", return_value=clock.replace(tzinfo=None)):
+                                    consumed = await asyncio.to_thread(remote.load_stored_ranking)
+                                self.assertEqual(day, remote.server_now().date().isoformat())
+                                self.assertEqual(original_native, native_rows())
+                                self.assertEqual([original_native], staged_rows)
+                                return live, persisted, committed_live, committed_stored, original_native, codes, consumed, requests
+                        finally:
+                            release.set()
+                            if refresh is not None:
+                                await asyncio.gather(refresh, return_exceptions=True)
+                            await service.close()
+
+                try:
+                    live, persisted, committed_live, committed_stored, original_native, codes, consumed, requests = asyncio.run(read_snapshots())
+                finally:
+                    store.close()
 
         self.assertEqual("pending", live["snapshots"][0]["persistence_state"])
         self.assertEqual([], persisted["snapshots"])
+        self.assertEqual(expected_payload, live["snapshots"][0]["payload"])
+        self.assertEqual(tuple(expected_payload["codes"]), codes)
+        self.assertEqual("persisted", committed_live["snapshots"][0]["persistence_state"])
+        self.assertEqual(expected_payload, committed_live["snapshots"][0]["payload"])
+        self.assertEqual(expected_payload, committed_stored["snapshots"][0]["payload"])
+        self.assertEqual(clock.timestamp(), committed_stored["snapshots"][0]["saved_at"])
+        self.assertEqual({"snapshots": 1, "metadata": 1, "revisions": 1},
+                         {name: len(values) for name, values in original_native.items()})
+        self.assertEqual(key, original_native["snapshots"][0][0])
+        self.assertIsNone(original_native["snapshots"][0][1])
+        self.assertEqual(original_native["revisions"][0][0], original_native["snapshots"][0][2])
+        self.assertEqual(clock.isoformat(timespec="microseconds"), original_native["snapshots"][0][3])
+        self.assertEqual((key, clock.isoformat(), clock.isoformat(), None, original_native["revisions"][0][0]),
+                         original_native["metadata"][0])
+        self.assertEqual("nas-autonomous-ka00198", original_native["revisions"][0][5])
+        self.assertEqual(("COMBINED", "count", "actual", "complete", "query", "ranking_top20",
+                          clock.astimezone(UTC).isoformat(), clock.isoformat(), clock.astimezone(UTC).isoformat()),
+                         original_native["revisions"][0][6:])
+        self.assertEqual(key, original_native["revisions"][0][1])
+        self.assertIsNone(original_native["revisions"][0][3])
+        self.assertEqual(expected_payload, json.loads(original_native["revisions"][0][4]))
+        self.assertEqual({"item_inq_rank": rows}, consumed)
+        self.assertEqual(["/api/v1/market/snapshots/top20_membership?subject=2026-09-22&limit=1&prefer_live=true"], requests)
 
     def test_mock_account_monitor_is_wired_only_with_explicit_mock_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3574,6 +3914,7 @@ class CentralServerAppTests(unittest.TestCase):
         )
         expected = {
             ("GET", "/health"),
+            ("GET", "/api/v1/operator/state"),
             ("GET", "/api/v1/market/morning-brief/settings"),
             ("PUT", "/api/v1/market/morning-brief/settings"),
             ("GET", "/api/v1/market/morning-brief"),
@@ -3644,6 +3985,8 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/market/coverage"),
             ("GET", "/api/v1/market/external-bars"),
             ("GET", "/api/v1/research/observations"),
+            ("POST", "/api/v1/research/reported-results"),
+            ("GET", "/api/v1/research/reported-results/{result_id}"),
             ("GET", "/api/v1/research/candidates"),
             ("GET", "/api/v1/research/ram-shadow"),
             ("GET", "/api/v1/research/ram-shadow/source-check"),
@@ -3666,6 +4009,9 @@ class CentralServerAppTests(unittest.TestCase):
             ("POST", "/api/v1/content/{collection}"),
             ("PUT", "/api/v1/content/{collection}"),
             ("GET", "/api/v1/themes/history"),
+            ("GET", "/api/v1/themes/current-snapshot"),
+            ("PUT", "/api/v1/themes/snapshot"),
+            ("GET", "/api/v1/themes/snapshot"),
             ("WEBSOCKET", "/api/v1/realtime"),
         }
         self.assertEqual(expected, actual)
@@ -3832,7 +4178,7 @@ class CentralServerAppTests(unittest.TestCase):
             )
             headers = {"Authorization": "Bearer private-token"}
             with TestClient(create_app(settings)) as client:
-                with patch("kiwoom_monitor.central_server.app.CandidateMonitor.start",
+                with patch("kiwoom_monitor.central_server.candidate_monitor.CandidateMonitor.start",
                            side_effect=RuntimeError("runtime failure")):
                     failed = client.put("/api/v1/settings/operations", headers=headers, json={
                         "shadow_candidate_enabled": True,
@@ -3954,9 +4300,11 @@ class CentralServerAppTests(unittest.TestCase):
 
     def test_health_is_public_and_capabilities_require_token(self) -> None:
         import httpx
+        import threading
+        from kiwoom_monitor.central_server import diagnostic_read_routes
         with tempfile.TemporaryDirectory() as directory:
             settings = CentralServerSettings(
-                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token",
+                f"sqlite:///{Path(directory) / 'monitor.sqlite3'}", "private-token", query_access_token="query-token",
             )
             app = create_app(settings)
             async def exercise():
@@ -3965,6 +4313,47 @@ class CentralServerAppTests(unittest.TestCase):
                         health = await client.get('/health')
                         self.assertEqual(200, health.status_code)
                         self.assertEqual('ok', health.json()['status'])
+                        self.assertEqual(1, health.json()['operator_state_version'])
+                        self.assertNotIn('operator_state', health.json())
+                        self.assertFalse({'control', 'trace', 'runs'} & set(health.json()))
+                        endpoint = '/api/v1/operator/state'
+                        self.assertEqual(401, (await client.get(endpoint)).status_code)
+                        self.assertEqual(403, (await client.get(endpoint, headers={'Authorization': 'Bearer query-token'})).status_code)
+                        state = await client.get(endpoint, headers={'Authorization': 'Bearer private-token'})
+                        self.assertEqual(200, state.status_code)
+                        self.assertEqual('operator-state', state.json()['contract'])
+                        self.assertEqual('diagnostic_exclusion', state.json()['scope'])
+                        self.assertEqual('installed', state.json()['composition'])
+                        self.assertEqual({'contract', 'version', 'scope', 'checked_at', 'composition',
+                                          'control', 'trace', 'runs'}, set(state.json()))
+                        self.assertTrue(state.json()['checked_at'].endswith('+09:00'))
+                        # Cancellation must join the actual owner read, without a new read-task owner.
+                        entered, release = threading.Event(), threading.Event()
+                        original_read = diagnostic_read_routes.operator_state_facts
+                        def held_read(runs):
+                            entered.set()
+                            if not release.wait(3):
+                                raise TimeoutError('test owner read not released')
+                            return original_read(runs)
+                        request = None
+                        try:
+                            with patch.object(diagnostic_read_routes, 'operator_state_facts', side_effect=held_read):
+                                request = asyncio.create_task(client.get(endpoint, headers={'Authorization': 'Bearer private-token'}))
+                                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                                for _ in range(3):
+                                    request.cancel()
+                                    await asyncio.sleep(0)
+                                    self.assertFalse(request.done())
+                                release.set()
+                                with self.assertRaises(asyncio.CancelledError):
+                                    await asyncio.wait_for(asyncio.shield(request), 3)
+                        finally:
+                            release.set()
+                            if request is not None and not request.done():
+                                try:
+                                    await asyncio.wait_for(asyncio.shield(request), 3)
+                                except asyncio.CancelledError:
+                                    pass
                         self.assertEqual({'state': 'unknown', 'coverage': 'partial', 'realtime': None, 'candidate_inputs': None}, health.json()['operational'])
                         self.assertEqual(401, (await client.get('/api/v1/capabilities')).status_code)
                         return await client.get('/api/v1/capabilities', headers={'Authorization': 'Bearer private-token'})
@@ -4657,3 +5046,437 @@ class CentralServerAppTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class OptionalDiagnosticApplicationCompositionTests(unittest.TestCase):
+    def test_actual_app_starts_stores_reads_and_closes_with_diagnostic_files_physically_absent(self):
+        import shutil
+        import subprocess
+        import sys
+        import textwrap
+        import hashlib
+        from tests.unit.test_historical_news_archive_api import fixed_archive_contract_fixture
+
+        with tempfile.TemporaryDirectory(prefix="app-tools-absent-") as directory:
+            root = Path(directory).resolve()
+            archive_root = root / "retained-archive"
+            archive_root.mkdir()
+            archive = fixed_archive_contract_fixture(archive_root)
+            archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            source = root / "src"
+            package = source / "kiwoom_monitor"
+            original = Path(__file__).resolve().parents[2] / "src" / "kiwoom_monitor"
+            shutil.copytree(original, package, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            removed = []
+            for path in package.rglob("diagnostic*.py"):
+                self.assertTrue(path.resolve().is_relative_to(package.resolve()))
+                removed.append(path.relative_to(source).as_posix())
+                path.unlink()
+            self.assertGreater(len(removed), 10)
+            program = r'''
+import asyncio, hashlib, importlib.util, json, sys
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
+# Isolated -I children do not inherit their parent's native HKCU mapping.
+# Reuse the runner-owned scope only when the existing regression seam is set.
+import os, runpy
+if os.name == 'nt' and os.environ.get('KIWOOM_REGRESSION_REGISTRY_HELPER'):
+    _registry_helper = Path(os.environ['KIWOOM_REGRESSION_REGISTRY_HELPER']).resolve()
+    _registry = runpy.run_path(str(_registry_helper))['join_from_environment']()
+    assert _registry is not None and not _registry.owner
+    _registry_temp = Path(_registry.description['temporary_directory']).resolve()
+    assert _registry_temp == Path(os.environ['TEMP']).resolve()
+    assert all(Path(value).resolve().is_relative_to(_registry_temp) for value in sys.argv[1:4])
+    assert not any(name == 'kiwoom_monitor' or name.startswith('kiwoom_monitor.') for name in sys.modules)
+    _registry_evidence = _registry_temp / ('app-tools-absent-registry-' + str(os.getpid()) + '.json')
+    with _registry_evidence.open('x', encoding='utf-8') as _stream:
+        json.dump({'status': 'SOURCE_PRUNED_CHILD_JOINED_EXISTING_HKCU_SCOPE',
+            'pid': os.getpid(), 'native_immediate_parent_pid': os.getppid(),
+            'registry_owner': _registry.description, 'scope': ['HKCU'],
+            'HKLM_fallback': 'outside_scope', 'joined_before_product_imports': True,
+            'borrower': not _registry.owner, 'temporary_directory': str(_registry_temp),
+            'fixture_root': str(Path(sys.argv[2]).resolve()),
+            'registry_helper_sha256': hashlib.sha256(_registry_helper.read_bytes()).hexdigest()},
+            _stream, ensure_ascii=False, sort_keys=True)
+        _stream.write('\n')
+    # The existing helper keeps native handles through interpreter teardown.
+    # The external owner alone deletes the exact UUID after Job tree exit.
+import httpx
+sys.path.insert(0, sys.argv[1])
+import kiwoom_monitor.central_server.app as module
+import kiwoom_monitor.central_server.realtime_collector as collector_module
+from kiwoom_monitor.central_server.config import CentralServerSettings
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
+source = Path(sys.argv[1]).resolve()
+assert Path(module.__file__).resolve() == source/'kiwoom_monitor/central_server/app.py'
+assert importlib.util.find_spec('kiwoom_monitor.central_server.diagnostic_read_routes') is None
+assert not list((source/'kiwoom_monitor').rglob('diagnostic*.py'))
+# A regular-session clock exercises the native LOGIN/REG/ACK owner; the
+# earlier off-session fixture had no RAM retention or approved trade source.
+clock = datetime.fromisoformat('2026-10-27T10:15:40+09:00')
+database = Path(sys.argv[2])/'native.sqlite3'
+archive = Path(sys.argv[3])
+archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+store = SQLiteQueryStore(database, now_provider=lambda: clock)
+requests = []
+class FixtureSocket:
+    def __init__(self):
+        self.responses = asyncio.Queue()
+        self.sent = []
+        self.closed = False
+    async def send(self, raw):
+        packet = json.loads(raw)
+        self.sent.append(packet)
+        if packet['trnm'] in {'LOGIN', 'REG', 'REMOVE'}:
+            self.responses.put_nowait({'trnm':packet['trnm'], 'return_code':0})
+    async def recv(self):
+        return json.dumps(await self.responses.get())
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *_args):
+        self.closed = True
+        return False
+async def fixture_ready(predicate):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(.002)
+    await asyncio.wait_for(poll(), timeout=3)
+def transport(client, api_id, path, body, **continuation):
+    requests.append(api_id)
+    return {'return_code': 0, 'item_inq_rank': []}, False, ''
+settings = CentralServerSettings(f'sqlite:///{database}', 'fixture-token', query_access_token='fixture-query',
+    kiwoom_app_key='fixture-key', kiwoom_secret_key='fixture-secret',
+    autonomous_top20_minute_backfill_enabled=False, news_naver_api_enabled=False,
+    news_naver_market_enabled=False, news_query_set_enabled=False,
+    external_market_symbols='', top20_outbox_path=str(Path(sys.argv[2])/'outbox.json'),
+    historical_news_archive_path=str(archive))
+async def exercise():
+    socket = FixtureSocket()
+    with patch.object(module, 'create_query_store', return_value=store), \
+            patch.object(KiwoomRestClient, 'server_now', return_value=clock), \
+            patch.object(KiwoomRestClient, 'get_access_token', return_value='fixture-token') as token, \
+            patch.object(collector_module, 'connect', return_value=socket), \
+            patch.object(KiwoomRestClient, 'request_with_continuation', transport):
+        app = module.create_app(settings)
+        assert not getattr(store, '_recorded_input_installed', False)
+        assert app.state.diagnostic_runs is None
+        collector = app.state.realtime_collector
+        top20 = app.state.autonomous_top20_service
+        events = app.state.market_event_service
+        assert collector is not None and top20 is not None and events is not None
+        # Use the existing catalog I/O seam; all native scheduler/store work runs.
+        top20._catalog_loader = lambda: ()
+        # This fixture is an explicit RAM consumer. Native subscription approval
+        # still belongs to the real receiver after the public Hub request.
+        ram_owner = object()
+        collector.set_ram_observation_retention(20, owner=ram_owner)
+        hub = app.state.realtime_hub
+        subscriber = hub.connect()
+        hub.update_subscription(subscriber, ['005930'], [], program_codes=[])
+        broker = top20._broker
+        assert top20._hub is app.state.realtime_hub and app.state.realtime_hub._observer is None
+        assert broker._input_observer is None
+        assert collector._input_observer is None and collector._subscription_observer is None
+        before = set(asyncio.all_tasks())
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+            assert collector._task is not None and not collector._task.done()
+            assert collector._snapshot_task is not None and not collector._snapshot_task.done()
+            assert broker._worker is not None and not broker._worker.done()
+            assert broker._persist_worker is not None and not broker._persist_worker.done()
+            assert len(top20._tasks) == 4 and all(not task.done() for task in top20._tasks)
+            assert app.state.ram_shadow_selection_session is not None
+            await fixture_ready(lambda: hub.upstream_ready_for({'005930'}))
+            assert collector.credential_connection_status()['phase'] == 'READY'
+            assert any(packet['trnm'] == 'REG' for packet in socket.sent)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://fixture') as client:
+                headers = {'Authorization': 'Bearer fixture-token'}
+                health = await client.get('/health', headers={'X-Kiwoom-Clock': '1'})
+                assert health.status_code == 200 and health.json()['server_time'] == clock.isoformat()
+                assert health.json()['operator_state_version'] == 1 and 'operator_state' not in health.json()
+                assert (await client.get('/api/v1/operator/state')).status_code == 401
+                assert (await client.get('/api/v1/operator/state', headers={'Authorization':'Bearer fixture-query'})).status_code == 403
+                owner = await client.get('/api/v1/operator/state', headers=headers)
+                assert owner.status_code == 200
+                assert owner.json() == {'contract':'operator-state', 'version':1, 'scope':'diagnostic_exclusion',
+                    'checked_at':clock.isoformat(), 'composition':'not_installed',
+                    'control':{'state':'not_created'}, 'trace':{'state':'not_created'}, 'runs':{'state':'not_created'}}
+                assert (await client.get('/api/v1/diagnostics/resources')).status_code == 401
+                resource = await client.get('/api/v1/diagnostics/resources', headers=headers)
+                assert resource.status_code == 200
+                assert resource.json()['database_size_bytes'] > 0
+                assert not resource.json()['retention_policy']['automatic_deletion_enabled']
+                assert (await client.get('/api/v1/diagnostics/workloads', headers=headers)).status_code == 404
+                archived = await client.get('/api/v1/news/historical-archive/search', headers=headers,
+                    params={'stock_code':'005930', 'limit':1})
+                assert archived.status_code == 200 and len(archived.json()['items']) == 1
+                row = archived.json()['items'][0]
+                detail = await client.get('/api/v1/news/historical-archive/articles/'+row['article_revision_id'],
+                    headers=headers, params={'dataset_id':archived.json()['dataset_id'],
+                        'body_revision_id':row['body_revision_id']})
+                assert detail.status_code == 200
+                socket.responses.put_nowait({'trnm':'REAL', 'data':[{'type':'0B', 'item':'005930',
+                    'values':{'10':'+70000', '14':'1000', '15':'2', '20':'101540'}}]})
+                await fixture_ready(lambda: collector.automation_price_observation('005930') is not None)
+                ram = collector.ram_observation_snapshot(('005930',), seconds=20)
+                assert len(ram['rows']) == 1 and ram['rows'][0]['price_won'] == 70000
+                # A native write error retains the real owner's retry input.
+                with patch.object(store, 'save_minute_bars', side_effect=OSError('fixture native write')):
+                    try:
+                        await collector._flush_snapshots(flush_latest=False)
+                    except OSError as error:
+                        assert str(error) == 'fixture native write'
+                    else:
+                        raise AssertionError('native write failure was hidden')
+                persistence = collector.operational_status()['persistence']
+                assert persistence['state'] == 'degraded' and 'minute_bars' in persistence['unresolved_failures']
+                await collector._flush_snapshots(flush_latest=False)
+                bars = store.load_minute_bars('005930', '2026-10-27', 'KRX')
+                assert len(bars) == 1 and bars[0]['close'] == 70000 and bars[0]['volume'] == 2
+                response = await client.get('/api/v1/market/minute-bars', headers=headers,
+                    params={'code':'005930','trading_date':'2026-10-27','market':'KRX'})
+                assert response.status_code == 200 and response.json()['bars'][0]['close'] == 70000
+        collector.set_ram_observation_retention(0, owner=ram_owner)
+        hub.disconnect(subscriber)
+        assert socket.closed
+        assert app.state.shutdown_status == {'state':'completed', 'stage':'store'}
+        assert collector._task is None and collector._snapshot_task is None
+        assert not top20._tasks and not events._background
+        assert broker._worker is None and broker._persist_worker is None
+        assert not broker._inflight and not broker._lookup_tasks
+        assert not [task for task in asyncio.all_tasks()-before if not task.done()]
+        assert token.call_count == 1
+    # Native persisted input remains available after the app's actual close.
+    reopened = SQLiteQueryStore(database, now_provider=lambda: clock)
+    try:
+        reopened.initialize()
+        assert reopened.load_minute_bars('005930','2026-10-27','KRX')[0]['close'] == 70000
+    finally:
+        reopened.close()
+asyncio.run(exercise())
+assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_sha256
+assert not any(name.startswith('kiwoom_monitor.') and '.diagnostic' in name for name in sys.modules)
+print(json.dumps({'actual_app_origin':module.__file__, 'tools_physically_absent':True,
+    'app_start_0b_ram_native_retry_read_close':True}))
+'''
+            result = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", "-c",
+                                     textwrap.dedent(program), str(source), str(root), str(archive)],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            proof = json.loads(result.stdout.strip())
+            self.assertTrue(proof["tools_physically_absent"])
+            self.assertTrue(proof["app_start_0b_ram_native_retry_read_close"])
+            self.assertEqual(str(package / "central_server" / "app.py"), proof["actual_app_origin"])
+            self.assertEqual(archive_sha256, hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    def test_installed_diagnostic_input_failure_propagates_and_closes_native_store(self):
+        from kiwoom_monitor.central_server import diagnostic_read_routes
+        from kiwoom_monitor.central_server import app as module
+
+        failure = ModuleNotFoundError("installed tool dependency missing", name="fixture_tool_dependency")
+        store = SQLiteQueryStore(Path(":memory:"), now_provider=lambda: datetime.fromisoformat("2026-10-27T02:15:30+09:00"))
+        with patch.object(module, "create_query_store", return_value=store), \
+                patch.object(diagnostic_read_routes, "compose_application_inputs", side_effect=failure), \
+                patch.object(store, "close", wraps=store.close) as close:
+            with self.assertRaises(ModuleNotFoundError) as raised:
+                create_app(CentralServerSettings("sqlite:///:memory:", "fixture-token"))
+            self.assertIs(failure, raised.exception)
+            close.assert_called_once_with()
+
+
+class ServerConstructionOwnershipTests(unittest.TestCase):
+    """Construction resources belong to the app until its lifespan takes over."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_server_construction_failure_releases_vault_and_preserves_metadata(self):
+        from kiwoom_monitor.central_server.app import create_app
+        native_init = CredentialStore.__init__
+        for failure_stage in ("brief", "router"):
+            with self.subTest(stage=failure_stage):
+                directory = self.root / ("construction-" + failure_stage)
+                store = SQLiteQueryStore(directory.with_suffix(".sqlite"))
+                store.initialize()
+                original = {"owner": "preserved", "key": "preserved", "document": {"value": failure_stage},
+                            "updated_at": "2026-10-23T09:00:00+09:00"}
+                store.upsert_documents("construction_original", [original])
+                stored_before = store.load_documents("construction_original", "preserved", 1)[0]
+                acquired = []
+                failure = RuntimeError("controlled construction " + failure_stage)
+                def capture_vault(instance, *args, **kwargs):
+                    native_init(instance, *args, **kwargs)
+                    acquired.append(instance)
+                settings = CentralServerSettings(f"sqlite:///{store._path}", uuid.uuid4().hex,
+                    credential_directory=str(directory), autonomous_top20_enabled=False,
+                    market_event_collection_enabled=False)
+                target = ("kiwoom_monitor.central_server.morning_market_brief.MorningMarketBrief"
+                          if failure_stage == "brief" else
+                          "kiwoom_monitor.central_server.content_routes.create_content_router")
+                try:
+                    with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store), \
+                            patch.object(CredentialStore, "__init__", capture_vault), \
+                            patch(target, side_effect=failure):
+                        with self.assertRaises(RuntimeError) as caught:
+                            create_app(settings)
+                    self.assertIs(failure, caught.exception)
+                    self.assertEqual(1, len(acquired))
+                    # A real OS lease must be available, not merely a close mock.
+                    replacement = CredentialStore(directory, store)
+                    replacement.close()
+                    rows = store.load_documents("construction_original", "preserved", 1)
+                    self.assertEqual(original["document"], rows[0]["document"])
+                    self.assertEqual(stored_before, rows[0])
+                finally:
+                    for vault in acquired:
+                        vault.close()
+                    store.close()
+
+    def test_server_construction_initialization_failure_closes_native_keeper(self):
+        from kiwoom_monitor.central_server.app import create_app
+        store = SQLiteQueryStore(Path(":memory:"))
+        native_initialize = store.initialize
+        keepers = []
+        failure = RuntimeError("controlled initialization failure")
+        def initialize_then_fail():
+            native_initialize()
+            keepers.append(store._keeper)
+            raise failure
+        try:
+            settings = CentralServerSettings("sqlite:///:memory:", uuid.uuid4().hex)
+            with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store), \
+                    patch.object(store, "initialize", initialize_then_fail):
+                with self.assertRaises(RuntimeError) as caught:
+                    create_app(settings)
+            self.assertIs(failure, caught.exception)
+            self.assertEqual(1, len(keepers))
+            self.assertIsNone(store._keeper)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                keepers[0].execute("SELECT 1")
+        finally:
+            store.close()
+
+    def test_server_construction_cleanup_failure_keeps_store_and_original_cause(self):
+        from kiwoom_monitor.central_server.app import create_app
+        native_init, native_close = CredentialStore.__init__, CredentialStore.close
+        store = SQLiteQueryStore(Path(":memory:"))
+        acquired = []
+        original = RuntimeError("controlled construction failure")
+        close_failure = RuntimeError("controlled vault close failure")
+        def capture_vault(instance, *args, **kwargs):
+            native_init(instance, *args, **kwargs)
+            acquired.append(instance)
+        try:
+            settings = CentralServerSettings("sqlite:///:memory:", uuid.uuid4().hex,
+                credential_directory=str(self.root / "cleanup-failure"),
+                autonomous_top20_enabled=False, market_event_collection_enabled=False)
+            with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store), \
+                    patch.object(CredentialStore, "__init__", capture_vault), \
+                    patch.object(CredentialStore, "close", side_effect=close_failure), \
+                    patch("kiwoom_monitor.central_server.morning_market_brief.MorningMarketBrief",
+                          side_effect=original):
+                with self.assertRaises(RuntimeError) as caught:
+                    create_app(settings)
+            self.assertIs(close_failure, caught.exception)
+            self.assertIs(original, caught.exception.__cause__)
+            self.assertIsNotNone(store._keeper)
+            self.assertEqual(1, store._keeper.execute("SELECT 1").fetchone()[0])
+            self.assertEqual(1, len(acquired))
+            with self.assertRaisesRegex(CredentialStoreError, "VAULT_ALREADY_OWNED"):
+                CredentialStore(self.root / "cleanup-failure", store)
+        finally:
+            for vault in acquired:
+                native_close(vault)
+            store.close()
+
+
+class HttpContractHeaderOracleTests(unittest.TestCase):
+    def test_handled_500_502_503_require_id_and_missing_header_mutant_is_rejected(self):
+        from fastapi import FastAPI, HTTPException
+        from kiwoom_monitor.central_server.app import _HttpOperationContextMiddleware
+        app = FastAPI()
+        app.add_middleware(_HttpOperationContextMiddleware,
+            server_now=lambda: datetime(2026, 10, 24, 9, tzinfo=KST), access_token="fixture-bearer")
+
+        @app.get("/handled/{status}")
+        async def handled(status: int):
+            raise HTTPException(status_code=status, detail="original handled failure")
+
+        with TestClient(app) as client:
+            for status in (500, 502, 503):
+                with self.subTest(status=status):
+                    request_id = f"handled-{status}-opaque"
+                    response = client.get(f"/handled/{status}", headers={"X-Request-ID": request_id})
+                    self.assertEqual(status, response.status_code)
+                    self.assertEqual({"detail": "original handled failure"}, response.json())
+                    self.assertEqual(request_id, response.headers["x-request-id"])
+                    original_headers = dict(response.headers)
+                    del original_headers["x-request-id"]
+                    self.assertEqual(original_headers, _contract_headers(response))
+                    # Mutate only the new observation field on the real handled response.
+                    del response.headers["x-request-id"]
+                    with self.assertRaisesRegex(AssertionError, "HTTP correlation header missing"):
+                        _contract_headers(response)
+                    self.assertEqual(status, response.status_code)
+                    self.assertEqual({"detail": "original handled failure"}, response.json())
+                    self.assertEqual(original_headers, dict(response.headers))
+
+class LoggingSinkHealthStatusTests(unittest.TestCase):
+    def test_public_health_projects_recorded_sink_failure_without_business_state_or_storage_probe(self):
+        import logging
+        import httpx
+        from kiwoom_monitor.infrastructure.logging_config import SafeStreamHandler
+
+        class BrokenConsole(io.StringIO):
+            def write(self, text):
+                raise OSError("private-console-exception")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            clock = datetime.fromisoformat("2026-10-27T10:15:40+09:00")
+            store = SQLiteQueryStore(path, now_provider=lambda: clock)
+            settings = CentralServerSettings(f"sqlite:///{path}", "private-token")
+            with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store):
+                app = create_app(settings)
+            root = logging.getLogger()
+            handler = SafeStreamHandler(BrokenConsole())
+            registry = {name: logging.Logger(name) for name in
+                        ("uvicorn.access", "uvicorn.error", "kiwoom_monitor.kiwoom_api")}
+            expected = {
+                "state": "recorded_failure", "coverage": "reported_only",
+                "failure_semantics": "latest_recorded_since_handler_configuration",
+                "failures": [{"output": "console", "stage": "emit", "kind": "io_error"}],
+            }
+
+            async def exercise():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    with patch.object(store, "load_documents", side_effect=AssertionError("health must not poll storage")):
+                        initial = await client.get("/health")
+                        self.assertEqual("unknown", initial.json()["logging"]["state"])
+                        logging.getLogger().warning("stage=failed token=private-record-token")
+                        failed = await client.get("/health")
+                        with patch.object(handler, "stream", io.StringIO()):
+                            logging.getLogger().warning("stage=written_after_failure")
+                            repeated = await client.get("/health")
+                        self.assertEqual((200, 200, 200),
+                                         (initial.status_code, failed.status_code, repeated.status_code))
+                        self.assertEqual(expected, failed.json()["logging"])
+                        self.assertEqual(expected, repeated.json()["logging"])
+                        for response in (failed, repeated):
+                            self.assertEqual(initial.json()["status"], response.json()["status"])
+                            self.assertEqual(initial.json()["operational"], response.json()["operational"])
+                            for secret in ("private-console-exception", "private-record-token", "private-token", str(path)):
+                                self.assertNotIn(secret, response.text)
+                    self.assertEqual(401, (await client.get("/api/v1/capabilities")).status_code)
+
+            try:
+                with patch.object(root, "handlers", [handler]), patch.dict(root.manager.loggerDict, registry):
+                    asyncio.run(exercise())
+            finally:
+                handler.close()
+                store.close()

@@ -1,9 +1,12 @@
 """Shared retention and durable wire equivalence, using the actual recorder."""
+
+from kiwoom_monitor.central_server.diagnostic_top20_lifecycle_input import CollectorInputRecorder
 import json
 import asyncio
 import threading
 import time
 import unittest
+from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
@@ -43,10 +46,11 @@ class DeliveryRecordTests(unittest.TestCase):
         from kiwoom_monitor.central_server.diagnostic_top20_input import consumed_delivery, compile_delivery_coverage
         from tests.unit.test_top20_delivery_provenance import message, NOW
         async def source():
-            hub = RealtimeHub()
+            hub_observer = hub_capture.HubInputRecorder()
+            hub = RealtimeHub(now_provider=lambda: NOW, observer=hub_observer)
             first = hub.connect(capture_component='autonomous_top20:first')
             peer = hub.connect(capture_component='autonomous_top20:peer')
-            collector = CentralRealtimeCollector(lambda: '', 'real', hub, lambda: NOW)
+            collector = CentralRealtimeCollector(lambda: '', 'real', hub, lambda: NOW, input_observer=CollectorInputRecorder(hub_observer=hub_observer))
             collector._publish_parsed(message(101))
             nodes = []
             for subscriber in (first, peer):

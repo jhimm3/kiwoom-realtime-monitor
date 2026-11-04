@@ -439,7 +439,7 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
         self.case.bundle.automation_context.control_revision=1
         record=self.case.execution.load(self.case.intent.intent_id)
         gate=self.case.repository.load_mock_automation_approved_gate(fixture.ACCOUNT_REF,record.intent.intent_id)
-        self.case.runner._register_native_unfilled(record,gate)
+        self.case.runner.episode._register_native_unfilled(record,gate)
         self.owner=SimpleNamespace(bundle=lambda profile:self.case.bundle if profile==fixture.PROFILE_ID else None)
         self.supervisor=MockAutomationSupervisor(self.case.store,self.owner)
         self.supervisor._runners[fixture.ACCOUNT_REF]=self.case.runner
@@ -480,7 +480,7 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((1,0),(counts['selects'],counts['commits']))
         self.assertTrue(self.case.runner._wake_event.is_set())
         self.assertEqual(before,len(self.case.transport.calls));self.assertEqual(0,self.case.cancel_calls)
-        source=self.case.runner.status['unfilled_population_source']
+        source=self.case.runner.episode.status['unfilled_population_source']
         self.assertEqual(self.packet['available_at'],source['available_at'])
         self.assertEqual('PC_READONLY_REPLAY_REPORTED',source['native_validation'])
 
@@ -488,13 +488,13 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
         first=await self.post();self.assertEqual(200,first.status_code,first.text)
-        original=self.case.runner._unfilled_population;generation=self.case.runner._unfilled_source_generation
+        original=self.case.runner.episode._unfilled_population;generation=self.case.runner.episode._unfilled_source_generation
         with patch.object(ResearchRepository,'load_position_action_evidence',side_effect=AssertionError('server accessed PC source')):
             with self.case.count_native() as counts:
                 for _ in range(100):
                     response=await self.post();self.assertEqual('unchanged',response.json()['status'])
-        self.assertIs(original,self.case.runner._unfilled_population)
-        self.assertEqual(generation,self.case.runner._unfilled_source_generation)
+        self.assertIs(original,self.case.runner.episode._unfilled_population)
+        self.assertEqual(generation,self.case.runner.episode._unfilled_source_generation)
         self.assertEqual((0,0),(counts['selects'],counts['commits']))
 
     async def test_auth_size_and_malformed_body_fail_without_publication(self):
@@ -503,7 +503,7 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
             response=await self.post(headers={'Authorization':'Bearer wrong'});self.assertEqual(401,response.status_code)
             response=await self.http.post('/api/v1/mock-automation/unfilled-population',content=b'x'*(1024*1024+1));self.assertEqual(413,response.status_code)
             response=await self.http.post('/api/v1/mock-automation/unfilled-population',content=b'{');self.assertEqual(400,response.status_code)
-        self.assertIsNone(self.case.runner._unfilled_population)
+        self.assertIsNone(self.case.runner.episode._unfilled_population)
 
     async def test_malformed_outcome_structure_is_bad_request_and_not_a_server_error(self):
         from copy import deepcopy
@@ -515,7 +515,7 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
             self.reseal(packet)
             response=await self.post(packet)
             self.assertEqual(400,response.status_code,response.text)
-        self.assertIsNone(self.case.runner._unfilled_population)
+        self.assertIsNone(self.case.runner.episode._unfilled_population)
 
     async def test_control_spec_run_and_profile_conflicts_do_not_activate_or_store(self):
         from copy import deepcopy
@@ -525,31 +525,50 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(key=key),patch.object(self.supervisor,'activate',side_effect=AssertionError('activated')):
                 response=await self.post(packet)
             self.assertIn(response.status_code,(409,503),response.text)
-            self.assertIsNone(self.case.runner._unfilled_population)
+            self.assertIsNone(self.case.runner.episode._unfilled_population)
 
     async def test_native_stop_rejects_a_new_packet_before_runner_poll_updates_status(self):
         from tests.unit.test_mock_automation_specification import ACCOUNT_REF,PROFILE_ID
+        from kiwoom_monitor.application.mock_automation_execution import MockAutomationDesiredState
+
+        bundle = self.case.bundle
+        episode = self.case.runner.episode
+        runner_state = episode.status["state"]
+
+        def refresh_automation_control(control):
+            bundle.automation_context.control_revision = control.control_revision
+
+        bundle.refresh_automation_control = refresh_automation_control
         await self.supervisor.stop(account_ref=ACCOUNT_REF,credential_profile_id=PROFILE_ID,spec_id=self.case.spec.spec_id,
             expected_control_revision=1,reason='explicit stop fixture')
-        response=await self.post()
-        self.assertEqual(409,response.status_code,response.text)
-        self.assertIsNone(self.case.runner._unfilled_population)
+        control = self.case.repository.load_mock_automation_control(ACCOUNT_REF)
+        self.assertEqual(MockAutomationDesiredState.STOPPED, control.desired_state)
+        self.assertEqual(2, control.control_revision)
+        self.assertEqual(control.control_revision, bundle.automation_context.control_revision)
+        self.assertEqual(runner_state, episode.status["state"])
+
+        fresh = self.reseal({**self.packet, "expected_control_revision": control.control_revision})
+        for packet in (self.packet, fresh):
+            response = await self.post(packet)
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertEqual("MOCK_AUTOMATION_CONTROL_REVISION_CONFLICT", response.json()["detail"])
+        self.assertIsNone(episode._unfilled_population)
 
     async def test_expired_source_is_not_renewed_by_new_account_cut_or_http_retry(self):
         from datetime import timedelta
         self.case.clock+=timedelta(seconds=6)
         await self.case.monitor.refresh_recovery()
         response=await self.post();self.assertEqual(400,response.status_code,response.text)
-        self.assertIsNone(self.case.runner._unfilled_population)
+        self.assertIsNone(self.case.runner.episode._unfilled_population)
 
     async def test_partial_or_cancelled_current_native_state_has_explicit_ev_unavailable(self):
         from dataclasses import replace
         from kiwoom_monitor.domain.order_contract import OrderState
         response=await self.post();self.assertEqual(200,response.status_code,response.text)
         record=self.case.execution.load(self.case.intent.intent_id)
-        population=self.case.runner._unfilled_population
+        population=self.case.runner.episode._unfilled_population
         for state in (OrderState.PARTIALLY_FILLED,OrderState.CANCELLED,OrderState.SUBMISSION_UNKNOWN):
-            evidence,report=self.case.runner._prepare_native_unfilled_evidence(population,None,replace(record,state=state),
+            evidence,report=self.case.runner.episode._prepare_native_unfilled_evidence(population,None,replace(record,state=state),
                 10,0,10,1100,None,self.case.clock)
             self.assertIsNone(evidence);self.assertEqual('native_unfilled_model_state_unsupported',report['reason'])
         self.assertEqual(0,self.case.cancel_calls)
@@ -557,9 +576,9 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_published_runtime_outcomes_reach_existing_pair_calculation_without_synthetic_profit(self):
         response=await self.post();self.assertEqual(200,response.status_code,response.text)
         record=self.case.execution.load(self.case.intent.intent_id)
-        policy=self.case.runner._validate_unfilled_registration(self.case.runner._unfilled_registration)
-        evidence,report=self.case.runner._prepare_native_unfilled_evidence(self.case.runner._unfilled_population,policy,
-            record,10,0,10,1100,self.case.runner._unfilled_cost_model,self.case.clock)
+        policy=self.case.runner.episode._validate_unfilled_registration(self.case.runner.episode._unfilled_registration)
+        evidence,report=self.case.runner.episode._prepare_native_unfilled_evidence(self.case.runner.episode._unfilled_population,policy,
+            record,10,0,10,1100,self.case.runner.episode._unfilled_cost_model,self.case.clock)
         self.assertEqual((2,-12),(evidence.paired_sample_count,evidence.net_advantage_won))
         self.assertEqual('EMPIRICAL_ESTIMATE',report['comparison']['ev_status'])
         self.assertFalse(report['order_authorized'])
@@ -568,18 +587,18 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_registration_switch_during_encoding_rejects_old_episode_packet(self):
         from copy import deepcopy
         from unittest.mock import patch
-        import kiwoom_monitor.central_server.mock_automation_runner as module
+        import kiwoom_monitor.central_server.mock_automation_episode as module
         original=module.json.dumps;changed=False
         def interleave(value,*args,**kwargs):
             nonlocal changed
             if isinstance(value,dict) and 'candidate_price' in value and 'source_publication' in value and not changed:
                 changed=True
-                with self.case.runner._unfilled_input_lock:
-                    self.case.runner._unfilled_registration=deepcopy(self.case.runner._unfilled_registration)
+                with self.case.runner.episode._unfilled_input_lock:
+                    self.case.runner.episode._unfilled_registration=deepcopy(self.case.runner.episode._unfilled_registration)
             return original(value,*args,**kwargs)
         with patch.object(module.json,'dumps',side_effect=interleave):response=await self.post()
         self.assertTrue(changed);self.assertEqual(400,response.status_code,response.text)
-        self.assertIn('registration_changed',response.text);self.assertIsNone(self.case.runner._unfilled_population)
+        self.assertIn('registration_changed',response.text);self.assertIsNone(self.case.runner.episode._unfilled_population)
 
     async def test_protection_request_does_not_wait_for_source_decode_and_close_blocks_late_publish(self):
         import asyncio
@@ -593,14 +612,98 @@ class NativeUnfilledPublicationApiTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(frame,'drain_thread_call',side_effect=slow):
             posting=asyncio.create_task(self.post())
             await asyncio.wait_for(entered.wait(),2)
-            self.case.runner.request_protection_review(reason='hard_risk_limit',input_ref='native-risk',requested_at=self.case.clock)
-            await self.case.runner.run_once()
-            self.assertTrue(self.case.runner._protection_pending())
-            self.assertIsNone(self.case.runner._unfilled_population)
+            self.case.runner.episode.request_protection_review(reason='hard_risk_limit',input_ref='native-risk',requested_at=self.case.clock)
+            await self.case.runner.episode.advance_once()
+            self.assertTrue(self.case.runner.episode._protection_pending())
+            self.assertIsNone(self.case.runner.episode._unfilled_population)
             await self.supervisor.close();release.set()
             response=await asyncio.wait_for(posting,2)
         self.assertEqual(503,response.status_code,response.text)
 
+
+
+class ContentOperationContextTests(unittest.TestCase):
+    def test_actual_opener_uses_exact_parent_context_without_changing_request(self):
+        from kiwoom_monitor.domain import operation_context as c
+        observed = []
+        def opener(request, **kwargs):
+            observed.append((request, kwargs, c.snapshot_operation_context()))
+            return Response(b'{"documents":[]}')
+        client = CentralContentClient("https://nas.test", "private-bearer", opener=opener, timeout_seconds=7)
+        parent = c.OperationContextSnapshot("local.owner", "opaque ID/42")
+        with c.operation_context_scope(parent):
+            self.assertEqual([], client.load("news_article"))
+            self.assertEqual(parent, c.snapshot_operation_context())
+        request, kwargs, actual = observed[0]
+        self.assertEqual(parent, actual)
+        self.assertEqual(parent.request_id, request.get_header("X-request-id"))
+        self.assertEqual("Bearer private-bearer", request.get_header("Authorization"))
+        self.assertEqual("1", request.get_header("X-kiwoom-clock"))
+        self.assertEqual(7, kwargs["timeout"])
+        self.assertEqual(c.OperationContextSnapshot(), c.snapshot_operation_context())
+
+    def test_invalid_nonserializable_and_bearer_overlap_get_wire_only_uuid(self):
+        from kiwoom_monitor.domain import operation_context as c
+        import uuid
+        observed = []
+        def opener(request, **kwargs):
+            observed.append((request.get_header("X-request-id"), c.snapshot_operation_context()))
+            return Response(b'{"status":"ok"}')
+        client = CentralContentClient("https://nas.test", "private-bearer", opener=opener)
+        for value in ("", "bad\nvalue", "한글", "prefix-private-bearer-suffix"):
+            parent = c.OperationContextSnapshot("local.owner", value)
+            with c.operation_context_scope(parent):
+                client.load_health()
+                self.assertEqual(parent, c.snapshot_operation_context())
+            wire, actual = observed[-1]
+            self.assertEqual(uuid.UUID(wire).hex, wire)
+            self.assertEqual(c.OperationContextSnapshot("local.owner", wire), actual)
+            self.assertNotIn("private-bearer", wire)
+        self.assertEqual(4, len({wire for wire, _ in observed}))
+
+    def test_failures_and_cancellation_reset_scope_and_never_log_transport_secrets(self):
+        import asyncio
+        import logging
+        from kiwoom_monitor.domain import operation_context as c
+        observed = []
+        parent = c.OperationContextSnapshot("", "")
+        for failure, expected in ((TimeoutError("private-bearer body-secret"), CentralContentUnavailableError),
+                                  (asyncio.CancelledError(), asyncio.CancelledError),
+                                  (ValueError("decode-secret"), ValueError)):
+            def opener(request, **kwargs):
+                observed.append(c.snapshot_operation_context())
+                raise failure
+            client = CentralContentClient("https://nas.test/?secret=raw", "private-bearer", opener=opener)
+            with patch.object(logging.Logger, "_log") as log, c.operation_context_scope(parent):
+                with self.assertRaises(expected):
+                    client.load_health()
+                self.assertEqual(parent, c.snapshot_operation_context())
+                log.assert_not_called()
+            self.assertEqual("pc.central_http", observed[-1].source)
+            self.assertTrue(observed[-1].request_id)
+
+    def test_concurrent_to_thread_requests_do_not_share_ids_or_leak_context(self):
+        import asyncio
+        import threading
+        from kiwoom_monitor.domain import operation_context as c
+        barrier = threading.Barrier(2)
+        observed = []
+        def opener(request, **kwargs):
+            barrier.wait(timeout=3)
+            observed.append((request.get_header("X-request-id"), c.snapshot_operation_context()))
+            return Response(b'{"status":"ok"}')
+        client = CentralContentClient("https://nas.test", "private-bearer", opener=opener)
+        async def run():
+            async def caller(name):
+                parent = c.OperationContextSnapshot(name, name + "-id")
+                with c.operation_context_scope(parent):
+                    await asyncio.to_thread(client.load_health)
+                    self.assertEqual(parent, c.snapshot_operation_context())
+            await asyncio.gather(caller("A"), caller("B"))
+        asyncio.run(run())
+        self.assertEqual({("A-id", c.OperationContextSnapshot("A", "A-id")),
+                          ("B-id", c.OperationContextSnapshot("B", "B-id"))}, set(observed))
+        self.assertEqual(c.OperationContextSnapshot(), c.snapshot_operation_context())
 
 if __name__ == "__main__":
     unittest.main()

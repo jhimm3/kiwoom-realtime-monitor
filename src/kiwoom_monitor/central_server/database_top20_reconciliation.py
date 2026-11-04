@@ -11,9 +11,12 @@ from kiwoom_monitor.domain.top20_reconciliation import (
 )
 from .database_codec import MINUTE_BAR_COLUMNS
 from .database_top20_statistics import _top20_market_values, _top20_statistics_days, _top20_statistics_merge, _top20_today
-from .postgres_access import DBWriterContext, open_observed_connection
-from .diagnostic_workloads import is_paused
-from .diagnostic_top20_display_input import environment_value
+from .postgres_access import DBWriterContext, database_observer, open_observed_connection
+
+
+def _environment_value(tag, producer):
+    observer = database_observer()
+    return producer() if observer is None else observer.display.environment_value(tag, producer)
 
 
 def _document(value: object) -> dict[str, Any]:
@@ -97,15 +100,15 @@ def _inputs(cursor: Any, day: str, marker: str) -> Top20ReconciliationInput:
                 if document is not None:
                     pairs.setdefault(subject, {"bars": {}, "metadata": {}, "coverage": {}})["coverage"] = document
     return Top20ReconciliationInput(day, cohorts, pairs, eligibility, markets,
-                                    environment_value('computed_at', lambda: datetime.now(KST).isoformat()), sources)
+                                    _environment_value('computed_at', lambda: datetime.now(KST).isoformat()), sources)
 
 
 def _statistics(cursor: Any, start: str, end: str, marker: str) -> dict[str, Any]:
     days = _top20_statistics_days(start, end,
-        today=date.fromisoformat(environment_value('today', lambda: _top20_today().isoformat())))
+        today=date.fromisoformat(_environment_value('today', lambda: _top20_today().isoformat())))
     results = {}
     for day in days:
-        historical = day < environment_value('today', lambda: _top20_today().isoformat())
+        historical = day < _environment_value('today', lambda: _top20_today().isoformat())
         if historical and marker == "%s":
             cursor.execute("SELECT pg_advisory_xact_lock(%s,%s)", (902025, int(day.replace("-", ""))))
         cursor.execute("SELECT payload_json FROM central_dataset_snapshots "
@@ -123,11 +126,13 @@ def _statistics(cursor: Any, start: str, end: str, marker: str) -> dict[str, Any
                                                "kosdaq_eok": amounts.get("kosdaq", 0.0),
                                                "market_complete": all(key in amounts for key in ("kospi", "kosdaq"))})
         results[day] = document
-        if historical and not environment_value('cache_write_paused', lambda: is_paused("top20_after_close")):
+        observer = database_observer()
+        if historical and not _environment_value('cache_write_paused', lambda: observer is not None
+                                                 and observer.workloads.is_paused("top20_after_close")):
             cursor.execute("INSERT INTO central_dataset_snapshots(kind,subject,snapshot_key,saved_at,payload_json) "
                            "VALUES('top20_statistics_display_day'," + ",".join([marker] * 4) + ") "
                            "ON CONFLICT(kind,subject,snapshot_key) DO UPDATE SET saved_at=excluded.saved_at,"
-                           "payload_json=excluded.payload_json", (day, day, environment_value('saved_at', time), json.dumps(document)))
+                           "payload_json=excluded.payload_json", (day, day, _environment_value('saved_at', time), json.dumps(document)))
     return {"basis": "display", **_top20_statistics_merge(results, days, include_sample_count=True)}
 
 

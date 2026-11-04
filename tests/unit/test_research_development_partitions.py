@@ -20,7 +20,8 @@ from kiwoom_monitor.infrastructure.research_data_source import (
     FrozenResearchDataset, prepare_development_partition, development_partition_start,
 )
 from kiwoom_monitor.research_process import execute_process_request, load_research_process_request
-from scripts.run_research import execute_research, PaperExecutionEngine, ResearchRunCancelled, main as research_main
+from kiwoom_monitor.research_run import execute_research, PaperExecutionEngine, ResearchRunCancelled
+from scripts.run_research import main as research_main
 from tests.unit.test_research_bundle_execution import rows_for, child, KST, PROFILE
 from tests.unit.test_research_execution import _execution as base_execution, _strategy
 from tests.unit.research_test_support import research_request_document as _request_document
@@ -173,7 +174,7 @@ class DevelopmentPartitionTests(unittest.TestCase):
                 super().__init__(*args, **kwargs)
                 initial.append((deepcopy(engine.portfolio), deepcopy(engine.strategy_state)))
         results = []
-        with patch('scripts.run_research.PaperExecutionEngine', RecordingEngine):
+        with patch('kiwoom_monitor.research_run.PaperExecutionEngine', RecordingEngine):
             for name in ('train', 'validation'):
                 partition = replace(self.partition, fold_name=name)
                 results.append(execute_research(self.prepare(partition=partition), repo, self.root / 'runs', _strategy(), _execution(), partition.evaluation_for(self.evaluation), session_profile=PROFILE))
@@ -319,7 +320,7 @@ class DevelopmentPartitionTests(unittest.TestCase):
         prepared = prepare_development_partition(dataset, self.partition, evaluation)
         repo = ResearchRepository(self.root / 'two-days.sqlite3')
         strategy = replace(_strategy(), max_hold_minutes=2000)
-        with patch('scripts.run_research.PaperExecutionEngine', wraps=PaperExecutionEngine) as engine:
+        with patch('kiwoom_monitor.research_run.PaperExecutionEngine', wraps=PaperExecutionEngine) as engine:
             result = execute_research(prepared, repo, self.root / 'runs', strategy, _execution(), self.partition.evaluation_for(evaluation), session_profile=PROFILE)
         self.assertEqual(1, engine.call_count)
         self.assertEqual({self.day, next_day}, {datetime.fromisoformat(row['available_at']).astimezone(KST).date() for row in prepared.observations})

@@ -64,6 +64,7 @@ class MainWindowLayoutTests(unittest.TestCase):
 
             try:
                 window = MainWindow(database.settings, loader, columns=repository)
+                window.activate_startup()
                 windows.append(window)
                 app.processEvents()
                 header = window._table.horizontalHeader()
@@ -102,6 +103,7 @@ class MainWindowLayoutTests(unittest.TestCase):
                     close_save.assert_called_once_with()
                 self.assertEqual(receipt, versions())
                 restored = MainWindow(database.settings, loader, columns=repository)
+                restored.activate_startup()
                 windows.append(restored)
                 app.processEvents()
                 assert_table_matches(restored)

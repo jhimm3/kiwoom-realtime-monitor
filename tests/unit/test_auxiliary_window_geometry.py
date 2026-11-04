@@ -65,6 +65,8 @@ class AuxiliaryWindowGeometryTests(unittest.TestCase):
                     side_effect=self._settings_factory(directory),
                 ):
                     first = factory()
+                    if isinstance(first, (CandidateMonitorDialog, ResearchDialog)):
+                        first.activate_startup()
                     if module == "mock_automation_dialog":
                         first._context = {"loaded": True}
                     first.show()
@@ -73,6 +75,8 @@ class AuxiliaryWindowGeometryTests(unittest.TestCase):
                     first.stop()
                     first._settings.sync() if module != "mock_automation_dialog" else first._window_settings.sync()
                     second = factory()
+                    if isinstance(second, (CandidateMonitorDialog, ResearchDialog)):
+                        second.activate_startup()
                     if module == "mock_automation_dialog":
                         second._context = {"loaded": True}
                     second.show()

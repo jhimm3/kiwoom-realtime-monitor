@@ -60,20 +60,19 @@ from kiwoom_monitor.application.research_queue import (
     LeaderDecisionCampaignSpec, decode_campaign_spec,
 )
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
-from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient, CentralContentHttpError, CentralContentUnavailableError
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
-from scripts.export_research_dataset import prepare_campaign_nas_input
+from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
 from kiwoom_monitor.infrastructure.research_data_source import load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
 from kiwoom_monitor.infrastructure.research_storage import validate_research_storage_root
 from kiwoom_monitor.infrastructure.research_data_source import (prepare_development_partition,
     prepare_final_holdout_partition, final_holdout_partition_start, FrozenResearchDataset)
 from kiwoom_monitor.application.research_resources import ResearchResourceGuard, ResearchResourceLimits, ResearchResourceBlocked
-from scripts.run_research import (
+from kiwoom_monitor.application.research_implementation import research_implementation_hash
+from kiwoom_monitor.research_run import (
     ResearchRunCancelled,
     execute_rank_comparison,
     execute_research,
-    research_implementation_hash,
     research_run_identity,
 )
 
@@ -493,7 +492,7 @@ def load_final_holdout_execution_request(path: Path) -> FinalHoldoutExecutionReq
             or any(not isinstance(value, Mapping) or set(value) != candidate_fields
                    for value in raw_candidates)):
         raise ValueError('final request requires 1 to 200 fixed candidate documents')
-    candidates = tuple(_process_request_from_document(value, path.parent) for value in raw_candidates)
+    candidates = tuple(research_process_request_from_document(value, path.parent) for value in raw_candidates)
     if any(request.mode != 'single_run' or request.search is not None
            or request.development_partition is not None for request in candidates):
         raise ValueError('final request candidates must be fixed single_run documents')
@@ -636,10 +635,10 @@ def load_research_process_request(path: Path) -> ResearchProcessRequest | Leader
         raise ValueError("research request cannot be read") from exc
     if not isinstance(document, Mapping):
         raise ValueError("research request must be a JSON object")
-    return _process_request_from_document(document, request_path.resolve().parent)
+    return research_process_request_from_document(document, request_path.resolve().parent)
 
 
-def _process_request_from_document(document: Mapping[str, Any], root: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest:
+def research_process_request_from_document(document: Mapping[str, Any], root: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest:
     mode = str(document.get("mode", ""))
     if mode == "leader_breakout":
         from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy
@@ -904,7 +903,7 @@ def _campaign_request_from_spec(spec, input_path, database, runs_dir):
             search=spec, database=Path(database), runs_dir=Path(runs_dir), policies=policies, max_seconds=spec.max_seconds)
     context = spec.research_context
     profile = context.get('session_profile')
-    return _process_request_from_document({
+    return research_process_request_from_document({
         'mode': 'limited_search', 'family': context.get('family'),
         'strategy': context.get('baseline_strategy'), 'execution': context.get('execution'),
         'evaluation': context.get('evaluation'),
@@ -1033,7 +1032,11 @@ def execute_process_request(
     cancel_path: Path | None = None,
     cancel_requested: Callable[[], bool] | None = None,
     campaign_cycle: Mapping[str, Any] | None = None,
+    reported_result_target=None,
 ) -> dict[str, Any]:
+    if reported_result_target is not None and (
+            not isinstance(request, ResearchProcessRequest) or request.mode != "single_run" or campaign_cycle is not None):
+        raise ValueError("reported result delivery supports ordinary single_run only")
     cancelled = lambda: bool(
         (cancel_path is not None and cancel_path.is_file())
         or (cancel_requested is not None and cancel_requested())
@@ -1332,12 +1335,17 @@ def execute_process_request(
         request.session_profile,
         resource_guard,
     )
-    return {
+    document = {
         "status": "ok", "kind": "single_run", "run_id": result.run_id,
         "report_status": result.report_status, "manifest": str(result.output_manifest),
         "report": repository.load_research_report(result.run_id),
         "market_regime": result.market_regime,
     }
+    if reported_result_target is not None:
+        from kiwoom_monitor.research_result_delivery import attach_result_delivery
+        document = attach_result_delivery(document, request.database, request.runs_dir, result.run_id,
+                                          reported_result_target, cancel_requested=cancelled)
+    return document
 
 
 def execute_campaign_cycle(
@@ -1955,9 +1963,19 @@ def load_development_validation_request(path: Path) -> DevelopmentValidationRequ
     path = Path(path).resolve()
     with path.open('rb') as stream:
         encoded = stream.read(1024 * 1024 + 1)
-    if len(encoded) > 1024 * 1024:
-        raise ValueError('development validation request exceeds 1 MiB')
-    document = json.loads(encoded.decode('utf-8-sig'))
+    return development_validation_request_from_document(None, path.parent, encoded=encoded)
+
+
+def development_validation_request_from_document(
+    document: Any, root: Path, *, encoded: bytes | None = None,
+) -> DevelopmentValidationRequest:
+    """Decode the existing request contract, reusing an already parsed raw file."""
+    if encoded is not None:
+        if len(encoded) > 1024 * 1024:
+            raise ValueError('development validation request exceeds 1 MiB')
+        text = encoded.decode('utf-8-sig')
+        if document is None or json.detect_encoding(encoded) not in {'utf-8', 'utf-8-sig'}:
+            document = json.loads(text)
     required = {'version', 'request', 'dataset_id', 'dataset_hash', 'fold_names', 'max_seconds'}
     if not isinstance(document, dict) or document.get('version') not in (
             'independent_development_validation/v1', 'independent_development_validation/v2'):
@@ -1975,7 +1993,7 @@ def load_development_validation_request(path: Path) -> DevelopmentValidationRequ
             raise ValueError('validation requires 2 to 20 stock buckets')
         symbols = tuple(DevelopmentSymbolPartitionSpec(policy['version'], policy['salt'], policy['bucket_count'], bucket)
                         for bucket in buckets)
-    request = _process_request_from_document(_mapping(document['request'], 'request'), path.parent)
+    request = research_process_request_from_document(_mapping(document['request'], 'request'), root)
     if request.mode != 'single_run' or request.development_partition is not None or request.session_profile is None:
         raise ValueError('validation requires one fixed single_run strategy, full evaluation and explicit session profile')
     names = document['fold_names']
@@ -2180,6 +2198,8 @@ def execute_independent_comparison(request: IndependentComparisonRequest, *, can
 def main(argv: list[str] | None = None) -> int:
     data_dir = os.environ.get("KIWOOM_DESKTOP_DATA_DIR")
     if data_dir:
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import StrictRestoreCoordinator
+
         root = Path(data_dir)
         with StrictRestoreCoordinator(
             root / "monitor.sqlite3", root / "news.sqlite3",
@@ -2205,7 +2225,17 @@ def _run_research_process(argv: list[str] | None = None) -> int:
     parser.add_argument('--register-campaign', help='Validate and register --request in an existing campaign')
     parser.add_argument("--result", required=True, type=Path)
     parser.add_argument("--cancel", type=Path)
+    parser.add_argument('--result-connection', type=Path)
+    parser.add_argument('--result-owner')
     args = parser.parse_args(argv)
+    if bool(args.result_connection) != (args.result_owner is not None):
+        parser.error('--result-connection and --result-owner must be supplied together')
+    if args.result_connection:
+        if not args.request or args.register_campaign:
+            parser.error('reported result delivery supports ordinary --request single_run only')
+        if any(path is not None and path.resolve() == args.result_connection.resolve()
+               for path in (args.result, args.cancel)):
+            parser.error('result/cancel must not overwrite result connection')
     if args.validation_owner_token is not None and not args.validate_partitions:
         parser.error('--validation-owner-token requires --validate-partitions')
     if args.expose_final:
@@ -2273,7 +2303,7 @@ def _run_research_process(argv: list[str] | None = None) -> int:
             request_header = None
         if isinstance(request_header, dict) and request_header.get("mode") == "leader_breakout":
             try:
-                leader_request = _process_request_from_document(request_header, request_path.parent)
+                leader_request = research_process_request_from_document(request_header, request_path.parent)
             except (OSError, ValueError, TypeError) as error:
                 parser.error(str(error))
             if any(_is_within(path, leader_request.dataset) for path in outputs):
@@ -2313,7 +2343,7 @@ def _run_research_process(argv: list[str] | None = None) -> int:
             result = run_campaign_worker(args.database, args.campaign, args.runs_dir, args.result, cancel_path=args.cancel, worker_claim=claim)
         else:
             request = leader_request or (
-                _process_request_from_document(request_header, request_path.parent)
+                research_process_request_from_document(request_header, request_path.parent)
                 if isinstance(request_header, dict) else load_research_process_request(args.request)
             )
             if args.register_campaign:
@@ -2322,8 +2352,24 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                 result = register_campaign_request(ResearchRepository(request.database), args.register_campaign, request,
                     cancel_requested=lambda: args.cancel is not None and args.cancel.is_file())
             else:
-                result = execute_process_request(request, cancel_path=args.cancel)
-        exit_code = 2 if result.get('status') == 'cancelled' else 3 if result.get('status') == 'resource_blocked' else 0
+                if args.result_connection:
+                    if not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run':
+                        raise ValueError('reported result delivery supports ordinary single_run only')
+                    connection = args.result_connection.resolve()
+                    if (connection == request.database.resolve() or _is_within(connection, request.runs_dir)
+                            or any(path is not None and _is_within(path, request.runs_dir)
+                                   for path in (args.result, args.cancel))):
+                        raise ValueError('result connection/result/cancel must not alias generated artifacts or database')
+                    from kiwoom_monitor.research_result_delivery import load_result_target
+                    try:
+                        target = load_result_target(connection, args.result_owner)
+                    except (OSError, TypeError, ValueError):
+                        raise ValueError('explicit result connection is invalid') from None
+                    result = execute_process_request(request, cancel_path=args.cancel, reported_result_target=target)
+                else:
+                    result = execute_process_request(request, cancel_path=args.cancel)
+        exit_code = (4 if result.get('delivery', {}).get('status') in {'pending', 'not_prepared'} else
+                     2 if result.get('status') == 'cancelled' else 3 if result.get('status') == 'resource_blocked' else 0)
     except ResearchRunCancelled as exc:
         result = {"status": "cancelled", "reason": str(exc)}
         exit_code = 2

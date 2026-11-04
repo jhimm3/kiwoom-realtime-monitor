@@ -31,7 +31,7 @@ def _insert_sqlite_news_job(connection: sqlite3.Connection, article_revision_id:
                             input_revision: str | None = None) -> None:
     key = news_job_key(stage, target_id, input_revision or article_revision_id, input_hash, version)
     connection.execute(
-        "INSERT INTO central_news_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        "INSERT INTO central_news_jobs(job_key,article_revision_id,stock_code,target_id,stage,input_hash,processing_version,attempts,next_retry_at,state,output_ref,error,payload_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(job_key) DO NOTHING",
         (key, article_revision_id, stock_code, target_id, stage, input_hash, version, 0, now,
          "PENDING", "", "", json.dumps(payload, ensure_ascii=False, separators=(",", ":")), now),
@@ -44,8 +44,22 @@ def _insert_postgres_news_job(cursor: Any, article_revision_id: str, stock_code:
                               input_revision: str | None = None) -> None:
     key = news_job_key(stage, target_id, input_revision or article_revision_id, input_hash, version)
     cursor.execute(
-        "INSERT INTO central_news_jobs VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        "INSERT INTO central_news_jobs(job_key,article_revision_id,stock_code,target_id,stage,input_hash,processing_version,attempts,next_retry_at,state,output_ref,error,payload_json,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
         "ON CONFLICT(job_key) DO NOTHING",
         (key, article_revision_id, stock_code, target_id, stage, input_hash, version, 0, now,
          "PENDING", "", "", json.dumps(payload, ensure_ascii=False, separators=(",", ":")), now),
     )
+
+
+_NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL = (
+    "'historical_backfill','historical_market_backfill',"
+    "'historical_market_pc_backfill','historical_news_pc_backfill'"
+)
+
+
+def _news_job_rows(rows: list[tuple[object, ...]]) -> list[dict[str, Any]]:
+    keys = ("job_key", "article_revision_id", "stock_code", "target_id", "stage",
+            "input_hash", "processing_version", "attempts")
+    return [{**dict(zip(keys, row[:8], strict=True)), "attempts": int(row[7]) + 1,
+             "payload": row[8] if isinstance(row[8], dict) else json.loads(str(row[8])),
+             "queued_at": float(row[9])} for row in rows]

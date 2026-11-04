@@ -5,6 +5,8 @@
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 from datetime import date, datetime, timedelta
@@ -258,9 +260,13 @@ class Top20TradeValueWindow(QMainWindow):
     modeRequested = Signal(str)
     statisticsRequested = Signal(int)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, data_dir: Path | None = None) -> None:
         super().__init__(parent)
-        self._window_settings = QSettings("KiwoomMonitor", "Top20TradeValueWindow")
+        if data_dir is None:
+            self._window_settings = QSettings("KiwoomMonitor", "Top20TradeValueWindow")
+        else:
+            self._window_settings = QSettings(str(data_dir / "query-windows.ini"), QSettings.Format.IniFormat)
+            self._window_settings.beginGroup("Top20TradeValueWindow")
         self._geometry_tracking_ready = False
         self._geometry_save_timer = QTimer(self)
         self._geometry_save_timer.setSingleShot(True)

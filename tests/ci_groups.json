@@ -65,14 +65,14 @@
     "tests.unit.test_verify_prepared_historical_news_rules",
     "tests.unit.test_prepared_historical_archive_v2",
     "tests.unit.test_historical_archive_audit_stream",
-      "tests.unit.test_historical_archive_batch_writes",
-      "tests.unit.test_historical_archive_batch_reads",
-      "tests.unit.test_historical_archive_completion_gate",
-      "tests.unit.test_historical_archive_execution_transition",
-      "tests.unit.test_index_historical_archive_lookups",
-      "tests.unit.test_prepared_historical_archive_inputs",
-      "tests.unit.test_historical_archive_prefix_transition",
-      "tests.unit.test_publish_historical_archive_file",
+    "tests.unit.test_historical_archive_batch_writes",
+    "tests.unit.test_historical_archive_batch_reads",
+    "tests.unit.test_historical_archive_completion_gate",
+    "tests.unit.test_historical_archive_execution_transition",
+    "tests.unit.test_index_historical_archive_lookups",
+    "tests.unit.test_prepared_historical_archive_inputs",
+    "tests.unit.test_historical_archive_prefix_transition",
+    "tests.unit.test_publish_historical_archive_file",
     "tests.unit.test_seed_news_jobs_from_nas_rankings"
   ],
   "long_windows_modules": [
@@ -88,6 +88,9 @@
   ],
   "postgres_required": [
     "tests.integration.test_postgres_access_postgres",
+    "tests.integration.test_ai_request_authority_postgres",
+    "tests.integration.test_theme_generation_postgres",
+    "tests.integration.test_theme_current_snapshot_postgres",
     "tests.integration.test_storage_boundary_postgres",
     "tests.integration.test_market_events_postgres",
     "tests.integration.test_observation_bootstrap_postgres",
@@ -97,7 +100,10 @@
     "tests.integration.test_top20_program_postgres",
     "tests.integration.test_top20_reconciliation_postgres",
     "tests.integration.test_dataset_batch_postgres",
-    "tests.integration.test_postgres_scope_locks"
+    "tests.integration.test_postgres_scope_locks",
+    "tests.integration.test_preserved_rank_history_postgres",
+    "tests.integration.test_reported_research_result_postgres",
+    "tests.integration.test_import_preserved_rank_history_postgres"
   ],
   "postgres_extended": [
     "tests.integration.test_diagnostic_collector_replay_postgres",

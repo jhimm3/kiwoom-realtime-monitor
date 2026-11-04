@@ -11,10 +11,10 @@ import unittest
 from unittest.mock import patch
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore, stable_document_hash
-from kiwoom_monitor.central_server.database_news_sources import _news_article_content_hash
+from kiwoom_monitor.domain.news_observation import news_article_content_hash as _news_article_content_hash
 from scripts.preprocess_historical_news_to_nas import prepare_job
 from scripts.prepared_historical_archive_v2 import (
-    MARKET, SEARCH, _writer, build_projection, finalize_events, finalize_inputs, initialize,
+    MARKET, SEARCH, _writer, build_projection, code_digest, finalize_events, finalize_inputs, initialize,
     stage, validated_targets,
 )
 from scripts.stage_prepared_historical_news_archive import _sha256
@@ -22,6 +22,28 @@ from kiwoom_monitor.central_server.historical_news_archive import HistoricalNews
 
 
 class ArchiveV2Tests(unittest.TestCase):
+    def test_live_parser_source_change_invalidates_build_generation(self):
+        self.add(MARKET)
+        prepared_digest = _sha256(self.prepared)
+        original_digest = code_digest()
+        parser_path = (Path(__file__).resolve().parents[2] /
+                       "src/kiwoom_monitor/infrastructure/naver_stock_market_news_source.py")
+        read_bytes = Path.read_bytes
+
+        def changed_parser(path):
+            value = read_bytes(path)
+            return value + b"\n# changed live parser source\n" if path.resolve() == parser_path else value
+
+        with patch.object(Path, "read_bytes", changed_parser):
+            self.assertNotEqual(original_digest, code_digest())
+            with self.assertRaisesRegex(ValueError, "construction code changed"):
+                stage(self.archive, self.prepared, MARKET, prepared_digest)
+        with closing(sqlite3.connect(self.archive)) as db:
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM archive_input_progress").fetchone()[0])
+        self.assertEqual(prepared_digest, _sha256(self.prepared))
+        self.assertEqual(original_digest, code_digest())
+        self.assertEqual(1, stage(self.archive, self.prepared, MARKET, prepared_digest)["staged_now"])
+
     def test_direct_original_alias_preserves_bytes_origins_and_resume(self):
         self.add(MARKET, 'canonical')
         self.add(MARKET, 'legacy')
@@ -306,7 +328,10 @@ class ArchiveV2Tests(unittest.TestCase):
         def authorize(authorization: str | None = Header(default=None)):
             if authorization != 'Bearer fixture':
                 raise HTTPException(status_code=401)
-        app=FastAPI(); app.include_router(create_historical_news_archive_router(reader,authorize))
+        paused_workloads = set()
+        app = FastAPI()
+        app.include_router(create_historical_news_archive_router(
+            reader, authorize, workload_paused=lambda name: name in paused_workloads))
         headers={'Authorization':'Bearer fixture'}
         with patch('scripts.prepared_historical_archive_v2.prepare_job',side_effect=AssertionError('reader calculated RULE')), patch('scripts.prepared_historical_archive_v2._resolve_event',side_effect=AssertionError('reader wrote events')), TestClient(app) as client:
             endpoint='/api/v1/news/historical-archive/v2/market'
@@ -321,8 +346,10 @@ class ArchiveV2Tests(unittest.TestCase):
             self.assertEqual(409,client.get(detail,headers=headers,params={**params,'dataset_id':'old'}).status_code)
             self.assertEqual(400,client.get(detail,headers=headers,params={**params,'body_revision_id':'wrong'}).status_code)
             self.assertEqual(409,client.get('/api/v1/news/historical-archive/search',headers=headers,params={'stock_code':'005930'}).status_code)
-            with patch('kiwoom_monitor.central_server.diagnostic_workloads.is_paused',return_value=True):
-                self.assertEqual(503,client.get(endpoint,headers=headers).status_code)
+            paused_workloads.add('historical_news_archive')
+            response = client.get(endpoint, headers=headers)
+            self.assertEqual(503, response.status_code)
+            self.assertEqual('HISTORICAL_NEWS_ARCHIVE_PAUSED', response.json()['detail'])
         self.assertEqual(before,_sha256(self.archive))
 
     def test_market_event_uses_target_not_global_article_owner(self):

@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-from .diagnostic_replay_contract import captured_workload
+from copy import deepcopy
 
 import asyncio
 import logging
 from dataclasses import asdict
-from time import time
+from datetime import datetime
+from time import monotonic
 from typing import Any, Callable
 
-from kiwoom_monitor.application.news_rules import (
-    classify_supply_contract,
-    grouped_candidate_identities,
-    rule_input_hash,
-)
-from kiwoom_monitor.application.news_analysis import assess_stock_news, extractive_news_summary
-from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION
+from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION, AIJobResultError, NewsBodyDeliveryError
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.infrastructure.article_text import clean_article_text, fetch_article_text_with_metadata
-from .diagnostic_workloads import is_paused
 
 
 LOGGER = logging.getLogger(__name__)
@@ -29,8 +24,18 @@ class NewsJobRunner:
                  fetcher: Callable[..., str | tuple[str, str]] = fetch_article_text_with_metadata,
                  poll_seconds: float = 1.0, body_timeout: float = 15.0,
                  ai_timeout: float = 90.0, busy_pause_seconds: float = 1.0,
-                 parallelism: int = 1, max_idle_poll_seconds: float = 5.0) -> None:
+                 parallelism: int = 1, max_idle_poll_seconds: float = 5.0,
+                 now_provider: Callable[[], datetime] | None = None,
+                 body_input: Callable | None = None, body_accept: Callable | None = None,
+                 diagnostic_scope: Callable | None = None, paused: Callable[[], bool] | None = None) -> None:
         self._store, self._ai_service, self._fetcher = store, ai_service, fetcher
+        self._body_input, self._body_accept = body_input, body_accept
+        self._run_loop = (diagnostic_scope(self._loop.__func__).__get__(self,type(self))
+                          if diagnostic_scope is not None else self._loop)
+        self._paused = paused or (lambda: False)
+        # Standalone/offline runners use the common KST fallback. The server
+        # supplies its existing corrected clock through CentralNewsService.
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
         self._poll_seconds = max(0.05, float(poll_seconds))
         self._max_idle_poll_seconds = max(self._poll_seconds, float(max_idle_poll_seconds))
         self._busy_pause_seconds = max(0.01, float(busy_pause_seconds))
@@ -43,7 +48,7 @@ class NewsJobRunner:
         self._wake_events: tuple[asyncio.Event, ...] = ()
         self._loop_owner: asyncio.AbstractEventLoop | None = None
         self._stage_metrics: dict[str, dict[str, float]] = {}
-        self._metrics_started_at = time()
+        self._metrics_started_at = monotonic()
 
     def set_ai_service(self, service: Any) -> None:
         self._ai_service = service
@@ -63,7 +68,7 @@ class NewsJobRunner:
             if register is not None:
                 register(self.wake)
             self._tasks = tuple(
-                asyncio.create_task(self._loop(stage, wake), name=f"central-news-jobs-{index + 1}")
+                asyncio.create_task(self._run_loop(stage, wake), name=f"central-news-jobs-{index + 1}")
                 for index, (stage, wake) in enumerate(zip(stages, self._wake_events, strict=True))
             )
             self._task = self._tasks[0]
@@ -82,6 +87,11 @@ class NewsJobRunner:
         self._wake_events = ()
         self._loop_owner = None
 
+    async def wait(self) -> None:
+        """Join this existing runner lifetime without exposing private tasks."""
+        if self._tasks:
+            await asyncio.gather(*self._tasks)
+
     def wake(self) -> None:
         """A committed enqueue may arrive from an asyncio.to_thread producer."""
         loop = self._loop_owner
@@ -98,11 +108,15 @@ class NewsJobRunner:
     async def run_once(self, *, preferred_stage: str = "") -> int:
         jobs = await asyncio.to_thread(
             self._store.claim_news_jobs, limit=1,
+            now=self._now().timestamp(),
             priority_stock_code=self._priority_stock_code,
             **({"preferred_stage": preferred_stage} if preferred_stage else {}),
         )
         for job in jobs:
-            started_at = time()
+            started_at = monotonic()
+            queued_wait_ms = max(0.0, (
+                self._now().timestamp() - float(job.get("queued_at") or self._now().timestamp())
+            ) * 1000)
             failed = False
             try:
                 if job["stage"] == "BODY":
@@ -113,44 +127,50 @@ class NewsJobRunner:
                     output_ref = await self._run_ai(job)
                 else:
                     raise ValueError(f"지원하지 않는 뉴스 작업 단계입니다: {job['stage']}")
-                await asyncio.to_thread(self._store.finish_news_job, job["job_key"], output_ref,
-                                        attempts=int(job["attempts"]))
             except asyncio.CancelledError:
                 raise
+            except NewsBodyDeliveryError:
+                failed = True
+                raise
+            except AIJobResultError:
+                # The accepted request already owned native error settlement.
+                # Preserve its first receipt or unknown ACK; never retry outside
+                # its accepted/drain lifetime.
+                failed = True
             except Exception as error:
                 failed = True
-                output_ref = ""
-                if job["stage"] == "BODY" and int(job["attempts"]) >= 3:
-                    output_ref = await asyncio.to_thread(self._store.save_news_body_revision, {
-                        "article_revision_id": job["article_revision_id"],
-                        "extractor_version": ARTICLE_BODY_EXTRACTOR_VERSION,
-                        "fetched_at": time(), "status": "failed", "body_text": "",
-                        "error": str(error),
+                if job["stage"] == "AI":
+                    await self._accept_result(job, {"stage": "AI", "error": str(error)})
+                elif job["stage"] in {"BODY", "RULE"}:
+                    delay = min(60.0, float(2 ** min(int(job["attempts"]), 5)))
+                    next_retry_at = self._now().timestamp() + delay
+                    await self._accept_result(job, {
+                        "stage": job["stage"], "error": str(error), "next_retry_at": next_retry_at,
                     })
-                delay = min(60.0, float(2 ** min(int(job["attempts"]), 5)))
-                await asyncio.to_thread(
-                    self._store.retry_news_job, job["job_key"], str(error), time() + delay,
-                    output_ref, attempts=int(job["attempts"]),
-                )
+                else:
+                    delay = min(60.0, float(2 ** min(int(job["attempts"]), 5)))
+                    await asyncio.to_thread(
+                        self._store.retry_news_job, job["job_key"], str(error), self._now().timestamp() + delay,
+                        attempts=int(job["attempts"]),
+                    )
             finally:
-                self._record_stage(job, started_at, failed)
+                self._record_stage(job, started_at, failed, queued_wait_ms)
         return len(jobs)
 
-    def _record_stage(self, job: dict[str, Any], started_at: float, failed: bool) -> None:
+    def _record_stage(self, job: dict[str, Any], started_at: float, failed: bool, wait_ms: float) -> None:
         stage = str(job.get("stage") or "UNKNOWN")
         metrics = self._stage_metrics.setdefault(stage, {
             "count": 0, "failed": 0, "elapsed_ms": 0, "max_ms": 0,
             "wait_ms": 0, "max_wait_ms": 0,
         })
-        elapsed_ms = max(0.0, (time() - started_at) * 1000)
-        wait_ms = max(0.0, (started_at - float(job.get("queued_at") or started_at)) * 1000)
+        elapsed_ms = max(0.0, (monotonic() - started_at) * 1000)
         metrics["count"] += 1
         metrics["failed"] += int(failed)
         metrics["elapsed_ms"] += elapsed_ms
         metrics["max_ms"] = max(metrics["max_ms"], elapsed_ms)
         metrics["wait_ms"] += wait_ms
         metrics["max_wait_ms"] = max(metrics["max_wait_ms"], wait_ms)
-        if time() - self._metrics_started_at >= 60:
+        if monotonic() - self._metrics_started_at >= 60:
             for name, value in self._stage_metrics.items():
                 count = int(value["count"])
                 LOGGER.info(
@@ -160,14 +180,25 @@ class NewsJobRunner:
                     value["max_ms"], value["wait_ms"] / count, value["max_wait_ms"],
                 )
             self._stage_metrics.clear()
-            self._metrics_started_at = time()
+            self._metrics_started_at = monotonic()
+
+    async def _accept_result(self, job: dict[str, Any], result: dict[str, Any]) -> str:
+        if job["stage"] == "BODY" and self._body_accept is not None:
+            receipt = await asyncio.to_thread(self._body_accept, job, result)
+            return str(receipt["output_ref"])
+        receipt = await asyncio.to_thread(
+            self._store.accept_news_job_result, str(job["job_key"]), result,
+            attempts=int(job["attempts"]),
+        )
+        return receipt["output_ref"]
 
     async def _run_body(self, job: dict[str, Any]) -> str:
-        cached = await asyncio.to_thread(
-            self._store.load_latest_news_body, str(job["article_revision_id"]),
-        )
+        cached = (await asyncio.to_thread(self._body_input, job) if self._body_input is not None
+                  else await asyncio.to_thread(self._store.load_latest_news_body, str(job["article_revision_id"])))
         if cached and cached.get("status") in {"fulltext", "summary_only"}:
-            return str(cached["body_revision_id"])
+            return await self._accept_result(job, {
+                "stage": "BODY", "output_ref": str(cached["body_revision_id"]),
+            })
         payload = job["payload"]
         body = ""
         original_published_at = ""
@@ -190,19 +221,19 @@ class NewsJobRunner:
             body, status = str(payload.get("description") or "").strip(), "summary_only"
         if not body:
             raise ValueError("기사 본문과 검색 요약을 가져오지 못했습니다.")
+        result = {
+            "stage": "BODY",
+            "body": {
+                "extractor_version": ARTICLE_BODY_EXTRACTOR_VERSION,
+                "fetched_at": self._now().timestamp(), "status": status, "body_text": body, "error": "",
+            },
+        }
         if original_published_at:
-            await asyncio.to_thread(self._store.upsert_documents, "news_original_publication", [{
-                "owner": str(job["article_revision_id"]), "key": "published_at",
-                "document": {
+            result["original_publication"] = {
                     "published_at": original_published_at, "source_url": fetched_url,
                     "source": "article_html", "precision": "second",
-                },
-            }])
-        return await asyncio.to_thread(self._store.save_news_body_revision, {
-            "article_revision_id": job["article_revision_id"],
-            "extractor_version": ARTICLE_BODY_EXTRACTOR_VERSION,
-            "fetched_at": time(), "status": status, "body_text": body, "error": "",
-        })
+            }
+        return await self._accept_result(job, result)
 
     async def _run_ai(self, job: dict[str, Any]) -> str:
         if self._ai_service is None:
@@ -217,6 +248,11 @@ class NewsJobRunner:
         event = dict(payload["event"])
         cleaned_body = clean_article_text(str(body["body_text"]))
         event["body"] = cleaned_body or str(event.get("description") or "")
+        event["body_status"] = str(body["status"])
+        event["_raw_body"] = str(body["body_text"])
+        event["_native_body"] = {name: deepcopy(body[name]) for name in
+                                 ("body_revision_id", "article_revision_id", "content_hash", "extractor_version",
+                                  "fetched_at", "available_at", "status") if name in body}
         event["article_revision_id"] = job["article_revision_id"]
         event["body_revision_id"] = body["body_revision_id"]
         arguments = (
@@ -224,15 +260,16 @@ class NewsJobRunner:
             str(payload.get("provider") or "none"), str(payload.get("model") or ""),
             [event], int(payload.get("article_count") or 1),
         )
-        owned = getattr(self._ai_service, "analyze_job", None)
-        if owned is not None:
-            result = await owned(*arguments, timeout_seconds=self._ai_timeout)
-        else:
-            result = await asyncio.wait_for(self._ai_service.analyze(*arguments), timeout=self._ai_timeout)
-        revisions = result.get("analysis_revision_ids", [])
-        return str(revisions[0]) if revisions else str(event.get("body_hash") or job["input_hash"])
+        result = await self._ai_service.analyze_job(
+            *arguments, job_key=str(job["job_key"]), attempts=int(job["attempts"]),
+            output_ref_fallback=str(event.get("body_hash") or job["input_hash"]),
+            timeout_seconds=self._ai_timeout,
+        )
+        return str(result["job_receipt"]["output_ref"])
 
     async def _run_rule(self, job: dict[str, Any]) -> str:
+        from kiwoom_monitor.application.news_rules import classify_supply_contract, grouped_candidate_identities, rule_input_hash
+        from kiwoom_monitor.application.news_analysis import assess_stock_news, extractive_news_summary
         body_revision_id = str(job["payload"].get("body_revision_id") or "")
         article, body = await asyncio.gather(
             asyncio.to_thread(self._store.load_news_article_revision, str(job["article_revision_id"])),
@@ -261,9 +298,7 @@ class NewsJobRunner:
             str(document.get("description") or ""),
             article_body=cleaned_body if body.get("status") == "fulltext" else "",
         )
-        await asyncio.to_thread(self._store.upsert_documents, "news_assessment", [{
-            "owner": target_code, "key": str(article["article_revision_id"]),
-            "document": {
+        assessment_document = {
                 "article_revision_id": str(article["article_revision_id"]),
                 "body_revision_id": body_revision_id,
                 "rule_version": "stock-news-assessment-v1",
@@ -275,11 +310,10 @@ class NewsJobRunner:
                 "core_sentences": list(extractive_news_summary(
                     "", str(document.get("title") or ""), cleaned_body,
                 )) if body.get("status") == "fulltext" else [],
-            },
-        }])
+        }
         result = None if target_code == "GLOBAL" else classify_supply_contract(document, cleaned_body)
         if result is None:
-            return f"ignored:{body_revision_id}"
+            return await self._accept_result(job, {"stage": "RULE", "assessment": assessment_document})
         recent_rows = await asyncio.to_thread(
             self._store.load_news_history, "article", target=str(article["stock_code"]), limit=100,
         )
@@ -291,7 +325,7 @@ class NewsJobRunner:
             item["identity"] = row["identity"]
             recent.append(item)
         candidates = grouped_candidate_identities(document, recent)
-        return await asyncio.to_thread(self._store.save_news_event_revision, {
+        return await self._accept_result(job, {"stage": "RULE", "assessment": assessment_document, "event": {
             "stock_code": target_code,
             "article_revision_id": article["article_revision_id"],
             "body_revision_id": body["body_revision_id"],
@@ -299,9 +333,8 @@ class NewsJobRunner:
             "input_hash": rule_input_hash(article["article_revision_id"], body["body_revision_id"], result),
             "candidate_identities": candidates,
             "result": result.as_document(),
-        })
+        }})
 
-    @captured_workload("news", "news_jobs")
     async def _loop(self, preferred_stage: str | None = None,
                     wake: asyncio.Event | None = None) -> None:
         empty_polls = 0
@@ -310,12 +343,15 @@ class NewsJobRunner:
                 wake.clear()  # Signals arriving during the claim remain set for the next wait.
             claim_failed = False
             try:
-                paused = is_paused("news_jobs")
+                paused = self._paused()
                 processed = 0 if paused else await (
                     self.run_once(preferred_stage=preferred_stage)
                     if preferred_stage else self.run_once()
                 )
             except asyncio.CancelledError:
+                raise
+            except NewsBodyDeliveryError:
+                self._closing.set()
                 raise
             except Exception:
                 LOGGER.exception("뉴스 후속 작업 조회에 실패했습니다.")

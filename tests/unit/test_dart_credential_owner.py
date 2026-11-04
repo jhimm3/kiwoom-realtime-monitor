@@ -41,7 +41,7 @@ class DartCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.old = FakeDart("old", self.cache)
         self.naver = FakeNaver(NaverNewsCredentials("old-naver", "fake-secret"))
         self.service = CentralNewsService(self.naver, self.store, self.old,
-            jobs_enabled=False, query_set=("증권",))
+            query_set=("증권",))
         self.owner = DartCredentialOwner(self.service, self.vault, self.cache)
         self.naver_owner = NaverCredentialOwner(self.service, self.vault)
         self.runtime = CredentialRuntime(self.vault, self.store)

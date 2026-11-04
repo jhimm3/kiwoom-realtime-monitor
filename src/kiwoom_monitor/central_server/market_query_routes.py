@@ -23,10 +23,21 @@ class MarketQueryStore(Protocol):
     def load_daily_bars(self, code: str, market: str = "", limit: int = 250) -> list[dict[str, Any]]: ...
 
 
+QUERY_MARKET_ENDPOINTS = {
+    "ka00198": "/api/dostk/stkinfo", "ka10001": "/api/dostk/stkinfo",
+    "ka10100": "/api/dostk/stkinfo", "ka10080": "/api/dostk/chart",
+    "ka10081": "/api/dostk/chart", "ka10083": "/api/dostk/chart",
+    "ka10094": "/api/dostk/chart", "ka10045": "/api/dostk/mrkcond",
+    "ka90008": "/api/dostk/mrkcond", "ka20005": "/api/dostk/chart",
+    "ka20006": "/api/dostk/chart",
+}
+
+
 def create_market_query_router(
     store: MarketQueryStore, authorize: Callable[..., None],
     broker: "CentralRestBroker | None", collector: "CentralRealtimeCollector | None",
     *, now_provider: Callable[[], datetime] = kst_now,
+    read_authorize: Callable[..., Any] | None = None,
 ) -> "APIRouter":
     """Preserve archive-first reads, account-query exclusion and reconnect fencing."""
     from fastapi import APIRouter, Depends, HTTPException
@@ -41,8 +52,10 @@ def create_market_query_router(
         cont_yn: str = "N"
         next_key: str = ""
 
-    @router.post("/api/v1/kiwoom/query", dependencies=[Depends(authorize)])
-    async def kiwoom_query(query: QueryRequest) -> dict[str, object]:
+    @router.post("/api/v1/kiwoom/query")
+    async def kiwoom_query(query: QueryRequest, access_scope: str | None = Depends(read_authorize or authorize)) -> dict[str, object]:
+        if access_scope == "query" and QUERY_MARKET_ENDPOINTS.get(query.api_id) != query.path:
+            raise HTTPException(status_code=403, detail="공통 시장 조회 권한이 필요합니다.")
         from .rest_broker import ACCOUNT_RECOVERY_ENDPOINTS
         if query.api_id in ACCOUNT_RECOVERY_ENDPOINTS:
             raise HTTPException(400, detail="ACCOUNT_QUERY_SCOPE_REQUIRED")

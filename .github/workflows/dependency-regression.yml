@@ -426,18 +426,18 @@ jobs:
       - name: Provision owned v1 replay DB and verify baseline
         shell: bash
         run: |
-          mkdir -p tmp/regression/ci-sealed/secrets
-          chmod 700 tmp/regression/ci-sealed/secrets
+          mkdir -p tmp/regression/ci-sealed
+          mkdir -m 700 "$RUNNER_TEMP/kiwoom-ci-sealed-v1"
           set -o pipefail
           python scripts/check_recorded_replay_baseline.py --provision \
-            --secrets-directory tmp/regression/ci-sealed/secrets \
+            --secrets-directory "$RUNNER_TEMP/kiwoom-ci-sealed-v1" \
             2>&1 | tee tmp/regression/ci-sealed/v1-baseline.log
       - name: Check v1 recorded execution on sealed DB
         shell: bash
         run: |
           set -o pipefail
           python scripts/check_recorded_replay_baseline.py --execution-gates \
-            --secrets-directory tmp/regression/ci-sealed/secrets \
+            --secrets-directory "$RUNNER_TEMP/kiwoom-ci-sealed-v1" \
             --report tmp/regression/ci-sealed/v1-execution.json \
             2>&1 | tee tmp/regression/ci-sealed/v1-execution.log
       - name: Build exact checkout runtime image for isolated v2
@@ -471,15 +471,16 @@ jobs:
           sh scripts/run_ci_replay_cache.sh \
             "$(cat tmp/regression/ci-sealed/image-id)" \
             "$(cat tmp/regression/ci-sealed/postgres-image-id)" \
+            --report tmp/regression/ci-sealed/v2-execution.json \
             2>&1 | tee tmp/regression/ci-sealed/v2-cache.log
       - name: Remove disposable replay secrets
         if: always()
         shell: bash
         run: |
-          if [ -d tmp/regression/ci-sealed/secrets ]; then
-            rm -f tmp/regression/ci-sealed/secrets/recorded-replay-database.json \
-              tmp/regression/ci-sealed/secrets/recorded-replay-setup.lock
-            rmdir tmp/regression/ci-sealed/secrets
+          if [ -d "$RUNNER_TEMP/kiwoom-ci-sealed-v1" ]; then
+            rm -f "$RUNNER_TEMP/kiwoom-ci-sealed-v1/recorded-replay-database.json" \
+              "$RUNNER_TEMP/kiwoom-ci-sealed-v1/recorded-replay-setup.lock"
+            rmdir "$RUNNER_TEMP/kiwoom-ci-sealed-v1"
           fi
       - name: Preserve replay outcomes without secret files
         if: always()
@@ -489,6 +490,7 @@ jobs:
           path: |
             tmp/regression/ci-sealed/*.log
             tmp/regression/ci-sealed/v1-execution.json
+            tmp/regression/ci-sealed/v2-execution.json
           if-no-files-found: error
           retention-days: 14
 
@@ -514,26 +516,17 @@ jobs:
         run: |
           set -o pipefail
           test "$(docker image inspect kiwoom-ci-runtime:local --format '{{index .Config.Labels "com.kiwoom.ci-source"}}')" = "$GITHUB_SHA"
-          docker run --rm --network none --entrypoint python kiwoom-ci-runtime:local -I -c '
-          from pathlib import Path
-          import kiwoom_monitor
-          source = Path("/app/src/kiwoom_monitor")
-          installed = Path(kiwoom_monitor.__file__).parent
-          files = list(source.rglob("*.py"))
-          different = [str(path.relative_to(source)) for path in files
-                       if not (installed / path.relative_to(source)).is_file()
-                       or path.read_bytes() != (installed / path.relative_to(source)).read_bytes()]
-          assert files and not different, different[:5]
-          print(f"installed_source_parity=true python_files={len(files)}")'
-          sh deploy/synology/check-nas-operator.sh \
-            "$(cat tmp/regression/ci-operator/image-id)" \
+          python3 -B -m scripts.run_linux_operator_ci \
+            "$(cat tmp/regression/ci-operator/image-id)" tmp/regression/ci-operator/execution.json \
             2>&1 | tee tmp/regression/ci-operator/tests.log
       - name: Preserve operator result
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: linux-operator-${{ github.run_id }}
-          path: tmp/regression/ci-operator/*.log
+          path: |
+            tmp/regression/ci-operator/*.log
+            tmp/regression/ci-operator/execution.json
           if-no-files-found: error
           retention-days: 14
 
@@ -601,6 +594,20 @@ jobs:
           name: sealed-replay-${{ github.run_id }}
           path: tmp/ci-required/sealed
 
+      - name: Download selected extended PostgreSQL result
+        if: ${{ env.PG_SELECTED == 'true' }}
+        uses: actions/download-artifact@v7
+        with:
+          name: extended-postgres-${{ github.run_id }}
+          path: tmp/ci-required/postgres-extended
+
+      - name: Download selected Linux operator result
+        if: ${{ env.OPERATOR_SELECTED == 'true' }}
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-operator-${{ github.run_id }}
+          path: tmp/ci-required/operator
+
       - name: Confirm declared related tests actually ran
         env:
           REVIEW_BASE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
@@ -610,6 +617,13 @@ jobs:
                    --execution tmp/ci-required/postgres/required.json)
           if [ "$SEALED_SELECTED" = true ]; then
             reports+=(--execution tmp/ci-required/sealed/v1-execution.json)
+            reports+=(--execution tmp/ci-required/sealed/v2-execution.json)
           fi
-          python -m scripts.check_test_changes --base-ref "$REVIEW_BASE" "${reports[@]}" \
+          if [ "$PG_SELECTED" = true ]; then
+            reports+=(--execution tmp/ci-required/postgres-extended/run.json)
+          fi
+          if [ "$OPERATOR_SELECTED" = true ]; then
+            reports+=(--execution tmp/ci-required/operator/execution.json)
+          fi
+          python -m scripts.check_test_changes --hosted-ci --base-ref "$REVIEW_BASE" "${reports[@]}" \
             --report tmp/ci-required/test-review.json

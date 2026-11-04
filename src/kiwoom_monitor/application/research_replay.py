@@ -70,9 +70,13 @@ def normalize_candidate_codes(observation: Mapping[str, Any]) -> tuple[str, ...]
 
 def replay_candidate_universe(
     observations: Iterable[Mapping[str, Any]], *, as_of: datetime | None = None,
-    chronological: bool = False,
+    chronological: bool = True,
     kinds: tuple[str, ...] = ("top20_membership",),
 ) -> tuple[CandidateUniverseFrame, ...]:
+    """Order membership by actual availability, then recorded ingest tie-breakers.
+
+    Explicit chronological=False preserves the legacy timestamp-text comparison.
+    """
     cutoff: datetime | None = None
     if as_of is not None:
         if as_of.tzinfo is None:
@@ -287,3 +291,110 @@ def _optional_text(value: object) -> str | None:
     if value is None:
         return None
     return str(value).strip()
+
+
+def trim_bar_frames(bars, code: str, keep_count: int) -> dict:
+    rows = sorted(
+        (frame for frame in bars.values() if frame.code == code),
+        key=lambda frame: (frame.bar_start, frame.available_at, frame.revision_id),
+        reverse=True,
+    )
+    keep = {(frame.code, frame.observation_key) for frame in rows[:keep_count]}
+    return {key: frame for key, frame in bars.items() if frame.code != code or key in keep}
+
+
+def trim_universe_frames(universes, latest_at: str, horizon: int, *, use_maximum: bool) -> list:
+    latest = datetime.fromisoformat(latest_at).astimezone(timezone.utc)
+    if use_maximum and universes:
+        latest = max(datetime.fromisoformat(frame.available_at).astimezone(timezone.utc)
+                     for frame in universes)
+    return [frame for frame in universes
+            if (latest - datetime.fromisoformat(frame.available_at).astimezone(timezone.utc))
+            .total_seconds() <= horizon][-5000:]
+
+
+class MinuteStrategyInputs:
+    """Own the bounded live minute window; never own execution progress or IO.
+
+    Unlike ResearchReplayCursor, this window keeps the previous valid frame
+    when an individually delivered correction is invalid. Bootstrap and legacy
+    recovery retain their existing codecs and publication boundary.
+    """
+
+    def __init__(self, *, session_profile: str, keep_bars: int, universe_horizon: int):
+        self.session_profile = session_profile
+        self.keep_bars = keep_bars
+        self.universe_horizon = universe_horizon
+        self._bars: dict[tuple[str, str], KrxMinuteBarFrame] = {}
+        self._universes: list[CandidateUniverseFrame] = []
+
+    def accept_observation(self, observation: Mapping[str, Any]) -> KrxMinuteBarFrame | None:
+        if observation.get("kind") == "top20_membership":
+            frames = replay_candidate_universe((observation,))
+            if frames:
+                self._universes.append(frames[0])
+                self._universes = trim_universe_frames(
+                    self._universes, frames[0].available_at, self.universe_horizon, use_maximum=False,
+                )
+            return None
+        frames = replay_krx_minute_bars(
+            (observation,), strict=True, session_profile=self.session_profile,
+        )
+        if not frames:
+            return None
+        bar = frames[0]
+        self._bars[(bar.code, bar.observation_key)] = bar
+        self._bars = trim_bar_frames(self._bars, bar.code, self.keep_bars)
+        return bar
+
+    def seed(self, observations) -> None:
+        self._universes = list(replay_candidate_universe(observations))
+        self._bars = {}
+        if observations:
+            for frame in replay_krx_minute_bars(
+                observations, strict=True, session_profile=self.session_profile,
+            ):
+                self._bars[(frame.code, frame.observation_key)] = frame
+            for code in {frame.code for frame in self._bars.values()}:
+                self._bars = trim_bar_frames(self._bars, code, self.keep_bars)
+            if self._universes:
+                self._universes = trim_universe_frames(
+                    self._universes, self._universes[-1].available_at,
+                    self.universe_horizon, use_maximum=False,
+                )
+
+    def evaluate_bar(self, *, family, run_id, evaluation_bar, config, state):
+        return family.evaluate_bar(
+            run_id=run_id, evaluation_bar=evaluation_bar,
+            bar_history=tuple(self._bars.values()), universe_frames=tuple(self._universes),
+            config=config, state=state,
+        )
+
+    def clock_price_frame(self, symbol, through, observations):
+        frames = tuple(self._bars.values()) + tuple(replay_krx_minute_bars(
+            observations, strict=True, session_profile=self.session_profile,
+        ))
+        bars = [bar for bar in frames if bar.code == symbol
+                and datetime.fromisoformat(bar.available_at) <= through]
+        return max(bars, key=lambda value: (
+            datetime.fromisoformat(value.bar_end), datetime.fromisoformat(value.available_at), value.revision_id),
+                   default=None)
+
+    def restore_bars(self, values) -> None:
+        self._bars = {
+            (frame.code, frame.observation_key): frame
+            for frame in (KrxMinuteBarFrame(**value) for value in values)
+        }
+
+    def restore_universes(self, values) -> None:
+        self._universes = [CandidateUniverseFrame(**value) for value in values]
+
+    def install_frames(self, *, bars=None, universes=None) -> None:
+        """Transfer already decoded frames after the episode's checkpoint ACK."""
+        if bars is not None:
+            self._bars = bars
+        if universes is not None:
+            self._universes = universes
+
+    def frames_for_checkpoint(self):
+        return self._bars.values(), self._universes

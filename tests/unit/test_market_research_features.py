@@ -433,6 +433,20 @@ class MarketResearchFeatureTests(unittest.TestCase):
         self.assertEqual(1234, frames[0].members[0].trade_value_million_won)
         self.assertEqual(250, frames[0].members[0].change_bps)
         self.assertEqual(("반도체", "AI"), frames[0].members[0].themes)
+        earlier = dict(observation, revision_id='early', available_at='2026-09-13T09:20:01+09:00')
+        later = dict(observation, revision_id='later', available_at='2026-09-13T00:20:02+00:00')
+        source = [later, earlier]
+        before = json.loads(json.dumps(source))
+        uniform = [dict(row, available_at=datetime.fromisoformat(row['available_at']).astimezone(UTC).isoformat())
+                   for row in source]
+        self.assertEqual(['early', 'later'], [frame.revision_id for frame in market_frames_from_observations(uniform)])
+        ordered = market_frames_from_observations(source, snapshots)
+        self.assertEqual(['early', 'later'], [frame.revision_id for frame in ordered])
+        self.assertEqual({row['revision_id']: row['available_at'] for row in source},
+                         {frame.revision_id: frame.available_at for frame in ordered})
+        self.assertEqual(before, source)
+        self.assertEqual(['later', 'early'], [frame.revision_id for frame in
+                         market_frames_from_observations(source, snapshots, chronological=False)])
 
 
 from dataclasses import asdict, replace

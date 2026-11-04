@@ -3,8 +3,26 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import Callable
+
+
+_LEGACY_FILES = (
+    "api.env", "account-bindings.dat", "monitor.sqlite3",
+    "google_drive_client.json", "google_drive_token.dat",
+)
+_LEGACY_DIRECTORIES = ("strength_icons", "near_high_icons", "near_high_sounds")
+_DEFAULT_SOUNDS = ("interest.mp3", "caution.mp3", "fire.mp3")
+
+
+def _query_root_is_unc(path: Path) -> bool:
+    """Classify only explicit Windows UNC syntax, without probing a drive or host."""
+    drive = PureWindowsPath(path).drive
+    if drive.startswith("\\\\?\\"):
+        return drive[4:].casefold().startswith("unc\\")
+    return drive.startswith("\\\\") and not drive.startswith("\\\\.\\")
 
 
 @dataclass(frozen=True)
@@ -12,6 +30,11 @@ class AppPaths:
     data_dir: Path
     log_dir: Path
     database_path: Path
+
+    @property
+    def central_database_path(self) -> Path:
+        """Full-root native central data/execution store, separate from UI settings."""
+        return self.data_dir / "central.sqlite3"
 
     @property
     def news_database_path(self) -> Path:
@@ -30,57 +53,144 @@ class AppPaths:
 
     @classmethod
     def for_current_user(cls) -> "AppPaths":
-        """프로그램 본체와 분리된 현재 사용자 데이터 위치를 돌려준다.
+        """Resolve/create the default folders without importing personal data.
 
-        설치본은 Program Files에 놓이므로 쓰기 가능한 설정·DB·로그는 항상
-        ``%LocalAppData%\\KiwoomMonitor\\data``에 보관한다. 개발 폴더 또는
-        이전 설치본의 data 폴더에 있던 개인 데이터는 최초 한 번만 옮긴다.
+        A source/editable checkout keeps its project data. Installed wheels and
+        frozen desktops use the existing writable Windows user-data default.
+        Explicit desktop preparation belongs inside the root restore lease.
         """
         frozen = getattr(sys, "frozen", False)
-        app_root = Path(sys.executable).resolve().parent if frozen else Path(__file__).resolve().parents[3]
-        if not frozen:
-            # 개발 실행은 프로젝트의 data를 그대로 사용한다. 설치본 테스트를 위해
-            # LocalAppData를 지워도 개발 API·테마 설정이 영향을 받지 않는다.
+        module_path = Path(__file__).resolve()
+        app_root = module_path.parents[3]
+        source_checkout = (
+            not frozen
+            and module_path == app_root / "src" / "kiwoom_monitor" / "infrastructure" / "app_paths.py"
+            and (app_root / "pyproject.toml").is_file()
+        )
+        if source_checkout:
             base_dir = app_root / "data"
-            log_dir = base_dir / "logs"
-            base_dir.mkdir(parents=True, exist_ok=True)
-            log_dir.mkdir(parents=True, exist_ok=True)
-            return cls(base_dir, log_dir, base_dir / "monitor.sqlite3")
-        local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        base_dir = local_app_data / "KiwoomMonitor" / "data"
+        else:
+            local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+            base_dir = local_app_data / "KiwoomMonitor" / "data"
         log_dir = base_dir / "logs"
         base_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
-        cls._migrate_legacy_personal_data(app_root / "data", base_dir)
-        cls._copy_default_sounds(app_root / "data" / "near_high_sounds", base_dir / "near_high_sounds")
         return cls(base_dir, log_dir, base_dir / "monitor.sqlite3")
+
+    @classmethod
+    def for_query_role(cls, data_dir: Path) -> "AppPaths":
+        """Select only the explicitly named local role root, without importing data."""
+        return cls._for_desktop_role(data_dir, database_name="query-role.sqlite3", label="조회 역할")
+
+    @classmethod
+    def for_full_role(cls, data_dir: Path) -> "AppPaths":
+        """Select a new full desktop root without adopting the default data."""
+        return cls._for_desktop_role(data_dir, database_name="monitor.sqlite3", label="전체 앱 역할")
+
+    @classmethod
+    def _for_desktop_role(cls, data_dir: Path, *, database_name: str, label: str) -> "AppPaths":
+        if _query_root_is_unc(data_dir):
+            raise ValueError(f"{label}의 SQLite DB는 UNC 공유 폴더에서 열 수 없습니다.")
+        root = data_dir.expanduser().absolute()
+        if root.resolve() != root or root.is_symlink():
+            raise ValueError(f"{label} 폴더는 우회되지 않은 로컬 경로여야 합니다.")
+        root.mkdir(parents=True, exist_ok=True)
+        log_dir = root / "logs"
+        log_dir.mkdir(exist_ok=True)
+        return cls(root, log_dir, root / database_name)
+
+    def desktop_startup_preparation(
+        self, *, query_only: bool = False, copy_legacy_personal: bool = True,
+    ) -> Callable[[], None] | None:
+        """Observe missing frozen files; the returned action requires the root lock.
+
+        Re-evaluating this method is copy-free. The action rechecks destinations
+        through the existing compatibility helpers while exclusively owned.
+        A restore ledger takes priority over this action in the coordinator.
+        """
+        if not getattr(sys, "frozen", False):
+            return None
+        legacy_dir = Path(sys.executable).resolve().parent / "data"
+        personal_work = not query_only and copy_legacy_personal and (
+            any((legacy_dir / name).is_file() and not (self.data_dir / name).exists()
+                for name in _LEGACY_FILES)
+            or any((legacy_dir / name).is_dir() and not (self.data_dir / name).exists()
+                   and self._legacy_directory_has_personal_data(legacy_dir / name)
+                   for name in _LEGACY_DIRECTORIES)
+        )
+        sound_source = legacy_dir / "near_high_sounds"
+        sound_destination = self.data_dir / "near_high_sounds"
+        sound_work = any((sound_source / name).is_file() and not (sound_destination / name).exists()
+                         for name in _DEFAULT_SOUNDS)
+        if not personal_work and not sound_work:
+            return None
+
+        def prepare() -> None:
+            if not query_only and copy_legacy_personal:
+                self._migrate_legacy_personal_data(legacy_dir, self.data_dir)
+            self._copy_default_sounds(sound_source, sound_destination)
+
+        return prepare
 
     @staticmethod
     def _migrate_legacy_personal_data(legacy_dir: Path, data_dir: Path) -> None:
         """기존 개발/구형 설치 폴더의 개인 데이터만 안전하게 복사한다."""
-        for filename in (
-            "api.env", "account-bindings.dat", "monitor.sqlite3",
-            "google_drive_client.json", "google_drive_token.dat",
-        ):
+        for filename in _LEGACY_FILES:
             source, destination = legacy_dir / filename, data_dir / filename
             if source.is_file() and not destination.exists():
-                try:
-                    shutil.copy2(source, destination)
-                except OSError:
-                    pass
-        for directory in ("strength_icons", "near_high_icons", "near_high_sounds"):
+                AppPaths._copy_legacy_asset(source, destination, directory=False)
+        for directory in _LEGACY_DIRECTORIES:
             source, destination = legacy_dir / directory, data_dir / directory
             if not source.is_dir() or destination.exists():
                 continue
+            if not AppPaths._legacy_directory_has_personal_data(source):
+                continue
+            AppPaths._copy_legacy_asset(source, destination, directory=True)
+
+    @staticmethod
+    def _legacy_directory_has_personal_data(source: Path) -> bool:
+        # A packaged folder with only the three known public sounds belongs to
+        # the separate best-effort default helper, including on full startup.
+        return source.name != "near_high_sounds" or any(
+            item.name not in _DEFAULT_SOUNDS or not item.is_file()
+            for item in source.iterdir()
+        )
+
+    @staticmethod
+    def _copy_legacy_asset(source: Path, destination: Path, *, directory: bool) -> None:
+        """Publish a completed private copy while the startup root is exclusive.
+
+        A failed copy must remain absent at the final path, so a restart retries
+        instead of treating a partial file/directory as accepted user data.
+        """
+        temporary = Path(tempfile.mkdtemp(
+            dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp",
+        ))
+        try:
+            staged = temporary / destination.name
+            if directory:
+                shutil.copytree(source, staged)
+            else:
+                shutil.copy2(source, staged)
+            # Other cooperating writers share the exclusive root lease. Retain
+            # a destination that appeared since planning instead of overwriting.
+            if not destination.exists():
+                staged.rename(destination)
+        except BaseException:
             try:
-                shutil.copytree(source, destination)
+                shutil.rmtree(temporary)
             except OSError:
+                # Cleanup must not replace the original copy/publish failure.
+                # A leftover staging directory is never a completed destination.
                 pass
+            raise
+        else:
+            shutil.rmtree(temporary)
 
     @staticmethod
     def _copy_default_sounds(source_dir: Path, destination_dir: Path) -> None:
         """설치 폴더의 기본 음성 파일을 사용자 데이터로 최초 한 번 복사한다."""
-        for filename in ("interest.mp3", "caution.mp3", "fire.mp3"):
+        for filename in _DEFAULT_SOUNDS:
             source, destination = source_dir / filename, destination_dir / filename
             if source.is_file() and not destination.exists():
                 try:
