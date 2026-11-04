@@ -603,6 +603,8 @@ S1 PC Top20 표시창 geometry는 명시 role INI를 사용한다. NAS index/out
 <a id="shadow"></a>
 ## 공유 판단과 Shadow — F11/F12/F13
 
+**S12-02 F13 0B 가격·대금 창 분류.** 기존 시장 계산에서 승인 관측을 정렬한 뒤 종목과 두 창에 한 번 나눈다. 개별 같은 초 체결·원래 증거 순서·시장 범위·결측 판정과 기존 가격/대금 계산을 보존한다. 합성 동일 입력 비교와 관련 413건의 범위를 확인했다. [비교 근거](app-target-20261023.md#section12-library-comparison).
+
 **MAIN157 선택창 시작수명(F13·F15 소비):** CandidateMonitorDialog는constructor에서poll/상태timer를시작하지않고게시된MainWindow의명시startup에서자기작업을한번시작한다. persisted alert=True·원candidate출력/알림·RAM선택조회·stop후늦은입장차단을현재query8및불변candidate33/관련소비범위로확인했다. 판단kernel/입력/주문권한·수집기는변경0이며C12전체종료/운영은별도다. [국소수락](../../tmp/ar-v1-wave51-20261029/integration157/acceptance157-c11.json).
 
 **MAIN134 checkpoint 소비 갱신:** InputProgress의bootstrap/repair ACK-before-install과Position의FILL/publication fence는유지하고aggregate checkpoint의revision/pending/lastACK와실제write/성공ACK를같은모듈MockAutomationCheckpoint 한owner로이전했다. 같은18before/after와새unit357/actualPCPG5에서freshcontrol·STOP/consume prefix/ACKloss/force-noop/재시작·공개position소비를확인했다. 공유Shadow owner/원시각·원JSON/native권한은변경0이며source별Shadow PG5/전체PIT·NAS/운영수락은별도다. [현재근거](app-target-20261023.md#1157-main134-통합-검증--2026-10-27).

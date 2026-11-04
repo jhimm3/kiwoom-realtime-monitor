@@ -258,15 +258,18 @@ def compute_price_trade_candidates(
             raise ValueError("ambiguous price/trade revision at one observation time")
         if previous is None or available > _aware_datetime(previous.available_at):
             latest[key] = point
-    ordered = sorted(latest.values(), key=lambda point: (_aware_datetime(point.observed_at),
-        _aware_datetime(point.available_at), getattr(point, 'sequence', 0), point.input_ref))
+    ordered = sorted(latest.items(), key=lambda item: (item[0][1], _aware_datetime(item[1].available_at),
+        getattr(item[1], "sequence", 0), item[1].input_ref))
+    windows = {code: ([], []) for code in codes}
+    for key, point in ordered:
+        before, after = windows[key[0]]
+        (before if key[1] <= midpoint else after).append(point)
     metrics = []
     missing_codes = []
     expiries = []
     for code in sorted(codes):
-        rows = [point for point in ordered if normalize_stock_code(point.code) == code]
-        before = [point for point in rows if _aware_datetime(point.observed_at) <= midpoint]
-        after = [point for point in rows if _aware_datetime(point.observed_at) > midpoint]
+        before, after = windows[code]
+        rows = (*before, *after)
         missing = []
         if inputs.continuity.get(code) != "COMPLETE":
             missing.append("price_trade_continuity_unconfirmed")
@@ -321,7 +324,7 @@ def compute_price_trade_candidates(
                         "previous_sample_insufficient_members": sum("previous_price_sample_insufficient" in row["reasons"] for row in metrics),
                         "current_sample_insufficient_members": sum("current_price_sample_insufficient" in row["reasons"] for row in metrics),
                         "stale_members": sum("price_observation_stale" in row["reasons"] for row in metrics)}},
-        "input_refs": ((*((inputs.universe_ref,) if codes else ()), *(point.input_ref for point in ordered))),
+        "input_refs": ((*((inputs.universe_ref,) if codes else ()), *(point.input_ref for _, point in ordered))),
         "limitations": ("observed_cohort_not_whole_market", "received_0B_not_all_exchange_trades",
                          "price_trade_axes_not_independent_sources", "candidate_rule_not_strategy_validation"),
         "order_authorized": False}

@@ -100,6 +100,26 @@ class PriceTradeCandidateTests(unittest.TestCase):
         inputs = self.inputs()
         self.assertEqual(self.compute(inputs), self.compute(replace(inputs, member_codes=inputs.member_codes[::-1], points=inputs.points[::-1])))
 
+    def test_symbol_windows_preserve_interleaved_same_second_receipts(self):
+        from kiwoom_monitor.application.theme_leadership import RealtimeTradePoint
+
+        inputs = self.inputs()
+        points = tuple(RealtimeTradePoint(**vars(point), sequence=2 * index)
+                       for index, point in enumerate(inputs.points))
+        original = next(point for point in points if point.input_ref == "000001:39")
+        next_receipt = replace(original, input_ref="first-extra", sequence=original.sequence + 1,
+                               close=130, high=130)
+        last_receipt = replace(original, input_ref="last-extra", sequence=1000, close=140, high=140)
+        result = self.compute(replace(
+            inputs, points=(last_receipt, next_receipt, *reversed(points)), input_resolution="0B",
+        ))
+        first_symbol = result["metrics"][0]
+        self.assertEqual(first_symbol["input_refs"][-3:], (original.input_ref, "first-extra", "last-extra"))
+        self.assertEqual((first_symbol["current_observation_count"], first_symbol["current_return_bps"]), (4, 4000))
+        refs = result["input_refs"]
+        self.assertLess(refs.index("first-extra"), refs.index("000002:39"))
+        self.assertEqual(refs[-1], "last-extra")
+
     def test_money_without_price_and_price_without_money_are_not_candidates(self):
         for axis in ('close', 'trade_value_won'):
             inputs = self.inputs()
