@@ -67,6 +67,9 @@ class SafeFileHandler(logging.FileHandler):
             self.handleError(record)
 
     def handleError(self, record: logging.LogRecord) -> None:
+        # FileHandler can route open-time exceptions directly to handleError.
+        if isinstance(sys.exception(), RecursionError):
+            raise
         record_sink_failure(self)
 
 

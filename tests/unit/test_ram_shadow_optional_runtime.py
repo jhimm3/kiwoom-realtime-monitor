@@ -120,10 +120,10 @@ class OptionalRuntimeSeamTests(unittest.IsolatedAsyncioTestCase):
         return value
 
     def physical_fixture(self, root, *, missing):
-        import importlib.util, os, shutil, time
+        import importlib.util, shutil, time
         started=time.monotonic();print('OPTIONAL_FIXTURE=source-start',flush=True)
         source=root/'isolated/src'; runtime=root/'isolated/site-packages'
-        shutil.copytree(Path(__file__).resolve().parents[2]/'src',source,copy_function=os.link,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+        shutil.copytree(Path(__file__).resolve().parents[2]/'src',source,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
         print('OPTIONAL_FIXTURE=source-done '+str(time.monotonic()-started),flush=True)
         removed=[]
         for name in (('application/market_theme_shadow.py','application/research_factors.py') if missing is True else missing or ()):
@@ -138,8 +138,9 @@ class OptionalRuntimeSeamTests(unittest.IsolatedAsyncioTestCase):
             if spec is None:continue
             path=Path(spec.origin)
             if spec.submodule_search_locations:
-                shutil.copytree(path.parent,runtime/name,copy_function=os.link,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
-            else:os.link(path,runtime/path.name)
+                shutil.copytree(path.parent,runtime/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+            else:
+                shutil.copy2(path,runtime/path.name)
         for name in ('domain/strategy_contract.py','domain/simulation_contract.py'):
             self.assertTrue((source/'kiwoom_monitor'/name).is_file())
         self.assertTrue(all(not (source/'kiwoom_monitor'/name).exists() for name in removed))
@@ -214,13 +215,13 @@ class OptionalRuntimeSeamTests(unittest.IsolatedAsyncioTestCase):
             self.run_child(root,source,runtime,'missing',self.selection(enabled=True))
 
     async def test_native_restart_and_fresh_kernel_restore_recover_same_revision(self):
-        import os,shutil
+        import shutil
         with tempfile.TemporaryDirectory(prefix='optional-restart-') as folder:
             root=Path(folder);source,runtime=self.physical_fixture(root,missing=True);selection=self.selection(enabled=True)
             first=self.run_child(root,source,runtime,'missing',selection)
             second=self.run_child(root,source,runtime,'restart-missing',selection,seed=False)
             for name in ('application/market_theme_shadow.py','application/research_factors.py'):
-                os.link(Path(__file__).resolve().parents[2]/'src/kiwoom_monitor'/name,source/'kiwoom_monitor'/name)
+                shutil.copy2(Path(__file__).resolve().parents[2]/'src/kiwoom_monitor'/name,source/'kiwoom_monitor'/name)
             restored=self.run_child(root,source,runtime,'restore',selection,seed=False)
             self.assertEqual(3,len({row['pid'] for row in (first,second,restored)}))
             self.assertTrue(restored['runtime_id'])

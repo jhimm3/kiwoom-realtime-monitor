@@ -824,9 +824,10 @@ def main() -> int:
                 }
                 activated = store.finalize_credential_activation(activation)
                 repeated = store.finalize_credential_activation(activation)
+                latest_binding = store.load_latest_account_binding(marker, "kiwoom", "mock")
                 checks["credential_activation_idempotency"] = (
                     activated == repeated and activated["binding_revision"] == binding["binding_revision"]
-                    and store.load_latest_account_binding(marker, "kiwoom", "mock")["verified_at"] == binding["verified_at"]
+                    and datetime.fromisoformat(latest_binding["verified_at"]) == observed_at
                     and len(store.load_credential_activations(marker)) == 1
                 )
                 account_settings_scope = {"broker": "kiwoom", "environment": "mock", "account_ref": account_ref}

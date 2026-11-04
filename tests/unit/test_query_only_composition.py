@@ -649,7 +649,7 @@ class QueryOnlyCompositionTests(unittest.TestCase):
     def test_selected_current_state_reaches_actual_query_role_render_save_ack_and_second_process(self):
         self._physical_query_composition(role_kind='selected-current-state')
 
-    def _physical_query_composition(self, *, role_kind=None):
+    def _physical_query_composition(self, *, role_kind=None, prepare_runtime=None):
         import uvicorn
         from fastapi import FastAPI, Header, HTTPException
         from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy
@@ -667,6 +667,8 @@ class QueryOnlyCompositionTests(unittest.TestCase):
             package = source / 'kiwoom_monitor'
             for relative in ABSENT:
                 (package / relative).unlink()
+            if prepare_runtime is not None:
+                prepare_runtime(source.parent / 'site-packages')
             data = root / ('chosen-role-root' if role_kind else 'data')
             research = data / 'research'
             research.mkdir(parents=True)
@@ -995,6 +997,17 @@ for name in absent_packages:
 assert all('site-packages' not in path.lower() or Path(path).resolve() == runtime.resolve()
            for path in sys.path)
 '''
+
+
+def _stage_query_runtime(runtime: Path) -> None:
+    # Hosted Windows installs dependencies and creates fixtures on separate volumes.
+    runtime.mkdir()
+    for name in ('PySide6', 'shiboken6', 'websockets', 'tzdata', 'PIL'):
+        installed = Path(importlib.util.find_spec(name).origin).parent
+        shutil.copytree(installed, runtime / name,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+
+
 NATIVE_READERS = r'''
 import hashlib, pickle
 from dataclasses import asdict
@@ -1104,12 +1117,6 @@ class QueryNewsDataBoundaryTests(unittest.TestCase):
                 policy = (saved['mode'], bool(saved.get('local_fallback_enabled')), bool(saved.get('parallel_validation_enabled')))
                 native_barrier = kwargs['env'].get('KIWOOM_QUERY_SAVE_GATE') != '0'
                 runtime = Path(command[3]).parent / 'site-packages'
-                if not runtime.exists():
-                    runtime.mkdir()
-                    for name in ('PySide6', 'shiboken6', 'websockets', 'tzdata', 'PIL'):
-                        installed = Path(importlib.util.find_spec(name).origin).parent
-                        shutil.copytree(installed, runtime / name, copy_function=os.link,
-                                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
                 command.insert(1, '-S')
                 kwargs['env'] = dict(kwargs['env'], PYTHONPATH=os.pathsep.join((command[4], str(runtime))))
             result = original_run(command, **kwargs)
@@ -1134,7 +1141,7 @@ class QueryNewsDataBoundaryTests(unittest.TestCase):
         with patch.object(fixture, 'ABSENT', fixture.ABSENT + EXTRA_ABSENT), \
              patch.object(fixture, 'CHILD', child), patch.object(fixture.subprocess, 'run', run), \
              patch.object(FastAPI, 'middleware', middleware):
-            fixture.QueryOnlyCompositionTests.test_query_bootstrap_with_physically_absent_processors_reads_closes_and_restarts(self)
+            fixture.QueryOnlyCompositionTests._physical_query_composition(self, prepare_runtime=_stage_query_runtime)
         # Independently specified five source-policy/persist-owner cases from source E.
         expected_cases = (
             (('local_server', False, False), True, False, 'local_server'),
@@ -1355,10 +1362,7 @@ class QueryClientAuthorityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='query-client-physical-') as folder:
             root=Path(folder);source=root/'isolated/src';shutil.copytree(ROOT/'src',source,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
             for name in composition.ABSENT+composition.EXTRA_ABSENT:(source/'kiwoom_monitor'/name).unlink()
-            runtime=root/'isolated/site-packages';runtime.mkdir()
-            for name in ('PySide6','shiboken6','websockets','tzdata','PIL'):
-                installed=Path(importlib.util.find_spec(name).origin).parent
-                shutil.copytree(installed,runtime/name,copy_function=os.link,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+            runtime=root/'isolated/site-packages';_stage_query_runtime(runtime)
             data=root/'data';data.mkdir();(data/'api.env').write_bytes(b'no-local-key-read');(data/'account-bindings.dat').write_bytes(b'no-account-binding-read')
             with patch('kiwoom_monitor.central_server.market_query_routes.create_market_query_router',market_router):app=query_app(settings('sqlite:///'+str(root/'server.sqlite3')))
             store=app.state.query_authority_store

@@ -21,6 +21,9 @@ on:
 permissions:
   contents: read
 
+env:
+  WINDOWS_SHARD_COUNT: '8'
+
 concurrency:
   group: dependency-regression-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -71,7 +74,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     env:
       PYTHONPATH: '${{ github.workspace }}\src;${{ github.workspace }}\tests\unit'
     steps:
@@ -113,7 +116,7 @@ jobs:
               print(json.dumps({"probe": "sqlite_commit", "location": label,
                                 "parent": str(parent), "transactions": 40, "seconds": elapsed}))
           '@ | python -
-          python -m scripts.run_regression --profile all-local --shard-count 2 --shard-index ${{ matrix.shard }} --timeout-seconds 1800 --output tmp/regression/ci-shard-${{ matrix.shard }}
+          python -m scripts.run_regression --profile all-local --shard-count $env:WINDOWS_SHARD_COUNT --shard-index ${{ matrix.shard }} --timeout-seconds 1800 --output tmp/regression/ci-shard-${{ matrix.shard }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Preserve partition report and worker logs
@@ -178,7 +181,7 @@ jobs:
             $global:LASTEXITCODE = 0
           }
 
-      - name: Download both Windows partition receipts
+      - name: Download Windows partition receipts
         uses: actions/download-artifact@v7
         with:
           pattern: windows-regression-shard-*-${{ github.run_id }}
@@ -190,7 +193,11 @@ jobs:
         shell: pwsh
         run: |
           if ($env:WINDOWS_SHARDS_RESULT -ne 'success') { exit 1 }
-          python -m scripts.check_required_ci_results --windows-shard tmp/ci-shards/windows-regression-shard-0-${{ github.run_id }}/run.json --windows-shard tmp/ci-shards/windows-regression-shard-1-${{ github.run_id }}/run.json --merge-windows tmp/regression/ci-all-local/run.json
+          $reports = foreach ($index in 0..([int]$env:WINDOWS_SHARD_COUNT - 1)) {
+            '--windows-shard'
+            "tmp/ci-shards/windows-regression-shard-$index-${{ github.run_id }}/run.json"
+          }
+          python -m scripts.check_required_ci_results @reports --windows-shard-count $env:WINDOWS_SHARD_COUNT --merge-windows tmp/regression/ci-all-local/run.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Preserve regression report and worker logs

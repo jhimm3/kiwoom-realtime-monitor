@@ -84,15 +84,18 @@ def validate_windows(windows: dict, commit: str | None) -> None:
         raise ValueError("Windows source changed during regression")
 
 
-def merge_windows_shards(shards: list[dict], commit: str) -> dict:
-    """Accept two complete disjoint worker ranges before publishing full evidence."""
-    if len(shards) != 2:
-        raise ValueError("Exactly two Windows shards are required")
+def merge_windows_shards(shards: list[dict], commit: str, *, shard_count: int = 2) -> dict:
+    """Accept all expected disjoint worker ranges before publishing full evidence."""
+    if type(shard_count) is not int or shard_count not in (2, run_regression.CI_WINDOWS_SHARD_COUNT):
+        raise ValueError("Unsupported Windows shard count")
+    if len(shards) != shard_count:
+        raise ValueError(f"Exactly {shard_count} Windows shards are required")
     current_git = run_regression._git_metadata()
     if (not commit or current_git.get("commit") != commit
             or current_git.get("working_tree_dirty") is not False):
         raise ValueError("Merge checkout commit or cleanliness differs")
-    batches = run_regression._planned_batches(run_regression._load_manifest(), "all-local")
+    manifest = run_regression._load_manifest()
+    batches = run_regression._planned_batches(manifest, "all-local")
     workers = run_regression._profile_workers(batches)
     current_source = run_regression._code_tree_identity()["lf_sha256"]
     hashes = {
@@ -107,12 +110,16 @@ def merge_windows_shards(shards: list[dict], commit: str) -> dict:
     all_ids = []
     test_hashes = {}
     environment = None
+    expected_indices = range(shard_count)
     for report in shards:
         shard = report.get("shard", {})
         index = shard.get("index")
-        if type(index) is not int or index not in (0, 1) or index in by_index:
+        if type(index) is not int or index not in expected_indices or index in by_index:
             raise ValueError("Missing or duplicate Windows shard index")
-        expected = run_regression._all_local_shard_plan(workers, index=index, count=2)
+        expected = run_regression._all_local_shard_plan(
+            workers, index=index, count=shard_count,
+            worker_seconds=manifest.get("ci_windows_worker_seconds"),
+        )
         if any(type(shard.get(key)) is not type(value) or shard[key] != value
                for key, value in expected.items()):
             raise ValueError("Windows shard range or full plan differs")
@@ -166,13 +173,14 @@ def merge_windows_shards(shards: list[dict], commit: str) -> dict:
         by_index[index] = report
     if len(all_ids) != len(set(all_ids)):
         raise ValueError("Duplicate executed test IDs across Windows shards")
-    merged = copy.deepcopy(by_index[0])
+    ordered_reports = [by_index[index] for index in expected_indices]
+    merged = copy.deepcopy(ordered_reports[0])
     merged.update(profile="all-local", status="passed", planned_batches=batches,
-                  batch_results=[worker for index in (0, 1) for worker in by_index[index]["batch_results"]],
+                  batch_results=[worker for report in ordered_reports for worker in report["batch_results"]],
                   test_file_sha256=test_hashes,
                   started_at=min(report["started_at"] for report in shards),
                   finished_at=max(report["finished_at"] for report in shards),
-                  shards=[report["shard"] for report in (by_index[0], by_index[1])])
+                  shards=[report["shard"] for report in ordered_reports])
     merged.pop("shard", None)
     validate_windows(merged, commit)
     return merged
@@ -209,6 +217,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--windows", type=Path)
     parser.add_argument("--windows-shard", type=Path, action="append", default=[])
+    parser.add_argument("--windows-shard-count", type=int, choices=(2, run_regression.CI_WINDOWS_SHARD_COUNT),
+                        help="expected shard count for a Windows merge (default 2)")
     parser.add_argument("--merge-windows", type=Path)
     parser.add_argument("--base-ref", default="")
     parser.add_argument("--linux", type=Path)
@@ -219,16 +229,17 @@ def main() -> int:
                         help="Allow a precommit dirty report; still require exact current source content")
     parser.add_argument("--covered-profile", choices=run_regression.CI_WINDOWS_PROFILES)
     args = parser.parse_args()
-    if args.windows_shard or args.merge_windows:
-        if (len(args.windows_shard) != 2 or args.merge_windows is None or args.windows
+    if args.windows_shard or args.merge_windows or args.windows_shard_count is not None:
+        shard_count = args.windows_shard_count or 2
+        if (len(args.windows_shard) != shard_count or args.merge_windows is None or args.windows
                 or args.windows_only or args.local or args.covered_profile or args.base_ref
                 or args.linux or args.postgres):
-            parser.error("merge requires exactly two --windows-shard paths and --merge-windows only")
+            parser.error(f"merge requires --merge-windows and exactly {shard_count} --windows-shard paths")
         try:
             if args.merge_windows.exists() or args.merge_windows.is_symlink():
                 raise FileExistsError("Refusing to overwrite merged Windows report")
             reports = [_read(path) for path in args.windows_shard]
-            merged = merge_windows_shards(reports, os.environ["GITHUB_SHA"])
+            merged = merge_windows_shards(reports, os.environ["GITHUB_SHA"], shard_count=shard_count)
             # Point diagnostic links at the downloaded artifact, retaining global worker names.
             for path, report in zip(args.windows_shard, reports):
                 for worker in merged["batch_results"]:
@@ -239,7 +250,7 @@ def main() -> int:
             args.merge_windows.parent.mkdir(parents=True, exist_ok=True)
             with args.merge_windows.open("x", encoding="utf-8") as stream:
                 stream.write(json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
-            print("Complete Windows all-local evidence merged from two validated shards")
+            print(f"Complete Windows all-local evidence merged from {shard_count} validated shards")
             return 0
         except (OSError, KeyError, TypeError, ValueError) as error:
             print(f"Required regression failed: {error}", file=sys.stderr)

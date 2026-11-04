@@ -108,14 +108,20 @@ class RunRegressionTests(unittest.TestCase):
             )
 
     @contextmanager
-    def _windows_shard_fixture(self):
+    def _windows_shard_fixture(self, shard_count=2):
         modules = ["tests.unit.test_kiwoom_rest_client", "tests.unit.test_central_rest_broker",
                    "tests.unit.test_ranking_service", "tests.unit.test_ranking_schedule",
                    "tests.unit.test_ranking_execution", "tests.unit.test_realtime_subscription"]
         batches = [{"name": "core", "modules": modules[:2], "isolate_modules": False},
                    {"name": "isolated", "modules": modules[2:5], "isolate_modules": True},
                    {"name": "tail", "modules": modules[5:], "isolate_modules": False}]
-        source = {"files": 6, "lf_sha256": "f" * 64, "raw_sha256": "f" * 64}
+        weights = {}
+        if shard_count == run_regression.CI_WINDOWS_SHARD_COUNT:
+            extra = [f"tests.unit.test_windows_worker_{index}" for index in range(11)]
+            modules.extend(extra)
+            batches.append({"name": "remaining", "modules": extra, "isolate_modules": True})
+            weights = {"core": 50}
+        source = {"files": len(modules), "lf_sha256": "f" * 64, "raw_sha256": "f" * 64}
         dependencies = dict(line.split("==", 1) for line in
             (run_regression.ROOT / "requirements.lock.txt").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#"))
@@ -125,7 +131,7 @@ class RunRegressionTests(unittest.TestCase):
         membership = {name: set(modules) if name == "ci-required-windows" else set()
                       for name in run_regression.CI_WINDOWS_PROFILES}
         with ExitStack() as stack:
-            for name, value in (("_load_manifest", {}), ("_load_ci_groups", {}),
+            for name, value in (("_load_manifest", {"ci_windows_worker_seconds": weights}), ("_load_ci_groups", {}),
                                 ("_planned_batches", batches), ("_ci_membership", membership),
                                 ("_code_tree_identity", source), ("_git_metadata", git),
                                 ("_locked_environment", environment), ("_check_test_catalog", 0),
@@ -133,8 +139,10 @@ class RunRegressionTests(unittest.TestCase):
                 stack.enter_context(patch.object(run_regression, name, return_value=value))
             workers = run_regression._profile_workers(batches)
             reports = []
-            for index in (0, 1):
-                shard = run_regression._all_local_shard_plan(workers, index=index, count=2)
+            for index in range(shard_count):
+                shard = run_regression._all_local_shard_plan(
+                    workers, index=index, count=shard_count, worker_seconds=weights,
+                )
                 selected = workers[shard["start"]:shard["end"]]
                 results = []
                 for number, (name, current_modules) in enumerate(selected, start=shard["start"] + 1):
@@ -160,6 +168,26 @@ class RunRegressionTests(unittest.TestCase):
                     "planned_batches": [{"name": name, "modules": list(group)} for name, group in selected],
                     "batch_results": results})
             yield reports, workers, batches
+
+    def test_eight_windows_shards_isolate_the_heavy_worker_and_require_every_receipt(self) -> None:
+        count = run_regression.CI_WINDOWS_SHARD_COUNT
+        with self._windows_shard_fixture(count) as (reports, workers, _):
+            self.assertEqual((0, 1), (reports[0]["shard"]["start"], reports[0]["shard"]["end"]))
+            self.assertEqual(list(range(len(workers))), [
+                number for report in reports
+                for number in range(report["shard"]["start"], report["shard"]["end"])
+            ])
+            self.assertTrue(all(report["batch_results"] for report in reports))
+            merged = check_required_ci_results.merge_windows_shards(
+                list(reversed(reports)), "test-commit", shard_count=count,
+            )
+            self.assertEqual([name for name, _ in workers], [row["name"] for row in merged["batch_results"]])
+            with self.assertRaises(ValueError):
+                check_required_ci_results.merge_windows_shards(reports[:2], "test-commit", shard_count=count)
+            mismatched = copy.deepcopy(reports)
+            mismatched[-1]["shard"]["end"] -= 1
+            with self.assertRaises(ValueError):
+                check_required_ci_results.merge_windows_shards(mismatched, "test-commit", shard_count=count)
 
     def test_windows_shards_merge_only_complete_current_disjoint_evidence(self) -> None:
         with self._windows_shard_fixture() as (reports, workers, _):
@@ -257,10 +285,14 @@ class RunRegressionTests(unittest.TestCase):
             self.assertEqual(0, run_regression.main(["--profile", "all-local", *pair]))
             self.assertEqual(1, execute.call_args.kwargs["shard_index"])
             self.assertEqual(2, execute.call_args.kwargs["shard_count"])
+            self.assertEqual(0, run_regression.main(["--profile", "all-local", "--shard-index", "7", "--shard-count", "8"]))
+            self.assertEqual(7, execute.call_args.kwargs["shard_index"])
+            self.assertEqual(8, execute.call_args.kwargs["shard_count"])
             execute.reset_mock()
             self.assertEqual(0, run_regression.main(["--profile", "core"]))
             self.assertNotIn("shard_index", execute.call_args.kwargs)
         for args in (["--profile", "all-local", "--shard-index", "0"],
+                     ["--profile", "all-local", "--shard-index", "7", "--shard-count", "2"],
                      ["--profile", "core", *pair], ["--list", *pair],
                      ["--selection", "fake.json", *pair], ["--summarize", "fake.json", *pair],
                      ["--check-test-catalog", *pair], ["--check-new-test-modules", *pair],
@@ -655,13 +687,15 @@ class RunRegressionTests(unittest.TestCase):
         self.assertNotIn('if', shard_job)
         self.assertEqual('false', shard_job.get('continue-on-error', 'false'))
         self.assertEqual('false', shard_job['strategy']['fail-fast'])
-        self.assertEqual(['0', '1'], shard_job['strategy']['matrix']['shard'])
+        count = run_regression.CI_WINDOWS_SHARD_COUNT
+        self.assertEqual(str(count), workflow['env']['WINDOWS_SHARD_COUNT'])
+        self.assertEqual([str(index) for index in range(count)], shard_job['strategy']['matrix']['shard'])
         runners = [step for step in shard_job['steps']
                    if 'python -m scripts.run_regression --profile all-local ' in step.get('run', '')]
         self.assertEqual(1, len(runners))
         self.assertNotIn('if', runners[0])
         self.assertEqual('false', runners[0].get('continue-on-error', 'false'))
-        self.assertIn('--shard-count 2 --shard-index ${{ matrix.shard }}', runners[0]['run'])
+        self.assertIn('--shard-count $env:WINDOWS_SHARD_COUNT --shard-index ${{ matrix.shard }}', runners[0]['run'])
         self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', runners[0]['run'].splitlines())
         merges = [step for step in job['steps'] if '--merge-windows ' in step.get('run', '')]
         self.assertEqual(1, len(merges))
@@ -669,7 +703,10 @@ class RunRegressionTests(unittest.TestCase):
         self.assertEqual('false', merges[0].get('continue-on-error', 'false'))
         self.assertEqual('${{ needs.windows-shards.result }}', merges[0]['env']['WINDOWS_SHARDS_RESULT'])
         self.assertIn("if ($env:WINDOWS_SHARDS_RESULT -ne 'success') { exit 1 }", merges[0]['run'].splitlines())
-        self.assertEqual(2, merges[0]['run'].count('--windows-shard '))
+        self.assertIn('foreach ($index in 0..([int]$env:WINDOWS_SHARD_COUNT - 1))', merges[0]['run'])
+        self.assertIn("'--windows-shard'", merges[0]['run'])
+        self.assertIn('windows-regression-shard-$index-${{ github.run_id }}/run.json', merges[0]['run'])
+        self.assertIn('@reports --windows-shard-count $env:WINDOWS_SHARD_COUNT', merges[0]['run'])
         self.assertIn('--merge-windows tmp/regression/ci-all-local/run.json', merges[0]['run'])
         self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', merges[0]['run'].splitlines())
         steps = [step for step in job['steps']
@@ -703,7 +740,7 @@ class RunRegressionTests(unittest.TestCase):
             'filtered_pr': original.replace('  pull_request:\n', '  pull_request:\n    paths: ["docs/**"]\n'),
             'missing_guard': original.replace('python -m scripts.check_architecture ', 'python -m scripts.other_check '),
             'ignored_required': original.replace('test "$WINDOWS_JOB" = success\n', 'test "$WINDOWS_JOB" = success || true\n'),
-            'missing_partition': original.replace('shard: [0, 1]', 'shard: [0]'),
+            'missing_partition': original.replace('shard: [0, 1, 2, 3, 4, 5, 6, 7]', 'shard: [0]'),
             'cancel_other_partition': original.replace('fail-fast: false', 'fail-fast: true'),
             'ignored_partition_job': original.replace("if ($env:WINDOWS_SHARDS_RESULT -ne 'success') { exit 1 }",
                                                      "if ($env:WINDOWS_SHARDS_RESULT -ne 'success') { exit 0 }"),
