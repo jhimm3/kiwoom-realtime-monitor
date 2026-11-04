@@ -982,7 +982,8 @@ class MainWindowTest(unittest.TestCase):
         def wait_until(predicate):
             deadline = time.monotonic() + 20
             while not predicate() and time.monotonic() < deadline:
-                QTest.qWait(10)
+                QApplication.processEvents()
+                time.sleep(0.01)  # Let the Python Drive worker run between Qt event pumps.
             self.assertTrue(predicate(), "actual Drive worker/Qt owner did not settle")
 
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
