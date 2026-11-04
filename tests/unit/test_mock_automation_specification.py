@@ -32,6 +32,7 @@ from kiwoom_monitor.application.mock_automation_admission import (
 )
 from kiwoom_monitor.application.mock_automation_execution import (
     MockAutomationGateStatus,
+    assess_mock_automation_decision_from_risk,
     dispatch_mock_automation_decision_from_risk,
     emergency_stop_mock_automation,
 )
@@ -79,7 +80,7 @@ from kiwoom_monitor.domain.execution_activation import (
 )
 from kiwoom_monitor.domain.order_contract import (
     AccountEnvironment, AccountScope, AccountSnapshot, BrokerFill,
-    BrokerOrderSnapshot, BrokerSubmission, OrderState,
+    BrokerOrderSnapshot, BrokerSubmission, OrderIntent, OrderPlanRef, OrderSide, OrderState, OrderType, PlannedOrderIntent,
 )
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
 from kiwoom_monitor.application.trade_cost_service import DailyTradeCost
@@ -298,6 +299,270 @@ def mock_specification_inputs(store, *, scientific_hash="a" * 64, publish_candid
         unfilled_execution_policy=unfilled_execution_policy,
     )
     return value
+
+
+def _planned_execution_fixture(case, store, inputs, *, cash=145_000):
+    from kiwoom_monitor.central_server.database_execution import PLAN_POSITION_COLLECTION
+
+    repository, spec = inputs.repository, inputs.spec
+    publish_ready_mock_automation_spec(
+        repository, profile=inputs.profile, stage_revisions=inputs.stages, spec=spec,
+        shadow_event=inputs.shadow_event, current_binding=inputs.binding,
+    )
+    clock = [inputs.profile.evaluation_start + timedelta(minutes=1)]
+    case.enterContext(patch.object(store, "_execution_wall_now", lambda: clock[0], create=True))
+    transport = _FakeBrokerTransport(lambda: clock[0])
+    run_id = execution_run_id_for_spec(spec.spec_id)
+
+    def owner(token, owner_run_id=run_id):
+        execution = ExecutionRepository(store)
+        runtime = ExecutionRuntime(
+            OrderLifecycle(execution, transport, now_provider=lambda: clock[0]), execution,
+            account_ref=ACCOUNT_REF, run_id=owner_run_id, owner_token=token, now_provider=lambda: clock[0],
+        )
+        case.addCleanup(runtime.stop)
+        return runtime
+
+    def head(plan_id):
+        row = store.load_document(PLAN_POSITION_COLLECTION, ACCOUNT_REF, plan_id)
+        return row["document"] if row is not None else None
+
+    runtime = owner("planned-native-first")
+    admit_mock_automation(
+        repository, repository, runtime, account_ref=ACCOUNT_REF, spec_id=spec.spec_id, requested_at=clock[0],
+    )
+    account = AccountSnapshot(ACCOUNT_REF, cash, 0, {}, clock[0])
+    recovery = MockAccountRecovery(account, ())
+    risk = build_mock_automation_risk_snapshot(
+        recovery, (), (), (), execution_run_id=run_id, binding_revision=spec.binding_revision,
+        reconciliation_revision=1, observed_at=clock[0], broker_query_started_at=clock[0],
+        broker_query_completed_at=clock[0],
+    )
+    repository.save_mock_automation_risk_snapshot(risk)
+    record_mock_automation_recovery_from_risk(
+        repository, runtime, recovery, risk, account_ref=ACCOUNT_REF, spec_id=spec.spec_id,
+    )
+    scope = dict(account_ref=ACCOUNT_REF, spec_id=spec.spec_id, strategy_ref=spec.strategy_ref)
+    return SimpleNamespace(
+        repository=repository, spec=spec, clock=clock, transport=transport, run_id=run_id,
+        owner=owner, head=head, runtime=runtime, account=account, recovery=recovery, risk=risk, scope=scope,
+    )
+
+
+def verify_native_planned_execution(case, store, inputs):
+    """Same synthetic admission and assertions against either native backend."""
+    from kiwoom_monitor.central_server.database_execution import PLAN_POSITION_COLLECTION
+
+    fixture = _planned_execution_fixture(case, store, inputs, cash=215_000)
+    repository, spec, runtime = fixture.repository, fixture.spec, fixture.runtime
+    account, recovery, risk = fixture.account, fixture.recovery, fixture.risk
+    clock, transport, head = fixture.clock, fixture.transport, fixture.head
+    run_id, scope = fixture.run_id, fixture.scope
+    plans = [OrderPlanRef(plan_id, "synthetic-same-symbol/v1", 0) for plan_id in ("a", "b", "c", "d")]
+    decisions = [
+        _automation_decision(run_id, "ENTER", clock[0] - timedelta(seconds=seconds))
+        for seconds in (0, 1, 2, 3)
+    ]
+
+    def prepare(decision, plan):
+        gate = assess_mock_automation_decision_from_risk(
+            repository, runtime, decision, recovery, risk, plan=plan, **scope,
+        )
+        case.assertEqual(MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, gate.status, gate.reasons)
+        repository.save_mock_automation_decision_gate(gate)
+        intent = PlannedOrderIntent(
+            gate.intent_id, run_id, decision.decision_id, ACCOUNT_REF, "mock", gate.symbol, "KRX",
+            OrderSide.BUY, gate.quantity, OrderType.LIMIT, gate.limit_price, gate.decided_at,
+            gate.decided_at + timedelta(seconds=spec.maximum_data_gap_seconds),
+            f"{gate.version}:{spec.session_profile}", plan=plan,
+        )
+        return gate, intent
+
+    second_gate, second_intent = prepare(decisions[1], plans[1])
+    third_gate, third_intent = prepare(decisions[2], plans[2])
+    fourth_gate, fourth_intent = prepare(decisions[3], plans[3])
+    _, first, _ = dispatch_mock_automation_decision_from_risk(
+        repository, runtime, decisions[0], recovery, risk, plan=plans[0], **scope,
+    )
+    case.assertEqual(OrderState.ACCEPTED, first.state)
+    case.assertEqual(0, head("a")["quantity"])
+    case.assertEqual(1, head("a")["revision"])
+
+    def submit(runtime, gate, intent):
+        return runtime.submit_automation_intent(
+            intent, account, spec_id=spec.spec_id, control_revision=gate.control_revision, plan_recovery=recovery,
+        )
+
+    create = store.create_execution_intent
+
+    def lost_ack(value, **options):
+        case.assertTrue(create(value, **options))
+        raise OSError("planned QUEUED commit ACK lost")
+
+    with patch.object(store, "create_execution_intent", side_effect=lost_ack):
+        with case.assertRaisesRegex(OSError, "ACK lost"):
+            submit(runtime, second_gate, second_intent)
+        with case.assertRaisesRegex(OSError, "ACK lost"):
+            submit(runtime, third_gate, third_intent)
+    case.assertEqual(OrderState.QUEUED, submit(runtime, second_gate, second_intent).state)
+    case.assertEqual(1, head("b")["revision"])
+    with case.assertRaisesRegex(RuntimeError, "EXECUTION_PLAN_CASH_UNAVAILABLE"):
+        submit(runtime, fourth_gate, fourth_intent)
+    case.assertIsNone(runtime.load_intent(fourth_intent.intent_id))
+    case.assertIsNone(head("d"))
+    case.assertEqual(OrderState.REJECTED, runtime.cancel(third_intent.intent_id).state)
+    case.assertEqual(2, head("c")["revision"])
+    case.assertEqual("PLANNED_UNSENT_CANCELLED", runtime.load_intent_events(third_intent.intent_id)[0]["event_type"])
+    case.assertEqual(1, len(transport.calls))
+    with case.assertRaisesRegex(ValueError, "native execution"):
+        store.upsert_documents(PLAN_POSITION_COLLECTION, [])
+
+    with patch.object(transport, "cancel", return_value=BrokerSubmission(first.broker_order_id, clock[0])):
+        case.assertEqual(OrderState.CANCEL_PENDING, runtime.cancel(first.intent.intent_id).state)
+    case.assertEqual(2, len(runtime.load_account_active_intents()[0]))
+    case.assertTrue(runtime.stop())
+
+    clock[0] += timedelta(days=1)
+    restored = fixture.owner("planned-native-next-session")
+    restored.start(new_orders_enabled=False)
+    case.assertEqual(OrderState.QUEUED, restored.load_intent(second_intent.intent_id).state)
+    case.assertEqual(OrderState.REJECTED, submit(restored, second_gate, second_intent).state)
+    case.assertEqual(OrderState.REJECTED, submit(restored, second_gate, second_intent).state)
+    case.assertEqual(2, head("b")["revision"])
+    case.assertEqual("PLANNED_UNSENT_EXPIRED", restored.load_intent_events(second_intent.intent_id)[0]["event_type"])
+    cancelled = BrokerOrderSnapshot(
+        first.broker_order_id, ACCOUNT_REF, first.intent.symbol, OrderState.CANCELLED, 0, 0, clock[0],
+    )
+    case.assertEqual(OrderState.CANCELLED, restored.reconcile(first.intent.intent_id, cancelled).state)
+    case.assertEqual(((), True), restored.load_account_active_intents())
+    clock[0] += timedelta(seconds=1)
+    late = replace(
+        cancelled, state=OrderState.FILLED, filled_quantity=1, as_of=clock[0],
+        fills=(BrokerFill("late-planned-fill", 1, 70_000, clock[0]),),
+    )
+    case.assertEqual(OrderState.FILLED, restored.reconcile(first.intent.intent_id, late).state)
+    projected = head("a")
+    case.assertEqual((1, 3, "synthetic-same-symbol/v1"), (
+        projected["quantity"], projected["revision"], projected["policy_ref"],
+    ))
+    events = ExecutionRepository(store).account_events("mock", ACCOUNT_REF).events
+    fill = next(event for event in events if event.broker_execution_id == "late-planned-fill")
+    case.assertEqual(fill.accepted_sequence, projected["fill_cursor"])
+    restored.reconcile(first.intent.intent_id, replace(late, as_of=clock[0] + timedelta(seconds=1)))
+    case.assertEqual(projected, head("a"))
+    case.assertEqual(0, head("b")["quantity"])
+    case.assertEqual(1, len(transport.calls))
+
+
+def verify_native_planned_sell_isolation(case, store, inputs):
+    fixture = _planned_execution_fixture(case, store, inputs)
+    repository, spec, runtime = fixture.repository, fixture.spec, fixture.runtime
+    clock, run_id, scope = fixture.clock, fixture.run_id, fixture.scope
+    plans = [OrderPlanRef(plan_id, "synthetic-same-symbol/v1", 0) for plan_id in ("a", "b")]
+    buys = [
+        _automation_decision(run_id, "ENTER", clock[0] - timedelta(seconds=seconds))
+        for seconds in (0, 1)
+    ]
+    for decision, plan in zip(buys, plans):
+        gate = assess_mock_automation_decision_from_risk(
+            repository, runtime, decision, fixture.recovery, fixture.risk, plan=plan, **scope,
+        )
+        case.assertEqual(MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, gate.status, gate.reasons)
+        repository.save_mock_automation_decision_gate(gate)
+    buy_records = [
+        dispatch_mock_automation_decision_from_risk(
+            repository, runtime, decision, fixture.recovery, fixture.risk, plan=plan, **scope,
+        )[1]
+        for decision, plan in zip(buys, plans)
+    ]
+    for record in buy_records:
+        clock[0] += timedelta(seconds=1)
+        runtime.reconcile(record.intent.intent_id, BrokerOrderSnapshot(
+            record.broker_order_id, ACCOUNT_REF, record.intent.symbol, OrderState.FILLED, 1, 0, clock[0],
+            (BrokerFill(f"buy-{record.intent.plan.plan_id}", 1, 70_000, clock[0]),),
+        ))
+
+    # An independently recorded manual fill is a known part of the broker
+    # position, with no strategy plan or permission to sell those shares.
+    manual_ledger = ExecutionRepository(store)
+    manual = fixture.owner("planned-test-manual-owner", "synthetic-manual-run")
+    with case.assertRaisesRegex(RuntimeError, "another mock execution runtime owns this account"):
+        manual.start(new_orders_enabled=True)
+    case.assertTrue(runtime.stop())
+    manual.start(new_orders_enabled=True)
+    manual_intent = OrderIntent(
+        "synthetic-manual-buy", "synthetic-manual-run", "manual", ACCOUNT_REF, "mock", "005930", "KRX",
+        OrderSide.BUY, 1, OrderType.LIMIT, 70_000, clock[0], clock[0] + timedelta(seconds=5), "manual",
+    )
+    manual_order = manual.submit(
+        manual_intent, AccountSnapshot(ACCOUNT_REF, 75_000, 0, {"005930": 2}, clock[0]),
+    )
+    clock[0] += timedelta(seconds=1)
+    manual.reconcile(manual_intent.intent_id, BrokerOrderSnapshot(
+        manual_order.broker_order_id, ACCOUNT_REF, "005930", OrderState.FILLED, 1, 0, clock[0],
+        (BrokerFill("manual-buy-fill", 1, 70_000, clock[0]),),
+    ))
+    case.assertTrue(manual.stop())
+    runtime = fixture.owner("planned-test-owner-after-manual")
+    runtime.start(new_orders_enabled=False)
+    case.assertEqual([1, 1], [fixture.head(plan.plan_id)["quantity"] for plan in plans])
+
+    clock[0] += timedelta(seconds=1)
+    account = AccountSnapshot(ACCOUNT_REF, 5_000, 0, {"005930": 3}, clock[0])
+    recovery = MockAccountRecovery(account, ())
+    events = manual_ledger.account_events("mock", ACCOUNT_REF).events
+    risk = build_mock_automation_risk_snapshot(
+        recovery, events, (), (), execution_run_id=run_id, binding_revision=spec.binding_revision,
+        reconciliation_revision=2, observed_at=clock[0], broker_query_started_at=clock[0],
+        broker_query_completed_at=clock[0],
+    )
+    case.assertTrue(risk.reconciliation_complete)
+    case.assertEqual({"005930": 2}, dict(risk.owned_position_quantities))
+    repository.save_mock_automation_risk_snapshot(risk)
+    record_mock_automation_recovery_from_risk(
+        repository, runtime, recovery, risk, account_ref=ACCOUNT_REF, spec_id=spec.spec_id,
+    )
+    plans = [replace(plan, expected_revision=2) for plan in plans]
+    sells = [
+        _automation_decision(run_id, "EXIT", clock[0] - timedelta(seconds=seconds))
+        for seconds in (0, 1)
+    ]
+    oversized = sells[0].to_dict()
+    oversized.pop("decision_id")
+    oversized["quantity"] = 2
+    oversized = StrategyDecision(decision_id=f"decision_{_hash(oversized)}", **oversized)
+    with case.assertRaisesRegex(RuntimeError, "EXECUTION_PLAN_QUANTITY_UNAVAILABLE"):
+        dispatch_mock_automation_decision_from_risk(
+            repository, runtime, oversized, recovery, risk, plan=plans[0], **scope,
+        )
+    case.assertEqual(3, len(fixture.transport.calls))
+    for decision, plan in zip(sells, plans):
+        gate = assess_mock_automation_decision_from_risk(
+            repository, runtime, decision, recovery, risk, plan=plan, **scope,
+        )
+        case.assertEqual(MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, gate.status, gate.reasons)
+        repository.save_mock_automation_decision_gate(gate)
+    sell_records = [
+        dispatch_mock_automation_decision_from_risk(
+            repository, runtime, decision, recovery, risk, plan=plan, **scope,
+        )[1]
+        for decision, plan in zip(sells, plans)
+    ]
+    case.assertEqual([1, 1], [fixture.head(plan.plan_id)["quantity"] for plan in plans])
+    for record in sell_records:
+        clock[0] += timedelta(seconds=1)
+        runtime.reconcile(record.intent.intent_id, BrokerOrderSnapshot(
+            record.broker_order_id, ACCOUNT_REF, record.intent.symbol, OrderState.FILLED, 1, 0, clock[0],
+            (BrokerFill(f"sell-{record.intent.plan.plan_id}", 1, 70_500, clock[0]),),
+        ))
+    case.assertEqual([0, 0], [fixture.head(plan.plan_id)["quantity"] for plan in plans])
+    filled = [event for event in manual_ledger.account_events("mock", ACCOUNT_REF).events
+              if event.event_type == "FILL"]
+    case.assertEqual(1, sum(event.quantity if event.side == "BUY" else -event.quantity for event in filled))
+    for record in sell_records:
+        sequence = next(event.accepted_sequence for event in filled if event.intent_id == record.intent.intent_id)
+        case.assertEqual(sequence, fixture.head(record.intent.plan.plan_id)["fill_cursor"])
+    case.assertEqual(["BUY", "BUY", "BUY", "SELL", "SELL"], [call[1] for call in fixture.transport.calls])
 
 
 PUBLICATION_BASELINE = Path(__file__).resolve().parents[1] / "fixtures/api_contract_baselines/mock_publication_http_v1.json"
@@ -912,6 +1177,12 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         inputs = mock_specification_inputs(self.store)
         self.__dict__.update(vars(inputs))
+
+    def test_planned_execution_claim_and_fill_use_native_sqlite(self):
+        verify_native_planned_execution(self, self.store, self)
+
+    def test_planned_sell_isolation_preserves_manual_shares_in_sqlite(self):
+        verify_native_planned_sell_isolation(self, self.store, self)
 
     def test_candidate_publication_list_returns_complete_account_scoped_lineage(self) -> None:
         publications = self.repository.load_mock_automation_candidate_publications(ACCOUNT_REF)

@@ -20,9 +20,11 @@ from kiwoom_monitor.domain.order_contract import (
     OrderSide,
     OrderState,
     OrderType,
+    PlannedOrderIntent,
     TERMINAL_ORDER_STATES,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord, ExecutionRepository
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 from .market_observations import KST, as_kst
 
 
@@ -137,6 +139,8 @@ class ExecutionRuntime:
         self, intent: OrderIntent, account: AccountSnapshot, *, reference_price: int | None = None,
     ) -> ExecutionRecord:
         with self._operation_lock, self._observe_operation():
+            if isinstance(intent, PlannedOrderIntent):
+                raise ValueError("planned orders require the automation approval path")
             self._require_active(intent)
             if not self._new_orders_enabled:
                 raise RuntimeError("MOCK_NEW_ORDERS_DISABLED")
@@ -193,9 +197,16 @@ class ExecutionRuntime:
         self, intent: OrderIntent, account: AccountSnapshot, *, reference_price: int | None = None,
         spec_id: str, control_revision: int, replacement_claim: dict | None = None,
         protection_claim: dict | None = None,
+        plan_recovery: MockAccountRecovery | None = None,
     ) -> ExecutionRecord:
         """Submit one approved automation intent without leaving the account gate open."""
         with self._operation_lock, self._observe_operation():
+            if isinstance(intent, PlannedOrderIntent):
+                if replacement_claim is not None or protection_claim is not None:
+                    raise ValueError("planned orders require their own exact approval")
+                return self._submit_planned(intent, account, spec_id, control_revision, plan_recovery)
+            if plan_recovery is not None:
+                raise ValueError("plan recovery requires a planned order")
             self._require_active(intent)
             if self._new_orders_enabled:
                 raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
@@ -218,6 +229,36 @@ class ExecutionRuntime:
                 )
             finally:
                 self._new_orders_enabled = False
+
+    def _submit_planned(
+        self, intent: PlannedOrderIntent, account: AccountSnapshot, spec_id: str, control_revision: int,
+        recovery: MockAccountRecovery | None,
+    ) -> ExecutionRecord:
+        self._require_active(intent)
+        if self._new_orders_enabled:
+            raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
+        existing = self._repository.load(intent.intent_id)
+        if existing is not None:
+            if existing.intent != intent:
+                raise ValueError("intent_id already belongs to a different order")
+            if existing.state is OrderState.QUEUED and self.server_now() >= intent.expires_at:
+                return self._lifecycle.release_queued_plan(existing, expired=True)
+            return existing
+        if recovery is None or recovery.account != account:
+            raise ValueError("planned order requires the exact broker recovery snapshot")
+        self._repository.bind_automation_control(
+            spec_id=spec_id, control_revision=control_revision, plan_recovery=recovery,
+        )
+        try:
+            record, first_claim = self._lifecycle.queue_planned(intent)
+            if not first_claim:
+                return record
+            return self._lifecycle.submit(
+                intent.intent_id, account,
+                after_submission_claim=self._repository.clear_automation_control,
+            )
+        finally:
+            self._repository.clear_automation_control()
 
     def reconcile(self, intent_id: str, snapshot: BrokerOrderSnapshot) -> ExecutionRecord:
         with self._operation_lock, self._observe_operation():

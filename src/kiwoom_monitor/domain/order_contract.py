@@ -125,6 +125,22 @@ TERMINAL_ORDER_STATES = frozenset({OrderState.FILLED, OrderState.CANCELLED, Orde
 
 
 @dataclass(frozen=True)
+class OrderPlanRef:
+    """Plan identity and the exact revision approved for an order."""
+
+    plan_id: str
+    policy_ref: str
+    expected_revision: int
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (self.plan_id, self.policy_ref)):
+            raise ValueError("plan identity and policy are required")
+        if type(self.expected_revision) is not int or self.expected_revision < 0:
+            raise ValueError("plan revision must be a non-negative integer")
+
+
+@dataclass(frozen=True)
 class OrderIntent:
     intent_id: str
     run_id: str
@@ -161,6 +177,16 @@ class OrderIntent:
         _require_aware(self.expires_at, "expires_at")
         if self.expires_at <= self.created_at:
             raise ValueError("expires_at must be later than created_at")
+
+
+@dataclass(frozen=True)
+class PlannedOrderIntent(OrderIntent):
+    plan: OrderPlanRef
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.plan, OrderPlanRef) or self.order_type is not OrderType.LIMIT:
+            raise ValueError("planned orders require a plan reference and a limit price")
 
 
 @dataclass(frozen=True)

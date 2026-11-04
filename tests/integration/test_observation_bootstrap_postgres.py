@@ -39,6 +39,25 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
         cls.store = PostgresQueryStore(cls.url)
         cls.store.initialize()
 
+    def test_planned_execution_claim_and_fill_match_sqlite_contract(self):
+        from tests.unit.test_mock_automation_specification import (
+            mock_specification_inputs,
+            verify_native_planned_execution,
+        )
+
+        verify_native_planned_execution(self, self.store, mock_specification_inputs(self.store))
+
+    def test_planned_sell_isolation_preserves_manual_shares_in_postgres(self):
+        from tests.unit.test_mock_automation_specification import (
+            mock_specification_inputs,
+            verify_native_planned_sell_isolation,
+        )
+
+        url = self.enterContext(isolated_observation_schema(os.environ["KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL"]))
+        store = PostgresQueryStore(url)
+        store.initialize()
+        verify_native_planned_sell_isolation(self, store, mock_specification_inputs(store))
+
     def _exercise(self, *, mock=False, bootstrap_during_gap=True, normalized=False,
                   legacy=False, recovery_ack_loss=False):
         token = uuid.uuid4().hex[:12]

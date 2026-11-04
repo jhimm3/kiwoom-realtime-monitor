@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Protocol
 
@@ -13,10 +13,13 @@ from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot,
     OrderEvent,
     OrderIntent,
+    OrderPlanRef,
     OrderSide,
     OrderState,
     OrderType,
+    PlannedOrderIntent,
 )
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 
 
 class ExecutionStore(Protocol):
@@ -153,7 +156,8 @@ class ExecutionRepository:
 
     def bind_automation_control(self, *, spec_id: str, control_revision: int,
                                 replacement_claim: dict | None = None, protection_claim: dict | None = None,
-                                cancel_retry_claim: dict | None = None) -> None:
+                                cancel_retry_claim: dict | None = None,
+                                plan_recovery: MockAccountRecovery | None = None) -> None:
         if self._ownership is None:
             raise RuntimeError("EXECUTION_REPOSITORY_OWNER_REQUIRED")
         if not spec_id.strip() or type(control_revision) is not int or control_revision <= 0:
@@ -172,18 +176,23 @@ class ExecutionRepository:
             if replacement_claim is not None or protection_claim is not None:
                 raise ValueError('execution_claim_purposes_conflict')
             self._automation_control['cancel_retry_claim']=dict(cancel_retry_claim)
+        if plan_recovery is not None:
+            self._automation_control["plan_recovery"] = plan_recovery
 
     def clear_automation_control(self) -> None:
         self._automation_control = None
 
     def create(self, intent: OrderIntent) -> ExecutionRecord:
+        return self.claim(intent)[0]
+
+    def claim(self, intent: OrderIntent) -> tuple[ExecutionRecord, bool]:
         record = ExecutionRecord(intent, OrderState.QUEUED, "", 0, (), None, intent.created_at)
         if self._store.create_execution_intent(_record_document(record), **self._write_options()):
-            return record
+            return record, True
         existing = self.load(intent.intent_id)
         if existing is None or existing.intent != intent:
             raise ValueError("intent_id already belongs to a different order")
-        return existing
+        return existing, False
 
     def apply(
         self, record: ExecutionRecord, event: OrderEvent, *, _connection: Any = None, **changes: object,
@@ -363,6 +372,7 @@ def _record_document(record: ExecutionRecord) -> dict[str, Any]:
         "created_at": intent.created_at.isoformat(),
         "expires_at": intent.expires_at.isoformat(),
         "policy_version": intent.policy_version,
+        **({"plan": asdict(intent.plan)} if isinstance(intent, PlannedOrderIntent) else {}),
         "state": record.state.value,
         "broker_order_id": record.broker_order_id,
         "filled_quantity": record.filled_quantity,
@@ -392,7 +402,8 @@ def _event_document(event: OrderEvent) -> dict[str, Any]:
 
 
 def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
-    intent = OrderIntent(
+    intent_type = PlannedOrderIntent if "plan" in value else OrderIntent
+    intent = intent_type(
         intent_id=str(value["intent_id"]), run_id=str(value["run_id"]),
         decision_id=str(value["decision_id"]), account_ref=str(value["account_ref"]),
         environment=str(value["environment"]), symbol=str(value["symbol"]), venue=str(value["venue"]),
@@ -402,6 +413,7 @@ def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
         created_at=datetime.fromisoformat(str(value["created_at"])),
         expires_at=datetime.fromisoformat(str(value["expires_at"])),
         policy_version=str(value["policy_version"]),
+        **({"plan": OrderPlanRef(**value["plan"])} if "plan" in value else {}),
     )
     last_as_of = value.get("last_broker_as_of")
     return ExecutionRecord(

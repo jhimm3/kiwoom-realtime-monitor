@@ -15,10 +15,15 @@ from typing import Any
 
 from kiwoom_monitor.central_server.database_codec import _event_document, _json_document
 
+PLAN_POSITION_COLLECTION = "execution_mock_plan_positions"
+
+
 def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                                  value: dict[str, Any], p: str, *, now_provider=None,
-                                 new_intent_claim=False, submission_claim=False) -> None:
+                                 new_intent_claim=False, submission_claim=False):
     if ownership is None:
+        if "plan" in value:
+            raise RuntimeError("PLANNED_EXECUTION_OWNER_REQUIRED")
         return  # Offline ledger/import callers keep the existing unowned contract.
     if new_intent_claim and ownership.get('cancel_retry_claim') is not None:
         raise RuntimeError('MOCK_PROTECTIVE_CANCEL_RETRY_CANNOT_CREATE_ORDER')
@@ -66,11 +71,247 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
     if new_intent_claim and value.get('policy_version') == 'leader_execution_adapter/v1':
         _require_leader_execution_claim(cursor, ownership, value, p, now_provider=now_provider)
     if "intent_id" in value:
-        cursor.execute(f"SELECT environment,account_ref,run_id FROM central_execution_intents WHERE intent_id={p}",
+        plan_projection = "document_json->'plan'" if p == "%s" else "json_extract(document_json,'$.plan')"
+        stored_projection = "document_json" if "plan" in value else plan_projection
+        cursor.execute(f"SELECT environment,account_ref,run_id,{stored_projection} FROM central_execution_intents WHERE intent_id={p}",
                        (value["intent_id"],))
         stored = cursor.fetchone()
-        if stored is not None and tuple(stored) != (value["environment"], value["account_ref"], value["run_id"]):
-            raise RuntimeError("EXECUTION_OWNER_SCOPE_MISMATCH")
+        if stored is not None:
+            if tuple(stored[:3]) != (value["environment"], value["account_ref"], value["run_id"]):
+                raise RuntimeError("EXECUTION_OWNER_SCOPE_MISMATCH")
+            stored_value = _json_document(stored[3]) if "plan" in value else None
+            stored_plan = stored_value.get("plan") if stored_value is not None else stored[3]
+            if stored_plan != value.get("plan"):
+                raise RuntimeError("EXECUTION_PLAN_REFERENCE_CHANGED")
+            return stored_value
+
+
+def _plan_document(cursor, p, collection, account, key):
+    cursor.execute(
+        f"SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} AND document_key={p}"
+        + (" FOR UPDATE" if p == "%s" else ""),
+        (collection, account, key),
+    )
+    row = cursor.fetchone()
+    return _json_document(row[0]) if row is not None else None
+
+
+def _save_plan_position(cursor, p, account, document, changed_at):
+    cursor.execute(
+        f"INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+        f"VALUES({p},{p},{p},{p},{p}) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
+        "updated_at=excluded.updated_at,document_json=excluded.document_json",
+        (PLAN_POSITION_COLLECTION, account, document["plan_id"], changed_at.timestamp(), _event_document(document)),
+    )
+
+
+def _require_plan_approval(cursor, p, value, ownership, now_provider):
+    from dataclasses import asdict
+
+    from kiwoom_monitor.application.mock_automation_execution import (
+        MOCK_AUTOMATION_DECISION_GATE_VERSION,
+        MockAutomationGateStatus,
+        mock_automation_decision_gate_from_dict,
+        mock_automation_intent_id,
+    )
+    from kiwoom_monitor.application.mock_automation_recovery import (
+        MockAutomationRecoveryStatus,
+        mock_account_recovery_fingerprint,
+        mock_automation_recovery_decision_from_dict,
+    )
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+    from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+
+    recovery = ownership.get("plan_recovery") if ownership is not None else None
+    if recovery is None:
+        raise RuntimeError("PLANNED_EXECUTION_APPROVAL_REQUIRED")
+    account_ref = value["account_ref"]
+    gate_doc = _plan_document(cursor, p, "execution_mock_automation_approved_gates", account_ref, value["intent_id"])
+    if gate_doc is None:
+        raise RuntimeError("PLANNED_EXECUTION_APPROVAL_REQUIRED")
+    gate = mock_automation_decision_gate_from_dict(gate_doc)
+    if (
+        gate.plan is None
+        or asdict(gate.plan) != value["plan"]
+        or gate.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+        or gate.version != MOCK_AUTOMATION_DECISION_GATE_VERSION
+        or gate.spec_id != ownership.get("active_spec_id")
+        or gate.control_revision != ownership.get("control_revision")
+        or (gate.account_ref, gate.execution_run_id, gate.strategy_decision_id,
+            gate.intent_id, gate.symbol, gate.quantity, gate.limit_price) != (
+            account_ref, value["run_id"], value["decision_id"], value["intent_id"],
+            value["symbol"], value["quantity"], value["limit_price"])
+        or value["intent_id"] != mock_automation_intent_id(gate.spec_id, gate.strategy_decision_id)
+        or value["side"] != {"ENTER": "BUY", "EXIT": "SELL"}.get(gate.action)
+        or value["order_type"] != "LIMIT"
+        or gate.decided_at != datetime.fromisoformat(value["created_at"])
+    ):
+        raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
+    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account_ref, gate.spec_id)
+    risk_doc = _plan_document(cursor, p, "execution_mock_automation_current_risk", account_ref, account_ref)
+    recovery_doc = _plan_document(
+        cursor, p, "execution_mock_automation_current_recovery", account_ref, gate.admission_id,
+    )
+    if spec_doc is None or risk_doc is None or recovery_doc is None:
+        raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_MISSING")
+    spec = mock_automation_spec_from_dict(spec_doc)
+    risk = mock_automation_risk_snapshot_from_dict(risk_doc)
+    current = mock_automation_recovery_decision_from_dict(recovery_doc)
+    now = kst_now() if now_provider is None else now_provider()
+    max_age = spec.maximum_data_gap_seconds
+    expiry = datetime.fromisoformat(value["expires_at"])
+    fingerprint = mock_account_recovery_fingerprint(recovery)
+    statuses = {MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED}
+    if value["side"] == "SELL":
+        statuses.add(MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED)
+    if (
+        spec.account_scope.account_ref != account_ref or spec.spec_id != gate.spec_id
+        or spec.strategy_ref != gate.strategy_ref or value["venue"] != spec.supported_venue
+        or value["policy_version"] != f"{gate.version}:{spec.session_profile}"
+        or risk.binding_revision != spec.binding_revision or not risk.reconciliation_complete
+        or (risk.account_ref, risk.execution_run_id) != (account_ref, value["run_id"])
+        or (risk.snapshot_id, risk.reconciliation_revision) != (gate.risk_snapshot_id, gate.risk_reconciliation_revision)
+        or (current.account_ref, current.execution_run_id, current.spec_id) != (account_ref, value["run_id"], gate.spec_id)
+        or (current.decision_id, current.lease_receipt_id, current.recovery_fingerprint)
+        != (gate.recovery_decision_id, gate.lease_receipt_id, fingerprint)
+        or (current.risk_snapshot_id, current.risk_reconciliation_revision) != (risk.snapshot_id, risk.reconciliation_revision)
+        or current.status not in statuses
+        or (gate.recovery_fingerprint, gate.account_as_of) != (fingerprint, recovery.account.as_of)
+        or risk.account_as_of != recovery.account.as_of or recovery.account.account_ref != account_ref
+        or max_age is None or now >= expiry or expiry != gate.decided_at + timedelta(seconds=max(1, int(max_age)))
+        or any(not 0 <= (now - at).total_seconds() <= max_age
+               for at in (gate.decided_at, gate.server_now, risk.observed_at, risk.account_as_of))
+        or any(order.state not in TERMINAL_ORDER_STATES for order in recovery.orders)
+    ):
+        raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_CHANGED")
+    event_type = "e.document_json->>'event_type'" if p == "%s" else "json_extract(e.document_json,'$.event_type')"
+    cursor.execute(
+        "SELECT 1 FROM central_execution_events e JOIN central_execution_intents i ON i.intent_id=e.intent_id "
+        f"WHERE i.environment='mock' AND i.account_ref={p} AND e.accepted_sequence>{p} "
+        f"AND {event_type} IN ('FILL','BROKER_FILL_AGGREGATE') LIMIT 1",
+        (account_ref, risk.execution_event_high_watermark),
+    )
+    if cursor.fetchone() is not None:
+        raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_CHANGED")
+    return gate.gate_id, spec
+
+
+def _claim_plan_position(cursor, p, value, ownership, now_provider):
+    gate_id, spec = _require_plan_approval(cursor, p, value, ownership, now_provider)
+    account_ref, ref = value["account_ref"], value["plan"]
+    head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account_ref, ref["plan_id"])
+    if head is None:
+        head = {
+            "version": "mock_plan_position/v1", "plan_id": ref["plan_id"], "policy_ref": ref["policy_ref"],
+            "run_id": value["run_id"], "symbol": value["symbol"],
+            "revision": 0, "quantity": 0, "fill_cursor": 0,
+        }
+    if (head["policy_ref"], head["run_id"], head["symbol"], head["revision"]) != (
+        ref["policy_ref"], value["run_id"], value["symbol"], ref["expected_revision"],
+    ):
+        raise RuntimeError("EXECUTION_PLAN_REVISION_CHANGED")
+    if head.get("unreconciled_sell_quantity"):
+        raise RuntimeError("EXECUTION_PLAN_RECONCILIATION_REQUIRED")
+    rows = _account_active_execution_rows(cursor, "mock", account_ref, 401, p)
+    if len(rows) > 400:
+        raise RuntimeError("EXECUTION_ACCOUNT_OPEN_ORDERS_INCOMPLETE")
+    active = [_json_document(row[0]) for row in rows]
+    if (spec.maximum_submission_unknown_count is not None
+            and sum(row["state"] == "SUBMISSION_UNKNOWN" for row in active) > spec.maximum_submission_unknown_count):
+        raise RuntimeError("EXECUTION_PLAN_SUBMISSION_UNKNOWN_LIMIT")
+    account = ownership["plan_recovery"].account
+    if value["side"] == "BUY":
+        if any(account.positions.values()):
+            raise RuntimeError("PLANNED_ENTRY_REQUIRES_FLAT_ACCOUNT")
+        if any(not row.get("plan") or row["run_id"] != value["run_id"] for row in active):
+            raise RuntimeError("PLANNED_EXECUTION_UNVERIFIED_OPEN_ORDER")
+        buys = [row for row in active if row["side"] == "BUY"]
+        if any(row.get("limit_price") is None for row in buys):
+            raise RuntimeError("EXECUTION_ACCOUNT_RESERVATION_UNKNOWN")
+        reserved = sum(_unfilled_quantity(row) * row["limit_price"] for row in buys)
+        required = value["quantity"] * value["limit_price"]
+        free = account.available_cash_won - account.reserved_open_buy_won - reserved
+        capital_limit = spec.maximum_capital_won
+        if required > free or (capital_limit is not None and reserved + required > capital_limit):
+            raise RuntimeError("EXECUTION_PLAN_CASH_UNAVAILABLE")
+    else:
+        sells = [row for row in active if row["side"] == "SELL" and row["symbol"] == value["symbol"]]
+        pending = sum(_unfilled_quantity(row) for row in sells)
+        plan_pending = sum(
+            _unfilled_quantity(row) for row in sells
+            if (row.get("plan") or {}).get("plan_id") == ref["plan_id"]
+        )
+        if value["quantity"] > min(head["quantity"] - plan_pending, account.positions.get(value["symbol"], 0) - pending):
+            raise RuntimeError("EXECUTION_PLAN_QUANTITY_UNAVAILABLE")
+    _save_plan_position(
+        cursor, p, account_ref, {**head, "revision": head["revision"] + 1},
+        datetime.fromisoformat(value["created_at"]),
+    )
+    return {**value, "mock_plan_approval": gate_id}
+
+
+def _unfilled_quantity(order):
+    return max(0, order["quantity"] - order.get("detailed_filled_quantity", order.get("filled_quantity", 0)))
+
+
+def _plan_event_changes_position(event):
+    return event["event_type"] == "FILL" or event["state"] in {"CANCELLED", "REJECTED"}
+
+
+def _validate_plan_event(stored, intent, event):
+    if stored is None or event["intent_id"] != intent["intent_id"]:
+        raise RuntimeError("EXECUTION_PLAN_EVENT_SCOPE_CHANGED")
+    fields = ("plan", "decision_id", "symbol", "side", "quantity", "order_type", "limit_price", "policy_version")
+    if (any(intent[name] != stored[name] for name in fields) or intent["state"] != event["state"]
+            or (intent["state"] == "QUEUED" and stored["state"] != "QUEUED")):
+        raise RuntimeError("EXECUTION_PLAN_EVENT_SCOPE_CHANGED")
+    if event["event_type"] == "SUBMISSION_STARTED" and stored["state"] != "QUEUED":
+        raise RuntimeError("EXECUTION_PLAN_ALREADY_SUBMITTED")
+    if event["event_type"] in {"PLANNED_UNSENT_CANCELLED", "PLANNED_UNSENT_EXPIRED"}:
+        if (stored["state"] != "QUEUED" or intent["state"] != "REJECTED"
+                or stored["broker_order_id"] or event["broker_order_id"] or stored["fill_ids"]
+                or stored["filled_quantity"] or stored["detailed_filled_quantity"]
+                or stored["broker_reported_filled_quantity"]
+                or (event["event_type"] == "PLANNED_UNSENT_EXPIRED"
+                    and datetime.fromisoformat(event["received_at"]) < datetime.fromisoformat(stored["expires_at"]))):
+            raise RuntimeError("EXECUTION_PLAN_UNSENT_RELEASE_CHANGED")
+    if (event["event_type"] in {"FILL", "BROKER_FILL_AGGREGATE", "BROKER_RECONCILED"}
+            and not stored["broker_order_id"] and stored["state"] != "SUBMISSION_UNKNOWN"):
+        raise RuntimeError("EXECUTION_PLAN_BROKER_ORDER_UNCONFIRMED")
+    if event["event_type"] != "FILL":
+        return True
+    fill_id, quantity, price = event["broker_execution_id"], event["quantity"], event["price"]
+    if fill_id in stored["fill_ids"]:
+        return False
+    if (not fill_id or type(quantity) is not int or quantity <= 0 or type(price) is not int or price <= 0
+            or intent["fill_ids"] != [*stored["fill_ids"], fill_id]
+            or intent["detailed_filled_quantity"] != stored["detailed_filled_quantity"] + quantity
+            or intent["detailed_filled_quantity"] > stored["quantity"]):
+        raise RuntimeError("EXECUTION_PLAN_FILL_EVIDENCE_CHANGED")
+    return True
+
+
+def _apply_plan_execution_event(cursor, p, intent, event, sequence):
+    ref = intent["plan"]
+    account = intent["account_ref"]
+    head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, ref["plan_id"])
+    if head is None or (head["policy_ref"], head["run_id"], head["symbol"]) != (
+        ref["policy_ref"], intent["run_id"], intent["symbol"],
+    ):
+        raise RuntimeError("EXECUTION_PLAN_POSITION_MISSING")
+    if event["event_type"] == "FILL":
+        delta = event["quantity"] if intent["side"] == "BUY" else -event["quantity"]
+        quantity = head["quantity"] + delta
+        if quantity < 0:
+            # Preserve a late broker FILL even if a previously released
+            # reservation cannot be attributed to the plan's remaining shares.
+            head["unreconciled_sell_quantity"] = head.get("unreconciled_sell_quantity", 0) - quantity
+        head = {**head, "quantity": max(0, quantity), "fill_cursor": sequence}
+    _save_plan_position(
+        cursor, p, account, {**head, "revision": head["revision"] + 1},
+        datetime.fromisoformat(event["received_at"]),
+    )
 
 
 def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider):
@@ -709,8 +950,14 @@ class SQLiteExecutionStoreMixin:
         document = _event_document(value)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            _require_execution_ownership(connection.cursor(), ownership, value, "?",
+            stored = _require_execution_ownership(connection.cursor(), ownership, value, "?",
                                          now_provider=getattr(self, '_execution_wall_now', None), new_intent_claim=True)
+            if "plan" in value:
+                if stored is not None:
+                    return False
+                value = _claim_plan_position(connection.cursor(), "?", value, ownership,
+                                             getattr(self, "_execution_wall_now", None))
+                document = _event_document(value)
             if ownership and ownership.get('replacement_claim') is not None:
                 value = {**value, 'mock_replacement_claim': dict(ownership['replacement_claim'])}
                 document = _event_document(value)
@@ -730,9 +977,16 @@ class SQLiteExecutionStoreMixin:
         event_document = _event_document(event)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            _require_execution_ownership(connection.cursor(), ownership, intent, "?",
+            stored = _require_execution_ownership(connection.cursor(), ownership, intent, "?",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
+            if "plan" in intent and not _validate_plan_event(stored, intent, event):
+                return False
+            if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
+                approval, _ = _require_plan_approval(connection.cursor(), "?", intent, ownership,
+                                                    getattr(self, "_execution_wall_now", None))
+                if stored is None or stored.get("mock_plan_approval") != approval:
+                    raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
             event = _require_mock_cancel_retry(connection.cursor(), ownership, intent, event, '?',
                                               now_provider=getattr(self, '_execution_wall_now', None))
             event_document = _event_document(event)
@@ -740,18 +994,24 @@ class SQLiteExecutionStoreMixin:
                 "SELECT 1 FROM central_execution_events WHERE event_id=?", (str(event["event_id"]),),
             ).fetchone() is not None:
                 return False
-            if connection.execute(
-                "SELECT 1 FROM central_execution_intents WHERE intent_id=?", (str(intent["intent_id"]),),
-            ).fetchone() is None:
-                raise KeyError(f"unknown execution intent: {intent['intent_id']}")
+            if stored is None:
+                row = _execution_intent_row(connection.cursor(), intent["intent_id"], "?")
+                if row is None:
+                    raise KeyError(f"unknown execution intent: {intent['intent_id']}")
+                if ownership is None and "plan" in _json_document(row[0]):
+                    raise RuntimeError("PLANNED_EXECUTION_OWNER_REQUIRED")
             intent = _retain_execution_claim(connection.cursor(), intent, '?')
+            if "plan" in intent:
+                intent = {**intent, "mock_plan_approval": stored["mock_plan_approval"]}
             intent_document = _event_document(intent)
-            connection.execute(
+            inserted = connection.execute(
                 "INSERT INTO central_execution_events("
                 "event_id,intent_id,state,occurred_at,received_at,broker_execution_id,document_json) "
                 "VALUES(?,?,?,?,?,?,?)",
                 _execution_event_values(event, event_document),
             )
+            if "plan" in intent and _plan_event_changes_position(event):
+                _apply_plan_execution_event(connection.cursor(), "?", intent, event, inserted.lastrowid)
             connection.execute(
                 "UPDATE central_execution_intents SET state=?,broker_order_id=?,last_broker_as_of=?,"
                 "updated_at=?,document_json=? WHERE intent_id=?",
@@ -962,8 +1222,13 @@ class PostgresExecutionStoreMixin:
             operation="create_execution_intent", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
-            _require_execution_ownership(cursor, ownership, value, "%s",
+            stored = _require_execution_ownership(cursor, ownership, value, "%s",
                                          now_provider=getattr(self, '_execution_wall_now', None), new_intent_claim=True)
+            if "plan" in value:
+                if stored is not None:
+                    return False
+                value = _claim_plan_position(cursor, "%s", value, ownership,
+                                             getattr(self, "_execution_wall_now", None))
             if ownership and ownership.get('replacement_claim') is not None:
                 value = {**value, 'mock_replacement_claim': dict(ownership['replacement_claim'])}
             if ownership and ownership.get('protection_claim') is not None:
@@ -990,23 +1255,40 @@ class PostgresExecutionStoreMixin:
         transaction = (open_observed_connection(self._connect, writer) if _connection is None
                        else observe_existing_transaction(_connection, writer, require_idle=True))
         with transaction as connection, connection.cursor() as cursor:
-            _require_execution_ownership(cursor, ownership, intent, "%s",
+            stored = _require_execution_ownership(cursor, ownership, intent, "%s",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
+            if "plan" in intent and not _validate_plan_event(stored, intent, event):
+                return False
+            if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
+                approval, _ = _require_plan_approval(cursor, "%s", intent, ownership,
+                                                    getattr(self, "_execution_wall_now", None))
+                if stored is None or stored.get("mock_plan_approval") != approval:
+                    raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
             event = _require_mock_cancel_retry(cursor, ownership, intent, event, '%s',
                                               now_provider=getattr(self, '_execution_wall_now', None))
+            changes_plan = "plan" in intent and _plan_event_changes_position(event)
             cursor.execute(
                 "INSERT INTO central_execution_events("
                 "event_id,intent_id,state,occurred_at,received_at,broker_execution_id,document_json) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(event_id) DO NOTHING",
+                "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(event_id) DO NOTHING"
+                + (" RETURNING accepted_sequence" if changes_plan else ""),
                 _execution_event_values(event, json.dumps(event, ensure_ascii=False)),
             )
             if cursor.rowcount != 1:
                 return False
+            if changes_plan:
+                sequence = cursor.fetchone()[0]
+                _apply_plan_execution_event(cursor, "%s", intent, event, sequence)
             intent = _retain_execution_claim(cursor, intent, '%s')
+            if "plan" in intent:
+                if stored is None:
+                    raise KeyError(f"unknown execution intent: {intent['intent_id']}")
+                intent = {**intent, "mock_plan_approval": stored["mock_plan_approval"]}
             cursor.execute(
                 "UPDATE central_execution_intents SET state=%s,broker_order_id=%s,last_broker_as_of=%s,"
-                "updated_at=%s,document_json=%s WHERE intent_id=%s",
+                "updated_at=%s,document_json=%s WHERE intent_id=%s"
+                + (" AND NOT (document_json ? 'plan')" if ownership is None else ""),
                 (
                     str(intent["state"]), str(intent.get("broker_order_id") or ""),
                     intent.get("last_broker_as_of"), str(intent["updated_at"]),

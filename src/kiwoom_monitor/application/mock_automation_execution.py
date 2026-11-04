@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from copy import deepcopy
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -34,8 +34,11 @@ from kiwoom_monitor.domain.order_contract import (
     TERMINAL_ORDER_STATES,
     AccountSnapshot,
     OrderIntent,
+    OrderPlanRef,
     OrderSide,
+    OrderState,
     OrderType,
+    PlannedOrderIntent,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord
@@ -134,6 +137,7 @@ class MockAutomationDecisionGate:
     risk_snapshot_id: str = ""
     risk_reconciliation_revision: int = 0
     replacement_binding: Mapping[str, Any] | None = None
+    plan: OrderPlanRef | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -207,6 +211,12 @@ class MockAutomationDecisionGate:
                 UnfilledRepriceEvidence(**evidence)
         elif self.replacement_binding is not None:
             raise ValueError("legacy gate cannot carry replacement authority")
+        if self.plan is not None and (
+            not isinstance(self.plan, OrderPlanRef)
+            or self.version != MOCK_AUTOMATION_DECISION_GATE_VERSION
+            or not self.risk_snapshot_id
+        ):
+            raise ValueError("plan approval requires the current decision gate and Risk evidence")
 
     def to_dict(self) -> dict[str, Any]:
         document = {
@@ -246,6 +256,8 @@ class MockAutomationDecisionGate:
         }
         if self.replacement_binding is not None:
             document["replacement_binding"] = deepcopy(dict(self.replacement_binding))
+        if self.plan is not None:
+            document["plan"] = asdict(self.plan)
         return document
 
 
@@ -406,6 +418,7 @@ class ClosedGateMockRuntime(Protocol):
         self, intent: OrderIntent, account: AccountSnapshot, *, reference_price: int | None = None,
         spec_id: str, control_revision: int, replacement_claim: dict | None = None,
         protection_claim: dict | None = None,
+        plan_recovery: MockAccountRecovery | None = None,
     ) -> ExecutionRecord: ...
 
 
@@ -548,6 +561,7 @@ def assess_mock_automation_decision(
     server_now: datetime | None = None,
     risk_snapshot_id: str = "",
     risk_reconciliation_revision: int = 0,
+    plan: OrderPlanRef | None = None,
 ) -> MockAutomationDecisionGate:
     _validate_decision_identity(decision)
     _validate_lineage(spec, admission, lease_receipt, recovery_decision, recovery)
@@ -633,6 +647,7 @@ def assess_mock_automation_decision(
         "reasons": list(unique_reasons),
         "risk_snapshot_id": risk_snapshot_id,
         "risk_reconciliation_revision": risk_reconciliation_revision,
+        **({"plan": asdict(plan)} if plan is not None else {}),
     }
     return MockAutomationDecisionGate(
         gate_id=_content_id("mock_automation_gate", body),
@@ -646,9 +661,10 @@ def assess_mock_automation_decision(
             key: value for key, value in body.items()
             if key not in {
                 "decided_at", "observed_at", "account_as_of", "server_now",
-                "status", "reasons",
+                "status", "reasons", "plan",
             }
         },
+        plan=plan,
     )
 
 
@@ -665,7 +681,10 @@ def dispatch_mock_automation_decision(
     risk_snapshot_id: str = "",
     risk_reconciliation_revision: int = 0,
     protection_exit_id: str | None = None,
+    plan: OrderPlanRef | None = None,
 ) -> tuple[MockAutomationDecisionGate, ExecutionRecord | None, MockAutomationDispatchReceipt | None]:
+    if plan is not None and protection_exit_id is not None:
+        raise ValueError("planned orders require their own exact approval")
     spec, profile, admission, lease, recovered, latest_stop, control = _load_context(
         repository, account_ref, spec_id,
     )
@@ -688,12 +707,14 @@ def dispatch_mock_automation_decision(
                 profile=profile, server_now=server_now,
                 risk_snapshot_id=risk_snapshot_id,
                 risk_reconciliation_revision=risk_reconciliation_revision,
+                plan=plan,
             )
             repository.save_mock_automation_decision_gate(gate)
             return gate, None, None
         expected_intent = _intent_for_decision(spec, admission, decision, family_id=profile.family_version if profile is not None else None)
+        if plan is not None:
+            expected_intent = PlannedOrderIntent(**asdict(expected_intent), plan=plan)
         if protection_exit_id is not None:
-            from dataclasses import replace
             from kiwoom_monitor.application.mock_automation_risk import PROTECTION_EXIT_VERSION
             if decision.final_action != 'EXIT':
                 raise ValueError('protection_claim_requires_exit')
@@ -705,25 +726,35 @@ def dispatch_mock_automation_decision(
             gate = repository.load_mock_automation_approved_gate(
                 account_ref, existing.intent.intent_id,
             )
-            if gate is None or gate.admission_id != admission.admission_id:
+            if gate is None or gate.admission_id != admission.admission_id or gate.plan != plan:
                 raise RuntimeError("existing automation intent has no approved decision gate")
             receipt = repository.load_mock_automation_dispatch_receipt(
                 account_ref, existing.intent.intent_id,
             )
-            if receipt is None:
+            if receipt is None and plan is None:
                 raise RuntimeError("existing automation intent has no dispatch receipt")
+            if plan is not None and existing.state is OrderState.QUEUED:
+                existing = runtime.submit_automation_intent(
+                    expected_intent, recovery.account, spec_id=spec_id,
+                    control_revision=gate.control_revision, plan_recovery=recovery,
+                )
             return gate, existing, receipt
 
-        in_flight = len(runtime.load_active_intents())
-        gate = assess_mock_automation_decision(
-            spec, admission, lease, recovered, decision, recovery, metrics,
-            strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
-            in_flight_order_count=in_flight,
-            profile=profile, server_now=server_now,
-            risk_snapshot_id=risk_snapshot_id,
-            risk_reconciliation_revision=risk_reconciliation_revision,
-        )
-        repository.save_mock_automation_decision_gate(gate)
+        gate = (repository.load_mock_automation_approved_gate(account_ref, expected_intent.intent_id)
+                if plan is not None else None)
+        if gate is None:
+            gate = assess_mock_automation_decision(
+                spec, admission, lease, recovered, decision, recovery, metrics,
+                strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
+                in_flight_order_count=len(runtime.load_active_intents()),
+                profile=profile, server_now=server_now,
+                risk_snapshot_id=risk_snapshot_id,
+                risk_reconciliation_revision=risk_reconciliation_revision,
+                plan=plan,
+            )
+            repository.save_mock_automation_decision_gate(gate)
+        elif gate.plan != plan or gate.admission_id != admission.admission_id:
+            raise ValueError("stored decision approval does not match the plan")
         if gate.status is MockAutomationGateStatus.BLOCKED:
             return gate, None, None
 
@@ -733,6 +764,7 @@ def dispatch_mock_automation_decision(
             **({'protection_claim': {'workflow_id':protection_exit_id,'gate_id':gate.gate_id,
                 'risk_snapshot_id':risk_snapshot_id,'risk_reconciliation_revision':risk_reconciliation_revision}}
                if protection_exit_id is not None else {}),
+            **({"plan_recovery": recovery} if plan is not None else {}),
         )
         receipt = _dispatch_receipt(gate, record, metrics.observed_at)
         repository.save_mock_automation_dispatch_receipt(receipt)
@@ -750,6 +782,7 @@ def dispatch_mock_automation_decision_from_risk(
     spec_id: str,
     strategy_ref: str,
     protection_exit_id: str | None = None,
+    plan: OrderPlanRef | None = None,
 ) -> tuple[MockAutomationDecisionGate, ExecutionRecord | None, MockAutomationDispatchReceipt | None]:
     """Dispatch only from the latest stored NAS risk revision."""
     metrics = _validated_risk_metrics(repository, runtime, recovery, risk, account_ref, spec_id)
@@ -758,11 +791,14 @@ def dispatch_mock_automation_decision_from_risk(
         account_ref=account_ref, spec_id=spec_id, strategy_ref=strategy_ref,
         risk_snapshot_id=risk.snapshot_id,
         risk_reconciliation_revision=risk.reconciliation_revision,
+        plan=plan,
         **({'protection_exit_id':protection_exit_id} if protection_exit_id is not None else {}),
     )
 
 
-def assess_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, *, account_ref, spec_id, strategy_ref):
+def assess_mock_automation_decision_from_risk(
+    repository, runtime, decision, recovery, risk, *, account_ref, spec_id, strategy_ref, plan=None,
+):
     """Existing ENTER/EXIT gate assessment without dispatch or approved-gate writes.
 
     The caller owns automation_decision_guard through its native checkpoint ACK.
@@ -776,6 +812,7 @@ def assess_mock_automation_decision_from_risk(repository, runtime, decision, rec
         strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
         profile=profile, server_now=now, in_flight_order_count=in_flight,
         risk_snapshot_id=risk.snapshot_id, risk_reconciliation_revision=risk.reconciliation_revision,
+        plan=plan,
     )
 
 
@@ -1394,6 +1431,7 @@ def mock_automation_decision_gate_from_dict(value: Mapping[str, Any]) -> MockAut
         risk_snapshot_id=str(value.get("risk_snapshot_id") or ""),
         risk_reconciliation_revision=int(value.get("risk_reconciliation_revision") or 0),
         replacement_binding=deepcopy(value.get("replacement_binding")),
+        plan=OrderPlanRef(**value["plan"]) if "plan" in value else None,
     )
     _verify_content_id("mock_automation_gate", gate.gate_id, dict(value), "gate_id")
     return gate

@@ -2900,6 +2900,20 @@
         "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_active_execution_intents|connection.execute": 0,
         "db|src/kiwoom_monitor/central_server/database_execution.py|_active_execution_rows|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-03-native-plan-reservation-20261105",
+      "reason": "Planned mock orders need one durable plan projection in the existing intent and event transactions, plus an account fill check before consuming current risk evidence.",
+      "connection": "SQLite and PostgreSQL use the current account lease and existing intent and event owners. The shared cursor reads pinned approval and plan documents, checks for a fill newer than risk, and writes only the plan projection. Legacy intent and account paths do not use the additional queries.",
+      "validation": "S12-03 compares the same synthetic admission, contention, fill, and manual-share assertions in both native stores. The reviewed limits cover the three specific shared SQL sites.",
+      "evidence": [
+        "docs/architecture/section12-development-roadmap-20261105.md#s12-03-native-order-work"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_plan_document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_plan_approval|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_save_plan_position|cursor.execute": 1
+      }
     }
   ]
 }

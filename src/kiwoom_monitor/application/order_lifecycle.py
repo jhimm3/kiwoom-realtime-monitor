@@ -21,6 +21,7 @@ from kiwoom_monitor.domain.order_contract import (
     OrderSide,
     OrderState,
     OrderType,
+    PlannedOrderIntent,
     TERMINAL_ORDER_STATES,
     order_event,
 )
@@ -746,7 +747,14 @@ class OrderLifecycle:
         self._now = now_provider
 
     def queue(self, intent: OrderIntent) -> ExecutionRecord:
-        record = self._repository.create(intent)
+        return self._mark_queued(self._repository.create(intent))
+
+    def queue_planned(self, intent: OrderIntent) -> tuple[ExecutionRecord, bool]:
+        record, first_claim = self._repository.claim(intent)
+        return (self._mark_queued(record), True) if first_claim else (record, False)
+
+    def _mark_queued(self, record: ExecutionRecord) -> ExecutionRecord:
+        intent = record.intent
         if self._repository.events(intent.intent_id):
             return record
         event = order_event(
@@ -757,6 +765,7 @@ class OrderLifecycle:
 
     def submit(
         self, intent_id: str, account: AccountSnapshot, *, reference_price: int | None = None,
+        after_submission_claim: Callable[[], None] | None = None,
     ) -> ExecutionRecord:
         record = self._required(intent_id)
         if record.state is not OrderState.QUEUED:
@@ -770,6 +779,8 @@ class OrderLifecycle:
         # Persist unknown before crossing the network boundary. A crash can then cause a
         # missed submission, but never an automatic duplicate order.
         record = self._apply(record, "SUBMISSION_STARTED", OrderState.SUBMISSION_UNKNOWN)
+        if after_submission_claim is not None:
+            after_submission_claim()
         try:
             submission = transport.submit(record.intent)
         except SubmissionUnknown as error:
@@ -787,6 +798,10 @@ class OrderLifecycle:
         record = self._required(intent_id)
         if record.state in TERMINAL_ORDER_STATES:
             return record
+        if isinstance(record.intent, PlannedOrderIntent) and record.state is OrderState.QUEUED:
+            if quantity not in (0, record.intent.quantity):
+                raise ValueError("a queued planned order can only be cancelled in full")
+            return self.release_queued_plan(record)
         if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED} or not record.broker_order_id:
             raise ValueError("order must be reconciled and accepted before cancellation")
         transport = self._required_transport()
@@ -801,6 +816,12 @@ class OrderLifecycle:
             fallback = OrderState.PARTIALLY_FILLED if record.filled_quantity else OrderState.ACCEPTED
             return self._apply(record, "CANCEL_REJECTED", fallback, reason=str(error))
         return self._apply(record, "CANCEL_ACCEPTED", OrderState.CANCEL_PENDING)
+
+    def release_queued_plan(self, record: ExecutionRecord, *, expired: bool = False) -> ExecutionRecord:
+        if not isinstance(record.intent, PlannedOrderIntent) or record.state is not OrderState.QUEUED:
+            raise ValueError("only queued planned orders can be released before submission")
+        event_type = "PLANNED_UNSENT_EXPIRED" if expired else "PLANNED_UNSENT_CANCELLED"
+        return self._apply(record, event_type, OrderState.REJECTED)
 
     def reconcile(
         self, intent_id: str, snapshot: BrokerOrderSnapshot, *, _connection: Any = None,

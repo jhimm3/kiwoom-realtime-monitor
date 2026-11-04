@@ -154,6 +154,8 @@ def _reported_news_ai_document(collection: str, document: dict[str, Any]) -> dic
 
 
 def _validate_journal_generic_write(collection: str) -> None:
+    if collection == "execution_mock_plan_positions":
+        raise ValueError("use the native execution claim or event command for plan positions")
     if collection in {"preserved_rank_targets", "data_transition_receipts"}:
         raise ValueError("use the native preserved rank command for offline target and receipt documents")
     if collection == JOURNAL_ANALYSIS_REVISION_COLLECTION:

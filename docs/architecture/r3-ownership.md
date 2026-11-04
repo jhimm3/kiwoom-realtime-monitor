@@ -662,6 +662,8 @@ S1 PC Top20 표시창 geometry는 명시 role INI를 사용한다. NAS index/out
 <a id="execution"></a>
 ## 계좌·Risk·Execution — F14/F16/F17/F18
 
+**S12-03 계획 주문.** 새 계획은 명시적으로 선택한 모의 실행에서만 기존 승인·Risk·control·lease와 함께 수락한다. 계좌 owner의 native 주문 저장에 예약과 계획 판본을 묶고, 주문 원장의 상세 FILL만 해당 계획에 반영한다. 전송 전 취소·만료와 미확정 제출의 대사를 분리한다. [정본](app-target-20261023.md#section12-native-planned-orders) · [범위와 검증](section12-development-roadmap-20261105.md#s12-03-native-order-work).
+
 **12절의 익일 보유 격리 검증(2026-11-05).** 기존 명시 익일 보유 정책에서 마감 뒤 Runner와 lease를 닫고, 다음 합성 세션의 새 lease에서 이전 매수 FILL과 고정 보호 근거를 복구했다. 가짜 브로커의 청산 한 번과 매도 FILL 뒤 종결을 확인했다. 적용 범위는 기존 돌파 시험 명세의 보유 수명이다. [11.239](app-target-20261023.md#rss-and-section12-development).
 
 **F16/F17/F18 실행 명세 337.** native gate는 기존 저장소 조회의 명세 원문을 검사한다. 원문이 달라지면 추가 조회·불변 저장·전송 없이 충돌을 반환한다. 최신 계좌 binding·Risk·STOP·control과 일반 읽기·복구 경계는 유지한다. SQLite와 해당 Windows 연결 검사 범위다. [337 근거](app-target-20261023.md#c24-canonical-execution-spec337).

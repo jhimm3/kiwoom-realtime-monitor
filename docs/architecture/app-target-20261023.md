@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · 라이브러리 비교·시장 집계 S12-02 수락**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · 모의 계획 주문의 S12-03 수락**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01과 S12-02를 수락했다. DD와 MICRO는 같은 승인 로드맵의 개발 범위다. 운영 전환은 별도다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-01](#section12-input-baseline) · [S12-02](#section12-library-comparison) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~03을 수락했다. 다음은 S12-04의 네 운용군과 추가 DD·MICRO의 전략·연구·Shadow 연결이다. 운영 전환은 별도다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-01](#section12-input-baseline) · [S12-02](#section12-library-comparison) · [S12-03](#section12-native-planned-orders) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4578,6 +4578,14 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 
 - 7영역의 유지·도입 판정을 기록했다. 같은 동결 분봉 판본으로 DuckDB/Parquet와 기존 JSONL의 결과를 일치시켰다. DuckDB의 파일·메모리 절감과 20쌍의 긴 전체 조회 시간을 분리해 보고하며, 이번 조회 경로는 기존 방식으로 둔다. 후보 패키지는 격리 비교용이다. [비교 결과](section12-development-roadmap-20261105.md#s12-02-비교-판정과-근거).
 - F13의 0B 가격·대금 후보 계산은 정렬 뒤 한 번의 종목/창 분류를 사용한다. 합성 8,000건의 동일 결과와 근거 순서, 중앙값 37.933→20.056ms, 영향 검사 413건을 확인했다. 실제 장중 지연, Risk·주문 경로 수락과 구분한다. [동일 입력 비교](../../tmp/s12-02-market/paired-market.json) · [격리 회귀](../../tmp/s12-02-market/targeted/run.json).
+
+<a id="section12-native-planned-orders"></a>
+
+### 11.242 S12-03 모의 계획의 주문 예약·체결 귀속 — 2026-11-05
+
+- 명시적 계획 주문은 원래 Risk·control·lease와 승인 판본에 결합된다. SQLite와 PostgreSQL의 기존 주문 저장 트랜잭션이 계좌 한도와 계획 판본을 확인해 최초 예약을 저장한다. 기존 주문의 자료 형식과 실행 경로는 보존한다. 새 계획 projection은 native writer가 소유한다.
+- 실제 상세 FILL만 계획 수량과 수락 cursor를 갱신한다. 같은 종목의 계획별 수량과 수동분을 구분한다. 전송 전 취소·만료는 네트워크 없이 예약을 해제한다. 제출이 미확정인 주문은 원주문 대사를 계속한다.
+- 동일 계좌/종목을 쓰는 합성 주문은 한 명세에서 계좌가 비었을 때 명시적으로 미리 승인했다. 동일 소스의 관련 Windows 480건과 격리 PostgreSQL 14건, 구조 검사와 증분 실행 대조를 수락했다. 운용군별 정책과 계획 조회의 소비자 연결은 다음 단계다. [로드맵과 검증](section12-development-roadmap-20261105.md#s12-03-native-order-work).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 
