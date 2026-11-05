@@ -68,8 +68,8 @@ from kiwoom_monitor.infrastructure.persistence.research_repository import Resear
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient, CentralContentHttpError, CentralContentUnavailableError
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
-from kiwoom_monitor.infrastructure.research_data_source import load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
-from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
+from kiwoom_monitor.infrastructure.research_data_source import FrozenStrategyReferences, load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
+from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, CLOSE_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
 from kiwoom_monitor.domain.research_contract import (
     SECTION12_EVIDENCE_EXPERIMENT_FAMILIES as EVIDENCE_EXPERIMENT_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FORMAT,
@@ -156,24 +156,42 @@ class EvidenceExperimentRequest:
     resource_limits: ResearchResourceLimits
 
 
+_FINAL_CLOSE_RESEARCH_CANDIDATE = 'final_research_candidate/v1'
+
+
 def final_candidate_spec_document(
     request: ResearchProcessRequest, implementation_hash: str,
 ) -> dict[str, Any]:
-    """Preserve v1 identities; use v2 for the explicitly configured leader Family."""
+    """Preserve legacy identities and bind CLOSE's pinned calendar to its research identity."""
     if (not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run'
-            or request.search is not None or request.development_partition is not None or request.strategy_references is not None
+            or request.search is not None or request.development_partition is not None or request.shadow_only
             or request.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES):
         raise ValueError('final candidate requires a fixed registered single-run strategy')
     if (not isinstance(implementation_hash, str) or len(implementation_hash) != 64
             or any(char not in '0123456789abcdef' for char in implementation_hash)):
         raise ValueError('final candidate requires a scientific implementation SHA256')
-    family = family_for_config(request.strategy)
-    if family.family_id != request.family:
-        raise ValueError('final candidate family differs from its registered strategy')
-    parameters = parse_strategy_config(request.family, request.strategy.to_dict()).to_dict()
+    close = isinstance(request.strategy, MinuteExperiment) and request.strategy.family == CLOSE_FAMILY
+    references = request.strategy_references
+    if close:
+        if (request.family != CLOSE_FAMILY or request.session_profile != 'krx-regular/v1'
+                or not isinstance(references, tuple) or len(references) != 2 or not isinstance(references[0], Path)
+                or not references[0].is_absolute()
+                or not isinstance(references[1], str) or len(references[1]) != 64
+                or any(char not in '0123456789abcdef' for char in references[1])):
+            raise ValueError('final CLOSE candidate requires its pinned KRX calendar reference')
+        parameters = MinuteExperiment.from_document(request.family, request.strategy.to_dict()).to_dict()
+    else:
+        if references is not None or isinstance(request.strategy, MinuteExperiment):
+            raise ValueError('final candidate requires a fixed registered single-run strategy')
+        family = family_for_config(request.strategy)
+        if family.family_id != request.family:
+            raise ValueError('final candidate family differs from its registered strategy')
+        parameters = parse_strategy_config(request.family, request.strategy.to_dict()).to_dict()
     execution = request.execution
     if not isinstance(execution, SimulationExecutionConfig) or type(execution.initial_cash_won) is not int:
         raise ValueError('final candidate requires a typed execution model and integer capital')
+    if close != (execution.version == COMPLETED_CLOSE_EXECUTION_VERSION):
+        raise ValueError('final CLOSE candidate and completed-close execution must be selected together')
     costs = execution.cost_model
     if (not isinstance(costs, SimulationCostModel) or costs.rate_basis == 'unspecified'
             or not costs.source.strip() or not costs.valid_from or not costs.valid_to
@@ -188,10 +206,14 @@ def final_candidate_spec_document(
         if missing:
             raise ValueError("leader candidate execution blocked:" + ",".join(missing))
         parameters = {**parameters, "contexts": []}
-    return {'version': 'final_candidate/v2' if leader else 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
+    document = {'version': 'final_candidate/v2' if leader else 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
             'execution_model': execution.to_dict(),
             'session_profile': research_session_profile_document(request.session_profile),
             'implementation_hash': implementation_hash}
+    if references is not None:
+        document['version'] = _FINAL_CLOSE_RESEARCH_CANDIDATE
+        document['strategy_references'] = {'version': 'strategy-reference/v1', 'sha256': references[1]}
+    return document
 
 
 def final_candidate_spec_hash(request: ResearchProcessRequest, implementation_hash: str) -> str:
@@ -219,6 +241,8 @@ def prepare_mock_automation_candidate_publication(
     )
 
     candidate_spec = final_candidate_spec_document(request, implementation_hash)
+    if candidate_spec['version'] == _FINAL_CLOSE_RESEARCH_CANDIDATE:
+        raise ValueError('final CLOSE research cannot be published as a mock automation candidate')
     candidate_hash = final_candidate_spec_hash(request, implementation_hash)
     matches = [
         row for row in repository.load_final_holdout_executions(final_batch_id)
@@ -257,6 +281,7 @@ class PreparedFinalHoldoutEvaluation:
     dataset: FrozenResearchDataset
     storage_paths: tuple[str, str, str]
     implementation_hash: str
+    strategy_references: tuple[FrozenStrategyReferences | None, ...]
 
 
 @dataclass(frozen=True)
@@ -283,6 +308,9 @@ class FinalHoldoutExecutionRequest:
                 'evaluation': request.evaluation.to_dict(),
                 'resource_budget': {'memory_mb': request.resource_limits.memory_mb,
                                     'cpu_duty_percent': request.resource_limits.cpu_duty_percent}})
+            if request.strategy_references is not None:
+                path, digest = request.strategy_references
+                candidates[-1]['strategy_references'] = {'path': str(path), 'sha256': digest}
         return {'version': 'independent_final_holdout_request/v1', 'batch': self.batch.to_dict(),
                 'candidates': candidates,
                 'access': {'request_id': self.access_request_id, 'accessed_at': self.accessed_at},
@@ -329,6 +357,11 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
     if (current_hash != prepared.implementation_hash
             or tuple(key for key, _ in keyed) != batch.candidate_spec_hashes):
         raise ValueError('prepared final candidates or implementation changed before execution')
+    if (len(prepared.strategy_references) != len(keyed) or any(
+            (references.sha256 if references is not None else None)
+            != (candidate.strategy_references[1] if candidate.strategy_references is not None else None)
+            for (_, candidate), references in zip(keyed, prepared.strategy_references))):
+        raise ValueError('prepared final strategy references differ from the locked candidates')
     if any(FinalHoldoutBatchSpec(batch.version, batch.dataset_id, batch.dataset_hash,
                request.session_profile, batch.candidate_spec_hashes, request.evaluation).to_dict()['evaluation']
                != batch.to_dict()['evaluation'] for _, request in keyed):
@@ -392,7 +425,7 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
             progress_callback(snapshot())
 
     publish_progress()
-    for index, (candidate_hash, candidate) in enumerate(keyed):
+    for index, ((candidate_hash, candidate), references) in enumerate(zip(keyed, prepared.strategy_references)):
         row = rows[index]
         if cancel_requested():
             row['state'], row['reason'] = 'CANCELLED', 'user_cancelled_before_claim'
@@ -402,7 +435,8 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
             raise ValueError('research implementation changed during final execution')
         guard = ResearchResourceGuard(candidate.resource_limits)
         run_id, spec = research_run_identity(dataset, candidate.strategy, candidate.execution, candidate.evaluation,
-            session_profile=candidate.session_profile, execution_scope='independent_final_holdout/v1')
+            session_profile=candidate.session_profile, execution_scope='independent_final_holdout/v1',
+            strategy_references=references)
         row['run_id'] = run_id
         recovery = recovery_documents.get(candidate_hash)
         if recovery is not None:
@@ -449,7 +483,7 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
             result = execute_research(dataset, repository, candidate.runs_dir, candidate.strategy,
                 candidate.execution, candidate.evaluation, cancel_requested, candidate.session_profile, guard,
                 execution_scope='independent_final_holdout/v1', expected_code_hash=prepared.implementation_hash,
-                final_execution=ownership)
+                final_execution=ownership, strategy_references=references)
             if result.run_id != run_id:
                 raise RuntimeError('final scientific run identity mismatch')
             repository.finish_final_holdout_execution(batch.batch_id, candidate_hash, run_id=run_id,
@@ -478,8 +512,9 @@ def prepare_final_holdout_evaluation(batch: FinalHoldoutBatchSpec, candidates: t
     if not isinstance(batch, FinalHoldoutBatchSpec) or not isinstance(candidates, tuple) or not 1 <= len(candidates) <= 200:
         raise ValueError('final preparation requires a locked batch and 1 to 200 fixed candidates')
     implementation_hash = research_implementation_hash(batch.session_profile)
-    keyed = [(final_candidate_spec_hash(request, implementation_hash), request) for request in candidates]
-    if tuple(sorted(key for key, _ in keyed)) != batch.candidate_spec_hashes:
+    keyed = sorted(((final_candidate_spec_hash(request, implementation_hash), request) for request in candidates),
+                   key=lambda pair: pair[0])
+    if tuple(key for key, _ in keyed) != batch.candidate_spec_hashes:
         raise ValueError('final candidates differ from the locked scientific hash set')
     first = candidates[0]
     if any(not isinstance(path, Path) or not path.is_absolute() for path in (first.dataset, first.database, first.runs_dir)):
@@ -504,12 +539,21 @@ def prepare_final_holdout_evaluation(batch: FinalHoldoutBatchSpec, candidates: t
     def checked():
         checkpoint()
         guard.checkpoint()
+    loaded_references = {}
+    candidate_references = []
+    for _, request in keyed:
+        checked()
+        reference = request.strategy_references
+        if reference is not None and reference not in loaded_references:
+            path, digest = reference
+            loaded_references[reference] = load_frozen_strategy_references(path, expected_sha256=digest)
+        candidate_references.append(loaded_references.get(reference))
     checked()
     source = load_research_input(paths[0], session_profile=batch.session_profile, checkpoint=checked)
     dataset = prepare_final_holdout_partition(source, batch, checkpoint=checked)
     prepared = PreparedFinalHoldoutEvaluation(batch,
-        tuple(request for _, request in sorted(keyed, key=lambda pair: pair[0])), dataset,
-        tuple(str(path) for path in paths), implementation_hash)
+        tuple(request for _, request in keyed), dataset,
+        tuple(str(path) for path in paths), implementation_hash, tuple(candidate_references))
     if research_implementation_hash(batch.session_profile) != implementation_hash:
         raise ValueError('scientific implementation changed during final preparation')
     checked()
@@ -536,7 +580,7 @@ def load_final_holdout_execution_request(path: Path) -> FinalHoldoutExecutionReq
     candidate_fields = {'mode', 'family', 'dataset', 'database', 'runs_dir', 'session_profile',
                         'strategy', 'execution', 'evaluation', 'resource_budget'}
     if (not isinstance(raw_candidates, list) or not 1 <= len(raw_candidates) <= 200
-            or any(not isinstance(value, Mapping) or set(value) != candidate_fields
+            or any(not isinstance(value, Mapping) or not candidate_fields <= set(value) <= candidate_fields | {'strategy_references'}
                    for value in raw_candidates)):
         raise ValueError('final request requires 1 to 200 fixed candidate documents')
     candidates = tuple(research_process_request_from_document(value, path.parent) for value in raw_candidates)

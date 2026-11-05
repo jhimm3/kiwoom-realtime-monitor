@@ -244,6 +244,109 @@ class FinalExecutionTests(unittest.TestCase):
     def execute(self, **kwargs):
         return rp.execute_final_holdout_evaluation(self.prepared, owner_token=self.owner, **kwargs)
 
+    def test_section12_close_final_locks_calendar_and_preserves_overnight_paper_fills(self):
+        from kiwoom_monitor.infrastructure.research_data_source import load_research_input, write_frozen_research_bundle
+
+        root = self.fixture.root
+        source = root / 'close-source'
+        friday, monday = '2026-09-18', '2026-09-21'
+
+        def stamp(day, clock):
+            return f'{day}T{clock}:00+09:00'
+
+        def bars(day, times_and_prices):
+            rows = fixtures.rows_for(datetime.fromisoformat(day).date(), len(times_and_prices))
+            for row, (clock, price) in zip(rows[1:], times_and_prices):
+                start = stamp(day, clock)
+                end = (datetime.fromisoformat(start) + timedelta(minutes=1)).isoformat()
+                row.update(observation_key=start, available_at=end)
+                row['payload'].update(bar_start=start, bar_end=end, open=price, high=price, low=price, close=price)
+            return rows
+
+        paths = (
+            fixtures.child(source, datetime.fromisoformat(friday).date(), bars(friday, (
+                ('15:14', 100), ('15:15', 100), ('15:16', 105), ('15:17', 105), ('15:29', 110),
+            ))),
+            fixtures.child(source, datetime.fromisoformat(monday).date(), bars(monday, (
+                ('10:00', 103), ('10:01', 102), ('10:02', 101),
+            ))),
+        )
+        write_frozen_research_bundle(source, paths)
+        manifest = load_research_input(source, session_profile=fixtures.PROFILE).manifest
+
+        def session(day, start, end, name='KRX_REGULAR', phase='CONTINUOUS'):
+            return {'starts_at': stamp(day, start), 'ends_at': stamp(day, end), 'session': name,
+                    'phase': phase, 'support': 'SUPPORTED', 'schedule_version': 'fixture/v1'}
+
+        calendar = [
+            {'venue': 'KRX', 'trading_date': day, 'available_at': stamp(friday, '08:00'),
+             'revision_id': day, 'evidence_ref': 'fixture-calendar', 'sessions': windows}
+            for day, windows in (
+                (friday, [session(friday, '09:00', '15:20'),
+                          session(friday, '15:29', '15:30', 'KRX_CLOSING_AUCTION', 'AUCTION_ORDER_ENTRY')]),
+                ('2026-09-19', []), ('2026-09-20', []), (monday, [session(monday, '10:00', '15:20')]),
+            )
+        ]
+        calendar.append({**calendar[0], 'revision_id': 'after-close', 'available_at': stamp(friday, '16:00'),
+                         'sessions': []})
+        reference = root / 'close-calendar.json'
+        encoded = json.dumps({'version': 'strategy-reference/v1', 'calendar': calendar, 'listings': []}).encode()
+        digest = hashlib.sha256(encoded).hexdigest()
+        reference.write_bytes(encoded)
+
+        candidate_path, _, _ = self.candidate_cli_paths()
+        document = json.loads(candidate_path.read_text(encoding='utf-8'))
+        document.update(family='close_betting/v1', dataset=str(source), database=str(root / 'close.sqlite3'),
+                        runs_dir=str(root / 'close-runs'), strategy_references={'path': str(reference), 'sha256': digest},
+                        strategy={'capital_won': 1000, 'policy': {
+                            'quantity': 4, 'entry_window_minutes': 10, 'lookback_bars': 2,
+                            'minimum_close_return_bps': 200, 'adverse_gap_bps': 500, 'protection_loss_bps': 1000,
+                            'exit_minutes_after_open': 8, 'ipo_reduction_quantity': None, 'listing_phases': [],
+                        }})
+        document['execution'].update(version='completed_close_then_next_open/v1', same_bar_path_version='no_intrabar_fill/v1')
+        document['execution']['cost_model'].update(commission_bps=0, sell_tax_bps=0, slippage_bps=0,
+                                                  valid_from=stamp(friday, '08:00'), valid_to=stamp(monday, '16:00'))
+        document['evaluation']['folds'][0].update(start=stamp(friday, '09:00'), end=stamp(monday, '16:00'))
+        candidate = rp.research_process_request_from_document(document, root)
+        implementation_hash = rp.research_implementation_hash(fixtures.PROFILE)
+        candidate_hash = rp.final_candidate_spec_hash(candidate, implementation_hash)
+        self.assertNotEqual(candidate_hash, rp.final_candidate_spec_hash(
+            replace(candidate, strategy_references=(reference, 'a' * 64)), implementation_hash))
+        self.assertEqual(candidate_hash, rp.final_candidate_spec_hash(
+            replace(candidate, strategy_references=(root / 'copied.json', digest)), implementation_hash))
+        batch = rp.FinalHoldoutBatchSpec('final_holdout_batch/v1', manifest['dataset_id'], manifest['revision_ids_hash'],
+                                        fixtures.PROFILE, (candidate_hash,), candidate.evaluation)
+        request = rp.FinalHoldoutExecutionRequest(batch, (candidate,), 'close-access', stamp(monday, '17:00'), self.owner)
+        request_path = root / 'close-final.json'
+        request_path.write_text(json.dumps(request.to_dict()), encoding='utf-8')
+        parsed = rp.load_final_holdout_execution_request(request_path)
+        self.assertEqual(request.to_dict(), parsed.to_dict())
+        reference.write_bytes(encoded + b' ')
+        with (patch.object(rp, 'load_research_input', side_effect=AssertionError('no OOS bytes')),
+              self.assertRaisesRegex(ValueError, 'reference.*hash')):
+            rp.execute_final_holdout_request(parsed)
+        self.assertFalse(candidate.database.exists())
+        reference.write_bytes(encoded)
+        result = rp.execute_final_holdout_request(parsed)['candidates'][0]
+        self.assertEqual('COMPLETED', result['state'], result['reason'])
+        repo = ResearchRepository(candidate.database)
+        self.assertEqual(digest, repo.load_run(result['run_id'])['spec']['strategy_references']['sha256'])
+        fills = [row for row in repo.load_execution_events(result['run_id']) if row['event_type'] == 'FILL']
+        self.assertEqual([('BUY', 4, 105), ('SELL', 4, 102)],
+                         [(row['side'], row['quantity'], row['price']) for row in fills])
+        self.assertEqual([friday, monday], [row['occurred_at'][:10] for row in fills])
+        repeated = rp.execute_final_holdout_request(parsed)['candidates'][0]
+        self.assertEqual(('CACHED', result['run_id'], result['logical_result_hash']),
+                         (repeated['state'], repeated['run_id'], repeated['logical_result_hash']))
+        self.assertEqual(1, len(repo.load_final_holdout_executions(batch.batch_id)))
+        policy = MockAutomationEligibilityPolicy('close-test', candidate_hash,
+            datetime.fromisoformat(stamp(friday, '08:00')), 1, 1, 0, 1_000_000)
+        with self.assertRaisesRegex(ValueError, 'cannot be published as a mock automation candidate'):
+            rp.prepare_mock_automation_candidate_publication(repo, candidate,
+                implementation_hash=implementation_hash, strategy_ref=policy.strategy_ref,
+                account_ref='test-mock', final_batch_id=batch.batch_id, final_run_id=result['run_id'],
+                eligibility_policy=policy)
+
     def candidate_cli_paths(self):
         root = self.fixture.root
         document = json.loads((root / 'request.json').read_text(encoding='utf-8'))

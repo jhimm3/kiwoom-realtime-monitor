@@ -34,7 +34,7 @@ from kiwoom_monitor.application.research_implementation import (
     LEGACY_RESEARCH_IMPLEMENTATION_HASH, research_implementation_hash,
 )
 from kiwoom_monitor.application.section12_minute_research import (
-    BREAKOUT_STUDY_FAMILY, IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MinuteExperiment, MinuteExperimentRun,
+    BREAKOUT_STUDY_FAMILY, CLOSE_FAMILY, IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MinuteExperiment, MinuteExperimentRun,
 )
 from kiwoom_monitor.domain.simulation_contract import COMPLETED_CLOSE_EXECUTION_VERSION
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
@@ -94,6 +94,8 @@ def execute_research(
 ) -> ResearchRunResult:
     leader = isinstance(config, LeaderBreakoutConfig)
     section12 = isinstance(config, MinuteExperiment)
+    final_scope = execution_scope == 'independent_final_holdout/v1'
+    final_close = final_scope and section12 and config.family == CLOSE_FAMILY
     historical_reconstruction = _is_historical_reconstruction(dataset.manifest)
     historical_breakout = (section12 and config.family == BREAKOUT_STUDY_FAMILY and historical_reconstruction
                            and session_profile == KRX_REGULAR_RESEARCH_PROFILE
@@ -124,9 +126,9 @@ def execute_research(
         research_context=not shadow_only and execution_scope is None,
     ) if section12 else None
     if strategy_references is not None and (
-        session_profile is None or execution_scope is not None or leader
+        session_profile is None or (execution_scope is not None and not final_close) or leader
     ):
-        raise ValueError("pinned strategy references require ordinary ordered minute research")
+        raise ValueError("pinned strategy references require ordered minute research or a final CLOSE candidate")
     calendar_evidence = strategy_references.calendar if strategy_references is not None else None
     if leader:
         missing = config.execution_missing("1m")
@@ -139,7 +141,6 @@ def execute_research(
             raise ResearchRunCancelled('development partition validation interrupted')
         if resource_guard is not None:
             resource_guard.checkpoint()
-    final_scope = execution_scope == 'independent_final_holdout/v1'
     active_start = (final_holdout_partition_start(dataset, evaluation_spec, checkpoint=partition_checkpoint)
                     if final_scope else development_partition_start(dataset, evaluation_spec, checkpoint=partition_checkpoint))
     target_partition = (DevelopmentPartitionSpec.from_dict(dataset.manifest['development_partition']['spec']).symbol_partition
