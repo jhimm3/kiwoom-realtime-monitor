@@ -3020,6 +3020,20 @@
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|_close_native_documents|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-close-completed-gap-native-revisions-20261105",
+      "reason": "A native CLOSE adverse-gap SELL must use the same completed-auction and first-minute rule as research and bind the two actual source revisions.",
+      "connection": "The existing plan claim reads exactly two revision IDs with the native observation codec in the same intent or submission transaction. The pure gap rule is shared with research; original setup retains the selected next session. The extra indexed read occurs only for the completed-gap reason, while current 0B and Risk/lease/control checks remain shared.",
+      "validation": "The restarted plan holds without completed gap input or with future opening data, rejects missing native revisions and mutated frozen payload before order/plan changes, then submits only the three actual shares using a fresh 0B price distinct from the completed bar close. Both SQLite and PostgreSQL use the same synthetic native revision fixture.",
+      "evidence": [
+        "tests/unit/test_close_and_ipo.py",
+        "tests/unit/test_close_mock_execution.py",
+        "tests/integration/test_close_mock_execution_postgres.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_close_native_gap_observations|cursor.execute": 1
+      }
     }
   ]
 }

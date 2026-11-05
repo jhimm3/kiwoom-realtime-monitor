@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 import json
 
 from .breakout_strategy import StrategyState
-from .close_and_ipo import CloseIpoSetup, ClosePolicy, matches_close_shadow
-from .market_session_schedule import KST
+from .close_and_ipo import CloseIpoPosition, CloseIpoSetup, ClosePolicy, evaluate_close_gap, matches_close_shadow
+from .market_session_schedule import KST, MarketPhase, MarketSession, SessionSupport
+from .research_replay import KrxMinuteBarFrame
 from .mock_automation_execution import (
     MockAutomationGateStatus,
     assess_mock_automation_decision_from_risk,
@@ -212,8 +213,39 @@ def cancel_close_entry_deadline(repository, runtime, execution, spec, expected, 
                                           build_planned_cancel_claim=build_claim)
 
 
+def _completed_close_gap(position, observations, decided_at):
+    setup, window = position.setup, position.setup.next_session
+    if window is None:
+        return None  # Older stored setups retain their 0B protection and deadline path.
+    if ((window.venue, window.trading_date, window.starts_at, window.session, window.phase, window.support)
+            != ('KRX', setup.next_date, setup.next_open_at, MarketSession.KRX_REGULAR, MarketPhase.CONTINUOUS,
+                SessionSupport.SUPPORTED) or decided_at.astimezone(KST).date() != setup.next_date):
+        return None
+    if len(observations) != 2 or len({row['revision_id'] for row in observations}) != 2:
+        raise ValueError('CLOSE gap requires two distinct native bar revisions')
+    frames = []
+    for row in observations:
+        payload = row['payload']
+        if ((row['kind'], row['subject'], row['venue'], row['value_kind'], row['completeness'])
+                != ('minute_bar', setup.symbol, 'KRX', 'actual', 'complete')
+                or payload.get('window_closed') is not True or payload.get('capture_quality') != 'complete'
+                or payload.get('market') != 'KRX' or payload.get('code') != setup.symbol
+                or payload.get('price_unit') != 'won'
+                or any(type(payload.get(key)) is not int for key in
+                       ('open', 'high', 'low', 'close', 'volume', 'trade_value_million_won'))):
+            raise ValueError('CLOSE gap requires completed actual KRX bars in won')
+        frames.append(KrxMinuteBarFrame(row['revision_id'], row['observation_key'], setup.symbol,
+            payload['bar_start'], payload['bar_end'], row['available_at'],
+            payload['open'], payload['high'], payload['low'], payload['close'], payload['volume'],
+            payload['trade_value_million_won'], bool(payload.get('session_finalized', False)),
+            payload['capture_quality'], payload['finalization_source'], market_session=payload['session'],
+            market_phase=payload['phase'], schedule_version=payload['schedule_version']))
+    result = evaluate_close_gap(position, frames, session=window, cut=decided_at)
+    return result if result.action == 'EXIT' else None
+
+
 def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence, root, head, fill_events,
-                              trigger_quote, quote, decided_at, now):
+                              trigger_quote, quote, decided_at, now, gap_observations=None):
     """Manage only the original plan's detailed fills, independently of new-entry settings."""
     entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
     expected_entry, entry_decision, original_plan = build_close_entry_evidence(spec, run_id=run_id,
@@ -257,6 +289,9 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     elif local.date() == setup.next_date and decided_at >= setup.next_open_at + timedelta(
             minutes=setup.policy.exit_minutes_after_open):
         reason = "next_session_exit_deadline_0B"
+    elif gap_observations is not None and _completed_close_gap(
+            CloseIpoPosition(setup, head.quantity, basis, 0), gap_observations, decided_at) is not None:
+        reason = 'adverse_gap_full_exit_completed_bars'
     else:
         return None
     snapshot = {"version": "close_exit_snapshot/v1", "spec_id": spec.spec_id,
@@ -265,6 +300,8 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
         "entry_intent_id": root.intent.intent_id, "quantity": head.quantity, "fill_cursor": head.fill_cursor,
         "entry_price_won": basis, "entry_fill_ref": content_id("close_fills", fills),
         "trigger_quote": trigger, "quote": execution_quote, "reason": reason}
+    if reason == 'adverse_gap_full_exit_completed_bars':
+        snapshot['gap_observations'] = gap_observations
     state = StrategyState(status="open", symbol=event["symbol"], entry_price=basis,
         position_quantity=head.quantity, opened_at=fills[0]["occurred_at"]).to_dict()
     body = {"run_id": run_id, "snapshot_id": content_id("snapshot", snapshot), "symbol": event["symbol"],
@@ -277,7 +314,8 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     return {**document, "proof_id": content_id("close_exit", document)}, decision, head.plan
 
 
-def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameters, event, trigger_quote, quote, recovery, risk):
+def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameters, event, trigger_quote, quote, recovery, risk,
+                        gap_observations=None):
     """Restore frozen management from its native entry and use the existing SELL gate."""
     from .mock_automation_execution import mock_automation_intent_id
 
@@ -296,6 +334,7 @@ def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameter
         if runtime.load_intent(mock_automation_intent_id(spec.spec_id, decision.decision_id)) is not None:
             return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
         trigger_quote, quote = snapshot["trigger_quote"], snapshot["quote"]
+        gap_observations = snapshot.get('gap_observations')
         decided_at = datetime.fromisoformat(decision.decided_at)
     entry = repository.load_close_entry_evidence(runtime.account_ref, plan.plan_id)
     if entry is None:
@@ -307,7 +346,7 @@ def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameter
         raise ValueError("CLOSE plan revision changed before management")
     prepared = build_close_exit_evidence(spec, run_id=runtime.run_id, parameters=parameters, event=event,
         entry_evidence=entry, root=root, head=head, fill_events=execution.events(root_id),
-        trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now)
+        trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now, gap_observations=gap_observations)
     if prepared is None:
         return None, None, None
     evidence, decision, plan = prepared

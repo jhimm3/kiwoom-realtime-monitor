@@ -522,6 +522,22 @@ def _close_native_documents(cursor, p, account, spec_id, plan_id):
     return spec, package, proof, event
 
 
+def _close_native_gap_observations(cursor, p, observations):
+    from kiwoom_monitor.central_server.database_codec import _observation_revision_columns, observation_revision_result_rows
+
+    if observations is None:
+        return None
+    refs = [row['revision_id'] for row in observations]
+    if len(refs) != 2 or len(set(refs)) != 2:
+        raise RuntimeError('CLOSE_GAP_NATIVE_REVISIONS_MISSING')
+    cursor.execute(f"SELECT {_observation_revision_columns(postgres=p == '%s')} FROM central_observation_revisions "
+                   f"WHERE revision_id IN ({p},{p})", refs)
+    rows = {row['revision_id']: row for row in observation_revision_result_rows(cursor.fetchall())}
+    if set(rows) != set(refs):
+        raise RuntimeError('CLOSE_GAP_NATIVE_REVISIONS_MISSING')
+    return [rows[ref] for ref in refs]
+
+
 def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider, submission_claim):
     """Recheck entry or owned-position management in the order's native transaction."""
     from dataclasses import asdict, replace
@@ -575,7 +591,8 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
             root=_record_from_document(_json_document(root_row[0])), head=replace(head, plan=plan),
             fill_events=[_json_document(item[0]) for item in _execution_event_rows(cursor, root_id, p)],
             trigger_quote=exit_proof["snapshot"]["trigger_quote"], quote=exit_proof["snapshot"]["quote"],
-            decided_at=datetime.fromisoformat(value["created_at"]), now=now)
+            decided_at=datetime.fromisoformat(value["created_at"]), now=now,
+            gap_observations=_close_native_gap_observations(cursor, p, exit_proof['snapshot'].get('gap_observations')))
         if prepared is None:
             raise RuntimeError("CLOSE_EXIT_TRIGGER_MISSING")
         expected, decision, plan = prepared

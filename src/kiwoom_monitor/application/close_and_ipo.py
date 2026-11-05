@@ -108,6 +108,7 @@ class CloseIpoSetup:
     next_date: date | None
     next_open_at: datetime | None
     next_calendar_ref: str | None
+    next_session: SessionWindow | None = None
 
     @classmethod
     def from_document(cls, document: Mapping) -> CloseIpoSetup:
@@ -121,14 +122,15 @@ class CloseIpoSetup:
         values["entry_bar_refs"] = tuple(values["entry_bar_refs"])
         values["listing_refs"] = tuple(values["listing_refs"])
         values["listing_phase"] = ListingPhase(values["listing_phase"]) if values["listing_phase"] is not None else None
-        auction = values["close_auction"]
-        if auction is not None:
-            values["close_auction"] = SessionWindow(**{
-                **auction, "trading_date": date.fromisoformat(auction["trading_date"]),
-                "session": MarketSession(auction["session"]), "phase": MarketPhase(auction["phase"]),
-                "support": SessionSupport(auction["support"]),
-                "starts_at": datetime.fromisoformat(auction["starts_at"]), "ends_at": datetime.fromisoformat(auction["ends_at"]),
-            })
+        for key in ("close_auction", "next_session"):
+            window = values.get(key)
+            if window is not None:
+                values[key] = SessionWindow(**{
+                    **window, "trading_date": date.fromisoformat(window["trading_date"]),
+                    "session": MarketSession(window["session"]), "phase": MarketPhase(window["phase"]),
+                    "support": SessionSupport(window["support"]),
+                    "starts_at": datetime.fromisoformat(window["starts_at"]), "ends_at": datetime.fromisoformat(window["ends_at"]),
+                })
         values["next_date"] = date.fromisoformat(values["next_date"]) if values["next_date"] is not None else None
         values["next_open_at"] = datetime.fromisoformat(values["next_open_at"]) if values["next_open_at"] is not None else None
         return cls(**values)
@@ -275,7 +277,7 @@ def _entry(policy, bar, history, calendar, listings, day, session, start, cut) -
     if auction is None or next_open is None:
         return CloseIpoDecision("WAIT", 0, "close_or_next_open_evidence_unavailable", evidence_refs=bar_refs)
     setup = replace(setup, close_auction=auction, next_date=following.trading_date,
-                    next_open_at=next_open.starts_at, next_calendar_ref=following.revision_id)
+                    next_open_at=next_open.starts_at, next_calendar_ref=following.revision_id, next_session=next_open)
     return CloseIpoDecision("ENTER", policy.quantity, "preclose_return_setup", setup,
                             (*bar_refs, day.revision_id, following.revision_id, *listing_refs))
 
@@ -302,16 +304,22 @@ def _manage_position(position, bar, history, day, session, cut) -> CloseIpoDecis
     if cut >= setup.next_open_at + timedelta(minutes=policy.exit_minutes_after_open):
         return CloseIpoDecision("EXIT", position.quantity, "next_session_exit_deadline", setup, refs)
 
+    return evaluate_close_gap(position, (*history, bar), session=session, cut=cut, refs=refs)
+
+
+def evaluate_close_gap(position, frames, *, session, cut, refs=()):
+    """Share the completed-bar gap rule with native management, without inferring intrabar paths."""
+    setup, policy = position.setup, position.setup.policy
+    frames = tuple(frames)
     # Only the actual first completed continuous minute and exact prior closing
     # auction are supported gap proxies. A later first observation is not an open.
     auction = setup.close_auction
-    frames = tuple(history)
     closing = _window_bar(frames, setup.symbol, auction, auction.starts_at, auction.ends_at, setup.next_open_at)
-    opening = _window_bar((*frames, bar), setup.symbol, session, setup.next_open_at,
+    opening = _window_bar(frames, setup.symbol, session, setup.next_open_at,
                           setup.next_open_at + timedelta(minutes=1), cut)
     if closing is None or opening is None:
         return CloseIpoDecision("HOLD", 0, "completed_close_or_open_proxy_unavailable", setup, refs)
-    refs = tuple(dict.fromkeys((closing.revision_id, opening.revision_id, bar.revision_id)))
+    refs = tuple(dict.fromkeys((closing.revision_id, opening.revision_id, *refs)))
     if opening.open * 10_000 > closing.close * (10_000 - policy.adverse_gap_bps):
         return CloseIpoDecision("HOLD", 0, "no_adverse_opening_gap", setup, refs)
     if policy.ipo_reduction_quantity is None:

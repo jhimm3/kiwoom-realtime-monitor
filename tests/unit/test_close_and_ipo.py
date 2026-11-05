@@ -94,6 +94,7 @@ class CloseAndIpoTests(unittest.TestCase):
         self.assertEqual(("ENTER", 4), (decision.action, decision.quantity))
         self.assertEqual(self.tuesday, decision.setup.next_date)
         self.assertEqual(datetime.combine(self.tuesday, time(10), KST), decision.setup.next_open_at)
+        self.assertEqual(self.following, decision.setup.next_session)
         self.assertEqual(self.auction, decision.setup.close_auction)
         self.assertEqual(("first", "second", "signal"), decision.setup.entry_bar_refs)
 
