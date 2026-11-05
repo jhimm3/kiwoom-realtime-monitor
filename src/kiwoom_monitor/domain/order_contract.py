@@ -201,6 +201,19 @@ class BrokerSubmission:
 
 
 @dataclass(frozen=True)
+class BrokerAmendmentSubmission(BrokerSubmission):
+    original_broker_order_id: str
+    quantity: int
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if (not isinstance(self.original_broker_order_id, str) or not self.original_broker_order_id.strip()
+                or self.original_broker_order_id == self.broker_order_id
+                or type(self.quantity) is not int or self.quantity <= 0):
+            raise ValueError("amendment acknowledgement requires original/new order IDs and positive quantity")
+
+
+@dataclass(frozen=True)
 class BrokerFill:
     execution_id: str
     quantity: int

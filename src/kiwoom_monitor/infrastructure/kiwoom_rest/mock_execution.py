@@ -7,7 +7,7 @@ from typing import Protocol
 
 from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 
-from kiwoom_monitor.domain.order_contract import BrokerSubmission, OrderIntent, OrderSide, OrderType
+from kiwoom_monitor.domain.order_contract import BrokerAmendmentSubmission, BrokerSubmission, OrderIntent, OrderSide, OrderType
 
 from .client import KiwoomApiError, KiwoomRestClient, KiwoomSubmissionUnknownError
 
@@ -26,6 +26,15 @@ ORDER_API_IDS = frozenset({
 
 class SubmissionUnknown(RuntimeError):
     """The request may have reached the broker and must be reconciled before any retry."""
+
+
+class AmendmentResponseUnknown(SubmissionUnknown):
+    """Keep a reported new number for reconciliation without treating it as accepted."""
+
+    def __init__(self, message: str, *, original_broker_order_id: str, reported_broker_order_id: str) -> None:
+        super().__init__(message)
+        self.original_broker_order_id = original_broker_order_id
+        self.reported_broker_order_id = reported_broker_order_id
 
 
 class SubmissionRejected(RuntimeError):
@@ -71,6 +80,35 @@ class KiwoomMockExecutionTransport:
             "cncl_qty": str(max(0, quantity)),
         })
         return BrokerSubmission(str(response.get("ord_no") or ""), self._now())
+
+    def amend(self, intent: OrderIntent, broker_order_id: str, quantity: int, limit_price: int) -> BrokerAmendmentSubmission:
+        """One explicit LIMIT amendment; native authority and reconciliation belong to the caller."""
+        if (intent.environment != 'mock' or intent.venue != 'KRX' or intent.order_type is not OrderType.LIMIT
+                or not isinstance(broker_order_id, str) or not broker_order_id.strip()
+                or type(quantity) is not int or not 0 < quantity <= intent.quantity
+                or type(limit_price) is not int or limit_price <= 0):
+            raise ValueError('amendment requires a KRX mock LIMIT order and explicit remaining quantity/price')
+        original = broker_order_id.strip()
+        response = self._send(MODIFY_API_ID, {
+            'dmst_stex_tp': 'KRX', 'orig_ord_no': original, 'stk_cd': intent.symbol,
+            'mdfy_qty': str(quantity), 'mdfy_uv': str(limit_price), 'mdfy_cond_uv': '',
+        })
+        raw_quantity = response.get('mdfy_qty')
+        try:
+            text = str(raw_quantity).strip().removeprefix('+')
+            acknowledged_quantity = int(text) if type(raw_quantity) in (str, int) and text.isascii() and text.isdecimal() else 0
+        except ValueError:
+            acknowledged_quantity = 0
+        if (not 0 < acknowledged_quantity <= quantity or response.get('base_orig_ord_no') != original
+                or response.get('dmst_stex_tp', 'KRX') != 'KRX' or type(response.get('ord_no')) is not str):
+            raise AmendmentResponseUnknown('amendment response cannot be bound to its original order and quantity',
+                original_broker_order_id=original, reported_broker_order_id=str(response.get('ord_no') or ''))
+        try:
+            return BrokerAmendmentSubmission(broker_order_id=str(response['ord_no']).strip(), accepted_at=self._now(),
+                original_broker_order_id=original, quantity=acknowledged_quantity)
+        except ValueError as error:
+            raise AmendmentResponseUnknown('amendment response did not identify its new order',
+                original_broker_order_id=original, reported_broker_order_id=str(response.get('ord_no') or '')) from error
 
     def _send(self, api_id: str, body: dict[str, object]) -> dict[str, object]:
         try:
