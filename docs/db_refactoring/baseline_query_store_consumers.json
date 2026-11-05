@@ -5085,8 +5085,8 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/close_plan_management.py",
-      "ClosePlanManagement._load_context",
+      "src/kiwoom_monitor/central_server/minute_plan_management.py",
+      "MinutePlanManagement._load_context",
       "self._store",
       "load_shadow_candidates",
       "direct_call",
@@ -5096,8 +5096,8 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/close_plan_management.py",
-      "ClosePlanManagement._manage",
+      "src/kiwoom_monitor/central_server/minute_plan_management.py",
+      "MinutePlanManagement._manage",
       "self._store",
       "load_close_gap_observations",
       "bound_reference",
@@ -5107,8 +5107,8 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/close_plan_management.py",
-      "ClosePlanManagement.advance",
+      "src/kiwoom_monitor/central_server/minute_plan_management.py",
+      "MinutePlanManagement.advance",
       "self._store",
       "load_shadow_candidates",
       "bound_reference",
@@ -5118,8 +5118,8 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/close_plan_management.py",
-      "ClosePlanManagement.prepare",
+      "src/kiwoom_monitor/central_server/minute_plan_management.py",
+      "MinutePlanManagement.prepare",
       "self._store",
       "load_documents",
       "direct_call",
@@ -5129,8 +5129,8 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/close_plan_management.py",
-      "ClosePlanManagement.prepare",
+      "src/kiwoom_monitor/central_server/minute_plan_management.py",
+      "MinutePlanManagement.prepare",
       "self._store",
       "load_shadow_candidates",
       "direct_call",
@@ -5141,7 +5141,7 @@
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_episode.py",
-      "MockAutomationEpisode._prepare_close",
+      "MockAutomationEpisode._prepare_minute_plan",
       "self._store",
       "load_documents",
       "direct_call",
@@ -5162,8 +5162,8 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/close_plan_management.py",
-      "ClosePlanManagement._manage_current_order",
+      "src/kiwoom_monitor/central_server/minute_plan_management.py",
+      "MinutePlanManagement._manage_current_order",
       "self._store",
       "load_document",
       "bound_reference",
@@ -6243,8 +6243,8 @@
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_episode.py",
-      "MockAutomationEpisode._prepare_close",
-      "ClosePlanManagement",
+      "MockAutomationEpisode._prepare_minute_plan",
+      "MinutePlanManagement",
       "self._store",
       "0",
       "direct_call",
@@ -6672,6 +6672,175 @@
       "evidence": [
         "tests/unit/test_close_order_management.py",
         "tests/integration/test_close_order_management_postgres.py"
+      ]
+    },
+    {
+      "id": "S12-05-existing-minute-plan-owner-move-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/central_server/minute_plan_management.py",
+          "MinutePlanManagement._load_context",
+          "self._store",
+          "load_shadow_candidates",
+          "direct_call",
+          "self._store.load_shadow_candidates",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/minute_plan_management.py",
+          "MinutePlanManagement._manage",
+          "self._store",
+          "load_close_gap_observations",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/minute_plan_management.py",
+          "MinutePlanManagement.advance",
+          "self._store",
+          "load_shadow_candidates",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/minute_plan_management.py",
+          "MinutePlanManagement.prepare",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/minute_plan_management.py",
+          "MinutePlanManagement.prepare",
+          "self._store",
+          "load_shadow_candidates",
+          "direct_call",
+          "self._store.load_shadow_candidates",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._prepare_minute_plan",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/minute_plan_management.py",
+          "MinutePlanManagement._manage_current_order",
+          "self._store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [
+        [
+          "src/kiwoom_monitor/central_server/close_plan_management.py",
+          "ClosePlanManagement._load_context",
+          "self._store",
+          "load_shadow_candidates",
+          "direct_call",
+          "self._store.load_shadow_candidates",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/close_plan_management.py",
+          "ClosePlanManagement._manage",
+          "self._store",
+          "load_close_gap_observations",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/close_plan_management.py",
+          "ClosePlanManagement.advance",
+          "self._store",
+          "load_shadow_candidates",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/close_plan_management.py",
+          "ClosePlanManagement.prepare",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/close_plan_management.py",
+          "ClosePlanManagement.prepare",
+          "self._store",
+          "load_shadow_candidates",
+          "direct_call",
+          "self._store.load_shadow_candidates",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._prepare_close",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/close_plan_management.py",
+          "ClosePlanManagement._manage_current_order",
+          "self._store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "reason": "Rename and extend the existing CLOSE owner in place to share current physical-order checks and support PANIC. Seven source read identities and the one existing Episode constructor forwarding identity move with the same store/transaction/lifetime. The stable reviewed receiver ID is retained; signatures, baseline contracts, other identities and prior review records are untouched. Exact forwarding/binding before-after is recorded separately; this is not a reset or runtime acceptance claim.",
+      "evidence": [
+        "tmp/s12-05-panic/management-consumer-move.json",
+        "tests/unit/test_close_mock_execution.py",
+        "tests/unit/test_close_order_management.py",
+        "tests/unit/test_panic_mock_execution.py",
+        "tests/integration/test_panic_mock_execution_postgres.py"
       ]
     }
   ]

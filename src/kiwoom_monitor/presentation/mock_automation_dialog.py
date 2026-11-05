@@ -20,7 +20,7 @@ from kiwoom_monitor.application.mock_automation_specification import (
     matching_shadow_events,
 )
 from kiwoom_monitor.domain.execution_activation import (
-    CLOSE_NATIVE_PLAN_MODE, CloseMockExecutionPolicy, ForwardCriteria,
+    CLOSE_NATIVE_PLAN_MODE, CloseMockExecutionPolicy, ForwardCriteria, PANIC_NATIVE_PLAN_MODE, PanicMockExecutionPolicy,
     LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy,
 )
 from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
@@ -30,19 +30,19 @@ from kiwoom_monitor.infrastructure.central_credentials_client import CentralCred
 from kiwoom_monitor.presentation.mock_automation_candidate_dialog import MockAutomationCandidateDialog
 
 
-def _is_close_research_publication(publication: Any) -> bool:
-    package = publication.get("package") if isinstance(publication, dict) else None
-    spec = package.get("candidate_spec") if isinstance(package, dict) else None
-    return (isinstance(spec, dict) and spec.get("version") == CLOSE_FINAL_CANDIDATE_VERSION
-            and spec.get('family') in {None, 'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'})
-
-
-def _ipo_research_label(publication: Any) -> str:
+def _minute_research_family(publication: Any) -> str:
     package = publication.get('package') if isinstance(publication, dict) else None
     spec = package.get('candidate_spec') if isinstance(package, dict) else None
     if not isinstance(spec, dict) or spec.get('version') != CLOSE_FINAL_CANDIDATE_VERSION:
         return ''
-    return {'ipo_close/v1': '신규주 종가베팅', 'ipo_breakout/v1': '신규주 돌파'}.get(spec.get('family'), '')
+    family = spec.get('family')
+    if family is None: family = 'close_betting/v1'
+    return family if family in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1', 'panic_rebound/v1'} else ''
+
+
+def _minute_research_label(publication: Any) -> str:
+    return {'close_betting/v1': '종가베팅', 'ipo_close/v1': '신규주 종가베팅',
+            'ipo_breakout/v1': '신규주 돌파', 'panic_rebound/v1': '낙주'}.get(_minute_research_family(publication), '')
 
 
 def available_mock_profiles(document: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -311,8 +311,8 @@ class MockAutomationPublicationDialog(QDialog):
         top.addRow("Shadow 증거", self._shadow)
         self._close_inputs = {}
         self._close_management = None
-        if _is_close_research_publication(candidate):
-            kind = _ipo_research_label(candidate) or '종가베팅'
+        if _minute_research_family(candidate):
+            kind = _minute_research_label(candidate)
             for name, label in (("maximum_adverse_slippage_bps", kind + " 진입 가격 허용 범위(bp)"),
                                 ("protective_slippage_bps", kind + " 청산 가격 허용 범위(bp)")):
                 field = QLineEdit()
@@ -321,8 +321,9 @@ class MockAutomationPublicationDialog(QDialog):
                 top.addRow(label, field)
             self._close_management = QComboBox()
             self._close_management.addItem("중지 후 관리 방식을 선택하세요", None)
-            self._close_management.addItem("신규 주문 중지·대사만 유지", "close-mock-execution-policy/v3")
-            self._close_management.addItem("신규 진입 중지·원래 계획의 취소·청산 유지", "close-mock-execution-policy/v4")
+            panic = _minute_research_family(candidate) == 'panic_rebound/v1'
+            self._close_management.addItem("신규 주문 중지·대사만 유지", "reconcile_only/v1" if panic else "close-mock-execution-policy/v3")
+            self._close_management.addItem("신규 진입 중지·원래 계획의 취소·청산 유지", "continue_original_plan/v1" if panic else "close-mock-execution-policy/v4")
             top.addRow(kind + " 중지 후 관리", self._close_management)
         self._plan_policy_path = None
         package = candidate.get("package")
@@ -385,20 +386,26 @@ class MockAutomationPublicationDialog(QDialog):
             raise ValueError("일치하는 Shadow 증거를 선택하세요.")
         policy = None
         close_policy = None
+        panic_policy = None
         if self._close_management is not None:
             version = self._close_management.currentData()
             if version is None or any(not field.text().strip().isascii()
                     or not field.text().strip().isdigit() for field in self._close_inputs.values()):
-                raise ValueError("종가베팅 가격 허용 범위와 중지 후 관리 방식을 명시하세요.")
-            close_policy = CloseMockExecutionPolicy(
-                **{name: int(field.text().strip()) for name, field in self._close_inputs.items()},
-                entry_price_basis="acknowledged_0B_bounded_by_signal/v1",
-                entry_remainder_policy="cancel_at_entry_deadline/v1",
-                exit_price_basis="acknowledged_0B_bounded_slippage/v1", version=version,
-                stopped_management="continue_original_plan/v1" if version in {'close-mock-execution-policy/v2', 'close-mock-execution-policy/v4'} else None,
-                accepted_order_management='reassess_then_amend_price/v1' if version in {
-                    'close-mock-execution-policy/v3', 'close-mock-execution-policy/v4'} else None,
-            )
+                raise ValueError(_minute_research_label(self._candidate) + " 가격 허용 범위와 중지 후 관리 방식을 명시하세요.")
+            if _minute_research_family(self._candidate) == 'panic_rebound/v1':
+                panic_policy = PanicMockExecutionPolicy(
+                    **{name: int(field.text().strip()) for name, field in self._close_inputs.items()},
+                    stopped_management=version)
+            else:
+                close_policy = CloseMockExecutionPolicy(
+                    **{name: int(field.text().strip()) for name, field in self._close_inputs.items()},
+                    entry_price_basis="acknowledged_0B_bounded_by_signal/v1",
+                    entry_remainder_policy="cancel_at_entry_deadline/v1",
+                    exit_price_basis="acknowledged_0B_bounded_slippage/v1", version=version,
+                    stopped_management="continue_original_plan/v1" if version in {'close-mock-execution-policy/v2', 'close-mock-execution-policy/v4'} else None,
+                    accepted_order_management='reassess_then_amend_price/v1' if version in {
+                        'close-mock-execution-policy/v3', 'close-mock-execution-policy/v4'} else None,
+                )
         policy_path = self._plan_policy_path.text().strip() if self._plan_policy_path is not None else ""
         if policy_path:
             try:
@@ -411,9 +418,11 @@ class MockAutomationPublicationDialog(QDialog):
             evaluation_start=evaluation_start, evaluation_end=evaluation_end,
             frozen_at=frozen_at, criteria=criteria, limits=limits,
             unfilled_execution_policy=policy,
-            execution_plan_mode=(CLOSE_NATIVE_PLAN_MODE if close_policy is not None else
+            execution_plan_mode=(PANIC_NATIVE_PLAN_MODE if panic_policy is not None else
+                                 CLOSE_NATIVE_PLAN_MODE if close_policy is not None else
                                  LEADER_NATIVE_PLAN_MODE if policy is not None else None),
             close_execution_policy=close_policy,
+            **({"panic_execution_policy": panic_policy} if panic_policy is not None else {}),
         )
 
 
@@ -616,9 +625,8 @@ class MockAutomationDialog(QDialog):
 
     def _update_candidate_action(self) -> None:
         candidate = self._candidate.currentData()
-        ipo_label = _ipo_research_label(candidate)
-        self._publish.setText(ipo_label + ' READY 명세 작성' if ipo_label else
-            '종가베팅 READY 명세 작성' if _is_close_research_publication(candidate) else '새 READY 명세 작성')
+        label = _minute_research_label(candidate)
+        self._publish.setText(label + ' READY 명세 작성' if label else '새 READY 명세 작성')
 
     def _publish_prepared_candidate(self, context: dict[str, Any]) -> None:
         selected = context["selected_profile"]
@@ -732,9 +740,8 @@ class MockAutomationDialog(QDialog):
                 continue
             source = package.get("source_final", {})
             finished = source.get("finished_at", "") if isinstance(source, dict) else ""
-            label = "종가베팅 · " + status if _is_close_research_publication(publication) else status
-            if ipo_label := _ipo_research_label(publication):
-                label = ipo_label + ' · ' + status
+            label = _minute_research_label(publication)
+            label = label + ' · ' + status if label else status
             self._candidate.addItem(
                 f"{package.get('strategy_ref', '')} · {label} · {format_kst_time(finished, missing='')}", publication,
             )
@@ -749,6 +756,11 @@ class MockAutomationDialog(QDialog):
             label = f"{spec.get('strategy_ref', '')} · {row.get('readiness', 'BLOCKED')}"
             if spec.get("execution_plan_mode") == LEADER_NATIVE_PLAN_MODE:
                 label += " · 계획형 0B 모의"
+            elif spec.get('execution_plan_mode') == PANIC_NATIVE_PLAN_MODE:
+                terms = spec.get('panic_execution_policy', {})
+                management = ('원래 계획 취소·청산 유지' if terms.get('stopped_management') == 'continue_original_plan/v1'
+                              else '대사만 유지')
+                label += ' · 낙주 모의 · 현재 조건 재판단·정정 우선 · ' + management
             elif spec.get("execution_plan_mode") == CLOSE_NATIVE_PLAN_MODE:
                 close_policy = spec.get("close_execution_policy", {})
                 management = ("중지 후 원계획 관리" if close_policy.get("stopped_management") == "continue_original_plan/v1"
@@ -756,7 +768,7 @@ class MockAutomationDialog(QDialog):
                 candidate = next((item for item in self._context.get('candidate_publications', ())
                     if isinstance(item, dict) and isinstance(item.get('package'), dict)
                     and item['package'].get('package_hash') == spec.get('candidate_package_hash')), None)
-                label += " · " + (_ipo_research_label(candidate) or '종가베팅') + " 모의 · " + management
+                label += " · " + (_minute_research_label(candidate) or '종가베팅') + " 모의 · " + management
                 if close_policy.get('accepted_order_management') == 'reassess_then_amend_price/v1':
                     label += " · 현재 조건 재판단·정정 우선"
             self._spec.addItem(label, spec.get("spec_id", ""))

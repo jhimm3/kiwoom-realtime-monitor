@@ -7,6 +7,10 @@ from datetime import datetime, timedelta
 import json
 
 from .breakout_strategy import StrategyState
+from .minute_order_management import (
+    MinuteOrderManagementClaim, assess_current_minute_order,
+    acknowledged_minute_quote as _close_quote, frozen_minute_candidate as frozen_close_candidate,
+)
 from .close_and_ipo import (
     CloseIpoPosition, CloseIpoSetup, evaluate_close_gap, evaluate_close_gap_at_price, matches_close_shadow,
 )
@@ -18,7 +22,7 @@ from .mock_automation_execution import (
     dispatch_mock_automation_decision_from_risk,
 )
 from .mock_automation_session_clock import content_id
-from .mock_automation_risk import mock_owned_buy_basis
+from .mock_automation_risk import mock_automation_risk_account_revision, mock_owned_buy_basis
 from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
 from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderSide, OrderState, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.domain.strategy_contract import StrategyDecision
@@ -30,15 +34,6 @@ CLOSE_ORDER_POLICY_VERSION = "close_execution_adapter/v1"
 CLOSE_CANCEL_VERSION = "close-entry-deadline-cancel/v1"
 CLOSE_PROTECTIVE_CANCEL_VERSION = 'close-entry-protective-cancel/v1'
 CLOSE_ORDER_MANAGEMENT_VERSION = 'close-current-order-management/v1'
-
-
-@dataclass(frozen=True)
-class CloseOrderManagementClaim:
-    assessment: dict
-    recovery: object
-
-    def to_dict(self):
-        return json.loads(json.dumps(self.assessment, allow_nan=False))
 
 
 def close_current_shadow_matches(spec, event, settings):
@@ -59,8 +54,6 @@ def assess_close_order_management(spec, *, run_id, parameters, event, entry_evid
         exit_evidence=None, root=None, root_fill_events=(), protection_notice=None, stop_risk=None):
     """Reassess this accepted order, without granting a new entry or resetting its price anchor."""
     from .mock_automation_execution import mock_automation_intent_id
-    from .mock_automation_risk import mock_automation_risk_account_revision
-    from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
 
     terms = spec.close_execution_policy
     if terms is None or terms.accepted_order_management != 'reassess_then_amend_price/v1':
@@ -95,96 +88,26 @@ def assess_close_order_management(spec, *, run_id, parameters, event, entry_evid
                 != (mock_automation_intent_id(spec.spec_id, proof['decision']['decision_id']),
                     proof['decision']['decision_id'], proof['decision']['quantity'], proof['decision']['signal_reference_price'])):
             raise ValueError('CLOSE current SELL original exit changed')
-    age = spec.maximum_data_gap_seconds
-    account = recovery.account
-    if (age is None or (risk.account_ref, risk.execution_run_id, risk.binding_revision, risk.data_path)
-            != (record.intent.account_ref, run_id, spec.binding_revision, spec.data_path)
-            or (account.account_ref, account.as_of) != (risk.account_ref, risk.account_as_of)
-            or risk.account_revision != mock_automation_risk_account_revision(recovery)
-            or risk.submission_unknown_count or risk.balance_mismatch_count or not risk.reconciliation_complete
-            or head.fill_cursor > risk.execution_event_high_watermark
-            or any(not 0 <= (now - at).total_seconds() <= age for at in (decided_at, risk.observed_at, account.as_of))):
-        raise ValueError('CLOSE current-order requires a matching fresh account/Risk cut')
-    legs = [leg for leg in execution_broker_legs(record) if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity]
-    orders = {order.broker_order_id: order for order in recovery.orders if order.state not in TERMINAL_ORDER_STATES}
-    if len(orders) != len([order for order in recovery.orders if order.state not in TERMINAL_ORDER_STATES]) or set(orders) != {leg.broker_order_id for leg in legs}:
-        raise ValueError('CLOSE current-order broker coverage changed')
-    for leg in legs:
-        observed = orders[leg.broker_order_id]
-        if ((observed.account_ref, observed.symbol, observed.state, observed.filled_quantity, observed.remaining_quantity)
-                != (record.intent.account_ref, record.intent.symbol, leg.state, leg.filled_quantity, leg.remaining_quantity)
-                or not 0 <= (now - observed.as_of).total_seconds() <= age):
-            raise ValueError('CLOSE current-order physical remainder changed')
-    cancelled = {row.get('broker_order_id') or record.broker_order_id for row in order_events if row['event_type'] == 'CANCEL_STARTED'}
-    available = [leg for leg in legs if leg.broker_order_id not in cancelled and leg.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}]
-    if not available:
-        return None  # No second cancellation/amendment while an earlier cancellation is unresolved.
-    leg = available[0]
-    action, reason, current_quote = 'AMEND', 'current_conditions_valid', None
-    owned = dict(risk.owned_position_quantities).get(record.intent.symbol, 0)
     setup = CloseIpoSetup.from_document(event['close_ipo_entry_setup'])
-    if record.intent.side is OrderSide.BUY:
-        if protection_notice is not None:
-            validate_close_stop_notice(spec, run_id=run_id, root=record, fill_events=root_fill_events,
-                notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=setup.policy.protection_loss_bps, event=event, now=now)
-            action, reason = 'CANCEL', 'original_filled_position_protection'
-        elif not entry_enabled:
-            action, reason = 'CANCEL', 'current_entry_context_disabled_or_changed'
-        elif now >= min(datetime.fromisoformat(event['expires_at']), setup.entry_deadline):
-            action, reason = 'CANCEL', 'original_entry_signal_expired'
-        elif record.filled_quantity >= record.intent.quantity:
-            action, reason = 'CANCEL', 'original_target_already_filled'
-        elif account.positions.get(record.intent.symbol, 0) != owned:
-            action, reason = 'CANCEL', 'current_run_position_unverified'
-        elif (risk.daily_net_pnl_won is None or spec.maximum_daily_loss_won is None
-                or risk.daily_net_pnl_won <= -spec.maximum_daily_loss_won):
-            action, reason = 'CANCEL', 'current_daily_loss_limit_or_evidence'
-        elif spec.maximum_reconnect_count is None or risk.reconnect_count > spec.maximum_reconnect_count:
-            action, reason = 'CANCEL', 'current_reconnect_limit'
-    elif owned < head.quantity or account.positions.get(record.intent.symbol, 0) < head.quantity:
-        raise ValueError('CLOSE current SELL owned position changed')
-    elif sum(item.remaining_quantity for item in legs) > head.quantity:
-        action, reason = 'CANCEL', 'current_sell_remainder_exceeds_plan_position'
-    if action == 'AMEND':
-        if not mock_order_entry_decision(now, environment='mock', venue='KRX', order_type='LIMIT').allowed:
-            return None
-        if quote is None:
-            return None
-        current_quote = _close_quote(spec, quote, decided_at, now)
-        price = current_quote['price_won']
-        if record.intent.side is OrderSide.BUY:
-            pending = sum(item.remaining_quantity for item in legs)
-            increase = max(0, price - leg.limit_price) * leg.remaining_quantity
-            if price * 10_000 > event['signal_reference_price'] * (10_000 + terms.maximum_adverse_slippage_bps):
-                action, reason = 'CANCEL', 'current_entry_slippage_bound_exceeded'
-            elif setup.policy.variant == 'IPO_BREAKOUT' and price * 10_000 <= setup.breakout_level * (10_000 + setup.policy.breakout_buffer_bps):
-                action, reason = 'CANCEL', 'current_ipo_breakout_not_confirmed'
-            elif (spec.maximum_capital_won is None or (owned + pending) * price > spec.maximum_capital_won
-                    or increase > account.available_cash_won - account.reserved_open_buy_won):
-                action, reason = 'CANCEL', 'current_buy_budget_unavailable'
-            elif (spec.maximum_concurrent_positions is None or
-                    len([q for q in account.positions.values() if q]) + int(not account.positions.get(record.intent.symbol, 0))
-                    > spec.maximum_concurrent_positions):
-                action, reason = 'CANCEL', 'current_position_limit'
-        else:
-            anchor = exit_evidence['snapshot']['trigger_quote']['price_won']
-            if price * 10_000 < anchor * (10_000 - terms.protective_slippage_bps):
-                action, reason = 'WAIT', 'original_exit_slippage_bound_exceeded'
-            elif sum(item.remaining_quantity for item in legs) > head.quantity:
-                action, reason = 'CANCEL', 'current_sell_remainder_exceeds_plan_position'
-        if action == 'AMEND' and (record.state is OrderState.CANCEL_PENDING or price == leg.limit_price):
-            action, reason = 'WAIT', 'awaiting_cancellation_or_current_price_already_working'
-        if (action == 'AMEND' and record.amendment is not None and record.amendment.status == 'REJECTED'
-                and record.amendment.assessment is not None and record.amendment.assessment.get('quote') == current_quote):
-            action, reason = 'WAIT', 'same_rejected_quote_already_assessed'
-    return {'version': CLOSE_ORDER_MANAGEMENT_VERSION, 'spec_id': spec.spec_id, 'execution_run_id': run_id,
-        'intent_id': record.intent.intent_id, 'plan': asdict(head.plan), 'entry_proof_id': entry_evidence['proof_id'],
-        'broker_order_id': leg.broker_order_id, 'quantity': leg.remaining_quantity,
-        'limit_price': current_quote['price_won'] if current_quote is not None else leg.limit_price,
-        'quote': current_quote, 'decided_at': decided_at.isoformat(), 'action': action, 'reason': reason,
-        'entry_enabled': bool(entry_enabled), 'risk_snapshot_id': risk.snapshot_id,
-        'risk_reconciliation_revision': risk.reconciliation_revision,
-        **({'protection_notice': protection_notice} if protection_notice is not None else {})}
+    protection_reason = None
+    if protection_notice is not None and record.intent.side is OrderSide.BUY:
+        validate_close_stop_notice(spec, run_id=run_id, root=record, fill_events=root_fill_events,
+            notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=setup.policy.protection_loss_bps, event=event, now=now)
+        protection_reason = 'original_filled_position_protection'
+
+    def invalid_price(price):
+        if setup.policy.variant == 'IPO_BREAKOUT' and price * 10_000 <= setup.breakout_level * (10_000 + setup.policy.breakout_buffer_bps):
+            return 'current_ipo_breakout_not_confirmed'
+        return None
+
+    return assess_current_minute_order(spec, run_id=run_id, record=record, head=head, order_events=order_events,
+        recovery=recovery, risk=risk, quote=quote, decided_at=decided_at, now=now, entry_enabled=entry_enabled,
+        terms=terms, management_version=CLOSE_ORDER_MANAGEMENT_VERSION, entry_proof_id=entry_evidence['proof_id'],
+        signal_reference_price=event['signal_reference_price'],
+        entry_deadline=min(datetime.fromisoformat(event['expires_at']), setup.entry_deadline),
+        capital_limit=spec.maximum_capital_won, invalid_entry_price=invalid_price,
+        protection_notice=protection_notice, protection_reason=protection_reason,
+        exit_anchor=exit_evidence['snapshot']['trigger_quote']['price_won'] if exit_evidence is not None else None)
 
 
 def prepare_close_order_management_claim(repository, runtime, execution, spec, record, *, parameters, event,
@@ -202,7 +125,7 @@ def prepare_close_order_management_claim(repository, runtime, execution, spec, r
         root_fill_events=execution.events(root.intent.intent_id) if protection_notice is not None else (),
         protection_notice=protection_notice, stop_risk=(repository.load_mock_automation_risk_snapshot(runtime.account_ref,
             protection_notice['risk_trigger']['snapshot_id']) if protection_notice is not None else None))
-    return CloseOrderManagementClaim(assessment, recovery) if assessment is not None else None
+    return MinuteOrderManagementClaim(assessment, recovery) if assessment is not None else None
 
 
 @dataclass(frozen=True)
@@ -237,30 +160,6 @@ class CloseEntryDeadlineCancelClaim:
 
 def close_entry_plan_id(spec_id: str, run_id: str, event_id: str) -> str:
     return content_id("close_plan", {"spec_id": spec_id, "run_id": run_id, "event_id": event_id})
-
-
-def _close_quote(spec, quote, decided_at, now):
-    at = quote.get("available_at")
-    if isinstance(at, str):
-        at = datetime.fromisoformat(at)
-    gap = spec.maximum_data_gap_seconds
-    if (not isinstance(at, datetime) or at.utcoffset() is None or decided_at.utcoffset() is None
-            or now.utcoffset() is None or gap is None or gap <= 0
-            or quote.get("durable") is not False or quote.get("market_status") != "TRADABLE"
-            or not isinstance(quote.get("input_ref"), str) or not quote["input_ref"].startswith("collector-trade:")
-            or type(quote.get("price_won")) is not int or quote["price_won"] <= 0
-            or not 0 <= (now - at).total_seconds() <= gap
-            or not 0 <= (now - decided_at).total_seconds() <= gap
-            or at > decided_at):
-        raise ValueError("CLOSE execution requires a fresh acknowledged 0B quote")
-    return {"price_won": quote["price_won"], "available_at": at.isoformat(),
-            "input_ref": quote["input_ref"], "durable": False, "market_status": "TRADABLE"}
-
-
-def frozen_close_candidate(event):
-    value = {key: item for key, item in event.items() if key != 'accepted_sequence'}
-    value['expires_at'] = datetime.fromisoformat(value['expires_at']).astimezone(KST).isoformat()
-    return value
 
 
 def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decided_at, now, retain_candidate=True):
@@ -390,7 +289,6 @@ def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evid
                                   fill_events, recovery, risk, now, protection_notice=None, stop_risk=None):
     """Authorize only cancellation of the original, currently mapped BUY remainder."""
     from .mock_automation_execution import mock_automation_intent_id
-    from .mock_automation_risk import mock_automation_risk_account_revision
 
     entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
     expected, decision, plan = build_close_entry_evidence(spec, run_id=run_id, parameters=parameters,

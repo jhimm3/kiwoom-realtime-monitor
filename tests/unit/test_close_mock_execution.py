@@ -694,7 +694,7 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
         publish_gap_observations(store, context.example, clock)
         await runner.episode.advance_once()
         case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
-        case.assertEqual('planned_overnight_hold', runner.episode._close_management.status['reason'])
+        case.assertEqual('planned_overnight_hold', runner.episode._minute_management.status['reason'])
         old_cut = clock[0]
         clock[0] += timedelta(seconds=1)
         context.example.opening = replace(original, available_at=clock[0].isoformat())
@@ -764,7 +764,7 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     case.assertEqual(((), True), runtime.load_account_active_intents())
     if stopped:
         case.assertEqual(stopped_control, repository.load_mock_automation_control(ACCOUNT_REF))
-        case.assertEqual('STOPPED', runner.episode._close_management.status['state'])
+        case.assertEqual('STOPPED', runner.episode._minute_management.status['state'])
     if acceptance:
         from tests.unit.test_mock_automation_specification import _ExecutionPageSource
         from kiwoom_monitor.application.journal_enrichment import sync_journal_execution_projection
@@ -851,10 +851,10 @@ class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_flat_runner_clears_previous_pending_order_without_new_shadow(self):
         from types import SimpleNamespace
-        from kiwoom_monitor.central_server.close_plan_management import ClosePlanManagement
+        from kiwoom_monitor.central_server.minute_plan_management import MinutePlanManagement
 
         store = SimpleNamespace(load_shadow_candidates=lambda *_: {'events': [], 'high_watermark': 7})
-        management = ClosePlanManagement(store, None, None, None, parameters={}, price_source=None, now_provider=None)
+        management = MinutePlanManagement(store, None, None, None, parameters={}, price_source=None, now_provider=None)
         management.status = {'state': 'ORDER_SUBMITTED', 'pending_intent_id': 'already-filled', 'orders_enabled': False}
         control = SimpleNamespace(desired_state=SimpleNamespace(value='RUNNING'))
         self.assertEqual(0, await management.advance(control, limit=10, allow_entry=lambda: True))

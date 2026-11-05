@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from kiwoom_monitor.application.close_mock_execution import dispatch_close_entry
-from kiwoom_monitor.central_server.close_plan_management import ClosePlanManagement
+from kiwoom_monitor.central_server.minute_plan_management import MinutePlanManagement
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
 from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor
@@ -27,13 +27,13 @@ def management_terms(stopped=True):
 
 class BrokerBook:
     """Independent physical-order book; no execution-repository inference of broker fills."""
-    def __init__(self, context):
+    def __init__(self, context, *, empty=False):
         self.context = context
         self.rows = {}
         self.mutations = []
         self.reads = 0
         self.lost_ack = False
-        self.add(context.buy.broker_order_id, context.buy.intent)
+        if not empty: self.add(context.buy.broker_order_id, context.buy.intent)
 
     def add(self, number, intent, *, parent=None, quantity=None, price=None):
         self.rows[number] = dict(number=number, side=intent.side, ordered=quantity or intent.quantity,
@@ -139,7 +139,7 @@ async def management_context(case, factory=None, *, stopped=True, family='close_
         'input_ref': 'collector-trade:current-management:1'}}
     ctx.bundle = SimpleNamespace(account_ref=ctx.runtime.account_ref, run_id=ctx.runtime.run_id,
         runtime=ctx.runtime, repository=ctx.execution, monitor=monitor, gateway=gateway)
-    ctx.manager = ClosePlanManagement(store, ctx.bundle, ctx.spec, ctx.repository, parameters=ctx.parameters,
+    ctx.manager = MinutePlanManagement(store, ctx.bundle, ctx.spec, ctx.repository, parameters=ctx.parameters,
         price_source=lambda symbol: ctx.quotes.get(symbol), now_provider=lambda: ctx.clock[0], family=family)
     ctx.manager.prepare(None)
     ctx.control = ctx.repository.load_mock_automation_control(ctx.runtime.account_ref)

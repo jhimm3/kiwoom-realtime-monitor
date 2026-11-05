@@ -374,6 +374,54 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                 self.assertEqual('reassess_then_amend_price/v1', build.call_args.kwargs['close_execution_policy'].accepted_order_management)
                 self.assertIsNone(build.call_args.kwargs['unfilled_execution_policy'])
 
+    def test_panic_ready_requires_explicit_prices_and_original_plan_management_terms(self):
+        from kiwoom_monitor.domain.execution_activation import PANIC_NATIVE_PLAN_MODE
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationPublicationDialog
+        candidate = {'package': {'candidate_spec': {'version': CLOSE_FINAL_CANDIDATE_VERSION, 'family': 'panic_rebound/v1'}}}
+        event = {'event_id': 'panic-ui-event'}
+        dialog = MockAutomationPublicationDialog(candidate, {}, 'profile', (event,), self.dialog)
+        self.addCleanup(dialog.deleteLater)
+        with patch('kiwoom_monitor.presentation.mock_automation_dialog.build_mock_automation_publication_documents') as build:
+            with self.assertRaisesRegex(ValueError, '낙주.*명시하세요'): dialog.publication_values()
+            self.assertEqual(0, build.call_count)
+            dialog._close_inputs['maximum_adverse_slippage_bps'].setText('100')
+            dialog._close_inputs['protective_slippage_bps'].setText('500')
+            with self.assertRaisesRegex(ValueError, '명시하세요'): dialog.publication_values()
+            self.assertEqual(0, build.call_count)
+            for index, stopped in ((1, 'reconcile_only/v1'), (2, 'continue_original_plan/v1')):
+                dialog._close_management.setCurrentIndex(index); dialog.publication_values()
+                values = build.call_args.kwargs
+                self.assertEqual((candidate, event, PANIC_NATIVE_PLAN_MODE),
+                    (values['candidate_publication'], values['shadow_event'], values['execution_plan_mode']))
+                policy = values['panic_execution_policy']
+                self.assertEqual((100, 500, stopped, 'reassess_then_amend_price/v1'),
+                    (policy.maximum_adverse_slippage_bps, policy.protective_slippage_bps,
+                     policy.stopped_management, policy.accepted_order_management))
+                self.assertIsNone(values['close_execution_policy'])
+                self.assertIsNone(values['unfilled_execution_policy'])
+            dialog._close_inputs['protective_slippage_bps'].setText('10000')
+            with self.assertRaises(ValueError): dialog.publication_values()
+
+    def test_panic_candidate_and_saved_spec_show_their_own_policy_without_starting_orders(self):
+        from kiwoom_monitor.domain.execution_activation import PANIC_NATIVE_PLAN_MODE, PanicMockExecutionPolicy
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+        candidate = {'package': {'strategy_ref': 'panic-test', 'candidate_spec': {
+            'version': CLOSE_FINAL_CANDIDATE_VERSION, 'family': 'panic_rebound/v1'},
+            'source_final': {'finished_at': '2026-11-06T09:00:00+09:00'}}, 'eligibility_receipt': {'status': 'ELIGIBLE'}}
+        self.context.update(candidate_publications=[candidate], specs=[], selected_spec_id='')
+        self.dialog._completed('refresh', self.context)
+        self.assertIn('낙주 · ELIGIBLE', self.dialog._candidate.currentText())
+        self.assertEqual('낙주 READY 명세 작성', self.dialog._publish.text())
+        self.assertFalse(self.dialog._start.isEnabled())
+        for stopped, text in (('reconcile_only/v1', '대사만 유지'), ('continue_original_plan/v1', '원래 계획 취소·청산 유지')):
+            spec = {'strategy_ref': 'panic-test', 'spec_id': 'panic-ready', 'execution_plan_mode': PANIC_NATIVE_PLAN_MODE,
+                    'panic_execution_policy': PanicMockExecutionPolicy(100, 500, stopped).to_dict()}
+            self.context.update(specs=[{'spec': spec, 'readiness': 'READY'}], selected_spec_id='panic-ready')
+            self.dialog._completed('refresh', self.context)
+            self.assertIn('낙주 모의 · 현재 조건 재판단·정정 우선', self.dialog._spec.currentText())
+            self.assertIn(text, self.dialog._spec.currentText())
+
     def test_close_ready_review_requires_explicit_prices_and_stopped_management(self):
         from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
         from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION

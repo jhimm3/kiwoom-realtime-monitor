@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 낙주 P0/P1은 최종 후보/Shadow에 이어 현재 날짜·가격·뉴스를 쓰는 명시 READY backend→native 진입·실제 잔량 보호·STOPPED/익일 DB 복구를 Windows57/실제PG9건으로 확인했다. 다음은 기존 Episode의 첫0B 보존·현재 조건 재판단/정정·미체결/보유 자동 관리와 READY UI·일지/API다. 대표7개·DD/MICRO·독립 계좌/원주문 검증과 운영 제외 및 완료 기준을 유지한다. [낙주 native](#s12-panic-native-plan) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·5·7·9,5/11 개발 수락. 낙주 P0/P1의 명시 READY/UI/API→기존 자동 Episode→현재 조건 재판단·정정 우선·첫0B 보존·부분/늦은 체결·당일 미완료/익일 복구·일지를 Windows115/실제PG21건으로 확인했다. 다음은 기존 대표1·2·6·8·10·11과 DD/MICRO·독립 계좌/원주문 검증이다. 운영 제외와 원래 완료 기준을 유지한다. [항목5 수락](#s12-acceptance-panic-five) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -363,7 +363,7 @@ P1이 재시작 후 확인 봉에서 후보를 내면 최초 급락 봉의 판�
 | 1 · 2 · 6 | 진행 | 돌파 최초 진입·만료·보호와 명시 재개를 격리 모의 실행에서 확인했다. 계좌 위험 연구는 동일 현금에서 계획별 예약·부분 체결·수량과 계좌 평가를 대조한다. 추가·부분 청산·재진입과 서로 다른 전략의 동시 승인은 전략별 행동 근거·수량·공유 계좌 배분 정책을 확정해 같은 계좌의 다른 계획 및 수동 수량과 대조해야 한다. 기존 취소 후 잔량 재요청의 `ADD`·`REDUCE`는 같은 주문의 잔량을 다시 요청하는 기능이다. [계좌 위험 연구 검증](../../tests/unit/test_account_risk_research.py). |
 | 3 | 개발 수락 | 일반 READY builder/서버·명시 화면·인증 조회·공개 기동에서 원계획의 진입/부분 체결/미확정 취소·늦은 체결·DB 재개방·Shadow 비활성·익일 갭 청산을 연결했다. 마감/휴장·가격 중단/정지 상태·오래된 0B는 가짜 청산/새 진입을 만들지 않으며 원래 3주를 보존한다. 실제 Collector의 마감 가격·첫 분봉으로 3주만 청산하고, 원장/계좌 잔량 0·일지 재조회/화면 계획 ID와 BUY=3/SELL=3을 확인했다. 기존 v1/v2 중지 정책과 최초 손절·정정/native 검증은 유지한다. 합성 계좌·명시 휴장/정지 입력의 소프트웨어 수락이며 운영 시장 감지·주문/체결 품질은 별도다. [수락 근거](#s12-acceptance-close-three). |
 | 4 | 개발 수락 | 신규주 두 방식/두 상장 단계의 실제 final/Shadow→정상 READY·UI/API→공개 자동 Episode→원계획·첫0B 구조 보호/부분·늦은 체결·재개→일지/실제 화면 조회를 연결했다. 부족한 이력을0으로 채우지 않고, 원래 계획 ID/정책 증거·상장 프로필과 BUY3/SELL3·잔량0을 보존했다. [수락 근거](#s12-acceptance-ipo-four). |
-| 5 | 진행 | 낙주의 같은 계획 모의 주문·부분 체결→반등→잔량 취소 중 늦은 체결과 당일 미완료 관리는 남아 있다. 기존 연구/Shadow 결과를 native 수락으로 대체하지 않는다. |
+| 5 | 개발 수락 | 낙주 P0/P1의 final/현재 Shadow→명시 READY/UI/API→공개 자동 관리·native 현재 판단/정정·일지를 연결했다. 부분2/취소 UNKNOWN/늦은1은 실제3주만 관리하고, 최초 반등/실패와 당일 미완료를 보존해 DB 재열기·익일3→부분1/확인된 취소→잔량2→0을 확인했다. 무체결 취소 뒤 늦은1도 같은 실행 중 원계획으로 복원한다. [수락 근거](#s12-acceptance-panic-five). |
 | 7 | 개발 수락 | 같은 계획의 재전달·COMMIT 응답 유실·같은 모의계좌의 검증된 키 교체·상세 체결 복구와 새 진입의 명시 재개를 검증했다. 다른 계좌의 기존 권한 승계는 거절한다. [수락 근거](#s12-acceptance-seven-nine). |
 | 8 · 10 | 진행 | 늦은 시장·뉴스·정정의 신규 진입 제한과 데이터가 바뀌어도 유지되는 최초 보호, saved/applied 및 조회 전용 수신은 확인했다. 각 새 전략의 실행 활성·비활성 전환에서 기존 보유 관리와 원장·화면 일치를 추가 확인한다. |
 | 9 | 개발 수락 | 합성과 검토된 TRAIN 사례에서 여러 출처·후속 봉을 같은 사건에 묶고 학습·검증 분할을 차단했다. 원래 공시 수신 시각과 수정 전 보도 판본은 확인하지 못해 최초 신호 입력에서 제외했다. [수락 근거](#s12-acceptance-seven-nine) · [검토된 개발 사례](../../data/research/historical-monthly-exchange-case-context-20260924.json). |
@@ -685,3 +685,23 @@ source `de4456e50daae48e51d940b1d6a03af7f6ef5524ec6b3fff061420e2a8d6376f`에서 
 구조1328/위반0·소비 delta0·증분7295정의/292기록·기존미결49와 worker11/TEMP·PG job/DB/port/private 정리를 대조했다. native reader의 기존 `_close_native_documents` SQL1 지점은0으로 닫고 공통 `_minute_native_documents`의 같은 지점1만 기록했다. 기존 채택 목록이나 런타임 SQL 한도는 초기화하지 않았다. 속도/메모리 개선을 주장하지 않는다. 첫 정규 Windows57건 중 기존 CLOSE 취소1건이 남은 옛 reader 이름으로 실패했고 actual PG8건은 통과했다. 실패를 보존한 뒤 그 호출을 수정하고 기존 PG 취소 counterpart를 추가해 동일 최종 source의 영향 검사를 확인했다. [최초57건](../../tmp/s12-04-shadow/s12-05-panic-native/evidence.json) · [수정 전 PG8건](../../tmp/s12-03-pg-baseline/s12-05-panic-native/postgres-run.json). 초기 새 fixture의 `source_final.finished_at` 필드와16:00의 기존 after-hours에 대한 정확한 `SESSION_PROFILE_MISMATCH` 기대만 바로잡았으며 제품의 시간/세션 제한을 바꾸지 않았다. [최초 fixture 오류](../../tmp/s12-05-panic/native-probe.json) · [세션 기대 확인](../../tmp/s12-05-panic/native-probe-v3.json) · [최종 연결 probe](../../tmp/s12-05-panic/native-probe-v5.json).
 
 **항목5 전체는 미완료다.** 남은 직접 연결은 기존 Episode의 첫0B 실패/반등 고정·깨우기/checkpoint, 부분 BUY 미체결의 현재 조건 재판단→정정 우선/필요 취소와 UNKNOWN 복구, 현재 보유/SELL 잔량 자동 관리, READY UI·실제 화면/일지/API 경로다. 기존 종가베팅·신규주의 현재 정정 정책과 공통 물리 원장·Gateway/command/drain을 재사용하며 새 자동 관리 엔진을 만들지 않는다. 전체4/5·대표3/4/7/9의4/11과 원래 나머지1/2/5/6/8/10/11·DD/MICRO·독립 계좌 인계 및 완료 기준은 유지한다. 실제 주문·NAS 변경/배포·T0·권한 인계·push는 수행하지 않았다.
+
+<a id="s12-acceptance-panic-five"></a>
+
+### S12-05 대표 시나리오5 · 낙주 자동 관리·현재 정정·제품 연결 수락 — 2026-11-06
+
+낙주 P0/P1의 실제 final/현재 Shadow→명시 READY 화면·인증 게시/조회→기존 Supervisor/Runner/Episode→native 주문·보유·일지 경로를 연결했다. 가격 한도와 STOPPED 관리 선택은 사용자가 입력하며 새 기본값을 만들지 않는다. 기존 client는 typed operating_spec 전체를 전송하므로 별도 전달 계층을 추가하지 않았다. 게시·조회만으로 주문하지 않는 기존 경계도 유지한다.
+
+기존 ClosePlanManagement를 같은 수명의 MinutePlanManagement로 옮겨 CLOSE/IPO/PANIC이 공유한다. Shadow 커서·원래 계획·checkpoint는 이 owner가, 명령 직렬화·fresh 계좌 cut·권한/lease·복구·drain은 기존 Gateway/monitor/Runtime/native 저장소가 계속 소유한다. 순수한 물리 주문·계좌·가격/자본 검증만 minute_order_management로 모았고 전략별 원셋업과 실패/반등 조건은 각 adapter에 남겼다. 옛 CLOSE checkpoint/wire는 보존하며 실제 caller·소비자와 정확한 read/forward identity만 이동했다. 새 worker·DB schema·공개 QueryStore API·라이브러리·주문 권한은 없다.
+
+**현재 조건 재판단→유효한 접수 잔량은 정정 우선**을 실제 자동 관리와 native AMEND/CANCEL 재검증에 연결했다. 최초 전송 TTL 뒤에도 현재 판단이 유효한 BUY는 정정하고, 셋업 실패·현재 설정 실효는 취소한다. 원래 진입 승인으로 AMEND를 열지 않으며 native 직전 설정 변조는 전송/사건 변경0이다. UNKNOWN은 재전송하지 않고 실제 계좌 대사로 확인한다. STOPPED/Shadow OFF의 SELL도 원래 청산 근거·보호 한도와 실제 계획 잔량을 다시 확인해 정정한다. 이미 접수된 주문을 무조건 취소→신규로 바꾸지 않았다.
+
+첫 실제0B 실패/반등은 RAM callback에서 고정·깨우기만 하고 DB0이다. 같은 Episode checkpoint의 저장 ACK 뒤 행동하며 native transaction이 첫 관측과 원래 계획을 다시 대조한다. 반등/재하락으로 원래 관측을 덮어쓰지 않는다. 부분 BUY2→취소 UNKNOWN→늦은1은 실제 보유3이다. P1은 첫 반등 뒤 가격이 범위 안으로 돌아와도 원래 반등을 보존하고16:00의 기존 세션 거절로3주를 유지한다. 실제 DB 재열기·다음 거래일 fresh cut 뒤3주 청산, 상세1/확인된 취소 뒤 잔량2→최종0을 확인했다. 무체결 취소로 RAM 계획이 제거된 뒤 늦은1도 기존 계좌 FILL 전달이 해당 원계획만 다시 활성화해 재시작 전 SELL1로 관리한다. accepted SELL 재열기는 중복 전송0이고 Shadow 과거 재스캔은 금지한 상태로 검증했다. 목표 미달 추격이나 미확인 체결의 보유 합산은 하지 않는다.
+
+검증 중 같은 raw 체결번호가 원주문1주·정정 주문3주에 쓰이면 Episode가1주로 표시하는 실제 결함을 재현했다. 번호가 확인된 체결의 중복 키를 intent/물리 주문번호/raw ID로 구분해4주로 바로잡았다. 물리 번호가 없는 구형 자료는 기존 raw ID 중복 방지를 유지한다. 실제 journal projection은 원1+정정3/매도4와 같은 plan_id를 보존하고 재요청 추가 저장0, Episode 잔량0을 대조했다. [수정 전](../../tmp/s12-05-panic/episode-physical-fill-probe.json) · [수정 후](../../tmp/s12-05-panic/episode-physical-fill-fixed.json).
+
+최종 source `0269fdf45dff82b2216c78d554993e1ebf611164aa31136cb89b3dce845cfad5`에서 **Windows115건/10모듈 + 실제 격리 PostgreSQL21건(낙주 전체10·관련 회귀10·기존 화면 소비자1)**이 통과했다. 새 낙주 현재 판단/native 변조·원래 잔량·첫 관측·자동 복구·정규장 밖/익일·일지·정상 READY/API/UI와 기존 CLOSE/IPO·generic FILL/checkpoint/drain·leader 보호·수동 물량 격리·실제PG 원장/lease/SQL 계측을 대조했다. 구조1328site/38retirable·위반0, 소비 protocol125/PG135/SQLite130/검토390·delta0, 증분7310정의/295기록·기존미결49 보존과 같은 소스 지문/실제 실행 ID·소유 작업자10 및 PG 세 클러스터·DB/port/private/TEMP/registry 정리를 확인했다. 기존 UI fixture의 등록 소비자1건은 증분 대조가 누락을 발견해 같은 source에서 추가 실행했다. [Windows](../../tmp/s12-04-shadow/s12-05-panic-management-final-v3/evidence.json) · [낙주PG](../../tmp/s12-03-pg-baseline/s12-05-panic-management-final-v3/postgres-run.json) · [관련PG](../../tmp/s12-03-pg-baseline/s12-05-panic-management-regression-final-v3/postgres-run.json) · [화면 소비자PG](../../tmp/s12-03-pg-baseline/s12-05-panic-management-ipo-compat-final/postgres-run.json) · [증분](../../tmp/s12-05-panic/management-review-verified.json) · [정리](../../tmp/s12-05-panic/management-acceptance.json).
+
+같은 working SELL의 두 무변화 poll에서 불필요한 진입 설정 조회는 **2→0**, 추가 broker 조회는0이다. SELL이 소비하지 않는 진입 설정 조회만 제거했으며 현재 Risk/보호·원장·복구를 생략하지 않았다. 전체 CPU/지연/RSS 개선을 주장하지 않는다. [동일 입력 수정 전](../../tmp/s12-05-panic/working-sell-read-before.json) · [수정 후](../../tmp/s12-05-panic/working-sell-read-after.json). 첫 정규115건의 누락 Risk import·구형 FILL 중복 방지와 옛 모듈을 참조하던 기존 검사1건은 실패를 보존한 뒤 실제 경로/호출을 수정했다. 기대값·안전 한도를 완화하지 않았다. 첫 PG 낙주 전체 묶음은240초 도구 제한에 도달해 미수락으로 남겼고 진행 근거에 따라 도구 예산360초에서 같은 전체10건을 완료했다. 제품 timeout은 바꾸지 않았다. [최초115건](../../tmp/s12-04-shadow/s12-05-panic-management-final/evidence.json) · [옛 호출1건](../../tmp/s12-04-shadow/s12-05-panic-management-final-v2/evidence.json) · [최초PG 도구 timeout](../../tmp/s12-03-pg-baseline/s12-05-panic-management-final/fixture.json).
+
+정본12.12 항목5의 원래 완료 조건인 목표 미달 추격 없음·실제 체결만 보유/매도·늦은 FILL/당일 미완료 관리를 닫았다. **개발 수락은 대표3·4·5·7·9의5/11, 전체4/5**다. 남은 대표1·2·6·8·10·11과 DD/MICRO·독립 계좌/원주문 검증을 그대로 이어간다. 모든 시장/계좌/체결 입력은 합성이며 과거 실증 성과나 실제 운영 수락이 아니다. 실제 주문·NAS 변경/배포·T0·권한 인계·push는 수행하지 않았다.

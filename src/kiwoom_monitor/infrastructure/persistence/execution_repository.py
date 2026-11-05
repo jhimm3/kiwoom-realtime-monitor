@@ -312,6 +312,7 @@ class ExecutionRepository:
             requires_recovery = planned_cancel_claim.get("version") in {
                 "planned-leader-expired-entry-cancel/v1", "close-entry-deadline-cancel/v1",
                 'close-entry-protective-cancel/v1', 'close-current-order-management/v1',
+                'panic-current-order-management/v1',
             }
             if (any(value is not None for value in (replacement_claim, protection_claim, cancel_retry_claim))
                     or (plan_recovery is not None) != requires_recovery):

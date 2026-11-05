@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 import json
 
 from .breakout_strategy import StrategyState
-from .close_mock_execution import _close_quote as acknowledged_quote, frozen_close_candidate as frozen_candidate
 from .mock_automation_execution import (
     MockAutomationGateStatus, assess_mock_automation_decision_from_risk,
     dispatch_mock_automation_decision_from_risk, mock_automation_intent_id,
@@ -13,13 +12,130 @@ from .mock_automation_risk import mock_owned_buy_basis
 from .mock_automation_session_clock import content_id
 from .panic_rebound import PanicSetup, matches_panic_shadow, parse_panic_parameters
 from .market_session_schedule import KST
+from .minute_order_management import (
+    MinuteOrderManagementClaim, assess_current_minute_order, acknowledged_minute_quote as acknowledged_quote,
+    frozen_minute_candidate as frozen_candidate,
+)
 from kiwoom_monitor.domain.execution_activation import PANIC_NATIVE_PLAN_MODE
-from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderSide, OrderType, TERMINAL_ORDER_STATES
+from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderSide, OrderState, OrderType, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.domain.strategy_contract import StrategyDecision
 
 PANIC_ORDER_POLICY_VERSION = 'panic_execution_adapter/v1'
 PANIC_ENTRY_COLLECTION = 'execution_panic_entry_evidence'
 PANIC_EXIT_COLLECTION = 'execution_panic_exit_evidence'
+PANIC_ORDER_MANAGEMENT_VERSION = 'panic-current-order-management/v1'
+PANIC_INPUT_PROTOCOL = 'panic-shadow-native-plan/v1'
+
+
+def build_panic_trigger(spec, *, run_id, event, quote, observed_at):
+    """The original setup's first actual 0B failure/rebound, independent of fill cost."""
+    current = acknowledged_quote(spec, quote, observed_at, observed_at)
+    if datetime.fromisoformat(current['available_at']) < datetime.fromisoformat(event['available_at']):
+        raise ValueError('PANIC trigger predates the original signal')
+    setup = PanicSetup.from_dict(event['panic_entry_setup'])
+    if current['price_won'] <= setup.failure_price:
+        reason = 'panic_failure_reached_0B'
+    elif current['price_won'] >= setup.target_price:
+        reason = 'panic_rebound_reached_0B'
+    else:
+        return None
+    body = dict(version='panic-setup-trigger/v1', spec_id=spec.spec_id, execution_run_id=run_id,
+        candidate_event_id=event['event_id'], candidate_snapshot_id=event['snapshot_id'], symbol=event['symbol'],
+        plan_id=panic_entry_plan_id(spec.spec_id, run_id, event['event_id']), quote=current,
+        observed_at=observed_at.isoformat(), reason=reason)
+    return {**body, 'proof_id': content_id('panic_trigger', body)}
+
+
+def validate_panic_trigger(spec, *, run_id, event, trigger, now):
+    if not isinstance(trigger, dict): raise ValueError('PANIC first trigger is invalid')
+    observed = datetime.fromisoformat(trigger['observed_at'])
+    if observed.utcoffset() is None or observed > now:
+        raise ValueError('PANIC first trigger is from the future')
+    original = build_panic_trigger(spec, run_id=run_id, event=event, quote=trigger['quote'], observed_at=observed)
+    if original is None or original != trigger:
+        raise ValueError('PANIC first trigger or original setup changed')
+    return trigger['quote']
+
+
+def assess_panic_order_management(spec, *, run_id, parameters, event, entry_evidence, record, head,
+        order_events, recovery, risk, quote, decided_at, now, entry_enabled, exit_evidence=None, root=None,
+        panic_trigger=None):
+    terms = spec.panic_execution_policy
+    if terms is None or terms.accepted_order_management != 'reassess_then_amend_price/v1':
+        raise ValueError('PANIC current-order policy is not selected')
+    entered_at = datetime.fromisoformat(entry_evidence['decision']['decided_at'])
+    original, decision, plan = build_panic_entry_evidence(spec, run_id=run_id, parameters=parameters,
+        event=event, quote=entry_evidence['snapshot']['quote'], decided_at=entered_at, now=entered_at)
+    if (original != entry_evidence or record is None or not isinstance(record.intent, PlannedOrderIntent)
+            or record.intent.policy_version != PANIC_ORDER_POLICY_VERSION
+            or (record.intent.account_ref, record.intent.run_id) != (spec.account_scope.account_ref, run_id)
+            or (record.intent.plan.plan_id, record.intent.plan.policy_ref, record.intent.symbol)
+            != (plan.plan_id, plan.policy_ref, event['symbol'])
+            or (head.plan.plan_id, head.plan.policy_ref, head.symbol) != (plan.plan_id, plan.policy_ref, event['symbol'])
+            or head.unreconciled_sell_quantity or record.state not in {
+                OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED, OrderState.CANCEL_PENDING}
+            or record.amendment is not None and record.amendment.reconciliation_pending
+            or record.detailed_filled_quantity != record.filled_quantity):
+        raise ValueError('PANIC current-order origin or fill reconciliation changed')
+    if record.intent.side is OrderSide.BUY:
+        if ((record.intent.intent_id, record.intent.decision_id)
+                != (mock_automation_intent_id(spec.spec_id, decision.decision_id), decision.decision_id)
+                or head.quantity != record.detailed_filled_quantity):
+            raise ValueError('PANIC current BUY plan quantity changed')
+    elif (exit_evidence is None or root is None or root.intent.plan != plan
+            or root.state not in TERMINAL_ORDER_STATES
+            or exit_evidence['proof_id'] != content_id('panic_exit', {key: value for key, value in exit_evidence.items() if key != 'proof_id'})
+            or exit_evidence['snapshot']['entry_proof_id'] != entry_evidence['proof_id']
+            or exit_evidence['snapshot']['plan'] != asdict(record.intent.plan)
+            or (record.intent.intent_id, record.intent.decision_id, record.intent.quantity, record.intent.limit_price)
+            != (mock_automation_intent_id(spec.spec_id, exit_evidence['decision']['decision_id']),
+                exit_evidence['decision']['decision_id'], exit_evidence['decision']['quantity'],
+                exit_evidence['decision']['signal_reference_price'])):
+        raise ValueError('PANIC current SELL original exit changed')
+    setup = PanicSetup.from_dict(event['panic_entry_setup'])
+    if panic_trigger is not None:
+        validate_panic_trigger(spec, run_id=run_id, event=event, trigger=panic_trigger, now=now)
+    if (record.intent.side is OrderSide.SELL
+            and panic_trigger != exit_evidence['snapshot'].get('panic_trigger')):
+        raise ValueError('PANIC current SELL original trigger changed')
+
+    def invalid_price(price):
+        if price <= setup.failure_price:
+            return 'current_panic_failure_reached'
+        if price >= setup.target_price:
+            return 'current_panic_rebound_already_reached'
+        return None
+
+    capital = min(spec.maximum_capital_won, parameters['capital_won']) if spec.maximum_capital_won is not None else None
+    assessment = assess_current_minute_order(spec, run_id=run_id, record=record, head=head, order_events=order_events,
+        recovery=recovery, risk=risk, quote=quote, decided_at=decided_at, now=now, entry_enabled=entry_enabled,
+        terms=terms, management_version=PANIC_ORDER_MANAGEMENT_VERSION, entry_proof_id=entry_evidence['proof_id'],
+        signal_reference_price=event['signal_reference_price'], entry_deadline=datetime.fromisoformat(event['expires_at']),
+        capital_limit=capital, invalid_entry_price=invalid_price,
+        protection_reason=panic_trigger['reason'] if panic_trigger is not None else None,
+        exit_anchor=exit_evidence['snapshot']['trigger_quote']['price_won'] if exit_evidence is not None else None)
+    if assessment is not None and panic_trigger is not None:
+        assessment['panic_trigger'] = panic_trigger
+    return assessment
+
+
+def prepare_panic_order_management_claim(repository, runtime, execution, spec, record, *, parameters, event,
+        quote, recovery, risk, entry_enabled, panic_trigger=None):
+    entry = repository.load_panic_entry_evidence(runtime.account_ref, record.intent.plan.plan_id)
+    if entry is None: raise ValueError('PANIC original entry evidence is missing')
+    root = execution.load(mock_automation_intent_id(spec.spec_id, entry['decision']['decision_id']))
+    exit_proof = (repository.load_panic_exit_evidence(runtime.account_ref, panic_exit_key(record.intent.plan))
+                  if record.intent.side is OrderSide.SELL else None)
+    if record.intent.side is OrderSide.SELL:
+        panic_trigger = exit_proof['snapshot'].get('panic_trigger') if exit_proof is not None else None
+    now = runtime.server_now()
+    assessment = assess_panic_order_management(spec, run_id=runtime.run_id, parameters=parameters, event=event,
+        entry_evidence=entry, record=record,
+        head=execution.load_plan_position(runtime.account_ref, runtime.run_id, record.intent.symbol, record.intent.plan),
+        order_events=execution.events(record.intent.intent_id), recovery=recovery, risk=risk, quote=quote,
+        decided_at=now, now=now, entry_enabled=entry_enabled, root=root,
+        exit_evidence=exit_proof, panic_trigger=panic_trigger)
+    return MinuteOrderManagementClaim(assessment, recovery) if assessment is not None else None
 
 
 def panic_entry_plan_id(spec_id, run_id, event_id):
@@ -92,7 +208,7 @@ def dispatch_panic_entry(repository, runtime, spec, *, parameters, event, quote,
 
 
 def build_panic_exit_evidence(spec, *, run_id, parameters, event, entry_evidence, root, head, fill_events,
-                              trigger_quote, quote, decided_at, now):
+                              trigger_quote, quote, decided_at, now, panic_trigger=None):
     entered = datetime.fromisoformat(entry_evidence['decision']['decided_at'])
     original, entry_decision, original_plan = build_panic_entry_evidence(spec, run_id=run_id, parameters=parameters,
         event=event, quote=entry_evidence['snapshot']['quote'], decided_at=entered, now=entered)
@@ -118,7 +234,8 @@ def build_panic_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     if (quantity != root.detailed_filled_quantity or quantity < head.quantity or len(identities) != len(set(identities))
             or tuple(row['broker_execution_id'] for row in fills) != root.fill_ids):
         raise ValueError('PANIC entry detailed fill basis is incomplete')
-    trigger = acknowledged_quote(spec, trigger_quote, decided_at, now)
+    trigger = (validate_panic_trigger(spec, run_id=run_id, event=event, trigger=panic_trigger, now=now)
+               if panic_trigger is not None else acknowledged_quote(spec, trigger_quote, decided_at, now))
     current = acknowledged_quote(spec, quote, decided_at, now)
     if (datetime.fromisoformat(trigger['available_at']) > datetime.fromisoformat(current['available_at'])
             or current['price_won'] * 10_000 < trigger['price_won'] * (10_000 - spec.panic_execution_policy.protective_slippage_bps)):
@@ -143,11 +260,13 @@ def build_panic_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
         plan=asdict(head.plan), entry_intent_id=root.intent.intent_id, quantity=head.quantity,
         fill_cursor=head.fill_cursor, entry_price_won=basis, entry_fill_ref=content_id('panic_fills', fills),
         trigger_quote=trigger, quote=current, reason=reason)
+    if panic_trigger is not None: snapshot['panic_trigger'] = panic_trigger
     decision = _decision(run_id, snapshot, 'EXIT', head.quantity, current['price_won'], (reason,), decided_at)
     return _evidence('panic_exit', snapshot, decision), decision, head.plan
 
 
-def dispatch_panic_exit(repository, runtime, execution, spec, plan, *, parameters, event, trigger_quote, quote, recovery, risk):
+def dispatch_panic_exit(repository, runtime, execution, spec, plan, *, parameters, event, trigger_quote, quote, recovery, risk,
+                        panic_trigger=None):
     scope = dict(account_ref=runtime.account_ref, spec_id=spec.spec_id, strategy_ref=spec.strategy_ref)
     saved = repository.load_panic_exit_evidence(runtime.account_ref, panic_exit_key(plan))
     now = decided_at = runtime.server_now()
@@ -161,6 +280,7 @@ def dispatch_panic_exit(repository, runtime, execution, spec, plan, *, parameter
         if runtime.load_intent(mock_automation_intent_id(spec.spec_id, decision.decision_id)) is not None:
             return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
         trigger_quote, quote = saved['snapshot']['trigger_quote'], saved['snapshot']['quote']
+        panic_trigger = saved['snapshot'].get('panic_trigger')
         decided_at = datetime.fromisoformat(decision.decided_at)
     entry = repository.load_panic_entry_evidence(runtime.account_ref, plan.plan_id)
     if entry is None: raise ValueError('PANIC original entry evidence is missing')
@@ -169,7 +289,7 @@ def dispatch_panic_exit(repository, runtime, execution, spec, plan, *, parameter
     if head.plan != plan: raise ValueError('PANIC plan revision changed before management')
     prepared = build_panic_exit_evidence(spec, run_id=runtime.run_id, parameters=parameters, event=event,
         entry_evidence=entry, root=execution.load(root_id), head=head, fill_events=execution.events(root_id),
-        trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now)
+        trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now, panic_trigger=panic_trigger)
     if prepared is None: return None, None, None
     evidence, decision, plan = prepared
     gate = assess_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)

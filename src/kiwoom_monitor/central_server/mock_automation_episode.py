@@ -53,7 +53,7 @@ from kiwoom_monitor.application.leader_breakout import (
 from kiwoom_monitor.application.research_replay import (
     KrxMinuteBarFrame, MinuteStrategyInputs,
 )
-from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, LEADER_NATIVE_PLAN_MODE, MockAutomationOperatingSpec
+from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, LEADER_NATIVE_PLAN_MODE, PANIC_NATIVE_PLAN_MODE, MockAutomationOperatingSpec
 from kiwoom_monitor.domain.order_contract import OrderIntent, OrderPlanRef, OrderSide, OrderState, OrderType, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
@@ -99,6 +99,11 @@ class MockAutomationEpisodePosition:
         self._position_state_available_at = None
         self._position_state_failed = False
         self._seen_fill_ids: set[str] = set()
+        self._plan_fill_listener = None
+
+    def set_plan_fill_listener(self, listener):
+        """Borrow the existing minute-plan owner; notification performs no I/O."""
+        self._plan_fill_listener = listener
 
     @property
     def state(self) -> StrategyState:
@@ -146,16 +151,20 @@ class MockAutomationEpisodePosition:
             )
             for event in page.events:
                 self._fill_cursor = max(self._fill_cursor, event.accepted_sequence)
+                fill_key = (json.dumps([event.intent_id, event.broker_order_id, event.broker_execution_id], separators=(',', ':'))
+                            if event.broker_order_id else event.broker_execution_id)
                 if (
                     event.run_id != self._run_id
                     or event.event_type != "FILL"
                     or not event.broker_execution_id
-                    or event.broker_execution_id in self._seen_fill_ids
+                    or fill_key in self._seen_fill_ids
                     or event.quantity <= 0
                     or event.price <= 0
                 ):
                     continue
-                self._seen_fill_ids.add(event.broker_execution_id)
+                self._seen_fill_ids.add(fill_key)
+                if self._plan_fill_listener is not None and getattr(event, 'plan', None) is not None:
+                    self._plan_fill_listener(event.plan)
                 if event.side == "BUY":
                     old_quantity = (
                         int(self._state.position_quantity or 0)
@@ -438,8 +447,9 @@ class MockAutomationEpisode:
         self._strategy_inputs = None
         self._leader_position_proof = None
         self._leader_plan_mode = self._spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE
-        self._close_plan_mode = self._spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE
-        self._close_management = None
+        self._panic_plan_mode = self._spec.execution_plan_mode == PANIC_NATIVE_PLAN_MODE
+        self._minute_plan_mode = self._spec.execution_plan_mode in {CLOSE_NATIVE_PLAN_MODE, PANIC_NATIVE_PLAN_MODE}
+        self._minute_management = None
         self._leader_plan_root = None
         self._leader_plan_deadline = None
         self._leader_plan_cancel_attempt = None
@@ -513,7 +523,7 @@ class MockAutomationEpisode:
 
     @property
     def needs_native_execution_inputs(self) -> bool:
-        return self._close_plan_mode or self._spec.unfilled_execution_policy is not None
+        return self._minute_plan_mode or self._spec.unfilled_execution_policy is not None
 
     def bind_execution_callbacks(self, *, scheduled_task_present, capture_wake) -> None:
         # Narrow lifecycle queries only: neither returns a Runner or Task.
@@ -606,8 +616,8 @@ class MockAutomationEpisode:
         try:self._position_policy_implementation = native_study_policy_implementation_ref()
         except (OSError,ValueError):self._position_policy_implementation = None
         family_id = str(candidate.get("family", ""))
-        if self._close_plan_mode:
-            self._prepare_close(candidate)
+        if self._minute_plan_mode:
+            self._prepare_minute_plan(candidate)
             return
         self._family = get_research_family(family_id)
         self._config = parse_strategy_config(family_id, candidate.get("parameters", {}))
@@ -656,40 +666,44 @@ class MockAutomationEpisode:
         self._restore_or_bootstrap(runner_document)
         self._session_clock = restored_clock
 
-    def _prepare_close(self, candidate):
+    def _prepare_minute_plan(self, candidate):
         from kiwoom_monitor.application.section12_minute_research import MinuteExperiment
-        from kiwoom_monitor.domain.research_contract import CLOSE_IPO_FINAL_CANDIDATE_FAMILIES
-        from .close_plan_management import CLOSE_INPUT_PROTOCOL, ClosePlanManagement
+        from kiwoom_monitor.domain.research_contract import MINUTE_FINAL_CANDIDATE_FAMILIES
+        from .minute_plan_management import CLOSE_INPUT_PROTOCOL, MinutePlanManagement
+        from kiwoom_monitor.application.panic_mock_execution import PANIC_INPUT_PROTOCOL
+        protocol = PANIC_INPUT_PROTOCOL if self._panic_plan_mode else CLOSE_INPUT_PROTOCOL
+        management_key = "minute_management" if self._panic_plan_mode else "close_management"
 
-        if candidate.get('family') not in CLOSE_IPO_FINAL_CANDIDATE_FAMILIES or not isinstance(self._bundle.repository, ExecutionRepository):
-            raise ValueError('native CLOSE plan requires the existing CLOSE execution owner')
+        if candidate.get('family') not in MINUTE_FINAL_CANDIDATE_FAMILIES or not isinstance(self._bundle.repository, ExecutionRepository):
+            raise ValueError('native minute plan requires the existing execution owner')
         self._config = MinuteExperiment.from_document(candidate['family'], candidate['parameters'])
         self._strategy_inputs = MinuteStrategyInputs(session_profile=self._spec.session_profile,
-            keep_bars=self._config.policy.lookback_bars + 2, universe_horizon=self._spec.maximum_data_gap_seconds)
-        self._input_progress.use_native_protocol(CLOSE_INPUT_PROTOCOL)
-        self._close_management = ClosePlanManagement(self._store, self._bundle, self._spec, self._repository,
+            keep_bars=(self._config.policy.lookback_minutes if self._panic_plan_mode else self._config.policy.lookback_bars) + 2, universe_horizon=self._spec.maximum_data_gap_seconds)
+        self._input_progress.use_native_protocol(protocol)
+        self._minute_management = MinutePlanManagement(self._store, self._bundle, self._spec, self._repository,
             parameters=candidate['parameters'], price_source=self._price_source, now_provider=self._now,
             family=candidate['family'])
+        self._episode_position.set_plan_fill_listener(self._minute_management.observe_fill)
         rows = self._store.load_documents('execution_mock_automation_runner_current', self._bundle.account_ref, 1)
         document = rows[0]['document'] if rows else None
         matching = isinstance(document, Mapping) and (
             document.get('version'), document.get('spec_id'), document.get('execution_run_id'), document.get('candidate_package_hash')
         ) == (RUNNER_CHECKPOINT_VERSION, self._spec.spec_id, self._bundle.run_id, self._spec.candidate_package_hash)
         if matching:
-            if document.get('delivery_protocol') != CLOSE_INPUT_PROTOCOL:
+            if document.get('delivery_protocol') != protocol:
                 raise ValueError('unsupported CLOSE input protocol')
             self._episode_position.restore_fill_cursor(document.get('fill_cursor', 0))
             self._episode_position.restore_strategy_state(document.get('strategy_state', {}))
             self._episode_position.restore_seen_fill_ids(document.get('seen_fill_ids', ()))
             self._checkpoint.restore_revision(document.get('checkpoint_revision', 0))
-        self._close_management.prepare(document.get('close_management') if matching else None)
+        self._minute_management.prepare(document.get(management_key) if matching else None)
         notice = document.get('protection_review') if matching else None
         if notice is not None:
             self._validate_protection_review(notice)
             self._protection_review = deepcopy(notice)
         self._episode_position.apply_new_fills(self._bundle.repository, leader=False, config=self._config,
                                                position_time=self._position_state_time)
-        self._status = dict(self._close_management.status)
+        self._status = dict(self._minute_management.status)
         self._save_checkpoint()
 
 
@@ -843,7 +857,7 @@ class MockAutomationEpisode:
                 'account_observed_at':observation.observed_at.isoformat(),'state_available_at':available.isoformat(),
                 'state_revision':revision,'runtime_observation_revision':runtime_revision,'fill_cursor':cursor,
                 'risk_event_high_watermark':risk.execution_event_high_watermark,
-                'family':self._config.family if self._close_plan_mode else self._family.family_id,
+                'family':self._config.family if self._minute_plan_mode else self._family.family_id,
                 'parameters':self._config.to_dict(),'session_profile':self._spec.session_profile,
                 'registered_implementation_hash':self._position_registered_implementation,
                 'candidate_package_hash':self._spec.candidate_package_hash,'strategy_state':state.to_dict(),
@@ -983,7 +997,7 @@ class MockAutomationEpisode:
             return  # Healthy recovery cannot erase an armed protection request.
         previous = self._protection_snapshot()
         stop = (previous or {}).get('risk_trigger', {}).get('stop_loss')
-        if self._close_plan_mode and stop is not None and previous['state'] == 'PENDING':
+        if self._minute_plan_mode and stop is not None and previous['state'] == 'PENDING':
             return  # Keep the original historical cut; the current cut still updates above.
         if stop is not None and trigger['disposition'] == 'RECONCILE_REQUIRED':
             trigger = {**trigger, 'stop_loss':stop, 'reasons':[*trigger['reasons'], 'SYMBOL_STOP_LOSS_REACHED']}
@@ -998,9 +1012,11 @@ class MockAutomationEpisode:
             input_ref="native-risk:" + risk.snapshot_id, requested_at=now, risk_trigger=trigger)
 
     def _stop_validation_terms(self):
-        if self._close_plan_mode:
+        if self._panic_plan_mode:
+            return {}  # PANIC absolute setup triggers are owned by the retained minute plan.
+        if self._minute_plan_mode:
             return {'stop_loss_bps': self._config.policy.protection_loss_bps, 'ipo_policy': self._config.policy,
-                    'ipo_candidate': self._close_management.active_candidate()}
+                    'ipo_candidate': self._minute_management.active_candidate()}
         if self._leader:
             return {"leader_config": self._config, "position_proof": self._leader_position_proof}
         return {"stop_loss_bps": self._config.stop_loss_bps}
@@ -1151,10 +1167,16 @@ class MockAutomationEpisode:
 
     def observe_automation_price(self, symbol, price):
         """RAM-only immediate stop cue; transport remains in the existing Runner."""
+        if self._panic_plan_mode:
+            if (not self._closing and self._minute_management is not None
+                    and self._minute_management.observe_price(symbol, price)):
+                notify = self._wake_notification()
+                if notify is not None: notify()
+            return
         if self._leader:
             return  # The approved actual-0B callback owns the new observation proof.
         if (self._closing or self._stop_loss_cut is None
-                or self._spec.unfilled_execution_policy is None and not self._close_plan_mode):
+                or self._spec.unfilled_execution_policy is None and not self._minute_plan_mode):
             return
         risk, positions = self._stop_loss_cut
         if symbol not in dict(risk.owned_entry_prices):
@@ -2824,13 +2846,13 @@ class MockAutomationEpisode:
                     self._status = status
                     await drain_thread_call(self._save_checkpoint)
                 return 0
-            if self._close_management is not None:
-                if self._checkpoint.pending or self._protection_pending():
+            if self._minute_management is not None:
+                if self._checkpoint.pending or self._protection_pending() or self._minute_management.checkpoint_pending:
                     await drain_thread_call(self._save_checkpoint)
-                count = await self._close_management.advance(control, limit=limit,
+                count = await self._minute_management.advance(control, limit=limit,
                     allow_entry=lambda: not self._closing and not self._protection_pending(),
                     protection_notice=self._protection_snapshot())
-                self._status = dict(self._close_management.status)
+                self._status = dict(self._minute_management.status)
                 await drain_thread_call(self._save_checkpoint)
                 return count
             if control.desired_state.value != "RUNNING":
@@ -3465,8 +3487,8 @@ class MockAutomationEpisode:
         if self._leader:
             content["leader_position_proof"] = deepcopy(self._leader_position_proof)
         content.update(self._input_progress.checkpoint_protocol_fields(recovery=recovery))
-        if self._close_management is not None:
-            content['close_management'] = self._close_management.checkpoint_fields()
+        if self._minute_management is not None:
+            content['minute_management' if self._panic_plan_mode else 'close_management'] = self._minute_management.checkpoint_fields()
         if self._unfilled_preflight is not None:
             content["unfilled_management_preflight"] = deepcopy(self._unfilled_preflight)
         if self._unfilled_registration is not None:
@@ -3485,3 +3507,9 @@ class MockAutomationEpisode:
             content, self._store,
             account_ref=self._bundle.account_ref, now_provider=self._now, force=force,
         )
+        if self._minute_management is not None:
+            was_pending = self._minute_management.checkpoint_pending
+            self._minute_management.acknowledge_checkpoint(content['minute_management' if self._panic_plan_mode else 'close_management'])
+            if was_pending and not self._minute_management.checkpoint_pending:
+                notify = self._wake_notification()
+                if notify is not None: notify()

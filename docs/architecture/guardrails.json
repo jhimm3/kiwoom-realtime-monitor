@@ -3179,6 +3179,22 @@
         "tests/unit/test_close_order_management.py",
         "tests/integration/test_postgres_access_postgres.py"
       ]
+    },
+    {
+      "id": "S12-05-shared-current-order-and-original-panic-trigger-20261106",
+      "reason": "Reuse the already verified current Risk/account/physical remainder/budget checks for PANIC rather than duplicate an order manager; preserve first actual failure/rebound through cancellation, late fills and restart.",
+      "connection": "Existing Episode and renamed-in-place MinutePlanManagement keep the cursor, original plan context, first PANIC cue and checkpoint ACK. The 0B callback changes RAM only. Existing ordered FILL delivery scopes unit identity by intent/physical order/raw ID and cues only a newly affected plan. Application common assessment borrows immutable physical-leg facts without I/O. Native QUEUED/SUBMISSION_STARTED and current AMEND/CANCEL claims reread the same durable cue in their existing owner/control/Risk/head transaction. No worker/schema/library/public QueryStore method or second authority.",
+      "validation": "Same SQLite/actual PG fake broker cases cover both variants, current valid amendment after original transmission expiry, thesis loss/cancel and UNKNOWN no resend, partial/late real quantity, first0B failure and target followed by recovery, native first-checkpoint mutation rollback, terminal zero-fill followed by actual late FILL, restored Shadow-disabled plan, closed-session hold/next-weekday partial residual, authenticated READY and UI explicit fields, current stopped SELL amendment and physical journal replay. Existing CLOSE/IPO/lease/native source-cost and generic safety cases protect unchanged semantics. Source-site relocation is not a performance claim.",
+      "limits": {
+        "boundary|kiwoom_monitor.application.close_mock_execution|kiwoom_monitor.infrastructure.persistence.execution_repository": 0,
+        "boundary|kiwoom_monitor.application.minute_order_management|kiwoom_monitor.infrastructure.persistence.execution_repository": 1
+      },
+      "evidence": [
+        "tests/unit/test_close_order_management.py",
+        "tests/unit/test_close_mock_execution.py",
+        "tests/unit/test_panic_mock_execution.py",
+        "tests/integration/test_panic_mock_execution_postgres.py"
+      ]
     }
   ]
 }
