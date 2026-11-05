@@ -12,6 +12,9 @@
 
 종가베팅 실행 정책 v1은 기존 JSON·spec/plan ID와 중지 권한을 보존한다. v2는 `stopped_management: continue_original_plan/v1`을 명시해야 저장할 수 있으며 그 선택은 내용 hash에 포함한다. 중지 중 원래 계획의 취소·청산만 해당 native control fence를 통과할 수 있다. 계좌·run·spec·revision·lease·최신 대사와 원체결 검증은 공통 원장에 남고 신규 진입은 계속 거절한다. 스키마 변경이나 기존 명세의 일괄 변환은 없다.
 
+일반 READY 게시도 동일한 `forward_profile`·stage revision·operating spec 저장 계약을 사용한다. CLOSE의 명시 정책과 그 hash는 인증 조회에서 동일하게 반환하며 선택하지 않은 실행 수치를 생성하지 않는다. 같은 날 마감 가격이 연속해 같으면 최초 원관측만 저장하고, A→B→A와 날짜 변경은 별도 사실로 보존한다. COMMIT 응답 유실의 원래 보류 문서는 재시도까지 유지한다. 갭 HOLD 뒤 늦은 첫 분봉 정정은 당시 가용 판본으로 다시 조회하며 과거 cut과 이미 고정한 주문 proof는 유지한다. 새 스키마·운영 DB 전환은 없다.
+
+
 종가베팅의 `closing_auction_price`는 기존 dataset snapshot·시장 metadata·불변 observation revision에 저장한다. subject는 `종목코드:KRX`이며 payload의 `event_at`과 metadata `effective_at`은 실제 0B 체결 시각, `available_at`은 원래 수신 시각이다. 별도 OHLC나 테이블을 만들지 않는다. 이 새 종류는 불변 보관 대상으로만 확장하며 기존 일반 연구의 선택 종류와 과거 결과는 바꾸지 않는다. native 갭 조회는 고정 구간의 실제 마감 가격을 우선하고 기존 완료 동시호가 봉 비교도 보존한다. v3 청산 근거는 사용한 원장 두 판본을 그대로 보존한다. schema 25와 기존 운영 DB는 변경하지 않았다. [생산·검증 경로](docs/architecture/section12-development-roadmap-20261105.md#s12-close-collector-gap).
 
 ## 새 명시full 로컬 저장 계약 — AR04/05 source253·기동/복원 연결257

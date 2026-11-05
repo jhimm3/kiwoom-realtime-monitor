@@ -25,6 +25,8 @@ from kiwoom_monitor.domain.execution_activation import (
     MOCK_RECOVERY_POLICY,
     MOCK_STOP_POLICY,
     MockAutomationOperatingSpec,
+    CLOSE_NATIVE_PLAN_MODE,
+    CloseMockExecutionPolicy,
     MockUnfilledExecutionPolicy,
     MockAutomationReadiness,
     MockAutomationReadinessStatus,
@@ -37,6 +39,7 @@ from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScop
 from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
 from .leader_breakout import LeaderBreakoutConfig, validate_leader_shadow_event
 from .close_and_ipo import matches_close_shadow
+from .section12_minute_research import CLOSE_FAMILY, MinuteExperiment
 
 
 MOCK_AUTOMATION_LIMIT_FIELDS = (
@@ -45,6 +48,17 @@ MOCK_AUTOMATION_LIMIT_FIELDS = (
     "maximum_submission_unknown_count", "maximum_reconnect_count",
     "maximum_balance_mismatch_count",
 )
+
+
+def _candidate_family_contract(package):
+    family_id = str(package.candidate_spec.get("family", ""))
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
+        if family_id != CLOSE_FAMILY:
+            raise ValueError("CLOSE candidate family does not match its version")
+        MinuteExperiment.from_document(family_id, _mapping(package.candidate_spec, "parameters"))
+        return family_id, (family_id,)
+    family = get_research_family(family_id)
+    return family.family_id, family.factor_ids
 
 
 def matching_shadow_events(
@@ -103,11 +117,14 @@ def build_mock_automation_publication_documents(
     criteria: ForwardCriteria, limits: Mapping[str, int],
     unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None,
     execution_plan_mode: str | None = None,
+    close_execution_policy: CloseMockExecutionPolicy | None = None,
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
-    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
-        raise ValueError("CLOSE READY publication requires an approved native order policy and runner")
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
+        execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or not isinstance(close_execution_policy, CloseMockExecutionPolicy)
+    ):
+        raise ValueError("CLOSE READY publication requires an explicit CLOSE execution policy")
     policy = eligibility_policy_from_dict(
         _mapping(candidate_publication, "eligibility_policy")
     )
@@ -144,13 +161,12 @@ def build_mock_automation_publication_documents(
     if frozen_at < max(binding_verified_at, shadow_at):
         raise ValueError("READY publication freeze predates binding or shadow evidence")
 
-    family_id = str(package.candidate_spec.get("family", ""))
-    family = get_research_family(family_id)
+    family_id, factor_ids = _candidate_family_contract(package)
     session = _mapping(package.candidate_spec, "session_profile")
     session_profile = str(session.get("profile", ""))
     profile = ForwardEvaluationSpec(
-        strategy_ref=package.strategy_ref, family_version=family.family_id,
-        factor_versions=family.factor_ids, policy_version=policy.policy_id,
+        strategy_ref=package.strategy_ref, family_version=family_id,
+        factor_versions=factor_ids, policy_version=policy.policy_id,
         data_path="nas", account_ref=account_ref, environment="mock",
         evaluation_start=evaluation_start, evaluation_end=evaluation_end,
         frozen_at=frozen_at, criteria=criteria, session_profile=session_profile,
@@ -198,6 +214,7 @@ def build_mock_automation_publication_documents(
         stop_policy=MOCK_STOP_POLICY, recovery_policy=MOCK_RECOVERY_POLICY,
         unfilled_execution_policy=unfilled_execution_policy,
         execution_plan_mode=execution_plan_mode,
+        close_execution_policy=close_execution_policy,
         **{name: int(limits[name]) for name in MOCK_AUTOMATION_LIMIT_FIELDS},
     )
     return {
@@ -247,8 +264,11 @@ def publish_ready_mock_automation_spec(
     )
     if package is None:
         raise ValueError("mock automation candidate package is not stored")
-    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
-        raise ValueError("CLOSE READY publication requires an approved native order policy and runner")
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
+        spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE
+        or not isinstance(spec.close_execution_policy, CloseMockExecutionPolicy)
+    ):
+        raise ValueError("CLOSE READY publication requires an explicit CLOSE execution policy")
     policy = repository.load_mock_automation_eligibility_policy(
         spec.strategy_ref, spec.candidate_package_hash,
     )
@@ -271,11 +291,7 @@ def publish_ready_mock_automation_spec(
     ):
         raise ValueError("candidate final lineage does not match operating spec")
 
-    family_id = str(package.candidate_spec.get("family", ""))
-    family = get_research_family(family_id)
-    config = parse_strategy_config(
-        family_id, package.candidate_spec.get("parameters", {}),
-    )
+    family_id, factor_ids = _candidate_family_contract(package)
     session = package.candidate_spec.get("session_profile", {})
     package_session = str(session.get("profile", "")) if isinstance(session, Mapping) else ""
     if (
@@ -283,8 +299,8 @@ def publish_ready_mock_automation_spec(
         or profile.account_ref != spec.account_scope.account_ref
         or profile.environment != "mock"
         or profile.data_path != "nas"
-        or profile.family_version != family.family_id
-        or profile.factor_versions != family.factor_ids
+        or profile.family_version != family_id
+        or profile.factor_versions != factor_ids
         or profile.policy_version != policy.policy_id
         or profile.session_profile != package_session
         or spec.forward_profile_id != profile.profile_id
@@ -325,20 +341,7 @@ def publish_ready_mock_automation_spec(
         or spec.shadow_evidence_ref != shadow.revision_id
     ):
         raise ValueError("strategy stage evidence does not match candidate publication")
-    expected_monitor_id = shadow_monitor_id_for_config(family_id, config, package_session)
-    family_parts = family_id.rsplit("/", 1)
-    shadow_quantity = shadow_event.get("quantity")
-    if isinstance(config, LeaderBreakoutConfig):
-        validate_leader_shadow_event(config, shadow_event)
-    elif (
-        len(family_parts) != 2
-        or str(shadow_event.get("run_id", "")) != expected_monitor_id
-        or str(shadow_event.get("strategy_id", "")) != family_parts[0]
-        or str(shadow_event.get("strategy_version", "")) != family_parts[1]
-        or str(shadow_event.get("transition", "")) != "flat->candidate"
-        or type(shadow_quantity) is not int
-        or shadow_quantity <= 0
-    ):
+    if not matching_shadow_events({"package": package.to_dict()}, (shadow_event,)):
         raise ValueError("shadow evidence does not match the published candidate configuration")
     try:
         shadow_at = datetime.fromisoformat(str(shadow_event.get("available_at", "")))

@@ -211,7 +211,9 @@ def publish_gap_observations(store, example, clock):
                 _append_postgres_observation_revision(cursor, 'minute_bar', bar.code, bar.bar_start, payload,
                                                      observation, now_provider=lambda: clock[0])
         keys.append(bar.bar_start)
-    rows = {row['observation_key']: row for row in store.load_observation_revisions('minute_bar', example.symbol)}
+    rows = {row['observation_key']: row for row in sorted(
+        store.load_observation_revisions('minute_bar', example.symbol),
+        key=lambda row: (datetime.fromisoformat(row['available_at']), row['accepted_sequence']))}
     return [rows[key] for key in keys]
 
 
@@ -427,7 +429,7 @@ def verify_close_legacy_entry(case, store_factory):
 
 
 async def verify_close_runner(case, store_factory, *, protective=False, stopped=False, collector_gap=False,
-                              tamper_collector_gap=False):
+                              tamper_collector_gap=False, corrected_gap=False):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
@@ -499,21 +501,38 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
             return self.cut if self.enabled else None
 
     async def assemble():
+        from kiwoom_monitor.central_server.mock_runtime import (
+            MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION, MockAccountRuntimeMode, MockAutomationRuntimeContext,
+        )
         monitor = Monitor()
         async def refresh_account():
             return (await monitor.refresh_recovery()).account
         gateway = ManualMockOrderGateway(runtime, execution, refresh_account, now_provider=lambda: clock[0],
                                         automation_execution_cut=lambda: monitor.latest_automation_execution_cut)
         gateway.set_manual_submit_enabled(False)
+        control = repository.load_mock_automation_control(ACCOUNT_REF)
+        admission = repository.load_mock_automation_admission_for_spec(ACCOUNT_REF, context.spec.spec_id)
         bundle = SimpleNamespace(account_ref=ACCOUNT_REF, credential_profile_id=PROFILE_ID, run_id=runtime.run_id,
             runtime=runtime, repository=execution, monitor=monitor, gateway=gateway,
-            automation_context=SimpleNamespace(spec_id=context.spec.spec_id, execution_run_id=runtime.run_id))
-        supervisor = MockAutomationSupervisor(store, SimpleNamespace(bundle=lambda _: bundle), poll_seconds=3600,
+            runtime_mode=MockAccountRuntimeMode.AUTOMATIC,
+            automation_context=MockAutomationRuntimeContext(MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION, ACCOUNT_REF,
+                runtime.run_id, context.spec.spec_id, admission.admission_id, control.control_revision, 1))
+        async def require_settings(profile_id, *, expected_settings_revision, credential_revision):
+            case.assertEqual((PROFILE_ID, 1, 1), (profile_id, expected_settings_revision, credential_revision))
+        supervisor = MockAutomationSupervisor(store, SimpleNamespace(bundle=lambda _: bundle,
+            require_execution_settings=require_settings), poll_seconds=3600,
             price_source=lambda symbol: quotes.get(symbol), now_provider=lambda: clock[0])
         case.addAsyncCleanup(supervisor.close)
         case.addAsyncCleanup(gateway.close)
-        runner = await supervisor._assemble_runner(bundle, context.spec, PROFILE_ID)
-        supervisor._runners[ACCOUNT_REF] = runner
+        if control.desired_state.value == 'RUNNING':
+            status = await supervisor.activate(credential_profile_id=PROFILE_ID, account_ref=ACCOUNT_REF,
+                spec_id=context.spec.spec_id, expected_settings_revision=1, credential_revision=1)
+            case.assertEqual(('AUTOMATIC', context.spec.spec_id),
+                             (status['runtime_mode'], status['control']['active_spec_id']))
+            runner = supervisor._runners[ACCOUNT_REF]
+        else:
+            runner = await supervisor._assemble_runner(bundle, context.spec, PROFILE_ID)
+            supervisor._runners[ACCOUNT_REF] = runner
         await asyncio.sleep(0)
         async def idle():
             while runner.episode.execution_busy:
@@ -640,13 +659,31 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     await runner.episode.advance_once()
     if not protective:
         case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+    if corrected_gap:
+        # A complete initially known opening price says HOLD. A later complete
+        # revision of that same minute must replace it before any exit is fixed.
+        original = context.example.opening
+        context.example.opening = replace(original, open=105, high=105)
+        publish_gap_observations(store, context.example, clock)
+        await runner.episode.advance_once()
+        case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+        case.assertEqual('planned_overnight_hold', runner.episode._close_management.status['reason'])
+        old_cut = clock[0]
+        clock[0] += timedelta(seconds=1)
+        context.example.opening = replace(original, available_at=clock[0].isoformat())
+        quotes[buy.intent.symbol] = {**quotes[buy.intent.symbol], 'available_at': clock[0]}
     expected_gap = (await publish_collector_gap_observations(case, store, context.example) if collector_gap else
                     publish_gap_observations(store, context.example, clock))
+    if corrected_gap:
+        before = store.load_close_gap_observations(buy.intent.symbol, context.example.auction.starts_at,
+            context.example.auction.ends_at, context.example.following.starts_at, old_cut)
+        case.assertEqual(105, before[1]['payload']['open'])
     selected = store.load_close_gap_observations(buy.intent.symbol, context.example.auction.starts_at,
         context.example.auction.ends_at, context.example.following.starts_at, clock[0])
     case.assertEqual(expected_gap, list(selected))
-    case.assertEqual((), store.load_close_gap_observations(buy.intent.symbol, context.example.auction.starts_at,
-        context.example.auction.ends_at, context.example.following.starts_at, clock[0] - timedelta(microseconds=1)))
+    if not corrected_gap:
+        case.assertEqual((), store.load_close_gap_observations(buy.intent.symbol, context.example.auction.starts_at,
+            context.example.auction.ends_at, context.example.following.starts_at, clock[0] - timedelta(microseconds=1)))
     from datetime import timezone
     case.assertEqual(selected, store.load_close_gap_observations(buy.intent.symbol,
         context.example.auction.starts_at.astimezone(timezone.utc), context.example.auction.ends_at.astimezone(timezone.utc),
@@ -672,7 +709,9 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
         await supervisor.close()
         return
     await runner.episode.advance_once()
-    sell, = execution.active_intents('mock', ACCOUNT_REF, runtime.run_id)
+    pending = execution.active_intents('mock', ACCOUNT_REF, runtime.run_id)
+    case.assertEqual(1, len(pending), runner.episode.status)
+    sell, = pending
     case.assertEqual((OrderState.ACCEPTED, 3, 103, buy.intent.plan.plan_id),
                      (sell.state, sell.intent.quantity, sell.intent.limit_price, sell.intent.plan.plan_id))
     if protective:
@@ -703,6 +742,12 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
 
 
 class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_later_available_opening_revision_replaces_hold_before_gap_exit(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-gap-correction.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), corrected_gap=True)
+
     async def test_collector_gap_rechecks_original_closing_price_before_native_order_claim(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 

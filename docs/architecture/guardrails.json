@@ -3086,6 +3086,20 @@
         "tests/unit/test_central_realtime_collector.py"
       ],
       "limits": {}
+    },
+    {
+      "id": "S12-05-close-ready-and-current-gap-20261105",
+      "reason": "Close the normal CLOSE publication/UI/activation boundary and two confirmed stale/repeated-input costs before scenario 3 acceptance.",
+      "connection": "Reuse the existing pure builder and native publisher, typed CLOSE policy, Qt review and Supervisor activation. No global research Family registration or new order authority. Collector keeps only the last accepted closing price per symbol/day while preserving every immediate price callback and pending retry. Existing bounded Runner poll rereads the indexed close/open window until an exit is fixed; after fresh broker reconciliation reread the original plan head before native CAS. No tick DB work, new schema or worker.",
+      "validation": "Actual READY builder/publisher and authenticated roundtrip retain explicit v1/v2 terms; missing policy and wrong factors/Shadow/binding fail before writes. Public activation and DB reopen preserve original entry/cancel/FILL/gap exit. Unchanged prices coalesce, A/B/A and next-day changes survive ACK loss. Late available opening revision replaces HOLD at its own cut; old cut remains HOLD and fresh head submits without relaxing the native revision fence.",
+      "evidence": [
+        "tests/unit/test_mock_automation_specification.py",
+        "tests/unit/test_mock_automation_dialog.py",
+        "tests/unit/test_close_mock_execution.py",
+        "tests/integration/test_close_mock_execution_postgres.py",
+        "tests/unit/test_central_realtime_collector.py"
+      ],
+      "limits": {}
     }
   ]
 }

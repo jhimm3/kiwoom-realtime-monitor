@@ -19,7 +19,10 @@ from kiwoom_monitor.application.mock_automation_specification import (
     build_mock_automation_publication_documents,
     matching_shadow_events,
 )
-from kiwoom_monitor.domain.execution_activation import ForwardCriteria, LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy
+from kiwoom_monitor.domain.execution_activation import (
+    CLOSE_NATIVE_PLAN_MODE, CloseMockExecutionPolicy, ForwardCriteria,
+    LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy,
+)
 from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
 from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
@@ -297,6 +300,20 @@ class MockAutomationPublicationDialog(QDialog):
             )
         top = QFormLayout()
         top.addRow("Shadow 증거", self._shadow)
+        self._close_inputs = {}
+        self._close_management = None
+        if _is_close_research_publication(candidate):
+            for name, label in (("maximum_adverse_slippage_bps", "종가 진입 가격 허용 범위(bp)"),
+                                ("protective_slippage_bps", "종가 청산 가격 허용 범위(bp)")):
+                field = QLineEdit()
+                field.setPlaceholderText("0~9999 정수 · 100bp = 1%")
+                self._close_inputs[name] = field
+                top.addRow(label, field)
+            self._close_management = QComboBox()
+            self._close_management.addItem("중지 후 관리 방식을 선택하세요", None)
+            self._close_management.addItem("신규 주문 중지·대사만 유지 (v1)", "close-mock-execution-policy/v1")
+            self._close_management.addItem("신규 진입 중지·원래 계획의 취소·청산 유지 (v2)", "close-mock-execution-policy/v2")
+            top.addRow("종가베팅 중지 후 관리", self._close_management)
         self._plan_policy_path = None
         package = candidate.get("package")
         candidate_spec = package.get("candidate_spec") if isinstance(package, dict) else None
@@ -357,6 +374,19 @@ class MockAutomationPublicationDialog(QDialog):
         if not isinstance(event, dict):
             raise ValueError("일치하는 Shadow 증거를 선택하세요.")
         policy = None
+        close_policy = None
+        if self._close_management is not None:
+            version = self._close_management.currentData()
+            if version is None or any(not field.text().strip().isascii()
+                    or not field.text().strip().isdigit() for field in self._close_inputs.values()):
+                raise ValueError("종가베팅 가격 허용 범위와 중지 후 관리 방식을 명시하세요.")
+            close_policy = CloseMockExecutionPolicy(
+                **{name: int(field.text().strip()) for name, field in self._close_inputs.items()},
+                entry_price_basis="acknowledged_0B_bounded_by_signal/v1",
+                entry_remainder_policy="cancel_at_entry_deadline/v1",
+                exit_price_basis="acknowledged_0B_bounded_slippage/v1", version=version,
+                stopped_management="continue_original_plan/v1" if version.endswith("/v2") else None,
+            )
         policy_path = self._plan_policy_path.text().strip() if self._plan_policy_path is not None else ""
         if policy_path:
             try:
@@ -369,7 +399,9 @@ class MockAutomationPublicationDialog(QDialog):
             evaluation_start=evaluation_start, evaluation_end=evaluation_end,
             frozen_at=frozen_at, criteria=criteria, limits=limits,
             unfilled_execution_policy=policy,
-            execution_plan_mode=LEADER_NATIVE_PLAN_MODE if policy is not None else None,
+            execution_plan_mode=(CLOSE_NATIVE_PLAN_MODE if close_policy is not None else
+                                 LEADER_NATIVE_PLAN_MODE if policy is not None else None),
+            close_execution_policy=close_policy,
         )
 
 
@@ -437,7 +469,8 @@ class MockAutomationDialog(QDialog):
         buttons.addWidget(self._resume)
 
         self._message = QLabel(
-            "이 화면은 모의계좌만 제어합니다. 중지는 기존 주문을 취소하거나 보유 종목을 자동 매도하지 않습니다."
+            "이 화면은 모의계좌만 제어합니다. 중지 후 관리는 게시한 운용 명세를 따릅니다. "
+            "종가베팅 v2는 신규 진입을 막고 원래 계획의 취소·청산을 유지합니다."
         )
         self._message.setWordWrap(True)
         layout = QVBoxLayout(self)
@@ -571,7 +604,7 @@ class MockAutomationDialog(QDialog):
 
     def _update_candidate_action(self) -> None:
         close_research = _is_close_research_publication(self._candidate.currentData())
-        self._publish.setText("종가베팅 Shadow 대조" if close_research else "새 READY 명세 작성")
+        self._publish.setText("종가베팅 READY 명세 작성" if close_research else "새 READY 명세 작성")
 
     def _publish_prepared_candidate(self, context: dict[str, Any]) -> None:
         selected = context["selected_profile"]
@@ -587,10 +620,6 @@ class MockAutomationDialog(QDialog):
         )
         if not events:
             self._message.setText("이 후보 설정과 일치하는 실제 Shadow 후보 기록이 아직 없습니다.")
-            return
-        if _is_close_research_publication(candidate):
-            recent = format_kst_time(events[0]["available_at"])
-            self._message.setText(f"종가베팅 Shadow 일치 {len(events)}건 · 최근 {recent} · 주문 명세 승인 대기")
             return
         dialog = MockAutomationPublicationDialog(
             candidate, binding, str(selected["profile_id"]), events, self,
@@ -689,7 +718,7 @@ class MockAutomationDialog(QDialog):
                 continue
             source = package.get("source_final", {})
             finished = source.get("finished_at", "") if isinstance(source, dict) else ""
-            label = "종가베팅 연구 적격" if _is_close_research_publication(publication) else status
+            label = "종가베팅 · " + status if _is_close_research_publication(publication) else status
             self._candidate.addItem(
                 f"{package.get('strategy_ref', '')} · {label} · {format_kst_time(finished, missing='')}", publication,
             )
@@ -704,6 +733,11 @@ class MockAutomationDialog(QDialog):
             label = f"{spec.get('strategy_ref', '')} · {row.get('readiness', 'BLOCKED')}"
             if spec.get("execution_plan_mode") == LEADER_NATIVE_PLAN_MODE:
                 label += " · 계획형 0B 모의"
+            elif spec.get("execution_plan_mode") == CLOSE_NATIVE_PLAN_MODE:
+                close_policy = spec.get("close_execution_policy", {})
+                management = ("중지 후 원계획 관리" if close_policy.get("stopped_management") == "continue_original_plan/v1"
+                              else "중지 후 대사만 유지")
+                label += " · 종가베팅 모의 · " + management
             self._spec.addItem(label, spec.get("spec_id", ""))
         index = self._spec.findData(selected_spec_id)
         self._spec.setCurrentIndex(index if index >= 0 else 0)

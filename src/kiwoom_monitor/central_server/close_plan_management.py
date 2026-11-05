@@ -25,7 +25,6 @@ class ClosePlanManagement:
         self._parameters, self._price, self._now = parameters, price_source, now_provider
         self._cursor = 0
         self._plans = {}
-        self._gap = {}
         self.status = {'state': 'WARMUP', 'reason': 'awaiting_new_close_shadow', 'orders_enabled': False}
 
     def checkpoint_fields(self):
@@ -114,7 +113,6 @@ class ClosePlanManagement:
         elif root.state in TERMINAL_ORDER_STATES:
             if not head.quantity:
                 del self._plans[plan_id]
-                self._gap.pop(plan_id, None)
                 return
             active = await drain_thread_call(execution.active_intents, 'mock', self._bundle.account_ref, self._bundle.run_id)
             if any(getattr(row.intent, 'plan', None) is not None and row.intent.plan.plan_id == plan_id for row in active):
@@ -127,15 +125,16 @@ class ClosePlanManagement:
             setup = event['close_ipo_entry_setup']
             next_open = datetime.fromisoformat(setup['next_open_at'])
             policy = self._parameters['policy']
+            gap = None
             if (next_open + timedelta(minutes=1) <= now < next_open + timedelta(minutes=policy['exit_minutes_after_open'])
-                    and plan_id not in self._gap and setup.get('next_session') is not None):
+                    and setup.get('next_session') is not None):
                 auction = setup['close_auction']
                 rows = await drain_thread_call(self._store.load_close_gap_observations, root.intent.symbol,
                     datetime.fromisoformat(auction['starts_at']), datetime.fromisoformat(auction['ends_at']), next_open, now)
                 if rows:
-                    self._gap[plan_id] = list(rows)
+                    gap = list(rows)
             args = dict(parameters=self._parameters, event=event, trigger_quote=quote, quote=quote,
-                        gap_observations=self._gap.get(plan_id), protection_notice=protection_notice)
+                        gap_observations=gap, protection_notice=protection_notice)
             stop_risk = (await drain_thread_call(self._repository.load_mock_automation_risk_snapshot,
                 self._bundle.account_ref, protection_notice['risk_trigger']['snapshot_id'])
                 if protection_notice is not None else None)
@@ -146,6 +145,9 @@ class ClosePlanManagement:
                 self.status = {'state': 'MANAGING', 'reason': 'planned_overnight_hold', 'orders_enabled': False}
                 return
             recovery, risk = await self._fresh_cut()
+            # Broker reconciliation can advance the plan revision even when
+            # its detailed quantity is unchanged. Submit against that fresh head.
+            _, head = await drain_thread_call(self._read_plan, context)
             gate, sell, _ = await drain_thread_call(dispatch_close_exit, self._repository, self._bundle.runtime,
                 execution, self._spec, head.plan, recovery=recovery, risk=risk, **args)
             self.status = {'state': 'ORDER_SUBMITTED' if sell is not None else 'BLOCKED',

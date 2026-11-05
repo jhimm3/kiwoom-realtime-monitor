@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 Collector 마감 가격·첫 분봉의 native 연결**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 종가베팅 일반 READY·화면·공개 기동 연결**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 계획 수명·첫 손절·부분 체결 보호·명시한 v2 정책의 중지 후 관리에 이어 Collector 마감 가격·첫 분봉 생산 코드를 합성 0B로 연결 검증했다. 기존 v1 권한·연구 비교와 새 진입 차단은 보존한다. 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [마감 가격 생산 경로](#section12-close-collector-gap) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 계획 수명·보호·Collector 입력에 이어 일반 READY 게시·명시 화면·인증 조회·공개 기동/재기동을 연결 검증했다. 동일 마감 가격의 반복 저장을 합치고 HOLD 뒤 정정과 fresh 대사 후 계획 판본을 반영한다. 기존 v1 권한·연구 비교·새 진입 차단은 유지한다. 항목 3의 휴장/정지·계좌/원장/표시 최종 대조 등 대표 연결 9개와 DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [일반 게시·기동](#section12-close-ready-current-gap) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4751,6 +4751,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.267 S12-05 Collector 마감 가격·첫 분봉의 native 연결 — 2026-11-05
 
 - 기존 Collector의 RAM·보류/재시도·flush와 dataset/불변 원장을 재사용해 승인 KRX의 실제 마감 가격을 보존한다. 랜덤 종료와 지연 개장을 반영하고 실제 체결·수신 시각을 유지한다. 실제 분봉의 거래소 포함 키를 native 갭 조회·검증에 함께 연결했다. 완료 동시호가 봉 연구 비교는 보존하며 가격 관측에서 OHLC를 만들지 않는다. 합성 0B를 실제 생산 코드에 공급해 COMMIT 응답 유실·source 교체·DB 재개방·원계획 3주 청산과 변조 차단을 확인했다. 현재 소스 `39b6be7c`의 Windows 431건과 PostgreSQL 고유 19건, 구조·소비·증분 대조를 수락했다. 일반 READY/UI와 전체 대표 연결의 수락은 남아 있다. [생산·검증·비용·잔여](section12-development-roadmap-20261105.md#s12-close-collector-gap).
+
+<a id="section12-close-ready-current-gap"></a>
+
+### 11.268 S12-05 종가베팅 일반 READY·화면·공개 기동과 현재 갭 판본 — 2026-11-05
+
+CLOSE의 실제 계약과 typed 실행 정책으로 일반 READY builder·서버 검증을 연결했다. 화면의 명시 가격 허용 범위·중지 관리 v1/v2는 같은 spec으로 인증 게시·조회되며 게시만으로 주문을 시작하지 않는다. 공용 CLOSE fixture는 일반 게시를 거치고 공개 Supervisor 기동과 원계획 재시작/청산을 가짜 계좌 bundle·격리 원장으로 검증했다. 동일 마감 가격은 기존 Collector RAM에서 합치되 가격 변화·다음 날짜·0B 전달과 ACK 재시도를 보존한다. HOLD 후 늦은 갭 정정을 당시 cut으로 재조회하고 fresh 대사가 바꾼 계획 head를 읽어 기존 native CAS를 유지했다. 소스 `37272aff`의 Windows 380건·PG 20건, 구조/소비/증분 대조와 작업자 종료를 확인했다. 첫 이름 변경 전 ID 선택 실패는 보존하고 해당 화면 48건만 재검증했다. 같은 마감 입력 1,200건×5쌍은 공통 출력/가격 전달 동일·DB 호출0, 가격 사실 1,200→3·벽시간 중앙값59.1→28.3ms다. 전체 앱/운영 속도 증거와 구분한다. 전체4/5·대표 수락2/11을 유지하며 다음은 항목3 휴장/정지와 계좌·원장·표시의 마지막 연결 대조다. [상세·실패·측정·실행 근거](section12-development-roadmap-20261105.md#s12-close-ready-current-gap).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

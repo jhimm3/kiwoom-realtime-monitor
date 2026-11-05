@@ -59,6 +59,54 @@ class _HeldDocumentStore:
 
 
 class CentralRealtimeCollectorTests(unittest.TestCase):
+    def test_closing_price_history_coalesces_equal_prices_but_keeps_changes_and_next_day(self):
+        from unittest.mock import patch
+
+        at = [datetime.fromisoformat('2026-09-25T15:30:07+09:00')]
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / 'close-points.sqlite3')
+            store.initialize()
+            self.addCleanup(store.close)
+            collector = CentralRealtimeCollector(lambda: 'unused', 'mock', RealtimeHub(), lambda: at[0], store)
+            collector._approved_trade_sources = {('005930', 'KRX')}
+            collector._continuous_from = {('005930', 'KRX'): at[0] - timedelta(minutes=1)}
+            prices = []
+            collector.set_automation_price_listener(lambda code, quote: prices.append(quote['price_won']))
+            def trade(price):
+                at[0] += timedelta(milliseconds=1)
+                collector._publish_parsed({'trnm': 'REAL', 'data': [{'type': '0B', 'item': '005930',
+                    'values': {'20': '153007', '10': str(price), '13': '100', '14': '1', '15': '1'}}]})
+            async def exercise():
+                with patch.object(store, 'save_dataset_snapshots', side_effect=AssertionError('callback wrote DB')):
+                    for price in (105,) * 20:
+                        trade(price)
+                first = deepcopy(collector._pending_closing_auction_prices)
+                self.assertEqual(1, len(first))
+                save = store.save_dataset_snapshots
+                def lost_ack(values):
+                    save(values)
+                    raise OSError('synthetic COMMIT ACK loss')
+                with patch.object(store, 'save_dataset_snapshots', side_effect=lost_ack):
+                    with self.assertRaisesRegex(OSError, 'ACK loss'):
+                        await collector._flush_snapshots(flush_latest=False)
+                trade(105)
+                self.assertEqual(first, collector._pending_closing_auction_prices)
+                await collector._flush_snapshots(flush_latest=False)
+                trade(105)
+                self.assertEqual({}, collector._pending_closing_auction_prices)
+                for price in (106, 106, 105, 105):
+                    trade(price)
+                await collector._flush_snapshots(flush_latest=False)
+                rows = store.load_observation_revisions('closing_auction_price', '005930:KRX')
+                self.assertEqual([105, 106, 105], [row['payload']['price_won'] for row in rows])
+                self.assertEqual([105] * 22 + [106, 106, 105, 105], prices)
+                at[0] += timedelta(days=3)
+                trade(105)
+                await collector._flush_snapshots(flush_latest=False)
+                self.assertEqual(4, len(store.load_observation_revisions('closing_auction_price', '005930:KRX')))
+                self.assertEqual({}, collector._pending_closing_auction_prices)
+            asyncio.run(exercise())
+
     def test_closing_price_point_uses_actual_schedule_boundary_and_preserves_raw_session(self):
         from dataclasses import replace
         from kiwoom_monitor.central_server.market_observations import closing_auction_price_observation

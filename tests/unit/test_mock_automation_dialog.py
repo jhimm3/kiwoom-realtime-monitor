@@ -304,7 +304,7 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         self.dialog.deleteLater()
         self.app.processEvents()
 
-    def test_close_research_candidate_reviews_shadow_and_keeps_execution_spec_unpublished(self):
+    def test_close_candidate_opens_explicit_ready_review_without_starting_orders(self):
         from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
 
         candidate = {'package': {'strategy_ref': 'close-test',
@@ -313,18 +313,48 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                      'eligibility_receipt': {'status': 'ELIGIBLE'}}
         self.context.update(candidate_publications=[candidate], specs=[], selected_spec_id='')
         self.dialog._completed('refresh', self.context)
-        self.assertIn('종가베팅 연구 적격', self.dialog._candidate.currentText())
-        self.assertEqual('종가베팅 Shadow 대조', self.dialog._publish.text())
+        self.assertIn('종가베팅 · ELIGIBLE', self.dialog._candidate.currentText())
+        self.assertEqual('종가베팅 READY 명세 작성', self.dialog._publish.text())
         event = {'event_id': 'stored-close-event', 'available_at': '2026-09-11T15:17:02+09:00'}
         context = {**self.context, 'publication_candidate': candidate, 'shadow_events': [event]}
         with (patch('kiwoom_monitor.presentation.mock_automation_dialog.matching_shadow_events', return_value=(event,)),
               patch('kiwoom_monitor.presentation.mock_automation_dialog.MockAutomationPublicationDialog') as modal):
+            modal.return_value.exec.return_value = 0  # Review cancellation never posts or starts.
             self.dialog._publish_prepared_candidate(context)
-            modal.assert_not_called()
-        self.assertIn('Shadow 일치 1건', self.dialog._message.text())
-        self.assertIn('주문 명세 승인 대기', self.dialog._message.text())
+            modal.assert_called_once_with(candidate, context['candidate_binding'],
+                                           context['selected_profile']['profile_id'], (event,), self.dialog)
         self.assertEqual(0, self.dialog._spec.count())
         self.assertFalse(self.dialog._start.isEnabled())
+
+    def test_close_ready_review_requires_explicit_prices_and_stopped_management(self):
+        from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationPublicationDialog
+
+        candidate = {'package': {'candidate_spec': {'version': CLOSE_FINAL_CANDIDATE_VERSION}}}
+        dialog = MockAutomationPublicationDialog(candidate, {}, 'profile', ({'event_id': 'shadow'},), self.dialog)
+        self.addCleanup(dialog.deleteLater)
+        with patch('kiwoom_monitor.presentation.mock_automation_dialog.build_mock_automation_publication_documents') as build:
+            with self.assertRaisesRegex(ValueError, '명시하세요'):
+                dialog.publication_values()
+            self.assertEqual(0, build.call_count)
+            dialog._close_inputs['maximum_adverse_slippage_bps'].setText('100')
+            dialog._close_inputs['protective_slippage_bps'].setText('200')
+            with self.assertRaisesRegex(ValueError, '명시하세요'):
+                dialog.publication_values()
+            for version in ('v1', 'v2'):
+                dialog._close_management.setCurrentIndex(1 if version == 'v1' else 2)
+                dialog.publication_values()
+                args = build.call_args.kwargs
+                self.assertEqual(CLOSE_NATIVE_PLAN_MODE, args['execution_plan_mode'])
+                self.assertIsNone(args['unfilled_execution_policy'])
+                policy = args['close_execution_policy']
+                self.assertEqual((100, 200, 'close-mock-execution-policy/' + version),
+                    (policy.maximum_adverse_slippage_bps, policy.protective_slippage_bps, policy.version))
+                self.assertEqual(None if version == 'v1' else 'continue_original_plan/v1', policy.stopped_management)
+            dialog._close_inputs['protective_slippage_bps'].setText('10000')
+            with self.assertRaisesRegex(ValueError, 'basis points'):
+                dialog.publication_values()
 
     def test_server_automatic_mode_enables_stop_for_active_spec(self):
         self.context["status"].update(

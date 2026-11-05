@@ -712,6 +712,27 @@ def capture_mock_publication_http_contract(client, store, inputs):
 
 
 class MockPublicationHTTPContractTests(unittest.TestCase):
+    def test_close_ready_policy_roundtrips_through_authenticated_publication_and_readback(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        with mock_publication_contract_app(create_app, Path(directory) / 'close-ready.sqlite3') as (app, store, _):
+            context = MockAutomationSpecificationTests._verify_close_entry_claim(self, store, prepare_only=True)
+            headers = {'Authorization': 'Bearer private-token'}
+            with TestClient(app) as client:
+                response = client.post('/api/v1/research/mock-automation-specs', headers=headers,
+                                       json=context.documents)
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual(('unchanged', 'READY', False),
+                    (response.json()['status'], response.json()['readiness'], response.json()['orders_started']))
+                reply = client.get('/api/v1/research/mock-automation-specs/' + ACCOUNT_REF, headers=headers)
+                self.assertEqual(200, reply.status_code)
+                row, = reply.json()['specs']
+                self.assertEqual(('READY', context.spec.to_dict()), (row['readiness'], row['spec']))
+                changed = deepcopy(context.documents)
+                changed['expected_binding_revision'] += 1
+                self.assertEqual(409, client.post('/api/v1/research/mock-automation-specs', headers=headers,
+                                                  json=changed).status_code)
+                self.assertEqual([], context.transport.calls)
+
     def test_explicit_selected_artifact_and_restart_revocation_preserve_only_complete_receipt(self):
         from dataclasses import replace
         from kiwoom_monitor.central_server.config import ProducerGrant
@@ -1202,6 +1223,32 @@ class MockAutomationSpecificationTests(unittest.TestCase):
     def test_close_entry_uses_native_shadow_quote_policy_and_one_plan(self):
         self._verify_close_entry_claim(self.store)
 
+    def test_close_ready_publication_rejects_missing_policy_and_mismatched_evidence_before_save(self):
+        context = self._verify_close_entry_claim(self.store, prepare_only=True)
+        from kiwoom_monitor.application.mock_automation_specification import MOCK_AUTOMATION_LIMIT_FIELDS
+
+        with self.assertRaisesRegex(ValueError, 'explicit CLOSE execution policy'):
+            build_mock_automation_publication_documents(candidate_publication=context.publication,
+                binding=context.binding, credential_profile_id=PROFILE_ID, shadow_event=context.event,
+                evaluation_start=context.profile.evaluation_start, evaluation_end=context.profile.evaluation_end,
+                frozen_at=context.spec.frozen_at, criteria=context.profile.criteria,
+                limits={name: getattr(context.spec, name) for name in MOCK_AUTOMATION_LIMIT_FIELDS})
+        call = dict(profile=context.profile, stage_revisions=context.stages, spec=context.spec,
+                    shadow_event=context.event, current_binding=context.binding)
+        cases = (
+            ({'spec': replace(context.spec, execution_plan_mode=None, close_execution_policy=None)}, 'explicit CLOSE'),
+            ({'profile': replace(context.profile, factor_versions=('wrong-factor/v1',))}, 'forward profile'),
+            ({'shadow_event': {**context.event, 'quantity': context.event['quantity'] + 1}}, 'shadow evidence'),
+            ({'current_binding': {**context.binding, 'binding_revision': context.binding['binding_revision'] + 1}},
+             'current verified mock binding'),
+        )
+        with patch.object(context.repository, 'save_profile', side_effect=AssertionError('invalid publication saved')):
+            for changed, reason in cases:
+                with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
+                    publish_ready_mock_automation_spec(context.repository, **{**call, **changed})
+        ready, changed = publish_ready_mock_automation_spec(context.repository, **call)
+        self.assertEqual((MockAutomationReadinessStatus.READY, False), (ready.status, changed))
+
     def _verify_close_entry_claim(self, store, *, prepare_only=False, close_terms=None, native_windows=False):
         from dataclasses import asdict
         from datetime import time
@@ -1266,7 +1313,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
             store.finalize_minute_bars([{**key, 'available_at': datetime.fromisoformat(frame.available_at).timestamp(),
                 'capture_quality': 'complete', 'finalization_source': 'timer', 'operation_id': f'close-finalize-{index}'}])
         monitor.run_once()
-        event, = store.load_shadow_candidates()['events']
+        event, = (row for row in store.load_shadow_candidates()['events'] if row['strategy_id'] == 'close_betting')
         candidate = {**inputs.package.candidate_spec, 'version': CLOSE_FINAL_CANDIDATE_VERSION,
             'family': 'close_betting/v1', 'parameters': parameters,
             'strategy_references': {'version': 'strategy-reference/v1', 'sha256': _hash(config['references'])},
@@ -1278,32 +1325,30 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         repository = inputs.repository
         repository.publish_mock_automation_candidate(package, policy, receipt, credential_profile_id=PROFILE_ID,
                                                      expected_binding_revision=inputs.binding['binding_revision'])
-        profile = replace(inputs.profile, family_version='close_betting/v1', factor_versions=('close_betting/v1',),
-            policy_version=policy.policy_id, frozen_at=cut, evaluation_start=cut, evaluation_end=example.following.ends_at)
-        repository.save_profile(profile)
-        shadow = strategy_stage_revision(strategy_ref=package.strategy_ref, previous_stage=StrategyLifecycleStage.VALIDATED,
-            stage=StrategyLifecycleStage.SHADOW, evidence_refs=(event['event_id'],), reason='synthetic native CLOSE admission',
-            decided_at=cut)
-        evaluated = strategy_stage_revision(strategy_ref=package.strategy_ref,
-            previous_stage=StrategyLifecycleStage.DRAFT, stage=StrategyLifecycleStage.EVALUATED,
-            evidence_refs=(package.package_hash,), reason='synthetic final CLOSE evidence', decided_at=inputs.stages[0].decided_at)
-        validated = strategy_stage_revision(strategy_ref=package.strategy_ref,
-            previous_stage=StrategyLifecycleStage.EVALUATED, stage=StrategyLifecycleStage.VALIDATED,
-            evidence_refs=(receipt.receipt_id,), reason='synthetic CLOSE eligibility', decided_at=inputs.stages[1].decided_at)
-        stages = (evaluated, validated, shadow)
-        for stage in stages:
-            repository.save_stage_revision(stage)
         terms = close_terms or CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
                                         'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1')
-        # Explicit isolated kernel approval. Product READY publication remains
-        # unavailable until the CLOSE runner and complete position management connect.
-        spec = replace(inputs.spec, candidate_package_hash=package.package_hash, forward_profile_id=profile.profile_id,
-            frozen_at=cut, shadow_evidence_ref=shadow.revision_id, execution_plan_mode=CLOSE_NATIVE_PLAN_MODE,
-            close_execution_policy=terms)
-        self.assertEqual(spec, mock_automation_spec_from_dict(spec.to_dict()))
+        publication = {'package': package.to_dict(), 'eligibility_policy': policy.to_dict(),
+                       'eligibility_receipt': receipt.to_dict()}
+        documents = build_mock_automation_publication_documents(
+            candidate_publication=publication, binding=inputs.binding, credential_profile_id=PROFILE_ID,
+            shadow_event=event, evaluation_start=cut, evaluation_end=example.following.ends_at, frozen_at=cut,
+            criteria=inputs.profile.criteria,
+            limits={name: getattr(inputs.spec, name) for name in (
+                'maximum_concurrent_strategies', 'maximum_concurrent_positions', 'maximum_capital_won',
+                'maximum_daily_loss_won', 'maximum_data_gap_seconds', 'maximum_submission_unknown_count',
+                'maximum_reconnect_count', 'maximum_balance_mismatch_count')},
+            execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=terms)
+        from kiwoom_monitor.domain.execution_activation import forward_spec_from_dict, stage_revision_from_dict
+        profile = forward_spec_from_dict(documents['forward_profile'])
+        stages = tuple(stage_revision_from_dict(value) for value in documents['stage_revisions'])
+        spec = mock_automation_spec_from_dict(documents['operating_spec'])
+        self.assertEqual(('close_betting/v1',), profile.factor_versions)
+        self.assertEqual(terms, spec.close_execution_policy)
         with self.assertRaisesRegex(ValueError, 'explicit KRX execution policy'):
             replace(spec, close_execution_policy=None)
-        repository.save_mock_automation_spec(spec)
+        readiness, changed = publish_ready_mock_automation_spec(repository, profile=profile,
+            stage_revisions=stages, spec=spec, shadow_event=event, current_binding=inputs.binding)
+        self.assertEqual((MockAutomationReadinessStatus.READY, True), (readiness.status, changed))
         transport = _FakeBrokerTransport(lambda: clock[0])
         execution = ExecutionRepository(store)
         run_id = execution_run_id_for_spec(spec.spec_id)
@@ -1325,7 +1370,8 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         if prepare_only:
             return SimpleNamespace(store=store, example=example, spec=spec, parameters=parameters, event=event,
                 repository=repository, runtime=runtime, execution=execution, clock=clock, quote=quote,
-                transport=transport, settings=settings, monitor=monitor)
+                transport=transport, settings=settings, monitor=monitor, publication=publication,
+                profile=profile, stages=stages, binding=inputs.binding, documents=documents)
         with self.assertRaisesRegex(ValueError, 'approved signal slippage'):
             dispatch_close_entry(repository, runtime, spec, **{**call, 'quote': {**quote, 'price_won': 106}})
         save_settings({**settings, 'shadow_candidate_enabled': False})

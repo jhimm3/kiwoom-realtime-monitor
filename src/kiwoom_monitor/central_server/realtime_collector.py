@@ -212,6 +212,7 @@ class CentralRealtimeCollector:
         self._pending_minute_finalizations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._pending_closing_auction_prices: dict[tuple[str, int], tuple] = {}
         self._closing_minute = None
+        self._last_closing_prices: dict[str, int] = {}
         self._minute_bars = MinuteBarAccumulator()
         # Individual 0B receipts, owned by this collector; never persisted as bars.
         self._ram_trades: deque[dict[str, Any]] = deque()
@@ -1140,13 +1141,16 @@ class CentralRealtimeCollector:
                         day = datetime.fromtimestamp(snapshot['received_at'], KST).date()
                         if self._closing_minute is None or self._closing_minute[0] != day:
                             self._closing_minute = (day, krx_regular_session_hours(day)[1].strftime('%H%M'))
-                        boundary = str(value.trade_time)[:4] == self._closing_minute[1]
+                            self._last_closing_prices.clear()
+                        boundary = (str(value.trade_time)[:4] == self._closing_minute[1]
+                                    and self._last_closing_prices.get(code) != value.current_price)
                     if self._automation_price_listener is not None or boundary:
                         observation = self.automation_price_observation(code)
                         if boundary:
                             close = closing_auction_price_observation(value, observation)
                             if close is not None:
                                 key, point = close
+                                self._last_closing_prices[code] = point.value['price_won']
                                 self._pending_closing_auction_prices[(point.value['input_ref'], point.value['price_won'])] = (
                                     point.kind.value, point.subject, key, point.value, point)
                         if observation is not None and self._automation_price_listener is not None:
