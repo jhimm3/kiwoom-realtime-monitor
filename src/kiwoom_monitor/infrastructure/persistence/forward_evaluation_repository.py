@@ -311,6 +311,10 @@ class ForwardEvaluationRepository:
             item.reconciliation_revision, item.observed_at, item.snapshot_id,
         )))
 
+    def load_mock_automation_risk_snapshot(self, account_ref: str, snapshot_id: str, *, _reader: Any = None):
+        document = self._find(self.MOCK_AUTOMATION_RISK_COLLECTION, account_ref, snapshot_id, _reader=_reader)
+        return mock_automation_risk_snapshot_from_dict(document) if document else None
+
     def save_mock_automation_admission(self, value: MockAutomationAdmission) -> bool:
         value = mock_automation_admission_from_dict(value.to_dict())
         spec = self.load_mock_automation_spec(value.account_ref, value.spec_id)

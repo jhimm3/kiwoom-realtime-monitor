@@ -216,6 +216,12 @@ def publish_gap_observations(store, example, clock):
 
 
 class CloseDeadlineExecutionTests(unittest.TestCase):
+    def test_native_stop_rejects_changed_checkpoint_and_later_fill_cut_before_cancel(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-stop-fences.sqlite3'
+        verify_close_stop_native_fences(self, lambda: SQLiteQueryStore(db))
+
     def test_legacy_v1_entry_keeps_original_plan_and_receipt(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
@@ -239,6 +245,60 @@ class CloseDeadlineExecutionTests(unittest.TestCase):
 
         db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-gap.sqlite3'
         verify_close_deadline(self, lambda: SQLiteQueryStore(db), partial=True, gap=True)
+
+
+def verify_close_stop_native_fences(case, store_factory):
+    from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests, ACCOUNT_REF
+    from kiwoom_monitor.application.close_mock_execution import prepare_close_entry_deadline_claim
+    from kiwoom_monitor.application.mock_automation_risk import build_mock_automation_risk_snapshot, mock_automation_stop_loss_trigger
+    from kiwoom_monitor.domain.order_contract import AccountSnapshot, BrokerFill, BrokerOrderSnapshot, OrderState
+    from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
+
+    store = store_factory()
+    case.addCleanup(store.close)
+    store.initialize()
+    context = MockAutomationSpecificationTests._verify_close_entry_claim(case, store)
+    clock, buy, runtime, execution, repository = context.clock, context.buy, context.runtime, context.execution, context.repository
+    clock[0] = datetime.fromisoformat(context.event['close_ipo_entry_setup']['entry_deadline']) - timedelta(seconds=1)
+    order = BrokerOrderSnapshot(buy.broker_order_id, ACCOUNT_REF, buy.intent.symbol, OrderState.PARTIALLY_FILLED,
+        2, 2, clock[0], (BrokerFill('native-stop-prefix', 2, 104, buy.intent.created_at + timedelta(seconds=1)),))
+    current = runtime.reconcile(buy.intent.intent_id, order)
+    recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT_REF, 100_000, 208, {buy.intent.symbol: 2}, clock[0]), (order,))
+    risk = build_mock_automation_risk_snapshot(recovery, execution.account_events('mock', ACCOUNT_REF).events,
+        (), execution.active_intents('mock', ACCOUNT_REF, runtime.run_id), execution_run_id=runtime.run_id,
+        binding_revision=context.spec.binding_revision, reconciliation_revision=2,
+        observed_at=clock[0], broker_query_started_at=clock[0], broker_query_completed_at=clock[0])
+    repository.save_mock_automation_risk_snapshot(risk)
+    trigger = mock_automation_stop_loss_trigger(context.spec, risk, execution_run_id=runtime.run_id, now=clock[0],
+        price={**context.quote, 'symbol': buy.intent.symbol, 'price_won': 94, 'available_at': clock[0]},
+        account_positions=recovery.account.positions, stop_loss_bps=context.parameters['policy']['protection_loss_bps'])
+    notice = dict(version='mock-protection-review/v1', state='PENDING', account_ref=ACCOUNT_REF,
+        spec_id=context.spec.spec_id, execution_run_id=runtime.run_id, revision=1, order_authorized=False,
+        transport_state='OFF', requested_at=clock[0].isoformat(), input_ref=trigger['stop_loss']['input_ref'], risk_trigger=trigger)
+    checkpoint = dict(account_ref=ACCOUNT_REF, spec_id=context.spec.spec_id, execution_run_id=runtime.run_id,
+                      candidate_package_hash=context.spec.candidate_package_hash, protection_review=notice)
+    def save_checkpoint(value):
+        store.upsert_documents('execution_mock_automation_runner_current', [{'owner': ACCOUNT_REF, 'key': 'current', 'document': value}])
+    save_checkpoint(checkpoint)
+    claim = prepare_close_entry_deadline_claim(repository, runtime, execution, context.spec, current,
+        parameters=context.parameters, event=context.event, recovery=recovery, risk=risk, protection_notice=notice)
+    revision = repository.load_mock_automation_control(ACCOUNT_REF).control_revision
+    before = execution.events(buy.intent.intent_id)
+    with patch.object(context.transport, 'cancel', side_effect=AssertionError('invalid stop reached transport')):
+        changed = deepcopy(checkpoint)
+        changed['protection_review']['revision'] += 1
+        save_checkpoint(changed)
+        with case.assertRaisesRegex(RuntimeError, 'CLOSE_DURABLE_STOP_CHANGED'):
+            runtime.cancel_automation_intent(current, spec_id=context.spec.spec_id, control_revision=revision, planned_cancel_claim=claim)
+        save_checkpoint(checkpoint)
+        late_risk = risk.to_dict()
+        late_risk['execution_event_high_watermark'] = 0
+        store.upsert_documents(repository.MOCK_AUTOMATION_RISK_COLLECTION,
+            [{'owner': ACCOUNT_REF, 'key': risk.snapshot_id, 'document': late_risk}])
+        with case.assertRaisesRegex((RuntimeError, ValueError), 'CLOSE_STOP_NATIVE_FILL_CUT_CHANGED|snapshot_id'):
+            runtime.cancel_automation_intent(current, spec_id=context.spec.spec_id, control_revision=revision, planned_cancel_claim=claim)
+    case.assertEqual(before, execution.events(buy.intent.intent_id))
+    case.assertEqual(OrderState.PARTIALLY_FILLED, execution.load(buy.intent.intent_id).state)
 
 
 def verify_close_legacy_entry(case, store_factory):
@@ -268,7 +328,7 @@ def verify_close_legacy_entry(case, store_factory):
     case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
 
 
-async def verify_close_runner(case, store_factory):
+async def verify_close_runner(case, store_factory, *, protective=False):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
@@ -384,15 +444,46 @@ async def verify_close_runner(case, store_factory):
     clock[0] += timedelta(seconds=1)
     await monitor.refresh_recovery()
     deadline = datetime.fromisoformat(proof['snapshot']['candidate']['close_ipo_entry_setup']['entry_deadline'])
-    clock[0] = deadline
+    if not protective:
+        clock[0] = deadline
     cancellations = []
     def cancel(*args, **kwargs):
         cancellations.append((args, kwargs))
+        if protective:
+            saved = store.load_documents('execution_mock_automation_runner_current', ACCOUNT_REF, 1)[0]['document']
+            case.assertEqual(first_notice, saved['protection_review'])
         return BrokerSubmission(buy.broker_order_id, clock[0])
     with patch.object(context.transport, 'cancel', side_effect=cancel):
-        await runner.episode.advance_once()
-    case.assertEqual(1, len(cancellations))
+        if protective:
+            stopped_quote = {**quotes[buy.intent.symbol], 'price_won': 94, 'available_at': clock[0],
+                             'input_ref': 'collector-trade:close-first-stop'}
+            previous_notice = runner.episode._protection_snapshot()
+            with patch.object(store, 'load_documents', side_effect=AssertionError('0B callback must not read DB')), \
+                    patch.object(store, 'upsert_documents', side_effect=AssertionError('0B callback must not write DB')):
+                supervisor.observe_automation_price(buy.intent.symbol,
+                    {**stopped_quote, 'available_at': clock[0] - timedelta(seconds=1)})
+                case.assertEqual(previous_notice, runner.episode._protection_snapshot())
+                supervisor.observe_automation_price(buy.intent.symbol, stopped_quote)
+                first_notice = runner.episode._protection_snapshot()
+                case.assertEqual(94, first_notice['risk_trigger']['stop_loss']['price_won'])
+                quotes[buy.intent.symbol] = {**stopped_quote, 'price_won': 103, 'input_ref': 'collector-trade:close-rebound'}
+                supervisor.observe_automation_price(buy.intent.symbol, quotes[buy.intent.symbol])
+            case.assertEqual(first_notice, runner.episode._protection_snapshot())
+            case.assertLess(clock[0], deadline)
+            async def cancelled():
+                for _ in range(1000):
+                    if cancellations and not runner.episode.execution_busy:
+                        return
+                    await asyncio.sleep(0.01)
+            await cancelled()
+        else:
+            await runner.episode.advance_once()
+    case.assertEqual(1, len(cancellations), runner.episode.status)
     case.assertEqual(OrderState.CANCEL_PENDING, execution.load(buy.intent.intent_id).state)
+    if protective:
+        cancel_event, = [row for row in execution.events(buy.intent.intent_id) if row['event_type'] == 'CANCEL_STARTED']
+        case.assertEqual('close-entry-protective-cancel/v1', cancel_event['close_entry_cancel_claim']['version'])
+        case.assertEqual(first_notice, cancel_event['close_entry_cancel_claim']['protection_notice'])
     clock[0] += timedelta(seconds=1)
     fills = (*fills, BrokerFill('runner-late-fill', 1, 105, clock[0]))
     broker_positions[buy.intent.symbol] = 3
@@ -401,6 +492,8 @@ async def verify_close_runner(case, store_factory):
     await monitor.refresh_recovery()
     await supervisor.close()
     case.assertFalse(monitor.enabled)
+    if protective:
+        quotes.pop(buy.intent.symbol)
     case.assertTrue(runtime.stop())
     store.close()
     store = store_factory()
@@ -418,9 +511,14 @@ async def verify_close_runner(case, store_factory):
         supervisor, runner, monitor = await assemble()
     clock[0] = datetime.fromisoformat(context.example.opening.available_at)
     quotes[buy.intent.symbol] = {**context.quote, 'price_won': 103, 'available_at': clock[0]}
+    if protective:
+        case.assertEqual(first_notice, runner.episode._protection_snapshot())
+        case.assertGreater((clock[0] - datetime.fromisoformat(first_notice['requested_at'])).total_seconds(),
+                           context.spec.maximum_data_gap_seconds)
     await monitor.refresh_recovery()
     await runner.episode.advance_once()
-    case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+    if not protective:
+        case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
     expected_gap = publish_gap_observations(store, context.example, clock)
     selected = store.load_close_gap_observations(buy.intent.symbol, context.example.auction.starts_at,
         context.example.auction.ends_at, context.example.following.starts_at, clock[0])
@@ -435,6 +533,12 @@ async def verify_close_runner(case, store_factory):
     sell, = execution.active_intents('mock', ACCOUNT_REF, runtime.run_id)
     case.assertEqual((OrderState.ACCEPTED, 3, 103, buy.intent.plan.plan_id),
                      (sell.state, sell.intent.quantity, sell.intent.limit_price, sell.intent.plan.plan_id))
+    if protective:
+        from kiwoom_monitor.application.close_mock_execution import close_exit_key
+        evidence = repository.load_close_exit_evidence(ACCOUNT_REF, close_exit_key(sell.intent.plan))
+        case.assertEqual(('close_exit_snapshot/v2', 94, 103, 'filled_position_protection_0B'),
+            (evidence['snapshot']['version'], evidence['snapshot']['trigger_quote']['price_won'],
+             evidence['snapshot']['quote']['price_won'], evidence['snapshot']['reason']))
     clock[0] += timedelta(seconds=1)
     broker_positions.clear()
     broker_orders[sell.broker_order_id] = BrokerOrderSnapshot(sell.broker_order_id, ACCOUNT_REF, buy.intent.symbol,
@@ -449,6 +553,12 @@ async def verify_close_runner(case, store_factory):
 
 
 class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_0B_stop_cancels_partial_buy_and_survives_rebound_late_fill_and_restart(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-stop.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), protective=True)
+
     async def test_flat_runner_clears_previous_pending_order_without_new_shadow(self):
         from types import SimpleNamespace
         from kiwoom_monitor.central_server.close_plan_management import ClosePlanManagement

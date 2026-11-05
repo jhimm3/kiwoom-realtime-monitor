@@ -538,6 +538,29 @@ def _close_native_gap_observations(cursor, p, observations):
     return [rows[ref] for ref in refs]
 
 
+def _close_native_stop_risk(cursor, p, account, spec, notice, root_id):
+    """Read the acknowledged stop and the historical native fill cut, never a newer basis."""
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+
+    if notice is None:
+        return None
+    checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, 'current')
+    document = _plan_document(cursor, p, 'execution_mock_automation_risk_snapshots', account,
+                              notice['risk_trigger']['snapshot_id'])
+    if (checkpoint is None or document is None or checkpoint.get('protection_review') != notice
+            or (checkpoint.get('account_ref'), checkpoint.get('spec_id'), checkpoint.get('execution_run_id'),
+                checkpoint.get('candidate_package_hash'))
+            != (account, spec.spec_id, notice['execution_run_id'], spec.candidate_package_hash)):
+        raise RuntimeError('CLOSE_DURABLE_STOP_CHANGED')
+    risk = mock_automation_risk_snapshot_from_dict(document)
+    cursor.execute(f'SELECT document_json FROM central_execution_events WHERE intent_id={p} '
+                   f'AND accepted_sequence<={p} ORDER BY accepted_sequence', (root_id, risk.execution_event_high_watermark))
+    fills = [_json_document(row[0]) for row in cursor.fetchall()]
+    if sum(row['quantity'] for row in fills if row['event_type'] == 'FILL') != notice['risk_trigger']['stop_loss']['quantity']:
+        raise RuntimeError('CLOSE_STOP_NATIVE_FILL_CUT_CHANGED')
+    return risk
+
+
 def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider, submission_claim):
     """Recheck entry or owned-position management in the order's native transaction."""
     from dataclasses import asdict, replace
@@ -577,6 +600,8 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
         root_row = _execution_intent_row(cursor, root_id, p)
         if exit_proof is None or head_doc is None or root_row is None:
             raise RuntimeError("CLOSE_EXIT_EVIDENCE_MISSING")
+        notice = exit_proof['snapshot'].get('protection_notice')
+        stop_risk = _close_native_stop_risk(cursor, p, account, spec, notice, root_id)
         head = plan_position_from_document(head_doc, value["run_id"], value["symbol"], plan)
         # Creating the intent reserves exactly one head revision. Submission
         # rechecks that reservation, without treating it as a new position.
@@ -593,7 +618,8 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
             fill_events=[_json_document(item[0]) for item in _execution_event_rows(cursor, root_id, p)],
             trigger_quote=exit_proof["snapshot"]["trigger_quote"], quote=exit_proof["snapshot"]["quote"],
             decided_at=datetime.fromisoformat(value["created_at"]), now=now,
-            gap_observations=_close_native_gap_observations(cursor, p, exit_proof['snapshot'].get('gap_observations')))
+            gap_observations=_close_native_gap_observations(cursor, p, exit_proof['snapshot'].get('gap_observations')),
+            protection_notice=notice, stop_risk=stop_risk)
         if prepared is None:
             raise RuntimeError("CLOSE_EXIT_TRIGGER_MISSING")
         expected, decision, plan = prepared
@@ -1429,14 +1455,16 @@ def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored
     validate_close_entry_deadline(spec, run_id=value["run_id"], parameters=package.candidate_spec["parameters"],
         event=candidate, entry_evidence=proof, root=_record_from_document(stored), head=head,
         fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored["intent_id"], p)],
-        recovery=claim.recovery, risk=risk, now=kst_now() if now_provider is None else now_provider())
+        recovery=claim.recovery, risk=risk, now=kst_now() if now_provider is None else now_provider(),
+        protection_notice=claim.protection_notice,
+        stop_risk=_close_native_stop_risk(cursor, p, account, spec, claim.protection_notice, stored['intent_id']))
     return {**event, "close_entry_cancel_claim": claim.to_dict()}
 
 
 def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provider=None, stored=None):
     """Fence a protective retry in the same native CANCEL_STARTED transaction."""
     if ownership is not None and ownership.get("planned_cancel_claim") is not None:
-        if ownership["planned_cancel_claim"].get("version") == "close-entry-deadline-cancel/v1":
+        if ownership["planned_cancel_claim"].get("version") in {"close-entry-deadline-cancel/v1", 'close-entry-protective-cancel/v1'}:
             return _require_close_deadline_cancel(cursor, ownership, value, event, p, stored=stored,
                                                   now_provider=now_provider)
         if ownership["planned_cancel_claim"].get("version") == "planned-leader-expired-entry-cancel/v1":

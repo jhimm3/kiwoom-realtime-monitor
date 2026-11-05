@@ -26,6 +26,7 @@ CLOSE_ENTRY_COLLECTION = "execution_close_entry_evidence"
 CLOSE_EXIT_COLLECTION = "execution_close_exit_evidence"
 CLOSE_ORDER_POLICY_VERSION = "close_execution_adapter/v1"
 CLOSE_CANCEL_VERSION = "close-entry-deadline-cancel/v1"
+CLOSE_PROTECTIVE_CANCEL_VERSION = 'close-entry-protective-cancel/v1'
 
 
 @dataclass(frozen=True)
@@ -34,21 +35,28 @@ class CloseEntryDeadlineCancelClaim:
     risk_snapshot_id: str
     risk_reconciliation_revision: int
     recovery: object
+    protection_notice: dict | None = None
 
     def to_dict(self):
-        return {"version": CLOSE_CANCEL_VERSION, "plan": asdict(self.plan),
+        value = {"version": CLOSE_CANCEL_VERSION, "plan": asdict(self.plan),
                 "risk_snapshot_id": self.risk_snapshot_id,
                 "risk_reconciliation_revision": self.risk_reconciliation_revision}
+        if self.protection_notice is not None:
+            value.update(version=CLOSE_PROTECTIVE_CANCEL_VERSION, protection_notice=self.protection_notice)
+        return value
 
     @classmethod
     def from_dict(cls, value, recovery):
+        protective = value.get('version') == CLOSE_PROTECTIVE_CANCEL_VERSION
         if (set(value) != {"version", "plan", "risk_snapshot_id", "risk_reconciliation_revision"}
-                or value["version"] != CLOSE_CANCEL_VERSION or recovery is None
+                | ({'protection_notice'} if protective else set())
+                or value["version"] not in {CLOSE_CANCEL_VERSION, CLOSE_PROTECTIVE_CANCEL_VERSION} or recovery is None
+                or protective and not isinstance(value.get('protection_notice'), dict)
                 or type(value["risk_reconciliation_revision"]) is not int
                 or value["risk_reconciliation_revision"] <= 0):
             raise ValueError("invalid CLOSE deadline cancellation claim")
         return cls(OrderPlanRef(**value["plan"]), value["risk_snapshot_id"],
-                   value["risk_reconciliation_revision"], recovery)
+                   value["risk_reconciliation_revision"], recovery, value.get('protection_notice'))
 
 
 def close_entry_plan_id(spec_id: str, run_id: str, event_id: str) -> str:
@@ -155,8 +163,53 @@ def close_exit_key(plan: OrderPlanRef) -> str:
     return content_id("close_exit_slot", asdict(plan))
 
 
+def validate_close_stop_notice(spec, *, run_id, root, fill_events, notice, stop_risk, stop_loss_bps, now):
+    """Replay the first observed stop against its immutable Risk and original BUY fill prefix."""
+    from .mock_automation_risk import _sha256, validate_mock_stop_loss_proof
+
+    if not isinstance(notice, dict) or stop_risk is None:
+        raise ValueError('CLOSE historical stop Risk is unavailable')
+    trigger = notice.get('risk_trigger') or {}
+    proof = trigger.get('stop_loss')
+    requested = datetime.fromisoformat(notice['requested_at'])
+    if ((notice.get('version'), notice.get('state'), notice.get('account_ref'), notice.get('spec_id'),
+         notice.get('execution_run_id'), notice.get('order_authorized'), notice.get('transport_state'))
+            != ('mock-protection-review/v1', 'PENDING', spec.account_scope.account_ref, spec.spec_id, run_id, False, 'OFF')
+            or requested.utcoffset() is None or requested > now
+            or (stop_risk.account_ref, stop_risk.execution_run_id, stop_risk.binding_revision)
+            != (spec.account_scope.account_ref, run_id, spec.binding_revision)
+            or (trigger.get('snapshot_id'), trigger.get('reconciliation_revision'), trigger.get('source'))
+            != (stop_risk.snapshot_id, stop_risk.reconciliation_revision, 'acknowledged_account_monitor')
+            or trigger.get('disposition') not in {'EXIT_REQUIRED', 'RECONCILE_REQUIRED'}):
+        raise ValueError('CLOSE historical stop scope changed')
+    validate_mock_stop_loss_proof(proof, spec, stop_risk, stop_loss_bps=stop_loss_bps)
+    if (notice.get('input_ref') != proof['input_ref'] or type(notice.get('revision')) is not int or notice['revision'] <= 0
+            or (trigger.get('account_ref'), trigger.get('execution_run_id'), trigger.get('binding_revision'))
+            != (stop_risk.account_ref, run_id, spec.binding_revision)
+            or trigger.get('cause_signature') != _sha256({'stop_loss': proof,
+                'disposition': trigger['disposition'], 'reasons': trigger['reasons']})):
+        raise ValueError('CLOSE historical stop observation changed')
+    quote = _close_quote(spec, {**proof, 'durable': False, 'market_status': 'TRADABLE'}, requested, requested)
+    if (proof['symbol'] != root.intent.symbol
+            or datetime.fromisoformat(proof['available_at']) < stop_risk.observed_at
+            or not 0 <= (requested - stop_risk.account_as_of).total_seconds() <= spec.maximum_data_gap_seconds
+            or not 0 <= (requested - stop_risk.observed_at).total_seconds() <= spec.maximum_data_gap_seconds):
+        raise ValueError('CLOSE historical stop predates its acknowledged fill basis')
+    quantity = basis = 0
+    for fill in (row for row in fill_events if row['event_type'] == 'FILL'):
+        if quantity >= proof['quantity']:
+            break
+        if datetime.fromisoformat(fill['occurred_at']) > stop_risk.account_as_of:
+            raise ValueError('CLOSE historical stop uses a later BUY fill')
+        basis = mock_owned_buy_basis(quantity, basis, fill['quantity'], fill['price'])
+        quantity += fill['quantity']
+    if (quantity, basis) != (proof['quantity'], proof['entry_price_won']):
+        raise ValueError('CLOSE historical stop original BUY fill prefix changed')
+    return quote
+
+
 def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evidence, root, head,
-                                  fill_events, recovery, risk, now):
+                                  fill_events, recovery, risk, now, protection_notice=None, stop_risk=None):
     """Authorize only cancellation of the original, currently mapped BUY remainder."""
     from .mock_automation_execution import mock_automation_intent_id
     from .mock_automation_risk import mock_automation_risk_account_revision
@@ -178,7 +231,10 @@ def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evid
             or head.unreconciled_sell_quantity):
         raise ValueError("CLOSE deadline requires the confirmed original BUY remainder")
     deadline = datetime.fromisoformat(event["close_ipo_entry_setup"]["entry_deadline"])
-    if now < deadline:
+    if protection_notice is not None:
+        validate_close_stop_notice(spec, run_id=run_id, root=root, fill_events=fill_events,
+            notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=parameters['policy']['protection_loss_bps'], now=now)
+    elif now < deadline:
         raise ValueError("CLOSE entry deadline has not arrived")
     age = spec.maximum_data_gap_seconds
     account = recovery.account
@@ -207,15 +263,18 @@ def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evid
         raise ValueError("CLOSE deadline native fill or cancellation history changed")
 
 
-def prepare_close_entry_deadline_claim(repository, runtime, execution, spec, root, *, parameters, event, recovery, risk):
+def prepare_close_entry_deadline_claim(repository, runtime, execution, spec, root, *, parameters, event, recovery, risk,
+                                       protection_notice=None):
     entry = repository.load_close_entry_evidence(runtime.account_ref, root.intent.plan.plan_id)
     head = execution.load_plan_position(runtime.account_ref, runtime.run_id, root.intent.symbol, root.intent.plan)
     if entry is None:
         raise ValueError("CLOSE original entry evidence is missing")
     validate_close_entry_deadline(spec, run_id=runtime.run_id, parameters=parameters, event=event,
         entry_evidence=entry, root=root, head=head, fill_events=execution.events(root.intent.intent_id),
-        recovery=recovery, risk=risk, now=runtime.server_now())
-    return CloseEntryDeadlineCancelClaim(head.plan, risk.snapshot_id, risk.reconciliation_revision, recovery)
+        recovery=recovery, risk=risk, now=runtime.server_now(), protection_notice=protection_notice,
+        stop_risk=(repository.load_mock_automation_risk_snapshot(runtime.account_ref,
+            protection_notice['risk_trigger']['snapshot_id']) if protection_notice is not None else None))
+    return CloseEntryDeadlineCancelClaim(head.plan, risk.snapshot_id, risk.reconciliation_revision, recovery, protection_notice)
 
 
 def cancel_close_entry_deadline(repository, runtime, execution, spec, expected, *, parameters, event,
@@ -261,7 +320,8 @@ def _completed_close_gap(position, observations, decided_at):
 
 
 def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence, root, head, fill_events,
-                              trigger_quote, quote, decided_at, now, gap_observations=None):
+                              trigger_quote, quote, decided_at, now, gap_observations=None,
+                              protection_notice=None, stop_risk=None):
     """Manage only the original plan's detailed fills, independently of new-entry settings."""
     entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
     expected_entry, entry_decision, original_plan = build_close_entry_evidence(spec, run_id=run_id,
@@ -289,7 +349,9 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
             or len(fills) != len(root.fill_ids)
             or {row["broker_execution_id"] for row in fills} != set(root.fill_ids)):
         raise ValueError("CLOSE entry detailed fill basis is incomplete")
-    trigger = _close_quote(spec, trigger_quote, decided_at, now)
+    trigger = (validate_close_stop_notice(spec, run_id=run_id, root=root, fill_events=fill_events,
+        notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=parameters['policy']['protection_loss_bps'], now=now)
+        if protection_notice is not None else _close_quote(spec, trigger_quote, decided_at, now))
     execution_quote = _close_quote(spec, quote, decided_at, now)
     if (datetime.fromisoformat(trigger["available_at"]) > datetime.fromisoformat(execution_quote["available_at"])
             or execution_quote["price_won"] * 10_000 < trigger["price_won"] * (
@@ -299,7 +361,7 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     if not isinstance(setup.policy, ClosePolicy) or setup.policy.variant != "CLOSE":
         raise ValueError("CLOSE exit requires the original ordinary CLOSE policy")
     local = decided_at.astimezone(KST)
-    if trigger["price_won"] * 10_000 <= basis * (10_000 - setup.policy.protection_loss_bps):
+    if protection_notice is not None or trigger["price_won"] * 10_000 <= basis * (10_000 - setup.policy.protection_loss_bps):
         reason = "filled_position_protection_0B"
     elif local.date() > setup.next_date:
         reason = "next_session_management_overdue_0B"
@@ -319,6 +381,8 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
         "trigger_quote": trigger, "quote": execution_quote, "reason": reason}
     if reason == 'adverse_gap_full_exit_completed_bars':
         snapshot['gap_observations'] = gap_observations
+    if protection_notice is not None:
+        snapshot.update(version='close_exit_snapshot/v2', protection_notice=protection_notice)
     state = StrategyState(status="open", symbol=event["symbol"], entry_price=basis,
         position_quantity=head.quantity, opened_at=fills[0]["occurred_at"]).to_dict()
     body = {"run_id": run_id, "snapshot_id": content_id("snapshot", snapshot), "symbol": event["symbol"],
@@ -332,7 +396,7 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
 
 
 def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameters, event, trigger_quote, quote, recovery, risk,
-                        gap_observations=None):
+                        gap_observations=None, protection_notice=None):
     """Restore frozen management from its native entry and use the existing SELL gate."""
     from .mock_automation_execution import mock_automation_intent_id
 
@@ -352,6 +416,7 @@ def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameter
             return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
         trigger_quote, quote = snapshot["trigger_quote"], snapshot["quote"]
         gap_observations = snapshot.get('gap_observations')
+        protection_notice = snapshot.get('protection_notice')
         decided_at = datetime.fromisoformat(decision.decided_at)
     entry = repository.load_close_entry_evidence(runtime.account_ref, plan.plan_id)
     if entry is None:
@@ -363,7 +428,10 @@ def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameter
         raise ValueError("CLOSE plan revision changed before management")
     prepared = build_close_exit_evidence(spec, run_id=runtime.run_id, parameters=parameters, event=event,
         entry_evidence=entry, root=root, head=head, fill_events=execution.events(root_id),
-        trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now, gap_observations=gap_observations)
+        trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now, gap_observations=gap_observations,
+        protection_notice=protection_notice,
+        stop_risk=(repository.load_mock_automation_risk_snapshot(runtime.account_ref,
+            protection_notice['risk_trigger']['snapshot_id']) if protection_notice is not None else None))
     if prepared is None:
         return None, None, None
     evidence, decision, plan = prepared

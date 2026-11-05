@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 종가베팅 계획 수명과 청산 후 상태**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 종가베팅 첫 손절 보존·부분 체결 보호 취소**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 실행기는 기존 Supervisor·Episode·계좌 owner로 새 후보 진입·잔량 취소·DB 재개방·익일 갭 청산·실제 잔량 0을 연결했다. 순서 있는 0B 보호 고정·중지 제어하 관리·실제 완전한 동시호가 공급과 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 내부 실행기](#section12-close-episode) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 실행기는 새 후보 진입·잔량 취소·DB 재개방·익일 갭 청산·실제 잔량 0과 첫 0B 손절 보존·부분 체결 보호 취소를 연결했다. 가격 회복·늦은 체결·재시작 뒤에도 최초 근거를 유지한다. 중지 제어하 관리·실제 완전한 동시호가 공급과 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 첫 손절](#section12-close-sticky-stop) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4733,6 +4733,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.264 S12-05 종가베팅 청산 후 상태 정리 — 2026-11-05
 
 - 실제 계획이 모두 끝나고 새 후보도 없으면 이전 주문 전송 표시와 pending intent를 제거한다. 변경 전 실패를 재현했고 현재 소스 `9756ee1b`의 직접 회귀 6건, 구조·소비·증분 실행 대조를 확인했다. 공용 fixture AST와 native 주문 경로는 변경하지 않았다. 과거 fixture 목록까지 확장한 151건 시도의 긴 Supervisor 묶음 제한 시간 초과는 원보고서에 보존하고 통과로 계산하지 않았다. 항목 3과 S12-05 전체는 계속 진행이다. [근거와 잔여](section12-development-roadmap-20261105.md#s12-close-flat-status).
+
+<a id="section12-close-sticky-stop"></a>
+
+### 11.265 S12-05 종가베팅 첫 손절 보존과 부분 체결 보호 취소 — 2026-11-05
+
+- 기존 RAM 가격 callback과 보호 요청·checkpoint를 재사용한다. 첫 0B 손절을 원래 불변 Risk·상세 체결 기준에 묶고 저장 수락 뒤 마감 전 매수 잔량을 취소한다. 가격 회복·늦은 체결·실제 DB 재개방 뒤에도 그 근거를 유지하며 매도에는 현재 가격과 실제 잔량을 쓴다. native 트랜잭션은 같은 checkpoint와 원매수의 당시 체결 커서를 독립 대조한다. 현재 소스 `a9054555`의 Windows 93건과 PostgreSQL 고유 14건, 구조·소비·증분 대조를 수락했다. 중지 제어·실제 완전한 동시호가 공급·일반 READY/UI 등 항목 3 잔여는 진행이다. [검증·반례·잔여](section12-development-roadmap-20261105.md#s12-close-sticky-stop).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

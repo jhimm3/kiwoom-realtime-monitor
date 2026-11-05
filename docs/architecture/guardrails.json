@@ -3049,6 +3049,19 @@
         "db|src/kiwoom_monitor/central_server/database_observation_readers.py|SQLiteObservationReaderStoreMixin.load_close_gap_observations|connection.execute": 1,
         "db|src/kiwoom_monitor/central_server/database_observation_readers.py|PostgresObservationReaderStoreMixin.load_close_gap_observations|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-close-sticky-stop-native-cut-20261105",
+      "reason": "A first acknowledged 0B stop must survive a rebound, late BUY fills and restart without treating a later fill basis as the historical trigger.",
+      "connection": "The existing RAM-only price callback pins the common protection review. Episode acknowledges that checkpoint before the serialized Gateway or SELL dispatcher. Native cancel and exit claims reread the same checkpoint, immutable Risk snapshot and original BUY events through its acknowledged event watermark, in the existing order transaction. No per-tick database access, new task or order owner is added.",
+      "validation": "Shared SQLite/PostgreSQL scenarios check pre-fill quote rejection, RAM-only stop/rebound delivery, pre-deadline partial cancellation, a late fill, actual DB reopen with Shadow disabled, a stale historical trigger and fresh recovered execution quote. Counterexamples mutate the durable stop or historical native fill cut and must leave cancellation transport, order state and events untouched.",
+      "evidence": [
+        "tests/unit/test_close_mock_execution.py",
+        "tests/integration/test_close_mock_execution_postgres.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_close_native_stop_risk|cursor.execute": 1
+      }
     }
   ]
 }

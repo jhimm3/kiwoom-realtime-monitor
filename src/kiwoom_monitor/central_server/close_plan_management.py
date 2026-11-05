@@ -95,7 +95,7 @@ class ClosePlanManagement:
             recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
         return recovery, risk
 
-    async def _manage(self, plan_id, context, control):
+    async def _manage(self, plan_id, context, control, protection_notice):
         execution = self._bundle.repository
         root, head = await drain_thread_call(self._read_plan, context)
         event, now = context['event'], self._now()
@@ -103,11 +103,11 @@ class ClosePlanManagement:
             await drain_thread_call(self._bundle.runtime.cancel, root.intent.intent_id)
         elif root.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
             deadline = datetime.fromisoformat(event['close_ipo_entry_setup']['entry_deadline'])
-            if now >= deadline:
+            if now >= deadline or protection_notice is not None:
                 def claim(record, cut):
                     return prepare_close_entry_deadline_claim(self._repository, self._bundle.runtime, execution,
                         self._spec, record, parameters=self._parameters, event=event,
-                        recovery=cut['recovery'], risk=cut['risk'])
+                        recovery=cut['recovery'], risk=cut['risk'], protection_notice=protection_notice)
 
                 root = await self._bundle.gateway.cancel_automation_intent(root, spec_id=self._spec.spec_id,
                     control_revision=control.control_revision, prepare_plan_cancel=claim)
@@ -135,10 +135,13 @@ class ClosePlanManagement:
                 if rows:
                     self._gap[plan_id] = list(rows)
             args = dict(parameters=self._parameters, event=event, trigger_quote=quote, quote=quote,
-                        gap_observations=self._gap.get(plan_id))
+                        gap_observations=self._gap.get(plan_id), protection_notice=protection_notice)
+            stop_risk = (await drain_thread_call(self._repository.load_mock_automation_risk_snapshot,
+                self._bundle.account_ref, protection_notice['risk_trigger']['snapshot_id'])
+                if protection_notice is not None else None)
             prepared = build_close_exit_evidence(self._spec, run_id=self._bundle.run_id, entry_evidence=context['proof'],
                 root=root, head=head, fill_events=await drain_thread_call(execution.events, root.intent.intent_id),
-                decided_at=now, now=now, **args)
+                decided_at=now, now=now, stop_risk=stop_risk, **args)
             if prepared is None:
                 self.status = {'state': 'MANAGING', 'reason': 'planned_overnight_hold', 'orders_enabled': False}
                 return
@@ -152,10 +155,12 @@ class ClosePlanManagement:
         self.status = {'state': 'WAITING_ORDER', 'reason': root.state.value,
                        'pending_intent_id': root.intent.intent_id, 'orders_enabled': False}
 
-    async def advance(self, control, *, limit, allow_entry):
+    async def advance(self, control, *, limit, allow_entry, protection_notice=None):
+        stop = (protection_notice if protection_notice is not None and protection_notice.get('state') == 'PENDING'
+                and protection_notice.get('risk_trigger', {}).get('stop_loss') is not None else None)
         for plan_id, context in tuple(self._plans.items()):
             try:
-                await self._manage(plan_id, context, control)
+                await self._manage(plan_id, context, control, stop)
             except ValueError as error:
                 self.status = {'state': 'BLOCKED', 'reason': str(error), 'orders_enabled': False}
         if self._plans:

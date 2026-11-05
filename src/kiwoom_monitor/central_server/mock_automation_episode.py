@@ -981,6 +981,8 @@ class MockAutomationEpisode:
             return  # Healthy recovery cannot erase an armed protection request.
         previous = self._protection_snapshot()
         stop = (previous or {}).get('risk_trigger', {}).get('stop_loss')
+        if self._close_plan_mode and stop is not None and previous['state'] == 'PENDING':
+            return  # Keep the original historical cut; the current cut still updates above.
         if stop is not None and trigger['disposition'] == 'RECONCILE_REQUIRED':
             trigger = {**trigger, 'stop_loss':stop, 'reasons':[*trigger['reasons'], 'SYMBOL_STOP_LOSS_REACHED']}
         if (trigger['disposition'] == 'EXIT_REQUIRED' and previous is not None
@@ -1148,7 +1150,8 @@ class MockAutomationEpisode:
         """RAM-only immediate stop cue; transport remains in the existing Runner."""
         if self._leader:
             return  # The approved actual-0B callback owns the new observation proof.
-        if self._closing or self._spec.unfilled_execution_policy is None or self._stop_loss_cut is None:
+        if (self._closing or self._stop_loss_cut is None
+                or self._spec.unfilled_execution_policy is None and not self._close_plan_mode):
             return
         risk, positions = self._stop_loss_cut
         if symbol not in dict(risk.owned_entry_prices):
@@ -1169,7 +1172,7 @@ class MockAutomationEpisode:
         now = self._bundle.runtime.server_now()
         trigger = mock_automation_stop_loss_trigger(self._spec, risk, execution_run_id=self._bundle.run_id,
             now=now, price={**price, 'symbol':symbol}, account_positions=positions,
-            stop_loss_bps=self._config.stop_loss_bps)
+            stop_loss_bps=self._stop_validation_terms()['stop_loss_bps'])
         if trigger is None or previous is not None and previous.get('risk_trigger', {}).get('cause_signature') == trigger['cause_signature']:
             return
         self.request_protection_review(reason='native_risk:'+';'.join(trigger['reasons']),
@@ -2819,10 +2822,11 @@ class MockAutomationEpisode:
                     await drain_thread_call(self._save_checkpoint)
                 return 0
             if self._close_management is not None:
-                if self._checkpoint.pending:
+                if self._checkpoint.pending or self._protection_pending():
                     await drain_thread_call(self._save_checkpoint)
                 count = await self._close_management.advance(control, limit=limit,
-                    allow_entry=lambda: not self._closing and not self._protection_pending())
+                    allow_entry=lambda: not self._closing and not self._protection_pending(),
+                    protection_notice=self._protection_snapshot())
                 self._status = dict(self._close_management.status)
                 await drain_thread_call(self._save_checkpoint)
                 return count

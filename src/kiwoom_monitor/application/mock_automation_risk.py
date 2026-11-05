@@ -453,7 +453,9 @@ def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, pric
     basis = dict(risk.owned_entry_prices)
     owned = dict(risk.owned_position_quantities)
     symbol = price.get('symbol') if isinstance(price, Mapping) else None
-    age = min(spec.maximum_data_gap_seconds, spec.unfilled_execution_policy.max_snapshot_age_seconds)
+    age = spec.maximum_data_gap_seconds
+    if spec.unfilled_execution_policy is not None:
+        age = min(age, spec.unfilled_execution_policy.max_snapshot_age_seconds)
     if (symbol not in basis or symbol not in owned or owned.get(symbol) != account_positions.get(symbol)
             or price.get('durable') is not False or price.get('market_status') != 'TRADABLE'
             or type(price.get('price_won')) is not int or price['price_won'] <= 0

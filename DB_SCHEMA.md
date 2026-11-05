@@ -8,6 +8,8 @@
 
 종가베팅 신규 진입은 `close_entry_snapshot/v2`에 원래 후보·셋업·만료를 함께 보존한다. 공개 페이지의 `accepted_sequence`는 운송 커서라 제외하고 만료 시각은 같은 순간의 KST ISO로 정규화한다. 기존 v1의 해시·계획·영수증은 그대로 해석하며 다시 쓰지 않는다. 실행기 checkpoint의 `close_management`에는 `close-shadow-native-plan/v1`과 `shadow_cursor`를 저장하고 보유·미확정 주문·잔량은 native 계획·상세 체결에서 복원한다. 신규 v2 보유를 복원할 때 공개 Shadow 이력을 다시 검색하지 않는다.
 
+첫 종가베팅 0B 손절은 기존 checkpoint의 `protection_review`에 보존한다. `close-entry-protective-cancel/v1`은 원래 매수의 마감 전 잔량 취소에 그 요청을 결속하며 기존 deadline/v1의 문서는 그대로 해석한다. `close_exit_snapshot/v2`는 같은 요청과 최초 가격을 보존하고 실제 매도에는 별도의 최신 0B 가격을 사용한다. native 취소·청산 트랜잭션은 checkpoint, 불변 Risk 원장과 그 커서까지의 원매수 체결을 대조한다. 새 테이블·스키마 전환이나 매 틱 DB 쓰기는 없다. [수락 범위](docs/architecture/section12-development-roadmap-20261105.md#s12-close-sticky-stop).
+
 ## 새 명시full 로컬 저장 계약 — AR04/05 source253·기동/복원 연결257
 
 **실제사본265 검증:** source267의현재고유30 중실제1case에서같은full root의3owner를소비했다. 닫힌monitor/중앙2.3GB는공개소비후원사본전체bytes와같고journal3는신규native원자수락/원raw·판본·receipt/noop을보존했다. 새schema변경/원source SQL0이며기존journal11/central24/ownedfull 계약은그대로다. 실제sourcecut/T0·연구HTTP/설치소비는별도다. [실제수락·근거](docs/architecture/app-target-20261023.md#ar05-joint-native-copy265).
