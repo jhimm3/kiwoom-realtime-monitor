@@ -753,7 +753,8 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         raise ValueError("Section 12 minute experiments require an explicit KRX regular research mode")
     if mode == BREAKOUT_COMPARISON_MODE and family != BREAKOUT_STUDY_FAMILY:
         raise ValueError("breakout comparison requires the breakout study family")
-    strategy = (MinuteExperiment.from_document(family, strategy_raw) if minute_experiment
+    strategy = (MinuteExperiment.from_document(family, strategy_raw, paper_request=document.get("shadow_only") is not True)
+                if minute_experiment
                 else parse_strategy_config(family, strategy_raw))
     execution = SimulationExecutionConfig(
         version=str(execution_raw.get("version", "")),
@@ -1585,6 +1586,8 @@ def _section12_minute_result(repository: ResearchRepository, run_id: str, varian
         fields["source_range"] = manifest["captured_range"]
     if "strategy_references" in spec:
         fields["strategy_reference_sha256"] = spec["strategy_references"]["sha256"]
+    if spec.get("parameters", {}).get("panic_allow_unresolved_news") is True:
+        fields["panic_allow_unresolved_news"] = True
     source_event_links = spec.get("evaluation_spec", {}).get("source_event_links", ())
     if source_event_links:
         fields["source_event_group_count"] = len({link["event_id"] for link in source_event_links})

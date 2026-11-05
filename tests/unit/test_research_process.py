@@ -886,6 +886,7 @@ class ResearchProcessTests(unittest.TestCase):
                      "evidence_refs": ["article-r1", "body-r1", "rule-r1"]}
             adverse = {**proof, "revision": "adverse", "available_at": "2026-09-10T09:04:30+09:00",
                        "disposition": "fundamental_adverse"}
+            future_adverse = {**adverse, "revision": "future-adverse", "available_at": at(6)}
             request = _request_document()
             request.update(mode="single_run", family="panic_rebound/v1", session_profile="krx-regular/v1",
                            strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()})
@@ -894,20 +895,37 @@ class ResearchProcessTests(unittest.TestCase):
                                                        valid_from=at(-10), valid_to=at(380))
             request["evaluation"]["folds"][0].update(start=at(0), end=at(8))
             repository = ResearchRepository(root / request["database"])
-            for variant, proofs, expected in (("P0", [proof, adverse], [("BUY", 905), ("SELL", 940)]),
-                                               ("P1", [proof], [("BUY", 915), ("SELL", 940)]),
-                                               ("P1", [proof, adverse], [])):
-                with self.subTest(variant=variant, count=len(proofs)):
+            for variant, proofs, allow_unknown, expected in (
+                ("P0", [proof, adverse], False, [("BUY", 905), ("SELL", 940)]),
+                ("P1", [proof], False, [("BUY", 915), ("SELL", 940)]),
+                ("P1", [proof, adverse], False, []),
+                ("P0", [], False, []),
+                ("P0", [], True, [("BUY", 905), ("SELL", 940)]),
+                ("P1", [future_adverse], True, [("BUY", 915), ("SELL", 940)]),
+                ("P1", [adverse], True, []),
+            ):
+                with self.subTest(variant=variant, proofs=proofs, allow_unknown=allow_unknown):
                     request["strategy"] = {"quantity": 1, "capital_won": 2000, "news_proofs": proofs,
                                            "policy": {"variant": variant, "lookback_minutes": 3, "decline_bps": 1000,
                                            "minimum_turnover_won": 3_000_000, "max_input_age_seconds": 10,
                                            "rebound_target_bps": 500, "max_hold_minutes": 5}}
+                    if allow_unknown:
+                        request["strategy"]["panic_allow_unresolved_news"] = True
                     path = root / "request.json"
                     path.write_text(json.dumps(request), encoding="utf-8")
                     result = execute_process_request(load_research_process_request(path))
                     events = repository.load_execution_events(result["run_id"])
                     self.assertEqual(expected, [(event["side"], event["price"]) for event in events if event["event_type"] == "FILL"])
                     self.assertNotIn("RISK_FILL", {event["event_type"] for event in events})
+                    self.assertEqual(allow_unknown, result["section12"].get("panic_allow_unresolved_news", False))
+                    if allow_unknown and expected:
+                        decisions = repository.load_evaluations(result["run_id"])
+                        entry, = [row for row in decisions if row["final_action"] == "ENTER"]
+                        self.assertIn("panic_price_setup_news_unresolved", entry["reasons"])
+            request["shadow_only"] = True
+            path.write_text(json.dumps(request), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid minute experiment fields"):
+                load_research_process_request(path)
 
     def test_section12_micro_request_pins_receipts_and_persists_the_result(self) -> None:
         from kiwoom_monitor import research_process

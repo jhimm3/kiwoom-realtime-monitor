@@ -43,16 +43,21 @@ class MinuteExperiment:
     news_proofs: tuple = ()
     theme_proofs: tuple = ()
     breakout_entry_proofs: tuple = ()
+    panic_allow_unresolved_news: bool = False
 
     session_exit_policy = ""
     cooldown_seconds = 0
     rank_persistence_enabled = False
 
     @classmethod
-    def from_document(cls, family: str, document: Mapping[str, Any]) -> MinuteExperiment:
+    def from_document(
+        cls, family: str, document: Mapping[str, Any], *, paper_request: bool = False,
+    ) -> MinuteExperiment:
         fields = {"policy", "capital_won"}
         if family == PANIC_FAMILY:
             fields |= {"quantity", "news_proofs"}
+            if paper_request and "panic_allow_unresolved_news" in document:
+                fields.add("panic_allow_unresolved_news")
         if family == THEME_STUDY_FAMILY:
             fields.add("theme_proofs")
         if family == BREAKOUT_STUDY_FAMILY and "entry_proofs" in document:
@@ -69,13 +74,17 @@ class MinuteExperiment:
             quantity = document["quantity"]
             if type(quantity) is not int or quantity <= 0 or not isinstance(document["news_proofs"], list):
                 raise ValueError("panic research requires explicit quantity and news proofs")
+            allow_unresolved = document.get("panic_allow_unresolved_news", False)
+            if type(allow_unresolved) is not bool:
+                raise ValueError("panic_allow_unresolved_news must be boolean")
             proofs = tuple(PanicNewsProof(**{
                 **row,
                 "effective_at": datetime.fromisoformat(row["effective_at"]) if row["effective_at"] is not None else None,
                 "available_at": datetime.fromisoformat(row["available_at"]) if row["available_at"] is not None else None,
                 "evidence_refs": tuple(row["evidence_refs"]),
             }) for row in document["news_proofs"])
-            return cls(family, capital, quantity, PanicReboundRules(**policy_document), proofs)
+            return cls(family, capital, quantity, PanicReboundRules(**policy_document), proofs,
+                       panic_allow_unresolved_news=allow_unresolved)
         if family in BREAKOUT_STUDY_FAMILIES:
             from kiwoom_monitor.application.breakout_theme_research import BreakoutEntryProof, BreakoutThemePolicy, ThemeRoleProof
 
@@ -105,6 +114,8 @@ class MinuteExperiment:
         document = {"capital_won": self.capital_won, "policy": _wire_dataclass(self.policy)}
         if self.family == PANIC_FAMILY:
             document.update(quantity=self.quantity, news_proofs=[_wire_dataclass(row) for row in self.news_proofs])
+            if self.panic_allow_unresolved_news:
+                document["panic_allow_unresolved_news"] = True
         if self.family == THEME_STUDY_FAMILY:
             document["theme_proofs"] = [_wire_dataclass(row) for row in self.theme_proofs]
         if self.breakout_entry_proofs:
@@ -214,6 +225,7 @@ class MinuteExperimentRun:
                 news_proofs=self.config.news_proofs,
                 setup=setup if position is not None else self.armed.get(bar.code),
                 position_opened_at=datetime.fromisoformat(position.opened_at) if position is not None else None,
+                allow_unresolved_news=self.research_context and self.config.panic_allow_unresolved_news,
             )
             action, reason, setup, refs = decision.action, decision.reason, decision.setup, decision.input_refs
             if position is None and setup is not None and action in {"ARM", "ENTER"}:

@@ -134,6 +134,19 @@ class ResearchDialogTests(unittest.TestCase):
                         self.assertIn(manifest["revision_ids_hash"], dialog._summary.toolTip())
                         self.assertIn(result["run_id"], dialog._summary.toolTip())
                         self.assertEqual("미완료·거절", dialog._table.horizontalHeaderItem(4).text())
+                document.update(family="panic_rebound/v1", strategy={
+                    "capital_won": 1000, "quantity": 1, "news_proofs": [],
+                    "panic_allow_unresolved_news": True,
+                    "policy": {"variant": "P0", "lookback_minutes": 3, "decline_bps": 1000,
+                               "minimum_turnover_won": 3_000_000, "max_input_age_seconds": 10,
+                               "rebound_target_bps": 500, "max_hold_minutes": 5},
+                })
+                request_path.write_text(json.dumps(document), encoding="utf-8")
+                self.assertTrue(dialog._preview_request())
+                self.assertIn("뉴스 미확인 표본 허용", dialog._summary.text())
+                result = execute_process_request(load_research_process_request(request_path))
+                dialog._apply_result(result)
+                self.assertIn("뉴스 미확인 표본 허용", dialog._summary.text())
             finally:
                 dialog.stop()
                 dialog.deleteLater()

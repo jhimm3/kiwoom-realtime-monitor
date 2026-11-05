@@ -101,6 +101,7 @@ def evaluate_panic_rebound(
     *, evaluation_bar: KrxMinuteBarFrame, bar_history: Iterable[KrxMinuteBarFrame],
     rules: PanicReboundRules, news_proofs: Iterable[PanicNewsProof] = (),
     setup: PanicSetup | None = None, position_opened_at: datetime | None = None,
+    allow_unresolved_news: bool = False,
 ) -> PanicReboundDecision:
     """Decide on completed closes. The caller owns orders, fills and session closure."""
     bar = evaluation_bar
@@ -119,7 +120,7 @@ def evaluate_panic_rebound(
         result = _confirm_setup(bar, start, cutoff, rules, setup, history)
         if result.action != "ENTER":
             return result
-        return _with_news(result, bar, cutoff, news_proofs)
+        return _with_news(result, bar, cutoff, news_proofs, allow_unresolved_news)
 
     window = _complete_window(history, start, rules.lookback_minutes)
     if not window:
@@ -139,7 +140,8 @@ def evaluate_panic_rebound(
     )
     if rules.variant == "P1":
         return PanicReboundDecision("ARM", "panic_waiting_for_next_completed_close", setup, refs)
-    return _with_news(PanicReboundDecision("ENTER", "panic_decline_reached", setup, refs), bar, cutoff, news_proofs)
+    result = PanicReboundDecision("ENTER", "panic_decline_reached", setup, refs)
+    return _with_news(result, bar, cutoff, news_proofs, allow_unresolved_news)
 
 
 def _bar_times(bar: KrxMinuteBarFrame) -> tuple[datetime, datetime, datetime]:
@@ -228,6 +230,7 @@ def _confirm_setup(
 
 def _with_news(
     decision: PanicReboundDecision, bar: KrxMinuteBarFrame, cutoff: datetime, proofs: Iterable[PanicNewsProof],
+    allow_unresolved: bool,
 ) -> PanicReboundDecision:
     eligible: list[tuple[datetime, PanicNewsProof]] = []
     for row in proofs:
@@ -238,13 +241,15 @@ def _with_news(
             if effective.date() != cutoff.date() or effective > cutoff:
                 continue
         if row.available_at is None:
+            if allow_unresolved:
+                continue
             return PanicReboundDecision("NO_TRADE", "panic_news_unresolved", input_refs=decision.input_refs)
         available = row.available_at.astimezone(KST)
         if available <= cutoff:
+            if allow_unresolved and (row.effective_at is None or not row.evidence_refs):
+                continue
             eligible.append((available, row))
-    if not eligible:
-        return PanicReboundDecision("NO_TRADE", "panic_news_unresolved", input_refs=decision.input_refs)
-    latest_at = max(available for available, _ in eligible)
+    latest_at = max((available for available, _ in eligible), default=None)
     latest = tuple(row for available, row in eligible if available == latest_at)
     refs = tuple(dict.fromkeys((*decision.input_refs, *sorted({
         ref for row in latest for ref in (row.revision, *row.evidence_refs)
@@ -258,6 +263,8 @@ def _with_news(
         return PanicReboundDecision("NO_TRADE", "panic_fundamental_adverse", input_refs=refs)
     if dispositions == {"supported_nonfundamental"}:
         return PanicReboundDecision("ENTER", decision.reason, decision.setup, refs)
+    if allow_unresolved:
+        return PanicReboundDecision("ENTER", "panic_price_setup_news_unresolved", decision.setup, refs)
     return PanicReboundDecision("NO_TRADE", "panic_news_unresolved", input_refs=refs)
 
 

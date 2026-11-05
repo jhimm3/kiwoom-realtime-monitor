@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~03 수락 · 완료 3/5 · S12-04 진행 중. 기존 실행기에 계획형 0B 모의 실행을 연결했고, S12-05에서 명시 재개와 종가베팅·신규주 후보 근거를 연결했다. [최신 개발 근거](#s12-native-plan-runner) · [12.12 잔여 조건](#s12-acceptance-remaining).
+**현재 상태.** S12-01~03 수락 · 완료 3/5 · S12-04 진행 중. 기존 실행기의 계획형 0B 모의 실행과 명시 재개, 종가베팅·신규주 후보 근거 조회를 연결했다. 낙주 일반 Paper에서 뉴스 미확인 표본을 분리해 비교할 수 있다. [낙주 비교](#s12-paper-panic) · [계획형 실행](#s12-native-plan-runner) · [12.12 잔여 조건](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -260,6 +260,16 @@ U001의 실제 훈련 자료에서 시장 근거를 09:01~10:30의 90분으로 �
 현재 실행 소스 `08d1bdeb`에서 Windows 영향 검사 352건과 격리 PostgreSQL 24건이 통과했다. 앞서 PostgreSQL 모듈 실행에서 33건 중 28건의 개별 성공을 기록했으나 실행 제한 시간에 도달했다. 변경 11건, 완료 기록이 부족한 5건, 증분 원장에서 요구한 기존 검사 8건의 공식 실행 기록을 같은 소스에서 남겼다. 임시 데이터베이스와 실행 작업, 루프백 포트가 정리됐다. [Windows 실행](../../tmp/s12-04-shadow/native-plan-runner-final/evidence.json) · [PostgreSQL 영향 검사](../../tmp/s12-03-pg-baseline/s12-05-native-plan-reviewed-exact/postgres-run.json) · [SQLite·PostgreSQL 대조](../../tmp/s12-03-pg-baseline/s12-05-native-plan-parity-exact/postgres-run.json) · [기존 증분 검사](../../tmp/s12-03-pg-baseline/s12-05-native-plan-reviewed-ledger/postgres-run.json) · [임시 환경 정리](../../tmp/s12-03-pg-baseline/s12-05-native-plan-reviewed-exact/owned-job.json).
 
 12.12의 동일 사건 분할을 고려아연 개발 자료로 재생했다. 거래소 공시에 기록된 2024-10-02 14:09 정지·14:39 재개와 같은 날 30분 정지를 보도한 기사 한 건을 같은 사건으로 묶었다. 동결된 2024-10-04 분봉 381개에는 `historical_case_date=2024-10-02`가 남아 있고 후보 모집단 판본 1개도 같은 사례일을 가리킨다. 원본 TRAIN 파일의 해시와 판본 ID를 대조한 뒤 일반 연구 요청에서 사건 1개가 저장됐다. 같은 묶음을 10월 4일 정오 기준으로 학습·검증에 나눈 대조 요청은 연구 결과 저장 전에 거절됐다. 두 출처는 분할 메타데이터로 사용했다. 공시의 조치 시각을 공개 시각으로 해석하지 않았고 보도의 최초 본문 판본이나 봉 내부 체결 순서도 확정하지 않았다. [거래소 공시](https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20241002800242) · [당일 보도](https://www.fnnews.com/news/202410021433567484) · [발행사 당일 설명](https://campaign.koreazinc.co.kr/campaign/%EA%B8%B0%EC%9E%90%ED%9A%8C%EA%B2%AC%EB%AC%B8/) · [판본 및 분할 대조](../../tmp/s12-05-verification-matrix/reviewed-halt-event-v2/evidence.json).
+
+<a id="s12-paper-panic"></a>
+
+### S12-04 낙주 연구의 뉴스 미확인 표본
+
+일반 Paper에서 `strategy.panic_allow_unresolved_news: true`를 선택하면 P0·P1이 컷까지 관측한 가격·대금만으로 뉴스 미확인 표본을 탐색할 수 있다. 뉴스의 확인 수준은 판단 사유와 요청·저장·화면에 표시한다. 당시 확인된 악재와 확인 근거 간 충돌은 진입을 막고 이후에 가용해진 뉴스는 앞선 판단에 사용하지 않는다. 선택을 생략한 연구와 Shadow는 확인된 뉴스 근거를 요구한다.
+
+고려아연의 동결된 2024-10-04 분봉과 복원 정규장 시각에서 P0·P1을 각각 같은 자료와 조건으로 재생했다. 뉴스 확인을 요구한 두 실행에는 후보가 없었다. 미확인 표본을 허용하면 P0는 후보 1건과 Paper 매수·매도 각 1건이 기록됐고 P1은 후보 0건이었다. 사례는 사후 선택된 TRAIN 자료이며 결과는 조건별 연구 경로 점검이다. [한국거래소 매매 안내](https://global.krx.co.kr/contents/GLB/01/0109/0109000000/guide_to_trading_in_the_korean_stock_market.pdf) · [비교 요청과 결과](../../tmp/s12-05-verification-matrix/panic-coverage-main/coverage.json).
+
+현재 소스 `63a3aa5d`의 Windows 영향 검사 62건과 구조·저장소 호출·증분 원장 대조를 통과했다. 동일 분봉의 확인형과 미확인 허용형, 컷 이전·이후 악재, Shadow 요청 거절, 화면과 저장 결과를 대조했다. [정확한 실행 ID와 종료 기록](../../tmp/s12-04-shadow/panic-paper-final/evidence.json) · [증분 대조](../../tmp/s12-04-shadow/panic-paper-final-review.json).
 
 <a id="s12-acceptance-remaining"></a>
 

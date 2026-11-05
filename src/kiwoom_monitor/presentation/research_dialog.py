@@ -1072,6 +1072,8 @@ class ResearchDialog(QDialog):
             variants = " → ".join(config.policy.variant for config in (request.strategy, *request.breakout_variants))
             scope = _SECTION12_SCOPES["shadow_only" if request.shadow_only else "paper"]
             identity = f"{MINUTE_EXPERIMENT_LABELS[request.family]} ({request.family}) · {variants} · {scope} · 계좌 주문 없음"
+            if request.strategy.panic_allow_unresolved_news:
+                identity += " · 뉴스 미확인 표본 허용"
             references = []
             if request.strategy_references is not None:
                 reference_path, digest = request.strategy_references
@@ -1390,6 +1392,7 @@ def _section12_result_summary(context: Mapping[str, Any], report: object) -> str
         quality_text = f"자료 품질 {quality.get('status', '미확인')} · 재현성 {quality.get('reproducibility', '미확인')}"
     event_groups = context.get("source_event_group_count")
     events_text = f"분할을 확인한 검토 사건 {event_groups}개" if type(event_groups) is int else ""
+    panic_text = "낙주 연구 · 뉴스 미확인 표본 허용" if context.get("panic_allow_unresolved_news") is True else ""
     market_proxy = context.get("reconstructed_market_proxy")
     market_text = ""
     if isinstance(market_proxy, Mapping) and market_proxy.get("scope"):
@@ -1398,7 +1401,7 @@ def _section12_result_summary(context: Mapping[str, Any], report: object) -> str
         if type(covered) is int and type(regular) is int and 0 <= covered <= regular and regular > 0:
             market_text += f" · 시장 근거 {covered}/{regular}분"
     return " · ".join(str(value) for value in (
-        family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text, events_text, market_text,
+        family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text, events_text, market_text, panic_text,
     ) if value)
 
 
