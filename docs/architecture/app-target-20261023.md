@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-06 · S12-05 대표5 낙주 자동 관리·현재 정정·제품 연결 개발 수락**. AR 기준과 이전 근거는11절에 둔다.
+갱신. **2026-11-06 · S12-05 대표10 실행 코드 부재·설정 수명·공통 복구 연결 검증**. AR 판정과 선행 개발은11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 낙주 P0/P1의 명시 READY/UI/API→기존 자동 Episode→현재 조건 재판단/정정 우선·첫0B 보존·부분/늦은 체결·당일 미완료/익일 DB 복구·일지를 Windows115/실제PG21건으로 확인했다. 다음은 기존 대표1·2·6·8·10·11 및 DD/MICRO·독립 계좌/원주문 검증이다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [대표5 수락](#section12-acceptance-panic-five) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 대표10의 선택 adapter·자료 조회·코드 부재/공통0B·원래 취소 UNKNOWN/늦은 체결 복구·명시 재개와 API를 Windows104/실제PG22건으로 확인했다. 대표10의 새 spec 교체는 원래1·2·6의 계좌/계획 실행 연결과 함께 남는다. 다음은 그 최초/추가·부분 청산·재진입·동시 의도의 수량/계좌 연결이며 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증을 유지한다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [대표10 부분](#section12-minute-feature-lifecycle) · [대표5 수락](#section12-acceptance-panic-five) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4900,6 +4900,24 @@ source `de4456e50daae48e51d940b1d6a03af7f6ef5524ec6b3fff061420e2a8d6376f`에서 
 같은 working SELL의 두 무변화 poll에서 불필요한 진입 설정 조회는 **2→0**, 추가 broker 조회는0이다. SELL이 소비하지 않는 진입 설정 조회만 제거했으며 현재 Risk/보호·원장·복구를 생략하지 않았다. 전체 CPU/지연/RSS 개선을 주장하지 않는다. [동일 입력 수정 전](../../tmp/s12-05-panic/working-sell-read-before.json) · [수정 후](../../tmp/s12-05-panic/working-sell-read-after.json). 첫 정규115건의 누락 Risk import·구형 FILL 중복 방지와 옛 모듈을 참조하던 기존 검사1건은 실패를 보존한 뒤 실제 경로/호출을 수정했다. 기대값·안전 한도를 완화하지 않았다. 첫 PG 낙주 전체 묶음은240초 도구 제한에 도달해 미수락으로 남겼고 진행 근거에 따라 도구 예산360초에서 같은 전체10건을 완료했다. 제품 timeout은 바꾸지 않았다. [최초115건](../../tmp/s12-04-shadow/s12-05-panic-management-final/evidence.json) · [옛 호출1건](../../tmp/s12-04-shadow/s12-05-panic-management-final-v2/evidence.json) · [최초PG 도구 timeout](../../tmp/s12-03-pg-baseline/s12-05-panic-management-final/fixture.json).
 
 정본12.12 항목5의 원래 완료 조건인 목표 미달 추격 없음·실제 체결만 보유/매도·늦은 FILL/당일 미완료 관리를 닫았다. **개발 수락은 대표3·4·5·7·9의5/11, 전체4/5**다. 남은 대표1·2·6·8·10·11과 DD/MICRO·독립 계좌/원주문 검증을 그대로 이어간다. 모든 시장/계좌/체결 입력은 합성이며 과거 실증 성과나 실제 운영 수락이 아니다. 실제 주문·NAS 변경/배포·T0·권한 인계·push는 수행하지 않았다.
+
+<a id="section12-minute-feature-lifecycle"></a>
+
+### 11.284 S12-05 대표10 실행 코드 부재·설정 수명·공통 복구 연결 — 2026-11-06
+
+정본12.12 대표10의 실행 코드 부재·설정/수명·공통 복구 연결을 개발 검증했다. 기존 MinutePlanManagement가 선택한 CLOSE/IPO 또는 PANIC adapter만 참조하며 상태/작업 수명과 주문 권한은 기존 owner에 남긴다. 프로토콜·현재 주문 claim version·근거 collection의 문자열 값은 기존 domain 실행 명세에 모으고 원래 module alias와 wire/ID를 보존했다. 같은 순수 현재 Shadow 대조는 minute_order_management 한 곳에 두고 옛 CLOSE 공개 이름도 유지한다. 기존 native AMEND/CANCEL은 정확한 기존 version으로 해당 전략의 검증 함수만 고른다. 새 계층·plugin registry·worker·schema·라이브러리·공개 QueryStore 메서드는 없다.
+
+실제 source 복사본에서 PANIC 실행 파일을 빼고 기존 CLOSE 현재 BUY 재판단/정정·조건 실효 취소를, 반대 복사본에서 CLOSE 실행 파일을 빼고 PANIC native 직전 변조 거절/현재 취소를 실행했다. 선택한 파일 자체가 없으면 정확한 ModuleNotFoundError.name으로 미지원을 드러낸다. package from-import가 넓은 ImportError로 바꾸던 차이는 실제 부재 복사본으로 확인한 뒤 명시 module import로 고쳤다. 두 실행 파일이 모두 없어도 기존 DD/MICRO·연구 producer와 optional package가 없는 결과 수신/조회, 실제 Collector의 합성0B→일치 구독자 전달이 동작한다. 자료 조회는 코드가 없어도 보존 근거를 읽으며 새 근거 저장은 기존 전략 검증을 계속 요구한다. [착수 재현](../../tmp/s12-05-lifecycle/absence-before/result.json) · [오류 형식 확인](../../tmp/s12-05-lifecycle/selected-missing-error-shape/before.json).
+
+별도 native DB에 원래 BUY4의 상세2와 취소 ACK UNKNOWN을 저장하고 실제로 닫았다. 새 프로세스에서는 두 실행 파일을 제거한 채 공통 Runtime의 새 소유권을 얻어 진입을 닫고, 같은 broker snapshot의 늦은1을 실제 상세로 수락했다. 결과는 CANCELLED/원래 보유3·같은 plan_id/policy/control과 원래 진입 근거이며 중복 snapshot은 사건을 더 만들지 않았다. 모든 전송을 거절하는 transport로 새 주문0을 검증했다. 처음에는 체결/원계획 복구 뒤 근거 reader가 collection 이름 때문에 삭제된 실행 코드를 불렀고, 해당 네 reader의 데이터 의존을 바로잡았다. 실제 컴퓨터 인계가 아닌 같은 격리 DB의 소프트웨어 복구 검증이다. [근거 reader 실패](../../tmp/s12-05-panic/s12-05-lifecycle-retained-probe-v2.json) · [수정 후](../../tmp/s12-05-panic/s12-05-lifecycle-retained-probe-v3.json).
+
+선택한 adapter 부재는 기존 Supervisor의 오류/재시도 상태로 보존하고 명시 기동 또는 앱 재시작을 기다린다. 실제 부재를 나타내는 두 module 이름만 판별하며 다른 의존 오류의 기존30초 재시도는 유지한다. 변경 전 자동 시도2회를 재현했고 변경 후 같은 시간 진행에서 시도/설정 조회1회, 같은 계좌 monitor·native control과 진입 닫힘, 명시 재활성화의 오류/cache 해제를 확인했다. 기존 HTTP operation은 같은 판별로 알려진 부재를503/MOCK_AUTOMATION_STRATEGY_UNAVAILABLE로 투영한다. 실제 ASGI 응답500을 재현한 뒤503·원래 control 보존을 검증했다. 기존 인증/요청/다른 오류의 HTTP 기준은 그대로다. [자동 재시도 재현](../../tmp/s12-05-panic/s12-05-lifecycle-restore-before-v2.json) · [HTTP500 재현](../../tmp/s12-05-panic/s12-05-lifecycle-http-before.json) · [수정 후](../../tmp/s12-05-panic/s12-05-lifecycle-http-after.json).
+
+source `b2e2f47657072dada25fc97fddcd9862905c43a609a6403e1e68514c1fa769c1`의 **Windows104건/16모듈 + 실제 격리 PostgreSQL22건**을 수락했다. 신규5건과 기존 현재 주문·최초 보호/부분·늦은 체결/익일·일지/READY, 실제 app 설정 저장/적용·동일값 no-op·drain·비활성/UNKNOWN 재시작·키 교체, 명세/역할·화면의 복구 오류/중지, 공통0B/서버와 조회 producer 부재를 대조했다. PG는 PANIC 전체10, CLOSE 현재6·기존 종가/신규주 Runner·기한/보호 취소·원장/lease/SQL·control CAS·실제 계획 재개 ACK 유실의12이다. 구조1328site/38retirable·위반0, 소비 protocol125/PG135/SQLite130/검토390·delta0, 증분7315정의/297기록·기존미결49와 같은 소스/실제 ID·작업자16 및 두 PG cluster·DB/port/private/TEMP/registry 정리를 확인했다. 기존 required Windows safety profile에 새 lifecycle 모듈만 등록했고 외부 CI는 실행하지 않았다. 전체 CPU/지연/RSS 개선을 주장하지 않는다. [Windows](../../tmp/s12-04-shadow/s12-05-minute-lifecycle-final-v2/evidence.json) · [PANIC PG](../../tmp/s12-03-pg-baseline/s12-05-minute-lifecycle-panic-final-v2/postgres-run.json) · [관련 PG](../../tmp/s12-03-pg-baseline/s12-05-minute-lifecycle-regression-final-v2/postgres-run.json) · [증분](../../tmp/s12-05-lifecycle/review-verified.json) · [정리](../../tmp/s12-05-lifecycle/acceptance.json).
+
+정규 관련PG11 중 기존 control CAS의 고정 SQL 기대가 실패했다. 기준f01dde4와 같은 현재 소스의 단독1건에서도 같은[2,2,2,3,3] 대[2,2,3,3,3]을 재현했으며 CAS 본문은 양쪽 AST가 같았다. 원인은 active_spec_id가 없는 구형 STOPPED→RUNNING 제어가 SQL NULL 키의 불가능한 명세 조회를 한 뒤 JSON 직렬화 오류로 rollback하는 경로였다. 이 None 범위의 조회만 건너뛰고 owner/resume 증거가 있으면 빈 문자열도 기존 scope 오류로 거절한다. 실제/빈 문자열을 포함한 non-None 범위는 원래 조회·검증을 유지했다. 기존 비용 기대나 안전 조건을 바꾸지 않았으며 두 backend placeholder의 새 unit과 실제PG 연결된 계획 재개/COMMIT ACK 유실을 추가 대조했다. [직접 원인](../../tmp/s12-05-lifecycle/control-cas-cause.json) · [기준/현재 본문 대조](../../tmp/s12-05-lifecycle/control-cas-unchanged.json) · [첫PG11 실패](../../tmp/s12-03-pg-baseline/s12-05-minute-lifecycle-regression-final/postgres-run.json).
+
+**대표10 전체는 진행이다.** 현재 activate/admission은 기존 control과 다른 spec/run을 명시 인계 필요로 거절하며 공개 동작은 기동/중지/재개다. 새 전략/명세로 교체하면서 이전 계획·늦은 FILL을 같은 계좌의 단일 권한에서 관리하는 연결은 원래 대표1·2·6과 함께 남는다. 이 잔여를 생략하거나 현재의 부재 검증으로 대체하지 않는다. 다음은 해당 계좌·원계획/추가·부분 청산·재진입·병행 배분의 실행 연결이다. **전체4/5·대표3·4·5·7·9의5/11**과 대표8·11, DD/MICRO·독립 계좌/원주문 검증 및 운영 제외를 유지한다. 실계좌 주문·NAS 변경/배포·자료 이전·T0·실제 권한 인계·push는 수행하지 않았다.
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

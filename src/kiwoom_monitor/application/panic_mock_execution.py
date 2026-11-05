@@ -16,15 +16,14 @@ from .minute_order_management import (
     MinuteOrderManagementClaim, assess_current_minute_order, acknowledged_minute_quote as acknowledged_quote,
     frozen_minute_candidate as frozen_candidate,
 )
-from kiwoom_monitor.domain.execution_activation import PANIC_NATIVE_PLAN_MODE
+from kiwoom_monitor.domain.execution_activation import (
+    PANIC_NATIVE_PLAN_MODE, PANIC_INPUT_PROTOCOL, PANIC_ORDER_MANAGEMENT_VERSION,
+    PANIC_ENTRY_COLLECTION, PANIC_EXIT_COLLECTION,
+)
 from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderSide, OrderState, OrderType, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.domain.strategy_contract import StrategyDecision
 
 PANIC_ORDER_POLICY_VERSION = 'panic_execution_adapter/v1'
-PANIC_ENTRY_COLLECTION = 'execution_panic_entry_evidence'
-PANIC_EXIT_COLLECTION = 'execution_panic_exit_evidence'
-PANIC_ORDER_MANAGEMENT_VERSION = 'panic-current-order-management/v1'
-PANIC_INPUT_PROTOCOL = 'panic-shadow-native-plan/v1'
 
 
 def build_panic_trigger(spec, *, run_id, event, quote, observed_at):

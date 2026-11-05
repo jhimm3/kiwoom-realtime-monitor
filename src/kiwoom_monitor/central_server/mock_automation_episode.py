@@ -669,8 +669,8 @@ class MockAutomationEpisode:
     def _prepare_minute_plan(self, candidate):
         from kiwoom_monitor.application.section12_minute_research import MinuteExperiment
         from kiwoom_monitor.domain.research_contract import MINUTE_FINAL_CANDIDATE_FAMILIES
-        from .minute_plan_management import CLOSE_INPUT_PROTOCOL, MinutePlanManagement
-        from kiwoom_monitor.application.panic_mock_execution import PANIC_INPUT_PROTOCOL
+        from .minute_plan_management import MinutePlanManagement
+        from kiwoom_monitor.domain.execution_activation import CLOSE_INPUT_PROTOCOL, PANIC_INPUT_PROTOCOL
         protocol = PANIC_INPUT_PROTOCOL if self._panic_plan_mode else CLOSE_INPUT_PROTOCOL
         management_key = "minute_management" if self._panic_plan_mode else "close_management"
 

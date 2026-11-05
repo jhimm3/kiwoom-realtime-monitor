@@ -3195,6 +3195,19 @@
         "tests/unit/test_panic_mock_execution.py",
         "tests/integration/test_panic_mock_execution_postgres.py"
       ]
+    },
+    {
+      "id": "S12-05-selected-minute-adapter-and-data-only-recovery-20261106",
+      "reason": "Develop original S12-05 representative10 code absence and lifecycle: one existing minute owner loads only the selected adapter, data-only metadata/readers survive removed implementations, and permanent removed-code recovery waits for explicit start or application restart. Full strategy-spec replacement is not declared complete.",
+      "connection": "Existing MinutePlanManagement retains its state and lifetime and stores a reference to only its selected stateless adapter. Exact protocol/version/collection strings move into the existing domain execution metadata with old adapter aliases. Existing Episode and native claim select by exact unchanged versions; the common pure current matcher has one implementation and the old CLOSE alias. Four existing immutable-evidence readers use data metadata, while evidence writers still require their strategy validation. One finite existing-controller error predicate identifies the actual missing module for Supervisor retry and HTTP503 projection, keeping unrelated import failures visible. Existing error/backoff state preserves the account bundle/control and permits existing explicit activation; other dependency failures retain30s recovery. Only the new lifecycle module is added to an already-required Windows profile.",
+      "validation": "Real source copies physically omit the unselected CLOSE/PANIC adapter and execute the unchanged current BUY/native mutation regressions. Both omitted adapters still allow the original reported-results receiver with absent DD/MICRO/producers/optional packages and a real synthetic0B Collector delivery to the subscribed client. Missing selected constructor errors must be ModuleNotFoundError for the exact module, not a broad package ImportError. Another actual native DB is seeded with BUY4/partial2 and cancelACK UNKNOWN, closed, then reopened in a fresh process with both adapters absent: common recovery accepts exactly late1, terminal CANCELLED/owned3, original plan/policy/control and retained evidence, duplicate snapshot unchanged, new entry closed and a transport that forbids every request. An existing Supervisor fixture reproduces two removed-code automatic attempts before the fix; now one attempt/settings read, same monitor and unchanged control persist, and explicit actual activation clears the error/cache. Unrelated missing dependency still has two attempts and the original30s interval. Actual ASGI start with the same failing selected factory returned500 before the HTTP projection fix; it now returns503/MOCK_AUTOMATION_STRATEGY_UNAVAILABLE, keeps the same native control, and explicit later activation still clears the original error/cache. The prior HTTP/auth/strict-request baseline remains selected unchanged.",
+      "limits": {},
+      "evidence": [
+        "tests/unit/test_minute_plan_lifecycle.py",
+        "tests/unit/test_close_order_management.py",
+        "tests/unit/test_panic_mock_execution.py",
+        "tests/integration/test_panic_mock_execution_postgres.py"
+      ]
     }
   ]
 }

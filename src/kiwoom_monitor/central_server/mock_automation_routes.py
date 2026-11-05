@@ -67,11 +67,15 @@ def create_mock_automation_router(
 
     async def run_mock_automation_operation(operation: Any) -> dict[str, object]:
         from .credential_runtime import CredentialOperationError
-        from .mock_automation_supervisor import MockAutomationSupervisorError
+        from .mock_automation_supervisor import MockAutomationSupervisorError, strategy_implementation_unavailable
         try:
             return await operation
         except MockAutomationSupervisorError as error:
             raise HTTPException(status_code=error.status, detail=error.code) from None
+        except ModuleNotFoundError as error:
+            if not strategy_implementation_unavailable(error):
+                raise
+            raise HTTPException(status_code=503, detail="MOCK_AUTOMATION_STRATEGY_UNAVAILABLE") from None
         except CredentialOperationError as error:
             raise HTTPException(status_code=error.status, detail=error.code) from None
         except ValueError as error:

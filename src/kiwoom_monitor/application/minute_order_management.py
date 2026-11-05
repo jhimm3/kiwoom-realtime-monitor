@@ -24,6 +24,19 @@ def frozen_minute_candidate(event):
     return value
 
 
+def minute_current_shadow_matches(spec, event, settings):
+    from .section12_minute_research import MinuteShadowConfig
+    from kiwoom_monitor.domain.strategy_contract import _id
+
+    if not settings or settings.get('shadow_candidate_enabled') is not True:
+        return False
+    config = MinuteShadowConfig.from_document(settings['shadow_candidate_config'])
+    monitor = _id('section12-minute-shadow', {'config': config.to_dict(), 'session_profile': spec.session_profile,
+        'universe_max_age_seconds': settings['shadow_candidate_universe_max_age_seconds']})
+    return (event['run_id'] == monitor and config.strategy.family == f"{event['strategy_id']}/{event['strategy_version']}"
+            and (config.strategy.family != 'panic_rebound/v1' or event.get('panic_entry_parameters') == config.strategy.to_dict()))
+
+
 def acknowledged_minute_quote(spec, quote, decided_at, now):
     at = quote.get("available_at")
     if isinstance(at, str):
@@ -135,4 +148,3 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
         'entry_enabled': bool(entry_enabled), 'risk_snapshot_id': risk.snapshot_id,
         'risk_reconciliation_revision': risk.reconciliation_revision,
         **({'protection_notice': protection_notice} if protection_notice is not None else {})}
-

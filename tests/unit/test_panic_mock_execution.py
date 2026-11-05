@@ -581,7 +581,7 @@ async def start_panic_bundle(case, ctx):
 
 
 async def manage_panic_current(ctx, record=None):
-    from kiwoom_monitor.application.close_mock_execution import close_current_shadow_matches
+    from kiwoom_monitor.application.minute_order_management import minute_current_shadow_matches
     from kiwoom_monitor.application.panic_mock_execution import prepare_panic_order_management_claim
     from kiwoom_monitor.domain.order_contract import OrderSide
     record = record or ctx.execution.load(ctx.buy.intent.intent_id)
@@ -589,7 +589,7 @@ async def manage_panic_current(ctx, record=None):
     def prepare(current, cut):
         settings = ctx.store.load_document('server_operational_settings', 'global', 'current')
         enabled = (current.intent.side is OrderSide.BUY and control.desired_state.value == 'RUNNING'
-            and not control.entry_resume_required and close_current_shadow_matches(ctx.spec, ctx.event,
+            and not control.entry_resume_required and minute_current_shadow_matches(ctx.spec, ctx.event,
                 settings['document'] if settings else None))
         return prepare_panic_order_management_claim(ctx.repository, ctx.runtime, ctx.execution, ctx.spec, current,
             parameters=ctx.parameters, event=ctx.event, quote=ctx.current_quote,

@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from kiwoom_monitor.application.close_mock_execution import dispatch_close_entry
 from kiwoom_monitor.central_server.minute_plan_management import MinutePlanManagement
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
@@ -102,6 +101,7 @@ class BrokerBook:
 
 
 async def management_context(case, factory=None, *, stopped=True, family='close_betting/v1', phase='listing_day'):
+    from kiwoom_monitor.application.close_mock_execution import dispatch_close_entry
     from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
     if factory is None:
         directory = case.enterContext(tempfile.TemporaryDirectory())

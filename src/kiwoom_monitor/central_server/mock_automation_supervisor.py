@@ -42,6 +42,13 @@ from .mock_runtime import (
 logger = logging.getLogger(__name__)
 
 
+def strategy_implementation_unavailable(error: BaseException) -> bool:
+    return isinstance(error, ModuleNotFoundError) and error.name in {
+        'kiwoom_monitor.application.close_mock_execution',
+        'kiwoom_monitor.application.panic_mock_execution',
+    }
+
+
 class MockAutomationSupervisorError(RuntimeError):
     def __init__(self, code: str, status: int = 409) -> None:
         super().__init__(code)
@@ -583,4 +590,7 @@ class MockAutomationSupervisor:
                         account_ref, type(error).__name__,
                     )
                 self._restore_errors[account_ref] = detail
-                self._restore_retry_after[account_ref] = time.monotonic() + 30.0
+                missing_adapter = strategy_implementation_unavailable(error)
+                # A removed implementation needs explicit activation or restart,
+                # while unrelated failures retain the existing timed recovery.
+                self._restore_retry_after[account_ref] = float('inf') if missing_adapter else time.monotonic() + 30.0

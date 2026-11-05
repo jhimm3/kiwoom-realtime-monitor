@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+**S12-05 실행 코드 부재·수명:** 기존 `MinutePlanManagement`는 선택한 stateless adapter만 참조한다. `domain/execution_activation`은 기존 protocol/version/collection 값과 명세를, `minute_order_management`는 순수 공통 대조를 소유한다. 기존 ForwardEvaluationRepository의 근거 reader는 실행 코드 없이 보존 자료를 읽고 writer는 해당 전략 검증을 유지한다. 기존 Supervisor의 계좌/오류/수명과 HTTP operation이 정확한 코드 부재를 미지원으로 투영하며 공통 계좌 대사·native FILL·조회/수집을 보존한다. 새 spec 전략 교체는 원래1·2·6/10의 잔여다. [검증·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-minute-feature-lifecycle).
+
 **S12-05 낙주 자동 연결:** `panic_rebound`/`candidate_monitor`가 원셋업과 현재 뉴스·규칙을, 기존 READY/UI/API가 명시 정책을 소유한다. `application/panic_mock_execution`이 진입·첫0B 실패/반등·현재 판단·실제 잔량의 순수 근거를, `minute_order_management`가 CLOSE/IPO와 같은 물리 주문/계좌 검증을 소유한다. 같은 Episode의 `MinutePlanManagement`가 원계획/커서·RAM 최초 관측/checkpoint와 영향받은 FILL 재활성화를 맡는다. 기존 monitor/Gateway/Runtime/native transaction은 계좌 cut·직렬화·권한·정정/취소·복구·drain을, journal은 실제 물리 FILL을 소비한다. 후보 화면→명시 READY/인증 게시·조회→공개 자동 관리/복원→일지를 수락했으며 새 worker/schema/권한/라이브러리는 없다. [항목5 수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-acceptance-panic-five).
 
 **S12-05 선별 정정 보존:** 기존 `preserve_selected_order_evidence` CLI가 정지한 원본 cut/선택을, domain `selected_order_evidence` codec이 v1/v2 원장 사실·물리 부모/수량/FILL·미귀속 marker와 canonical bytes를, 기존 SQLite document native writer가 offline 최초 영수증/재전달을 소유한다. 실제 실행 원장/권한으로 채우지 않으며 원본·구형 미정정 v1은 유지한다. [수락·독립 계좌 인계 잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-selected-amendment-evidence).

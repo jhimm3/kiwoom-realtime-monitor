@@ -156,7 +156,12 @@ def _require_planned_resume_control(cursor, p, value, current, owner_token, now_
             raise RuntimeError("PLANNED_RESUME_CONTROL_CHANGED")
         return
     account, run_id, spec_id = (value.get(key) for key in ("account_ref", "execution_run_id", "active_spec_id"))
-    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, current.get("active_spec_id"))
+    current_spec_id = current.get("active_spec_id")
+    if current_spec_id is None:
+        if owner_token is not None or resume_id is not None:
+            raise RuntimeError("PLANNED_RESUME_SCOPE_CHANGED")
+        return
+    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, current_spec_id)
     if not spec_doc or spec_doc.get("execution_plan_mode") != LEADER_NATIVE_PLAN_MODE:
         if owner_token is not None or resume_id is not None:
             raise RuntimeError("PLANNED_RESUME_SCOPE_CHANGED")
@@ -518,13 +523,10 @@ def _validate_broker_ledger_write(cursor, p, stored, intent, event, ownership, n
 
 
 def _require_minute_order_management_claim(cursor, p, stored, value, event, ownership, now_provider, control):
-    from kiwoom_monitor.application.close_mock_execution import (
-        CLOSE_EXIT_COLLECTION, CLOSE_ORDER_MANAGEMENT_VERSION, assess_close_order_management,
-        close_current_shadow_matches, close_exit_key,
+    from kiwoom_monitor.domain.execution_activation import (
+        CLOSE_ORDER_MANAGEMENT_VERSION, PANIC_ORDER_MANAGEMENT_VERSION,
     )
-    from kiwoom_monitor.application.panic_mock_execution import (
-        PANIC_EXIT_COLLECTION, PANIC_ORDER_MANAGEMENT_VERSION, assess_panic_order_management, panic_exit_key,
-    )
+    from kiwoom_monitor.application.minute_order_management import minute_current_shadow_matches
     from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
     from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
     from kiwoom_monitor.domain.order_contract import OrderPlanRef
@@ -535,8 +537,14 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
     panic = isinstance(claim, dict) and claim.get('version') == PANIC_ORDER_MANAGEMENT_VERSION
     kind = 'PANIC' if panic else 'CLOSE'
     version = PANIC_ORDER_MANAGEMENT_VERSION if panic else CLOSE_ORDER_MANAGEMENT_VERSION
-    assess = assess_panic_order_management if panic else assess_close_order_management
-    exit_collection, exit_key = (PANIC_EXIT_COLLECTION, panic_exit_key) if panic else (CLOSE_EXIT_COLLECTION, close_exit_key)
+    if panic:
+        from kiwoom_monitor.application.panic_mock_execution import (
+            PANIC_EXIT_COLLECTION as exit_collection, assess_panic_order_management as assess, panic_exit_key as exit_key,
+        )
+    else:
+        from kiwoom_monitor.application.close_mock_execution import (
+            CLOSE_EXIT_COLLECTION as exit_collection, assess_close_order_management as assess, close_exit_key as exit_key,
+        )
     if (stored is None or not stored.get('plan') or not stored.get('mock_plan_approval')
             or not isinstance(claim, dict) or claim.get('version') != version
             or recovery is None or not control or ownership.get('control_revision') is None):
@@ -560,7 +568,7 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
         raise RuntimeError(f'{kind}_CURRENT_ORDER_PLAN_REVISION_CHANGED')
     settings = _plan_document(cursor, p, 'server_operational_settings', 'global', 'current') if stored['side'] == 'BUY' else None
     enabled = (stored['side'] == 'BUY' and control.get('desired_state') == 'RUNNING'
-               and not control.get('entry_resume_required', False) and close_current_shadow_matches(spec, candidate, settings))
+               and not control.get('entry_resume_required', False) and minute_current_shadow_matches(spec, candidate, settings))
     root_id = mock_automation_intent_id(spec.spec_id, entry['decision']['decision_id'])
     root = record
     if stored['side'] == 'SELL':
@@ -627,7 +635,6 @@ def _apply_plan_execution_event(cursor, p, intent, event, sequence):
 
 def _minute_native_documents(cursor, p, account, spec_id, plan_id, *, kind='CLOSE'):
     """Read one original minute-strategy scope in the existing native transaction."""
-    from kiwoom_monitor.application.close_mock_execution import CLOSE_ENTRY_COLLECTION
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
     from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, PANIC_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
 
@@ -635,6 +642,7 @@ def _minute_native_documents(cursor, p, account, spec_id, plan_id, *, kind='CLOS
         from kiwoom_monitor.application.panic_mock_execution import PANIC_ENTRY_COLLECTION
         collection, mode, families = PANIC_ENTRY_COLLECTION, PANIC_NATIVE_PLAN_MODE, {'panic_rebound/v1'}
     elif kind == 'CLOSE':
+        from kiwoom_monitor.application.close_mock_execution import CLOSE_ENTRY_COLLECTION
         collection, mode, families = CLOSE_ENTRY_COLLECTION, CLOSE_NATIVE_PLAN_MODE, {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'}
     else:
         raise ValueError('unsupported native minute-strategy scope')
@@ -795,7 +803,7 @@ def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider,
     from kiwoom_monitor.application.panic_mock_execution import (
         PANIC_EXIT_COLLECTION, build_panic_entry_evidence, build_panic_exit_evidence, panic_exit_key,
     )
-    from kiwoom_monitor.application.close_mock_execution import close_current_shadow_matches
+    from kiwoom_monitor.application.minute_order_management import minute_current_shadow_matches
     from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
     from kiwoom_monitor.domain.order_contract import OrderPlanRef
     from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
@@ -810,7 +818,7 @@ def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider,
         if _require_panic_trigger_checkpoint(cursor, p, account, spec, value['run_id'], event) is not None:
             raise RuntimeError('PANIC_ORIGINAL_SIGNAL_ALREADY_INVALIDATED')
         settings = _plan_document(cursor, p, 'server_operational_settings', 'global', 'current')
-        if not close_current_shadow_matches(spec, event, settings):
+        if not minute_current_shadow_matches(spec, event, settings):
             raise RuntimeError('PANIC_CURRENT_SHADOW_CHANGED')
         expected, decision, plan = build_panic_entry_evidence(spec, run_id=value['run_id'],
             parameters=package.candidate_spec['parameters'], event=event, quote=proof['snapshot']['quote'],

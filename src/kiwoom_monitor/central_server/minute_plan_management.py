@@ -5,27 +5,15 @@ from datetime import datetime, timedelta
 from copy import deepcopy
 from threading import RLock
 
-from kiwoom_monitor.application.close_and_ipo import matches_close_shadow
-from kiwoom_monitor.application.close_mock_execution import (
-    build_close_exit_evidence, dispatch_close_entry, dispatch_close_exit,
-    prepare_close_entry_deadline_claim,
-    close_current_shadow_matches, prepare_close_order_management_claim,
-)
 from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
 from kiwoom_monitor.application.mock_automation_recovery import record_mock_automation_recovery_from_risk
-from kiwoom_monitor.application.minute_order_management import frozen_minute_candidate
-from kiwoom_monitor.application.panic_rebound import matches_panic_shadow
-from kiwoom_monitor.application.panic_mock_execution import (
-    PANIC_INPUT_PROTOCOL, build_panic_exit_evidence, build_panic_trigger, validate_panic_trigger,
-    dispatch_panic_entry, dispatch_panic_exit, panic_entry_plan_id, prepare_panic_order_management_claim,
-)
+from kiwoom_monitor.application.minute_order_management import frozen_minute_candidate, minute_current_shadow_matches
 from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES, OrderSide, OrderState
-from kiwoom_monitor.domain.execution_activation import allows_stopped_close_management, allows_stopped_panic_management
+from kiwoom_monitor.domain.execution_activation import (
+    CLOSE_INPUT_PROTOCOL, PANIC_INPUT_PROTOCOL, allows_stopped_close_management, allows_stopped_panic_management,
+)
 from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
 from .observation_frame_recovery import drain_thread_call
-
-
-CLOSE_INPUT_PROTOCOL = 'close-shadow-native-plan/v1'
 
 
 class MinutePlanManagement:
@@ -37,6 +25,11 @@ class MinutePlanManagement:
         self._parameters, self._price, self._now = parameters, price_source, now_provider
         self._family = family
         self._panic = family == 'panic_rebound/v1'
+        if self._panic:
+            import kiwoom_monitor.application.panic_mock_execution as adapter
+        else:
+            import kiwoom_monitor.application.close_mock_execution as adapter
+        self._adapter = adapter
         self._tag = 'panic' if self._panic else 'close'
         self._protocol = PANIC_INPUT_PROTOCOL if self._panic else CLOSE_INPUT_PROTOCOL
         self._state_lock = RLock()
@@ -74,12 +67,12 @@ class MinutePlanManagement:
         with self._state_lock:
             event = self.active_candidate(symbol)
             if event is None: return False
-            plan_id = panic_entry_plan_id(self._spec.spec_id, self._bundle.run_id, event['event_id'])
+            plan_id = self._adapter.panic_entry_plan_id(self._spec.spec_id, self._bundle.run_id, event['event_id'])
             if plan_id in self._triggers: return False
             setup, price = event['panic_entry_setup'], quote.get('price_won')
             if type(price) is not int or setup['failure_price'] < price < setup['target_price']: return False
             try:
-                trigger = build_panic_trigger(self._spec, run_id=self._bundle.run_id, event=event,
+                trigger = self._adapter.build_panic_trigger(self._spec, run_id=self._bundle.run_id, event=event,
                     quote=quote, observed_at=self._now())
             except (TypeError, ValueError):
                 return False
@@ -110,7 +103,7 @@ class MinutePlanManagement:
                 for plan_id, trigger in self._triggers.items():
                     context = self._load_context(plan_id)
                     if context is not None:
-                        validate_panic_trigger(self._spec, run_id=self._bundle.run_id, event=context['event'],
+                        self._adapter.validate_panic_trigger(self._spec, run_id=self._bundle.run_id, event=context['event'],
                                                trigger=trigger, now=self._now())
         else:
             self._cursor = self._store.load_shadow_candidates(0, 1)['high_watermark']
@@ -207,7 +200,7 @@ class MinutePlanManagement:
         settings = (await drain_thread_call(self._store.load_document, 'server_operational_settings', 'global', 'current')
                     if record.intent.side is OrderSide.BUY else None)
         enabled = (record.intent.side is OrderSide.BUY and control.desired_state.value == 'RUNNING' and not control.entry_resume_required
-                   and close_current_shadow_matches(self._spec, context['event'], settings['document'] if settings else None))
+                   and minute_current_shadow_matches(self._spec, context['event'], settings['document'] if settings else None))
         quote = self._price(record.intent.symbol) if self._price is not None else None
         token = self._management_input(record, control, quote, enabled, notice)
         if context.get('management_input') == token:
@@ -215,7 +208,7 @@ class MinutePlanManagement:
         outcome = {}
         def prepare(current, cut):
             current_quote = self._price(current.intent.symbol) if self._price is not None else None
-            prepare_claim = prepare_panic_order_management_claim if self._panic else prepare_close_order_management_claim
+            prepare_claim = self._adapter.prepare_panic_order_management_claim if self._panic else self._adapter.prepare_close_order_management_claim
             claim = prepare_claim(self._repository, self._bundle.runtime, self._bundle.repository,
                 self._spec, current, parameters=self._parameters, event=context['event'], quote=current_quote,
                 recovery=cut['recovery'], risk=cut['risk'], entry_enabled=enabled,
@@ -247,7 +240,7 @@ class MinutePlanManagement:
             deadline = datetime.fromisoformat(event['close_ipo_entry_setup']['entry_deadline'])
             if now >= deadline or protection_notice is not None:
                 def claim(record, cut):
-                    return prepare_close_entry_deadline_claim(self._repository, self._bundle.runtime, execution,
+                    return self._adapter.prepare_close_entry_deadline_claim(self._repository, self._bundle.runtime, execution,
                         self._spec, record, parameters=self._parameters, event=event,
                         recovery=cut['recovery'], risk=cut['risk'], protection_notice=protection_notice)
 
@@ -273,7 +266,7 @@ class MinutePlanManagement:
             if self._panic:
                 args = dict(parameters=self._parameters, event=event, trigger_quote=quote, quote=quote,
                             panic_trigger=protection_notice)
-                prepared = build_panic_exit_evidence(self._spec, run_id=self._bundle.run_id,
+                prepared = self._adapter.build_panic_exit_evidence(self._spec, run_id=self._bundle.run_id,
                     entry_evidence=context['proof'], root=root, head=head,
                     fill_events=await drain_thread_call(execution.events, root.intent.intent_id),
                     decided_at=now, now=now, **args)
@@ -282,7 +275,7 @@ class MinutePlanManagement:
                     return
                 recovery, risk = await self._fresh_cut()
                 _, head = await drain_thread_call(self._read_plan, context)
-                gate, sell, _ = await drain_thread_call(dispatch_panic_exit, self._repository, self._bundle.runtime,
+                gate, sell, _ = await drain_thread_call(self._adapter.dispatch_panic_exit, self._repository, self._bundle.runtime,
                     execution, self._spec, head.plan, recovery=recovery, risk=risk, **args)
                 self.status = {'state': 'ORDER_SUBMITTED' if sell is not None else 'BLOCKED',
                     'reason': ';'.join(gate.reasons) if gate.reasons else 'panic_exit_submitted', 'orders_enabled': False,
@@ -305,7 +298,7 @@ class MinutePlanManagement:
             stop_risk = (await drain_thread_call(self._repository.load_mock_automation_risk_snapshot,
                 self._bundle.account_ref, protection_notice['risk_trigger']['snapshot_id'])
                 if protection_notice is not None else None)
-            prepared = build_close_exit_evidence(self._spec, run_id=self._bundle.run_id, entry_evidence=context['proof'],
+            prepared = self._adapter.build_close_exit_evidence(self._spec, run_id=self._bundle.run_id, entry_evidence=context['proof'],
                 root=root, head=head, fill_events=await drain_thread_call(execution.events, root.intent.intent_id),
                 decided_at=now, now=now, stop_risk=stop_risk, **args)
             if prepared is None:
@@ -316,7 +309,7 @@ class MinutePlanManagement:
             # Broker reconciliation can advance the plan revision even when
             # its detailed quantity is unchanged. Submit against that fresh head.
             _, head = await drain_thread_call(self._read_plan, context)
-            gate, sell, _ = await drain_thread_call(dispatch_close_exit, self._repository, self._bundle.runtime,
+            gate, sell, _ = await drain_thread_call(self._adapter.dispatch_close_exit, self._repository, self._bundle.runtime,
                 execution, self._spec, head.plan, recovery=recovery, risk=risk, **args)
             self.status = {'state': 'ORDER_SUBMITTED' if sell is not None else 'BLOCKED',
                 'reason': ';'.join(gate.reasons) if gate.reasons else 'close_exit_submitted', 'orders_enabled': False,
@@ -357,8 +350,8 @@ class MinutePlanManagement:
         consumed = 0
         for event in page['events']:
             try:
-                if (matches_panic_shadow(self._parameters, event) if self._panic
-                        else matches_close_shadow(self._parameters, event, family=self._family)):
+                if (self._adapter.matches_panic_shadow(self._parameters, event) if self._panic
+                        else self._adapter.matches_close_shadow(self._parameters, event, family=self._family)):
                     now = self._now()
                     if datetime.fromisoformat(event['available_at']) <= now < datetime.fromisoformat(event['expires_at']):
                         quote = self._price(event['symbol']) if self._price is not None else None
@@ -371,7 +364,7 @@ class MinutePlanManagement:
                                 break
                             with self._state_lock: self._pending_entry = frozen_minute_candidate(event)
                             try:
-                                dispatch = dispatch_panic_entry if self._panic else dispatch_close_entry
+                                dispatch = self._adapter.dispatch_panic_entry if self._panic else self._adapter.dispatch_close_entry
                                 gate, record, _ = await drain_thread_call(dispatch, self._repository,
                                     self._bundle.runtime, self._spec, parameters=self._parameters, event=event,
                                     quote=quote, recovery=recovery, risk=risk)

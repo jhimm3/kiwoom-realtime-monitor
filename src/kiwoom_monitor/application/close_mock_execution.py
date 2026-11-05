@@ -10,6 +10,7 @@ from .breakout_strategy import StrategyState
 from .minute_order_management import (
     MinuteOrderManagementClaim, assess_current_minute_order,
     acknowledged_minute_quote as _close_quote, frozen_minute_candidate as frozen_close_candidate,
+    minute_current_shadow_matches as close_current_shadow_matches,
 )
 from .close_and_ipo import (
     CloseIpoPosition, CloseIpoSetup, evaluate_close_gap, evaluate_close_gap_at_price, matches_close_shadow,
@@ -23,30 +24,16 @@ from .mock_automation_execution import (
 )
 from .mock_automation_session_clock import content_id
 from .mock_automation_risk import mock_automation_risk_account_revision, mock_owned_buy_basis
-from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
+from kiwoom_monitor.domain.execution_activation import (
+    CLOSE_NATIVE_PLAN_MODE, CLOSE_ORDER_MANAGEMENT_VERSION, CLOSE_ENTRY_COLLECTION, CLOSE_EXIT_COLLECTION,
+)
 from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderSide, OrderState, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.domain.strategy_contract import StrategyDecision
 
 
-CLOSE_ENTRY_COLLECTION = "execution_close_entry_evidence"
-CLOSE_EXIT_COLLECTION = "execution_close_exit_evidence"
 CLOSE_ORDER_POLICY_VERSION = "close_execution_adapter/v1"
 CLOSE_CANCEL_VERSION = "close-entry-deadline-cancel/v1"
 CLOSE_PROTECTIVE_CANCEL_VERSION = 'close-entry-protective-cancel/v1'
-CLOSE_ORDER_MANAGEMENT_VERSION = 'close-current-order-management/v1'
-
-
-def close_current_shadow_matches(spec, event, settings):
-    from .section12_minute_research import MinuteShadowConfig
-    from kiwoom_monitor.domain.strategy_contract import _id
-
-    if not settings or settings.get('shadow_candidate_enabled') is not True:
-        return False
-    config = MinuteShadowConfig.from_document(settings['shadow_candidate_config'])
-    monitor = _id('section12-minute-shadow', {'config': config.to_dict(), 'session_profile': spec.session_profile,
-        'universe_max_age_seconds': settings['shadow_candidate_universe_max_age_seconds']})
-    return (event['run_id'] == monitor and config.strategy.family == f"{event['strategy_id']}/{event['strategy_version']}"
-            and (config.strategy.family != 'panic_rebound/v1' or event.get('panic_entry_parameters') == config.strategy.to_dict()))
 
 
 def assess_close_order_management(spec, *, run_id, parameters, event, entry_evidence, record, head,

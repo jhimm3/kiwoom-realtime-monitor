@@ -290,7 +290,8 @@
       "tests.unit.test_close_mock_execution",
       "tests.unit.test_close_order_management",
       "tests.unit.test_ipo_mock_execution",
-        "tests.unit.test_panic_mock_execution",
+      "tests.unit.test_panic_mock_execution",
+      "tests.unit.test_minute_plan_lifecycle",
       "tests.unit.test_order_amendment",
       "tests.unit.test_mock_automation_supervisor",
       "tests.unit.test_market_role_change",
@@ -561,7 +562,7 @@
       "tests.unit.test_settings_repository",
       "tests.unit.test_shadow_checkpoint",
       "tests.unit.test_preserve_current_settings",
-        "tests.unit.test_selected_order_amendment_evidence",
+      "tests.unit.test_selected_order_amendment_evidence",
       "tests.unit.test_role_settings_transition",
       "tests.unit.test_role_settings_transition_qt"
     ],

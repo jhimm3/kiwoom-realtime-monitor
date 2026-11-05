@@ -25,6 +25,14 @@ MOCK_RECOVERY_POLICY = "broker_reconcile_before_resume"
 LEADER_NATIVE_PLAN_MODE = "leader-0b-native-plan/v1"
 CLOSE_NATIVE_PLAN_MODE = "close-minute-native-plan/v1"
 PANIC_NATIVE_PLAN_MODE = "panic-minute-native-plan/v1"
+CLOSE_INPUT_PROTOCOL = "close-shadow-native-plan/v1"
+PANIC_INPUT_PROTOCOL = "panic-shadow-native-plan/v1"
+CLOSE_ORDER_MANAGEMENT_VERSION = "close-current-order-management/v1"
+PANIC_ORDER_MANAGEMENT_VERSION = "panic-current-order-management/v1"
+CLOSE_ENTRY_COLLECTION = "execution_close_entry_evidence"
+CLOSE_EXIT_COLLECTION = "execution_close_exit_evidence"
+PANIC_ENTRY_COLLECTION = "execution_panic_entry_evidence"
+PANIC_EXIT_COLLECTION = "execution_panic_exit_evidence"
 
 
 @dataclass(frozen=True)
