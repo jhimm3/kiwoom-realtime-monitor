@@ -552,6 +552,42 @@ async def verify_ipo_runner(case, store_factory, *, family, phase):
     case.assertEqual(original_setup, restored['snapshot']['candidate']['close_ipo_entry_setup'])
     expected = ['BUY', 'SELL'] if family == 'ipo_breakout/v1' else ['BUY', 'SELL', 'SELL']
     case.assertEqual(expected, [row[1] for row in context.transport.calls])
+    from kiwoom_monitor.application.journal_enrichment import sync_journal_execution_projection
+    from kiwoom_monitor.application.trade_history_query_service import TradeHistoryQueryService
+    from kiwoom_monitor.application.trade_history_service import TradeFill
+    from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+    from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+
+    scope = AccountScope('kiwoom', AccountEnvironment.MOCK, fixtures.ACCOUNT_REF)
+    journal_path = Path(case.enterContext(tempfile.TemporaryDirectory())) / 'ipo-journal.sqlite3'
+    journal = JournalRepository(journal_path)
+    source = fixtures._ExecutionPageSource(context.execution, fixtures.ACCOUNT_REF)
+    projected = sync_journal_execution_projection(source, journal, scope, page_limit=2, max_pages=100, now=clock[0])
+    case.assertEqual(3 if family == 'ipo_breakout/v1' else 4, projected.detailed_fill_count)
+    rows = JournalRepository(journal_path).load_execution_fill_projections(scope)
+    expected_ids = {'ipo-runner-first', 'ipo-runner-late', 'ipo-runner-sell'}
+    if family == 'ipo_close/v1':
+        expected_ids.add('ipo-runner-residual')
+    case.assertEqual(expected_ids, {row['broker_execution_id'] for row in rows})
+    case.assertEqual({'BUY': 3, 'SELL': 3},
+        {side: sum(row['quantity'] for row in rows if row['side'] == side) for side in ('BUY', 'SELL')})
+    case.assertEqual({buy.intent.plan.plan_id}, {row['plan']['plan_id'] for row in rows})
+    summaries = tuple(TradeFill(order.broker_order_id, buy.intent.symbol, family,
+        '매수' if order.broker_order_id == buy.broker_order_id else '매도',
+        fill.occurred_at.replace(tzinfo=None), fill.quantity, fill.price, origin_scope=scope)
+        for order in orders.values() for fill in order.fills)
+    journal.upsert_fills(summaries, account_scope=scope)
+    visible = TradeHistoryQueryService(JournalRepository(journal_path)).load(
+        datetime.combine(context.example.friday, datetime.min.time()),
+        datetime.combine(context.example.tuesday + timedelta(days=1), datetime.min.time()), scope)
+    case.assertEqual(set(summaries), set(visible.fills))
+    case.assertEqual(set(summaries), set(visible.execution_plans))
+    case.assertEqual({(buy.intent.plan.plan_id, buy.intent.plan.policy_ref)},
+        {(plan.plan_id, plan.policy_ref) for plan in visible.execution_plans.values()})
+    repeated = sync_journal_execution_projection(source, JournalRepository(journal_path), scope, now=clock[0])
+    case.assertEqual(0, repeated.inserted_event_count)
+    case.assertEqual(rows, JournalRepository(journal_path).load_execution_fill_projections(scope))
+    case.assertEqual({}, positions)
     await supervisor.close()
 
 

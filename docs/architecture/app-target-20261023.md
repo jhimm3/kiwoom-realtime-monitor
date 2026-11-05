@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 신규주 정상 READY·UI/API 연결**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 대표 시나리오4 신규주 개발 수락**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 시나리오 **3·7·9, 3/11**을 개발 수락했다. 종가베팅 일반 READY·명시 화면·공개 기동·원주문/잔량·재시작·휴장/가격 중단·익일 갭과 원장/계좌/일지의 원계획 수량을 격리 검증했다. 기존 v1/v2 중지 정책·최초 손절·정정/CAS는 유지한다. 신규주 두 조합×상장 첫날/이후의 final 명세·후보 게시/조회·Shadow 대조를 연결했고 원래 상장 프로필·Paper 수량을 보존한다. 항목4의 내부 native 진입/청산 claim·부분 청산 실제 잔여·DB 재개와 돌파의 원래 구조/당일 기한을 격리 두 DB에서 확인했다. 기존 자동 Episode에 두 신규주 방식과 첫0B 구조 보호를 연결해 반등·부분 취소/늦은 체결·DB 재개/Shadow OFF 뒤 원계획 실제 수량을 보존했다. 정상 READY builder/서버 게시·조회와 명시 Qt 화면을 연결했고 실제 final 네 조합 및 일반 게시→공개 자동 기동을 검증했다. 다음은 일지 정합과 현재 조건 재판단을 유지하는 접수 미체결 정정 우선 연결이다. 대표8개·DD/MICRO 잔여와 운영 제외를 유지한다. AR의 C24 수락·C16 재발 시 이관과 운영 제한은 유지한다. [승인 로드맵](section12-development-roadmap-20261105.md) · [신규주 정상 READY](#section12-ipo-normal-ready) · [자동 수명](#section12-ipo-owned-runner) · [하위 native](#section12-ipo-native-claims) · [신규주 final](#section12-ipo-final-lineage) · [항목 3 수락](#section12-acceptance-close-three) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 시나리오 **3·4·7·9, 4/11**을 개발 수락했다. 종가베팅 일반 READY·명시 화면·공개 기동·원주문/잔량·재시작·휴장/가격 중단·익일 갭과 원장/계좌/일지의 원계획 수량을 격리 검증했다. 기존 v1/v2 중지 정책·최초 손절·원주문/CAS는 유지한다. 신규주 두 조합×상장 첫날/이후의 final 명세·후보 게시/조회·Shadow 대조를 연결했고 원래 상장 프로필·Paper 수량을 보존한다. 항목4의 내부 native 진입/청산 claim·부분 청산 실제 잔여·DB 재개와 돌파의 원래 구조/당일 기한을 격리 두 DB에서 확인했다. 기존 자동 Episode에 두 신규주 방식과 첫0B 구조 보호를 연결해 반등·부분 취소/늦은 체결·DB 재개/Shadow OFF 뒤 원계획 실제 수량을 보존했다. 정상 READY builder/서버 게시·조회와 명시 Qt 화면을 연결했고 실제 final 네 조합 및 일반 게시→공개 자동 기동을 검증했다. 같은 원계획/실제 체결을 별도 일지 재개·재요청·화면 조회까지 대조해 원래 항목4의 완료 조건을 닫았다. 다음은 현재 조건 재판단을 유지하는 접수 미체결 정정 우선의 S12-05 공통 실행 연결이다. 대표7개·DD/MICRO 잔여와 운영 제외를 유지한다. AR의 C24 수락·C16 재발 시 이관과 운영 제한은 유지한다. [승인 로드맵](section12-development-roadmap-20261105.md) · [항목4 수락](#section12-acceptance-ipo-four) · [정상 READY](#section12-ipo-normal-ready) · [자동 수명](#section12-ipo-owned-runner) · [하위 native](#section12-ipo-native-claims) · [신규주 final](#section12-ipo-final-lineage) · [항목 3 수락](#section12-acceptance-close-three) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4787,6 +4787,12 @@ CLOSE의 실제 계약과 typed 실행 정책으로 일반 READY builder·서버
 ### 11.273 S12-05 항목4 신규주 정상 READY·명시 UI/API — 2026-11-05
 
 두 신규주 방식의 실제 final/동결 참조→후보/Shadow→정상 READY builder/서버 게시/조회와 명시 Qt 가격·중지 관리 선택을 연결했다. family/원 final 계보/binding과 기존 CLOSE·native 안전 계약을 유지하며 게시만으로 주문하지 않는다. 일반 게시→공개 Supervisor→원계획 자동 관리/복원을 두 상장 단계로 검증했다. 동일 시각 평가/검증 근거가 hash순으로 역전되는 결함은 native writer/repository reader가 하나의 domain lifecycle 정렬 키를 쓰도록 수정했고 원시각/ID를 바꾸지 않았다. 소스 `582975a9`의 Windows163·PG8과 구조/소비 delta0·증분 대조/미결49보존·소유 작업자6/클러스터2 종료·정리를 수락했다. 다음은 일지와 현재 조건 재판단을 유지한 정정 우선 연결이며 항목4/전체는 아직 미완료다. 전체4/5·대표3/11·운영 제외 유지. [상세·근거](section12-development-roadmap-20261105.md#s12-ipo-normal-ready).
+
+<a id="section12-acceptance-ipo-four"></a>
+
+### 11.274 S12-05 대표 시나리오4 신규주 개발 수락 — 2026-11-05
+
+정본12.12의 부족한 이력0보정 금지·실제 두 조합/상장 단계·같은 계획 ID·보유 소급 재분류 금지를 원래 기준대로 대조했다. 실제 final/Shadow→정상 READY/UI/API→공개 자동 원계획/보호·부분/늦은 체결/재개에 이어 별도 일지 재개·실제 화면 조회를 검증했다. 돌파3개/종가4개 상세 실행 ID에서 BUY3/SELL3·잔량0·원 plan_id/policy_ref와 원래 상장 프로필을 보존하고 재요청 저장0이다. 소스 `3b75e1cf`의 Windows18(IPO6·일지12)·PG6과 구조/증분 대조·미결49보존·소유 작업자2/클러스터2 종료·정리를 확인했다. 제품 코드가 같은 직전217328d의 UI/final/활성화/저장소 소비 근거는 재사용했다. 항목4를 닫아 대표3·4·7·9,4/11·전체4/5다. 현재 조건 재판단/접수 미체결 정정 우선은 S12-05 공통 실행 후속으로 계속하며 항목4에 새 수락 게이트를 더하지 않는다. 운영 제외 유지. [상세·근거](section12-development-roadmap-20261105.md#s12-acceptance-ipo-four).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 
