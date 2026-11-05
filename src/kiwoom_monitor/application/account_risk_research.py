@@ -6,9 +6,11 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from itertools import accumulate
 
 from kiwoom_monitor.domain.order_contract import OrderSide, OrderState, TERMINAL_ORDER_STATES
+from kiwoom_monitor.domain.time_basis import aware_iso_kst
 
 
 @dataclass
@@ -54,6 +56,113 @@ def _identity(source: Mapping, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} is required")
     return value
+
+
+@dataclass(frozen=True)
+class _Mark:
+    mark_id: str
+    observed_at: datetime
+    price_won: int
+
+
+class _Valuation:
+    """Explicit as-of marks and drawdown on complete supplied account cuts."""
+
+    def __init__(self, initial_cash: int, mark_max_age_seconds: int | None) -> None:
+        self.cut: datetime | None = None
+        self.marks: dict[str, _Mark] = {}
+        self.mark_facts: dict[str, tuple[str, datetime, int]] = {}
+        self.conflicting: set[str] = set()
+        self.max_age = None if mark_max_age_seconds is None else timedelta(seconds=mark_max_age_seconds)
+        self.max_age_seconds = mark_max_age_seconds
+        self.equity: int | None = initial_cash
+        self.peak = initial_cash
+        self.drawdown = 0
+        self.drawdown_bps = 0 if initial_cash else None
+        self.known_cuts = 0
+        self.unknown_cuts = 0
+
+    def advance(self, event: Mapping) -> datetime:
+        cut = aware_iso_kst(_identity(event, "available_at"))
+        if self.cut is not None and cut < self.cut:
+            raise ValueError("event available_at must be nondecreasing in sequence order")
+        self.cut = cut
+        return cut
+
+    def mark(self, event: Mapping, cut: datetime) -> tuple[str, str]:
+        symbol = _identity(event, "symbol")
+        mark = _Mark(
+            _identity(event, "mark_id"), aware_iso_kst(_identity(event, "observed_at")),
+            _integer(event, "price_won", minimum=1),
+        )
+        if mark.observed_at > cut:
+            raise ValueError("mark observed_at cannot be later than available_at")
+        fact = symbol, mark.observed_at, mark.price_won
+        if mark.mark_id in self.mark_facts:
+            if self.mark_facts[mark.mark_id] != fact:
+                raise ValueError("conflicting evidence for the same mark_id")
+            return "NOOP", "duplicate_mark"
+        self.mark_facts[mark.mark_id] = fact
+        previous = self.marks.get(symbol)
+        if previous is not None:
+            if mark.observed_at < previous.observed_at:
+                return "NOT_APPLIED", "older_mark_observation"
+            if mark.observed_at == previous.observed_at:
+                if mark.price_won == previous.price_won:
+                    return "NOOP", "duplicate_mark_observation"
+                self.conflicting.add(symbol)
+                return "UNRESOLVED", "conflicting_mark_observation"
+        self.marks[symbol] = mark
+        self.conflicting.discard(symbol)
+        return "APPLIED", ""
+
+    def point(self, cut: datetime, cash: int, held: Mapping[str, int], unresolved: set[str]) -> dict:
+        marked_won = 0
+        used = {}
+        missing, stale, conflicting = [], [], []
+        for symbol in sorted(held):
+            mark = self.marks.get(symbol)
+            if mark is None:
+                missing.append(symbol)
+            elif symbol in self.conflicting:
+                conflicting.append(symbol)
+            elif self.max_age is not None and cut - mark.observed_at > self.max_age:
+                stale.append(symbol)
+            else:
+                marked_won += held[symbol] * mark.price_won
+                used[symbol] = mark.mark_id
+        if missing or stale or conflicting or unresolved:
+            self.equity = None
+            self.unknown_cuts += 1
+        else:
+            self.equity = cash + marked_won
+            self.known_cuts += 1
+            self.peak = max(self.peak, self.equity)
+            drawdown = self.peak - self.equity
+            self.drawdown = max(self.drawdown, drawdown)
+            if self.peak:
+                self.drawdown_bps = max(self.drawdown_bps or 0, drawdown * 10_000 // self.peak)
+        return {
+            "as_of": cut.isoformat(), "equity_won": self.equity, "mark_ids_by_symbol": used,
+            "missing_symbols": missing, "stale_symbols": stale, "conflicting_symbols": conflicting,
+            "unresolved_execution_order_ids": sorted(unresolved),
+        }
+
+    def summary(self) -> dict:
+        complete = not self.unknown_cuts
+        return {
+            "scope": "supplied_event_cuts",
+            "mark_basis": "latest_explicit_observation_available_at_cut",
+            "status": "COMPLETE" if complete else "PARTIAL",
+            "mark_max_age_seconds": self.max_age_seconds,
+            "equity_won": self.equity,
+            "maximum_drawdown_won": self.drawdown if complete else None,
+            "maximum_drawdown_bps": self.drawdown_bps if complete else None,
+            "known_drawdown_lower_bound_won": self.drawdown,
+            "known_drawdown_lower_bound_bps": self.drawdown_bps,
+            "known_cut_count": self.known_cuts,
+            "unknown_cut_count": self.unknown_cuts,
+        }
 
 
 def _proposal(event: Mapping) -> _Order:
@@ -108,6 +217,13 @@ def replay_account_risk_experiment(
     events = scenario.get("events")
     if not isinstance(events, (list, tuple)):
         raise ValueError("events must be a sequence of evidence objects")
+    age = policy.get("mark_max_age_seconds")
+    if age is not None:
+        age = _integer(policy, "mark_max_age_seconds")
+    valued = "mark_max_age_seconds" in policy or any(
+        isinstance(event, Mapping) and event.get("kind") == "MARK" for event in events
+    )
+    valuation = _Valuation(initial_cash, age) if valued else None
 
     cash = initial_cash
     orders: dict[str, _Order] = {}
@@ -117,6 +233,7 @@ def replay_account_risk_experiment(
     realized: dict[str, int] = defaultdict(int)
     fills: dict[tuple[str, str], tuple[int, int, int]] = {}
     rejections: dict[str, str] = {}
+    unresolved_fills: set[str] = set()
     results = []
     sequence = peak_reserved = peak_committed = 0
 
@@ -212,9 +329,12 @@ def replay_account_risk_experiment(
             raise ValueError("event sequence must be strictly increasing")
         sequence = current
         kind = _identity(event, "kind")
-        order_id = _identity(event, "order_id")
+        cut = valuation.advance(event) if valuation is not None else None
+        order_id = _identity(event, "order_id") if kind != "MARK" else ""
         reason = ""
-        if kind == "PROPOSE":
+        if kind == "MARK":
+            status, reason = valuation.mark(event, cut)
+        elif kind == "PROPOSE":
             order = _proposal(event)
             prior = orders.get(order_id)
             if prior is not None:
@@ -253,6 +373,8 @@ def replay_account_risk_experiment(
             order = orders.get(order_id)
             if kind == "FILL":
                 status, reason = record_fill(order_id, order, event)
+                if status == "UNRESOLVED":
+                    unresolved_fills.add(order_id)
             elif order is None:
                 status, reason = "UNRESOLVED", "order_not_observed"
             else:
@@ -265,10 +387,21 @@ def replay_account_risk_experiment(
         open_basis = sum(lot.cost_won for book in lots.values() for lot in book)
         peak_reserved = max(peak_reserved, reserved)
         peak_committed = max(peak_committed, open_basis + reserved)
-        results.append({
+        result = {
             "event": deepcopy(dict(event)), "status": status, "reason": reason,
             "cash_won": cash, "reserved_cash_won": reserved,
-        })
+        }
+        if valuation is not None:
+            held: dict[str, int] = defaultdict(int)
+            for (_, symbol), book in lots.items():
+                if book:
+                    held[symbol] += sum(lot.quantity for lot in book)
+            unresolved_cancel = {
+                key for key, order in active.items()
+                if order.cancel_reported_filled is not None and order.cancel_reported_filled > order.filled
+            }
+            result["valuation"] = valuation.point(cut, cash, held, unresolved_fills | unresolved_cancel)
+        results.append(result)
         checkpoint()
 
     reserved = reserved_cash()
@@ -293,4 +426,5 @@ def replay_account_risk_experiment(
             for key, order in orders.items()
         ],
         "events": results,
+        **({"valuation": valuation.summary()} if valuation is not None else {}),
     }

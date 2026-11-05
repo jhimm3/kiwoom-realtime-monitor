@@ -41,6 +41,7 @@ class MinuteExperiment:
     policy: Any
     news_proofs: tuple = ()
     theme_proofs: tuple = ()
+    breakout_entry_proofs: tuple = ()
 
     session_exit_policy = ""
     cooldown_seconds = 0
@@ -53,6 +54,8 @@ class MinuteExperiment:
             fields |= {"quantity", "news_proofs"}
         if family == THEME_STUDY_FAMILY:
             fields.add("theme_proofs")
+        if family == BREAKOUT_STUDY_FAMILY and "entry_proofs" in document:
+            fields.add("entry_proofs")
         if set(document) != fields or not isinstance(document["policy"], Mapping):
             raise ValueError("invalid minute experiment fields")
         capital = document["capital_won"]
@@ -73,17 +76,20 @@ class MinuteExperiment:
             }) for row in document["news_proofs"])
             return cls(family, capital, quantity, PanicReboundRules(**policy_document), proofs)
         if family in BREAKOUT_STUDY_FAMILIES:
-            from kiwoom_monitor.application.breakout_theme_research import BreakoutThemePolicy, ThemeRoleProof
+            from kiwoom_monitor.application.breakout_theme_research import BreakoutEntryProof, BreakoutThemePolicy, ThemeRoleProof
 
             policy = BreakoutThemePolicy.from_document(policy_document)
-            if policy.variant != ("TH" if family == THEME_STUDY_FAMILY else "B0"):
+            if (policy.variant == "TH") != (family == THEME_STUDY_FAMILY):
                 raise ValueError("breakout study policy differs from the selected family")
             proofs = document.get("theme_proofs", [])
-            if not isinstance(proofs, list):
-                raise ValueError("theme_proofs must be an array")
+            entry_proofs = document.get("entry_proofs", [])
+            if not isinstance(proofs, list) or not isinstance(entry_proofs, list):
+                raise ValueError("breakout proofs must be arrays")
+            if entry_proofs and policy.variant not in {"B2", "B3"}:
+                raise ValueError("entry proofs apply only to B2 and B3")
             return cls(family, capital, policy.quantity, policy, theme_proofs=tuple(
                 ThemeRoleProof.from_document(row) for row in proofs
-            ))
+            ), breakout_entry_proofs=tuple(BreakoutEntryProof.from_document(row) for row in entry_proofs))
         from kiwoom_monitor.application.close_and_ipo import ClosePolicy, IpoBreakoutPolicy
 
         policy_document["listing_phases"] = tuple(ListingPhase(value) for value in policy_document["listing_phases"])
@@ -100,6 +106,8 @@ class MinuteExperiment:
             document.update(quantity=self.quantity, news_proofs=[_wire_dataclass(row) for row in self.news_proofs])
         if self.family == THEME_STUDY_FAMILY:
             document["theme_proofs"] = [_wire_dataclass(row) for row in self.theme_proofs]
+        if self.breakout_entry_proofs:
+            document["entry_proofs"] = [_wire_dataclass(row) for row in self.breakout_entry_proofs]
         return document
 
 
@@ -163,7 +171,7 @@ class MinuteExperimentRun:
             holding = (BreakoutThemePosition(position.quantity, position.entry_price, datetime.fromisoformat(position.opened_at))
                        if position is not None else None)
             decision = evaluate_breakout_theme(self.config.policy, bar=bar, history=bars, proofs=self.config.theme_proofs,
-                                               position=holding, setup=setup)
+                                               entry_proofs=self.config.breakout_entry_proofs, position=holding, setup=setup)
             action, reason, setup = decision.action, decision.reason, decision.setup
             quantity, refs = decision.quantity, decision.evidence_refs
         else:

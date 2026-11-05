@@ -820,6 +820,8 @@ class ResearchProcessTests(unittest.TestCase):
 
     def test_section12_breakout_and_theme_studies_share_entry_but_close_on_their_own_evidence(self) -> None:
         from datetime import datetime, timedelta
+        from kiwoom_monitor import research_process
+        from kiwoom_monitor.application.market_session_schedule import research_session_profile_document
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -835,17 +837,18 @@ class ResearchProcessTests(unittest.TestCase):
                              "value_kind": "actual", "payload": {"code": "123456", "market": "KRX", "bar_start": at(minute),
                              "bar_end": at(minute + 1), "open": opening, "close": close, "high": max(opening, close),
                              "low": min(opening, close), "volume": 20, "trade_value_million_won": 1,
-                             "window_closed": True, "capture_quality": "complete"}})
+                             "window_closed": True, "capture_quality": "complete", "finalization_source": "fixture-native-timer"}})
             for ordinal, row in enumerate(rows, 1):
                 row.update(ordinal=ordinal, accepted_sequence=ordinal)
 
-            def write_rows():
+            def write_rows(**source_contract):
                 encoded = "\n".join(json.dumps(row) for row in rows).encode()
                 (root / "dataset/observations.jsonl").write_bytes(encoded)
                 (root / "dataset/manifest.json").write_text(json.dumps({
                     "dataset_id": "section12-breakout-fixture", "revision_count": len(rows), "end": at(14),
                     "observations_file": "observations.jsonl", "observations_file_hash": hashlib.sha256(encoded).hexdigest(),
                     "revision_ids_hash": hashlib.sha256("\n".join(row["revision_id"] for row in rows).encode()).hexdigest(),
+                    **source_contract,
                 }), encoding="utf-8")
 
             write_rows()
@@ -889,6 +892,56 @@ class ResearchProcessTests(unittest.TestCase):
             self.assertFalse(any(event["event_type"] == "FILL" for event in events))
             self.assertIn("next_open_has_no_positive_initial_risk_distance", {event["reason"] for event in events})
 
+            rows[12]["payload"].update(open=105, low=105)
+            write_rows()
+            b1 = {"minimum_price_progress_bps": 100, "minimum_symbol_relative_turnover_bps": 10_000}
+            b2 = {**b1, "market_scope": "KRX", "minimum_market_relative_turnover_bps": 15_000}
+            market = {"kind": "market_relative_turnover", "scope": "KRX", "effective_at": at(11), "available_at": at(11),
+                      "source": "fixture", "revision": "turnover", "basis": "point_in_time", "evidence_refs": ["market-r1"],
+                      "value": {"observed_turnover_won": 2_000_000, "baseline_median_turnover_won": 1_000_000}}
+            request.update(mode="breakout_filter_comparison", breakout_variants=[
+                {"capital_won": 1000, "policy": {**base, "variant": "B1", "entry_filters": b1}},
+                {"capital_won": 1000, "policy": {**base, "variant": "B2", "entry_filters": b2}, "entry_proofs": [market]},
+                {"capital_won": 1000, "policy": {**base, "variant": "B3", "entry_filters": {
+                    **b2, "minimum_daily_headroom_bps": None, "require_catalyst": True}}, "entry_proofs": [market]},
+            ])
+            path.write_text(json.dumps(request), encoding="utf-8")
+            comparison = execute_process_request(load_research_process_request(path))
+            self.assertEqual([("B0", 1), ("B1", 1), ("B2", 1), ("B3", 0)],
+                             [(run["variant"], run["candidate_count"]) for run in comparison["runs"]])
+            folds = [pair["comparison"]["fold_comparisons"][0] for pair in comparison["pairs"]]
+            self.assertEqual([1, 1, 0], [fold["shared_candidate_count"] for fold in folds])
+            self.assertEqual(7, folds[2]["avoided_loss_won"])
+            self.assertFalse(comparison["order_authorized"])
+            comparison_manifest = Path(comparison["pairs"][-1]["manifest"])
+            original_bytes = comparison_manifest.read_bytes()
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                research_process._run_research_process(["--request", str(path), "--result", str(comparison_manifest)])
+            self.assertEqual(original_bytes, comparison_manifest.read_bytes())
+            request["breakout_variants"][1]["policy"]["entry_filters"]["minimum_price_progress_bps"] += 1
+            path.write_text(json.dumps(request), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "previously selected filter"):
+                load_research_process_request(path)
+            request["breakout_variants"][1]["policy"]["entry_filters"]["minimum_price_progress_bps"] -= 1
+            request["evaluation"]["folds"][0]["end"] = at(13)
+            path.write_text(json.dumps(request), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "outside its development fold"):
+                execute_process_request(load_research_process_request(path))
+            request["evaluation"]["folds"][0]["end"] = at(14)
+            del request["strategy_references"]
+            path.write_text(json.dumps(request), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "require pinned references"):
+                execute_process_request(load_research_process_request(path))
+            rows[0]["kind"] = "historical_candidate_population"
+            for row in rows[1:]:
+                row["payload"]["finalization_source"] = "daishin_completed_history_job"
+            write_rows(runtime_input_version="historical_reconstruction_strategy/v1", not_contemporaneous_top20=True,
+                       research_session_profile=research_session_profile_document("krx-regular/v1"))
+            reconstructed = execute_process_request(load_research_process_request(path))
+            self.assertEqual([1, 1, 1, 0], [run["candidate_count"] for run in reconstructed["runs"]])
+            b1_manifest = json.loads(Path(reconstructed["runs"][1]["manifest"]).read_text(encoding="utf-8"))
+            self.assertEqual("reconstructed_completed_bar_end_proxy", b1_manifest["spec"]["observation_clock_basis"])
+
     def test_section12_account_risk_request_compares_equal_capital_reservations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -914,6 +967,27 @@ class ResearchProcessTests(unittest.TestCase):
                                                     trace["available_cash_won"], trace["positions"]))
                 run_ids.append(result["run_id"])
             self.assertNotEqual(*run_ids)
+
+    def test_account_risk_marked_equity_reaches_the_immutable_result(self) -> None:
+        from tests.unit.test_account_risk_research import _buy, _fill, _mark, _policy, _timed
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scenario = _timed(_mark("opening", 12, 0), _buy("entry", "a", 2), _fill("entry", "f1", 2, 10),
+                              _mark("later", 8, 3))
+            encoded = json.dumps(scenario).encode()
+            (root / "risk.json").write_bytes(encoded)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps({
+                "mode": "account_risk_experiment", "dataset": "risk.json", "dataset_sha256": hashlib.sha256(encoded).hexdigest(),
+                "policy": _policy(10_000), "database": "research.sqlite3", "runs_dir": "runs",
+            }), encoding="utf-8")
+            result = execute_process_request(load_research_process_request(request_path))
+            manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+            valuation = manifest["result"]["valuation"]
+            self.assertEqual(("COMPLETE", 96, 8, 769), (valuation["status"], valuation["equity_won"],
+                                                       valuation["maximum_drawdown_won"], valuation["maximum_drawdown_bps"]))
+            self.assertFalse(manifest["order_authorized"])
 
     def test_cli_reuses_parsed_request_with_native_input_and_result_oracles(self) -> None:
         from io import StringIO

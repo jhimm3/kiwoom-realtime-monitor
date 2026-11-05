@@ -64,7 +64,7 @@ from kiwoom_monitor.infrastructure.central_content_client import CentralContentC
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
 from kiwoom_monitor.infrastructure.research_data_source import load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
-from kiwoom_monitor.application.section12_minute_research import MINUTE_EXPERIMENT_LABELS, MinuteExperiment
+from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
 from kiwoom_monitor.domain.simulation_contract import COMPLETED_CLOSE_EXECUTION_VERSION
 from kiwoom_monitor.infrastructure.research_storage import validate_research_storage_root
 from kiwoom_monitor.infrastructure.research_data_source import (prepare_development_partition,
@@ -74,6 +74,7 @@ from kiwoom_monitor.application.research_implementation import research_implemen
 from kiwoom_monitor.research_run import (
     ResearchRunCancelled,
     _write_immutable_json,
+    execute_breakout_filter_comparison,
     execute_rank_comparison,
     execute_research,
     research_run_identity,
@@ -112,6 +113,7 @@ class ResearchProcessRequest:
     development_partition: DevelopmentPartitionSpec | None = None
     strategy_references: tuple[Path, str] | None = None
     shadow_only: bool = False
+    breakout_variants: tuple[MinuteExperiment, ...] = ()
 
 
 EVIDENCE_EXPERIMENT_FAMILIES = {
@@ -119,6 +121,7 @@ EVIDENCE_EXPERIMENT_FAMILIES = {
     "daily_decline_experiment": "daily_decline/v1",
     "account_risk_experiment": "account_risk_study/v1",
 }
+BREAKOUT_COMPARISON_MODE = "breakout_filter_comparison"
 
 
 @dataclass(frozen=True)
@@ -706,7 +709,7 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
             profile, ResearchResourceLimits(int(budget.get("memory_mb", 512)), int(budget.get("cpu_duty_percent", 50))),
             database=database, runs_dir=runs_dir,
             policies=policies, max_seconds=int(budget.get("max_seconds", 300)))
-    if mode not in {"single_run", "rank_comparison", "limited_search"}:
+    if mode not in {"single_run", "rank_comparison", "limited_search", BREAKOUT_COMPARISON_MODE}:
         raise ValueError(f"unsupported research request mode: {mode}")
     strategy_raw = _mapping(document.get("strategy"), "strategy")
     family = str(document.get("family", BREAKOUT_FAMILY_ID))
@@ -723,8 +726,10 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
     database = _request_path(root, document.get("database"), "database")
     runs_dir = _request_path(root, document.get("runs_dir"), "runs_dir")
     minute_experiment = family in MINUTE_EXPERIMENT_LABELS
-    if minute_experiment and (mode != "single_run" or session_profile != "krx-regular/v1"):
-        raise ValueError("Section 12 minute experiments require a KRX regular single_run")
+    if minute_experiment and (mode not in {"single_run", BREAKOUT_COMPARISON_MODE} or session_profile != "krx-regular/v1"):
+        raise ValueError("Section 12 minute experiments require an explicit KRX regular research mode")
+    if mode == BREAKOUT_COMPARISON_MODE and family != BREAKOUT_STUDY_FAMILY:
+        raise ValueError("breakout comparison requires the breakout study family")
     strategy = (MinuteExperiment.from_document(family, strategy_raw) if minute_experiment
                 else parse_strategy_config(family, strategy_raw))
     execution = SimulationExecutionConfig(
@@ -744,8 +749,8 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         partition.evaluation_for(evaluation)
     references = None
     if "strategy_references" in document:
-        if mode != "single_run" or session_profile is None or partition is not None:
-            raise ValueError("pinned strategy references require ordinary ordered single_run")
+        if mode not in {"single_run", BREAKOUT_COMPARISON_MODE} or session_profile is None or partition is not None:
+            raise ValueError("pinned strategy references require ordered research without a separate partition request")
         reference = _mapping(document["strategy_references"], "strategy_references")
         digest = reference.get("sha256")
         if set(reference) != {"path", "sha256"} or not isinstance(digest, str) or len(digest) != 64 or any(
@@ -758,11 +763,18 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         if reference_path == database or _is_within(reference_path, runs_dir):
             raise ValueError("research outputs must not overwrite the strategy reference")
         references = (reference_path, digest)
-    if minute_experiment and references is None:
+    if minute_experiment and family != BREAKOUT_STUDY_FAMILY and references is None:
         raise ValueError("Section 12 minute experiments require pinned strategy_references")
     shadow_only = document.get("shadow_only", False)
     if type(shadow_only) is not bool or (shadow_only and not minute_experiment):
         raise ValueError("shadow_only requires a Section 12 minute experiment")
+    breakout_variants = ()
+    if mode == BREAKOUT_COMPARISON_MODE:
+        if shadow_only or len(evaluation.folds) != 1 or evaluation.folds[0].role == "OOS":
+            raise ValueError("breakout comparison requires paper execution and one development fold")
+        breakout_variants = _breakout_filter_variants(strategy, document.get("breakout_variants"))
+    elif "breakout_variants" in document:
+        raise ValueError("breakout_variants requires breakout_filter_comparison")
     search = None
     if mode == "limited_search":
         search_raw = _mapping(document.get("search"), "search")
@@ -801,6 +813,7 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         development_partition=partition,
         strategy_references=references,
         shadow_only=shadow_only,
+        breakout_variants=breakout_variants,
         session_profile=session_profile,
         search=search,
         resource_limits=ResearchResourceLimits(
@@ -820,6 +833,29 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
     ):
         raise ValueError("research outputs must not overwrite the frozen dataset directory")
     return request
+
+
+def _breakout_filter_variants(baseline: MinuteExperiment, raw: Any) -> tuple[MinuteExperiment, ...]:
+    if baseline.policy.variant != "B0" or not isinstance(raw, list) or len(raw) != 3:
+        raise ValueError("breakout comparison requires B0 followed by B1, B2 and B3")
+    variants = tuple(MinuteExperiment.from_document(BREAKOUT_STUDY_FAMILY, _mapping(row, "breakout variant")) for row in raw)
+    if tuple(variant.policy.variant for variant in variants) != ("B1", "B2", "B3"):
+        raise ValueError("breakout comparison variants must be ordered B1, B2, B3")
+    if any((variant.quantity, variant.capital_won, variant.policy.exit_at_kst) !=
+           (baseline.quantity, baseline.capital_won, baseline.policy.exit_at_kst) for variant in variants):
+        raise ValueError("breakout comparison must keep quantity, capital and exit timing fixed")
+    for prior, current in zip(variants, variants[1:]):
+        previous = prior.to_dict()["policy"]["entry_filters"]
+        added = current.to_dict()["policy"]["entry_filters"]
+        if any(added[key] != value for key, value in previous.items()):
+            raise ValueError("breakout comparison cannot change a previously selected filter")
+    b2, b3 = variants[1:]
+    def market_proofs(config):
+        return tuple(proof for proof in config.breakout_entry_proofs if proof.kind == "market_relative_turnover")
+
+    if market_proofs(b2) != market_proofs(b3):
+        raise ValueError("B2 and B3 must use the same market evidence")
+    return variants
 
 
 def _prepare_development_request(request, dataset, checkpoint):
@@ -1144,8 +1180,8 @@ def execute_process_request(
     request, dataset = _prepare_development_request(request, dataset, loading_checkpoint)
     strategy_references = None
     if request.strategy_references is not None:
-        if request.mode != "single_run" or request.session_profile is None or request.development_partition is not None:
-            raise ValueError("pinned strategy references require ordinary ordered single_run")
+        if request.mode not in {"single_run", BREAKOUT_COMPARISON_MODE} or request.session_profile is None or request.development_partition is not None:
+            raise ValueError("pinned strategy references require ordered research without a separate partition request")
         path, digest = request.strategy_references
         strategy_references = load_frozen_strategy_references(path, expected_sha256=digest)
     if campaign_cycle is not None:
@@ -1410,6 +1446,22 @@ def execute_process_request(
             "manifest": str(result.output_manifest),
             "comparison": repository.load_research_comparison(result.comparison_id),
             "market_regime": result.market_regime,
+        }
+    if request.mode == BREAKOUT_COMPARISON_MODE:
+        configs = (request.strategy, *request.breakout_variants)
+        runs, pairs = execute_breakout_filter_comparison(
+            dataset, repository, request.runs_dir, configs, request.execution, request.evaluation,
+            cancelled, request.session_profile, resource_guard, strategy_references=strategy_references,
+        )
+        return {
+            "status": "ok", "kind": BREAKOUT_COMPARISON_MODE, "order_authorized": False,
+            "runs": [{"variant": config.policy.variant, "run_id": run.run_id,
+                      "candidate_count": run.candidate_count, "manifest": str(run.output_manifest)}
+                     for config, run in zip(configs, runs)],
+            "pairs": [{"baseline": prior.policy.variant, "variant": config.policy.variant,
+                       "manifest": str(pair.output_manifest),
+                       "comparison": repository.load_research_comparison(pair.comparison_id)}
+                      for prior, config, pair in zip(configs, configs[1:], pairs)],
         }
     result = execute_research(
         dataset, repository, request.runs_dir, request.strategy,
@@ -2458,12 +2510,17 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                 else:
                     if reference_path in outputs:
                         parser.error("research result/cancel must not overwrite the strategy reference")
-            if request_header.get("mode") in EVIDENCE_EXPERIMENT_FAMILIES:
+            mode = request_header.get("mode")
+            if mode in EVIDENCE_EXPERIMENT_FAMILIES or mode == BREAKOUT_COMPARISON_MODE:
                 runs_dir = request_header.get("runs_dir")
-                if isinstance(runs_dir, str) and runs_dir.strip() and any(
-                    _is_within(path, _request_path(request_path.parent, runs_dir, "runs_dir")) for path in outputs
-                ):
-                    parser.error("research result/cancel must not overwrite experiment artifacts")
+                if isinstance(runs_dir, str) and runs_dir.strip():
+                    try:
+                        artifact_root = _request_path(request_path.parent, runs_dir, "runs_dir")
+                    except (OSError, ValueError):
+                        pass  # Let the request loader report the malformed path.
+                    else:
+                        if any(_is_within(path, artifact_root) for path in outputs):
+                            parser.error("research result/cancel must not overwrite experiment artifacts")
     try:
         if args.register_campaign and args.request is None:
             raise ValueError('--register-campaign requires --request')

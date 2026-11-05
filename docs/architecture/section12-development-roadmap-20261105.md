@@ -148,6 +148,18 @@ S12-01에서는 명시 해시로 고정한 별도 거래일·상장 근거를 �
 
 `daily_decline_experiment`, `micro_experiment`, `account_risk_experiment`는 `dataset` JSON 파일, `dataset_sha256`, `policy`, `database`, `runs_dir`를 명시한다. 자료·정책·구현 지문을 연구 실행 ID에 묶고, 상세 결과는 실행별 `manifest.json`에 보존한다. DD는 완료 일봉·시장 대비 낙폭·거래일·원주가 보호를 연결하고, MICRO는 순서가 입증된 VI·호가·체결과 명시 영수증을 사용한다. 계좌 위험 비교는 같은 총예산 아래 예약 경쟁과 체결 귀속을 기록한다. 자세한 요청과 기대 결과는 기존 연구 명령의 연결 검사로 재현할 수 있다. [분봉·합성 연구 요청 검사](../../tests/unit/test_research_process.py).
 
-8개 실험군의 합성 요청을 실행할 수 있다. 돌파 B1~B3 비교, EX-RISK의 가격 평가·MDD, 사건군을 분리한 실증 자료 비교, 전략별 실행 근거를 실제 Shadow와 단일 계좌 모의 승인·복구에 연결하는 작업이 남아 있다. S12-04와 S12-05는 진행률에 합산하지 않는다.
+8개 실험군의 합성 요청을 실행할 수 있다. 사건군을 분리한 실증 자료 비교와 전략별 실행 근거를 실제 Shadow와 단일 계좌 모의 승인·복구에 연결하는 작업이 남아 있다. S12-04와 S12-05는 진행률에 합산하지 않는다.
 
 현재 소스 `2c3bcae3`에서 Windows 25모듈 633건과 격리 PostgreSQL 12건이 통과했다. 기존 Shadow 198건과 주도주 돌파 86건, 새 동결 Shadow의 주문 호출 0건을 포함한다. 구조와 증분 원장 대조를 통과했고 PostgreSQL 임시 프로세스와 포트 종료를 확인했다. [직접 회귀 542건](../../tmp/s12-04-strategy-wiring/related/run.json) · [기존 소비자 91건](../../tmp/s12-04-strategy-wiring/prior-dialog-fixtures/run.json) · [PostgreSQL 12건](../../tmp/s12-03-pg-baseline/s12-04-native-research/postgres-run.json) · [증분 실행 대조](../../tmp/s12-04-strategy-wiring/review-execution-final.json).
+
+<a id="s12-04-breakout-filters-and-account-valuation"></a>
+
+### S12-04 돌파 조건 비교와 계좌 가격 평가
+
+- `breakout_filter_comparison` 요청은 `breakout_study/v1`의 B0 `strategy`와 B1·B2·B3 `breakout_variants`를 받는다. 한 개발 구간의 동결 관측과 비용·예산·수량·종료 조건을 공유한다. 직전 판본에 새 조건만 더하고, 같은 종목·신호 판본을 기준으로 공통 후보와 회피 손실·놓친 이익을 비교한다. B1은 가격 진행·종목 상대 대금, B2는 같은 시점·범위의 시장 상대 대금, B3는 당시 확인된 일봉 여백 또는 재료를 추가한다. 완료 분봉의 확정 가격·대금은 사후 수집된 자료도 사용할 수 있다. 복원 연구의 봉 종료 시각은 실제 수신 시각과 구분해 실행 기록에 표시한다.
+- `account_risk_experiment`는 명시 `MARK`의 원시 관측시각·가용시각·가격과 상세 체결을 사용해 평가액과 최대 낙폭을 계산한다. 표시 가격·체결에 공백이 있으면 확인된 시점 사이의 낙폭 하한을 제시한다. 계좌에 예약된 현금은 평가액에서 중복 차감하지 않는다. 기간 전체 성과와 주어진 관측 시점에서의 결과를 구분한다.
+- 월별 로컬 재구성 자료에서 학습 12일 181,696개 분봉과 검증 4일 63,213개 분봉의 파일·판본 해시를 대조했다. 양쪽의 종목-거래일과 분봉 판본은 겹치지 않았고, 후보군 문맥 판본 1건은 공유됐다. 최종보류 자료는 봉인 메타데이터만 확인했다. 이 표본의 분봉은 모두 사후 복원본이다. 장중 수신 지연·정정 순서나 당시 시장·재료까지 비교하려면 해당 관측의 별도 근거가 필요하다. [로컬 자료 감사](../../tmp/s12-04-comparisons/historical-input-audit.json) · [분봉 자료 출처](../../tmp/s12-04-comparisons/breakout-input-eligibility.json).
+- 별도의 로컬 개발 표본인 2024-12-26 학습 2,239봉과 2025-05-30 검증 2,661봉에서 B0~B3를 각각 실행했다. B0와 B1 모두 각 구간에서 후보를 생성했다. B2·B3는 시장 상대 대금 근거가 없어 `breakout_market_turnover_unavailable`을 남겼다. 사후 선정 후보군, 봉 종료 시각 대리값, 진입 범위 점검용 비용 0원 조건이므로 장중 실행 품질이나 비용 후 성과와 구분한다. [로컬 재생 결과](../../tmp/s12-04-comparisons/historical-pair/summary.json).
+- 기존 `CandidateMonitor`는 완료봉 관측과 체크포인트를 소유하고, 모의 Runner는 후보 수락·새 승인·계좌 소유권·최신 Risk를 거친다. Section 12 정책과 근거를 이 경계에 연결하고, 보유 후 순서 있는 0B 보호와 승인된 실행을 별도 확인하는 작업이 남아 있다.
+
+현재 소스 `6e4e99b7`에서 Windows 16모듈 408건이 통과했다. 새 비교의 공통 신호 대응, 로컬 복원 재생, 평가 공백의 낙폭 하한, 기존 Shadow 및 연구 화면 회귀를 확인했다. 구조와 증분 원장 실행 대조를 함께 확인했다. [연구·화면 210건](../../tmp/s12-04-comparisons/final-research/run.json) · [기존 Shadow 198건](../../tmp/s12-04-comparisons/final-shadow/run.json) · [증분 대조](../../tmp/s12-04-comparisons/review-execution.json).

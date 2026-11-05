@@ -2531,6 +2531,7 @@ def build_research_comparison(
         raise ValueError("comparison requires two distinct research runs")
     if changed_condition not in {
         "rank_persistence_filter", "market_type_filter", "market_raw_feature_filter",
+        "breakout_price_turnover_filter", "breakout_market_turnover_filter", "breakout_daily_context_filter",
     }:
         raise ValueError(f"unsupported research comparison condition: {changed_condition}")
     baseline_folds = _fold_report_map(baseline_report)

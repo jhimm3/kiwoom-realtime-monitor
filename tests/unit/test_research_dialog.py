@@ -48,6 +48,17 @@ class ResearchDialogTests(unittest.TestCase):
         self.assertEqual("1,234원", rows[0][3])
         self.assertEqual("", rows[0][2])
 
+    def test_research_results_show_breakout_pair_and_partial_risk_valuation(self) -> None:
+        comparisons = format_research_result_rows({"kind": "breakout_filter_comparison", "pairs": [{
+            "baseline": "B2", "variant": "B3", "comparison": {"fold_comparisons": [{"name": "validation", "status": "ELIGIBLE"}]},
+        }]})
+        self.assertEqual("B2 → B3 · validation", comparisons[0][0])
+        risk = format_research_result_rows({"kind": "account_risk_experiment", "result": {
+            "cash_won": 70, "reserved_cash_won": 10, "valuation": {"status": "PARTIAL", "equity_won": None,
+            "maximum_drawdown_won": None, "known_drawdown_lower_bound_won": 20},
+        }})
+        self.assertEqual(("PARTIAL", "70원", "10원", "N/A", "N/A", "20원"), risk[0][1:])
+
     def test_evidence_request_preview_and_result_keep_partial_holding_visible(self) -> None:
         import hashlib
         import json

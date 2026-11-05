@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 
 from kiwoom_monitor.application.breakout_theme_research import (
+    BreakoutEntryProof,
     BreakoutThemePolicy,
     BreakoutThemePosition,
     ThemeRole,
@@ -49,11 +50,33 @@ class BreakoutThemeResearchTests(unittest.TestCase):
             "basis": basis, "dependency_valid": dependency,
         })
 
-    def decide(self, *, policy=None, bar=None, history=None, proofs=(), position=None, setup=None):
+    def decide(self, *, policy=None, bar=None, history=None, proofs=(), position=None, setup=None, entry_proofs=()):
         return evaluate_breakout_theme(
             policy or self.base, bar=bar or self.signal, history=self.prior if history is None else history,
-            proofs=proofs, position=position, setup=setup,
+            proofs=proofs, position=position, setup=setup, entry_proofs=entry_proofs,
         )
+
+    def filtered(self, variant, **changes):
+        filters = {"minimum_price_progress_bps": 400, "minimum_symbol_relative_turnover_bps": 20_000}
+        if variant in {"B2", "B3"}:
+            filters.update(market_scope="fixture:KRX-TOP20", minimum_market_relative_turnover_bps=15_000)
+        if variant == "B3":
+            filters.update(minimum_daily_headroom_bps=1000, require_catalyst=True)
+        filters.update(changes)
+        return BreakoutThemePolicy.from_document({**asdict(self.base), "variant": variant, "entry_filters": filters})
+
+    def entry_proof(self, kind, value, **changes):
+        return BreakoutEntryProof.from_document({
+            "kind": kind, "scope": "fixture:KRX-TOP20" if kind == "market_relative_turnover" else self.symbol,
+            "effective_at": self.signal.bar_end if kind == "market_relative_turnover" else self.first.isoformat(),
+            "available_at": self.signal.available_at, "source": f"fixture:{kind}", "revision": f"revision:{kind}",
+            "evidence_refs": [f"evidence:{kind}"], "basis": "point_in_time", "value": value, **changes,
+        })
+
+    def market_proof(self, observed=150, baseline=100, **changes):
+        return self.entry_proof("market_relative_turnover", {
+            "observed_turnover_won": observed, "baseline_median_turnover_won": baseline,
+        }, **changes)
 
     def test_first_crossing_uses_exact_prior_ten_and_pins_signal_open(self):
         older = replace(self.prior[0], high=120)
@@ -151,3 +174,93 @@ class BreakoutThemeResearchTests(unittest.TestCase):
         later_loss = replace(loss, available_at=fill_at + timedelta(minutes=1))
         self.assertEqual("HOLD", self.decide(bar=later, proofs=(transition, later_loss),
                                              position=position, setup=released.setup).action)
+
+    def test_original_policy_documents_keep_shape_and_filtered_fields_are_explicit(self):
+        for policy in (self.base, self.theme):
+            document = asdict(policy)
+            self.assertNotIn("entry_filters", document)
+            self.assertEqual(policy, BreakoutThemePolicy.from_document(document))
+        for variant in ("B1", "B2", "B3"):
+            policy = self.filtered(variant)
+            self.assertEqual(policy, BreakoutThemePolicy.from_document(asdict(policy)))
+            with self.assertRaisesRegex(ValueError, "invalid breakout research policy fields"):
+                BreakoutThemePolicy.from_document({**asdict(self.base), "variant": variant})
+        with self.assertRaisesRegex(ValueError, "invalid breakout entry filter fields"):
+            self.filtered("B1", market_scope="out-of-variant")
+        with self.assertRaisesRegex(ValueError, "headroom or catalyst"):
+            self.filtered("B3", minimum_daily_headroom_bps=None, require_catalyst=False)
+
+    def test_b1_compares_native_symbol_turnover_against_same_prior_ten_and_price_progress(self):
+        policy = self.filtered("B1")
+        bar = replace(self.signal, trade_value_million_won=2)
+        other = replace(self.prior[-1], code="654321", trade_value_million_won=10_000)
+        future = replace(self.prior[-1], revision_id="later-turnover", trade_value_million_won=10_000,
+                         available_at=(datetime.fromisoformat(self.signal.available_at) + timedelta(seconds=1)).isoformat())
+        decision = self.decide(policy=policy, bar=bar, history=(*self.prior, other, future))
+        self.assertEqual(("ENTER", 4, 101, 102), (decision.action, decision.quantity,
+                         decision.setup.breakout_level, decision.setup.failure_price))
+        self.assertEqual((100, 2, 10), (decision.setup.previous_close_won,
+                         decision.setup.signal_turnover_million_won, decision.setup.prior_turnover_sum_million_won))
+        slow = self.decide(policy=self.filtered("B1", minimum_price_progress_bps=401), bar=bar)
+        self.assertEqual("breakout_price_progress_below_threshold", slow.reason)
+        weak = self.decide(policy=policy, bar=self.signal)
+        self.assertEqual("breakout_symbol_relative_turnover_below_threshold", weak.reason)
+        zero = tuple(replace(row, trade_value_million_won=0) for row in self.prior)
+        self.assertEqual("breakout_symbol_turnover_baseline_unavailable", self.decide(policy=policy, bar=bar, history=zero).reason)
+        reconstructed = replace(bar, finalization_source="daishin_completed_history_job")
+        self.assertEqual("ENTER", self.decide(policy=policy, bar=reconstructed).action)
+        invalid = replace(reconstructed, trade_value_million_won=-1)
+        self.assertEqual("breakout_symbol_turnover_unavailable", self.decide(policy=policy, bar=invalid).reason)
+
+    def test_b2_requires_same_market_scope_cut_native_ratio_and_as_of_revision(self):
+        policy = self.filtered("B2")
+        bar = replace(self.signal, trade_value_million_won=2)
+        proof = self.market_proof()
+        future = self.market_proof(10_000, available_at=(datetime.fromisoformat(bar.available_at) + timedelta(seconds=1)).isoformat())
+        selected = self.decide(policy=policy, bar=bar, entry_proofs=(proof, future))
+        self.assertEqual(("ENTER", (proof,)), (selected.action, selected.setup.entry_proofs))
+        self.assertIn(proof.revision, selected.evidence_refs)
+        for unavailable in (
+            (future,), (self.market_proof(scope="fixture:whole-market"),),
+            (self.market_proof(effective_at=self.prior[-1].bar_end),), (self.market_proof(baseline=0),),
+            (proof, self.market_proof(250, revision="conflicting-turnover")),
+            (self.market_proof(basis="retrospective"),),
+        ):
+            with self.subTest(unavailable=unavailable):
+                self.assertEqual("breakout_market_turnover_unavailable",
+                                 self.decide(policy=policy, bar=bar, entry_proofs=unavailable).reason)
+        weak = self.decide(policy=policy, bar=bar, entry_proofs=(self.market_proof(149),))
+        self.assertEqual("breakout_market_relative_turnover_below_threshold", weak.reason)
+
+    def test_b3_compares_context_separately_and_never_uses_late_or_reconstructed_context(self):
+        bar = replace(self.signal, trade_value_million_won=2)
+        policy = self.filtered("B3")
+        market = self.market_proof()
+        daily = self.entry_proof("daily_headroom", 115)
+        catalyst = self.entry_proof("catalyst", "supported")
+        good = self.decide(policy=policy, bar=bar, entry_proofs=(market, daily, catalyst))
+        self.assertEqual(("ENTER", (market, daily, catalyst)), (good.action, good.setup.entry_proofs))
+        for context, reason in (
+            ((catalyst,), "breakout_daily_headroom_unavailable"),
+            ((replace(daily, value=110), catalyst), "breakout_daily_headroom_below_threshold"),
+            ((daily, replace(catalyst, basis="retrospective")), "breakout_catalyst_unavailable"),
+            ((daily, replace(catalyst, available_at=None)), "breakout_catalyst_unavailable"),
+            ((daily, replace(catalyst, value="unsupported")), "breakout_catalyst_not_supported"),
+        ):
+            with self.subTest(context=context):
+                self.assertEqual(reason, self.decide(policy=policy, bar=bar, entry_proofs=(market, *context)).reason)
+        self.assertEqual("ENTER", self.decide(policy=self.filtered("B3", require_catalyst=False), bar=bar,
+                                              entry_proofs=(market, daily)).action)
+        self.assertEqual("ENTER", self.decide(policy=self.filtered("B3", minimum_daily_headroom_bps=None), bar=bar,
+                                              entry_proofs=(market, catalyst)).action)
+
+    def test_filtered_hold_protection_uses_original_fill_and_failure_without_context(self):
+        policy = self.filtered("B3")
+        signal = replace(self.signal, trade_value_million_won=2)
+        setup = self.decide(policy=policy, bar=signal, entry_proofs=(self.market_proof(),
+            self.entry_proof("daily_headroom", 115), self.entry_proof("catalyst", "supported"))).setup
+        position = BreakoutThemePosition(3, 105, self.first + timedelta(minutes=13))
+        failed = self.bar(13, opening=105, close=101, high=106)
+        result = self.decide(policy=policy, bar=failed, position=position, setup=setup, entry_proofs=())
+        self.assertEqual(("EXIT", 3, "breakout_pinned_signal_open_failed"), (result.action, result.quantity, result.reason))
+        self.assertIs(setup, result.setup)

@@ -30,7 +30,7 @@ from kiwoom_monitor.presentation.process_control import (
 from kiwoom_monitor.research_process import (load_research_process_request,
     load_independent_comparison_request, load_development_validation_request,
     load_final_holdout_execution_request, FinalHoldoutExposureRequest, EvidenceExperimentRequest,
-    EVIDENCE_EXPERIMENT_FAMILIES)
+    EVIDENCE_EXPERIMENT_FAMILIES, BREAKOUT_COMPARISON_MODE)
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy, campaign_worker_retry_delay_ms
 from kiwoom_monitor.application.research_search import ExperimentSpec
 from kiwoom_monitor.application.research_evaluation import DevelopmentEvidence
@@ -1055,6 +1055,7 @@ class ResearchDialog(QDialog):
         )
         labels = {
             "rank_comparison": "기준선 비교 실행",
+            BREAKOUT_COMPARISON_MODE: "돌파 B0~B3 비교 실행",
             "limited_search": "제한 탐색 실행",
             "single_run": "단일 연구 실행",
         }
@@ -1220,6 +1221,8 @@ class ResearchDialog(QDialog):
             self._table.setHorizontalHeaderLabels(("실행 준비", "상태", "성과", "성과", "", "입력", "미정 조건"))
         elif kind == "limited_search":
             self._table.setHorizontalHeaderLabels(("실험", "상태", "최대 낙폭", "손익", "완료 거래", "활성일", "사유"))
+        elif kind == "account_risk_experiment":
+            self._table.setHorizontalHeaderLabels(("실험", "평가 상태", "현금", "예약", "평가 자산", "최대 낙폭", "낙폭 하한"))
         elif kind in EVIDENCE_EXPERIMENT_FAMILIES:
             self._table.setHorizontalHeaderLabels(("실험", "재생 상태", "보유 수량", "", "", "자료", "사유"))
         if kind != "leader_breakout_performance" and (status == 'resource_blocked' or result.get('job_status') == 'resource_blocked'):
@@ -1300,6 +1303,17 @@ class ResearchDialog(QDialog):
 
 def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, ...], ...]:
     kind = result.get("kind")
+    if kind == BREAKOUT_COMPARISON_MODE:
+        return tuple((f"{pair['baseline']} → {pair['variant']} · {row[0]}", *row[1:])
+                     for pair in result.get("pairs", ())
+                     for row in format_research_result_rows({"kind": "rank_comparison", "comparison": pair.get("comparison")}))
+    if kind == "account_risk_experiment" and isinstance(result.get("result"), Mapping):
+        trace = result["result"]
+        valuation = trace.get("valuation", {})
+        return (("계좌 자금·위험", str(valuation.get("status", "가격 평가 미요청")),
+                 _won(trace.get("cash_won")), _won(trace.get("reserved_cash_won")),
+                 _won(valuation.get("equity_won")), _won(valuation.get("maximum_drawdown_won")),
+                 _won(valuation.get("known_drawdown_lower_bound_won"))),)
     if kind in EVIDENCE_EXPERIMENT_FAMILIES:
         trace = result.get("result")
         if not isinstance(trace, Mapping):

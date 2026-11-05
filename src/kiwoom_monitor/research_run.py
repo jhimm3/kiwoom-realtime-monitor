@@ -34,7 +34,7 @@ from kiwoom_monitor.application.research_implementation import (
     LEGACY_RESEARCH_IMPLEMENTATION_HASH, research_implementation_hash,
 )
 from kiwoom_monitor.application.section12_minute_research import (
-    IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MinuteExperiment, MinuteExperimentRun,
+    BREAKOUT_STUDY_FAMILY, IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MinuteExperiment, MinuteExperimentRun,
 )
 from kiwoom_monitor.domain.simulation_contract import COMPLETED_CLOSE_EXECUTION_VERSION
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
@@ -93,11 +93,15 @@ def execute_research(
 ) -> ResearchRunResult:
     leader = isinstance(config, LeaderBreakoutConfig)
     section12 = isinstance(config, MinuteExperiment)
+    historical_reconstruction = _is_historical_reconstruction(dataset.manifest)
+    historical_breakout = (section12 and config.family == BREAKOUT_STUDY_FAMILY and historical_reconstruction
+                           and session_profile == KRX_REGULAR_RESEARCH_PROFILE
+                           and research_session_profile_contract_matches(dataset.manifest.get("research_session_profile"), session_profile))
     if shadow_only and not section12:
         raise ValueError("shadow replay requires a Section 12 minute experiment")
     if section12 != (execution_config.version == COMPLETED_CLOSE_EXECUTION_VERSION):
         raise ValueError("completed-close execution and a Section 12 minute experiment must be selected together")
-    if section12 and (session_profile != KRX_REGULAR_RESEARCH_PROFILE or strategy_references is None
+    if section12 and (session_profile != KRX_REGULAR_RESEARCH_PROFILE or (strategy_references is None and not historical_breakout)
                       or position_target_plan is not None or unfilled_action_plan is not None or position_action_study is not None):
         raise ValueError("minute experiments require pinned references and their own KRX regular execution")
     experiment = MinuteExperimentRun(config, strategy_references) if section12 else None
@@ -127,11 +131,6 @@ def execute_research(
         raise ValueError('independent partition requires a matching explicit session profile')
     bundle_replay = dataset.manifest.get("runtime_input_version") == "continuous_bundle_replay/v1"
     partition_replay = dataset.manifest.get('runtime_input_version') in (DEVELOPMENT_INPUT_VERSION, FINAL_INPUT_VERSION)
-    historical_reconstruction = (
-        dataset.manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
-        or dataset.manifest.get('source_runtime_input_version')
-        == 'historical_reconstruction_strategy/v1'
-    )
     if historical_reconstruction:
         if dataset.manifest.get('not_contemporaneous_top20') is not True:
             raise ValueError('historical reconstruction input is missing its population boundary')
@@ -555,6 +554,57 @@ def execute_rank_comparison(
         session_profile,
         resource_guard,
     )
+    return _save_research_pair(dataset, repository, runs_dir, baseline, variant, evaluation_spec,
+                               changed_condition="rank_persistence_filter")
+
+
+def execute_breakout_filter_comparison(
+    dataset, repository, runs_dir, configs, execution_config, evaluation_spec,
+    cancel_requested, session_profile, resource_guard, *, strategy_references,
+) -> tuple[tuple[ResearchRunResult, ...], tuple[ResearchComparisonResult, ...]]:
+    """Compare each added entry filter against its immediate predecessor."""
+    if (len(evaluation_spec.folds) != 1 or evaluation_spec.folds[0].role == "OOS"
+            or dataset.manifest.get("oos_included") is True or dataset.manifest.get("runtime_input_version") == FINAL_INPUT_VERSION):
+        raise ValueError("breakout comparison requires one isolated development fold")
+    if tuple(config.policy.variant for config in configs) != ("B0", "B1", "B2", "B3"):
+        raise ValueError("breakout comparison requires the complete B0–B3 chain")
+    if not dataset.manifest.get("development_partition"):
+        fold = evaluation_spec.folds[0]
+        start, end = _aware_datetime(fold.start), _aware_datetime(fold.end)
+        for index, row in enumerate(dataset.observations):
+            if index % 128 == 0:
+                if cancel_requested is not None and cancel_requested():
+                    raise ResearchRunCancelled("breakout comparison input validation cancelled")
+                if resource_guard is not None:
+                    resource_guard.checkpoint()
+            if row.get("kind") == "minute_bar" and row.get("venue") == "KRX" and (
+                _aware_datetime(row["payload"]["bar_start"]) < start or _aware_datetime(row["available_at"]) > end
+            ):
+                raise ValueError("breakout comparison input contains minute observations outside its development fold")
+    runs = tuple(execute_research(
+        dataset, repository, runs_dir, config, execution_config, evaluation_spec,
+        cancel_requested, session_profile, resource_guard, strategy_references=strategy_references,
+    ) for config in configs)
+    conditions = ("breakout_price_turnover_filter", "breakout_market_turnover_filter", "breakout_daily_context_filter")
+    comparisons = tuple(_save_research_pair(
+        dataset, repository, runs_dir, baseline, variant, evaluation_spec,
+        changed_condition=condition, match_signal_revision=True,
+    ) for baseline, variant, condition in zip(runs, runs[1:], conditions))
+    return runs, comparisons
+
+
+def _save_research_pair(
+    dataset, repository, runs_dir, baseline, variant, evaluation_spec, *, changed_condition,
+    match_signal_revision=False,
+) -> ResearchComparisonResult:
+    def candidates(run_id):
+        events = repository.load_candidate_events(run_id)
+        if not match_signal_revision:
+            return events
+        return tuple({**event, "dedup_key": _content_id("breakout_signal", {
+            "symbol": event["symbol"], "reference_revision_id": event["reference_revision_id"],
+        })} for event in events)
+
     baseline_report = repository.load_research_report(baseline.run_id)
     variant_report = repository.load_research_report(variant.run_id)
     if baseline_report is None or variant_report is None:
@@ -562,13 +612,13 @@ def execute_rank_comparison(
     comparison: ResearchComparison = build_research_comparison(
         baseline_run_id=baseline.run_id,
         variant_run_id=variant.run_id,
-        changed_condition="rank_persistence_filter",
+        changed_condition=changed_condition,
         input_dataset_id=str(dataset.manifest.get("dataset_id", "")),
         input_revision_ids_hash=str(dataset.manifest.get("revision_ids_hash", "")),
         baseline_report=baseline_report,
         variant_report=variant_report,
-        baseline_candidates=repository.load_candidate_events(baseline.run_id),
-        variant_candidates=repository.load_candidate_events(variant.run_id),
+        baseline_candidates=candidates(baseline.run_id),
+        variant_candidates=candidates(variant.run_id),
         baseline_events=repository.load_execution_events(baseline.run_id),
         variant_events=repository.load_execution_events(variant.run_id),
         spec=evaluation_spec,
@@ -703,7 +753,8 @@ def _run_spec(
         for factor_id in (family.factor_ids if family is not None else (config.family,))
     }
     factor_versions["market_regime"] = FACTOR_VERSION
-    historical_reconstruction = input_manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
+    historical_reconstruction = (input_manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
+                                 or experiment and _is_historical_reconstruction(input_manifest))
     document = {
         "mode": "historical_reconstruction" if historical_reconstruction else "historical_replay",
         "data_manifest_hash": hashlib.sha256(
@@ -728,7 +779,15 @@ def _run_spec(
         document["evaluation_spec"] = evaluation_spec.to_dict()
     if session_profile is not None:
         document["session_profile"] = research_session_profile_document(session_profile)
+    if experiment and historical_reconstruction:
+        document["observation_clock_basis"] = "reconstructed_completed_bar_end_proxy"
     return document
+
+
+def _is_historical_reconstruction(manifest: Mapping[str, Any]) -> bool:
+    return 'historical_reconstruction_strategy/v1' in (
+        manifest.get('runtime_input_version'), manifest.get('source_runtime_input_version'),
+    )
 
 
 def _final_market_regime(
