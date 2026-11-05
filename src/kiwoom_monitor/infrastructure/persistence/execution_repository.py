@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Protocol
 
@@ -18,6 +18,7 @@ from kiwoom_monitor.domain.order_contract import (
     OrderState,
     OrderType,
     PlannedOrderIntent,
+    TERMINAL_ORDER_STATES,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 
@@ -49,6 +50,45 @@ class ExecutionStore(Protocol):
 
 
 @dataclass(frozen=True)
+class ExecutionBrokerLeg:
+    """One physical order; transfers do not alter its original broker quantity."""
+
+    broker_order_id: str
+    original_broker_order_id: str
+    ordered_quantity: int
+    limit_price: int
+    state: OrderState
+    transferred_quantity: int = 0
+    detailed_filled_quantity: int = 0
+    broker_reported_filled_quantity: int = 0
+    fill_ids: tuple[str, ...] = ()
+    last_broker_as_of: datetime | None = None
+
+    @property
+    def filled_quantity(self) -> int:
+        return max(self.detailed_filled_quantity, self.broker_reported_filled_quantity)
+
+    @property
+    def remaining_quantity(self) -> int:
+        return max(0, self.ordered_quantity - self.transferred_quantity - self.filled_quantity)
+
+
+@dataclass(frozen=True)
+class ExecutionAmendment:
+    broker_order_id: str
+    quantity: int
+    limit_price: int
+    started_at: datetime
+    status: str = "PENDING"
+    reported_broker_order_id: str = ""
+    accepted_quantity: int = 0
+
+    @property
+    def unresolved(self) -> bool:
+        return self.status in {"PENDING", "UNKNOWN"}
+
+
+@dataclass(frozen=True)
 class ExecutionRecord:
     intent: OrderIntent
     state: OrderState
@@ -59,6 +99,23 @@ class ExecutionRecord:
     updated_at: datetime
     detailed_filled_quantity: int = 0
     broker_reported_filled_quantity: int = 0
+    broker_legs: tuple[ExecutionBrokerLeg, ...] = ()
+    amendment: ExecutionAmendment | None = None
+    broker_revision: int = 0
+
+
+def broker_legs_state(legs, requested, amendment=None):
+    if amendment is not None and amendment.unresolved:
+        return OrderState.SUBMISSION_UNKNOWN
+    filled = sum(leg.filled_quantity for leg in legs)
+    if filled >= requested:
+        return OrderState.FILLED
+    active = [leg for leg in legs if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity]
+    if any(leg.state is OrderState.CANCEL_PENDING for leg in active):
+        return OrderState.CANCEL_PENDING
+    if active:
+        return OrderState.PARTIALLY_FILLED if filled else OrderState.ACCEPTED
+    return OrderState.CANCELLED
 
 
 @dataclass(frozen=True)
@@ -234,6 +291,9 @@ class ExecutionRepository:
             broker_reported_filled_quantity=int(changes.get(
                 "broker_reported_filled_quantity", record.broker_reported_filled_quantity,
             )),
+            broker_legs=tuple(changes.get("broker_legs", record.broker_legs)),
+            amendment=changes.get("amendment", record.amendment),
+            broker_revision=record.broker_revision + int(bool(record.broker_legs or changes.get("broker_legs"))),
         )
         connection_args = {} if _connection is None else {"_connection": _connection}
         if not self._store.append_execution_event(
@@ -422,7 +482,126 @@ def _record_document(record: ExecutionRecord) -> dict[str, Any]:
         "updated_at": record.updated_at.isoformat(),
         "detailed_filled_quantity": record.detailed_filled_quantity,
         "broker_reported_filled_quantity": record.broker_reported_filled_quantity,
+        **({
+            "broker_legs": [broker_leg_document(leg) for leg in record.broker_legs],
+            "amendment": amendment_document(record.amendment),
+            "broker_revision": record.broker_revision,
+        } if record.broker_legs else {}),
     }
+
+
+def broker_leg_document(leg: ExecutionBrokerLeg) -> dict[str, Any]:
+    return {**asdict(leg), "state": leg.state.value, "fill_ids": list(leg.fill_ids),
+            "last_broker_as_of": leg.last_broker_as_of.isoformat() if leg.last_broker_as_of else None}
+
+
+def amendment_document(value: ExecutionAmendment | None) -> dict[str, Any] | None:
+    return {**asdict(value), "started_at": value.started_at.isoformat()} if value is not None else None
+
+
+def broker_leg_from_document(value: Mapping[str, Any]) -> ExecutionBrokerLeg:
+    return ExecutionBrokerLeg(**{**value, "state": OrderState(value["state"]),
+        "fill_ids": tuple(value["fill_ids"]),
+        "last_broker_as_of": datetime.fromisoformat(value["last_broker_as_of"]) if value["last_broker_as_of"] else None})
+
+
+def amendment_from_document(value: Mapping[str, Any] | None) -> ExecutionAmendment | None:
+    return ExecutionAmendment(**{**value, "started_at": datetime.fromisoformat(value["started_at"])}) if value else None
+
+
+def validate_broker_ledger_event(stored, document, event) -> None:
+    """Validate the physical-order transition again inside the native writer's CAS."""
+    before, after = _record_from_document(stored), _record_from_document(document)
+    if (before.intent != after.intent or before.broker_order_id != after.broker_order_id
+            or after.broker_revision != before.broker_revision + 1
+            or after.state.value != event["state"] or not after.broker_legs
+            or after.state is not broker_legs_state(after.broker_legs, after.intent.quantity, after.amendment)):
+        raise RuntimeError("EXECUTION_BROKER_REVISION_CHANGED")
+    legs = after.broker_legs
+    if (len({leg.broker_order_id for leg in legs}) != len(legs)
+            or sum(leg.ordered_quantity - leg.transferred_quantity for leg in legs) != after.intent.quantity
+            or any(not leg.broker_order_id or not 0 <= leg.transferred_quantity <= leg.ordered_quantity
+                   or leg.ordered_quantity <= 0 or leg.limit_price <= 0
+                   or min(leg.detailed_filled_quantity, leg.broker_reported_filled_quantity) < 0
+                   or len(set(leg.fill_ids)) != len(leg.fill_ids) for leg in legs)
+            or after.detailed_filled_quantity != sum(leg.detailed_filled_quantity for leg in legs)
+            or after.broker_reported_filled_quantity != sum(leg.broker_reported_filled_quantity for leg in legs)
+            or after.filled_quantity != sum(leg.filled_quantity for leg in legs)
+            or after.filled_quantity > after.intent.quantity):
+        raise RuntimeError("EXECUTION_BROKER_LEGS_CHANGED")
+    kind = event["event_type"]
+    command = after.amendment
+    if kind == "AMENDMENT_STARTED":
+        if "plan" in stored or before.intent.run_id.startswith("mock_auto_run_"):
+            # Automatic amendment is enabled only with its current-condition native
+            # admission, not by reusing a former new-order approval.
+            raise RuntimeError("PLANNED_AMENDMENT_ASSESSMENT_REQUIRED")
+        expected = ExecutionAmendment(event["broker_order_id"], event["quantity"], event["price"],
+                                      datetime.fromisoformat(event["received_at"]))
+        initial = before.broker_legs or (ExecutionBrokerLeg(
+            before.broker_order_id, "", before.intent.quantity, before.intent.limit_price, before.state,
+            detailed_filled_quantity=before.detailed_filled_quantity,
+            broker_reported_filled_quantity=before.broker_reported_filled_quantity,
+            fill_ids=before.fill_ids, last_broker_as_of=before.last_broker_as_of),)
+        selected = [leg for leg in initial if leg.broker_order_id == expected.broker_order_id]
+        if (command != expected or legs != initial or before.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+                or (before.amendment is not None and before.amendment.unresolved)
+                or len(selected) != 1 or not 0 < expected.quantity <= selected[0].remaining_quantity
+                or type(expected.quantity) is not int or type(expected.limit_price) is not int or expected.limit_price <= 0
+                or before.intent.order_type is not OrderType.LIMIT or before.intent.venue != "KRX"):
+            raise RuntimeError("EXECUTION_AMENDMENT_CLAIM_CHANGED")
+    elif kind in {"AMENDMENT_ACCEPTED", "AMENDMENT_REJECTED", "AMENDMENT_RESPONSE_UNKNOWN"}:
+        pending = before.amendment
+        if pending is None or not pending.unresolved:
+            raise RuntimeError("EXECUTION_AMENDMENT_COMMAND_MISSING")
+        if kind == "AMENDMENT_ACCEPTED":
+            q = event["quantity"]
+            expected = replace(pending, status="ACCEPTED", reported_broker_order_id=event["broker_order_id"], accepted_quantity=q)
+            expected_legs = tuple(replace(leg, transferred_quantity=leg.transferred_quantity + q)
+                if leg.broker_order_id == pending.broker_order_id else leg for leg in before.broker_legs)
+            expected_legs += (ExecutionBrokerLeg(event["broker_order_id"], pending.broker_order_id,
+                                                q, pending.limit_price, OrderState.ACCEPTED),)
+            valid = type(q) is int and 0 < q <= pending.quantity and event["price"] == pending.limit_price
+        else:
+            expected = replace(pending, status="REJECTED" if kind == "AMENDMENT_REJECTED" else "UNKNOWN",
+                               reported_broker_order_id=command.reported_broker_order_id if command else "")
+            expected_legs, valid = before.broker_legs, True
+        if not valid or command != expected or legs != expected_legs:
+            raise RuntimeError("EXECUTION_AMENDMENT_RESPONSE_CHANGED")
+    else:
+        if not before.broker_legs or command != before.amendment:
+            raise RuntimeError("EXECUTION_AMENDMENT_COMMAND_CHANGED")
+        physical = event["broker_order_id"]
+        prior = next((leg for leg in before.broker_legs if leg.broker_order_id == physical), None)
+        updated = next((leg for leg in legs if leg.broker_order_id == physical), None)
+        if prior is None or updated is None or any(
+                leg != new for leg, new in zip(before.broker_legs, legs) if leg.broker_order_id != physical
+        ) or len(legs) != len(before.broker_legs):
+            raise RuntimeError("EXECUTION_BROKER_LEGS_CHANGED")
+        if kind == "FILL":
+            q, fill_id = event["quantity"], event["broker_execution_id"]
+            expected = replace(prior, detailed_filled_quantity=prior.detailed_filled_quantity + q,
+                               fill_ids=(*prior.fill_ids, fill_id))
+            valid = (fill_id and fill_id not in prior.fill_ids and type(q) is int and q > 0
+                     and type(event["price"]) is int and event["price"] > 0
+                     and after.fill_ids == (*before.fill_ids, fill_id))
+        elif kind in {"BROKER_FILL_AGGREGATE", "BROKER_RECONCILED"}:
+            expected = replace(prior, state=updated.state, last_broker_as_of=updated.last_broker_as_of,
+                               broker_reported_filled_quantity=updated.broker_reported_filled_quantity)
+            valid = (updated.last_broker_as_of == datetime.fromisoformat(event["broker_as_of"])
+                     and (prior.last_broker_as_of is None or updated.last_broker_as_of > prior.last_broker_as_of)
+                     and updated.broker_reported_filled_quantity >= prior.broker_reported_filled_quantity)
+        elif kind in {"CANCEL_STARTED", "CANCEL_ACCEPTED", "CANCEL_RESPONSE_UNKNOWN", "CANCEL_REJECTED"}:
+            expected = replace(prior, state=updated.state)
+            valid = not (command and command.unresolved) and (
+                updated.state is OrderState.CANCEL_PENDING if kind != "CANCEL_REJECTED"
+                else updated.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
+        else:
+            raise RuntimeError("EXECUTION_BROKER_EVENT_UNSUPPORTED")
+        if not valid or updated != expected:
+            raise RuntimeError("EXECUTION_BROKER_EVENT_CHANGED")
+    if kind != "FILL" and after.fill_ids != before.fill_ids:
+        raise RuntimeError("EXECUTION_BROKER_FILL_IDENTITY_CHANGED")
 
 
 def _event_document(event: OrderEvent) -> dict[str, Any]:
@@ -475,6 +654,9 @@ def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
         updated_at=datetime.fromisoformat(str(value["updated_at"])),
         detailed_filled_quantity=int(value.get("detailed_filled_quantity", value.get("filled_quantity", 0)) or 0),
         broker_reported_filled_quantity=int(value.get("broker_reported_filled_quantity") or 0),
+        broker_legs=tuple(broker_leg_from_document(leg) for leg in value.get("broker_legs", ())),
+        amendment=amendment_from_document(value.get("amendment")),
+        broker_revision=int(value.get("broker_revision", 0)),
     )
 
 

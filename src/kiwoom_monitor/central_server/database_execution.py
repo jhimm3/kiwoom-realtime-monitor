@@ -472,7 +472,9 @@ def _validate_plan_event(stored, intent, event):
     if event["event_type"] != "FILL":
         return True
     fill_id, quantity, price = event["broker_execution_id"], event["quantity"], event["price"]
-    if fill_id in stored["fill_ids"]:
+    physical = next((leg for leg in stored.get("broker_legs", ())
+                     if leg["broker_order_id"] == event["broker_order_id"]), None)
+    if fill_id in (physical["fill_ids"] if physical is not None else stored["fill_ids"]):
         return False
     if (not fill_id or type(quantity) is not int or quantity <= 0 or type(price) is not int or price <= 0
             or intent["fill_ids"] != [*stored["fill_ids"], fill_id]
@@ -480,6 +482,36 @@ def _validate_plan_event(stored, intent, event):
             or intent["detailed_filled_quantity"] > stored["quantity"]):
         raise RuntimeError("EXECUTION_PLAN_FILL_EVIDENCE_CHANGED")
     return True
+
+
+def _validate_broker_ledger_write(cursor, p, stored, intent, event):
+    if not intent.get("broker_legs"):
+        return stored
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import validate_broker_ledger_event
+
+    if stored is None:
+        cursor.execute(f"SELECT document_json FROM central_execution_intents WHERE intent_id={p}"
+                       + (" FOR UPDATE" if p == "%s" else ""), (intent["intent_id"],))
+        row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"unknown execution intent: {intent['intent_id']}")
+        stored = _json_document(row[0])
+    validate_broker_ledger_event(stored, intent, event)
+    return stored
+
+
+def _broker_order_lookup_sql(p):
+    """Keep one round trip and the indexed direct path; search legs only after a miss."""
+    scope = f"environment={p} AND account_ref={p} AND run_id={p}"
+    physical = (f"SELECT 1 FROM jsonb_array_elements(i.document_json->'broker_legs') AS leg "
+                f"WHERE leg->>'broker_order_id'={p}" if p == "%s" else
+                f"SELECT 1 FROM json_each(i.document_json,'$.broker_legs') AS leg "
+                f"WHERE json_extract(leg.value,'$.broker_order_id')={p}")
+    return ("WITH direct AS MATERIALIZED (SELECT document_json FROM central_execution_intents WHERE "
+            + scope + f" AND broker_order_id={p} LIMIT 2) "
+            "SELECT document_json FROM direct UNION ALL SELECT document_json FROM ("
+            "SELECT i.document_json FROM central_execution_intents AS i WHERE " + scope
+            + " AND NOT EXISTS (SELECT 1 FROM direct) AND EXISTS (" + physical + ") LIMIT 2) AS amended")
 
 
 def _apply_plan_execution_event(cursor, p, intent, event, sequence):
@@ -1742,6 +1774,7 @@ class SQLiteExecutionStoreMixin:
             stored = _require_execution_ownership(connection.cursor(), ownership, intent, "?",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
+            stored = _validate_broker_ledger_write(connection.cursor(), "?", stored, intent, event)
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
@@ -1774,15 +1807,19 @@ class SQLiteExecutionStoreMixin:
             )
             if "plan" in intent and _plan_event_changes_position(event):
                 _apply_plan_execution_event(connection.cursor(), "?", intent, event, inserted.lastrowid)
-            connection.execute(
+            updated = connection.execute(
                 "UPDATE central_execution_intents SET state=?,broker_order_id=?,last_broker_as_of=?,"
-                "updated_at=?,document_json=? WHERE intent_id=?",
+                "updated_at=?,document_json=? WHERE intent_id=? "
+                "AND coalesce(json_extract(document_json,'$.broker_revision'),0)=?",
                 (
                     str(intent["state"]), str(intent.get("broker_order_id") or ""),
                     intent.get("last_broker_as_of"), str(intent["updated_at"]), intent_document,
                     str(intent["intent_id"]),
+                    max(0, int(intent.get("broker_revision", 0)) - 1),
                 ),
             )
+            if updated.rowcount != 1:
+                raise RuntimeError("EXECUTION_BROKER_REVISION_CHANGED")
         return True
 
     def load_execution_intent(self, intent_id: str, *, _reader: Any = None) -> dict[str, Any] | None:
@@ -1799,9 +1836,8 @@ class SQLiteExecutionStoreMixin:
     ) -> dict[str, Any] | None:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                "SELECT document_json FROM central_execution_intents "
-                "WHERE environment=? AND account_ref=? AND run_id=? AND broker_order_id=? LIMIT 2",
-                (environment, account_ref, run_id, broker_order_id),
+                _broker_order_lookup_sql("?"),
+                (environment, account_ref, run_id, broker_order_id) * 2,
             ).fetchall()
         if len(rows) > 1:
             raise ValueError("broker order id matches multiple execution intents")
@@ -2027,6 +2063,7 @@ class PostgresExecutionStoreMixin:
             stored = _require_execution_ownership(cursor, ownership, intent, "%s",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
+            stored = _validate_broker_ledger_write(cursor, "%s", stored, intent, event)
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
@@ -2057,14 +2094,18 @@ class PostgresExecutionStoreMixin:
             cursor.execute(
                 "UPDATE central_execution_intents SET state=%s,broker_order_id=%s,last_broker_as_of=%s,"
                 "updated_at=%s,document_json=%s WHERE intent_id=%s"
+                " AND coalesce((document_json->>'broker_revision')::bigint,0)=%s"
                 + (" AND NOT (document_json ? 'plan')" if ownership is None else ""),
                 (
                     str(intent["state"]), str(intent.get("broker_order_id") or ""),
                     intent.get("last_broker_as_of"), str(intent["updated_at"]),
                     json.dumps(intent, ensure_ascii=False), str(intent["intent_id"]),
+                    max(0, int(intent.get("broker_revision", 0)) - 1),
                 ),
             )
             if cursor.rowcount != 1:
+                if intent.get("broker_legs"):
+                    raise RuntimeError("EXECUTION_BROKER_REVISION_CHANGED")
                 raise KeyError(f"unknown execution intent: {intent['intent_id']}")
             return True
 
@@ -2099,9 +2140,8 @@ class PostgresExecutionStoreMixin:
                        else observe_existing_transaction(_connection, reader, require_idle=True))
         with transaction as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT document_json FROM central_execution_intents "
-                "WHERE environment=%s AND account_ref=%s AND run_id=%s AND broker_order_id=%s LIMIT 2",
-                (environment, account_ref, run_id, broker_order_id),
+                _broker_order_lookup_sql("%s"),
+                (environment, account_ref, run_id, broker_order_id) * 2,
             )
             rows = cursor.fetchall()
         if len(rows) > 1:

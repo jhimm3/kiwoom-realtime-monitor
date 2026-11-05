@@ -2839,7 +2839,9 @@
       "reason": "Post-checkpoint validation for a single native store can use the existing read connection for current intent and history checks. Four duplicate SQLite/PostgreSQL statement sites are moved to two shared native SQL sites.",
       "connection": "The existing episode checks control, Risk, root intent/history and child intents/histories in the original short-circuit order. SQLite retains per-read locking and PostgreSQL retains READ COMMITTED READ ONLY. The reader is never lent to a different store and closes before heartbeat. Existing standalone readers retain their own connections and diagnostics.",
       "validation": "Use the scoped peer-write visibility, retained STOP and owner fences, and measured connection count in the 375 evidence. A local read-scope result does not by itself establish the original protective deadline or NAS acceptance.",
-      "evidence": ["tmp/ar08-c24-post-ack-ledger375-20261104/ROOT_OUTCOME375.json"],
+      "evidence": [
+        "tmp/ar08-c24-post-ack-ledger375-20261104/ROOT_OUTCOME375.json"
+      ],
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_execution_events|cursor.execute": 0,
         "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_execution_intent|cursor.execute": 0,
@@ -2854,7 +2856,9 @@
       "reason": "Recovery with current Risk reads the existing immutable lineage SQL through the same read scope. A borrowed cursor and the standalone connection are mutually exclusive, and both execute the same single lineage query.",
       "connection": "The borrowed reader closes before either recovery write. SQLite retains its statement lock. PostgreSQL retains READ COMMITTED and the scalar diagnostic path. The internal reader is excluded from replay arguments.",
       "validation": "One native recovery lineage plus Risk scope and both writes observed in the original Windows PostgreSQL path. Related SQLite verifies one borrowed lineage connection and unchanged replay arguments. The original first cancel wait still errors.",
-      "evidence": ["tmp/ar08-c24-recovery-cancel-reads398-20261104/ROOT_OUTCOME398.json"],
+      "evidence": [
+        "tmp/ar08-c24-recovery-cancel-reads398-20261104/ROOT_OUTCOME398.json"
+      ],
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_mock_automation_lineage|_reader.execute": 1,
         "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_mock_automation_lineage|_reader.execute": 1
@@ -2865,7 +2869,9 @@
       "reason": "The native gate already holds a read scope when checking immutable lineage and current Risk. The following current account binding still gets its own statement but can borrow that same cursor.",
       "connection": "One shared SQL site replaces two backend sites. Standalone callers keep their native connection and SQLite keeps the existing statement lock. The active-order check and all write, ACK and lease boundaries stay separate.",
       "validation": "Use the native plan open count and related current binding, Risk, STOP and recovery checks in the 399 receipt.",
-      "evidence": ["tmp/ar08-c24-binding-account-reads399-20261104/ROOT_OUTCOME399.json"],
+      "evidence": [
+        "tmp/ar08-c24-binding-account-reads399-20261104/ROOT_OUTCOME399.json"
+      ],
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_account_identity.py|PostgresAccountIdentityStoreMixin.load_latest_account_binding|cursor.execute": 0,
         "db|src/kiwoom_monitor/central_server/database_account_identity.py|SQLiteAccountIdentityStoreMixin.load_latest_account_binding|connection.execute": 0,
@@ -2877,7 +2883,9 @@
       "reason": "After reconciliation the account recovery owner reads active intents and the first Risk event page before any new broker request. Share one native read connection while retaining both fresh statements.",
       "connection": "Four scalar SQL sites move to two shared query bodies. The before-REST cut remains separate. Active-read failure keeps the incomplete cut and independently reads Risk events. Event-read failure stops publication.",
       "validation": "Use the actual account recovery open count and related scoped success, failure fallback, cursor and publication ACK checks in the 399 receipt.",
-      "evidence": ["tmp/ar08-c24-binding-account-reads399-20261104/ROOT_OUTCOME399.json"],
+      "evidence": [
+        "tmp/ar08-c24-binding-account-reads399-20261104/ROOT_OUTCOME399.json"
+      ],
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.load_account_active_execution_intents|cursor.execute": 0,
         "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.load_account_active_execution_intents|connection.execute": 0,
@@ -3100,6 +3108,31 @@
         "tests/unit/test_central_realtime_collector.py"
       ],
       "limits": {}
+    },
+    {
+      "id": "S12-05-amendment-physical-ledger-20261106",
+      "reason": "Preserve original/amended physical order identities, per-order fills and cuts, and one durable amendment command on the existing execution intent for approved S12-05 amendment-first integration.",
+      "connection": "Existing Lifecycle -> ExecutionRepository -> same SQLite BEGIN IMMEDIATE/PostgreSQL transaction and owner fence. Native revision predicate prevents stale legacy writers erasing the command. Original broker-ID indexed lookup remains one SELECT; a miss adds one account/run-scoped JSON-leg lookup. Only amended writes may load the full intent for native transition validation; no new table, collection, worker, TR or tick I/O.",
+      "validation": "OrderAmendmentTests trace original lookup1/child lookup2, compare legacy persisted wire omission and offline decoder roundtrip. Fake transport asserts AMENDMENT_STARTED already durable. Native SQLite/PostgreSQL tests cover old/child late unique fills, shared raw fill ID, mixed detailed/aggregate sum, restart, partial transfers and per-leg cancellations, UNKNOWN no retransmit, pre-network interruption, stale-writer rollback, expired lease and rejection of automatic amendment using the old new-order approval. Existing native ledger/ownership and planned order regressions remain required.",
+      "evidence": [
+        "tests/unit/test_order_amendment.py",
+        "tests/integration/test_order_amendment_postgres.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.find_execution_intent_by_broker_order_id|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.find_execution_intent_by_broker_order_id|connection.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_validate_broker_ledger_write|cursor.execute": 1
+      }
+    },
+    {
+      "id": "S12-05-amendment-one-query-lookup-20261106",
+      "reason": "The first native PostgreSQL regression rejected the two-query miss fallback. Preserve its existing one-SQL reader contract without weakening that oracle.",
+      "connection": "One materialized direct CTE uses the existing account/run/broker-ID index. The same statement returns JSON-leg aliases only when the direct CTE is empty. SQLite/PostgreSQL keep one reader connection, transaction and SQL call, with no new schema or roundtrip. The amendment-only native validation load remains explicit.",
+      "validation": "Existing PostgresAccessIntegrationTests.test_execution_ledger_and_lease_keep_native_boundaries_and_metrics is unchanged and must pass with sql_calls1 for every reader. New original/child trace requires1/1 statements. Preserve first failure c83b66dc (Windows113PASS/PG8PASS1FAIL) and rerun affected original/child lookup and native regression on final source.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.find_execution_intent_by_broker_order_id|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.find_execution_intent_by_broker_order_id|connection.execute": 1
+      }
     }
   ]
 }

@@ -127,3 +127,11 @@
 S12-05 공통 미체결 정정의 선행 전송 경계는 `KiwoomMockExecutionTransport.amend`다. 명시한 KRX mock LIMIT 원주문의 수량/가격을 기존 `request_once`로1회 보낸다. `BrokerAmendmentSubmission`은 응답의 새 주문번호·모주문번호·보고 수량/접수 시각을 보존한다. 이는 실제 체결/잔여 보유의 확인이 아니다. 거절은 기존 주문을 유지하는 기존 오류 계약이며, 모호한 응답의 보고 주문번호는 `AmendmentResponseUnknown`에 보존해 대사 자료로 남긴다. 자동 재전송·취소/신규 우회는 없다. 현재 조건 재판단→native 사전 저장/권한·예약→정정/부분 체결·ACK 유실/재개를 같은 수명에 연결하는 단계는 아직 남아 있다. 이 메서드 추가로 자동 정정이나 운영 권한을 열지 않는다. [전송 선행 검증](architecture/section12-development-roadmap-20261105.md#s12-amendment-transport).
 
 기존 계좌 reader의 ka10075/ka10076 응답은 원주문 번호·매수/매도 정정 방향도 optional order_details에 보존한다. 추가 조회는 없고 원번호의 선행0을 유지하며 누락/0을 추정하지 않는다. 기존 snapshot/FILL·원장 귀속은 바꾸지 않으며 원/새 번호별 상세 체결·ACK 유실 복구는 native 연결 후 검증한다. [현재 입력 보존 근거](architecture/section12-development-roadmap-20261105.md#s12-amendment-account-input).
+
+### 정정 원장의 소프트웨어 기반 — 2026-11-06
+
+기존 intent/plan/최초 가격·수량은 불변이다. 선택적 broker_legs는 원/정정 번호·부모·원래 물리 주문 수량/이전 수량·가격·상태·상세/누적 체결·raw 체결번호·각 cut을 보존한다. 상세 중복 키는 (물리 주문번호, raw 체결번호)이며 기존 FILL 사건의 원번호/체결번호를 재작성하지 않는다. 논리 fill_ids는 사건 순서의 raw ID 목록이므로 서로 다른 주문의 같은 raw ID가 포함될 수 있다. 전체 체결은 leg별 max(상세,보고)의 합이다. 다른 leg의 더 최신 cut으로 늦은 고유 상세 체결을 버리지 않는다. broker_revision CAS는 저장 직후 중단과 구 writer의 덮어쓰기/사건 부분 저장을 방지한다.
+
+AMENDMENT_STARTED를 내구 저장한 뒤 한 번 전송한다. PENDING/UNKNOWN은 원주문 전량 체결 뒤에도 활성 SUBMISSION_UNKNOWN을 유지하고 다시 보내거나 취소/신규로 자동 대체하지 않는다. 정상 응답은 실제 이전 수량만 새 물리 주문으로 추가한다. 부분 이전 후 두 잔여는 각각 관리하고 한쪽 취소가 다른 잔여를 해제하지 않는다. 기존 원/새 번호 reader는 indexed direct CTE+miss leg 분기로 SQL 한 번을 유지한다. 기존 미정정 저장 문서에는 선택 필드를 추가하지 않는다.
+
+현재는 가짜 broker와 SQLite/실제 격리 PostgreSQL에서 검증한 수명 기반이다. 현재 조건·Risk의 native 승인과 ACK 유실/조기00 계좌 대사·관련 소비자·Gateway/Episode를 연결하기 전에는 이전 진입 승인으로 자동 정정을 시작하지 않는다. 이 미연결 제한은 개발 상태이며 새 사용자 전략 조건이나 수락 항목의 추가가 아니다. [검증·최초 실패·다음 연결](architecture/section12-development-roadmap-20261105.md#s12-amendment-physical-ledger).

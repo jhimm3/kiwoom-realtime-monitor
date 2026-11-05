@@ -102,6 +102,7 @@
     "tests.integration.test_observation_bootstrap_postgres",
     "tests.integration.test_close_mock_execution_postgres",
     "tests.integration.test_ipo_mock_execution_postgres",
+    "tests.integration.test_order_amendment_postgres",
     "tests.integration.test_observation_cursor_commit_order_postgres",
     "tests.integration.test_observation_sequence_fence_postgres",
     "tests.integration.test_replay_content_comparison_postgres",

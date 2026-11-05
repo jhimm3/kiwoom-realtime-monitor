@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 신규주 원계획/일지 통합을 닫았고, 현재는 사용자 재확인 원칙인 **현재 조건 재판단 + 접수 미체결 정정 우선**의 공통 실행 연결이다. kt10002 단일 전송에 이어 기존 계좌 조회의 원주문 번호·정정 방향 보존을 연결했고 추가TR0·예약/상세 체결 의미를48건으로 대조했다. 다음은 native 사전 저장/권한·원/새 번호별 FILL·ACK 유실·복구와 Episode 연결이다. 나머지 대표7개·DD/MICRO와 운영 제외는 유지한다. [정정 전송 선행](#s12-amendment-transport) · [항목4 수락](#s12-acceptance-ipo-four) · [잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 현재는 사용자 재확인 원칙인 **현재 조건 재판단 + 접수 미체결 정정 우선**의 공통 실행 연결이다. 단일 정정 전송/계좌 원번호 입력에 이어 기존 원장에 원/새 주문별 체결·cut·단발 사전 저장/UNKNOWN·부분 정정/각 취소를 연결했고 Windows115/실제PG9건으로 대조했다. 다음은 ACK 유실/새 번호 조기 관측의 완전한 계좌 대사, 현재 조건·Risk의 native 정정 승인과 기존 Gateway/Episode/관련 소비자 연결이다. 이전 진입 승인으로 자동 정정을 허용하지 않으며 대표7개·DD/MICRO·운영 제외와 완료 기준은 유지한다. [정정 원장 근거](#s12-amendment-physical-ledger) · [항목4 수락](#s12-acceptance-ipo-four) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -593,3 +593,15 @@ Collector 생산 경로 연결 조건을 닫는다. 다음은 일반 READY 게�
 현재 source `e163e50d`의 Windows48건/4모듈(조회14·실전 reader·모의 monitor·계좌 전체 노출 소비자)이 통과했다. 새2건은 실제 공유 reader의 모의5/실전6개 기존 조회만으로 원0000139/새0000140·매수와 원0000141/새0000142·매도, 예약140000/가용640000/보유10·기존 상세ID를 확인하고 open/filled 양쪽의 결손 원번호와 가짜 상세 체결0을 대조한다. 모두 가짜 broker 응답이며 실제 계좌 조회0이다. 구조/저장소 소비 delta0·증분 대조/원감사·미결49를 보존했고 소유 작업자4의 종료/임시 자료 정리를 확인했다. [실행](../../tmp/s12-04-shadow/s12-05-amend-account/evidence.json) · [증분 대조](../../tmp/s12-05-amend-account/review-verified.json).
 
 다음은 원주문과 정정 주문 각각의 상세 체결·가용 시각을 기존 논리 의도/계획에 보존하는 native 수명이다. 현재 원장은 broker 번호 하나와 단일 누적 체결 cut을 사용하므로 번호만 교체하면 늦은 원주문 FILL을 거절/누락할 수 있다. 기존 단일 계좌 owner/transaction·불변 intent/plan·durable-before-submit은 재사용하며, 이 입력 보존을 자동 정정/ACK 복구 완료로 처리하지 않는다. 전체4/5·대표4/11과 운영 제외 유지.
+
+<a id="s12-amendment-physical-ledger"></a>
+
+### S12-05 원/정정 주문별 체결·사전 저장·재개 기반 — 2026-11-06
+
+기존 ExecutionRecord에 선택적 physical broker legs·amendment command·native revision을 추가했다. 원래 intent/계획/가격/수량은 불변이고 기존 미정정 저장 문서에는 새 필드가 없다. 정정1회 전송 전 같은 owner/transaction으로 AMENDMENT_STARTED를 저장하며 UNKNOWN/PENDING은 재시작과 원주문 전량 체결 뒤에도 활성 SUBMISSION_UNKNOWN으로 유지한다. 불명확 응답의 새 번호는 관측값으로만 보존한다. 원/새 번호의 cut·raw 체결번호는 각각 관리하므로 다른 주문의 동일 체결번호와 더 늦게 도착한 고유 상세 체결이 누락되지 않는다. 전체 체결은 주문별 max(상세,보고)의 합이며 실제 FILL 사건은 원번호/원체결번호 그대로 기존 계좌 사건 reader에 연결한다. 부분 정정은 실제 수락 수량만 이전하고 두 잔여를 보존하며 한쪽 취소를 전체 취소로 처리하지 않는다. stale legacy writer가 명령을 덮으면 사건 insert까지 같은 native transaction에서 롤백한다. 기존 계좌 owner/lease·원장·조회·수명을 재사용했고 새 schema/collection/worker/TR는 없다. Offline PositionAccount 입력 decoder도 typed legs/command를 복원한다.
+
+최종 source `ecd5f06b5b7f11492da7638d74f82e3b5fa26d4225e6f6fc18b8bd7a2e475ae8`에서 **Windows115건/7모듈 + 실제 격리 PostgreSQL9건**을 수락했다. 신규8/7건과 기존 등록 검사2건은 매수/매도6주의 원상세2→실제 정정3/원잔여1→혼합 보고5→더 오래된 고유 상세→최종 상세6, 같은 raw ID의 물리번호별 중복 방지, 독립 재열기/계좌 사건, 부분 이전2·각 취소·늦은 FILL, 정정 전 저장 직후 중단·UNKNOWN 재전송0·stale rollback·만료 lease·구 진입 승인 재사용 금지를 대조한다. 기존 주문/미체결·원장·target·CLOSE 취소/보호·native 계획/PG 계측 검사는 그대로다. 구조1327site/위반0·소비 delta0·증분 정적7253/기존미결49 보존과 worker7/PG job·DB/port/private 정리를 확인했다. [Windows](../../tmp/s12-04-shadow/s12-05-amend-ledger-accepted/evidence.json) · [PG](../../tmp/s12-03-pg-baseline/s12-05-amend-ledger-accepted-module/postgres-run.json) · [증분 대조](../../tmp/s12-05-amend-ledger/review-verified.json).
+
+첫 source `c83b66dc`는 Windows113PASS/PG8PASS1FAIL이었다. 기존 PG 원장 계측이 miss 후 별도 조회의 sql_calls2를 거부했다. 해당 기존 기대값은 바꾸지 않고 indexed direct CTE와 miss 전용 JSON-leg 분기를 같은 한 문장으로 합쳤다. 최종 원/새 번호 모두 reader 연결/transaction/SQL1을 유지한다. JSON-leg 분기 비용은 miss 경로에 남으며 전체 성능 향상을 주장하지 않는다. 등록 검사에서 core 순서 지문 변경을 거부한2건은 지문을 변경하지 않고 기존 필수 account-order-safety profile에 신규 unit module을 배치해 종결했다. 기존 core/CI 보호 검사는 유지하고 최종 등록2건을 별도로 통과했다. [최초 실패](../../tmp/s12-03-pg-baseline/s12-05-amend-ledger/postgres-run.json) · [원문](../../tmp/s12-03-pg-baseline/s12-05-amend-ledger/official-runner.log) · [정확한 구조 비용 계약](guardrails.json).
+
+이는 **수명 기반 개발 수락**이며 자동 정정 완료가 아니다. 자동 계획의 AMENDMENT_STARTED는 현재 조건/native Risk 승인 연결 전까지 구 진입 승인으로 열리지 않는다. 다음은 pending/UNKNOWN 명령과 ka10075/ka10076의 parent/새 번호·상세 체결을 대조하는 복구, ACK보다 이른00 관측 보존/결합, 원/정정 leg 예약과 현재 가격을 보는 Risk/보호·일지/전송 증거 소비자, 현재 조건 재판단을 실제 Gateway/Episode에 연결하는 작업이다. 미확인 child를 symbol만으로 귀속하거나 ACK를 FILL/원주문 소멸 증거로 삼지 않는다. 기존 대표4/11과 운영 제외/전체 완료 기준은 변경하지 않는다.

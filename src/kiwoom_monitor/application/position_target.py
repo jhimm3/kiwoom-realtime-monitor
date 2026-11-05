@@ -14,7 +14,9 @@ from kiwoom_monitor.application.research_execution import SimulationCostModel, e
 from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot, OrderIntent, OrderSide, OrderState, OrderType, TERMINAL_ORDER_STATES,
 )
-from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord
+from kiwoom_monitor.infrastructure.persistence.execution_repository import (
+    ExecutionRecord, amendment_from_document, broker_leg_from_document,
+)
 
 
 POSITION_TARGET_SHADOW_VERSION = "position-target-shadow/v1"
@@ -1856,6 +1858,8 @@ def _position_account_orders_from_dict(value: dict[str, Any], orders: list) -> t
         if raw_record["last_broker_as_of"] is not None:
             raw_record["last_broker_as_of"] = datetime.fromisoformat(raw_record["last_broker_as_of"])
         raw_record["fill_ids"] = tuple(raw_record["fill_ids"])
+        raw_record["broker_legs"] = tuple(broker_leg_from_document(leg) for leg in raw_record.get("broker_legs", ()))
+        raw_record["amendment"] = amendment_from_document(raw_record.get("amendment"))
         records.append(ExecutionRecord(**raw_record))
     return account, tuple(records)
 
