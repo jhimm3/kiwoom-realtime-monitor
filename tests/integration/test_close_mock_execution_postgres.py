@@ -55,6 +55,16 @@ class CloseDeadlinePostgresTests(unittest.TestCase):
 
 
 class CloseRunnerPostgresTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_acceptance_preserves_holidays_halt_and_final_journal_plan_identity(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        from tests.unit.test_close_mock_execution import verify_close_runner
+
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        scoped = self.enterContext(isolated_observation_schema(url))
+        await verify_close_runner(self, lambda: PostgresQueryStore(scoped), collector_gap=True, acceptance=True)
+
     async def test_later_available_opening_revision_replaces_hold_before_gap_exit(self):
         from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
         from tests.unit.test_close_mock_execution import verify_close_runner

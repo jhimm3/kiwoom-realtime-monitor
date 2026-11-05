@@ -429,7 +429,7 @@ def verify_close_legacy_entry(case, store_factory):
 
 
 async def verify_close_runner(case, store_factory, *, protective=False, stopped=False, collector_gap=False,
-                              tamper_collector_gap=False, corrected_gap=False):
+                              tamper_collector_gap=False, corrected_gap=False, acceptance=False):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
@@ -649,6 +649,33 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
         'document': {**context.settings, 'shadow_candidate_enabled': False, 'shadow_candidate_config': {}}}])
     with patch.object(store, 'load_shadow_candidates', side_effect=AssertionError('retained CLOSE must not rescan Shadow history')):
         supervisor, runner, monitor = await assemble()
+    if acceptance:
+        from datetime import time
+
+        before = execution.load_plan_position(ACCOUNT_REF, runtime.run_id, buy.intent.symbol, buy.intent.plan)
+        # The admitted calendar deliberately contains a weekend and a synthetic
+        # Monday holiday. No completed bar or forced day-close may create an exit.
+        for cut in (context.example.auction.ends_at + timedelta(seconds=1),
+                    datetime.combine(context.example.friday + timedelta(days=1), time(12), context.clock[0].tzinfo),
+                    datetime.combine(context.example.friday + timedelta(days=3), time(12), context.clock[0].tzinfo)):
+            clock[0] = cut
+            quotes[buy.intent.symbol] = {**context.quote, 'price_won': 103, 'available_at': cut}
+            await monitor.refresh_recovery()
+            await runner.episode.advance_once()
+            held = execution.load_plan_position(ACCOUNT_REF, runtime.run_id, buy.intent.symbol, buy.intent.plan)
+            case.assertEqual((before.plan.plan_id, 3, 0), (held.plan.plan_id, held.quantity, held.unreconciled_sell_quantity))
+            case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+        clock[0] = datetime.fromisoformat(context.example.opening.available_at)
+        for unavailable in (None, {**context.quote, 'price_won': 103, 'available_at': clock[0], 'market_status': 'HALTED'},
+                             {**context.quote, 'price_won': 103}):
+            if unavailable is None:
+                quotes.pop(buy.intent.symbol, None)
+            else:
+                quotes[buy.intent.symbol] = unavailable
+            await monitor.refresh_recovery()
+            await runner.episode.advance_once()
+            case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+            case.assertEqual((), execution.active_intents('mock', ACCOUNT_REF, runtime.run_id))
     clock[0] = datetime.fromisoformat(context.example.opening.available_at)
     quotes[buy.intent.symbol] = {**context.quote, 'price_won': 103, 'available_at': clock[0]}
     if protective:
@@ -738,10 +765,54 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     if stopped:
         case.assertEqual(stopped_control, repository.load_mock_automation_control(ACCOUNT_REF))
         case.assertEqual('STOPPED', runner.episode._close_management.status['state'])
+    if acceptance:
+        from tests.unit.test_mock_automation_specification import _ExecutionPageSource
+        from kiwoom_monitor.application.journal_enrichment import sync_journal_execution_projection
+        from kiwoom_monitor.application.trade_history_query_service import TradeHistoryQueryService
+        from kiwoom_monitor.application.trade_history_service import TradeFill
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+
+        scope = AccountScope('kiwoom', AccountEnvironment.MOCK, ACCOUNT_REF)
+        directory = case.enterContext(tempfile.TemporaryDirectory())
+        journal_path = Path(directory) / 'close-journal.sqlite3'
+        journal = JournalRepository(journal_path)
+        source = _ExecutionPageSource(execution, ACCOUNT_REF)
+        projected = sync_journal_execution_projection(source, journal, scope, page_limit=2, max_pages=100, now=clock[0])
+        case.assertEqual(3, projected.detailed_fill_count)
+        rows = JournalRepository(journal_path).load_execution_fill_projections(scope)
+        case.assertEqual({'runner-first-fill', 'runner-late-fill', 'runner-exit'},
+                         {row['broker_execution_id'] for row in rows})
+        case.assertEqual({buy.intent.plan.plan_id}, {row['plan']['plan_id'] for row in rows})
+        case.assertEqual({'BUY': 3, 'SELL': 3},
+                         {side: sum(row['quantity'] for row in rows if row['side'] == side) for side in ('BUY', 'SELL')})
+        # Broker summaries stay separate from native details. The screen query
+        # reconciles the two evidence sets and carries the original plan refs.
+        summaries = tuple(TradeFill(order.broker_order_id, buy.intent.symbol, 'synthetic CLOSE',
+            '매수' if order.broker_order_id == buy.broker_order_id else '매도',
+            fill.occurred_at.replace(tzinfo=None), fill.quantity, fill.price, origin_scope=scope)
+            for order in broker_orders.values() for fill in order.fills)
+        journal.upsert_fills(summaries, account_scope=scope)
+        visible = TradeHistoryQueryService(JournalRepository(journal_path)).load(
+            datetime.combine(context.example.friday, datetime.min.time()),
+            datetime.combine(context.example.tuesday + timedelta(days=1), datetime.min.time()), scope)
+        case.assertEqual(set(summaries), set(visible.fills))
+        case.assertEqual(set(summaries), set(visible.execution_plans))
+        case.assertEqual({buy.intent.plan.plan_id}, {plan.plan_id for plan in visible.execution_plans.values()})
+        repeated = sync_journal_execution_projection(source, JournalRepository(journal_path), scope, now=clock[0])
+        case.assertEqual(0, repeated.inserted_event_count)
+        case.assertEqual(rows, JournalRepository(journal_path).load_execution_fill_projections(scope))
+        case.assertEqual({}, broker_positions)
     await supervisor.close()
 
 
 class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_acceptance_preserves_holidays_halt_and_final_journal_plan_identity(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-acceptance.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), collector_gap=True, acceptance=True)
+
     async def test_later_available_opening_revision_replaces_hold_before_gap_exit(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
