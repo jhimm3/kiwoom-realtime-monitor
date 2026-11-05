@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 종가베팅 최종 결과·Shadow 후보 연결**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 항목 7·9 개발 수락**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05의 종가베팅은 최종평가→후보 게시→Shadow 대조와 공통 주문 원장의 익일 복구를 합성 검증했다. 종가베팅 주문 명세 승인과 기동 연결, 다른 전략의 승인 모의 실행과 12.12 통합 수락이 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [종가베팅 후보 연결](#section12-close-candidate-admission) · [종가베팅 익일 복구](#section12-close-overnight-native) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 주문 명세와 실행기 연결, 새 전략별 모의 주문·복구 등 나머지 대표 연결 9개와 DD·MICRO 추가 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 후보 연결](#section12-close-candidate-admission) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4693,6 +4693,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.257 S12-05 종가베팅 최종 결과·Shadow 후보 연결 — 2026-11-05
 
 - 실제 독립 최종평가 결과를 기존 후보 API와 계좌 확인·저장 원장에 연결했다. 종가베팅 정책 파서는 연구·후보 검증에서 공유하며 최종 보고서가 실행 뒤에도 봉인되던 결함을 수정했다. 과거와 현재의 달력을 각각 보존하면서 같은 규칙의 native Shadow를 대조하고 화면에 표시한다. READY 작성에는 종가베팅 주문 명세와 실행기 연결이 필요하다. [구현·검증과 남은 조건](section12-development-roadmap-20261105.md#s12-close-candidate-admission).
+
+<a id="section12-acceptance-seven-nine"></a>
+
+### 11.258 S12-05 항목 7·9 개발 수락 — 2026-11-05
+
+- 현재 제품 소스 `7b5e9273`의 기존 검사 8건과 검토된 TRAIN 사례 재생을 확인해 12.12 항목 7·9를 수락했다. 같은 계좌의 계획 주문은 COMMIT 응답 유실·재전달·키 교체 뒤에도 최초 영수증·run·체결·계획 커서를 유지했고 전송은 1회였다. 다른 계좌와 검증 실패 키는 기존 권한을 대체하지 않았다. 사건 분할은 출처 2개·사건 1개·후속 분봉 381개를 같은 fold에 저장하며 교차 분할은 결과 저장 전에 차단했다. 제품·검사 코드는 추가 변경하지 않았다. 남은 대표 연결 9개와 DD·MICRO 경계는 담당 조건을 따른다. [완료 조건별 근거와 현재표](section12-development-roadmap-20261105.md#s12-acceptance-seven-nine).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 
