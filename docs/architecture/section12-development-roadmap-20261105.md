@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. **현재 조건 재판단 + 접수 미체결 정정 우선**을 종가베팅·신규주의 명시 새 v3/v4 정책에서 기존 Gateway/관리/native 승인·원/새 체결 Risk·원계획 일지까지 연결했다. Windows254/실제PG20건을 대조했다. 구형 v1/v2는 보존한다. 다음은 다른 전략의 현재 조건/행동·보호와 선별 전송 증거 소비자, 대표7개·DD/MICRO의 기존 잔여다. 완료 기준과 운영 제외는 유지한다. [현재 정정 연결](#s12-close-current-order-management) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 현재 조건 재판단/정정 우선의 종가베팅·신규주 v3/v4 연결을 로컬 수락했고, 정정 주문의 선별 보존 소비자도 v2로 연결했다. 원/새 물리 주문·같은 raw ID·미귀속 관측/marker를 보존하고 대상은 계속 주문 권한 없는 최초 영수증만 가진다. 다음은 낙주 native 연결과 기존 대표7개·DD/MICRO의 잔여다. 독립 계좌/원주문 검증과 실제 운영 인계는 별도이며 완료 기준은 유지한다. [정정 실행](#s12-close-current-order-management) · [선별 정정 보존](#s12-selected-amendment-evidence) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -641,3 +641,17 @@ source `ad312cf921683fe1a48eaffd745ca8f6dbc06e8962b7715a0f6070c22334b05b`의 **W
 이 수락은 종가베팅·신규주의 명시 새 정책에 대한 공통 실행 연결이며 모든 전략의 자동 정정이나 실제 운영 수락이 아니다. 남은 범위는 기존 대표1·2·5·6·8·10·11, DD/MICRO, 다른 전략의 현재 조건/행동 정책과 선별 전송 증거 소비자다. 전체4/5·대표3/4/7/9의4/11과 원래 완료 기준을 유지한다. 운영 주문·NAS 변경/배포·T0/권한 인계·push는 수행하지 않았다.
 
 기존 게시 화면 공용 fixture의 PostgreSQL final 게시 소비자1건을 별도 동일 소스로 실행해 통과했다. 앞선19건과 합쳐20건이며 반복 실행은 아니다. [추가 게시 연결](../../tmp/s12-03-pg-baseline/s12-05-current-management-publication/postgres-run.json).
+
+<a id="s12-selected-amendment-evidence"></a>
+
+### S12-05 항목11 · 정정 원장의 선별 보존과 offline v2 — 2026-11-06
+
+원/정정 주문을 선별 보존하는 기존 stopped-source→capture CLI→offline immutable receipt→inspect/retry 경로를 확장했다. 미체결 정정의 두 물리 주문이 v1에서 빠지고, 원/새 raw 체결번호가 같으면 상세 보존이 거절되며, UNKNOWN의 command/marker도 빠지는 것을 실제 native 모의 원장으로 재현했다. 원본 자료는 변경하지 않고 정정 자료에만 `selected-order-evidence/v2`를 선택한다. 미정정 v1의 직렬화·hash·최초 영수증과 기존 검사는 보존한다. AMENDMENT 사건이 있는 자료를 물리 사실 없이 v1으로 내려 누락시키는 것은 거절한다.
+
+v2는 원래 intent/계획·원/새 주문 ID와 부모/주문 수량·정정 이동량·물리 가격·상세/보고 체결·raw ID/cut·현재 command/assessment·native revision을 보존한다. 같은 raw ID는 물리 주문마다 구분하고 실제 상세 FILL만 계획 수량/커서에 합산한다. 귀속 전 AMENDMENT_FILL_OBSERVED의 structured parent/revision·원시각과 pending key를 보존하고, 복구 후에는 원래 관측과 실제 FILL1개를 함께 남긴다. 부모/이동 수량·상세/총계·관측/marker와 원래 start/상태를 canonical codec에서 대조한다. 일반 자유문 reason과 native owner/권한은 전송하지 않는다. 새 DB schema/worker/라이브러리나 주문 권한 경로는 없다.
+
+source `352bc279fd41b3679b187ca6e0802ed1154d0e18f28a4de3c9362385507b79a3`에서 **신규4건 + 기존 v1 보존1건 = Windows5건/2모듈**이 통과했다. 독립 가짜 브로커와 실제 SQLite 원장을 정지/drain한 뒤 읽었고, 실제 CLI의 pinned canonical bytes, 원4/정정3·이동3, 원/새 같은 raw ID의 상세1+1, 미귀속 관측의 계획0, 복구 뒤 관측1+실제 FILL1, child/이동/상세/marker/원번호/총계 변조·downgrade 거절, 대상의 최초 영수증 재조회·재전달과 원본 byte 불변을 확인했다. 대상 실행 intent/events/control·주문 권한은 생성되지 않는다. 기존 v1의 실제 commit/ACK 손실·rollback·source-free retry·CLI/보존 검사는 기대값 변경 없이 재사용했다. 구조1328·위반0/consumer delta0, 증분7284정의/288기록·기존미결49, worker2/TEMP 정리를 대조했다. backend SQL/native 트랜잭션은 변경하지 않았으며 PostgreSQL 대상 기능을 추가한 것이 아니다. [현재5건](../../tmp/s12-04-shadow/s12-05-selected-amendment-evidence/evidence.json) · [증분](../../tmp/s12-05-current-management/preservation-review-verified.json) · [정리](../../tmp/s12-05-current-management/preservation-cleanup.json).
+
+최초3건 실패는 보존 기능의 실제 누락을 보여준다. 첫 수정의2통과/1오류는 원장에 있는 `broker_revision=...;amendment_parent=...`를 그대로 읽도록 맞춰 관련3건을 통과시킨 뒤, 복구 관측/실제 FILL 분리와 CLI를 추가해 최종5건을 대조했다. 기존 시계·native 수량/권한·검사 기대값을 완화하지 않았다. [수정 전](../../tmp/s12-05-current-management/preservation-before.json) · [첫 수정](../../tmp/s12-05-current-management/preservation-after.json) · [관련 재검증](../../tmp/s12-05-current-management/preservation-after-v2.json).
+
+이는 항목11의 선별 자료 보존 소비자 수락이며 독립 컴퓨터의 계좌/원주문 검증이나 운영 관리 인계 수락이 아니다. 최초 영수증은 계속 `OFFLINE_RECOVERY_REQUIRED`, `order_authority=false`다. 신뢰할 원본·대상의 계좌 연결/namespace, fresh target 계좌·일자/원주문·상세 체결/coverage 근거와 원본/대상 좌표 구분은 기존 재개 조건으로 남긴다. 전체4/5·대표3/4/7/9의4/11과 다른7개·DD/MICRO의 잔여를 유지한다. 다음 독립 개발은 낙주 native 진입/부분 체결·반등·잔량 취소/당일 미완료 연결이며 운영·실계좌·NAS·T0/실제 권한 인계·push는 실행하지 않는다.

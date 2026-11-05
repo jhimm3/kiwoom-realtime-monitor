@@ -560,6 +560,7 @@
       "tests.unit.test_settings_repository",
       "tests.unit.test_shadow_checkpoint",
       "tests.unit.test_preserve_current_settings",
+        "tests.unit.test_selected_order_amendment_evidence",
       "tests.unit.test_role_settings_transition",
       "tests.unit.test_role_settings_transition_qt"
     ],

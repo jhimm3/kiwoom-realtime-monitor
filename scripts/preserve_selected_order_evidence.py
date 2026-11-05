@@ -14,7 +14,8 @@ from typing import Any, Callable
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.database_execution import PLAN_POSITION_COLLECTION
 from kiwoom_monitor.domain.selected_order_evidence import (
-    COLLECTION, EVENT_FIELDS, ORDER_FIELDS, OWNER, PLAN_FIELDS, VERSION, encode_selected_order_evidence,
+    AMENDED_ORDER_FIELDS, AMENDED_VERSION, COLLECTION, EVENT_FIELDS, ORDER_FIELDS, OWNER, PLAN_FIELDS, VERSION,
+    encode_selected_order_evidence,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 from kiwoom_monitor.infrastructure.persistence.sqlite_read_snapshot import readonly_sqlite_snapshot
@@ -69,15 +70,19 @@ def capture_selected_order_evidence(
         raw_events = repository.events(intent_id, _reader=reader)
         if len(raw_events) != len(sequences) or {event["event_id"] for event in raw_events} != sequences.keys():
             raise ValueError("selected-order source event cursors are incomplete")
-        # Raw event IDs and facts retain historical blanks. Free-form reasons and claim payloads stay at the source.
+        # Keep raw facts; v2 also retains the structured observation parent/revision
+        # and typed amendment assessment. Other free-form reasons and native authority stay at the source.
         events = [
-            {**{key: event[key] for key in EVENT_FIELDS}, "accepted_sequence": sequences[event["event_id"]]}
+            {**{key: event[key] for key in EVENT_FIELDS}, "accepted_sequence": sequences[event["event_id"]],
+             **({'reason': event['reason']} if order.get('broker_legs') and event['event_type'] == 'AMENDMENT_FILL_OBSERVED' else {})}
             for event in raw_events
         ]
         packet = {
-            "version": VERSION, "source_instance": source_instance, "operation_id": operation_id,
+            "version": AMENDED_VERSION if order.get('broker_legs') else VERSION,
+            "source_instance": source_instance, "operation_id": operation_id,
             "account_ref": account_ref, "run_id": run_id, "source_spec_id": control["active_spec_id"],
-            "stopped_at": control["changed_at"], "order": {key: order[key] for key in ORDER_FIELDS},
+            "stopped_at": control["changed_at"],
+            "order": {key: order[key] for key in (AMENDED_ORDER_FIELDS if order.get('broker_legs') else ORDER_FIELDS)},
             "events": events, "source_cursor": source_cursor,
             "plan_position": {key: position["document"][key] for key in PLAN_FIELDS},
         }

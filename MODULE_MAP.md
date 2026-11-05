@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+**S12-05 선별 정정 보존:** 기존 `preserve_selected_order_evidence` CLI가 정지한 원본 cut/선택을, domain `selected_order_evidence` codec이 v1/v2 원장 사실·물리 부모/수량/FILL·미귀속 marker와 canonical bytes를, 기존 SQLite document native writer가 offline 최초 영수증/재전달을 소유한다. 실제 실행 원장/권한으로 채우지 않으며 원본·구형 미정정 v1은 유지한다. [수락·독립 계좌 인계 잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-selected-amendment-evidence).
+
 **S12-05 종가베팅 실행 연결:** `central_server/close_plan_management.py`는 Shadow 커서와 원래 계획 입력을 소유한다. 갭 자료는 청산 전 기존 제한 주기의 현재 cut으로 조회하며 HOLD 판본을 영구 캐시하지 않는다. 현재 계좌 대사 후 계획 head를 다시 읽고 native CAS를 유지한다. 기존 Episode/Runner/Supervisor가 잠금·checkpoint·task·조립·종료를, 기존 계좌 monitor/Gateway/runtime/native 저장소가 fresh cut·명령 직렬화·권한과 주문/FILL을 소유한다. `application/close_mock_execution.py`가 최초/청산 근거와 typed 취소를 만들고 `database_observation_readers.py`가 고정된 두 봉 구간을 조회한다. 새 worker나 주문 권한 owner는 없다. [현재 수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-close-episode).
 
 `application/mock_automation_specification.py`의 기존 builder·게시 검증은 CLOSE의 실제 분봉 실험 계약과 typed 실행 정책을 사용한다. `presentation/mock_automation_dialog.py`는 명시한 가격 허용 범위·중지 후 관리 방식을 게시하고 저장된 명세를 조회하며, 기동은 기존 Supervisor와 단일 계좌 owner를 사용한다. 기존 연구 Family 등록표와 연구 수치는 바꾸지 않는다. Collector의 종목별 마지막 마감 가격 RAM은 같은 날의 동일 가격 저장만 합치며 실제 0B 전달·가격 변화·원래 보류 재시도는 보존한다. [현재 연결 수락](docs/architecture/section12-development-roadmap-20261105.md#s12-close-ready-current-gap).
