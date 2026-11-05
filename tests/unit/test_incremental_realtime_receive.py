@@ -303,21 +303,20 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
 
     async def test_explicit_quote_fixture_obeys_ack_and_item_scope_on_the_existing_receive_path(self):
         socket = Socket()
-        observed_at = NOW + timedelta(seconds=2)
-        hub = RealtimeHub(now_provider=lambda: observed_at)
+        clock = [NOW + timedelta(seconds=2)]
+        hub = RealtimeHub(now_provider=lambda: clock[0])
         subscriber = hub.connect(allowed_event_types=frozenset({"trade"}))
         hub.update_subscription(subscriber, [A], [])
-        collector = CentralRealtimeCollector(lambda: "fixture", "mock", hub, lambda: observed_at)
+        collector = CentralRealtimeCollector(lambda: "fixture", "mock", hub, lambda: clock[0])
         native_groups = collector._subscription_groups
         native_approve = collector._approve_incremental_subscription
         native_publish = collector._publish_parsed
         native_send = socket.send
-        quote_group = "4500"
+        quote_group = "5000"
         quote_atom = ("0D", A)
         quote_group_rows = [{"item": [A], "type": ["0D"]}]
         self.assertFalse(any(kind == "0D" for kind, _ in all_atoms(native_groups("KRX", (A,), (), (), ()))))
 
-        requested_quote = False
         quote_commands, approvals, admitted_frames = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
 
         async def send(raw):
@@ -327,13 +326,6 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
                 quote_commands.put_nowait(packet)  # The test releases only this ACK.
             else:
                 await native_send(raw)
-
-        def groups(*args, **kwargs):
-            result = native_groups(*args, **kwargs)
-            if requested_quote:
-                self.assertNotIn(quote_group, result)
-                result[quote_group] = quote_group_rows
-            return result
 
         def approve(groups, *args, **kwargs):
             native_approve(groups, *args, **kwargs)
@@ -350,6 +342,9 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
         async def get(queue):
             return await asyncio.wait_for(queue.get(), timeout=3)
 
+        def read_books():
+            return collector.ram_observation_snapshot((A,), seconds=8, include_micro_books=True)["micro_books"]
+
         async def receive_probe():
             quote = {"type": "0D", "item": A, "values": {
                 "21": "110001", "41": "1010", "61": "14", "51": "1000", "71": "28", "23": "1010", "24": "3",
@@ -364,7 +359,6 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
         with patch("kiwoom_monitor.central_server.realtime_collector.connect", return_value=socket) as connect, \
                 patch("kiwoom_monitor.central_server.realtime_collector.REALTIME_REG_INTERVAL_SECONDS", .01), \
                 patch.object(socket, "send", side_effect=send), \
-                patch.object(collector, "_subscription_groups", side_effect=groups), \
                 patch.object(collector, "_approve_incremental_subscription", side_effect=approve), \
                 patch.object(collector, "_publish_parsed", side_effect=publish):
             receiving = asyncio.create_task(collector._receive("KRX"))
@@ -373,10 +367,11 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
                 self.assertIn(("0B", A), base)
                 self.assertNotIn(quote_atom, base)
 
-                requested_quote = True
+                collector._micro_book_codes = frozenset({A})
                 added = await get(quote_commands)
                 self.assertEqual({"trnm": "REG", "grp_no": quote_group, "refresh": "1", "data": quote_group_rows}, added)
                 self.assertEqual(([("0B", A)], ()), await receive_probe())
+                self.assertEqual((), read_books())
                 acknowledge(added)
                 self.assertEqual(base | {quote_atom}, await get(approvals))
 
@@ -386,16 +381,51 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
                 self.assertEqual((A, "KRX", "110001", "second"),
                                  (book.code, book.subscription_market, book.quote_time, book.time_precision))
                 self.assertEqual((14, 28, 1010), (book.asks[0].quantity, book.bids[0].quantity, book.indicative_price_won))
+                retained, = read_books()
+                self.assertEqual((A, "KRX", clock[0].isoformat()),
+                                 (retained["code"], retained["subscription_market"], retained["available_at"]))
+                self.assertEqual({"price_won": 1010, "quantity": 14}, retained["asks"][0])
+                self.assertNotIn("micro_books", collector.ram_observation_snapshot((A,), seconds=8))
+                clock[0] += timedelta(seconds=9)
+                self.assertEqual((), read_books())
+                await receive_probe()
+                self.assertEqual(1, len(read_books()))
+                collector._mark_capture_gap()
+                self.assertEqual((), read_books())
+                await receive_probe()
+                self.assertEqual(1, len(read_books()))
 
-                requested_quote = False
+                collector._micro_book_codes = frozenset()
                 removed = await get(quote_commands)
                 self.assertEqual({"trnm": "REMOVE", "grp_no": quote_group, "data": quote_group_rows}, removed)
                 self.assertEqual(([("0B", A)], ()), await receive_probe())
+                self.assertEqual((), read_books())
                 acknowledge(removed)
                 self.assertEqual(base, await get(approvals))
                 self.assertEqual({(A, "KRX")}, collector._approved_trade_sources)
                 self.assertTrue(subscriber.queue.empty())
+
+                collector._micro_book_codes = frozenset({A})
+                await get(quote_commands)
+                socket.responses.put_nowait({"trnm": "REG", "grp_no": quote_group, "return_code": 1})
+                with self.assertRaisesRegex(RuntimeError, "realtime_subscription_rejected"):
+                    await asyncio.wait_for(receiving, timeout=3)
+                self.assertEqual((), read_books())
+                self.assertTrue(collector.ram_observation_snapshot(
+                    (A,), seconds=8, include_micro_books=True,
+                )["micro_book_registration_failed"])
+                self.assertEqual(base, all_atoms(native_groups(
+                    "KRX", (A,), (), hub.requested_program_codes(), hub.requested_priority_codes(),
+                )))
                 connect.assert_called_once()
+                fallback = Socket()
+                connect.return_value = fallback
+                receiving = asyncio.create_task(collector._receive("KRX"))
+                self.assertEqual(base, await get(approvals))
+                fallback.responses.put_nowait(trade(A))
+                tick = await get(subscriber.queue)
+                self.assertEqual(("trade", A), (tick["type"], tick["payload"]["code"]))
+                self.assertEqual(2, connect.call_count)
             finally:
                 receiving.cancel()
                 await asyncio.gather(receiving, return_exceptions=True)

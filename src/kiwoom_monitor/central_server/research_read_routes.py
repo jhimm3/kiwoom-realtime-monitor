@@ -97,7 +97,9 @@ def create_research_read_router(
         # Take the one current RAM cut after native reads so their visibility
         # is established even if a document writer sampled its clock before COMMIT.
         collector = get_realtime_collector()
-        snapshot = collector.ram_observation_snapshot((symbol,), seconds=lookback_seconds) if collector is not None else None
+        snapshot = collector.ram_observation_snapshot(
+            (symbol,), seconds=lookback_seconds, include_micro_books=True,
+        ) if collector is not None else None
         cut = aware_iso_kst(snapshot["decision_time"]) if snapshot is not None else now_kst()
         trading_date = _confirmed_krx_day(day_receipt, cut)
         result = assess_micro_shadow_inputs(

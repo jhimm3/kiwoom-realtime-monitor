@@ -341,6 +341,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 account_scope_resolver=realtime_account_scope if active.account_identity_registry_enabled else None,
                 subscription_observer=diagnostic_inputs.get("subscription"),
                 input_observer=diagnostic_inputs.get("collector"),
+                micro_book_codes=active.micro_book_codes,
             )
             if active.autonomous_top20_enabled:
                 top20_service = AutonomousTop20Service(

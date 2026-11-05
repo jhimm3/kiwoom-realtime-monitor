@@ -100,6 +100,7 @@ class CentralServerSettings:
     # Protected startup configuration. Unset + explicit restart revokes new strict publications.
     selected_research_artifact_file: str = ""
     research_input_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
+    micro_book_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.query_access_token and self.query_access_token == self.access_token:
@@ -311,6 +312,8 @@ class CentralServerSettings:
             ).strip() or "data/top20-index-outbox.json",
             shadow_candidate_enabled=shadow_enabled,
             shadow_candidate_config_json=shadow_config,
+            micro_book_codes=tuple(code.strip().upper() for code in
+                                   os.environ.get("KIWOOM_MICRO_BOOK_CODES", "").split(",") if code.strip()),
             shadow_candidate_poll_seconds=shadow_poll,
             shadow_candidate_universe_max_age_seconds=shadow_universe_age,
             mock_account_monitor_enabled=mock_account_monitor_enabled,

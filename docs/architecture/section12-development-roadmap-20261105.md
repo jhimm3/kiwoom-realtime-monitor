@@ -279,6 +279,14 @@ P1이 재시작 후 확인 봉에서 후보를 내면 최초 급락 봉의 판�
 
 소스 `f526bbab`의 Windows 영향 검사 89건과 격리 PostgreSQL의 공통 후보 저장·재시작 검사 1건이 통과했다. 낙주 재시작 검사는 최초 급락 봉과 실패선 890원·목표가 945원을 SQLite 재조회와 화면까지 대조했고, PostgreSQL 검사는 같은 저장 계약을 쓰는 종가베팅의 기존 후보 호환성을 확인했다. 구조·저장소 호출·증분 원장 대조도 통과했다. [Windows](../../tmp/s12-04-shadow/panic-shadow-readback-final/evidence.json) · [격리 PostgreSQL](../../tmp/s12-03-pg-baseline/s12-05-panic-shadow-readback-pg/postgres-run.json) · [증분 대조](../../tmp/s12-04-shadow/panic-shadow-readback-final-review.json).
 
+<a id="s12-native-micro-book"></a>
+
+### S12-04 MICRO의 KRX 호가 관측
+
+명시한 종목과 기존 중앙 수집 대상이 겹칠 때 KRX 0D를 같은 WebSocket에서 등록한다. 승인된 종목당 최신 한 건을 수집기에 보관하고, 관리자 조회는 같은 가용 시각의 0B 컷과 함께 요청 범위의 0D를 읽는다. 등록 확인 전·해제 대기 중 메시지는 제외하며, 수집 단절이나 연결 종료 뒤에는 새 관측을 기다린다. 호가 원문 시각과 수집기 가용 시각을 분리하고, 실제 수량 0과 결측 수량을 구분한다. 예정 체결과 실제 체결은 각각의 입력에 둔다. 새 호가는 메모리에서만 사용한다. [관리자 조회 계약](../../API_CONTRACT.md).
+
+소스 `dd7b1f79`의 Windows 영향 검사 62건과 구조·저장소 호출·증분 원장 대조가 통과했다. 가짜 연결로 승인 전 제외, 승인 후 조회, 조회 범위 만료, 단절 후 새 관측, 해제 대기 중 폐기, 0D 등록 거절 후 0B 수신 복구를 확인했다. 관리자 조회는 결측·부분·양쪽 호가 및 0 수량을 구분했다. 실제 거래소에서의 호가 공급과 체결 순서는 별도 수락 조건이다. [영향 검사](../../tmp/s12-04-shadow/micro-native-book-acceptance/evidence.json) · [증분 대조](../../tmp/s12-04-shadow/micro-native-book-acceptance-review.json).
+
 <a id="s12-acceptance-remaining"></a>
 
 ### 12.12 통합 수락의 잔여 조건
@@ -291,4 +299,4 @@ P1이 재시작 후 확인 봉에서 후보를 내면 최초 급락 봉의 판�
 | 8 · 10 | 늦은 시장·뉴스·정정의 신규 진입 제한과 데이터가 바뀌어도 유지되는 최초 보호, saved/applied 및 조회 전용 수신은 확인했다. 각 새 전략의 실행 활성·비활성 전환에서 기존 보유 관리와 원장·화면 일치를 추가 확인한다. |
 | 9 | 합성과 실제 개발 사례 한 건에서 같은 사건의 학습·검증 분할을 차단했다. 후속 봉은 동결 원본의 종목·사례일과 시장 판본으로 묶었으며, 원래 공시 수신 시각과 수정 전 보도 판본은 확인하지 못해 최초 신호 입력에서 제외했다. 최종평가 자료는 열지 않았다. [검토된 개발 사례](../../data/research/historical-monthly-exchange-case-context-20260924.json) · [실행 증거](../../tmp/s12-05-verification-matrix/reviewed-halt-event-v2/evidence.json). |
 | 11 | 빈 설치·순위/설정/저장과 선별 주문 증거의 최초 영수증은 검증했다. 독립 대상의 계좌 UUID와 원본 커서는 같은 계좌나 주문을 증명하지 못한다. 원본·대상의 검증된 계좌 연결과 일자·원주문·상세 체결의 브로커 근거가 있어야 관리 상태를 안전하게 복구한다. [격리 반례](../../tmp/s12-05-selective-install/independent-recovery-cut-audit.md). |
-| DD · MICRO | DD의 보유·분할은 합성이고 동결 일봉은 셋업만 평가한다. 원주가 보호와 체결별 비용, MICRO의 호가 깊이·거래 가능 상태·교차 순서·VI 해제 체결가를 확인해야 한다. |
+| DD · MICRO | DD의 보유·분할은 합성이고 동결 일봉은 셋업만 평가한다. 원주가 보호와 체결별 비용이 필요하다. MICRO의 KRX 호가 깊이는 가짜 연결과 관리자 조회로 검증했다. 실제 종목 거래 가능 상태·교차 순서·VI 해제 체결가는 별도 근거를 기다린다. |

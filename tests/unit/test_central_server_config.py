@@ -166,6 +166,13 @@ class CentralServerSettingsTests(unittest.TestCase):
             settings = CentralServerSettings.from_environment()
         self.assertFalse(settings.research_observation_history_enabled)
 
+    def test_micro_book_codes_are_opt_in_and_normalized(self) -> None:
+        base = {"MONITOR_SERVER_ACCESS_TOKEN": "token"}
+        with patch.dict(os.environ, base, clear=True):
+            self.assertEqual((), CentralServerSettings.from_environment().micro_book_codes)
+        with patch.dict(os.environ, base | {"KIWOOM_MICRO_BOOK_CODES": " 005930, a12345, "}, clear=True):
+            self.assertEqual(("005930", "A12345"), CentralServerSettings.from_environment().micro_book_codes)
+
     def test_shadow_candidate_requires_explicit_strategy_and_freshness(self) -> None:
         with patch.dict(os.environ, {
             "MONITOR_SERVER_ACCESS_TOKEN": "token", "SHADOW_CANDIDATE_ENABLED": "1",

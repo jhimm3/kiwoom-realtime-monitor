@@ -23,7 +23,7 @@ from kiwoom_monitor.application.market_session_schedule import realtime_subscrip
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     parse_account_balance_changes, parse_market_index_ticks, parse_market_operation_ticks,
-    parse_order_executions,
+    OrderBookTick, parse_order_book_ticks, parse_order_executions,
     parse_program_trade_ticks, parse_stock_price_references, parse_trade_ticks,
 )
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
@@ -171,7 +171,14 @@ class CentralRealtimeCollector:
         *, snapshot_sleep: Callable[[float], Awaitable[None]] | None = None,
         subscription_observer: RealtimeSubscriptionObserver | None = None,
         input_observer: RealtimeCollectorInputObserver | None = None,
+        micro_book_codes: tuple[str, ...] = (),
     ) -> None:
+        if any(not isinstance(code, str) or len(code) != 6 or not code.isascii() or not code.isalnum()
+               or code != code.upper() for code in micro_book_codes):
+            raise ValueError("MICRO 호가 종목은 대문자 영숫자 여섯 자리여야 합니다.")
+        self._micro_book_codes = frozenset(micro_book_codes)
+        self._micro_books: dict[str, tuple[datetime, int, OrderBookTick]] = {}
+        self._micro_book_registration_failed = False
         self._subscription_observer = subscription_observer
         self._input_observer = input_observer
         self._replay_message_validator: Callable[[dict[str, Any]], None] | None = None
@@ -737,6 +744,7 @@ class CentralRealtimeCollector:
                             retained_groups = encode_groups({group: atoms & approved
                                 for group, atoms in group_atoms_for_live(groups).items()})
                             self._apply_trade_source_approval(trade_sources(retained_groups), self._now_provider(), reset_all=False)
+                            self._prune_micro_books(approved)
                             if connection_approved:
                                 covered = ready_codes(desired, approved, target.active_codes)
                                 projected = recording.projection(self, batch, retained_groups, covered,
@@ -748,6 +756,7 @@ class CentralRealtimeCollector:
                         kept = encode_groups({group: atoms & approved
                             for group, atoms in group_atoms_for_live(groups).items()})
                         self._apply_trade_source_approval(trade_sources(kept),self._now_provider(),reset_all=False)
+                        self._prune_micro_books(approved)
                     allowed = approved & wanted
                     if connection_approved and progress is not None:
                         covered = ready_codes(desired,allowed,target.active_codes)
@@ -806,6 +815,8 @@ class CentralRealtimeCollector:
                             if market_events_connected:
                                 await self._market_events.handle_ws_message(admitted, websocket)
                             self._publish_parsed(admitted)
+                            if self._micro_book_codes:
+                                self._observe_micro_books(admitted)
                     if committed and progress.done:
                         groups = progress.plan.groups
                         latest_codes, latest_nxt = self._hub.requested_codes()
@@ -831,12 +842,17 @@ class CentralRealtimeCollector:
                         published_codes = subscribed
             except BaseException as error:
                 if progress is not None:
+                    command = progress.command
+                    if (command is not None and all(kind == "0D" for kind, _ in command.atoms)
+                            and str(error) in {"realtime_subscription_rejected", "WebSocket 구독 승인 시간 초과"}):
+                        self._micro_book_registration_failed = True
                     if recording is not None:
                         recording.end_batch(self, batch, encode_groups(progress.groups),
                                             outcome='failed', error_type=type(error).__name__)
                     batch_closed = True
                 raise
             finally:
+                self._micro_books.clear()
                 if progress is not None and not batch_closed:
                     if recording is not None:
                         recording.end_batch(self,batch,encode_groups(progress.groups),
@@ -895,6 +911,7 @@ class CentralRealtimeCollector:
         self._ram_observation_generation += 1
         self._ram_observation_gap_at = self._now_provider()
         self._ram_stock_references.clear()
+        self._micro_books.clear()
         self._ram_trades.clear()
         self._ram_trade_baselines.clear()
 
@@ -982,8 +999,34 @@ class CentralRealtimeCollector:
         elif self._ram_retention_since is None or seconds > previous:
             self._ram_retention_since = self._now_provider()
 
+    def _prune_micro_books(self, approved: set[tuple[str, str | None]]) -> None:
+        for code in tuple(self._micro_books):
+            if ("0D", code) not in approved:
+                del self._micro_books[code]
+
+    def _observe_micro_books(self, admitted: dict[str, Any]) -> None:
+        books = parse_order_book_ticks(admitted)
+        if books:
+            at = self._now_provider()
+            for book in books:
+                if book.item == book.code and book.code in self._micro_book_codes:
+                    self._micro_books[book.code] = (at, self._ram_observation_generation, book)
+
+    def _micro_book_snapshot(self, codes: tuple[str, ...], start: float, end: float) -> tuple[dict[str, Any], ...]:
+        rows = []
+        for code in codes:
+            entry = self._micro_books.get(code)
+            if entry is None:
+                continue
+            received, generation, book = entry
+            if start <= received.timestamp() <= end:
+                rows.append({**asdict(book), "subscription_market": "KRX", "available_at": received.isoformat(),
+                             "time_precision": book.time_precision, "generation": generation})
+        return tuple(rows)
+
     def ram_observation_snapshot(self, codes: tuple[str, ...] | None, *, seconds: int,
-                                 include_trade_references: bool = False, include_closed_minutes: bool = False) -> dict[str, Any]:
+                                 include_trade_references: bool = False, include_closed_minutes: bool = False,
+                                 include_micro_books: bool = False) -> dict[str, Any]:
         """One event-loop RAM cut; no store read, drain, registration or aggregation."""
         at = self._now_provider()
         if at.tzinfo is None:
@@ -1007,6 +1050,8 @@ class CentralRealtimeCollector:
             if key in self._approved_trade_sources and reference["trading_date"] == day
         }
         return {
+            **({"micro_books": self._micro_book_snapshot(codes, start, at.timestamp()),
+                "micro_book_registration_failed": self._micro_book_registration_failed} if include_micro_books else {}),
             **({'closed_minute_observations':self._minute_bars.closed_observation_snapshot(codes,at=at,
                 approved_sources=self._approved_trade_sources)} if include_closed_minutes else {}),
             **({'trade_references': tuple({**price, 'code':code, 'market':'KRX',
@@ -1483,6 +1528,10 @@ class CentralRealtimeCollector:
             groups[str(2000 + index)] = [{"item": list(chunk), "type": ["0w"]}]
         for index, chunk in enumerate(_chunks(active)):
             groups[str(4000 + index)] = [{"item": list(chunk), "type": ["0g"]}]
+        if session == "KRX" and self._micro_book_codes and not self._micro_book_registration_failed:
+            book_items = tuple(code for code in active if code in self._micro_book_codes)
+            for index, chunk in enumerate(_chunks(book_items)):
+                groups[str(5000 + index)] = [{"item": list(chunk), "type": ["0D"]}]
         groups["3000"] = [
             {"item": [""], "type": ["00", "04"]},
             {"item": ["001", "101"], "type": ["0J", "0U"]},

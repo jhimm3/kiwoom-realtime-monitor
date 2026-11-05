@@ -92,7 +92,7 @@ def assess_micro_shadow_inputs(
     """Report the current native inputs without granting a signal or execution.
 
     Callers supply one collector RAM cut and, for VI variants, the bounded
-    native VI history read. Their independent orders cannot be joined here.
+    native VI history read. No exchange sequence is inferred.
     """
     if len(symbol) != 6 or not symbol.isascii() or not symbol.isalnum():
         raise ValueError("MICRO Shadow requires a six-character stock code")
@@ -102,7 +102,11 @@ def assess_micro_shadow_inputs(
         raise ValueError("MICRO Shadow decision time must include its timezone")
     cut = decision_at.astimezone(KST)
     trade = _native_0b_observation(trade_snapshot, symbol, venue, cut)
-    missing = ["native_quote_depth", "native_instrument_tradability", "native_cross_stream_order"]
+    book = _native_0d_observation(trade_snapshot, symbol, venue, cut)
+    missing = []
+    if book["state"] != "OBSERVED":
+        missing.append("native_quote_depth")
+    missing.extend(("native_instrument_tradability", "native_cross_stream_order"))
     if trade["state"] != "OBSERVED":
         missing.append("native_0b_observation")
 
@@ -116,8 +120,38 @@ def assess_micro_shadow_inputs(
         "version": MICRO_SHADOW_INPUT_VERSION, "source_kind": "native",
         "symbol": symbol, "venue": venue, "variant": variant, "decision_at": cut.isoformat(),
         "status": "UNKNOWN", "candidate": None, "missing_inputs": missing,
-        "trade": trade, "vi": vi,
+        "trade": trade, "book": book, "vi": vi,
     }
+
+
+def _native_0d_observation(snapshot: Mapping[str, object] | None, symbol: str, venue: str, cut: datetime) -> dict:
+    if venue != "KRX":
+        return {"state": "UNKNOWN", "reason": "book_venue_unavailable"}
+    if (snapshot is None or snapshot.get("durable") is not False
+            or _offset_clock(snapshot.get("decision_time")) != cut):
+        return {"state": "UNKNOWN", "reason": "collector_cut_unconfirmed"}
+    if snapshot.get("micro_book_registration_failed") is True:
+        return {"state": "UNKNOWN", "reason": "book_registration_unavailable"}
+    source_id = snapshot.get("source_id")
+    rows = snapshot.get("micro_books")
+    if not isinstance(source_id, str) or not source_id or not isinstance(rows, tuple):
+        return {"state": "UNKNOWN", "reason": "book_cut_unavailable"}
+    for row in rows:
+        if (row.get("code"), row.get("item"), row.get("subscription_market")) != (symbol, symbol, venue):
+            continue
+        available = _offset_clock(row.get("available_at"))
+        generation = row.get("generation")
+        if available is None or available > cut or not _integer(generation, minimum=0):
+            continue
+        level_counts = {
+            side: sum(_integer(level["price_won"]) and _integer(level["quantity"], minimum=0)
+                      for level in row[side])
+            for side in ("asks", "bids")
+        }
+        return {"state": "OBSERVED" if all(level_counts.values()) else "PARTIAL",
+                "source": "kiwoom-websocket-0D", "source_id": source_id,
+                "generation": generation, "level_counts": level_counts, "latest": row}
+    return {"state": "UNKNOWN", "reason": "no_scoped_retained_book"}
 
 
 def _native_0b_observation(snapshot: Mapping[str, object] | None, symbol: str, venue: str, cut: datetime) -> dict:

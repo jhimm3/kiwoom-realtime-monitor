@@ -4251,6 +4251,7 @@ class CentralServerAppTests(unittest.TestCase):
                 f"sqlite:///{path}", "private-token", query_access_token="query-token",
                 kiwoom_app_key="fixture-key", kiwoom_secret_key="fixture-secret", autonomous_top20_enabled=False,
                 market_event_collection_enabled=True, news_history_jobs_enabled=False,
+                micro_book_codes=("005930",),
             ))
             with TestClient(app) as client:
                 collector, vi = app.state.realtime_collector, app.state.market_event_service
@@ -4315,7 +4316,7 @@ class CentralServerAppTests(unittest.TestCase):
                     self.assertEqual({("1223", "2026-09-11T09:15:01+09:00"), ("1224", "2026-09-11T09:17:01+09:00")},
                                      {(row["fid"], row["observed_at"]) for row in result["vi"]["observations"]})
                     self.assertEqual(2, len(result["vi"]["observations"]))
-                    ram.assert_called_once_with(("005930",), seconds=8)
+                    ram.assert_called_once_with(("005930",), seconds=8, include_micro_books=True)
                     day_read.assert_called_once_with("krx_trading_day_observations", cut.date().isoformat(), "latest")
                     vi_read.assert_called_once_with("vi", code="005930", limit=7)
                     self.assertEqual(["day", "vi", "ram"], [entry[0] for entry in read_order.mock_calls])
@@ -4326,6 +4327,34 @@ class CentralServerAppTests(unittest.TestCase):
                     self.assertIsNone(scalp["vi"])
                     self.assertEqual(1, day_read.call_count)
                     self.assertEqual(1, vi_read.call_count)
+
+                    async def retain_admitted_book(values):
+                        collector._observe_micro_books({"trnm": "REAL", "data": [
+                            {"type": "0D", "item": "005930", "values": values},
+                        ]})
+
+                    scalp_params = params | {"variant": "BOOK_SCALP"}
+                    ask = {"21": "091703", "41": "105", "61": "14"}
+                    client.portal.call(retain_admitted_book, ask)
+                    partial = client.get(url, params=scalp_params, headers=admin).json()
+                    self.assertEqual(("PARTIAL", {"asks": 1, "bids": 0}),
+                                     (partial["book"]["state"], partial["book"]["level_counts"]))
+                    self.assertIn("native_quote_depth", partial["missing_inputs"])
+                    client.portal.call(retain_admitted_book, ask | {"51": "104", "71": "0", "23": "106"})
+                    observed = client.get(url, params=scalp_params, headers=admin).json()
+                    self.assertEqual(("UNKNOWN", None, False),
+                                     (observed["status"], observed["candidate"], observed["order_authorized"]))
+                    book = observed["book"]
+                    self.assertEqual(("OBSERVED", "kiwoom-websocket-0D", {"asks": 1, "bids": 1}),
+                                     (book["state"], book["source"], book["level_counts"]))
+                    self.assertEqual((cut.isoformat(), "091703", 106, 0),
+                                     (book["latest"]["available_at"], book["latest"]["quote_time"],
+                                      book["latest"]["indicative_price_won"], book["latest"]["bids"][0]["quantity"]))
+                    self.assertEqual(["native_instrument_tradability", "native_cross_stream_order"],
+                                     observed["missing_inputs"])
+                    self.assertEqual("UNKNOWN", client.get(
+                        url, params=scalp_params | {"venue": "NXT"}, headers=admin,
+                    ).json()["book"]["state"])
 
                     clock[0] += timedelta(seconds=1)
                     save_day(1)  # The changed document is stamped after the cut despite the earlier observation.
