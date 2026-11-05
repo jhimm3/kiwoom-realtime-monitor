@@ -9,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
@@ -28,7 +28,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRe
 from .market_observations import KST, as_kst
 
 if TYPE_CHECKING:
-    from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderCancelClaim
+    from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderCancelClaim, PlannedLeaderStopCancelRequest
 
 
 class ExecutionRuntime:
@@ -301,6 +301,7 @@ class ExecutionRuntime:
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
+        build_planned_cancel_claim: Callable[[ExecutionRecord], PlannedLeaderCancelClaim] | None = None,
     ) -> ExecutionRecord:
         """One guarded cancellation claim for the exact assessed native order.
 
@@ -309,7 +310,7 @@ class ExecutionRuntime:
         protective retry proof; default callers retain once-only cancellation.
         """
         with self._operation_lock:
-            if planned_cancel_claim is not None and cancel_retry_claim is not None:
+            if sum(claim is not None for claim in (planned_cancel_claim, cancel_retry_claim, build_planned_cancel_claim)) > 1:
                 raise ValueError("execution_claim_purposes_conflict")
             self._require_active(expected.intent)
             if self._new_orders_enabled:
@@ -321,7 +322,8 @@ class ExecutionRuntime:
                     record = self._repository.load(expected.intent.intent_id, **reader_args)
                     if record is None:
                         raise KeyError(f"unknown order intent: {expected.intent.intent_id}")
-                    if cancel_retry_claim is not None and record.state in TERMINAL_ORDER_STATES:
+                    if ((cancel_retry_claim is not None or build_planned_cancel_claim is not None)
+                            and record.state in TERMINAL_ORDER_STATES):
                         return record  # REST resolved it; do not submit another cancellation.
                     history = self._repository.events(record.intent.intent_id, **reader_args)
                 if cancel_retry_claim is None and any(event.get("event_type") == "CANCEL_STARTED" for event in history):
@@ -350,6 +352,10 @@ class ExecutionRuntime:
                 if cancel_retry_claim is not None:
                     self._repository.bind_automation_control(spec_id=spec_id,control_revision=control_revision,
                         cancel_retry_claim=cancel_retry_claim)
+                if build_planned_cancel_claim is not None:
+                    planned_cancel_claim = build_planned_cancel_claim(record)
+                    if planned_cancel_claim is None:
+                        raise ValueError("planned stop cancellation claim is missing")
                 if planned_cancel_claim is not None:
                     self._repository.bind_automation_control(
                         spec_id=spec_id, control_revision=control_revision,
@@ -389,10 +395,12 @@ class ManualMockOrderGateway:
         account_refresh: Callable[[], Awaitable[AccountSnapshot]],
         *,
         now_provider: Callable[[], datetime] = lambda: datetime.now(KST),
+        automation_execution_cut: Callable[[], Mapping[str, Any] | None] | None = None,
     ) -> None:
         self._runtime = runtime
         self._repository = repository
         self._account_refresh = account_refresh
+        self._automation_execution_cut = automation_execution_cut
         self._now = now_provider
         self._command_lock = asyncio.Lock()
         self._accepting = True
@@ -497,6 +505,7 @@ class ManualMockOrderGateway:
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
+        planned_stop_cancel_request: PlannedLeaderStopCancelRequest | None = None,
     ) -> ExecutionRecord:
         """Reuse account refresh, command serialization and credential drain."""
         return await self._command(lambda: self._cancel_automation_intent(
@@ -504,6 +513,7 @@ class ManualMockOrderGateway:
             before_cancel_claim=before_cancel_claim,
             **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
             **({"planned_cancel_claim": planned_cancel_claim} if planned_cancel_claim is not None else {}),
+            **({"planned_stop_cancel_request": planned_stop_cancel_request} if planned_stop_cancel_request is not None else {}),
         ))
 
     async def _cancel_automation_intent(
@@ -511,18 +521,46 @@ class ManualMockOrderGateway:
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
+        planned_stop_cancel_request: PlannedLeaderStopCancelRequest | None = None,
     ) -> ExecutionRecord:
         async with self._command_lock:
+            if planned_stop_cancel_request is not None and (planned_cancel_claim is not None or cancel_retry_claim is not None):
+                raise ValueError("execution_claim_purposes_conflict")
             current, history = await asyncio.to_thread(self._read_automation_cancel, expected)
+            already_claimed = any(event.get("event_type") == "CANCEL_STARTED" for event in history)
+            build_claim = None
+            account, cut = None, None
+            if planned_stop_cancel_request is not None:
+                plan = planned_stop_cancel_request.plan
+                if (not isinstance(current.intent, PlannedOrderIntent) or current.intent.intent_id != plan.plan_id
+                        or (plan.plan_id, plan.policy_ref) != (current.intent.plan.plan_id, current.intent.plan.policy_ref)):
+                    raise ValueError("planned stop cancellation root changed")
+                if (not already_claimed and current.state not in TERMINAL_ORDER_STATES
+                        and (current.state is not OrderState.PARTIALLY_FILLED or self._automation_execution_cut is None)):
+                    raise ValueError("planned stop cancellation requires a refreshed owner cut")
             if (current.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
-                    and (cancel_retry_claim is not None or not any(event.get("event_type") == "CANCEL_STARTED" for event in history))):
-                await self._account_refresh()
+                    and (cancel_retry_claim is not None or not already_claimed)):
+                account = await self._account_refresh()
+                if planned_stop_cancel_request is not None:
+                    cut = self._automation_execution_cut()
+
+            if planned_stop_cancel_request is not None:
+                def build_claim(record):
+                    observation = cut.get("observation") if cut is not None else None
+                    risk = cut.get("risk") if cut is not None else None
+                    if (account is None or observation is None or risk is None or observation.risk_snapshot != risk
+                            or observation.account != account or risk.account_as_of != account.as_of
+                            or not observation.reconciliation_complete or not observation.open_orders_complete
+                            or observation.unmapped_broker_order_ids or observation.open_orders != (record,)):
+                        raise ValueError("planned stop cancellation requires a refreshed owner cut")
+                    return planned_stop_cancel_request.claim_from(risk)
             return await asyncio.to_thread(
                 self._runtime.cancel_automation_intent, expected,
                 spec_id=spec_id, control_revision=control_revision,
                 before_cancel_claim=before_cancel_claim,
                 **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
                 **({"planned_cancel_claim": planned_cancel_claim} if planned_cancel_claim is not None else {}),
+                **({"build_planned_cancel_claim": build_claim} if build_claim is not None else {}),
             )
 
     def _read_automation_cancel(self, expected: ExecutionRecord) -> tuple[ExecutionRecord, tuple[dict, ...]]:

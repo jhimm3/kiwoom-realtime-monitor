@@ -11,7 +11,7 @@ import unittest
 from kiwoom_monitor.central_server import diagnostic_top20_lifecycle_input as hub_capture
 from pathlib import Path
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -28,6 +28,8 @@ from kiwoom_monitor.central_server.diagnostic_top20_transport import Top20Subscr
 from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
 from kiwoom_monitor.central_server.realtime_routes import create_realtime_router
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import parse_order_book_ticks
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_registration import all_atoms
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime_worker import RealtimeTradeWorker
 
 NOW = datetime.fromisoformat('2026-10-12T11:00:00+09:00')
@@ -298,6 +300,108 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
 
     async def test_nas_removal_only_completes_without_synthetic_reg_ack(self):
         await self.exercise(True,remove_only=True)
+
+    async def test_explicit_quote_fixture_obeys_ack_and_item_scope_on_the_existing_receive_path(self):
+        socket = Socket()
+        observed_at = NOW + timedelta(seconds=2)
+        hub = RealtimeHub(now_provider=lambda: observed_at)
+        subscriber = hub.connect(allowed_event_types=frozenset({"trade"}))
+        hub.update_subscription(subscriber, [A], [])
+        collector = CentralRealtimeCollector(lambda: "fixture", "mock", hub, lambda: observed_at)
+        native_groups = collector._subscription_groups
+        native_approve = collector._approve_incremental_subscription
+        native_publish = collector._publish_parsed
+        native_send = socket.send
+        quote_group = "4500"
+        quote_atom = ("0D", A)
+        quote_group_rows = [{"item": [A], "type": ["0D"]}]
+        self.assertFalse(any(kind == "0D" for kind, _ in all_atoms(native_groups("KRX", (A,), (), (), ()))))
+
+        requested_quote = False
+        quote_commands, approvals, admitted_frames = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
+
+        async def send(raw):
+            packet = json.loads(raw)
+            if packet.get("grp_no") == quote_group:
+                socket.sent.append(packet)
+                quote_commands.put_nowait(packet)  # The test releases only this ACK.
+            else:
+                await native_send(raw)
+
+        def groups(*args, **kwargs):
+            result = native_groups(*args, **kwargs)
+            if requested_quote:
+                self.assertNotIn(quote_group, result)
+                result[quote_group] = quote_group_rows
+            return result
+
+        def approve(groups, *args, **kwargs):
+            native_approve(groups, *args, **kwargs)
+            approvals.put_nowait(all_atoms(groups))
+
+        def publish(admitted):
+            received_rows = [(row["type"], row["item"]) for row in admitted["data"]]
+            admitted_frames.put_nowait((received_rows, parse_order_book_ticks(admitted, subscription_item=A)))
+            native_publish(admitted)
+
+        def acknowledge(packet):
+            socket.responses.put_nowait({"trnm": packet["trnm"], "grp_no": quote_group, "return_code": 0})
+
+        async def get(queue):
+            return await asyncio.wait_for(queue.get(), timeout=3)
+
+        async def receive_probe():
+            quote = {"type": "0D", "item": A, "values": {
+                "21": "110001", "41": "1010", "61": "14", "51": "1000", "71": "28", "23": "1010", "24": "3",
+            }}
+            socket.responses.put_nowait({"trnm": "REAL", "data": [quote, quote | {"item": f"{A}_NX"}, *trade(A)["data"]]})
+            observed = await get(admitted_frames)
+            tick = await get(subscriber.queue)
+            self.assertEqual(("trade", A, "KRX"), (tick["type"], tick["payload"]["code"], tick["payload"]["market"]))
+            return observed
+
+        before_tasks = set(asyncio.all_tasks())
+        with patch("kiwoom_monitor.central_server.realtime_collector.connect", return_value=socket) as connect, \
+                patch("kiwoom_monitor.central_server.realtime_collector.REALTIME_REG_INTERVAL_SECONDS", .01), \
+                patch.object(socket, "send", side_effect=send), \
+                patch.object(collector, "_subscription_groups", side_effect=groups), \
+                patch.object(collector, "_approve_incremental_subscription", side_effect=approve), \
+                patch.object(collector, "_publish_parsed", side_effect=publish):
+            receiving = asyncio.create_task(collector._receive("KRX"))
+            try:
+                base = await get(approvals)
+                self.assertIn(("0B", A), base)
+                self.assertNotIn(quote_atom, base)
+
+                requested_quote = True
+                added = await get(quote_commands)
+                self.assertEqual({"trnm": "REG", "grp_no": quote_group, "refresh": "1", "data": quote_group_rows}, added)
+                self.assertEqual(([("0B", A)], ()), await receive_probe())
+                acknowledge(added)
+                self.assertEqual(base | {quote_atom}, await get(approvals))
+
+                received_rows, (book,) = await receive_probe()
+                # This is the admitted array order, with no exchange-order inference.
+                self.assertEqual([("0D", A), ("0B", A)], received_rows)
+                self.assertEqual((A, "KRX", "110001", "second"),
+                                 (book.code, book.subscription_market, book.quote_time, book.time_precision))
+                self.assertEqual((14, 28, 1010), (book.asks[0].quantity, book.bids[0].quantity, book.indicative_price_won))
+
+                requested_quote = False
+                removed = await get(quote_commands)
+                self.assertEqual({"trnm": "REMOVE", "grp_no": quote_group, "data": quote_group_rows}, removed)
+                self.assertEqual(([("0B", A)], ()), await receive_probe())
+                acknowledge(removed)
+                self.assertEqual(base, await get(approvals))
+                self.assertEqual({(A, "KRX")}, collector._approved_trade_sources)
+                self.assertTrue(subscriber.queue.empty())
+                connect.assert_called_once()
+            finally:
+                receiving.cancel()
+                await asyncio.gather(receiving, return_exceptions=True)
+                hub.disconnect(subscriber)
+                await collector.close()
+        self.assertLessEqual(set(asyncio.all_tasks()), before_tasks)
 
     async def test_latest_intent_supersedes_inflight_batch_without_false_ready(self):
         for central in (False,True):

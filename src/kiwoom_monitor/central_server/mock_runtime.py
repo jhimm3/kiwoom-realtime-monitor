@@ -884,6 +884,7 @@ class MockAccountBundle:
         )
         self.gateway = ManualMockOrderGateway(
             self.runtime, self.repository, self.monitor.refresh_account, now_provider=now,
+            automation_execution_cut=lambda: self.monitor.latest_automation_execution_cut,
         ) if order_transport_enabled else None
         if self.gateway is not None:
             self.gateway.set_manual_submit_enabled(runtime_mode is MockAccountRuntimeMode.MANUAL)

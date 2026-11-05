@@ -193,3 +193,13 @@ S12-01에서는 명시 해시로 고정한 별도 거래일·상장 근거를 �
 - 빈 설치와 선별 설치는 순위·현재 설정·미완료 저장의 최초 영수증을 각각 검증한다. 종료한 합성 계좌의 미확정 주문 한 건은 원본 이벤트 ID·커서·계획 판본과 함께 `OFFLINE_RECOVERY_REQUIRED`로 보존한다. 같은 증거의 재시도는 최초 영수증을 반환하고 대상의 주문·승인·lease를 만들지 않는다. 실제 복구에는 신규 소유자의 계좌·브로커 재대사와 명시 관리 승인 절차가 필요하다.
 
 현재 소스 `0524cfaf`에서 변경 및 영향 Windows 384건과 격리 PostgreSQL 15건이 통과했다. PostgreSQL에서 늦은 상세 체결을 복구하는 두 경로를 확인했고 임시 작업자와 연결을 종료했다. [Windows 실행](../../tmp/s12-04-shadow/protection-lineage-exact-v1/evidence.json) · [PostgreSQL 실행](../../tmp/s12-03-pg-baseline/s12-04-protection-lineage-current/postgres-run.json) · [증분 대조](../../tmp/s12-04-shadow/protection-lineage-review.json).
+
+<a id="s12-refreshed-cancel-and-offline-command"></a>
+
+### S12-04 최신 계좌 대사의 계획 보호와 S12-05 오프라인 명령
+
+- 기존 계좌 갱신에서 최신 Risk 판본으로 바뀌면 현재 판본과 최초 손절 근거를 함께 사용해 같은 계획의 취소 요청을 만든다. 갱신 전 판본은 거절하고 이미 수락한 요청을 재시도할 때는 재조회·재전송을 생략한다. 취소 응답 유실 이후 전량 체결도 같은 취소 기록과 늦은 상세 체결을 확인한 경우에만 잔량을 보호한다. 실제 실행 명세의 선택 연결, 미체결 원주문 만료와 이후 보호는 별도 작업이다.
+- 가짜 WebSocket의 0D 메시지는 등록 승인 뒤 정확한 종목·거래소 범위에서만 수신하고 해제 대기 때는 차단한다. 0B는 이 세 구간에서 모두 전달됐다. 증거는 수신 메시지의 순서이며 실제 운영 구독은 별도다.
+- 오프라인 증거는 `python -m scripts.preserve_selected_order_evidence`의 `capture`, `accept`, `inspect`로 다룬다. `capture`는 중지 확인된 원본과 선택한 계좌·실행·주문을 읽어 새 패킷 파일과 SHA256을 만든다. `accept`는 원본 파일 해시와 대상 범위를 검증해 기존 오프라인 SQLite에 수락한다. `inspect`는 최초 영수증을 읽는다. 기존 파일 덮어쓰기와 주문 권한 승계는 제외한다.
+
+현재 소스 `c7ce8060`에서 변경 및 영향 Windows 246건과 격리 PostgreSQL 16건이 통과했다. 새 모의 경로는 계좌 갱신으로 바뀐 Risk의 귀속, 취소 재요청 시 재조회·재전송 0, 늦은 전량 체결 뒤 계획 잔량만 한 번 보호하는 것을 대조했다. [Windows 실행](../../tmp/s12-04-shadow/refreshed-cancel-exact-v1/evidence.json) · [PostgreSQL 실행](../../tmp/s12-03-pg-baseline/s12-04-refreshed-cancel-current/postgres-run.json) · [증분 대조](../../tmp/s12-04-shadow/refreshed-cancel-review.json).

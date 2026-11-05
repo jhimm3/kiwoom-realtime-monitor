@@ -372,3 +372,8 @@ class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCa
         from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
 
         await PlannedLeaderPartialProtectionTests.test_typed_protection_accepts_full_detailed_fill_before_cancel(self)
+
+    async def test_typed_stop_uses_refreshed_risk_and_protects_full_fill_after_unknown_cancel(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_typed_stop_uses_refreshed_risk_and_protects_full_fill_after_unknown_cancel(self)

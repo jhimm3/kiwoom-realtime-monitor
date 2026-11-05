@@ -103,6 +103,20 @@ class PlannedLeaderCancelClaim:
             raise ValueError("invalid planned leader cancellation claim") from error
 
 
+@dataclass(frozen=True)
+class PlannedLeaderStopCancelRequest:
+    """Scope and historical notice selected before the gateway's account refresh."""
+
+    plan: OrderPlanRef
+    trigger_id: str
+    notice_revision: int
+
+    def claim_from(self, risk: MockAutomationRiskSnapshot) -> PlannedLeaderCancelClaim:
+        return PlannedLeaderCancelClaim(
+            self.plan, self.trigger_id, self.notice_revision, risk.snapshot_id, risk.reconciliation_revision,
+        )
+
+
 def validate_planned_leader_stop(
     trigger: PlannedLeaderStop, *, spec, leader_config, position_proof, original_risk,
     original_fill_quantity: int,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -84,6 +84,20 @@ class PreservedSelectedOrderEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no unambiguous original unresolved intent"):
             order_preservation.capture_selected_order_evidence(**{**selection, "intent_id": "missing-intent"})
         packet, digest = order_preservation.capture_selected_order_evidence(**selection)
+        packet_path = root / "selected-order.json"
+        capture_args = ["capture", "--source", str(source), "--source-instance", selection["source_instance"],
+                        "--operation-id", selection["operation_id"], "--intent-id", intent_id,
+                        "--account-ref", ACCOUNT_REF, "--run-id", fixture.run_id, "--packet", str(packet_path)]
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, order_preservation.main(capture_args))
+        self.assertEqual({"operation_id": selection["operation_id"], "sha256": digest},
+                         json.loads(output.getvalue()))
+        packet_bytes = packet_path.read_bytes()
+        self.assertEqual(packet, json.loads(packet_bytes))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as duplicate_capture:
+            order_preservation.main(capture_args)
+        self.assertEqual(2, duplicate_capture.exception.code)
+        self.assertEqual(packet_bytes, packet_path.read_bytes())
         self.assertEqual(source_before, source.read_bytes())
         self.assertEqual(("CANCEL_PENDING", initial.broker_order_id, [fill.execution_id]),
                          (packet["order"]["state"], packet["order"]["broker_order_id"], packet["order"]["fill_ids"]))
@@ -136,6 +150,22 @@ class PreservedSelectedOrderEvidenceTests(unittest.TestCase):
         expected_receipt = {"status": RECOVERY_REQUIRED, "operation_id": selection["operation_id"],
                             "sha256": digest, "accepted_at": NOW.isoformat(), "order_authority": False}
         self.assertEqual({"receipt": expected_receipt, "replayed": True}, first)
+        accept_args = ["accept", "--target", str(target), "--sha256", digest, "--account-ref", ACCOUNT_REF,
+                       "--run-id", fixture.run_id, "--packet"]
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, order_preservation.main([*accept_args, str(packet_path)]))
+        self.assertEqual(first, json.loads(output.getvalue()))
+        altered_file = root / "altered-order.json"
+        altered_file.write_bytes(packet_bytes + b"\n")
+        with redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit) as invalid_packet:
+            order_preservation.main([*accept_args, str(altered_file)])
+        self.assertEqual(2, invalid_packet.exception.code)
+        self.assertIn("packet file SHA256 does not match", error.getvalue())
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, order_preservation.main(
+                ["inspect", "--target", str(target), "--operation-id", selection["operation_id"]],
+            ))
+        self.assertEqual({"receipt": expected_receipt}, json.loads(output.getvalue()))
         self.assertEqual({"packet": packet, "receipt": expected_receipt},
                          order_preservation.inspect_selected_order_evidence(target=target,
                                                                             operation_id=selection["operation_id"]))

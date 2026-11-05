@@ -2037,10 +2037,13 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
             await self._verify_partial_buy_protection(cancel_before_terminal=False)
         cancel.assert_not_called()
 
-    async def _verify_partial_buy_protection(self, *, cancel_before_terminal):
+    async def test_typed_stop_uses_refreshed_risk_and_protects_full_fill_after_unknown_cancel(self):
+        await self._verify_partial_buy_protection(cancel_before_terminal=True, full_fill_after_cancel=True)
+
+    async def _verify_partial_buy_protection(self, *, cancel_before_terminal, full_fill_after_cancel=False):
         from kiwoom_monitor.application.market_session_schedule import KST
         from kiwoom_monitor.application.mock_automation_risk import (
-            PlannedLeaderCancelClaim, PlannedLeaderStop, prepare_planned_leader_protection_exit,
+            PlannedLeaderCancelClaim, PlannedLeaderStop, PlannedLeaderStopCancelRequest, prepare_planned_leader_protection_exit,
             validate_mock_stop_loss_proof, validate_planned_leader_current_cut,
         )
         from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
@@ -2089,7 +2092,35 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
                 replace(plan, expected_revision=self._head(plan.plan_id)["revision"]), trigger.trigger_id,
                 notice["revision"], original_risk.snapshot_id, original_risk.reconciliation_revision,
             )
-            gateway = ManualMockOrderGateway(self.runtime, self.execution, AsyncMock(return_value=account))
+            if full_fill_after_cancel:
+                case = self
+
+                class Reader:
+                    calls = 0
+
+                    async def read(self):
+                        self.calls += 1
+                        case.clock += timedelta(seconds=1)
+                        return MockAccountRecovery(replace(account, as_of=case.clock),
+                                                   (replace(first, as_of=case.clock, fills=()),))
+
+                    async def read_trade_cost_pages(self, *_args):
+                        raise OSError('cost source unavailable; protection still manages risk')
+
+                reader = Reader()
+                monitor = MockAccountMonitor(
+                    reader, self.runtime, self.execution, now_provider=lambda: self.clock,
+                    automation_risk_repository=self.repository, automation_binding_revision=self.spec.binding_revision,
+                    automation_account_scope=self.spec.account_scope,
+                )
+                monitor.set_automation_execution_inputs_enabled(True)
+                self.addAsyncCleanup(monitor.close)
+                gateway = ManualMockOrderGateway(
+                    self.runtime, self.execution, monitor.refresh_account,
+                    automation_execution_cut=lambda: monitor.latest_automation_execution_cut,
+                )
+            else:
+                gateway = ManualMockOrderGateway(self.runtime, self.execution, AsyncMock(return_value=account))
             self.addAsyncCleanup(gateway.close)
 
             async def cancel(request):
@@ -2099,11 +2130,33 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             with patch.object(self.transport, "cancel", side_effect=SubmissionUnknown("fixture lost cancel ACK")) as broker:
-                with self.assertRaisesRegex(RuntimeError, "PLANNED_LEADER_CANCEL_ROOT_CHANGED"):
-                    await cancel(replace(claim, plan=replace(claim.plan, plan_id="unrelated-plan")))
-                with self.assertRaisesRegex(RuntimeError, "PLANNED_LEADER_CANCEL_RISK_CHANGED"):
-                    await cancel(replace(claim, risk_snapshot_id="0" * 64))
-                pending = await cancel(claim)
+                if full_fill_after_cancel:
+                    with self.assertRaisesRegex(RuntimeError, "PLANNED_LEADER_CANCEL_RISK_CHANGED"):
+                        await cancel(claim)  # This fixed claim predates the actual owner refresh.
+                    self.assertEqual(1, reader.calls)
+                    broker.assert_not_called()
+                    request = PlannedLeaderStopCancelRequest(claim.plan, claim.trigger_id, claim.notice_revision)
+
+                    async def cancel_from_refresh():
+                        return await gateway.cancel_automation_intent(
+                            part, spec_id=self.spec.spec_id, control_revision=control.control_revision,
+                            planned_stop_cancel_request=request,
+                        )
+
+                    pending = await cancel_from_refresh()
+                    fresh = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+                    self.assertGreater(fresh.reconciliation_revision, claim.risk_reconciliation_revision)
+                    self.assertEqual(original_risk.reconciliation_revision + 2, fresh.reconciliation_revision)
+                    self.assertEqual((pending, 2), (await cancel_from_refresh(), reader.calls))
+                    self.assertIsNone(monitor.latest_automation_execution_cut)
+                    claim = request.claim_from(fresh)
+                    self.risk_revision = fresh.reconciliation_revision
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "PLANNED_LEADER_CANCEL_ROOT_CHANGED"):
+                        await cancel(replace(claim, plan=replace(claim.plan, plan_id="unrelated-plan")))
+                    with self.assertRaisesRegex(RuntimeError, "PLANNED_LEADER_CANCEL_RISK_CHANGED"):
+                        await cancel(replace(claim, risk_snapshot_id="0" * 64))
+                    pending = await cancel(claim)
                 self.assertEqual(OrderState.CANCEL_PENDING, pending.state)
                 events = self.execution.events(buy.intent.intent_id)
                 self.assertEqual(["CANCEL_STARTED", "CANCEL_RESPONSE_UNKNOWN"], [item["event_type"] for item in events[-2:]])
@@ -2128,6 +2181,7 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(OrderState.CANCEL_PENDING, replayed.state)
                 broker.assert_called_once_with(buy.intent, buy.broker_order_id, 0)
 
+        if cancel_before_terminal and not full_fill_after_cancel:
             self.clock += timedelta(seconds=1)
             late = replace(
                 first, state=OrderState.CANCEL_PENDING, filled_quantity=2, remaining_quantity=1, as_of=self.clock,
@@ -2201,9 +2255,9 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
         raw = workflow["decision"]
         decision = StrategyDecision(**{**raw, "constraints": tuple(raw["constraints"]), "reasons": tuple(raw["reasons"])})
 
-        def dispatch(workflow_id):
+        def dispatch(workflow_id, fixed_decision=decision):
             return dispatch_mock_automation_decision_from_risk(
-                self.repository, self.runtime, decision, recovery, current, account_ref=ACCOUNT_REF,
+                self.repository, self.runtime, fixed_decision, recovery, current, account_ref=ACCOUNT_REF,
                 spec_id=self.spec.spec_id, strategy_ref=self.spec.strategy_ref, protection_exit_id=workflow_id, plan=planned,
             )
 
@@ -2215,6 +2269,20 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
             self.runner.episode._save_checkpoint(force=True)
             with self.assertRaisesRegex(RuntimeError, 'PLANNED_LEADER_PROTECTION_FIXED_CUT_CHANGED'):
                 dispatch(workflow['workflow_id'])
+            self.runner.episode._protection_review = {**notice, 'planned_leader_protection_exit': workflow}
+            self.runner.episode._save_checkpoint(force=True)
+        if full_fill_after_cancel:
+            different_notice = {**notice, 'revision': notice['revision'] + 1}
+            wrong_receipt = prepare_planned_leader_protection_exit(
+                self.spec, observation=observation, **{**prepare, 'notice': different_notice},
+            )
+            self.runner.episode._protection_review = {**different_notice, 'planned_leader_protection_exit': wrong_receipt}
+            self.runner.episode._save_checkpoint(force=True)
+            wrong_raw = wrong_receipt['decision']
+            wrong_decision = StrategyDecision(**{**wrong_raw, 'constraints': tuple(wrong_raw['constraints']),
+                                                  'reasons': tuple(wrong_raw['reasons'])})
+            with self.assertRaisesRegex(RuntimeError, 'PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED'):
+                dispatch(wrong_receipt['workflow_id'], wrong_decision)
             self.runner.episode._protection_review = {**notice, 'planned_leader_protection_exit': workflow}
             self.runner.episode._save_checkpoint(force=True)
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])

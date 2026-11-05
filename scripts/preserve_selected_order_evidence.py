@@ -1,9 +1,14 @@
 """Explicit offline capture and acceptance of one unresolved planned mock order."""
 from __future__ import annotations
 
+import argparse
 from contextlib import closing
 from datetime import datetime
+from hashlib import sha256
+import json
+import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Callable
 
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -95,3 +100,57 @@ def inspect_selected_order_evidence(*, target: Path, operation_id: str) -> dict[
     with readonly_sqlite_snapshot(target, frozen=True) as connection, closing(connection.cursor()) as reader:
         row = SQLiteQueryStore(target).load_document(COLLECTION, OWNER, operation_id, _reader=reader)
         return row["document"] if row is not None else None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    capture = commands.add_parser("capture", help="capture a selected order from a stopped source")
+    capture.add_argument("--source", type=Path, required=True)
+    capture.add_argument("--source-instance", required=True)
+    capture.add_argument("--operation-id", required=True)
+    capture.add_argument("--intent-id", required=True)
+    accept = commands.add_parser("accept", help="accept pinned evidence in an offline target")
+    accept.add_argument("--target", type=Path, required=True)
+    accept.add_argument("--sha256", required=True)
+    inspect = commands.add_parser("inspect", help="read the first acceptance receipt")
+    inspect.add_argument("--target", type=Path, required=True)
+    inspect.add_argument("--operation-id", required=True)
+    for command in (capture, accept):
+        command.add_argument("--account-ref", required=True)
+        command.add_argument("--run-id", required=True)
+        command.add_argument("--packet", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "capture":
+            packet, digest = capture_selected_order_evidence(
+                source=args.source, source_instance=args.source_instance, operation_id=args.operation_id,
+                account_ref=args.account_ref, run_id=args.run_id, intent_id=args.intent_id,
+            )
+            encoded, _ = encode_selected_order_evidence(packet)
+            with TemporaryDirectory(dir=args.packet.parent) as stage:
+                staged = Path(stage) / "packet.json"
+                staged.write_bytes(encoded)
+                os.link(staged, args.packet)
+            result = {"operation_id": args.operation_id, "sha256": digest}
+        elif args.command == "accept":
+            if args.target.resolve() == args.packet.resolve():
+                raise ValueError("the packet and offline target must be different files")
+            encoded = args.packet.read_bytes()
+            if sha256(encoded).hexdigest() != args.sha256:
+                raise ValueError("selected-order packet file SHA256 does not match")
+            result = accept_selected_order_evidence(
+                target=args.target, packet=json.loads(encoded), expected_sha256=args.sha256,
+                account_ref=args.account_ref, run_id=args.run_id,
+            )
+        else:
+            evidence = inspect_selected_order_evidence(target=args.target, operation_id=args.operation_id)
+            result = {"receipt": evidence["receipt"] if evidence else None}
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

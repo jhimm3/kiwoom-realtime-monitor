@@ -597,20 +597,27 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
 
     cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} '
                    'ORDER BY accepted_sequence', (plan.plan_id,))
-    original_quantity = current_quantity = fill_cursor = cancel_sequence = 0
+    original_quantity = current_quantity = fill_cursor = cancel_sequence = unknown_sequence = 0
     fill_ids = []
     event, terminal_sequence = {}, 0
     for sequence, event_doc in cursor.fetchall():
         event = _json_document(event_doc)
         terminal_sequence = sequence
         if event['event_type'] == 'CANCEL_STARTED':
-            if root_state == 'FILLED' or 'planned_leader_cancel_claim' not in event:
+            if 'planned_leader_cancel_claim' not in event or event['state'] != 'CANCEL_PENDING':
                 raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
             cancel = PlannedLeaderCancelClaim.from_dict(event['planned_leader_cancel_claim'])
             if (cancel_sequence or (cancel.plan.plan_id, cancel.plan.policy_ref, cancel.trigger_id, cancel.notice_revision)
                     != (plan.plan_id, plan.policy_ref, trigger.trigger_id, notice['revision'])):
                 raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
             cancel_sequence = sequence
+        if root_state == 'FILLED' and event['event_type'] in {
+            'CANCEL_RESPONSE_UNKNOWN', 'CANCEL_ACCEPTED', 'CANCEL_REJECTED',
+        }:
+            if (not cancel_sequence or unknown_sequence or event['event_type'] != 'CANCEL_RESPONSE_UNKNOWN'
+                    or event['state'] != 'CANCEL_PENDING'):
+                raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
+            unknown_sequence = sequence
         if event['event_type'] == 'FILL' and event['broker_execution_id']:
             current_quantity += event['quantity']
             fill_ids.append(event['broker_execution_id'])
@@ -619,11 +626,13 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
                 original_quantity += event['quantity']
     head = document(PLAN_POSITION_COLLECTION, plan.plan_id)
     original_cursor = original_risk.execution_event_high_watermark
-    terminal_confirmed = (
-        original_cursor < cancel_sequence < terminal_sequence and event.get('event_type') == 'BROKER_RECONCILED'
-        if root_state == 'CANCELLED' else
-        original_cursor < fill_cursor <= terminal_sequence and event.get('event_type') in {'FILL', 'BROKER_RECONCILED'}
-    )
+    if root_state == 'CANCELLED':
+        terminal_confirmed = (original_cursor < cancel_sequence < terminal_sequence
+                              and event.get('event_type') == 'BROKER_RECONCILED')
+    else:
+        terminal_confirmed = (original_cursor < fill_cursor <= terminal_sequence
+                              and event.get('event_type') in {'FILL', 'BROKER_RECONCILED'}
+                              and (not cancel_sequence or original_cursor < cancel_sequence < unknown_sequence < fill_cursor))
     if (not terminal_confirmed or terminal_sequence > risk.execution_event_high_watermark
             or event.get('state') != root_state
             or event.get('broker_order_id') != root['broker_order_id']
