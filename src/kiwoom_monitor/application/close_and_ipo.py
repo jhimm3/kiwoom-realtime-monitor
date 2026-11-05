@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from .market_session_schedule import (
     KST,
@@ -19,6 +20,7 @@ from .market_session_schedule import (
     trading_day_as_of,
 )
 from .research_replay import KrxMinuteBarFrame
+from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION
 from kiwoom_monitor.domain.market_data_contract import (
     ListingEvidence,
     ListingEvidenceStatus,
@@ -106,6 +108,46 @@ class CloseIpoSetup:
     next_date: date | None
     next_open_at: datetime | None
     next_calendar_ref: str | None
+
+
+def matches_close_shadow(parameters: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    """Compare the frozen rule, while each stored Shadow setup keeps its own calendar."""
+    setup = event.get("close_ipo_entry_setup")
+    if (event.get("strategy_id") != "close_betting" or event.get("strategy_version") != "v1"
+            or event.get("strategy_variant") != "CLOSE" or event.get("shadow_scope") != MINUTE_SHADOW_VERSION
+            or event.get("transition") != "flat_to_candidate"
+            or event.get("decision_reasons") != ["preclose_return_setup"]
+            or not str(event.get("run_id", "")).startswith("section12-minute-shadow:")
+            or any(not isinstance(event.get(key), str) or not event[key]
+                   for key in ("event_id", "snapshot_id", "decision_id"))
+            or not isinstance(setup, Mapping) or setup.get("policy") != parameters["policy"]
+            or setup.get("symbol") != event.get("symbol") or type(event.get("quantity")) is not int
+            or event["quantity"] != parameters["policy"]["quantity"]):
+        return False
+    refs, bars = event.get("input_revision_refs"), setup.get("entry_bar_refs")
+    auction = setup.get("close_auction")
+    if (not isinstance(refs, list) or not isinstance(bars, list) or not bars
+            or bars[-1] != event.get("reference_revision_id")
+            or any(not isinstance(ref, str) or not ref or ref not in refs
+                   for ref in (*bars, setup.get("entry_calendar_ref"), setup.get("next_calendar_ref")))
+            or not isinstance(auction, Mapping) or auction.get("venue") != "KRX"
+            or auction.get("session") != "KRX_CLOSING_AUCTION" or auction.get("phase") != "AUCTION_ORDER_ENTRY"
+            or auction.get("support") != "SUPPORTED" or auction.get("trading_date") != setup.get("entry_date")):
+        return False
+    try:
+        available, cutoff, expiry, deadline, start, end, next_open = (
+            datetime.fromisoformat(value) for value in (
+                event["available_at"], event["input_cutoff"], event["expires_at"], setup["entry_deadline"],
+                auction["starts_at"], auction["ends_at"], setup["next_open_at"],
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (all(value.utcoffset() is not None for value in (available, cutoff, expiry, deadline, start, end, next_open))
+            and available == cutoff and available < expiry <= deadline <= start < end < next_open
+            and available.astimezone(KST).date().isoformat() == setup.get("entry_date")
+            and next_open.astimezone(KST).date().isoformat() == setup.get("next_date")
+            and setup["entry_date"] < setup["next_date"])
 
 
 @dataclass(frozen=True)

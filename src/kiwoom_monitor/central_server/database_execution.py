@@ -74,6 +74,8 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         _require_mock_protection_claim(cursor, ownership, value, p, now_provider=now_provider,new_intent_claim=new_intent_claim)
     if (new_intent_claim or (submission_claim and "plan" in value)) and value.get('policy_version') == 'leader_execution_adapter/v1':
         _require_leader_execution_claim(cursor, ownership, value, p, now_provider=now_provider)
+    if (new_intent_claim or submission_claim) and value.get("policy_version") == "close_execution_adapter/v1":
+        _require_close_entry_claim(cursor, p, value, ownership, now_provider=now_provider)
     if "intent_id" in value:
         plan_projection = "document_json->'plan'" if p == "%s" else "json_extract(document_json,'$.plan')"
         stored_projection = "document_json" if "plan" in value else plan_projection
@@ -488,6 +490,57 @@ def _apply_plan_execution_event(cursor, p, intent, event, sequence):
         cursor, p, account, {**head, "revision": head["revision"] + 1},
         datetime.fromisoformat(event["received_at"]),
     )
+
+
+def _require_close_entry_claim(cursor, p, value, ownership, *, now_provider):
+    """Bind CLOSE's initial claim to the native candidate and frozen 0B evidence."""
+    from dataclasses import asdict
+    from kiwoom_monitor.application.close_mock_execution import CLOSE_ENTRY_COLLECTION, build_close_entry_evidence
+    from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
+    from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
+    from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.strategy_contract import _id
+
+    if value.get("side") != "BUY" or value.get("plan") is None:
+        raise RuntimeError("CLOSE_ENTRY_REQUIRES_NATIVE_PLAN")
+    account = value["account_ref"]
+    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, ownership["active_spec_id"])
+    if spec_doc is None:
+        raise RuntimeError("CLOSE_EXECUTION_SPEC_MISSING")
+    spec = mock_automation_spec_from_dict(spec_doc)
+    package_doc = _plan_document(cursor, p, "execution_mock_automation_candidate_packages",
+                                 spec.strategy_ref, spec.candidate_package_hash)
+    proof = _plan_document(cursor, p, CLOSE_ENTRY_COLLECTION, account, value["plan"]["plan_id"])
+    if package_doc is None or proof is None:
+        raise RuntimeError("CLOSE_ENTRY_EVIDENCE_MISSING")
+    package = candidate_package_from_dict(package_doc)
+    if (spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or package.candidate_spec["family"] != "close_betting/v1"
+            or package.package_hash != spec.candidate_package_hash):
+        raise RuntimeError("CLOSE_ENTRY_PACKAGE_CHANGED")
+    cursor.execute(f"SELECT document_json,expires_at FROM central_shadow_candidate_events WHERE event_id={p}"
+                   + (" FOR UPDATE" if p == "%s" else ""), (proof["snapshot"]["candidate_event_id"],))
+    row = cursor.fetchone()
+    if row is None:
+        raise RuntimeError("CLOSE_SHADOW_CANDIDATE_MISSING")
+    event = _json_document(row[0])
+    event["expires_at"] = row[1].isoformat() if isinstance(row[1], datetime) else str(row[1])
+    settings = _plan_document(cursor, p, "server_operational_settings", "global", "current")
+    if settings is None or settings.get("shadow_candidate_enabled") is not True:
+        raise RuntimeError("CLOSE_SHADOW_NOT_ENABLED")
+    config = MinuteShadowConfig.from_document(settings["shadow_candidate_config"])
+    monitor_id = _id("section12-minute-shadow", {"config": config.to_dict(), "session_profile": spec.session_profile,
+        "universe_max_age_seconds": settings["shadow_candidate_universe_max_age_seconds"]})
+    if event["run_id"] != monitor_id or config.strategy.family != "close_betting/v1":
+        raise RuntimeError("CLOSE_CURRENT_SHADOW_CHANGED")
+    now = kst_now() if now_provider is None else now_provider()
+    expected, decision, plan = build_close_entry_evidence(spec, run_id=value["run_id"],
+        parameters=package.candidate_spec["parameters"], event=event, quote=proof["snapshot"]["quote"],
+        decided_at=datetime.fromisoformat(value["created_at"]), now=now)
+    if (json.dumps(expected, sort_keys=True) != json.dumps(proof, sort_keys=True)
+            or value["plan"] != asdict(plan) or value["decision_id"] != decision.decision_id
+            or value["symbol"] != decision.symbol or value["quantity"] != decision.quantity
+            or value["order_type"] != "LIMIT" or value["limit_price"] != decision.signal_reference_price):
+        raise RuntimeError("CLOSE_ENTRY_PROOF_OR_ORDER_CHANGED")
 
 
 def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider):

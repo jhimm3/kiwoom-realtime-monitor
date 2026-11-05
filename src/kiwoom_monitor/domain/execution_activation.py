@@ -23,6 +23,31 @@ MOCK_CANDIDATE_TRANSITION_POLICY = "wait_until_flat"
 MOCK_STOP_POLICY = "disable_new_orders_and_reconcile"
 MOCK_RECOVERY_POLICY = "broker_reconcile_before_resume"
 LEADER_NATIVE_PLAN_MODE = "leader-0b-native-plan/v1"
+CLOSE_NATIVE_PLAN_MODE = "close-minute-native-plan/v1"
+
+
+@dataclass(frozen=True)
+class CloseMockExecutionPolicy:
+    maximum_adverse_slippage_bps: int
+    protective_slippage_bps: int
+    entry_price_basis: str
+    entry_remainder_policy: str
+    exit_price_basis: str
+    version: str = "close-mock-execution-policy/v1"
+
+    def __post_init__(self) -> None:
+        if (self.version != "close-mock-execution-policy/v1"
+                or self.entry_price_basis != "acknowledged_0B_bounded_by_signal/v1"
+                or self.entry_remainder_policy != "cancel_at_entry_deadline/v1"
+                or self.exit_price_basis != "acknowledged_0B_bounded_slippage/v1"):
+            raise ValueError("unsupported CLOSE execution policy")
+        if any(type(value) is not int or not 0 <= value < 10_000 for value in (
+            self.maximum_adverse_slippage_bps, self.protective_slippage_bps,
+        )):
+            raise ValueError("CLOSE slippage bounds must be explicit integer basis points")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 class StrategyLifecycleStage(StrEnum):
@@ -234,13 +259,19 @@ class MockAutomationOperatingSpec:
     version: str = MOCK_AUTOMATION_SPEC_VERSION
     unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None
     execution_plan_mode: str | None = None
+    close_execution_policy: CloseMockExecutionPolicy | None = None
 
     def __post_init__(self) -> None:
-        if self.execution_plan_mode is not None and (
-            self.execution_plan_mode != LEADER_NATIVE_PLAN_MODE or self.unfilled_execution_policy is None
-            or self.supported_venue != "KRX"
-        ):
+        if self.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE:
+            if (not isinstance(self.close_execution_policy, CloseMockExecutionPolicy)
+                    or self.supported_venue != "KRX" or self.unfilled_execution_policy is not None):
+                raise ValueError("CLOSE native plan requires its explicit KRX execution policy")
+        elif self.execution_plan_mode is not None and (
+                self.execution_plan_mode != LEADER_NATIVE_PLAN_MODE or self.unfilled_execution_policy is None
+                or self.supported_venue != "KRX"):
             raise ValueError("leader native plan mode requires the explicit KRX mock unfilled policy")
+        if self.close_execution_policy is not None and self.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE:
+            raise ValueError("CLOSE execution policy requires its native plan mode")
         if self.unfilled_execution_policy is not None:
             if not isinstance(self.unfilled_execution_policy, MockUnfilledExecutionPolicy):
                 raise ValueError("mock unfilled execution policy must be typed")
@@ -354,6 +385,8 @@ class MockAutomationOperatingSpec:
             document["unfilled_execution_policy"] = self.unfilled_execution_policy.to_dict()
         if self.execution_plan_mode is not None:
             document["execution_plan_mode"] = self.execution_plan_mode
+        if self.close_execution_policy is not None:
+            document["close_execution_policy"] = self.close_execution_policy.to_dict()
         return document
 
 
@@ -381,6 +414,8 @@ def assess_mock_automation_readiness(
         reasons.append("FORWARD_PROFILE_NOT_MOCK")
     if spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE and profile.family_version != LEADER_BREAKOUT_FAMILY_ID:
         reasons.append("NATIVE_PLAN_MODE_REQUIRES_LEADER_0B_FAMILY")
+    if spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE and profile.family_version != "close_betting/v1":
+        reasons.append("NATIVE_PLAN_MODE_REQUIRES_CLOSE_FAMILY")
     if profile.criteria.tbd_fields:
         reasons.extend(f"FORWARD_CRITERIA_TBD:{name}" for name in profile.criteria.tbd_fields)
     if profile.session_profile != spec.session_profile:
@@ -611,6 +646,8 @@ def mock_automation_spec_from_dict(value: Mapping[str, Any]) -> MockAutomationOp
         unfilled_execution_policy=(MockUnfilledExecutionPolicy(**value["unfilled_execution_policy"])
                                    if value.get("unfilled_execution_policy") is not None else None),
         execution_plan_mode=value.get("execution_plan_mode"),
+        close_execution_policy=(CloseMockExecutionPolicy(**value["close_execution_policy"])
+                                if value.get("close_execution_policy") is not None else None),
     )
     expected = str(value.get("spec_id", spec.spec_id))
     if expected != spec.spec_id:

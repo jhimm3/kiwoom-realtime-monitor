@@ -338,6 +338,8 @@ class MockAutomationStopRevision:
 
 
 class MockAutomationExecutionRepository(Protocol):
+    def load_close_entry_evidence(self, account_ref: str, plan_id: str) -> Mapping[str, Any] | None: ...
+    def save_close_entry_evidence(self, account_ref: str, plan_id: str, value: Mapping[str, Any]) -> bool: ...
     def mock_automation_read_scope(self) -> AbstractContextManager[Any]: ...
     def load_mock_automation_spec(
         self, account_ref: str, spec_id: str, *,
@@ -433,6 +435,8 @@ def mock_automation_intent_id(spec_id: str, strategy_decision_id: str) -> str:
 def mock_automation_order_policy_version(family_id: str | None, session_profile: str | None) -> str:
     if family_id == LEADER_BREAKOUT_FAMILY_ID:
         return "leader_execution_adapter/v1"
+    if family_id == "close_betting/v1":
+        return "close_execution_adapter/v1"
     return f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{session_profile}"
 
 

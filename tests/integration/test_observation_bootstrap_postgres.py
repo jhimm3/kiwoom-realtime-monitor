@@ -368,6 +368,19 @@ class PlannedLeaderPostgresTests(unittest.IsolatedAsyncioTestCase):
         await PlannedLeaderNativeTests.test_explicit_leader_plan_replays_pinned_0b_proof_and_protects_the_fill_after_restart(self)
 
 
+class CloseEntryPostgresTests(unittest.TestCase):
+    def test_close_entry_uses_native_shadow_quote_policy_and_one_plan(self):
+        from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
+
+        url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
+        if not url:
+            raise unittest.SkipTest("dedicated diagnostic PostgreSQL URL is required")
+        store = PostgresQueryStore(self.enterContext(isolated_observation_schema(url)))
+        self.addCleanup(store.close)
+        store.initialize()
+        MockAutomationSpecificationTests._verify_close_entry_claim(self, store)
+
+
 class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests

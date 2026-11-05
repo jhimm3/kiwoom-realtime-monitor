@@ -325,6 +325,8 @@ R2 프로필 생성의 멱등 원장은 기존 `central_documents`의 `credentia
 binding revision, activation receipt와 매매 이력 참조는 유지한다. vault에는 빈 credentials의
 disabled tombstone만 남으므로 과거 App Key/Secret Key는 보존하지 않는다.
 
+종가베팅 최초 진입의 불변 근거는 `central_documents`의 collection=`execution_close_entry_evidence`, owner=모의계좌 UUID, key=`close_plan_…`에 저장한다. 계획 키는 명세·실행 run·원래 Shadow 후보 ID로 결정한다. 문서의 `snapshot`은 계좌·명세·후보 package·Shadow snapshot과 0B 가격 참조를, `decision`은 실제 수량·지정가·시점을 보존한다. `proof_id`를 계획의 `policy_ref`로 결합한다. 기존 immutable writer가 같은 내용의 재요청과 다른 내용의 충돌을 구분하고, 실제 intent의 native 트랜잭션은 원래 후보·만료와 현재 Shadow 설정을 다시 대조한다. 일반 종가베팅 실행기 연결은 [현재 범위](docs/architecture/section12-development-roadmap-20261105.md#s12-close-native-entry)를 따른다.
+
 R6b3a 시세 역할은 기존 central_documents의 collection=`server_market_profile_settings`,
 owner=`global`, key=`settings`에 저장한다. 필드는 market_profile_id,
 불변 legacy_real_profile_id=`nas-real-default`, 양의 정수 revision 세 개뿐이다.

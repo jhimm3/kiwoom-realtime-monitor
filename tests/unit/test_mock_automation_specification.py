@@ -1199,6 +1199,167 @@ class MockAutomationSpecificationTests(unittest.TestCase):
     def test_planned_sell_isolation_preserves_manual_shares_in_sqlite(self):
         verify_native_planned_sell_isolation(self, self.store, self)
 
+    def test_close_entry_uses_native_shadow_quote_policy_and_one_plan(self):
+        self._verify_close_entry_claim(self.store)
+
+    def _verify_close_entry_claim(self, store):
+        from dataclasses import asdict
+        from datetime import time
+        from kiwoom_monitor.application.close_mock_execution import (
+            CLOSE_ENTRY_COLLECTION, build_close_entry_evidence, dispatch_close_entry,
+        )
+        from kiwoom_monitor.application.market_session_schedule import KST, session_window_at
+        from kiwoom_monitor.domain.execution_activation import (
+            CLOSE_NATIVE_PLAN_MODE, CloseMockExecutionPolicy, mock_automation_spec_from_dict,
+        )
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+        from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+
+        inputs = mock_specification_inputs(store, publish_candidate=False)
+        example = CloseAndIpoTests()
+        example.symbol = '005930'
+        example.friday = NOW.astimezone(KST).date() + timedelta(days=4)
+        example.tuesday = example.friday + timedelta(days=4)
+        example.published = datetime.combine(example.friday, time(8), KST)
+        example.setUp()
+        cut = datetime.fromisoformat(example.signal.available_at)
+        clock = [cut]
+        self.enterContext(patch.object(store, '_execution_wall_now', lambda: clock[0], create=True))
+        entry_window = replace(example.entry, schedule_version=session_window_at(cut, venue='KRX').schedule_version)
+        calendar = (replace(example.calendar[0], sessions=(entry_window, example.auction)), *example.calendar[1:])
+        parameters = {'capital_won': 100_000, 'policy': example.close.to_dict()}
+        config = json.loads(json.dumps({
+            'version': MINUTE_SHADOW_VERSION, 'family': 'close_betting/v1', 'signal_valid_seconds': 30,
+            'symbols': [example.symbol], 'strategy': parameters,
+            'references': {'version': 'strategy-reference/v1', 'calendar': [asdict(day) for day in calendar], 'listings': []},
+        }, default=lambda value: value.isoformat()))
+        settings = {'revision': 1, 'shadow_candidate_enabled': True, 'shadow_candidate_config': config,
+                    'shadow_candidate_universe_max_age_seconds': 180}
+
+        def save_settings(value):
+            store.upsert_documents('server_operational_settings', [{'owner': 'global', 'key': 'current', 'document': value}])
+
+        save_settings(settings)
+        monitor = CandidateMonitor.from_json(store, json.dumps(config), poll_seconds=2,
+                                            universe_max_age_seconds=180, now_provider=lambda: clock[0])
+        monitor.run_once()
+        for index, frame in enumerate((*example.prior, example.signal)):
+            start = datetime.fromisoformat(frame.bar_start)
+            key = {'trading_date': start.date().isoformat(), 'minute': start.strftime('%H:%M'),
+                   'code': frame.code, 'market': 'KRX'}
+            store.save_minute_bars([{**key, 'open': frame.open, 'high': frame.high, 'low': frame.low,
+                'close': frame.close, 'volume': frame.volume, 'trade_value_million_won': frame.trade_value_million_won,
+                'updated_at': start.timestamp(), 'operation_id': f'close-write-{index}'}])
+            store.finalize_minute_bars([{**key, 'available_at': datetime.fromisoformat(frame.available_at).timestamp(),
+                'capture_quality': 'complete', 'finalization_source': 'timer', 'operation_id': f'close-finalize-{index}'}])
+        monitor.run_once()
+        event, = store.load_shadow_candidates()['events']
+        candidate = {**inputs.package.candidate_spec, 'version': CLOSE_FINAL_CANDIDATE_VERSION,
+            'family': 'close_betting/v1', 'parameters': parameters,
+            'strategy_references': {'version': 'strategy-reference/v1', 'sha256': _hash(config['references'])},
+            'execution_model': {**inputs.package.candidate_spec['execution_model'],
+                'version': 'completed_close_then_next_open/v1', 'same_bar_path_version': 'no_intrabar_fill/v1'}}
+        package = replace(inputs.package, candidate_spec=candidate, candidate_spec_hash=_hash(candidate))
+        policy = replace(inputs.policy, candidate_spec_hash=package.candidate_spec_hash)
+        receipt = evaluate_candidate_eligibility(package, policy, account_ref=ACCOUNT_REF)
+        repository = inputs.repository
+        repository.publish_mock_automation_candidate(package, policy, receipt, credential_profile_id=PROFILE_ID,
+                                                     expected_binding_revision=inputs.binding['binding_revision'])
+        profile = replace(inputs.profile, family_version='close_betting/v1', factor_versions=('close_betting/v1',),
+            policy_version=policy.policy_id, frozen_at=cut, evaluation_start=cut, evaluation_end=example.following.ends_at)
+        repository.save_profile(profile)
+        shadow = strategy_stage_revision(strategy_ref=package.strategy_ref, previous_stage=StrategyLifecycleStage.VALIDATED,
+            stage=StrategyLifecycleStage.SHADOW, evidence_refs=(event['event_id'],), reason='synthetic native CLOSE admission',
+            decided_at=cut)
+        evaluated = strategy_stage_revision(strategy_ref=package.strategy_ref,
+            previous_stage=StrategyLifecycleStage.DRAFT, stage=StrategyLifecycleStage.EVALUATED,
+            evidence_refs=(package.package_hash,), reason='synthetic final CLOSE evidence', decided_at=inputs.stages[0].decided_at)
+        validated = strategy_stage_revision(strategy_ref=package.strategy_ref,
+            previous_stage=StrategyLifecycleStage.EVALUATED, stage=StrategyLifecycleStage.VALIDATED,
+            evidence_refs=(receipt.receipt_id,), reason='synthetic CLOSE eligibility', decided_at=inputs.stages[1].decided_at)
+        stages = (evaluated, validated, shadow)
+        for stage in stages:
+            repository.save_stage_revision(stage)
+        terms = CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
+                                        'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1')
+        # Explicit isolated kernel approval. Product READY publication remains
+        # unavailable until the CLOSE runner and complete position management connect.
+        spec = replace(inputs.spec, candidate_package_hash=package.package_hash, forward_profile_id=profile.profile_id,
+            frozen_at=cut, shadow_evidence_ref=shadow.revision_id, execution_plan_mode=CLOSE_NATIVE_PLAN_MODE,
+            close_execution_policy=terms)
+        self.assertEqual(spec, mock_automation_spec_from_dict(spec.to_dict()))
+        with self.assertRaisesRegex(ValueError, 'explicit KRX execution policy'):
+            replace(spec, close_execution_policy=None)
+        repository.save_mock_automation_spec(spec)
+        transport = _FakeBrokerTransport(lambda: clock[0])
+        execution = ExecutionRepository(store)
+        run_id = execution_run_id_for_spec(spec.spec_id)
+        runtime = ExecutionRuntime(OrderLifecycle(execution, transport, now_provider=lambda: clock[0]), execution,
+            account_ref=ACCOUNT_REF, run_id=run_id, owner_token='close-native-entry-test', now_provider=lambda: clock[0])
+        self.addCleanup(runtime.stop)
+        admit_mock_automation(repository, repository, runtime, account_ref=ACCOUNT_REF,
+                              spec_id=spec.spec_id, requested_at=cut)
+        account = AccountSnapshot(ACCOUNT_REF, 100_000, 0, {}, cut)
+        recovery = MockAccountRecovery(account, ())
+        risk = build_mock_automation_risk_snapshot(recovery, (), (), (), execution_run_id=run_id,
+            binding_revision=spec.binding_revision, reconciliation_revision=1, observed_at=cut,
+            broker_query_started_at=cut, broker_query_completed_at=cut)
+        repository.save_mock_automation_risk_snapshot(risk)
+        record_mock_automation_recovery_from_risk(repository, runtime, recovery, risk, account_ref=ACCOUNT_REF, spec_id=spec.spec_id)
+        quote = {'price_won': 104, 'available_at': cut, 'input_ref': 'collector-trade:fixture:1:005930:1',
+                 'durable': False, 'market_status': 'TRADABLE'}
+        call = dict(parameters=parameters, event=event, quote=quote, recovery=recovery, risk=risk)
+        with self.assertRaisesRegex(ValueError, 'approved signal slippage'):
+            dispatch_close_entry(repository, runtime, spec, **{**call, 'quote': {**quote, 'price_won': 106}})
+        save_settings({**settings, 'shadow_candidate_enabled': False})
+        with self.assertRaisesRegex(RuntimeError, 'CLOSE_SHADOW_NOT_ENABLED'):
+            dispatch_close_entry(repository, runtime, spec, **call)
+        self.assertEqual([], transport.calls)
+        self.assertEqual((), execution.active_intents('mock', ACCOUNT_REF, run_id))
+        save_settings(settings)
+        submit = runtime.submit_automation_intent
+        changed_proofs = []
+
+        def change_quote_after_approval(intent, account, **kwargs):
+            row = store.load_document(CLOSE_ENTRY_COLLECTION, ACCOUNT_REF, intent.plan.plan_id)
+            changed_proofs.append(row['document'])
+            changed = deepcopy(row['document'])
+            changed['snapshot']['quote']['price_won'] = 105
+            store.upsert_documents(CLOSE_ENTRY_COLLECTION,
+                [{'owner': ACCOUNT_REF, 'key': intent.plan.plan_id, 'document': changed}])
+            return submit(intent, account, **kwargs)
+
+        with patch.object(runtime, 'submit_automation_intent', side_effect=change_quote_after_approval):
+            with self.assertRaisesRegex(RuntimeError, 'CLOSE_ENTRY_PROOF_OR_ORDER_CHANGED'):
+                dispatch_close_entry(repository, runtime, spec, **call)
+        original, = changed_proofs
+        from kiwoom_monitor.application.close_mock_execution import close_entry_plan_id
+
+        plan_id = close_entry_plan_id(spec.spec_id, run_id, event['event_id'])
+        store.upsert_documents(CLOSE_ENTRY_COLLECTION, [{'owner': ACCOUNT_REF, 'key': plan_id, 'document': original}])
+        self.assertEqual([], transport.calls)
+        self.assertEqual((), execution.active_intents('mock', ACCOUNT_REF, run_id))
+        self.assertIsNone(store.load_document('execution_mock_plan_positions', ACCOUNT_REF, plan_id))
+        first, buy, receipt = dispatch_close_entry(repository, runtime, spec, **call)
+        self.assertEqual((MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, OrderState.ACCEPTED, 4, 104),
+                         (first.status, buy.state, buy.intent.quantity, buy.intent.limit_price))
+        self.assertIsInstance(buy.intent, PlannedOrderIntent)
+        proof = store.load_document(CLOSE_ENTRY_COLLECTION, ACCOUNT_REF, buy.intent.plan.plan_id)['document']
+        self.assertEqual(event['event_id'], proof['snapshot']['candidate_event_id'])
+        self.assertEqual(proof['proof_id'], buy.intent.plan.policy_ref)
+        repeated = dispatch_close_entry(repository, runtime, spec, **{**call, 'quote': {**quote, 'price_won': 105}})
+        self.assertEqual((buy.intent, receipt), (repeated[1].intent, repeated[2]))
+        self.assertEqual(['BUY'], [entry[1] for entry in transport.calls])
+        expiry = datetime.fromisoformat(event['expires_at'])
+        clock[0] = expiry + timedelta(seconds=1)
+        after_expiry = dispatch_close_entry(repository, runtime, spec, **call)
+        self.assertEqual((buy.intent, receipt), (after_expiry[1].intent, after_expiry[2]))
+        self.assertEqual(['BUY'], [entry[1] for entry in transport.calls])
+        with self.assertRaisesRegex(ValueError, 'expired'):
+            build_close_entry_evidence(spec, run_id=run_id, parameters=parameters, event=event,
+                quote={**quote, 'available_at': expiry}, decided_at=expiry, now=expiry)
+
     def test_section12_close_overnight_reopens_native_plan_and_exits_only_detailed_fills(self):
         db = Path(self.enterContext(tempfile.TemporaryDirectory())) / "close-overnight.sqlite3"
         self._verify_native_close_overnight(lambda now: SQLiteQueryStore(db, now_provider=now))
