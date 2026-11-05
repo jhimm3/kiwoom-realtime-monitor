@@ -27,6 +27,7 @@ from kiwoom_monitor.domain.execution_activation import (
     MockAutomationOperatingSpec,
     CLOSE_NATIVE_PLAN_MODE,
     CloseMockExecutionPolicy,
+    PANIC_NATIVE_PLAN_MODE, PanicMockExecutionPolicy,
     MockUnfilledExecutionPolicy,
     MockAutomationReadiness,
     MockAutomationReadinessStatus,
@@ -121,10 +122,16 @@ def build_mock_automation_publication_documents(
     unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None,
     execution_plan_mode: str | None = None,
     close_execution_policy: CloseMockExecutionPolicy | None = None,
+    panic_execution_policy: PanicMockExecutionPolicy | None = None,
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
-    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
+    if package.candidate_spec.get('family') == 'panic_rebound/v1' and (
+        execution_plan_mode != PANIC_NATIVE_PLAN_MODE or not isinstance(panic_execution_policy, PanicMockExecutionPolicy)
+        or not isinstance(shadow_event.get('panic_entry_parameters'), Mapping)
+    ):
+        raise ValueError('PANIC READY publication requires an explicit PANIC execution policy')
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and package.candidate_spec['family'] != 'panic_rebound/v1' and (
         execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or not isinstance(close_execution_policy, CloseMockExecutionPolicy)
     ):
         raise ValueError("CLOSE READY publication requires an explicit CLOSE execution policy")
@@ -218,6 +225,7 @@ def build_mock_automation_publication_documents(
         unfilled_execution_policy=unfilled_execution_policy,
         execution_plan_mode=execution_plan_mode,
         close_execution_policy=close_execution_policy,
+        panic_execution_policy=panic_execution_policy,
         **{name: int(limits[name]) for name in MOCK_AUTOMATION_LIMIT_FIELDS},
     )
     return {
@@ -267,7 +275,12 @@ def publish_ready_mock_automation_spec(
     )
     if package is None:
         raise ValueError("mock automation candidate package is not stored")
-    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
+    if package.candidate_spec.get('family') == 'panic_rebound/v1' and (
+        spec.execution_plan_mode != PANIC_NATIVE_PLAN_MODE or not isinstance(spec.panic_execution_policy, PanicMockExecutionPolicy)
+        or not isinstance(shadow_event.get('panic_entry_parameters'), Mapping)
+    ):
+        raise ValueError('PANIC READY publication requires an explicit PANIC execution policy')
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and package.candidate_spec['family'] != 'panic_rebound/v1' and (
         spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE
         or not isinstance(spec.close_execution_policy, CloseMockExecutionPolicy)
     ):

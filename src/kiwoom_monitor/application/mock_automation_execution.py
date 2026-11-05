@@ -31,6 +31,7 @@ from kiwoom_monitor.application.mock_automation_risk import (
 )
 from kiwoom_monitor.domain.execution_activation import (
     LEADER_NATIVE_PLAN_MODE, ForwardEvaluationSpec, MockAutomationOperatingSpec, allows_stopped_close_management,
+    allows_stopped_panic_management,
 )
 from kiwoom_monitor.domain.order_contract import (
     TERMINAL_ORDER_STATES,
@@ -441,6 +442,8 @@ def mock_automation_order_policy_version(family_id: str | None, session_profile:
         return "leader_execution_adapter/v1"
     if family_id in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'}:
         return "close_execution_adapter/v1"
+    if family_id == 'panic_rebound/v1':
+        return 'panic_execution_adapter/v1'
     return f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{session_profile}"
 
 
@@ -482,8 +485,9 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
     elif (
         (control.desired_state is not MockAutomationDesiredState.RUNNING
          and not (control.desired_state is MockAutomationDesiredState.STOPPED and is_exit
-                  and allows_stopped_close_management(spec)
-                  and decision.final_action == 'EXIT' and decision.constraints == ('close_execution_adapter/v1',)))
+                  and decision.final_action == 'EXIT' and (
+                      allows_stopped_close_management(spec) and decision.constraints == ('close_execution_adapter/v1',)
+                      or allows_stopped_panic_management(spec) and decision.constraints == ('panic_execution_adapter/v1',))))
         or control.active_spec_id != spec.spec_id
         or control.execution_run_id != admission.execution_run_id
     ):

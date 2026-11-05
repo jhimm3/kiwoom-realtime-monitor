@@ -734,6 +734,7 @@ class CandidateMonitor:
                     candidate["close_ipo_entry_setup"] = evaluation.snapshot.feature_values[0]["setup"]
                 elif self._minute_shadow.strategy.family == PANIC_FAMILY:
                     candidate["panic_entry_setup"] = evaluation.snapshot.feature_values[0]["setup"]
+                    candidate['panic_entry_parameters'] = self._minute_shadow.strategy.to_dict()
         if expires_at is None:
             expires_at = evaluation.state.candidate_expires_at if candidate is not None else ""
         self._store.save_shadow_evaluation(

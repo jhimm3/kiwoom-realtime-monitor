@@ -1,6 +1,6 @@
 # 현재 모듈 지도
 
-**S12-05 낙주 결과/Shadow:** 기존 `panic_rebound`가 P0/P1 정책/뉴스 parse·canonical 표현과 원래 Shadow 대조를, `section12_minute_research`가 같은 설정/상태를, `research_process`/`research_run`이 기존 final 소유/캐시·Paper/unknown 연구를, 기존 후보 publisher가 원본 계보/immutable 게시를 소유한다. `candidate_monitor`의 원래 panic_entry_setup을 소비하며 새 order owner/worker/schema는 없다. 실제 주문/READY·부분/당일 미완료 관리는 후속이다. [근거·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-panic-final-shadow).
+**S12-05 낙주 native 연결:** `panic_rebound`는 P0/P1 규칙과 현재 뉴스/셋업 대조, `candidate_monitor`는 원래 setup/현재 parameters를 보존한다. `domain/execution_activation`과 기존 publication/admission이 명시 PANIC 정책·READY를, `application/panic_mock_execution`이 순수 진입/실제 상세 잔량의 청산 근거를, 기존 ForwardEvaluationRepository가 immutable 근거를 소유한다. 기존 Runtime/lifecycle/ExecutionRepository의 단일 권한과 `database_execution._minute_native_documents`/native claim을 재사용한다. Episode 자동 관리·현재 정정·READY UI/일지는 후속이며 새 worker/schema/공개 QueryStore API는 없다. [수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-panic-native-plan).
 
 **S12-05 선별 정정 보존:** 기존 `preserve_selected_order_evidence` CLI가 정지한 원본 cut/선택을, domain `selected_order_evidence` codec이 v1/v2 원장 사실·물리 부모/수량/FILL·미귀속 marker와 canonical bytes를, 기존 SQLite document native writer가 offline 최초 영수증/재전달을 소유한다. 실제 실행 원장/권한으로 채우지 않으며 원본·구형 미정정 v1은 유지한다. [수락·독립 계좌 인계 잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-selected-amendment-evidence).
 

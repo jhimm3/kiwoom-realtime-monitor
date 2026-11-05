@@ -305,7 +305,12 @@ def matches_panic_shadow(parameters: Mapping, event: Mapping) -> bool:
         if (parameters.get('panic_allow_unresolved_news', False) is not False
                 or set(parameters) != {'capital_won', 'quantity', 'policy', 'news_proofs'}):
             return False  # Unresolved-news research remains a research artifact.
-        _, _, rules, proofs, _ = parse_panic_parameters(parameters)
+        _, _, rules, _, _ = parse_panic_parameters(parameters)
+        current = event.get('panic_entry_parameters', parameters)
+        _, _, current_rules, proofs, _ = parse_panic_parameters(current)
+        if (current_rules != rules or current['quantity'] != parameters['quantity']
+                or current['capital_won'] != parameters['capital_won']):
+            return False
         setup = PanicSetup.from_dict(event['panic_entry_setup'])
         available, cutoff, expires = (aware_iso_kst(event[name]) for name in ('available_at', 'input_cutoff', 'expires_at'))
         quantity, price = event['quantity'], event['signal_reference_price']

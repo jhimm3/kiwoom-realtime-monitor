@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 종가베팅·신규주의 현재 재판단/정정과 선별 보존 v2에 이어, 낙주 P0/P1의 독립 최종 Paper→후보 게시→원래 native Shadow 대조를 Windows34/실제PG2건으로 연결했다. 뉴스 미확인은 최종 연구에도 보존하며 실시간 승인과 구분한다. 다음은 낙주의 명시 실행 정책/READY→native 주문·부분/늦은 체결·당일 미완료 수명이다. 대표7개·DD/MICRO·독립 계좌/원주문 검증과 운영 제외 및 완료 기준을 유지한다. [낙주 결과/Shadow](#s12-panic-final-shadow) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 낙주 P0/P1은 최종 후보/Shadow에 이어 현재 날짜·가격·뉴스를 쓰는 명시 READY backend→native 진입·실제 잔량 보호·STOPPED/익일 DB 복구를 Windows57/실제PG9건으로 확인했다. 다음은 기존 Episode의 첫0B 보존·현재 조건 재판단/정정·미체결/보유 자동 관리와 READY UI·일지/API다. 대표7개·DD/MICRO·독립 계좌/원주문 검증과 운영 제외 및 완료 기준을 유지한다. [낙주 native](#s12-panic-native-plan) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -669,3 +669,19 @@ source `2c347d86cc95be9e797c7fe98c4a61199ec5e1598c4e84a2479bc7b8a991a299`의 **W
 구조1328·위반0/consumer delta0, 증분7288정의/290기록·기존미결49를 보존했고 worker9/TEMP 및 PG DB/port/private 정리를 대조했다. 초기 probe는 실제 final family 차단과 ordinary-Paper 전용 unknown 제한을 재현했다. 새 fixture의 참조 파일에는 기존 필수 빈 listings를 넣었고, available=end+2초에 맞는 실제 후속 시가와 명시한 초기2분 warmup을 사용했다. 기존 engine/평가 기대값·warmup120·한도/skip/CI를 바꾸지 않았다. 새 cycle은 허용 목록을 늘리지 않고 기존 PANIC parser 책임으로 해소했다. [첫 final 차단](../../tmp/s12-05-panic/probe-v2.json) · [입력 순서 확인](../../tmp/s12-05-panic/probe-v3.json) · [warmup 확인](../../tmp/s12-05-panic/probe-v7.json) · [연결 probe](../../tmp/s12-05-panic/probe-v9.json).
 
 이는 **S12-05 항목5의 선행 결과/Shadow 연결**이며 낙주 native 주문·부분 체결/반등·잔량 취소/늦은 FILL·당일 미완료 관리·일지/READY UI 수락은 아니다. 다음은 이 원래 셋업과 명시 실행 정책을 같은 계좌 owner/native claim·현재 조건 재판단/정정 우선·기존 Episode에 연결한다. 전체4/5·대표3/4/7/9의4/11, 다른7개·DD/MICRO와 독립 계좌 인계의 기존 잔여/운영 제외를 유지한다. 실제 주문·NAS 변경/배포·권한 인계·T0·push는 실행하지 않았다.
+
+<a id="s12-panic-native-plan"></a>
+
+### S12-05 항목5 · 낙주 현재 근거의 READY backend와 native 원래 잔량 — 2026-11-06
+
+낙주 P0/P1의 최종 후보/Shadow를 기존 READY 게시·admission·단일 계좌 Runtime/lifecycle에 연결했다. 명시 `panic-minute-native-plan/v1`과 `PanicMockExecutionPolicy`는 진입 불리 가격 한도·보호 가격 한도·STOPPED 관리 의미를 동결한다. 값을 제품 기본값으로 채우지 않았으며 기존 명세는 새 필드를 생략해 직렬화와 ID를 보존한다. 이 단계의 READY는 backend 경계이며 화면 선택과 자동 Episode 연결은 아래 잔여다.
+
+연구 당시의 기사 ID/절대가격을 미래 진입 조건으로 재사용하던 연결을 제거했다. CandidateMonitor가 실제 현재 설정의 규칙·수량·자본·뉴스 근거를 `panic_entry_parameters`로 원래 셋업과 함께 보존한다. 후보 대조는 검증한 규칙과 명시 수량/자본이 같은지 확인하고 해당 신호의 현재 뉴스 판본을 cut에서 판단한다. 과거 metadata 없는 신호는 이력/비교 reader에서 읽을 수 있지만 새 native 진입은 현재 근거를 요구한다. 시각 미확인·후기 뉴스와 unknown 연구의 원래 구분은 유지한다. 실제 진입은 fresh 승인0B와 원래 실패/반등 구조·신호 유효기한·가격/자본을 다시 판단한다. 원래 접수 승인을 AMEND에 재사용하는 것은 계속 거절한다.
+
+내구 진입/청산 근거는 기존 immutable document owner에 저장하고 QUEUED와 SUBMISSION_STARTED의 기존 native transaction에서 원래 후보/현재 설정·원래 상세 FILL·계획 head/revision·Risk/control/lease를 다시 대조한다. 기존 CLOSE/IPO native reader의 한 SQL 지점을 공통 minute scope로 옮겼으며 새 주문 owner·task·schema·공개 QueryStore API·라이브러리는 없다. exit는 원래 매수가 확인된 terminal 상태가 된 뒤 실제 상세 체결과 현재 계획 잔량만 사용한다. 부분2→취소 응답 UNKNOWN→늦은1은 보유3이며 원래 주문4로 청산하지 않는다. 반등 SELL3의 상세1/확인된 취소 후 남은2는 새 현재 실패 판단과 같은 계획의 새 revision으로 처리한다. 이는 broker가 확인한 종료 뒤의 잔량 처리 검사이며 자동 정정 대신 취소하는 정책을 추가한 것이 아니다.
+
+source `de4456e50daae48e51d940b1d6a03af7f6ef5524ec6b3fff061420e2a8d6376f`에서 **Windows57건/11모듈 + 실제 격리 PostgreSQL9건**이 통과했다. 신규 unit4/PG3은 연구 표본과 다른 날짜·가격945/950·새 뉴스로 P0/P1 READY/native 진입, 불리 가격·실패/이미 반등 거절, 원래 영수증 재시도, 부분/늦은 체결·청산 잔량2·최종0, native 직전 설정/셋업/청산 수량 변조의 전송/예약0을 확인한다. STOPPED `reconcile_only`는 전송0, 명시 `continue_original_plan`은 기존 정규장 profile 밖16:00에서 주문을 보류하고 실제 DB 재열기·다음 평일 fresh 계좌 cut 뒤 원래 잔량3을 overdue 관리하며 STOPPED와 원래 근거를 보존한다. 기존 activation/옛 명세·generic 후보·CLOSE/IPO native/정정·수동 보유 격리·계좌 원장/lease/SQL 계측·인증 READY와 조회 역할 검사를 재사용했다. 모든 시장/계좌/체결은 합성 모의 자료이며 과거 실증 수익이나 실제 운영 수락이 아니다. [Windows](../../tmp/s12-04-shadow/s12-05-panic-native-final/evidence.json) · [PG](../../tmp/s12-03-pg-baseline/s12-05-panic-native-final/postgres-run.json) · [증분](../../tmp/s12-05-panic/native-review-verified.json) · [정리](../../tmp/s12-05-panic/native-cleanup.json).
+
+구조1328/위반0·소비 delta0·증분7295정의/292기록·기존미결49와 worker11/TEMP·PG job/DB/port/private 정리를 대조했다. native reader의 기존 `_close_native_documents` SQL1 지점은0으로 닫고 공통 `_minute_native_documents`의 같은 지점1만 기록했다. 기존 채택 목록이나 런타임 SQL 한도는 초기화하지 않았다. 속도/메모리 개선을 주장하지 않는다. 첫 정규 Windows57건 중 기존 CLOSE 취소1건이 남은 옛 reader 이름으로 실패했고 actual PG8건은 통과했다. 실패를 보존한 뒤 그 호출을 수정하고 기존 PG 취소 counterpart를 추가해 동일 최종 source의 영향 검사를 확인했다. [최초57건](../../tmp/s12-04-shadow/s12-05-panic-native/evidence.json) · [수정 전 PG8건](../../tmp/s12-03-pg-baseline/s12-05-panic-native/postgres-run.json). 초기 새 fixture의 `source_final.finished_at` 필드와16:00의 기존 after-hours에 대한 정확한 `SESSION_PROFILE_MISMATCH` 기대만 바로잡았으며 제품의 시간/세션 제한을 바꾸지 않았다. [최초 fixture 오류](../../tmp/s12-05-panic/native-probe.json) · [세션 기대 확인](../../tmp/s12-05-panic/native-probe-v3.json) · [최종 연결 probe](../../tmp/s12-05-panic/native-probe-v5.json).
+
+**항목5 전체는 미완료다.** 남은 직접 연결은 기존 Episode의 첫0B 실패/반등 고정·깨우기/checkpoint, 부분 BUY 미체결의 현재 조건 재판단→정정 우선/필요 취소와 UNKNOWN 복구, 현재 보유/SELL 잔량 자동 관리, READY UI·실제 화면/일지/API 경로다. 기존 종가베팅·신규주의 현재 정정 정책과 공통 물리 원장·Gateway/command/drain을 재사용하며 새 자동 관리 엔진을 만들지 않는다. 전체4/5·대표3/4/7/9의4/11과 원래 나머지1/2/5/6/8/10/11·DD/MICRO·독립 계좌 인계 및 완료 기준은 유지한다. 실제 주문·NAS 변경/배포·T0·권한 인계·push는 수행하지 않았다.

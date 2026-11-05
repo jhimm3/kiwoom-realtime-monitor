@@ -3163,6 +3163,22 @@
       ],
       "boundary_reason": "Reuse existing immutable ExecutionRecord/physical-leg facts through execution_broker_legs; no second order model, relay, I/O inside pure assessment, or new state owner. Native writer uses same pure assessment and already-read control facts. One bounded current Shadow read is in existing management poll, not per0B. Native command evidence reads are required only for an actual proposed change; no runtime SQL1 baseline is changed.",
       "validation": "Independent fake broker physical book transfers actual partial quantity3, retains original1, and publishes exact parent/side/price/cash/remainder. Real monitor/Gateway/native SQLite and PostgreSQL validate amendment after original transmission expiry but within original strategy signal validity; current Shadow loss and original IPO breakout loss cancel. A context change after prepare is rejected before any mutation event/transport. Lost ACK recovers with one mutation. BUY1+3 and protective SELL4 preserve same raw ID across physical orders and one original plan; actual journal retains three facts across reopen/retry. Original trigger bound and STOP/v4 remain effective. Repeated unchanged assessments add zero broker reads. Existing assertions, costs, limits, time gates and CI profiles are preserved."
+    },
+    {
+      "id": "S12-05-panic-original-native-plan-20261106",
+      "reason": "Implement the approved S12-05 scenario5 native PANIC predecessor: original P0/P1 final and current Shadow must reach explicit READY, single-owner native BUY and actual-owned protection without creating a second order engine.",
+      "connection": "Existing final package/current CandidateMonitor -> retained panic_entry_parameters and setup -> typed explicit PANIC policy/publication -> normal admission/gate -> existing Runtime/lifecycle/repository -> same native transaction at QUEUED and SUBMISSION_STARTED. Existing generic document owner holds immutable entry/exit proofs; native minute-scope reader is shared with unchanged CLOSE/IPO. Exit uses the original terminal BUY detailed ledger and current head/revision; no new authority/task/schema/library.",
+      "validation": "P0/P1 actual native runs use different forward dates/prices/news than the frozen research case. Reject current failed/rebounded/adverse entries; preserve one original BUY receipt, partial2/cancel UNKNOWN/late1, and SELL only actual3. A confirmed partial SELL1 leaves2 for a newly assessed original-plan exit, with idempotent old receipt and flat final head. Native preclaim settings/entry setup/exit quantity mutations roll back with no transport/reservation. Old BUY admission cannot authorize AMEND. Explicit STOP reconcile-only sends nothing; continue-original retains STOPPED through regular-session rejection at16:00, actual DB reopen and next-weekday fresh recovery/overdue SELL3 with original evidence. Both SQLite and actual PG exercise the same positive/negative paths.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_close_native_documents|cursor.execute": 0,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_minute_native_documents|cursor.execute": 1
+      },
+      "evidence": [
+        "tests/unit/test_panic_mock_execution.py",
+        "tests/integration/test_panic_mock_execution_postgres.py",
+        "tests/unit/test_close_order_management.py",
+        "tests/integration/test_postgres_access_postgres.py"
+      ]
     }
   ]
 }

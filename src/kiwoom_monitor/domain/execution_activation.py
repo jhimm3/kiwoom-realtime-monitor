@@ -24,6 +24,7 @@ MOCK_STOP_POLICY = "disable_new_orders_and_reconcile"
 MOCK_RECOVERY_POLICY = "broker_reconcile_before_resume"
 LEADER_NATIVE_PLAN_MODE = "leader-0b-native-plan/v1"
 CLOSE_NATIVE_PLAN_MODE = "close-minute-native-plan/v1"
+PANIC_NATIVE_PLAN_MODE = "panic-minute-native-plan/v1"
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,33 @@ class CloseMockExecutionPolicy:
 def allows_stopped_close_management(spec) -> bool:
     return (spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE and spec.close_execution_policy is not None
             and spec.close_execution_policy.stopped_management == 'continue_original_plan/v1')
+
+
+@dataclass(frozen=True)
+class PanicMockExecutionPolicy:
+    maximum_adverse_slippage_bps: int
+    protective_slippage_bps: int
+    stopped_management: str
+    version: str = 'panic-mock-execution-policy/v1'
+
+    def __post_init__(self):
+        if (self.version != 'panic-mock-execution-policy/v1'
+                or self.stopped_management not in {'continue_original_plan/v1', 'reconcile_only/v1'}
+                or any(type(value) is not int or not 0 <= value < 10_000 for value in
+                       (self.maximum_adverse_slippage_bps, self.protective_slippage_bps))):
+            raise ValueError('PANIC requires explicit price bounds and stopped management')
+
+    @property
+    def accepted_order_management(self):
+        return 'reassess_then_amend_price/v1'
+
+    def to_dict(self):
+        return asdict(self)
+
+
+def allows_stopped_panic_management(spec) -> bool:
+    return (spec.execution_plan_mode == PANIC_NATIVE_PLAN_MODE and spec.panic_execution_policy is not None
+            and spec.panic_execution_policy.stopped_management == 'continue_original_plan/v1')
 
 
 class StrategyLifecycleStage(StrEnum):
@@ -276,9 +304,14 @@ class MockAutomationOperatingSpec:
     unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None
     execution_plan_mode: str | None = None
     close_execution_policy: CloseMockExecutionPolicy | None = None
+    panic_execution_policy: PanicMockExecutionPolicy | None = None
 
     def __post_init__(self) -> None:
-        if self.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE:
+        if self.execution_plan_mode == PANIC_NATIVE_PLAN_MODE:
+            if (not isinstance(self.panic_execution_policy, PanicMockExecutionPolicy) or self.supported_venue != 'KRX'
+                    or self.unfilled_execution_policy is not None or self.close_execution_policy is not None):
+                raise ValueError('PANIC native plan requires its explicit KRX execution policy')
+        elif self.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE:
             if (not isinstance(self.close_execution_policy, CloseMockExecutionPolicy)
                     or self.supported_venue != "KRX" or self.unfilled_execution_policy is not None):
                 raise ValueError("CLOSE native plan requires its explicit KRX execution policy")
@@ -288,6 +321,8 @@ class MockAutomationOperatingSpec:
             raise ValueError("leader native plan mode requires the explicit KRX mock unfilled policy")
         if self.close_execution_policy is not None and self.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE:
             raise ValueError("CLOSE execution policy requires its native plan mode")
+        if self.panic_execution_policy is not None and self.execution_plan_mode != PANIC_NATIVE_PLAN_MODE:
+            raise ValueError('PANIC execution policy requires its native plan mode')
         if self.unfilled_execution_policy is not None:
             if not isinstance(self.unfilled_execution_policy, MockUnfilledExecutionPolicy):
                 raise ValueError("mock unfilled execution policy must be typed")
@@ -403,6 +438,8 @@ class MockAutomationOperatingSpec:
             document["execution_plan_mode"] = self.execution_plan_mode
         if self.close_execution_policy is not None:
             document["close_execution_policy"] = self.close_execution_policy.to_dict()
+        if self.panic_execution_policy is not None:
+            document['panic_execution_policy'] = self.panic_execution_policy.to_dict()
         return document
 
 
@@ -430,6 +467,8 @@ def assess_mock_automation_readiness(
         reasons.append("FORWARD_PROFILE_NOT_MOCK")
     if spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE and profile.family_version != LEADER_BREAKOUT_FAMILY_ID:
         reasons.append("NATIVE_PLAN_MODE_REQUIRES_LEADER_0B_FAMILY")
+    if spec.execution_plan_mode == PANIC_NATIVE_PLAN_MODE and profile.family_version != 'panic_rebound/v1':
+        reasons.append('NATIVE_PLAN_MODE_REQUIRES_PANIC_FAMILY')
     if spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE and profile.family_version not in {
         'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1',
     }:
@@ -671,6 +710,8 @@ def mock_automation_spec_from_dict(value: Mapping[str, Any]) -> MockAutomationOp
         execution_plan_mode=value.get("execution_plan_mode"),
         close_execution_policy=(CloseMockExecutionPolicy(**value["close_execution_policy"])
                                 if value.get("close_execution_policy") is not None else None),
+        panic_execution_policy=(PanicMockExecutionPolicy(**value['panic_execution_policy'])
+                                if value.get('panic_execution_policy') is not None else None),
     )
     expected = str(value.get("spec_id", spec.spec_id))
     if expected != spec.spec_id:

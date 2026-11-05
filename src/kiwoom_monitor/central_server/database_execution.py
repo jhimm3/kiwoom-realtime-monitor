@@ -61,16 +61,21 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
             control_facts.update(control)
         stopped_close_management = False
         if (control.get('desired_state') == 'STOPPED' and value.get('plan') is not None
-                and value.get('policy_version') == 'close_execution_adapter/v1'
+                and value.get('policy_version') in {'close_execution_adapter/v1', 'panic_execution_adapter/v1'}
                 and (value.get('side') == 'SELL'
                      or (ownership.get('planned_cancel_claim') or {}).get('version') in {
                          'close-entry-deadline-cancel/v1', 'close-entry-protective-cancel/v1',
                          'close-current-order-management/v1'})):
-            from kiwoom_monitor.domain.execution_activation import allows_stopped_close_management, mock_automation_spec_from_dict
+            from kiwoom_monitor.domain.execution_activation import (
+                allows_stopped_close_management, allows_stopped_panic_management, mock_automation_spec_from_dict,
+            )
 
             spec_doc = _plan_document(cursor, p, 'execution_mock_automation_specs', value['account_ref'],
                                        ownership.get('active_spec_id'))
-            stopped_close_management = spec_doc is not None and allows_stopped_close_management(mock_automation_spec_from_dict(spec_doc))
+            if spec_doc is not None:
+                bound_spec = mock_automation_spec_from_dict(spec_doc)
+                stopped_close_management = (allows_stopped_close_management(bound_spec)
+                    if value.get('policy_version') == 'close_execution_adapter/v1' else allows_stopped_panic_management(bound_spec))
         if control_revision is not None and (
             (control.get("desired_state") != "RUNNING" and not stopped_close_management)
             or int(control.get("control_revision", 0)) != int(control_revision)
@@ -90,6 +95,9 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         _require_leader_execution_claim(cursor, ownership, value, p, now_provider=now_provider)
     if (new_intent_claim or submission_claim) and value.get("policy_version") == "close_execution_adapter/v1":
         _require_close_execution_claim(cursor, p, value, ownership, now_provider=now_provider,
+                                       submission_claim=submission_claim)
+    if (new_intent_claim or submission_claim) and value.get('policy_version') == 'panic_execution_adapter/v1':
+        _require_panic_execution_claim(cursor, p, value, ownership, now_provider=now_provider,
                                        submission_claim=submission_claim)
     if "intent_id" in value:
         plan_projection = "document_json->'plan'" if p == "%s" else "json_extract(document_json,'$.plan')"
@@ -526,7 +534,7 @@ def _require_close_order_management_claim(cursor, p, stored, value, event, owner
             or recovery is None or not control or ownership.get('control_revision') is None):
         raise RuntimeError('CLOSE_CURRENT_ORDER_CLAIM_REQUIRED')
     account = value['account_ref']
-    spec, package, entry, candidate = _close_native_documents(cursor, p, account, ownership['active_spec_id'], stored['plan']['plan_id'])
+    spec, package, entry, candidate = _minute_native_documents(cursor, p, account, ownership['active_spec_id'], stored['plan']['plan_id'])
     approval = _plan_document(cursor, p, 'execution_mock_automation_approved_gates', account, stored['intent_id'])
     risk_doc = _plan_document(cursor, p, 'execution_mock_automation_current_risk', account, account)
     head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, stored['plan']['plan_id'])
@@ -605,36 +613,43 @@ def _apply_plan_execution_event(cursor, p, intent, event, sequence):
     )
 
 
-def _close_native_documents(cursor, p, account, spec_id, plan_id):
-    """Read the original CLOSE scope with the caller's native transaction and locks."""
+def _minute_native_documents(cursor, p, account, spec_id, plan_id, *, kind='CLOSE'):
+    """Read one original minute-strategy scope in the existing native transaction."""
     from kiwoom_monitor.application.close_mock_execution import CLOSE_ENTRY_COLLECTION
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
-    from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, PANIC_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
+
+    if kind == 'PANIC':
+        from kiwoom_monitor.application.panic_mock_execution import PANIC_ENTRY_COLLECTION
+        collection, mode, families = PANIC_ENTRY_COLLECTION, PANIC_NATIVE_PLAN_MODE, {'panic_rebound/v1'}
+    elif kind == 'CLOSE':
+        collection, mode, families = CLOSE_ENTRY_COLLECTION, CLOSE_NATIVE_PLAN_MODE, {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'}
+    else:
+        raise ValueError('unsupported native minute-strategy scope')
 
     spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, spec_id)
     if spec_doc is None:
-        raise RuntimeError("CLOSE_EXECUTION_SPEC_MISSING")
+        raise RuntimeError(f"{kind}_EXECUTION_SPEC_MISSING")
     spec = mock_automation_spec_from_dict(spec_doc)
     package_doc = _plan_document(cursor, p, "execution_mock_automation_candidate_packages",
                                  spec.strategy_ref, spec.candidate_package_hash)
-    proof = _plan_document(cursor, p, CLOSE_ENTRY_COLLECTION, account, plan_id)
+    proof = _plan_document(cursor, p, collection, account, plan_id)
     if package_doc is None or proof is None:
-        raise RuntimeError("CLOSE_ENTRY_EVIDENCE_MISSING")
+        raise RuntimeError(f"{kind}_ENTRY_EVIDENCE_MISSING")
     package = candidate_package_from_dict(package_doc)
     family = package.candidate_spec['family']
-    if (spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE
-            or family not in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'}
+    if (spec.execution_plan_mode != mode or family not in families
             or package.package_hash != spec.candidate_package_hash):
-        raise RuntimeError("CLOSE_ENTRY_PACKAGE_CHANGED")
+        raise RuntimeError(f"{kind}_ENTRY_PACKAGE_CHANGED")
     cursor.execute(f"SELECT document_json,expires_at FROM central_shadow_candidate_events WHERE event_id={p}"
                    + (" FOR UPDATE" if p == "%s" else ""), (proof["snapshot"]["candidate_event_id"],))
     row = cursor.fetchone()
     if row is None:
-        raise RuntimeError("CLOSE_SHADOW_CANDIDATE_MISSING")
+        raise RuntimeError(f"{kind}_SHADOW_CANDIDATE_MISSING")
     event = _json_document(row[0])
     event["expires_at"] = row[1].isoformat() if isinstance(row[1], datetime) else str(row[1])
     if f"{event.get('strategy_id')}/{event.get('strategy_version')}" != family:
-        raise RuntimeError('CLOSE_ENTRY_PACKAGE_CHANGED')
+        raise RuntimeError(f'{kind}_ENTRY_PACKAGE_CHANGED')
     return spec, package, proof, event
 
 
@@ -692,7 +707,7 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
     if value.get("side") not in {"BUY", "SELL"} or value.get("plan") is None:
         raise RuntimeError("CLOSE_EXECUTION_REQUIRES_NATIVE_PLAN")
     account = value["account_ref"]
-    spec, package, proof, event = _close_native_documents(cursor, p, account, ownership["active_spec_id"],
+    spec, package, proof, event = _minute_native_documents(cursor, p, account, ownership["active_spec_id"],
                                                          value["plan"]["plan_id"])
     now = kst_now() if now_provider is None else now_provider()
     if value["side"] == "BUY":
@@ -746,6 +761,60 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
             or value["order_type"] != "LIMIT" or value["limit_price"] != decision.signal_reference_price):
         raise RuntimeError("CLOSE_ENTRY_PROOF_OR_ORDER_CHANGED" if value["side"] == "BUY"
                            else "CLOSE_EXIT_PROOF_OR_ORDER_CHANGED")
+
+
+def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider, submission_claim):
+    from dataclasses import asdict, replace
+    from kiwoom_monitor.application.panic_mock_execution import (
+        PANIC_EXIT_COLLECTION, build_panic_entry_evidence, build_panic_exit_evidence, panic_exit_key,
+    )
+    from kiwoom_monitor.application.close_mock_execution import close_current_shadow_matches
+    from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
+    from kiwoom_monitor.domain.order_contract import OrderPlanRef
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
+
+    if value.get('side') not in {'BUY', 'SELL'} or value.get('plan') is None:
+        raise RuntimeError('PANIC_EXECUTION_REQUIRES_NATIVE_PLAN')
+    account = value['account_ref']
+    spec, package, proof, event = _minute_native_documents(cursor, p, account, ownership['active_spec_id'],
+                                                         value['plan']['plan_id'], kind='PANIC')
+    now = kst_now() if now_provider is None else now_provider()
+    if value['side'] == 'BUY':
+        settings = _plan_document(cursor, p, 'server_operational_settings', 'global', 'current')
+        if not close_current_shadow_matches(spec, event, settings):
+            raise RuntimeError('PANIC_CURRENT_SHADOW_CHANGED')
+        expected, decision, plan = build_panic_entry_evidence(spec, run_id=value['run_id'],
+            parameters=package.candidate_spec['parameters'], event=event, quote=proof['snapshot']['quote'],
+            decided_at=datetime.fromisoformat(value['created_at']), now=now)
+    else:
+        plan = OrderPlanRef(**value['plan'])
+        exit_proof = _plan_document(cursor, p, PANIC_EXIT_COLLECTION, account, panic_exit_key(plan))
+        head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, plan.plan_id)
+        root_id = mock_automation_intent_id(spec.spec_id, proof['decision']['decision_id'])
+        root_row = _execution_intent_row(cursor, root_id, p)
+        if exit_proof is None or head_doc is None or root_row is None:
+            raise RuntimeError('PANIC_EXIT_EVIDENCE_MISSING')
+        head = plan_position_from_document(head_doc, value['run_id'], value['symbol'], plan)
+        if head.plan.expected_revision != plan.expected_revision + int(submission_claim):
+            raise RuntimeError('PANIC_EXIT_PLAN_REVISION_CHANGED')
+        if submission_claim:
+            queued = _execution_intent_row(cursor, value['intent_id'], p)
+            queued = _json_document(queued[0]) if queued else {}
+            if queued.get('plan') != value['plan'] or queued.get('state') != 'QUEUED':
+                raise RuntimeError('PANIC_EXIT_RESERVATION_CHANGED')
+        prepared = build_panic_exit_evidence(spec, run_id=value['run_id'], parameters=package.candidate_spec['parameters'],
+            event=event, entry_evidence=proof, root=_record_from_document(_json_document(root_row[0])),
+            head=replace(head, plan=plan), fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, root_id, p)],
+            trigger_quote=exit_proof['snapshot']['trigger_quote'], quote=exit_proof['snapshot']['quote'],
+            decided_at=datetime.fromisoformat(value['created_at']), now=now)
+        if prepared is None: raise RuntimeError('PANIC_EXIT_TRIGGER_MISSING')
+        expected, decision, plan = prepared
+        proof = exit_proof
+    if (json.dumps(expected, sort_keys=True) != json.dumps(proof, sort_keys=True)
+            or value['plan'] != asdict(plan) or value['decision_id'] != decision.decision_id
+            or (value['symbol'], value['quantity'], value['order_type'], value['limit_price'])
+            != (decision.symbol, decision.quantity, 'LIMIT', decision.signal_reference_price)):
+        raise RuntimeError('PANIC_ENTRY_PROOF_OR_ORDER_CHANGED' if value['side'] == 'BUY' else 'PANIC_EXIT_PROOF_OR_ORDER_CHANGED')
 
 
 def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider):
@@ -1557,7 +1626,7 @@ def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored
             or not stored.get("mock_plan_approval")):
         raise RuntimeError("CLOSE_DEADLINE_CANCEL_ROOT_CHANGED")
     account = value["account_ref"]
-    spec, package, proof, candidate = _close_native_documents(cursor, p, account, ownership["active_spec_id"],
+    spec, package, proof, candidate = _minute_native_documents(cursor, p, account, ownership["active_spec_id"],
                                                              claim.plan.plan_id)
     risk_doc = _plan_document(cursor, p, "execution_mock_automation_current_risk", account, account)
     head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, claim.plan.plan_id)

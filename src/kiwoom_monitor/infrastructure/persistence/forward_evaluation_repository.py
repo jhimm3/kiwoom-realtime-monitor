@@ -159,6 +159,29 @@ class ForwardEvaluationRepository:
 
         return self._find(CLOSE_ENTRY_COLLECTION, account_ref, plan_id)
 
+    def load_panic_entry_evidence(self, account_ref, plan_id):
+        from kiwoom_monitor.application.panic_mock_execution import PANIC_ENTRY_COLLECTION
+        return self._find(PANIC_ENTRY_COLLECTION, account_ref, plan_id)
+
+    def save_panic_entry_evidence(self, account_ref, plan_id, value):
+        from kiwoom_monitor.application.panic_mock_execution import PANIC_ENTRY_COLLECTION, panic_entry_plan_id
+        snapshot = value['snapshot']
+        if (snapshot['account_ref'] != account_ref or panic_entry_plan_id(snapshot['spec_id'],
+                snapshot['execution_run_id'], snapshot['candidate_event_id']) != plan_id):
+            raise ValueError('PANIC entry evidence does not match its account and plan')
+        return self._save_immutable(PANIC_ENTRY_COLLECTION, account_ref, plan_id, dict(value))
+
+    def load_panic_exit_evidence(self, account_ref, key):
+        from kiwoom_monitor.application.panic_mock_execution import PANIC_EXIT_COLLECTION
+        return self._find(PANIC_EXIT_COLLECTION, account_ref, key)
+
+    def save_panic_exit_evidence(self, account_ref, key, value):
+        from kiwoom_monitor.application.panic_mock_execution import PANIC_EXIT_COLLECTION, panic_exit_key
+        from kiwoom_monitor.domain.order_contract import OrderPlanRef
+        if value['snapshot']['account_ref'] != account_ref or panic_exit_key(OrderPlanRef(**value['snapshot']['plan'])) != key:
+            raise ValueError('PANIC exit evidence does not match its account and plan revision')
+        return self._save_immutable(PANIC_EXIT_COLLECTION, account_ref, key, dict(value))
+
     def save_close_entry_evidence(self, account_ref: str, plan_id: str, value: Mapping[str, Any]) -> bool:
         from kiwoom_monitor.application.close_mock_execution import CLOSE_ENTRY_COLLECTION, close_entry_plan_id
 

@@ -50,7 +50,8 @@ def close_current_shadow_matches(spec, event, settings):
     config = MinuteShadowConfig.from_document(settings['shadow_candidate_config'])
     monitor = _id('section12-minute-shadow', {'config': config.to_dict(), 'session_profile': spec.session_profile,
         'universe_max_age_seconds': settings['shadow_candidate_universe_max_age_seconds']})
-    return event['run_id'] == monitor and config.strategy.family == f"{event['strategy_id']}/{event['strategy_version']}"
+    return (event['run_id'] == monitor and config.strategy.family == f"{event['strategy_id']}/{event['strategy_version']}"
+            and (config.strategy.family != 'panic_rebound/v1' or event.get('panic_entry_parameters') == config.strategy.to_dict()))
 
 
 def assess_close_order_management(spec, *, run_id, parameters, event, entry_evidence, record, head,
