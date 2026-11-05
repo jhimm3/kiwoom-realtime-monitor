@@ -493,30 +493,19 @@ def _apply_plan_execution_event(cursor, p, intent, event, sequence):
     )
 
 
-def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider, submission_claim):
-    """Recheck entry or owned-position management in the order's native transaction."""
-    from dataclasses import asdict, replace
-    from kiwoom_monitor.application.close_mock_execution import (
-        CLOSE_ENTRY_COLLECTION, CLOSE_EXIT_COLLECTION, build_close_entry_evidence, build_close_exit_evidence, close_exit_key,
-    )
+def _close_native_documents(cursor, p, account, spec_id, plan_id):
+    """Read the original CLOSE scope with the caller's native transaction and locks."""
+    from kiwoom_monitor.application.close_mock_execution import CLOSE_ENTRY_COLLECTION
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
-    from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
-    from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
     from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
-    from kiwoom_monitor.domain.order_contract import OrderPlanRef
-    from kiwoom_monitor.domain.strategy_contract import _id
-    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
 
-    if value.get("side") not in {"BUY", "SELL"} or value.get("plan") is None:
-        raise RuntimeError("CLOSE_EXECUTION_REQUIRES_NATIVE_PLAN")
-    account = value["account_ref"]
-    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, ownership["active_spec_id"])
+    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, spec_id)
     if spec_doc is None:
         raise RuntimeError("CLOSE_EXECUTION_SPEC_MISSING")
     spec = mock_automation_spec_from_dict(spec_doc)
     package_doc = _plan_document(cursor, p, "execution_mock_automation_candidate_packages",
                                  spec.strategy_ref, spec.candidate_package_hash)
-    proof = _plan_document(cursor, p, CLOSE_ENTRY_COLLECTION, account, value["plan"]["plan_id"])
+    proof = _plan_document(cursor, p, CLOSE_ENTRY_COLLECTION, account, plan_id)
     if package_doc is None or proof is None:
         raise RuntimeError("CLOSE_ENTRY_EVIDENCE_MISSING")
     package = candidate_package_from_dict(package_doc)
@@ -530,6 +519,26 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
         raise RuntimeError("CLOSE_SHADOW_CANDIDATE_MISSING")
     event = _json_document(row[0])
     event["expires_at"] = row[1].isoformat() if isinstance(row[1], datetime) else str(row[1])
+    return spec, package, proof, event
+
+
+def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider, submission_claim):
+    """Recheck entry or owned-position management in the order's native transaction."""
+    from dataclasses import asdict, replace
+    from kiwoom_monitor.application.close_mock_execution import (
+        CLOSE_EXIT_COLLECTION, build_close_entry_evidence, build_close_exit_evidence, close_exit_key,
+    )
+    from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
+    from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
+    from kiwoom_monitor.domain.order_contract import OrderPlanRef
+    from kiwoom_monitor.domain.strategy_contract import _id
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
+
+    if value.get("side") not in {"BUY", "SELL"} or value.get("plan") is None:
+        raise RuntimeError("CLOSE_EXECUTION_REQUIRES_NATIVE_PLAN")
+    account = value["account_ref"]
+    spec, package, proof, event = _close_native_documents(cursor, p, account, ownership["active_spec_id"],
+                                                         value["plan"]["plan_id"])
     now = kst_now() if now_provider is None else now_provider()
     if value["side"] == "BUY":
         settings = _plan_document(cursor, p, "server_operational_settings", "global", "current")
@@ -1377,9 +1386,41 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
     return {**event, "planned_leader_cancel_claim": claim.to_dict()}
 
 
+def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored, now_provider):
+    from kiwoom_monitor.application.close_mock_execution import CloseEntryDeadlineCancelClaim, validate_close_entry_deadline
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
+
+    claim = CloseEntryDeadlineCancelClaim.from_dict(ownership["planned_cancel_claim"], ownership.get("plan_recovery"))
+    if (stored is None or event.get("event_type") != "CANCEL_STARTED" or value["state"] != "CANCEL_PENDING"
+            or event["intent_id"] != stored["intent_id"] or ownership.get("control_revision") is None
+            or not stored.get("mock_plan_approval")):
+        raise RuntimeError("CLOSE_DEADLINE_CANCEL_ROOT_CHANGED")
+    account = value["account_ref"]
+    spec, package, proof, candidate = _close_native_documents(cursor, p, account, ownership["active_spec_id"],
+                                                             claim.plan.plan_id)
+    risk_doc = _plan_document(cursor, p, "execution_mock_automation_current_risk", account, account)
+    head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, claim.plan.plan_id)
+    if risk_doc is None or head_doc is None:
+        raise RuntimeError("CLOSE_DEADLINE_CURRENT_CUT_MISSING")
+    risk = mock_automation_risk_snapshot_from_dict(risk_doc)
+    head = plan_position_from_document(head_doc, value["run_id"], value["symbol"], claim.plan)
+    if (head.plan != claim.plan or (risk.snapshot_id, risk.reconciliation_revision)
+            != (claim.risk_snapshot_id, claim.risk_reconciliation_revision)):
+        raise RuntimeError("CLOSE_DEADLINE_CURRENT_CUT_CHANGED")
+    validate_close_entry_deadline(spec, run_id=value["run_id"], parameters=package.candidate_spec["parameters"],
+        event=candidate, entry_evidence=proof, root=_record_from_document(stored), head=head,
+        fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored["intent_id"], p)],
+        recovery=claim.recovery, risk=risk, now=kst_now() if now_provider is None else now_provider())
+    return {**event, "close_entry_cancel_claim": claim.to_dict()}
+
+
 def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provider=None, stored=None):
     """Fence a protective retry in the same native CANCEL_STARTED transaction."""
     if ownership is not None and ownership.get("planned_cancel_claim") is not None:
+        if ownership["planned_cancel_claim"].get("version") == "close-entry-deadline-cancel/v1":
+            return _require_close_deadline_cancel(cursor, ownership, value, event, p, stored=stored,
+                                                  now_provider=now_provider)
         if ownership["planned_cancel_claim"].get("version") == "planned-leader-expired-entry-cancel/v1":
             return _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, stored=stored,
                                                          now_provider=now_provider)

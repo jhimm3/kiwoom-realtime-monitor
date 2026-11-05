@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 import json
 
@@ -24,6 +24,30 @@ from kiwoom_monitor.domain.strategy_contract import StrategyDecision
 CLOSE_ENTRY_COLLECTION = "execution_close_entry_evidence"
 CLOSE_EXIT_COLLECTION = "execution_close_exit_evidence"
 CLOSE_ORDER_POLICY_VERSION = "close_execution_adapter/v1"
+CLOSE_CANCEL_VERSION = "close-entry-deadline-cancel/v1"
+
+
+@dataclass(frozen=True)
+class CloseEntryDeadlineCancelClaim:
+    plan: OrderPlanRef
+    risk_snapshot_id: str
+    risk_reconciliation_revision: int
+    recovery: object
+
+    def to_dict(self):
+        return {"version": CLOSE_CANCEL_VERSION, "plan": asdict(self.plan),
+                "risk_snapshot_id": self.risk_snapshot_id,
+                "risk_reconciliation_revision": self.risk_reconciliation_revision}
+
+    @classmethod
+    def from_dict(cls, value, recovery):
+        if (set(value) != {"version", "plan", "risk_snapshot_id", "risk_reconciliation_revision"}
+                or value["version"] != CLOSE_CANCEL_VERSION or recovery is None
+                or type(value["risk_reconciliation_revision"]) is not int
+                or value["risk_reconciliation_revision"] <= 0):
+            raise ValueError("invalid CLOSE deadline cancellation claim")
+        return cls(OrderPlanRef(**value["plan"]), value["risk_snapshot_id"],
+                   value["risk_reconciliation_revision"], recovery)
 
 
 def close_entry_plan_id(spec_id: str, run_id: str, event_id: str) -> str:
@@ -118,6 +142,74 @@ def dispatch_close_entry(repository, runtime, spec, *, parameters, event, quote,
 
 def close_exit_key(plan: OrderPlanRef) -> str:
     return content_id("close_exit_slot", asdict(plan))
+
+
+def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evidence, root, head,
+                                  fill_events, recovery, risk, now):
+    """Authorize only cancellation of the original, currently mapped BUY remainder."""
+    from .mock_automation_execution import mock_automation_intent_id
+    from .mock_automation_risk import mock_automation_risk_account_revision
+
+    entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
+    expected, decision, plan = build_close_entry_evidence(spec, run_id=run_id, parameters=parameters,
+        event=event, quote=entry_evidence["snapshot"]["quote"], decided_at=entered_at, now=entered_at)
+    if (expected != entry_evidence or root is None
+            or root.state.value not in {"ACCEPTED", "PARTIALLY_FILLED"}
+            or (root.intent.intent_id, root.intent.account_ref, root.intent.run_id, root.intent.environment,
+                root.intent.symbol, root.intent.side, root.intent.plan, root.intent.policy_version)
+            != (mock_automation_intent_id(spec.spec_id, decision.decision_id), spec.account_scope.account_ref,
+                run_id, "mock", event["symbol"], OrderSide.BUY, plan, CLOSE_ORDER_POLICY_VERSION)
+            or not root.broker_order_id or root.last_broker_as_of is None
+            or not 0 <= root.detailed_filled_quantity == root.filled_quantity == root.broker_reported_filled_quantity < root.intent.quantity
+            or (head.plan.plan_id, head.plan.policy_ref, head.symbol, head.quantity)
+            != (plan.plan_id, plan.policy_ref, event["symbol"], root.detailed_filled_quantity)
+            or head.unreconciled_sell_quantity):
+        raise ValueError("CLOSE deadline requires the confirmed original BUY remainder")
+    deadline = datetime.fromisoformat(event["close_ipo_entry_setup"]["entry_deadline"])
+    if now < deadline:
+        raise ValueError("CLOSE entry deadline has not arrived")
+    age = spec.maximum_data_gap_seconds
+    account = recovery.account
+    orders = [order for order in recovery.orders if order.broker_order_id == root.broker_order_id]
+    if (len(orders) != 1 or age is None or (risk.account_ref, risk.execution_run_id, risk.binding_revision)
+            != (spec.account_scope.account_ref, run_id, spec.binding_revision)
+            or risk.account_revision != mock_automation_risk_account_revision(recovery)
+            or (account.account_ref, account.as_of) != (risk.account_ref, risk.account_as_of)
+            or risk.submission_unknown_count or risk.balance_mismatch_count
+            or head.fill_cursor > risk.execution_event_high_watermark
+            or dict(risk.owned_position_quantities).get(event["symbol"], 0) < head.quantity
+            or account.positions.get(event["symbol"], 0) < head.quantity
+            or any(not 0 <= (now - at).total_seconds() <= age
+                   for at in (risk.account_as_of, risk.observed_at, root.last_broker_as_of))):
+        raise ValueError("CLOSE deadline requires a current matching broker and Risk cut")
+    order = orders[0]
+    if ((order.account_ref, order.symbol, order.state, order.filled_quantity, order.remaining_quantity, order.as_of)
+            != (root.intent.account_ref, root.intent.symbol, root.state, root.detailed_filled_quantity,
+                root.intent.quantity - root.detailed_filled_quantity, root.last_broker_as_of)
+            or any(fill.execution_id not in root.fill_ids for fill in order.fills)):
+        raise ValueError("CLOSE deadline broker order changed")
+    fills = [row for row in fill_events if row["event_type"] == "FILL"]
+    if (any(row["event_type"] == "CANCEL_STARTED" for row in fill_events)
+            or sum(row["quantity"] for row in fills) != head.quantity
+            or tuple(row["broker_execution_id"] for row in fills) != root.fill_ids):
+        raise ValueError("CLOSE deadline native fill or cancellation history changed")
+
+
+def cancel_close_entry_deadline(repository, runtime, execution, spec, expected, *, parameters, event,
+                                recovery, risk, control_revision):
+    """Claim once through the existing cancel primitive; late broker fills remain authoritative."""
+    def build_claim(root):
+        entry = repository.load_close_entry_evidence(runtime.account_ref, root.intent.plan.plan_id)
+        head = execution.load_plan_position(runtime.account_ref, runtime.run_id, root.intent.symbol, root.intent.plan)
+        if entry is None:
+            raise ValueError("CLOSE original entry evidence is missing")
+        validate_close_entry_deadline(spec, run_id=runtime.run_id, parameters=parameters, event=event,
+            entry_evidence=entry, root=root, head=head, fill_events=execution.events(root.intent.intent_id),
+            recovery=recovery, risk=risk, now=runtime.server_now())
+        return CloseEntryDeadlineCancelClaim(head.plan, risk.snapshot_id, risk.reconciliation_revision, recovery)
+
+    return runtime.cancel_automation_intent(expected, spec_id=spec.spec_id, control_revision=control_revision,
+                                          build_planned_cancel_claim=build_claim)
 
 
 def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence, root, head, fill_events,

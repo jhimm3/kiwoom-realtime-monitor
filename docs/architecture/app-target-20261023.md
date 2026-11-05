@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 종가베팅 원체결 복원과 native 청산**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 종가베팅 마감 잔량 취소와 늦은 체결 복원**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅은 최초 진입에 이어 재시작 후 상세 체결·계획 잔량을 복원하고 원래 정책의 0B 손절·익일 기한 청산을 native 주문에 연결했다. 일반 READY 게시·실행기 기동·마감 잔량 취소·완료봉 갭 대응 등 대표 연결 9개와 DD·MICRO 추가 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 보유 관리](#section12-close-native-exit) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅은 원래 진입 기한의 native 잔량 취소와 응답 유실·재시작 후 늦은 상세 체결을 연결했다. 실제 계획 잔량은 원래 정책의 0B 손절·익일 기한 청산으로 이어진다. 일반 READY 게시·실행기 자동 연결·완료봉 갭 대응 등 대표 연결 9개와 DD·MICRO 추가 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 마감 잔량](#section12-close-native-cancel) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4711,6 +4711,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.260 S12-05 종가베팅 원체결 복원과 native 청산 — 2026-11-05
 
 - 원래 진입과 종결된 매수의 상세 체결에서 계획 잔량·평균단가를 복원하는 내부 청산 dispatcher를 연결했다. 새 Shadow를 비활성화해도 원래 정책의 0B 손절과 고정한 익일 보유 기한을 관리한다. 청산 근거는 불변 저장하고 실제 주문 트랜잭션에서 원체결·계획·수량과 예약 판본을 다시 확인한다. 일반 READY 게시·실행기·마감 잔량 취소·완료봉 갭 대응은 남아 있다. 대표 연결 수락 2/11과 전체 단계 4/5는 유지한다. [구현·검증·잔여](section12-development-roadmap-20261105.md#s12-close-native-exit).
+
+<a id="section12-close-native-cancel"></a>
+
+### 11.261 S12-05 종가베팅 마감 잔량 취소와 늦은 체결 복원 — 2026-11-05
+
+- 원래 진입 기한에 현재 브로커·Risk·상세 체결·계획을 대조하는 취소 claim을 기존 native 취소 경로에 연결했다. 기한 전과 승인 후 변조는 수락 전 거절한다. 미체결·부분 체결의 취소 수락 또는 응답 유실 뒤 DB와 runtime을 다시 열어도 취소는 1회이며, 늦은 체결 1주를 같은 계획에 보존해 익일 실제 1주 또는 3주만 보호 청산한다. 일반 READY 게시·실행기 자동 관리·완료봉 갭 대응은 남아 있다. [구현·검증·다음](section12-development-roadmap-20261105.md#s12-close-native-cancel).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

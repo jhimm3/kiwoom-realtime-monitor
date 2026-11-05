@@ -3007,6 +3007,19 @@
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|_require_close_execution_claim|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-close-deadline-native-cancel-20261105",
+      "reason": "CLOSE must cancel only the original mapped BUY remainder at its pinned entry deadline and retain late broker fills through restart.",
+      "connection": "The scoped candidate read moves into one shared native CLOSE document reader reused by BUY, SELL and deadline cancellation. The existing runtime cancel builder and CANCEL_STARTED transaction repeat original proof, current Risk, broker order, plan revision, detailed quantity and once-only history checks. No broker call is added to the transaction.",
+      "validation": "Separate zero-fill and partial-fill fixtures reject pre-deadline and post-assessment proof mutation, claim one cancel, reopen the store after accepted or unknown response, retain a late detailed fill once, and manage exactly the restored quantity at the next supported session.",
+      "evidence": [
+        "tests/unit/test_close_mock_execution.py",
+        "tests/integration/test_close_mock_execution_postgres.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_close_native_documents|cursor.execute": 1
+      }
     }
   ]
 }

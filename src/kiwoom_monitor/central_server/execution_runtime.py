@@ -29,6 +29,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRe
 from .market_observations import KST, as_kst
 
 if TYPE_CHECKING:
+    from kiwoom_monitor.application.close_mock_execution import CloseEntryDeadlineCancelClaim
     from kiwoom_monitor.application.mock_automation_risk import (
         PlannedLeaderCancelClaim, PlannedLeaderExpiredEntryCancelClaim, PlannedLeaderStopCancelRequest,
     )
@@ -303,9 +304,9 @@ class ExecutionRuntime:
         self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
-        planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
+        planned_cancel_claim: PlannedLeaderCancelClaim | CloseEntryDeadlineCancelClaim | None = None,
         build_planned_cancel_claim: Callable[
-            [ExecutionRecord], PlannedLeaderCancelClaim | PlannedLeaderExpiredEntryCancelClaim,
+            [ExecutionRecord], PlannedLeaderCancelClaim | PlannedLeaderExpiredEntryCancelClaim | CloseEntryDeadlineCancelClaim,
         ] | None = None,
     ) -> ExecutionRecord:
         """One guarded cancellation claim for the exact assessed native order.
@@ -362,13 +363,15 @@ class ExecutionRuntime:
                     if planned_cancel_claim is None:
                         raise ValueError("planned stop cancellation claim is missing")
                 if planned_cancel_claim is not None:
+                    from kiwoom_monitor.application.close_mock_execution import CloseEntryDeadlineCancelClaim
                     from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderExpiredEntryCancelClaim
 
                     self._repository.bind_automation_control(
                         spec_id=spec_id, control_revision=control_revision,
                         planned_cancel_claim=planned_cancel_claim.to_dict(),
                         **({"plan_recovery": planned_cancel_claim.recovery}
-                           if isinstance(planned_cancel_claim, PlannedLeaderExpiredEntryCancelClaim) else {}),
+                           if isinstance(planned_cancel_claim, (PlannedLeaderExpiredEntryCancelClaim,
+                                                               CloseEntryDeadlineCancelClaim)) else {}),
                     )
                 with self._observe_operation():
                     return self._lifecycle.cancel(
