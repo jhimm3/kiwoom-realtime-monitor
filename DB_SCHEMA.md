@@ -603,3 +603,5 @@ source/primary/T0·전체미완료closure/권한/lease·운영이전은자동수
 
 
 **MAIN123 remote BODY attempt pin(2026-10-27):** 기존 `body_input_ref` JSON에 `accepted_envelope_hash`와 `accepted_receipt`를 새 remote 수락의 결과와 같은 native transaction으로 보존한다. 추가 컬럼/테이블/마이그레이션은 없다. pin과 proof는 재claim에서 초기화되며 옛 자료를 역생성하지 않는다. 직접POST/기존terminal 중복응답은 유지하고 GET의 두 proof필드는 additive다. proof가 없는 옛 server/attempt의 ACK손실은 새client에서safeUNKNOWN이며 운영전환은별도다. [원자성·호환·실측/검증](docs/architecture/app-target-20261023.md#1152-ar0406-body-시도별-수락-증거와-응답-손실-회복--2026-10-27)을따른다.
+
+S12-05 신규주 하위 native 모의 주문은 기존 CLOSE 증거/계획/intent/FILL 문서와 transaction을 재사용한다. IPO 청산 `close_exit_snapshot/v4`는 `quantity`(이번 매도), `position_quantity`(현재 실제 잔여), `reduced_quantity`(원래 상세 매수에서 이미 청산한 수량)를 구분하고 원 entry proof·plan revision·fill cursor에 묶는다. 같은 native claim이 원래 저장 Shadow/package family를 다시 검사한다. 기존 CLOSE v1/v2/v3 표현 및 schema 판본은 바꾸지 않는다. 내부 합성 검증이며 일반 IPO READY/자동 정정 수락은 아직 남아 있다. [근거·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-ipo-native-claims).

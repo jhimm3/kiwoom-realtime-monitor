@@ -425,7 +425,9 @@ def assess_mock_automation_readiness(
         reasons.append("FORWARD_PROFILE_NOT_MOCK")
     if spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE and profile.family_version != LEADER_BREAKOUT_FAMILY_ID:
         reasons.append("NATIVE_PLAN_MODE_REQUIRES_LEADER_0B_FAMILY")
-    if spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE and profile.family_version != "close_betting/v1":
+    if spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE and profile.family_version not in {
+        'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1',
+    }:
         reasons.append("NATIVE_PLAN_MODE_REQUIRES_CLOSE_FAMILY")
     if profile.criteria.tbd_fields:
         reasons.extend(f"FORWARD_CRITERIA_TBD:{name}" for name in profile.criteria.tbd_fields)

@@ -439,7 +439,7 @@ def mock_automation_intent_id(spec_id: str, strategy_decision_id: str) -> str:
 def mock_automation_order_policy_version(family_id: str | None, session_profile: str | None) -> str:
     if family_id == LEADER_BREAKOUT_FAMILY_ID:
         return "leader_execution_adapter/v1"
-    if family_id == "close_betting/v1":
+    if family_id in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'}:
         return "close_execution_adapter/v1"
     return f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{session_profile}"
 

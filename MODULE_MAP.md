@@ -6,6 +6,8 @@
 
 **S12-05 신규주 최종 명세·Shadow 선행 연결:** 기존 `application/close_and_ipo.py::close_ipo_policy_from_document`가 종가·신규주 정책의 순수 해석을 소유하고 연구 adapter와 후보 검증이 공유한다. 후보 검증에서 연구 실행 adapter를 불러오는 순환을 만들지 않는다. `research_process.final_candidate_spec_document`와 `research_run.execute_research`가 세 방식의 고정 참조와 final 수명을, `mock_automation_candidate.py`가 원본 계보·불변 후보를, `mock_automation_specification.py`와 기존 화면이 방식별 Shadow 대조·표시를 소유한다. 현재 IPO READY/native 주문 연결은 남아 있으며 기존 CLOSE 권한을 차용하지 않는다. [선행 수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-ipo-final-lineage).
 
+**S12-05 신규주 native claim 선행:** `close_mock_execution.py`의 같은 진입/청산 proof가 원래 IPO 셋업·상장 근거와 실제 상세 FILL/계획 head로 tranche 잔여·돌파선/당일 기한을 검증한다. `mock_automation_execution.py`의 family 어댑터 선택과 `database_execution.py`의 같은 native transaction을 함께 연결했다. 새 실행 owner/worker/schema는 없으며 기존 CLOSE 표현을 유지한다. 현재 내부 합성 명세 검증이고 IPO 일반 READY·자동 Episode·최초 구조 교차 보호·미체결 정정 우선·화면/일지 연결은 남아 있다. [현재 근거·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-ipo-native-claims).
+
 > **지도 읽는 순서.** 현재 진입점은 아래 기능별 코드 경로를 확인한다. 초기 국소 통합의 완료·차단 표현은 판본별 기록이며 전체 진행은 AR 정본에 있다. [관련 계약](docs/architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
 
 종가베팅 마감 가격은 기존 Collector가 RAM·보류/재시도·flush 수명을 소유하고 `market_observations.closing_auction_price_observation`이 실제 체결의 시간·출처를 정의한다. 기존 `database_datasets`가 native metadata·불변 판본을 저장하고 `database_observation_readers`가 마감 가격·첫 분봉의 가용 판본을 읽는다. 갭 수치 계산은 `close_and_ipo`에서 공유하며 원장 재대조는 기존 주문 트랜잭션에서 한다. 관측 가격을 OHLC로 변환하거나 별도 수집 task·writer·주문 owner를 만들지 않는다. [구현·검증](docs/architecture/section12-development-roadmap-20261105.md#s12-close-collector-gap).

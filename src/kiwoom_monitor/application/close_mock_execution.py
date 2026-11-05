@@ -1,4 +1,4 @@
-"""Bind a CLOSE entry to its stored Shadow setup and explicit mock order terms."""
+"""Bind CLOSE/IPO plans to their original Shadow setup and explicit mock terms."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 
 from .breakout_strategy import StrategyState
 from .close_and_ipo import (
-    CloseIpoPosition, CloseIpoSetup, ClosePolicy, evaluate_close_gap, evaluate_close_gap_at_price, matches_close_shadow,
+    CloseIpoPosition, CloseIpoSetup, evaluate_close_gap, evaluate_close_gap_at_price, matches_close_shadow,
 )
 from .market_session_schedule import KST, KRX_AUCTION_RANDOM_END_SECONDS, MarketPhase, MarketSession, SessionSupport
 from .research_replay import KrxMinuteBarFrame
@@ -94,7 +94,8 @@ def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decide
     terms = spec.close_execution_policy
     if spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or terms is None:
         raise ValueError("CLOSE native execution terms are missing")
-    if not matches_close_shadow(parameters, event):
+    family = f"{event.get('strategy_id')}/{event.get('strategy_version')}"
+    if not matches_close_shadow(parameters, event, family=family):
         raise ValueError("CLOSE entry does not match its stored Shadow setup")
     frozen_quote = _close_quote(spec, quote, decided_at, now)
     gap = spec.maximum_data_gap_seconds
@@ -118,7 +119,7 @@ def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decide
     body = {"run_id": run_id, "snapshot_id": content_id("snapshot", snapshot), "symbol": event["symbol"],
             "proposal": "ENTER", "final_action": "ENTER", "quantity": event["quantity"],
             "signal_reference_price": quote["price_won"], "required_capital_won": quote["price_won"] * event["quantity"],
-            "reasons": ("preclose_return_setup",), "constraints": (CLOSE_ORDER_POLICY_VERSION,),
+            "reasons": tuple(event['decision_reasons']), "constraints": (CLOSE_ORDER_POLICY_VERSION,),
             "state_before": state, "state_after": state, "decided_at": decided_at.isoformat()}
     decision = StrategyDecision(decision_id=content_id("decision", body), **body)
     document = json.loads(json.dumps({"snapshot": snapshot, "decision": decision.to_dict()}, allow_nan=False))
@@ -341,7 +342,7 @@ def _completed_close_gap(position, observations, decided_at):
     result = (evaluate_close_gap_at_price(position, point['payload']['price_won'], frames,
                   session=window, cut=decided_at, refs=(point['revision_id'],)) if point is not None else
               evaluate_close_gap(position, frames, session=window, cut=decided_at))
-    return result if result.action == 'EXIT' else None
+    return result if result.action in {'EXIT', 'REDUCE'} else None
 
 
 def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence, root, head, fill_events,
@@ -383,38 +384,51 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
                 10_000 - spec.close_execution_policy.protective_slippage_bps)):
         raise ValueError("CLOSE exit quote exceeds the approved protective slippage bound")
     setup = CloseIpoSetup.from_document(event["close_ipo_entry_setup"])
-    if not isinstance(setup.policy, ClosePolicy) or setup.policy.variant != "CLOSE":
-        raise ValueError("CLOSE exit requires the original ordinary CLOSE policy")
     local = decided_at.astimezone(KST)
+    exit_quantity = head.quantity
+    reduced_quantity = quantity - head.quantity
+    gap_result = None
     if protection_notice is not None or trigger["price_won"] * 10_000 <= basis * (10_000 - setup.policy.protection_loss_bps):
         reason = "filled_position_protection_0B"
+    elif setup.policy.variant == 'IPO_BREAKOUT':
+        if decided_at >= setup.entry_deadline:
+            reason = 'ipo_intraday_exit_deadline_0B'
+        elif trigger['price_won'] < setup.breakout_level:
+            reason = 'ipo_breakout_structure_failed_0B'
+        else:
+            return None
     elif local.date() > setup.next_date:
         reason = "next_session_management_overdue_0B"
     elif local.date() == setup.next_date and decided_at >= setup.next_open_at + timedelta(
             minutes=setup.policy.exit_minutes_after_open):
         reason = "next_session_exit_deadline_0B"
-    elif gap_observations is not None and _completed_close_gap(
-            CloseIpoPosition(setup, head.quantity, basis, 0), gap_observations, decided_at) is not None:
-        reason = ('adverse_gap_full_exit_closing_trade_and_completed_open' if gap_observations[0]['kind'] == 'closing_auction_price'
+    elif gap_observations is not None and (gap_result := _completed_close_gap(
+            CloseIpoPosition(setup, head.quantity, basis, reduced_quantity), gap_observations, decided_at)) is not None:
+        exit_quantity = gap_result.quantity
+        reason = ('ipo_adverse_gap_partial_reduction' if gap_result.action == 'REDUCE' else
+                  'adverse_gap_full_exit_closing_trade_and_completed_open' if gap_observations[0]['kind'] == 'closing_auction_price'
                   else 'adverse_gap_full_exit_completed_bars')
     else:
         return None
     snapshot = {"version": "close_exit_snapshot/v1", "spec_id": spec.spec_id,
         "candidate_package_hash": spec.candidate_package_hash, "account_ref": spec.account_scope.account_ref,
         "execution_run_id": run_id, "entry_proof_id": entry_evidence["proof_id"], "plan": asdict(head.plan),
-        "entry_intent_id": root.intent.intent_id, "quantity": head.quantity, "fill_cursor": head.fill_cursor,
+        "entry_intent_id": root.intent.intent_id, "quantity": exit_quantity, "fill_cursor": head.fill_cursor,
         "entry_price_won": basis, "entry_fill_ref": content_id("close_fills", fills),
         "trigger_quote": trigger, "quote": execution_quote, "reason": reason}
-    if reason in {'adverse_gap_full_exit_completed_bars', 'adverse_gap_full_exit_closing_trade_and_completed_open'}:
+    if gap_result is not None:
         snapshot['gap_observations'] = gap_observations
     if reason == 'adverse_gap_full_exit_closing_trade_and_completed_open':
         snapshot['version'] = 'close_exit_snapshot/v3'
     if protection_notice is not None:
         snapshot.update(version='close_exit_snapshot/v2', protection_notice=protection_notice)
+    if setup.policy.variant != 'CLOSE':
+        snapshot.update(version='close_exit_snapshot/v4', position_quantity=head.quantity,
+                        reduced_quantity=reduced_quantity)
     state = StrategyState(status="open", symbol=event["symbol"], entry_price=basis,
         position_quantity=head.quantity, opened_at=fills[0]["occurred_at"]).to_dict()
     body = {"run_id": run_id, "snapshot_id": content_id("snapshot", snapshot), "symbol": event["symbol"],
-        "proposal": "EXIT", "final_action": "EXIT", "quantity": head.quantity,
+        "proposal": "EXIT", "final_action": "EXIT", "quantity": exit_quantity,
         "signal_reference_price": execution_quote["price_won"], "required_capital_won": 0,
         "reasons": (reason,), "constraints": (CLOSE_ORDER_POLICY_VERSION,), "state_before": state, "state_after": state,
         "decided_at": decided_at.isoformat()}

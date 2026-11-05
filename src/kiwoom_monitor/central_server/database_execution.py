@@ -520,7 +520,9 @@ def _close_native_documents(cursor, p, account, spec_id, plan_id):
     if package_doc is None or proof is None:
         raise RuntimeError("CLOSE_ENTRY_EVIDENCE_MISSING")
     package = candidate_package_from_dict(package_doc)
-    if (spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or package.candidate_spec["family"] != "close_betting/v1"
+    family = package.candidate_spec['family']
+    if (spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE
+            or family not in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'}
             or package.package_hash != spec.candidate_package_hash):
         raise RuntimeError("CLOSE_ENTRY_PACKAGE_CHANGED")
     cursor.execute(f"SELECT document_json,expires_at FROM central_shadow_candidate_events WHERE event_id={p}"
@@ -530,6 +532,8 @@ def _close_native_documents(cursor, p, account, spec_id, plan_id):
         raise RuntimeError("CLOSE_SHADOW_CANDIDATE_MISSING")
     event = _json_document(row[0])
     event["expires_at"] = row[1].isoformat() if isinstance(row[1], datetime) else str(row[1])
+    if f"{event.get('strategy_id')}/{event.get('strategy_version')}" != family:
+        raise RuntimeError('CLOSE_ENTRY_PACKAGE_CHANGED')
     return spec, package, proof, event
 
 
@@ -597,7 +601,7 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
         config = MinuteShadowConfig.from_document(settings["shadow_candidate_config"])
         monitor_id = _id("section12-minute-shadow", {"config": config.to_dict(), "session_profile": spec.session_profile,
             "universe_max_age_seconds": settings["shadow_candidate_universe_max_age_seconds"]})
-        if event["run_id"] != monitor_id or config.strategy.family != "close_betting/v1":
+        if event["run_id"] != monitor_id or config.strategy.family != package.candidate_spec['family']:
             raise RuntimeError("CLOSE_CURRENT_SHADOW_CHANGED")
         expected, decision, plan = build_close_entry_evidence(spec, run_id=value["run_id"],
             parameters=package.candidate_spec["parameters"], event=event, quote=proof["snapshot"]["quote"],
