@@ -657,17 +657,19 @@ class MockAutomationEpisode:
         self._session_clock = restored_clock
 
     def _prepare_close(self, candidate):
-        from kiwoom_monitor.application.section12_minute_research import CLOSE_FAMILY, MinuteExperiment
+        from kiwoom_monitor.application.section12_minute_research import MinuteExperiment
+        from kiwoom_monitor.domain.research_contract import CLOSE_IPO_FINAL_CANDIDATE_FAMILIES
         from .close_plan_management import CLOSE_INPUT_PROTOCOL, ClosePlanManagement
 
-        if candidate.get('family') != CLOSE_FAMILY or not isinstance(self._bundle.repository, ExecutionRepository):
+        if candidate.get('family') not in CLOSE_IPO_FINAL_CANDIDATE_FAMILIES or not isinstance(self._bundle.repository, ExecutionRepository):
             raise ValueError('native CLOSE plan requires the existing CLOSE execution owner')
-        self._config = MinuteExperiment.from_document(CLOSE_FAMILY, candidate['parameters'])
+        self._config = MinuteExperiment.from_document(candidate['family'], candidate['parameters'])
         self._strategy_inputs = MinuteStrategyInputs(session_profile=self._spec.session_profile,
             keep_bars=self._config.policy.lookback_bars + 2, universe_horizon=self._spec.maximum_data_gap_seconds)
         self._input_progress.use_native_protocol(CLOSE_INPUT_PROTOCOL)
         self._close_management = ClosePlanManagement(self._store, self._bundle, self._spec, self._repository,
-            parameters=candidate['parameters'], price_source=self._price_source, now_provider=self._now)
+            parameters=candidate['parameters'], price_source=self._price_source, now_provider=self._now,
+            family=candidate['family'])
         rows = self._store.load_documents('execution_mock_automation_runner_current', self._bundle.account_ref, 1)
         document = rows[0]['document'] if rows else None
         matching = isinstance(document, Mapping) and (
@@ -680,11 +682,11 @@ class MockAutomationEpisode:
             self._episode_position.restore_strategy_state(document.get('strategy_state', {}))
             self._episode_position.restore_seen_fill_ids(document.get('seen_fill_ids', ()))
             self._checkpoint.restore_revision(document.get('checkpoint_revision', 0))
-            notice = document.get('protection_review')
-            if notice is not None:
-                self._validate_protection_review(notice)
-                self._protection_review = deepcopy(notice)
         self._close_management.prepare(document.get('close_management') if matching else None)
+        notice = document.get('protection_review') if matching else None
+        if notice is not None:
+            self._validate_protection_review(notice)
+            self._protection_review = deepcopy(notice)
         self._episode_position.apply_new_fills(self._bundle.repository, leader=False, config=self._config,
                                                position_time=self._position_state_time)
         self._status = dict(self._close_management.status)
@@ -997,7 +999,8 @@ class MockAutomationEpisode:
 
     def _stop_validation_terms(self):
         if self._close_plan_mode:
-            return {'stop_loss_bps': self._config.policy.protection_loss_bps}
+            return {'stop_loss_bps': self._config.policy.protection_loss_bps, 'ipo_policy': self._config.policy,
+                    'ipo_candidate': self._close_management.active_candidate()}
         if self._leader:
             return {"leader_config": self._config, "position_proof": self._leader_position_proof}
         return {"stop_loss_bps": self._config.stop_loss_bps}
@@ -1172,7 +1175,7 @@ class MockAutomationEpisode:
         now = self._bundle.runtime.server_now()
         trigger = mock_automation_stop_loss_trigger(self._spec, risk, execution_run_id=self._bundle.run_id,
             now=now, price={**price, 'symbol':symbol}, account_positions=positions,
-            stop_loss_bps=self._stop_validation_terms()['stop_loss_bps'])
+            **self._stop_validation_terms())
         if trigger is None or previous is not None and previous.get('risk_trigger', {}).get('cause_signature') == trigger['cause_signature']:
             return
         self.request_protection_review(reason='native_risk:'+';'.join(trigger['reasons']),

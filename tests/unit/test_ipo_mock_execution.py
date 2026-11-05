@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 
-def prepare_ipo_execution(case, store, family, phase):
+def prepare_ipo_execution(case, store, family, phase, *, runner=False):
     from tests.unit import test_mock_automation_specification as fixtures
     from tests.unit.test_close_and_ipo import CloseAndIpoTests
     from kiwoom_monitor.application.market_session_schedule import KST, session_window_at
@@ -26,6 +26,10 @@ def prepare_ipo_execution(case, store, family, phase):
     example.tuesday = example.friday + timedelta(days=4)
     example.published = datetime.combine(example.friday, time(8), KST)
     example.setUp()
+    if runner:
+        example.prior = (example.bar(example.entry, time(15, 13), price=100, revision='early-prior-1'),
+                         example.bar(example.entry, time(15, 14), price=101, revision='early-prior-2'))
+        example.signal = example.bar(example.entry, time(15, 15), price=104, revision='early-signal')
     policy = replace(example.ipo_close if family == 'ipo_close/v1' else example.ipo_breakout,
                      listing_phases=(ListingPhase(phase),))
     listing = replace(example.listing, listing_date=example.friday - timedelta(days=phase == 'after_listing_day'))
@@ -98,7 +102,7 @@ def prepare_ipo_execution(case, store, family, phase):
                                   spec_id=spec.spec_id, requested_at=clock[0])
     context = SimpleNamespace(store=store, example=example, spec=spec, parameters=parameters, event=event,
         repository=repository, runtime=runtime, execution=execution, transport=transport, clock=clock,
-        settings=settings, family=family, revision=0)
+        settings=settings, family=family, revision=0, monitor=monitor)
     refresh_ipo_cut(context, {})
     context.quote = {'price_won': 104, 'available_at': clock[0], 'input_ref': 'collector-trade:ipo-fixture:1:005930:1',
                      'durable': False, 'market_status': 'TRADABLE'}
@@ -301,3 +305,265 @@ class IpoMockExecutionTests(unittest.TestCase):
         for phase in ('listing_day', 'after_listing_day'):
             with self.subTest(phase=phase):
                 verify_ipo_breakout_native(self, self.factory(phase), phase=phase, deadline=True)
+
+async def verify_ipo_runner(case, store_factory, *, family, phase):
+    import asyncio
+    from tests.unit import test_mock_automation_specification as fixtures
+    from kiwoom_monitor.application.close_mock_execution import close_exit_key
+    from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
+    from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+    from kiwoom_monitor.central_server.mock_runtime import (
+        MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION, MockAccountRuntimeMode, MockAutomationRuntimeContext,
+    )
+    from tests.unit.test_close_mock_execution import publish_gap_observations
+    store = store_factory()
+    case.addCleanup(store.close)
+    store.initialize()
+    context = prepare_ipo_execution(case, store, family, phase, runner=True)
+    clock = context.clock
+    quotes = {context.event['symbol']: context.quote}
+    orders, positions = {}, {}
+
+    class Monitor:
+        listener = None
+        enabled = False
+        cut = None
+
+        async def refresh_recovery(self):
+            current_orders = []
+            for order in orders.values():
+                current = replace(order, as_of=clock[0])
+                record = context.execution.find_by_broker_order_id('mock', fixtures.ACCOUNT_REF,
+                    context.runtime.run_id, current.broker_order_id)
+                if record is not None:
+                    context.runtime.reconcile(record.intent.intent_id, current)
+                current_orders.append(current)
+            account = fixtures.AccountSnapshot(fixtures.ACCOUNT_REF, 100_000,
+                sum(row.remaining_quantity * 107 for row in current_orders
+                    if row.state in {fixtures.OrderState.ACCEPTED, fixtures.OrderState.PARTIALLY_FILLED}),
+                dict(positions), clock[0])
+            recovery = fixtures.MockAccountRecovery(account, tuple(current_orders))
+            previous = context.repository.load_latest_mock_automation_risk(fixtures.ACCOUNT_REF)
+            risk = fixtures.build_mock_automation_risk_snapshot(recovery,
+                context.execution.account_events('mock', fixtures.ACCOUNT_REF).events, (),
+                context.execution.active_intents('mock', fixtures.ACCOUNT_REF, context.runtime.run_id),
+                execution_run_id=context.runtime.run_id, binding_revision=context.spec.binding_revision,
+                reconciliation_revision=previous.reconciliation_revision + 1, observed_at=clock[0],
+                broker_query_started_at=clock[0], broker_query_completed_at=clock[0])
+            context.repository.save_mock_automation_risk_snapshot(risk)
+            observation = SimpleNamespace(account=account, risk_snapshot=risk, open_orders_complete=True,
+                reconciliation_complete=risk.reconciliation_complete, unmapped_broker_order_ids=(),
+                open_orders=context.execution.active_intents('mock', fixtures.ACCOUNT_REF, context.runtime.run_id))
+            self.cut = dict(account=account, risk=risk, recovery=recovery, observation=observation)
+            if self.listener is not None:
+                self.listener(self.cut)
+            return recovery
+
+        def set_automation_risk_listener(self, listener):
+            self.listener = listener
+
+        def clear_automation_risk_listener(self, listener):
+            if self.listener == listener:
+                self.listener = None
+
+        def set_automation_execution_inputs_enabled(self, enabled):
+            self.enabled = enabled
+
+        @property
+        def latest_automation_execution_cut(self):
+            return self.cut if self.enabled else None
+
+    async def assemble():
+        monitor = Monitor()
+        async def refresh_account():
+            return (await monitor.refresh_recovery()).account
+        gateway = ManualMockOrderGateway(context.runtime, context.execution, refresh_account,
+            now_provider=lambda: clock[0], automation_execution_cut=lambda: monitor.latest_automation_execution_cut)
+        gateway.set_manual_submit_enabled(False)
+        control = context.repository.load_mock_automation_control(fixtures.ACCOUNT_REF)
+        admission = context.repository.load_mock_automation_admission_for_spec(fixtures.ACCOUNT_REF, context.spec.spec_id)
+        bundle = SimpleNamespace(account_ref=fixtures.ACCOUNT_REF, credential_profile_id=fixtures.PROFILE_ID,
+            run_id=context.runtime.run_id, runtime=context.runtime, repository=context.execution, monitor=monitor,
+            gateway=gateway, runtime_mode=MockAccountRuntimeMode.AUTOMATIC,
+            automation_context=MockAutomationRuntimeContext(MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION,
+                fixtures.ACCOUNT_REF, context.runtime.run_id, context.spec.spec_id, admission.admission_id,
+                control.control_revision, 1))
+        async def require_settings(profile_id, *, expected_settings_revision, credential_revision):
+            case.assertEqual((fixtures.PROFILE_ID, 1, 1), (profile_id, expected_settings_revision, credential_revision))
+        supervisor = MockAutomationSupervisor(context.store, SimpleNamespace(bundle=lambda _: bundle,
+            require_execution_settings=require_settings), poll_seconds=3600,
+            price_source=lambda symbol: quotes.get(symbol), now_provider=lambda: clock[0])
+        case.addAsyncCleanup(supervisor.close)
+        case.addAsyncCleanup(gateway.close)
+        await supervisor.activate(credential_profile_id=fixtures.PROFILE_ID, account_ref=fixtures.ACCOUNT_REF,
+            spec_id=context.spec.spec_id, expected_settings_revision=1, credential_revision=1)
+        runner = supervisor._runners[fixtures.ACCOUNT_REF]
+        await asyncio.sleep(0)
+        async def idle():
+            while runner.episode.execution_busy:
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(idle(), 10)
+        case.assertFalse(runner._task.done())
+        return supervisor, runner, monitor
+
+    supervisor, runner, monitor = await assemble()
+    case.assertEqual([], context.transport.calls)
+    start = datetime.fromisoformat(context.example.signal.bar_end)
+    clock[0] = start + timedelta(minutes=1, seconds=2)
+    key = dict(trading_date=start.date().isoformat(), minute=start.strftime('%H:%M'),
+               code=context.event['symbol'], market='KRX')
+    context.store.save_minute_bars([{**key, 'open': 107, 'high': 108, 'low': 107, 'close': 107,
+        'volume': 100, 'trade_value_million_won': 1, 'updated_at': clock[0].timestamp(), 'operation_id': 'ipo-runner-new'}])
+    context.store.finalize_minute_bars([{**key, 'available_at': clock[0].timestamp(), 'capture_quality': 'complete',
+        'finalization_source': 'timer', 'operation_id': 'ipo-runner-new-final'}])
+    context.monitor.run_once()
+    quotes[key['code']] = {**context.quote, 'price_won': 107, 'available_at': clock[0]}
+    case.assertEqual(1, await runner.episode.advance_once(), runner.episode.status)
+    buy, = context.execution.active_intents('mock', fixtures.ACCOUNT_REF, context.runtime.run_id)
+    context.buy = buy
+    proof = context.repository.load_close_entry_evidence(fixtures.ACCOUNT_REF, buy.intent.plan.plan_id)
+    candidate = proof['snapshot']['candidate']
+    original_setup = deepcopy(candidate['close_ipo_entry_setup'])
+    case.assertEqual((4, 107, phase), (buy.intent.quantity, buy.intent.limit_price, original_setup['listing_phase']))
+    fills = (fixtures.BrokerFill('ipo-runner-first', 2, 107, clock[0]),)
+    positions[buy.intent.symbol] = 2
+    orders[buy.broker_order_id] = fixtures.BrokerOrderSnapshot(buy.broker_order_id, fixtures.ACCOUNT_REF,
+        buy.intent.symbol, fixtures.OrderState.PARTIALLY_FILLED, 2, 2, clock[0], fills)
+    clock[0] += timedelta(seconds=1)
+    await monitor.refresh_recovery()
+    deadline = datetime.fromisoformat(original_setup['entry_deadline'])
+    cancellations = []
+    first_notice = None
+    def cancel(*args, **kwargs):
+        cancellations.append((args, kwargs))
+        if first_notice is not None:
+            saved = context.store.load_documents('execution_mock_automation_runner_current', fixtures.ACCOUNT_REF, 1)[0]['document']
+            case.assertEqual(first_notice, saved['protection_review'])
+        return fixtures.BrokerSubmission(buy.broker_order_id, clock[0])
+    with patch.object(context.transport, 'cancel', side_effect=cancel):
+        if family == 'ipo_breakout/v1':
+            level = original_setup['breakout_level']
+            case.assertEqual(104, level)
+            first_price = {**quotes[buy.intent.symbol], 'price_won': level - 1, 'available_at': clock[0],
+                           'input_ref': 'collector-trade:ipo-first-structure'}
+            with patch.object(context.store, 'load_documents', side_effect=AssertionError('no callback DB read')), \
+                    patch.object(context.store, 'upsert_documents', side_effect=AssertionError('no callback DB write')):
+                supervisor.observe_automation_price(buy.intent.symbol,
+                    {**first_price, 'available_at': clock[0] - timedelta(seconds=1)})
+                case.assertIsNone(runner.episode._protection_snapshot())
+                supervisor.observe_automation_price(buy.intent.symbol, first_price)
+                first_notice = runner.episode._protection_snapshot()
+                case.assertEqual(('ipo_structure_stop/v1', 103),
+                    (first_notice['risk_trigger']['stop_loss']['version'], first_notice['risk_trigger']['stop_loss']['price_won']))
+                quotes[buy.intent.symbol] = {**first_price, 'price_won': 106, 'input_ref': 'collector-trade:ipo-rebound'}
+                supervisor.observe_automation_price(buy.intent.symbol, quotes[buy.intent.symbol])
+                case.assertEqual(first_notice, runner.episode._protection_snapshot())
+            case.assertLess(clock[0], deadline)
+            from kiwoom_monitor.application.mock_automation_risk import validate_mock_stop_loss_proof
+            for key, changed in (('breakout_level', 105), ('candidate_event_id', 'another-entry'), ('quantity', 3)):
+                invalid = {**first_notice['risk_trigger']['stop_loss'], key: changed}
+                with case.assertRaisesRegex(ValueError, 'ipo_structure_stop_(original_setup|native_basis)_changed'):
+                    validate_mock_stop_loss_proof(invalid, context.spec, monitor.cut['risk'],
+                                                  **runner.episode._stop_validation_terms())
+            async def cancelled():
+                while not cancellations or runner.episode.execution_busy:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(cancelled(), 10)
+        else:
+            clock[0] = deadline
+            await runner.episode.advance_once()
+    case.assertEqual(1, len(cancellations), runner.episode.status)
+    case.assertEqual(fixtures.OrderState.CANCEL_PENDING, context.execution.load(buy.intent.intent_id).state)
+    clock[0] += timedelta(seconds=1)
+    fills = (*fills, fixtures.BrokerFill('ipo-runner-late', 1, 107, clock[0]))
+    positions[buy.intent.symbol] = 3
+    orders[buy.broker_order_id] = replace(orders[buy.broker_order_id], state=fixtures.OrderState.CANCELLED,
+        filled_quantity=3, remaining_quantity=0, fills=fills, as_of=clock[0])
+    await monitor.refresh_recovery()
+    await supervisor.close()
+    case.assertFalse(monitor.enabled)
+    context.runtime.stop()
+    context.store.close()
+    context.store = store_factory()
+    case.addCleanup(context.store.close)
+    context.store.initialize()
+    case.enterContext(patch.object(context.store, '_execution_wall_now', lambda: clock[0], create=True))
+    context.execution = fixtures.ExecutionRepository(context.store)
+    context.repository = fixtures.ForwardEvaluationRepository(context.store)
+    context.runtime = fixtures.ExecutionRuntime(fixtures.OrderLifecycle(context.execution, context.transport,
+        now_provider=lambda: clock[0]), context.execution, account_ref=fixtures.ACCOUNT_REF, run_id=context.runtime.run_id,
+        owner_token='ipo-runner-restored', now_provider=lambda: clock[0])
+    case.addCleanup(context.runtime.stop)
+    context.runtime.start(new_orders_enabled=False)
+    context.store.upsert_documents('server_operational_settings', [{'owner': 'global', 'key': 'current',
+        'document': {**context.settings, 'shadow_candidate_enabled': False, 'shadow_candidate_config': {}}}])
+    quotes.pop(buy.intent.symbol)
+    with patch.object(context.store, 'load_shadow_candidates', side_effect=AssertionError('no original candidate rescan')):
+        supervisor, runner, monitor = await assemble()
+    if first_notice is not None:
+        case.assertEqual(first_notice, runner.episode._protection_snapshot())
+        clock[0] += timedelta(seconds=30)
+    else:
+        clock[0] = datetime.fromisoformat(context.example.opening.available_at)
+        publish_gap_observations(context.store, context.example, clock)
+    quotes[buy.intent.symbol] = {**context.quote, 'price_won': 106, 'available_at': clock[0]}
+    await monitor.refresh_recovery()
+    await runner.episode.advance_once()
+    sell, = (row for row in context.execution.active_intents('mock', fixtures.ACCOUNT_REF, context.runtime.run_id)
+             if row.intent.side.value == 'SELL')
+    case.assertEqual(3 if family == 'ipo_breakout/v1' else 2, sell.intent.quantity)
+    if first_notice is not None:
+        saved = context.repository.load_close_exit_evidence(fixtures.ACCOUNT_REF, close_exit_key(sell.intent.plan))
+        case.assertEqual(first_notice, saved['snapshot']['protection_notice'])
+        case.assertEqual('ipo_breakout_structure_failed_0B', saved['snapshot']['reason'])
+    clock[0] += timedelta(seconds=1)
+    positions[buy.intent.symbol] -= sell.intent.quantity
+    orders[sell.broker_order_id] = fixtures.BrokerOrderSnapshot(sell.broker_order_id, fixtures.ACCOUNT_REF,
+        sell.intent.symbol, fixtures.OrderState.FILLED, sell.intent.quantity, 0, clock[0],
+        (fixtures.BrokerFill('ipo-runner-sell', sell.intent.quantity, 106, clock[0]),))
+    if not positions[buy.intent.symbol]:
+        positions.clear()
+    await monitor.refresh_recovery()
+    await runner.episode.advance_once()
+    if family == 'ipo_close/v1':
+        case.assertEqual(1, ipo_head(context).quantity)
+        case.assertEqual(['BUY', 'SELL'], [row[1] for row in context.transport.calls])
+        clock[0] = datetime.fromisoformat(original_setup['next_open_at']) + timedelta(
+            minutes=context.parameters['policy']['exit_minutes_after_open'])
+        quotes[buy.intent.symbol] = {**quotes[buy.intent.symbol], 'available_at': clock[0]}
+        await monitor.refresh_recovery()
+        await runner.episode.advance_once()
+        residual, = context.execution.active_intents('mock', fixtures.ACCOUNT_REF, context.runtime.run_id)
+        case.assertEqual(1, residual.intent.quantity)
+        clock[0] += timedelta(seconds=1)
+        orders[residual.broker_order_id] = fixtures.BrokerOrderSnapshot(residual.broker_order_id, fixtures.ACCOUNT_REF,
+            residual.intent.symbol, fixtures.OrderState.FILLED, 1, 0, clock[0],
+            (fixtures.BrokerFill('ipo-runner-residual', 1, 106, clock[0]),))
+        positions.clear()
+        await monitor.refresh_recovery()
+        await runner.episode.advance_once()
+    case.assertEqual(0, ipo_head(context).quantity)
+    restored = context.repository.load_close_entry_evidence(fixtures.ACCOUNT_REF, buy.intent.plan.plan_id)
+    case.assertEqual(original_setup, restored['snapshot']['candidate']['close_ipo_entry_setup'])
+    expected = ['BUY', 'SELL'] if family == 'ipo_breakout/v1' else ['BUY', 'SELL', 'SELL']
+    case.assertEqual(expected, [row[1] for row in context.transport.calls])
+    await supervisor.close()
+
+
+class IpoRunnerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def factory(self, name):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        return lambda: SQLiteQueryStore(self.root / (name + '.sqlite3'))
+
+    async def test_ipo_breakout_first_structure_cross_survives_rebound_cancel_late_fill_and_reopen(self):
+        for phase in ('listing_day', 'after_listing_day'):
+            with self.subTest(phase=phase):
+                await verify_ipo_runner(self, self.factory(phase), family='ipo_breakout/v1', phase=phase)
+
+    async def test_ipo_close_runner_reopens_original_plan_and_manages_partial_gap_and_residual(self):
+        for phase in ('listing_day', 'after_listing_day'):
+            with self.subTest(phase=phase):
+                await verify_ipo_runner(self, self.factory(phase), family='ipo_close/v1', phase=phase)

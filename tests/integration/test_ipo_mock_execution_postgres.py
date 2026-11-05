@@ -33,3 +33,25 @@ class IpoMockExecutionPostgresTests(unittest.TestCase):
         for phase in ('listing_day', 'after_listing_day'):
             with self.subTest(phase=phase):
                 verify_ipo_breakout_native(self, self.factory(), phase=phase, deadline=True)
+
+
+class IpoRunnerPostgresTests(unittest.IsolatedAsyncioTestCase):
+    def factory(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        scoped = self.enterContext(isolated_observation_schema(url))
+        return lambda: PostgresQueryStore(scoped)
+
+    async def test_ipo_breakout_first_structure_cross_survives_rebound_cancel_late_fill_and_reopen(self):
+        from tests.unit.test_ipo_mock_execution import verify_ipo_runner
+        for phase in ('listing_day', 'after_listing_day'):
+            with self.subTest(phase=phase):
+                await verify_ipo_runner(self, self.factory(), family='ipo_breakout/v1', phase=phase)
+
+    async def test_ipo_close_runner_reopens_original_plan_and_manages_partial_gap_and_residual(self):
+        from tests.unit.test_ipo_mock_execution import verify_ipo_runner
+        for phase in ('listing_day', 'after_listing_day'):
+            with self.subTest(phase=phase):
+                await verify_ipo_runner(self, self.factory(), family='ipo_close/v1', phase=phase)

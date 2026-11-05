@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 신규주 native 진입/청산 선행 연결**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 신규주 자동 원계획·최초0B 구조 보호 연결**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 시나리오 **3·7·9, 3/11**을 개발 수락했다. 종가베팅 일반 READY·명시 화면·공개 기동·원주문/잔량·재시작·휴장/가격 중단·익일 갭과 원장/계좌/일지의 원계획 수량을 격리 검증했다. 기존 v1/v2 중지 정책·최초 손절·정정/CAS는 유지한다. 신규주 두 조합×상장 첫날/이후의 final 명세·후보 게시/조회·Shadow 대조를 연결했고 원래 상장 프로필·Paper 수량을 보존한다. 항목4의 내부 native 진입/청산 claim·부분 청산 실제 잔여·DB 재개와 돌파의 원래 구조/당일 기한을 격리 두 DB에서 확인했다. 다음은 자동 Episode·첫0B 구조 보호·일반 READY/UI/일지와 접수 미체결의 정정 우선 연결이다. 대표8개·DD/MICRO 잔여와 운영 제외를 유지한다. AR의 C24 수락·C16 재발 시 이관과 운영 제한은 유지한다. [승인 로드맵](section12-development-roadmap-20261105.md) · [신규주 native 선행](#section12-ipo-native-claims) · [신규주 final](#section12-ipo-final-lineage) · [항목 3 수락](#section12-acceptance-close-three) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 시나리오 **3·7·9, 3/11**을 개발 수락했다. 종가베팅 일반 READY·명시 화면·공개 기동·원주문/잔량·재시작·휴장/가격 중단·익일 갭과 원장/계좌/일지의 원계획 수량을 격리 검증했다. 기존 v1/v2 중지 정책·최초 손절·정정/CAS는 유지한다. 신규주 두 조합×상장 첫날/이후의 final 명세·후보 게시/조회·Shadow 대조를 연결했고 원래 상장 프로필·Paper 수량을 보존한다. 항목4의 내부 native 진입/청산 claim·부분 청산 실제 잔여·DB 재개와 돌파의 원래 구조/당일 기한을 격리 두 DB에서 확인했다. 기존 자동 Episode에 두 신규주 방식과 첫0B 구조 보호를 연결해 반등·부분 취소/늦은 체결·DB 재개/Shadow OFF 뒤 원계획 실제 수량을 보존했다. 다음은 일반 READY/UI/API·일지와 현재 조건 재판단을 유지하는 접수 미체결 정정 우선 연결이다. 대표8개·DD/MICRO 잔여와 운영 제외를 유지한다. AR의 C24 수락·C16 재발 시 이관과 운영 제한은 유지한다. [승인 로드맵](section12-development-roadmap-20261105.md) · [신규주 자동 수명](#section12-ipo-owned-runner) · [하위 native](#section12-ipo-native-claims) · [신규주 final](#section12-ipo-final-lineage) · [항목 3 수락](#section12-acceptance-close-three) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4775,6 +4775,12 @@ CLOSE의 실제 계약과 typed 실행 정책으로 일반 READY builder·서버
 ### 11.271 S12-05 항목4 신규주 native 진입/청산 선행 — 2026-11-05
 
 기존 CLOSE native 어댑터/계좌 owner/claim/CAS/FILL에 IPO 두 방식을 연결했다. 동일 transaction에서 현재 Shadow와 원 package family를 결속하며 원래 상장 셋업을 보존한다. IPO 종가의 실제 tranche 체결1+1·잔여2/재개, 실제 BUY2일 때 잔여 보존, 돌파선 미만/당일 기한의 실제 BUY3 청산을 두 상장 단계로 확인했다. 합성 broker 취소 확정 표본이며 자동 미체결 정정/취소 수락은 아니다. IPO v4 청산 증거를 추가하고 기존 CLOSE 표현을 유지했다. 소스 `cd8e60b5`의 Windows74·PG8과 구조/소비/증분 대조·작업자5/클러스터2 종료·정리를 확인했다. 일반 IPO READY 차단은 유지한다. 다음은 기존 Episode 자동 수명·첫0B 구조 보호·UI/API/일지 및 접수 미체결 정정 우선 연결이다. 후속 사용자 지시와 과거 목적별 미체결 계약을 대조했으며 모든 미체결을 무조건 취소하는 정책으로 해석하지 않는다. 전체4/5·대표3/11 유지. [상세·근거·명시 잔여](section12-development-roadmap-20261105.md#s12-ipo-native-claims).
+
+<a id="section12-ipo-owned-runner"></a>
+
+### 11.272 S12-05 항목4 신규주 자동 원계획·최초0B 구조 보호 — 2026-11-05
+
+기존 Supervisor/Runner/Episode·계좌/Gateway와 계획 RAM/불변 entry 증거를 IPO 두 방식에 연결했다. `ipo_structure_stop/v1`은 원래 candidate/돌파선과 최초0B/ACK된 실제 원가·수량을 고정하고 native 과거 Risk/매수 FILL prefix를 검증한다. 두 상장 단계에서 BUY4@107·상세2 뒤 돌파선104/첫103을106 반등에도 보존하고 durable checkpoint 후 잔량 취소1회·늦은 BUY1·DB 재개/Shadow OFF 뒤 새106원으로 실제3주만 청산했다. callback DB0·원 셋업/수량 변조 거절·과거 신호 재스캔0을 확인했다. 종가는 원래 기한 취소·늦은 체결·재개 뒤 갭2/잔여1을 관리했다. 소스 `56e8585d`의 Windows72·PG8과 구조/소비 delta0/증분 대조·소유 작업자4/클러스터2 종료·정리 수락. 일반 IPO READY/UI/API/일지와 현재 조건 재판단을 유지한 미체결 정정 우선은 미완료이며, 현 REPRICE(취소→신규)와 실제 broker 정정은 구분한다. 전체4/5·대표3/11·운영 제외 유지. [상세·근거·잔여](section12-development-roadmap-20261105.md#s12-ipo-owned-runner).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

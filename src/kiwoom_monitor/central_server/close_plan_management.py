@@ -20,15 +20,24 @@ CLOSE_INPUT_PROTOCOL = 'close-shadow-native-plan/v1'
 class ClosePlanManagement:
     """Own the Shadow cursor and retained plan inputs, without a worker or order authority."""
 
-    def __init__(self, store, bundle, spec, repository, *, parameters, price_source, now_provider):
+    def __init__(self, store, bundle, spec, repository, *, parameters, price_source, now_provider,
+                 family='close_betting/v1'):
         self._store, self._bundle, self._spec, self._repository = store, bundle, spec, repository
         self._parameters, self._price, self._now = parameters, price_source, now_provider
+        self._family = family
+        self._pending_entry = None
         self._cursor = 0
         self._plans = {}
         self.status = {'state': 'WARMUP', 'reason': 'awaiting_new_close_shadow', 'orders_enabled': False}
 
     def checkpoint_fields(self):
         return {'version': CLOSE_INPUT_PROTOCOL, 'shadow_cursor': self._cursor}
+
+    def active_candidate(self, symbol=None):
+        """Borrow the original RAM setup even during the first in-flight BUY dispatch."""
+        events = (context['event'] for context in self._plans.values())
+        return next((event for event in (*events, self._pending_entry)
+                     if event is not None and (symbol is None or event['symbol'] == symbol)), None)
 
     def prepare(self, document):
         if document is not None:
@@ -123,10 +132,11 @@ class ClosePlanManagement:
                 self.status = {'state': 'MANAGING', 'reason': 'awaiting_current_0B', 'orders_enabled': False}
                 return
             setup = event['close_ipo_entry_setup']
-            next_open = datetime.fromisoformat(setup['next_open_at'])
+            next_open = datetime.fromisoformat(setup['next_open_at']) if setup['next_open_at'] is not None else None
             policy = self._parameters['policy']
             gap = None
-            if (next_open + timedelta(minutes=1) <= now < next_open + timedelta(minutes=policy['exit_minutes_after_open'])
+            if (next_open is not None
+                    and next_open + timedelta(minutes=1) <= now < next_open + timedelta(minutes=policy['exit_minutes_after_open'])
                     and setup.get('next_session') is not None):
                 auction = setup['close_auction']
                 rows = await drain_thread_call(self._store.load_close_gap_observations, root.intent.symbol,
@@ -142,7 +152,8 @@ class ClosePlanManagement:
                 root=root, head=head, fill_events=await drain_thread_call(execution.events, root.intent.intent_id),
                 decided_at=now, now=now, stop_risk=stop_risk, **args)
             if prepared is None:
-                self.status = {'state': 'MANAGING', 'reason': 'planned_overnight_hold', 'orders_enabled': False}
+                self.status = {'state': 'MANAGING', 'reason': 'ipo_intraday_hold' if self._family == 'ipo_breakout/v1'
+                               else 'planned_overnight_hold', 'orders_enabled': False}
                 return
             recovery, risk = await self._fresh_cut()
             # Broker reconciliation can advance the plan revision even when
@@ -176,7 +187,7 @@ class ClosePlanManagement:
         consumed = 0
         for event in page['events']:
             try:
-                if matches_close_shadow(self._parameters, event):
+                if matches_close_shadow(self._parameters, event, family=self._family):
                     now = self._now()
                     if datetime.fromisoformat(event['available_at']) <= now < datetime.fromisoformat(event['expires_at']):
                         quote = self._price(event['symbol']) if self._price is not None else None
@@ -187,14 +198,19 @@ class ClosePlanManagement:
                             recovery, risk = await self._fresh_cut()
                             if not allow_entry():
                                 break
-                            gate, record, _ = await drain_thread_call(dispatch_close_entry, self._repository,
-                                self._bundle.runtime, self._spec, parameters=self._parameters, event=event,
-                                quote=quote, recovery=recovery, risk=risk)
+                            self._pending_entry = frozen_close_candidate(event)
+                            try:
+                                gate, record, _ = await drain_thread_call(dispatch_close_entry, self._repository,
+                                    self._bundle.runtime, self._spec, parameters=self._parameters, event=event,
+                                    quote=quote, recovery=recovery, risk=risk)
+                                if record is not None:
+                                    self._plans[record.intent.plan.plan_id] = await drain_thread_call(
+                                        self._load_context, record.intent.plan.plan_id)
+                            finally:
+                                self._pending_entry = None
                             self.status = {'state': 'ORDER_SUBMITTED' if record is not None else 'BLOCKED',
                                 'reason': ';'.join(gate.reasons) if gate.reasons else 'close_entry_submitted',
                                 'pending_intent_id': record.intent.intent_id if record is not None else '', 'orders_enabled': False}
-                            if record is not None:
-                                self._plans[record.intent.plan.plan_id] = await drain_thread_call(self._load_context, record.intent.plan.plan_id)
             except ValueError as error:
                 self.status = {'state': 'BLOCKED', 'reason': str(error), 'orders_enabled': False}
             self._cursor = event['accepted_sequence']

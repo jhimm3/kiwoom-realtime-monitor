@@ -398,8 +398,35 @@ def gross_price_stop_reached(price, entry, stop_loss_bps):
     return price * 10000 <= entry * (10000 - stop_loss_bps)
 
 
-def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None, leader_config=None, position_proof=None):
+def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None, leader_config=None, position_proof=None,
+                                  ipo_policy=None, ipo_candidate=None):
     """Bind a sticky gross-price stop to the admitted policy and native fill basis."""
+    if isinstance(proof, Mapping) and proof.get('version') == 'ipo_structure_stop/v1':
+        required = {'version', 'symbol', 'quantity', 'entry_price_won', 'price_won', 'available_at', 'input_ref',
+                    'breakout_level', 'candidate_event_id', 'candidate_snapshot_id', 'spec_id', 'package_hash',
+                    'execution_run_id'}
+        if (set(proof) != required or getattr(ipo_policy, 'variant', None) != 'IPO_BREAKOUT'
+                or (proof['spec_id'], proof['package_hash']) != (spec.spec_id, spec.candidate_package_hash)
+                or any(type(proof.get(key)) is not int or proof[key] <= 0 for key in
+                       ('quantity', 'entry_price_won', 'price_won', 'breakout_level'))
+                or proof['price_won'] >= proof['breakout_level']
+                or any(not isinstance(proof[key], str) or not proof[key] for key in
+                       ('symbol', 'candidate_event_id', 'candidate_snapshot_id', 'execution_run_id', 'input_ref'))
+                or not proof['input_ref'].startswith('collector-trade:') or len(proof['input_ref']) > 512
+                or datetime.fromisoformat(proof['available_at']).tzinfo is None):
+            raise ValueError('ipo_structure_stop_proof_invalid')
+        if ipo_candidate is not None and (
+                (proof['symbol'], proof['candidate_event_id'], proof['candidate_snapshot_id'], proof['breakout_level'])
+                != (ipo_candidate['symbol'], ipo_candidate['event_id'], ipo_candidate['snapshot_id'],
+                    ipo_candidate['close_ipo_entry_setup']['breakout_level'])
+                or ipo_candidate['close_ipo_entry_setup']['policy'] != ipo_policy.to_dict()):
+            raise ValueError('ipo_structure_stop_original_setup_changed')
+        if risk is not None and (
+                dict(risk.owned_position_quantities).get(proof['symbol']) != proof['quantity']
+                or dict(risk.owned_entry_prices).get(proof['symbol']) != proof['entry_price_won']
+                or risk.execution_run_id != proof['execution_run_id']):
+            raise ValueError('ipo_structure_stop_native_basis_changed')
+        return
     if isinstance(proof, Mapping) and proof.get("version") == "leader_absolute_stop/v1":
         from .leader_breakout import _id, LeaderBreakoutContext, validate_leader_position_proof
         required = {"version", "symbol", "quantity", "entry_price_won", "price_won", "available_at", "input_ref",
@@ -448,11 +475,15 @@ def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None,
         raise ValueError('mock_stop_loss_native_basis_changed')
 
 
-def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, price, account_positions, stop_loss_bps):
+def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, price, account_positions, stop_loss_bps,
+                                      ipo_policy=None, ipo_candidate=None):
     """Evaluate an admitted stop from ACKed fill basis and borrowed Collector RAM."""
     basis = dict(risk.owned_entry_prices)
     owned = dict(risk.owned_position_quantities)
     symbol = price.get('symbol') if isinstance(price, Mapping) else None
+    structure_stop = (getattr(ipo_policy, 'variant', None) == 'IPO_BREAKOUT' and ipo_candidate is not None
+                      and symbol == ipo_candidate['symbol'] and type(price.get('price_won')) is int
+                      and price['price_won'] < ipo_candidate['close_ipo_entry_setup']['breakout_level'])
     age = spec.maximum_data_gap_seconds
     if spec.unfilled_execution_policy is not None:
         age = min(age, spec.unfilled_execution_policy.max_snapshot_age_seconds)
@@ -461,12 +492,19 @@ def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, pric
             or type(price.get('price_won')) is not int or price['price_won'] <= 0
             or not isinstance(price.get('available_at'), datetime) or price['available_at'].tzinfo is None
             or not 0 <= (now-price['available_at']).total_seconds() <= age
-            or not gross_price_stop_reached(price['price_won'], basis[symbol], stop_loss_bps)):
+            or not (structure_stop or gross_price_stop_reached(price['price_won'], basis[symbol], stop_loss_bps))):
         return None
     proof = {'symbol': symbol, 'quantity': owned[symbol], 'entry_price_won': basis[symbol],
         'stop_loss_bps': stop_loss_bps, 'price_won': price['price_won'],
         'available_at': price['available_at'].isoformat(), 'input_ref': price['input_ref']}
-    validate_mock_stop_loss_proof(proof, spec, risk, stop_loss_bps=stop_loss_bps)
+    if structure_stop:
+        proof.pop('stop_loss_bps')
+        proof.update(version='ipo_structure_stop/v1',
+            breakout_level=ipo_candidate['close_ipo_entry_setup']['breakout_level'],
+            candidate_event_id=ipo_candidate['event_id'], candidate_snapshot_id=ipo_candidate['snapshot_id'],
+            spec_id=spec.spec_id, package_hash=spec.candidate_package_hash, execution_run_id=execution_run_id)
+    validate_mock_stop_loss_proof(proof, spec, risk, stop_loss_bps=stop_loss_bps,
+                                  ipo_policy=ipo_policy, ipo_candidate=ipo_candidate)
     trigger = mock_automation_protection_trigger(spec, risk, execution_run_id=execution_run_id,
         now=now, account_positions=account_positions)
     if trigger is None:

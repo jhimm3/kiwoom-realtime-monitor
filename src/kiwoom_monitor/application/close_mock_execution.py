@@ -166,7 +166,7 @@ def close_exit_key(plan: OrderPlanRef) -> str:
     return content_id("close_exit_slot", asdict(plan))
 
 
-def validate_close_stop_notice(spec, *, run_id, root, fill_events, notice, stop_risk, stop_loss_bps, now):
+def validate_close_stop_notice(spec, *, run_id, root, fill_events, notice, stop_risk, stop_loss_bps, event, now):
     """Replay the first observed stop against its immutable Risk and original BUY fill prefix."""
     from .mock_automation_risk import _sha256, validate_mock_stop_loss_proof
 
@@ -185,7 +185,8 @@ def validate_close_stop_notice(spec, *, run_id, root, fill_events, notice, stop_
             != (stop_risk.snapshot_id, stop_risk.reconciliation_revision, 'acknowledged_account_monitor')
             or trigger.get('disposition') not in {'EXIT_REQUIRED', 'RECONCILE_REQUIRED'}):
         raise ValueError('CLOSE historical stop scope changed')
-    validate_mock_stop_loss_proof(proof, spec, stop_risk, stop_loss_bps=stop_loss_bps)
+    validate_mock_stop_loss_proof(proof, spec, stop_risk, stop_loss_bps=stop_loss_bps,
+        ipo_policy=CloseIpoSetup.from_document(event['close_ipo_entry_setup']).policy, ipo_candidate=event)
     if (notice.get('input_ref') != proof['input_ref'] or type(notice.get('revision')) is not int or notice['revision'] <= 0
             or (trigger.get('account_ref'), trigger.get('execution_run_id'), trigger.get('binding_revision'))
             != (stop_risk.account_ref, run_id, spec.binding_revision)
@@ -236,7 +237,7 @@ def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evid
     deadline = datetime.fromisoformat(event["close_ipo_entry_setup"]["entry_deadline"])
     if protection_notice is not None:
         validate_close_stop_notice(spec, run_id=run_id, root=root, fill_events=fill_events,
-            notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=parameters['policy']['protection_loss_bps'], now=now)
+            notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=parameters['policy']['protection_loss_bps'], event=event, now=now)
     elif now < deadline:
         raise ValueError("CLOSE entry deadline has not arrived")
     age = spec.maximum_data_gap_seconds
@@ -376,7 +377,7 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
             or {row["broker_execution_id"] for row in fills} != set(root.fill_ids)):
         raise ValueError("CLOSE entry detailed fill basis is incomplete")
     trigger = (validate_close_stop_notice(spec, run_id=run_id, root=root, fill_events=fill_events,
-        notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=parameters['policy']['protection_loss_bps'], now=now)
+        notice=protection_notice, stop_risk=stop_risk, stop_loss_bps=parameters['policy']['protection_loss_bps'], event=event, now=now)
         if protection_notice is not None else _close_quote(spec, trigger_quote, decided_at, now))
     execution_quote = _close_quote(spec, quote, decided_at, now)
     if (datetime.fromisoformat(trigger["available_at"]) > datetime.fromisoformat(execution_quote["available_at"])
@@ -389,7 +390,9 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     reduced_quantity = quantity - head.quantity
     gap_result = None
     if protection_notice is not None or trigger["price_won"] * 10_000 <= basis * (10_000 - setup.policy.protection_loss_bps):
-        reason = "filled_position_protection_0B"
+        reason = ('ipo_breakout_structure_failed_0B' if protection_notice is not None
+                  and protection_notice['risk_trigger']['stop_loss'].get('version') == 'ipo_structure_stop/v1'
+                  else 'filled_position_protection_0B')
     elif setup.policy.variant == 'IPO_BREAKOUT':
         if decided_at >= setup.entry_deadline:
             reason = 'ipo_intraday_exit_deadline_0B'
