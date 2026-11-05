@@ -34,7 +34,10 @@ from kiwoom_monitor.domain.execution_activation import (
     strategy_stage_revision,
 )
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION
 from .leader_breakout import LeaderBreakoutConfig, validate_leader_shadow_event
+from .market_session_schedule import KST
 
 
 MOCK_AUTOMATION_LIMIT_FIELDS = (
@@ -45,10 +48,56 @@ MOCK_AUTOMATION_LIMIT_FIELDS = (
 )
 
 
+def _matches_close_shadow(parameters: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    """Compare the frozen rule, while each stored Shadow setup keeps its own calendar."""
+    setup = event.get("close_ipo_entry_setup")
+    if (event.get("strategy_id") != "close_betting" or event.get("strategy_version") != "v1"
+            or event.get("strategy_variant") != "CLOSE" or event.get("shadow_scope") != MINUTE_SHADOW_VERSION
+            or event.get("transition") != "flat_to_candidate"
+            or event.get("decision_reasons") != ["preclose_return_setup"]
+            or not str(event.get("run_id", "")).startswith("section12-minute-shadow:")
+            or any(not isinstance(event.get(key), str) or not event[key]
+                   for key in ("event_id", "snapshot_id", "decision_id"))
+            or not isinstance(setup, Mapping) or setup.get("policy") != parameters["policy"]
+            or setup.get("symbol") != event.get("symbol") or type(event.get("quantity")) is not int
+            or event["quantity"] != parameters["policy"]["quantity"]):
+        return False
+    refs, bars = event.get("input_revision_refs"), setup.get("entry_bar_refs")
+    auction = setup.get("close_auction")
+    if (not isinstance(refs, list) or not isinstance(bars, list) or not bars
+            or bars[-1] != event.get("reference_revision_id")
+            or any(not isinstance(ref, str) or not ref or ref not in refs
+                   for ref in (*bars, setup.get("entry_calendar_ref"), setup.get("next_calendar_ref")))
+            or not isinstance(auction, Mapping) or auction.get("venue") != "KRX"
+            or auction.get("session") != "KRX_CLOSING_AUCTION" or auction.get("phase") != "AUCTION_ORDER_ENTRY"
+            or auction.get("support") != "SUPPORTED" or auction.get("trading_date") != setup.get("entry_date")):
+        return False
+    try:
+        available, cutoff, expiry, deadline, start, end, next_open = (
+            datetime.fromisoformat(value) for value in (
+                event["available_at"], event["input_cutoff"], event["expires_at"], setup["entry_deadline"],
+                auction["starts_at"], auction["ends_at"], setup["next_open_at"],
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (all(value.utcoffset() is not None for value in (available, cutoff, expiry, deadline, start, end, next_open))
+            and available == cutoff and available < expiry <= deadline <= start < end < next_open
+            and available.astimezone(KST).date().isoformat() == setup.get("entry_date")
+            and next_open.astimezone(KST).date().isoformat() == setup.get("next_date")
+            and setup["entry_date"] < setup["next_date"])
+
+
 def matching_shadow_events(
     candidate_publication: Mapping[str, Any], events: tuple[Mapping[str, Any], ...],
 ) -> tuple[dict[str, Any], ...]:
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
+        parameters = package.candidate_spec["parameters"]
+        return tuple(sorted(
+            (dict(event) for event in events if _matches_close_shadow(parameters, event)),
+            key=lambda event: (datetime.fromisoformat(event["available_at"]), event["event_id"]), reverse=True,
+        ))
     family_id = str(package.candidate_spec.get("family", ""))
     config = parse_strategy_config(family_id, _mapping(package.candidate_spec, "parameters"))
     session = _mapping(package.candidate_spec, "session_profile")
@@ -98,6 +147,8 @@ def build_mock_automation_publication_documents(
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
+        raise ValueError("CLOSE READY publication requires an approved native order policy and runner")
     policy = eligibility_policy_from_dict(
         _mapping(candidate_publication, "eligibility_policy")
     )
@@ -237,6 +288,8 @@ def publish_ready_mock_automation_spec(
     )
     if package is None:
         raise ValueError("mock automation candidate package is not stored")
+    if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
+        raise ValueError("CLOSE READY publication requires an approved native order policy and runner")
     policy = repository.load_mock_automation_eligibility_policy(
         spec.strategy_ref, spec.candidate_package_hash,
     )

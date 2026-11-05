@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta
 
 from .market_session_schedule import (
@@ -58,6 +58,13 @@ class ClosePolicy:
     @property
     def variant(self) -> str:
         return "CLOSE" if self.ipo_reduction_quantity is None else "IPO_CLOSE"
+
+    @classmethod
+    def from_document(cls, document: Mapping) -> ClosePolicy:
+        return cls(**{**document, "listing_phases": tuple(ListingPhase(value) for value in document["listing_phases"])})
+
+    def to_dict(self) -> dict:
+        return {**asdict(self), "listing_phases": [value.value for value in self.listing_phases]}
 
 
 @dataclass(frozen=True)

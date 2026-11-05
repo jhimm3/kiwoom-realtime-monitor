@@ -103,8 +103,7 @@ class MinuteExperiment:
         from kiwoom_monitor.application.close_and_ipo import ClosePolicy, IpoBreakoutPolicy
 
         policy_document["listing_phases"] = tuple(ListingPhase(value) for value in policy_document["listing_phases"])
-        policy_type = IpoBreakoutPolicy if family == IPO_BREAKOUT_FAMILY else ClosePolicy
-        policy = policy_type(**policy_document)
+        policy = IpoBreakoutPolicy(**policy_document) if family == IPO_BREAKOUT_FAMILY else ClosePolicy.from_document(policy_document)
         variants = {CLOSE_FAMILY: "CLOSE", IPO_CLOSE_FAMILY: "IPO_CLOSE", IPO_BREAKOUT_FAMILY: "IPO_BREAKOUT"}
         if policy.variant != variants[family]:
             raise ValueError("minute experiment policy differs from the selected family")

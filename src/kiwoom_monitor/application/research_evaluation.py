@@ -2450,14 +2450,28 @@ def build_research_report(
     cost_model: Mapping[str, Any] | None,
     spec: ResearchEvaluationSpec,
     logical_result_hash: str,
+    evaluated_final_holdout: bool = False,
 ) -> ResearchReport:
     """한 불변 run을 시간순 fold별로 평가하며 경계 표본을 명시적으로 제외한다."""
+    if type(evaluated_final_holdout) is not bool:
+        raise ValueError("final report evaluation scope must be boolean")
+    if evaluated_final_holdout:
+        canonical = spec.to_dict()
+        for fold in canonical["folds"]:
+            for field in ("start", "end"):
+                fold[field] = _aware_datetime(fold[field]).astimezone(timezone.utc).isoformat(timespec="microseconds")
+        if (input_manifest.get("runtime_input_version") != "independent_final_holdout_input/v1"
+                or len(spec.folds) != 1 or spec.folds[0].role != "OOS"
+                or input_manifest.get("final_holdout_partition", {}).get("evaluation") != canonical):
+            raise ValueError("evaluated final report requires its independently prepared OOS partition")
     observation_rows = tuple(dict(row) for row in observations)
     candidate_rows = tuple(_document(row) for row in candidate_events)
     decision_rows = tuple(dict(row) for row in decisions)
     event_rows = tuple(_document(row) for row in execution_events)
     label_rows = tuple(_document(row) for row in outcome_labels)
     quality = _data_quality(input_manifest, observation_rows, spec, logical_result_hash)
+    if evaluated_final_holdout:
+        quality["evaluation_scope"] = "independent_final_holdout/v1"
     cost_reasons = _cost_model_reasons(cost_model, spec)
     historical_reconstruction = _historical_reconstruction_input(input_manifest)
     limitations = (
@@ -2477,6 +2491,7 @@ def build_research_report(
             events=event_rows, labels=label_rows, candidate_by_id=candidate_by_id,
             initial_cash_won=initial_cash_won,
             common_reasons=tuple(quality["reasons"]) + tuple(cost_reasons),
+            evaluated_final_holdout=evaluated_final_holdout,
         )
         for fold in spec.folds
     )
@@ -2707,8 +2722,9 @@ def _build_fold_report(
     candidate_by_id: Mapping[str, Mapping[str, Any]],
     initial_cash_won: int,
     common_reasons: tuple[str, ...],
+    evaluated_final_holdout: bool = False,
 ) -> ResearchFoldReport:
-    if fold.role == "OOS" and not spec.final_holdout_accessed_at:
+    if fold.role == "OOS" and not spec.final_holdout_accessed_at and not evaluated_final_holdout:
         return _empty_fold_report(fold.name, fold.role, "SEALED", ("final_holdout_not_accessed",))
     included: list[Mapping[str, Any]] = []
     purged_trade_count = 0

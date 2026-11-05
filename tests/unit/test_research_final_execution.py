@@ -256,6 +256,7 @@ class FinalExecutionTests(unittest.TestCase):
 
         def bars(day, times_and_prices):
             rows = fixtures.rows_for(datetime.fromisoformat(day).date(), len(times_and_prices))
+            rows[0].update(available_at=stamp(day, '08:58'), observation_key=stamp(day, '08:58'))
             for row, (clock, price) in zip(rows[1:], times_and_prices):
                 start = stamp(day, clock)
                 end = (datetime.fromisoformat(start) + timedelta(minutes=1)).isoformat()
@@ -307,6 +308,7 @@ class FinalExecutionTests(unittest.TestCase):
         document['execution']['cost_model'].update(commission_bps=0, sell_tax_bps=0, slippage_bps=0,
                                                   valid_from=stamp(friday, '08:00'), valid_to=stamp(monday, '16:00'))
         document['evaluation']['folds'][0].update(start=stamp(friday, '09:00'), end=stamp(monday, '16:00'))
+        document['evaluation'].update(minimum_closed_trades=1, minimum_active_days=1)
         candidate = rp.research_process_request_from_document(document, root)
         implementation_hash = rp.research_implementation_hash(fixtures.PROFILE)
         candidate_hash = rp.final_candidate_spec_hash(candidate, implementation_hash)
@@ -340,12 +342,99 @@ class FinalExecutionTests(unittest.TestCase):
                          (repeated['state'], repeated['run_id'], repeated['logical_result_hash']))
         self.assertEqual(1, len(repo.load_final_holdout_executions(batch.batch_id)))
         policy = MockAutomationEligibilityPolicy('close-test', candidate_hash,
-            datetime.fromisoformat(stamp(friday, '08:00')), 1, 1, 0, 1_000_000)
-        with self.assertRaisesRegex(ValueError, 'cannot be published as a mock automation candidate'):
+            datetime.fromisoformat(stamp(friday, '08:00')), 1, 1, -100, 1_000_000)
+        self._verify_close_final_publication(root, repo, candidate, implementation_hash, batch, result, policy)
+
+    def _verify_close_final_publication(self, root, repo, candidate, implementation_hash, batch, result, policy):
+        from copy import deepcopy
+        from dataclasses import asdict
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.application.market_session_schedule import session_window_at
+        from kiwoom_monitor.application.mock_automation_specification import (
+            build_mock_automation_publication_documents, matching_shadow_events,
+        )
+        from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        from kiwoom_monitor.central_server.mock_publication_routes import create_mock_publication_router
+        from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+        from tests.unit.test_mock_automation_specification import ACCOUNT_REF, PROFILE_ID, mock_specification_inputs
+
+        documents = rp.prepare_mock_automation_candidate_publication(repo, candidate,
+            implementation_hash=implementation_hash, strategy_ref=policy.strategy_ref,
+            account_ref=ACCOUNT_REF, final_batch_id=batch.batch_id, final_run_id=result['run_id'],
+            eligibility_policy=policy)
+        self.assertEqual('ELIGIBLE', documents['eligibility_receipt']['status'], documents['package']['evaluation_evidence'])
+        self.assertEqual(result['logical_result_hash'], documents['package']['source_final']['result_hash'])
+        wrong = deepcopy(repo.load_run(result['run_id']))
+        wrong['spec']['strategy_references']['sha256'] = 'b' * 64
+        with patch.object(repo, 'load_run', return_value=wrong), self.assertRaisesRegex(ValueError, 'source run differs'):
             rp.prepare_mock_automation_candidate_publication(repo, candidate,
                 implementation_hash=implementation_hash, strategy_ref=policy.strategy_ref,
-                account_ref='test-mock', final_batch_id=batch.batch_id, final_run_id=result['run_id'],
+                account_ref=ACCOUNT_REF, final_batch_id=batch.batch_id, final_run_id=result['run_id'],
                 eligibility_policy=policy)
+
+        fixture = CloseAndIpoTests()
+        fixture.setUp()
+        cut = datetime.fromisoformat(fixture.signal.available_at)
+        entry = replace(fixture.entry, schedule_version=session_window_at(cut, venue='KRX').schedule_version)
+        calendar = (replace(fixture.calendar[0], sessions=(entry, fixture.auction)), *fixture.calendar[1:])
+        config = {
+            'version': MINUTE_SHADOW_VERSION, 'family': candidate.family, 'signal_valid_seconds': 30,
+            'symbols': [fixture.symbol], 'strategy': candidate.strategy.to_dict(),
+            'references': {'version': 'strategy-reference/v1', 'calendar': [asdict(day) for day in calendar], 'listings': []},
+        }
+        with closing(SQLiteQueryStore(root / 'close-publication.sqlite3', now_provider=lambda: cut)) as store:
+            store.initialize()
+            inputs = mock_specification_inputs(store, publish_candidate=False)
+            app = FastAPI()
+            app.include_router(create_mock_publication_router(store, inputs.repository, lambda: None,
+                expected_implementation_hash=lambda _profile: implementation_hash))
+            body = {'account_ref': ACCOUNT_REF, 'credential_profile_id': PROFILE_ID,
+                    'expected_binding_revision': inputs.binding['binding_revision'], **documents}
+            client = TestClient(app)
+            response = client.post('/api/v1/research/mock-automation-candidates', json=body)
+            self.assertEqual((200, 'saved', False),
+                (response.status_code, response.json().get('status'), response.json().get('orders_started')))
+            repeated = client.post('/api/v1/research/mock-automation-candidates', json=body)
+            self.assertEqual('unchanged', repeated.json()['status'])
+            publication, = client.get(f'/api/v1/research/mock-automation-candidates/{ACCOUNT_REF}',
+                params={'credential_profile_id': PROFILE_ID}).json()['candidates']
+            self.assertEqual(documents, publication)
+            monitor = CandidateMonitor.from_json(store, json.dumps(config, default=lambda value: value.isoformat()),
+                poll_seconds=2, universe_max_age_seconds=180, now_provider=lambda: cut)
+            monitor.run_once()
+            for index, frame in enumerate((*fixture.prior, fixture.signal)):
+                start = datetime.fromisoformat(frame.bar_start)
+                key = {'trading_date': start.date().isoformat(), 'minute': start.strftime('%H:%M'),
+                       'code': fixture.symbol, 'market': 'KRX'}
+                store.save_minute_bars([{**key, 'open': frame.open, 'high': frame.high, 'low': frame.low,
+                    'close': frame.close, 'volume': frame.volume, 'trade_value_million_won': frame.trade_value_million_won,
+                    'updated_at': start.timestamp(), 'operation_id': f'write-{index}'}])
+                store.finalize_minute_bars([{**key, 'available_at': datetime.fromisoformat(frame.available_at).timestamp(),
+                    'capture_quality': 'complete', 'finalization_source': 'timer', 'operation_id': f'finalize-{index}'}])
+            monitor.run_once()
+            event, = store.load_shadow_candidates()['events']
+            matched = matching_shadow_events(publication, (event,))
+            self.assertEqual((event,), matched)
+            self.assertNotEqual(candidate.strategy_references[1],
+                hashlib.sha256(json.dumps(config['references'], default=lambda value: value.isoformat()).encode()).hexdigest())
+            for changed in (
+                {**event, 'quantity': True}, {**event, 'shadow_scope': 'historical-replay'},
+                {**event, 'close_ipo_entry_setup': {**event['close_ipo_entry_setup'], 'policy': asdict(fixture.close)}},
+                {**event, 'close_ipo_entry_setup': {**event['close_ipo_entry_setup'], 'next_open_at': event['available_at']}},
+            ):
+                with self.subTest(changed=changed):
+                    self.assertEqual((), matching_shadow_events(publication, (changed,)))
+            with self.assertRaisesRegex(ValueError, 'approved native order policy and runner'):
+                build_mock_automation_publication_documents(candidate_publication=publication,
+                    binding=inputs.binding, credential_profile_id=PROFILE_ID, shadow_event=event,
+                    evaluation_start=inputs.profile.evaluation_start, evaluation_end=inputs.profile.evaluation_end,
+                    frozen_at=inputs.spec.frozen_at, criteria=inputs.profile.criteria, limits={})
+            self.assertEqual((), inputs.repository.load_stage_revisions(policy.strategy_ref))
+            with store._connection() as connection:
+                self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM central_execution_intents').fetchone()[0])
 
     def candidate_cli_paths(self):
         root = self.fixture.root

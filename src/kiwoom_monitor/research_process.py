@@ -71,6 +71,7 @@ from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_
 from kiwoom_monitor.infrastructure.research_data_source import FrozenStrategyReferences, load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
 from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, CLOSE_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
 from kiwoom_monitor.domain.research_contract import (
+    CLOSE_FINAL_CANDIDATE_VERSION,
     SECTION12_EVIDENCE_EXPERIMENT_FAMILIES as EVIDENCE_EXPERIMENT_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FORMAT,
 )
@@ -156,9 +157,6 @@ class EvidenceExperimentRequest:
     resource_limits: ResearchResourceLimits
 
 
-_FINAL_CLOSE_RESEARCH_CANDIDATE = 'final_research_candidate/v1'
-
-
 def final_candidate_spec_document(
     request: ResearchProcessRequest, implementation_hash: str,
 ) -> dict[str, Any]:
@@ -211,7 +209,7 @@ def final_candidate_spec_document(
             'session_profile': research_session_profile_document(request.session_profile),
             'implementation_hash': implementation_hash}
     if references is not None:
-        document['version'] = _FINAL_CLOSE_RESEARCH_CANDIDATE
+        document['version'] = CLOSE_FINAL_CANDIDATE_VERSION
         document['strategy_references'] = {'version': 'strategy-reference/v1', 'sha256': references[1]}
     return document
 
@@ -241,8 +239,6 @@ def prepare_mock_automation_candidate_publication(
     )
 
     candidate_spec = final_candidate_spec_document(request, implementation_hash)
-    if candidate_spec['version'] == _FINAL_CLOSE_RESEARCH_CANDIDATE:
-        raise ValueError('final CLOSE research cannot be published as a mock automation candidate')
     candidate_hash = final_candidate_spec_hash(request, implementation_hash)
     matches = [
         row for row in repository.load_final_holdout_executions(final_batch_id)

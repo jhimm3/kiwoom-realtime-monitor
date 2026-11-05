@@ -20,10 +20,17 @@ from kiwoom_monitor.application.mock_automation_specification import (
     matching_shadow_events,
 )
 from kiwoom_monitor.domain.execution_activation import ForwardCriteria, LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy
+from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
 from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from kiwoom_monitor.presentation.mock_automation_candidate_dialog import MockAutomationCandidateDialog
+
+
+def _is_close_research_publication(publication: Any) -> bool:
+    package = publication.get("package") if isinstance(publication, dict) else None
+    spec = package.get("candidate_spec") if isinstance(package, dict) else None
+    return isinstance(spec, dict) and spec.get("version") == CLOSE_FINAL_CANDIDATE_VERSION
 
 
 def available_mock_profiles(document: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -417,6 +424,7 @@ class MockAutomationDialog(QDialog):
         self._resume = QPushButton("자동운용 재개")
         self._refresh.clicked.connect(lambda: self._request("refresh"))
         self._publish.clicked.connect(self._publish_selected_candidate)
+        self._candidate.currentIndexChanged.connect(self._update_candidate_action)
         self._start.clicked.connect(lambda: self._request("start"))
         self._stop.clicked.connect(lambda: self._request("stop"))
         self._resume.clicked.connect(lambda: self._request("resume"))
@@ -561,6 +569,10 @@ class MockAutomationDialog(QDialog):
         self._worker = worker
         worker.start()
 
+    def _update_candidate_action(self) -> None:
+        close_research = _is_close_research_publication(self._candidate.currentData())
+        self._publish.setText("종가베팅 Shadow 대조" if close_research else "새 READY 명세 작성")
+
     def _publish_prepared_candidate(self, context: dict[str, Any]) -> None:
         selected = context["selected_profile"]
         candidate = context["publication_candidate"]
@@ -575,6 +587,10 @@ class MockAutomationDialog(QDialog):
         )
         if not events:
             self._message.setText("이 후보 설정과 일치하는 실제 Shadow 후보 기록이 아직 없습니다.")
+            return
+        if _is_close_research_publication(candidate):
+            recent = format_kst_time(events[0]["available_at"])
+            self._message.setText(f"종가베팅 Shadow 일치 {len(events)}건 · 최근 {recent} · 주문 명세 승인 대기")
             return
         dialog = MockAutomationPublicationDialog(
             candidate, binding, str(selected["profile_id"]), events, self,
@@ -673,8 +689,9 @@ class MockAutomationDialog(QDialog):
                 continue
             source = package.get("source_final", {})
             finished = source.get("finished_at", "") if isinstance(source, dict) else ""
+            label = "종가베팅 연구 적격" if _is_close_research_publication(publication) else status
             self._candidate.addItem(
-                f"{package.get('strategy_ref', '')} · {status} · {format_kst_time(finished, missing='')}", publication,
+                f"{package.get('strategy_ref', '')} · {label} · {format_kst_time(finished, missing='')}", publication,
             )
 
         selected_spec_id = str(self._context.get("selected_spec_id", ""))

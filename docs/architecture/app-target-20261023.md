@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 종가베팅 독립 최종평가**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 종가베팅 최종 결과·Shadow 후보 연결**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05의 종가베팅은 동결 달력의 독립 최종평가와 공통 주문 원장의 익일 복구를 합성 검증했다. 종가베팅 명세 승인과 기동 연결, 다른 전략의 승인 모의 실행과 12.12 통합 수락이 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [종가베팅 최종평가](#section12-close-final-research) · [종가베팅 익일 복구](#section12-close-overnight-native) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05의 종가베팅은 최종평가→후보 게시→Shadow 대조와 공통 주문 원장의 익일 복구를 합성 검증했다. 종가베팅 주문 명세 승인과 기동 연결, 다른 전략의 승인 모의 실행과 12.12 통합 수락이 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [종가베팅 후보 연결](#section12-close-candidate-admission) · [종가베팅 익일 복구](#section12-close-overnight-native) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4687,6 +4687,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.256 S12-05 종가베팅 독립 최종평가 — 2026-11-05
 
 - 일반 종가베팅의 고정 정책·비용과 달력 파일 판본을 기존 최종평가 배치에 결속했다. 변경된 파일은 최종 관측 자료에 접근하기 전에 차단한다. 합성 Paper 재생에서 금요일 매수·월요일 갭 청산과 중복 실행의 같은 결과를 확인했다. 동결 자료의 달력 정정은 가용 시각에 맞춰 적용한다. 종가베팅 주문 명세 승인·기동은 12.12 항목 3의 남은 조건이다. [검증과 재개 조건](section12-development-roadmap-20261105.md#s12-close-final-research).
+
+<a id="section12-close-candidate-admission"></a>
+
+### 11.257 S12-05 종가베팅 최종 결과·Shadow 후보 연결 — 2026-11-05
+
+- 실제 독립 최종평가 결과를 기존 후보 API와 계좌 확인·저장 원장에 연결했다. 종가베팅 정책 파서는 연구·후보 검증에서 공유하며 최종 보고서가 실행 뒤에도 봉인되던 결함을 수정했다. 과거와 현재의 달력을 각각 보존하면서 같은 규칙의 native Shadow를 대조하고 화면에 표시한다. READY 작성에는 종가베팅 주문 명세와 실행기 연결이 필요하다. [구현·검증과 남은 조건](section12-development-roadmap-20261105.md#s12-close-candidate-admission).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

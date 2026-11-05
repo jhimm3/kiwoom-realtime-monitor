@@ -11,10 +11,12 @@ from enum import StrEnum
 from typing import Any, Mapping
 
 from kiwoom_monitor.domain.simulation_contract import (
+    COMPLETED_CLOSE_EXECUTION_VERSION,
     SimulationCostModel,
     SimulationExecutionConfig,
 )
-from kiwoom_monitor.application.market_session_schedule import research_session_profile_contract_matches
+from kiwoom_monitor.application.market_session_schedule import KRX_REGULAR_RESEARCH_PROFILE, research_session_profile_contract_matches
+from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
 from kiwoom_monitor.domain.strategy_contract import parse_strategy_config
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec
 
@@ -201,6 +203,13 @@ def build_candidate_package(
         raise ValueError("completed final candidate lineage is missing or inconsistent")
     if report.get("run_id") != run.get("run_id"):
         raise ValueError("final research report does not match the source run")
+    if candidate_spec.get("version") == CLOSE_FINAL_CANDIDATE_VERSION:
+        spec = _mapping(run.get("spec"), "CLOSE source run spec")
+        fields = ("family", "parameters", "execution_model", "session_profile", "strategy_references")
+        if (spec.get("execution_scope") != "independent_final_holdout/v1"
+                or spec.get("code_hash") != candidate_spec.get("implementation_hash")
+                or any(spec.get(field) != candidate_spec.get(field) for field in fields)):
+            raise ValueError("final CLOSE source run differs from the frozen candidate")
     evidence = {
         "report_id": str(report.get("report_id", "")),
         "report_status": str(report.get("status", "")),
@@ -323,18 +332,43 @@ def validate_publication_size(package: Mapping[str, Any], policy: Mapping[str, A
 
 def _validate_candidate_spec(value: Mapping[str, Any], expected_hash: str) -> None:
     required = {"version", "family", "parameters", "execution_model", "session_profile", "implementation_hash"}
-    if set(value) != required or value.get("version") not in {"final_candidate/v1", "final_candidate/v2"}:
+    close = value.get("version") == CLOSE_FINAL_CANDIDATE_VERSION
+    if close:
+        required.add("strategy_references")
+    elif value.get("version") not in {"final_candidate/v1", "final_candidate/v2"}:
+        raise ValueError("candidate_spec must be a canonical versioned final_candidate document")
+    if set(value) != required:
         raise ValueError("candidate_spec must be a canonical versioned final_candidate document")
     family = str(value.get("family", ""))
     parameters = _mapping(value.get("parameters"), "candidate parameters")
-    config = parse_strategy_config(family, parameters)
-    from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutConfig
-    if isinstance(config, LeaderBreakoutConfig):
-        if value["version"] != "final_candidate/v2" or config.contexts or config.execution_missing("0B", require_contexts=False):
-            raise ValueError("leader publication requires explicit v2 execution terms and separate live evidence")
-    elif value["version"] != "final_candidate/v1":
-        raise ValueError("legacy Family requires final_candidate/v1")
-    if config.to_dict() != dict(parameters):
+    if close:
+        from kiwoom_monitor.application.close_and_ipo import ClosePolicy
+
+        if family != "close_betting/v1":
+            raise ValueError("final CLOSE research candidate requires the ordinary CLOSE family")
+        reference = _mapping(value.get("strategy_references"), "CLOSE strategy references")
+        if (set(reference) != {"version", "sha256"} or reference["version"] != "strategy-reference/v1"
+                or not isinstance(reference["sha256"], str)):
+            raise ValueError("final CLOSE candidate requires its frozen calendar reference")
+        _require_sha256(str(reference["sha256"]), "CLOSE calendar reference")
+        if (set(parameters) != {"capital_won", "policy"}
+                or type(parameters["capital_won"]) is not int or parameters["capital_won"] <= 0):
+            raise ValueError("final CLOSE candidate requires explicit positive capital")
+        config = ClosePolicy.from_document(_mapping(parameters["policy"], "CLOSE policy"))
+        if config.variant != "CLOSE":
+            raise ValueError("final CLOSE candidate requires its ordinary CLOSE policy")
+        canonical_parameters = {"capital_won": parameters["capital_won"], "policy": config.to_dict()}
+    else:
+        config = parse_strategy_config(family, parameters)
+        from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutConfig
+
+        if isinstance(config, LeaderBreakoutConfig):
+            if value["version"] != "final_candidate/v2" or config.contexts or config.execution_missing("0B", require_contexts=False):
+                raise ValueError("leader publication requires explicit v2 execution terms and separate live evidence")
+        elif value["version"] != "final_candidate/v1":
+            raise ValueError("legacy Family requires final_candidate/v1")
+        canonical_parameters = config.to_dict()
+    if canonical_parameters != dict(parameters):
         raise ValueError("candidate parameters are not canonical")
     execution = _mapping(value.get("execution_model"), "execution_model")
     cost = _mapping(execution.get("cost_model"), "cost_model")
@@ -352,6 +386,8 @@ def _validate_candidate_spec(value: Mapping[str, Any], expected_hash: str) -> No
         raise ValueError("candidate session profile is missing")
     if not research_session_profile_contract_matches(session, profile):
         raise ValueError("candidate session profile is not canonical")
+    if close and (profile != KRX_REGULAR_RESEARCH_PROFILE or parsed_execution.version != COMPLETED_CLOSE_EXECUTION_VERSION):
+        raise ValueError("final CLOSE candidate requires KRX regular completed-close research execution")
     if _sha256(value) != expected_hash:
         raise ValueError("candidate_spec content does not match candidate_spec_hash")
 

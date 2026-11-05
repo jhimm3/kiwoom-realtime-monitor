@@ -480,6 +480,7 @@ def execute_research(
                 ),
                 spec=evaluation_spec,
                 logical_result_hash=core_logical_hash,
+                evaluated_final_holdout=final_scope,
             )
             repository.save_research_report(report)
             checkpoint()

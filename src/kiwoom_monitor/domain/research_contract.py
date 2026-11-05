@@ -20,6 +20,7 @@ DATASET_SNAPSHOT_RESEARCH_KINDS = frozenset({"ranking", "top20_membership", "min
 RESEARCH_OBSERVATION_KINDS = DATASET_SNAPSHOT_RESEARCH_KINDS | {"daily_bar"}
 REPORTED_RESEARCH_RESULT_KIND = "research-run-report"
 REPORTED_RESEARCH_RESULT_COLLECTION = "reported_research_results"
+CLOSE_FINAL_CANDIDATE_VERSION = "final_research_candidate/v1"
 SECTION12_EVIDENCE_EXPERIMENT_FORMAT = "kiwoom-monitor-evidence-experiment"
 SECTION12_EVIDENCE_EXPERIMENT_FAMILIES = {
     "micro_experiment": "micro_execution/v1",

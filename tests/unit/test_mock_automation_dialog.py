@@ -304,6 +304,28 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         self.dialog.deleteLater()
         self.app.processEvents()
 
+    def test_close_research_candidate_reviews_shadow_and_keeps_execution_spec_unpublished(self):
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+
+        candidate = {'package': {'strategy_ref': 'close-test',
+                     'candidate_spec': {'version': CLOSE_FINAL_CANDIDATE_VERSION},
+                     'source_final': {'finished_at': '2026-09-21T07:00:00+00:00'}},
+                     'eligibility_receipt': {'status': 'ELIGIBLE'}}
+        self.context.update(candidate_publications=[candidate], specs=[], selected_spec_id='')
+        self.dialog._completed('refresh', self.context)
+        self.assertIn('종가베팅 연구 적격', self.dialog._candidate.currentText())
+        self.assertEqual('종가베팅 Shadow 대조', self.dialog._publish.text())
+        event = {'event_id': 'stored-close-event', 'available_at': '2026-09-11T15:17:02+09:00'}
+        context = {**self.context, 'publication_candidate': candidate, 'shadow_events': [event]}
+        with (patch('kiwoom_monitor.presentation.mock_automation_dialog.matching_shadow_events', return_value=(event,)),
+              patch('kiwoom_monitor.presentation.mock_automation_dialog.MockAutomationPublicationDialog') as modal):
+            self.dialog._publish_prepared_candidate(context)
+            modal.assert_not_called()
+        self.assertIn('Shadow 일치 1건', self.dialog._message.text())
+        self.assertIn('주문 명세 승인 대기', self.dialog._message.text())
+        self.assertEqual(0, self.dialog._spec.count())
+        self.assertFalse(self.dialog._start.isEnabled())
+
     def test_server_automatic_mode_enables_stop_for_active_spec(self):
         self.context["status"].update(
             runtime_mode=MockAccountRuntimeMode.AUTOMATIC.value,

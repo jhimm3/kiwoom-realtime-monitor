@@ -50,6 +50,20 @@ def _inputs():
 
 
 class ResearchReportTests(unittest.TestCase):
+    def test_final_report_scope_rejects_unprepared_input_and_keeps_ordinary_oos_sealed(self):
+        from dataclasses import replace
+
+        observations, manifest, original = _inputs()
+        spec = replace(original, folds=(original.folds[-1],))
+        arguments = dict(run_id='final-report', input_manifest=manifest, observations=observations,
+            candidate_events=(), decisions=(), execution_events=(), outcome_labels=(), initial_cash_won=10_000,
+            cost_model=None, spec=spec, logical_result_hash='verified')
+        ordinary = build_research_report(**arguments)
+        self.assertEqual('SEALED', ordinary.fold_reports[0].status)
+        self.assertNotIn('evaluation_scope', ordinary.data_quality)
+        with self.assertRaisesRegex(ValueError, 'independently prepared OOS partition'):
+            build_research_report(**arguments, evaluated_final_holdout=True)
+
     def test_drawdown_uses_each_decline_peak_and_keeps_fold_boundaries(self) -> None:
         fold = ResearchFoldSpec("final", "OOS", "2026-09-12T00:00:00+00:00", "2026-09-12T01:00:00+00:00")
         cases = (
