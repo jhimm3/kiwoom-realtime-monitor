@@ -2563,6 +2563,7 @@ class ApprovedLeaderPlanRunnerTests(unittest.IsolatedAsyncioTestCase):
         reader.orders, reader.reserved = (order,), root.intent.quantity * root.intent.limit_price
         with patch.object(self.transport, "cancel", side_effect=SubmissionUnknown("fixture expiry cancel ACK lost")) as cancel:
             await self.runner.episode.advance_once()
+            await monitor.refresh_recovery()  # Deliver a real post-command cut, not the earlier accepted-order Risk.
             cancel.assert_called_once_with(root.intent, root.broker_order_id, 0)
         self.assertEqual("RECONCILE_REQUIRED", self.runner.episode._protection_snapshot()["risk_trigger"]["disposition"])
         emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
@@ -3236,18 +3237,24 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
                 "key": root.intent.decision_id, "document": source}])
             broker.assert_not_called()
             risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
-            self.assertEqual((False, (), 0), (risk.reconciliation_complete, risk.owned_position_quantities, risk.balance_mismatch_count))
+            # The matching ACCEPTED zero-fill reservation is known before any
+            # cancel request. A subsequent unknown cancel must remain incomplete.
+            self.assertEqual((True, (), 0), (risk.reconciliation_complete, risk.owned_position_quantities, risk.balance_mismatch_count))
             self.clock = deadline
             pending = await expire()
+            claim_risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+            # The command does not rewrite its earlier account observation.
+            # Consume one real later recovery cut before asserting its Risk.
+            await monitor.refresh_recovery()
             fresh = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
             self.assertEqual((False, (), 0), (fresh.reconciliation_complete, fresh.owned_position_quantities, fresh.balance_mismatch_count))
             self.assertEqual(OrderState.CANCEL_PENDING, pending.state)
-            self.assertEqual((pending, 3), (await expire(), reader.calls))
+            self.assertEqual((pending, 4), (await expire(), reader.calls))
             broker.assert_called_once_with(root.intent, root.broker_order_id, 0)
         events = self.execution.events(root.intent.intent_id)
         self.assertEqual(["CANCEL_STARTED", "CANCEL_RESPONSE_UNKNOWN"], [event["event_type"] for event in events[-2:]])
         self.assertEqual({"version": "planned-leader-expired-entry-cancel/v1", "plan": asdict(plan),
-                          "risk_snapshot_id": fresh.snapshot_id, "risk_reconciliation_revision": fresh.reconciliation_revision},
+                          "risk_snapshot_id": claim_risk.snapshot_id, "risk_reconciliation_revision": claim_risk.reconciliation_revision},
                          events[-2]["planned_leader_cancel_claim"])
         self.assertEqual((0, 1), (self._head(plan.plan_id)["quantity"], self._head(plan.plan_id)["revision"]))
         self.assertEqual((pending,), self.runtime.load_active_intents())
@@ -5977,7 +5984,12 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1,offer.call_count)
         self.assertEqual('BUY_OPPORTUNITY',self.runner.episode._unfilled_registration['purpose'])
         self.assertEqual('CANCEL_REQUESTED',self.runner.episode.status['unfilled_input_delivery']['state'])
-        self.assertFalse(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).reconciliation_complete)
+        await self.monitor.refresh_recovery()
+        risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+        self.assertIsNone(risk.daily_net_pnl_won)
+        self.assertIn('COST_QUERY_UNAVAILABLE', risk.missing_cost_reasons)
+        current = self.execution.load(self.intent.intent_id)
+        self.assertEqual((0, 0), (current.filled_quantity, current.detailed_filled_quantity))
         self.assertEqual('ABANDON',self.runner.episode.status['after_cancel'])
         self.assertEqual('UNAVAILABLE',self.runner.episode.status['unfilled_native_source']['paired_ev'])
         self.assertEqual(1,self.cancel_calls)
@@ -6072,6 +6084,14 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
                             replace(cut['observation'],unmapped_broker_order_ids=('unknown',)),
                             replace(cut['observation'],open_orders=(replace(self.record,broker_reported_filled_quantity=1),))):
             self.assertFalse(self.runner.episode._flat_unfilled_buy_cancel_cut(policy,observation,cut['risk']))
+        self.assertIsNotNone(self.runner.episode._current_unfilled_cost(self.clock))
+        with patch.object(self.reader, 'read_trade_cost_pages', AsyncMock(return_value=())):
+            await self.runner.episode.advance_once()
+        current = self.monitor.latest_automation_execution_cut
+        self.assertEqual(0, current['risk'].daily_net_pnl_won)
+        self.assertFalse(self.runner.episode._flat_unfilled_buy_cancel_cut(policy, current['observation'], current['risk']))
+        self.assertEqual(0, self.cancel_calls)
+        self.assertFalse(any(row['event_type'] == 'CANCEL_STARTED' for row in self.execution.events(self.intent.intent_id)))
 
     async def test_registration_rejects_rehashed_goal_and_extended_deadline(self):
         from kiwoom_monitor.application.mock_automation_session_clock import content_id

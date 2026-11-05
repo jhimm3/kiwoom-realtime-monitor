@@ -549,10 +549,23 @@ class MockAutomationDialogControlTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "계획형 모의 정책"):
                 dialog.publication_values()
             self.assertEqual(1, build.call_count)
-            path.write_text(json.dumps(policy.to_dict()), encoding="utf-8")
-            dialog.publication_values()
-            self.assertEqual(LEADER_NATIVE_PLAN_MODE, build.call_args.kwargs["execution_plan_mode"])
-            self.assertEqual(policy, build.call_args.kwargs["unfilled_execution_policy"])
+            from dataclasses import replace
+            for version in ('mock-unfilled-execution-policy/v1', 'mock-unfilled-execution-policy/v2'):
+                selected = replace(policy, version=version)
+                path.write_text(json.dumps(selected.to_dict()), encoding="utf-8")
+                dialog.publication_values()
+                self.assertEqual(LEADER_NATIVE_PLAN_MODE, build.call_args.kwargs["execution_plan_mode"])
+                self.assertEqual(selected, build.call_args.kwargs["unfilled_execution_policy"])
+
+    def test_leader_current_policy_label_matches_saved_spec_without_starting_orders(self):
+        from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE
+        for version, current in (('mock-unfilled-execution-policy/v1', False), ('mock-unfilled-execution-policy/v2', True)):
+            spec = {'spec_id': 'leader-explicit', 'strategy_ref': 'leader-test',
+                'execution_plan_mode': LEADER_NATIVE_PLAN_MODE, 'unfilled_execution_policy': {'version': version}}
+            context = {**self.context, 'specs': [{'spec': spec, 'readiness': 'READY'}], 'selected_spec_id': spec['spec_id']}
+            self.dialog._completed('refresh', context)
+            self.assertEqual(current, '현재 조건 재판단·정정 우선' in self.dialog._spec.currentText())
+            self.assertEqual('leader-explicit', self.dialog._spec.currentData())
 
     def test_publication_review_waits_for_thread_finish_and_posts_exact_fresh_selection(self):
         import sys

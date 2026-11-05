@@ -5171,6 +5171,28 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/application/leader_order_management.py",
+      "prepare_leader_order_management_claim.document",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._manage_current_leader_order.prepare",
+      "self._store",
+      "load_document",
+      "direct_call",
+      "self._store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [
@@ -6251,6 +6273,17 @@
       "",
       "",
       "central-mock-episode-store"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._manage_current_leader_order.prepare",
+      "prepare_leader_order_management_claim",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-mock-episode-store"
     ]
   ],
   "contracts": {
@@ -6841,6 +6874,53 @@
         "tests/unit/test_close_order_management.py",
         "tests/unit/test_panic_mock_execution.py",
         "tests/integration/test_panic_mock_execution_postgres.py"
+      ]
+    },
+    {
+      "id": "S12-05-current-leader-claim-consumer-delta-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/application/leader_order_management.py",
+          "prepare_leader_order_management_claim.document",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._manage_current_leader_order.prepare",
+          "self._store",
+          "load_document",
+          "direct_call",
+          "self._store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [],
+      "forwarding_added": [
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._manage_current_leader_order.prepare",
+          "prepare_leader_order_management_claim",
+          "self._store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-mock-episode-store"
+        ]
+      ],
+      "reason": "Only the two new reviewed load_document sites and existing-store forwarding edge are appended. Original contracts, site identities, unresolved candidates and prior reviews stay intact; no baseline reset. Actual caller, original writer/native claim, tests and no-repeat-read measurement are recorded in the leader current-order evidence.",
+      "evidence": [
+        "tmp/s12-05-leader-current/consumers-before-append.json",
+        "tests/unit/test_leader_order_management.py",
+        "tests/integration/test_leader_order_management_postgres.py"
       ]
     }
   ]

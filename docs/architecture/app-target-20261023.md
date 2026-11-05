@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-06 · S12-05 대표10 실행 코드 부재·설정 수명·공통 복구 연결 검증**. AR 판정과 선행 개발은11절에 둔다.
+갱신. **2026-11-06 · S12-05 대표1 선행 돌파 현재 주문 재판단·정정과 실제 보호 연결 검증**. AR 판정과 선행 개발은11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 대표10의 선택 adapter·자료 조회·코드 부재/공통0B·원래 취소 UNKNOWN/늦은 체결 복구·명시 재개와 API를 Windows104/실제PG22건으로 확인했다. 대표10의 새 spec 교체는 원래1·2·6의 계좌/계획 실행 연결과 함께 남는다. 다음은 그 최초/추가·부분 청산·재진입·동시 의도의 수량/계좌 연결이며 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증을 유지한다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [대표10 부분](#section12-minute-feature-lifecycle) · [대표5 수락](#section12-acceptance-panic-five) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 대표1 선행의 현재 조건 재판단·정정 우선·원래 물리 잔량/UNKNOWN·늦은 FILL·보호·명시 정책/UI를 Windows541/실제PG36건으로 확인했다. 대표1의 진짜 추가 물량·부분 청산과 대표2 재진입·대표6 병행/계좌 연결은 남는다. 대표10 코드 부재/복구 선행 수락과 새 spec 교체 잔여, 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증을 유지한다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [대표1 현재 주문](#section12-leader-current-order-management) · [대표10 부분](#section12-minute-feature-lifecycle) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4918,6 +4918,24 @@ source `b2e2f47657072dada25fc97fddcd9862905c43a609a6403e1e68514c1fa769c1`의 **W
 정규 관련PG11 중 기존 control CAS의 고정 SQL 기대가 실패했다. 기준f01dde4와 같은 현재 소스의 단독1건에서도 같은[2,2,2,3,3] 대[2,2,3,3,3]을 재현했으며 CAS 본문은 양쪽 AST가 같았다. 원인은 active_spec_id가 없는 구형 STOPPED→RUNNING 제어가 SQL NULL 키의 불가능한 명세 조회를 한 뒤 JSON 직렬화 오류로 rollback하는 경로였다. 이 None 범위의 조회만 건너뛰고 owner/resume 증거가 있으면 빈 문자열도 기존 scope 오류로 거절한다. 실제/빈 문자열을 포함한 non-None 범위는 원래 조회·검증을 유지했다. 기존 비용 기대나 안전 조건을 바꾸지 않았으며 두 backend placeholder의 새 unit과 실제PG 연결된 계획 재개/COMMIT ACK 유실을 추가 대조했다. [직접 원인](../../tmp/s12-05-lifecycle/control-cas-cause.json) · [기준/현재 본문 대조](../../tmp/s12-05-lifecycle/control-cas-unchanged.json) · [첫PG11 실패](../../tmp/s12-03-pg-baseline/s12-05-minute-lifecycle-regression-final/postgres-run.json).
 
 **대표10 전체는 진행이다.** 현재 activate/admission은 기존 control과 다른 spec/run을 명시 인계 필요로 거절하며 공개 동작은 기동/중지/재개다. 새 전략/명세로 교체하면서 이전 계획·늦은 FILL을 같은 계좌의 단일 권한에서 관리하는 연결은 원래 대표1·2·6과 함께 남는다. 이 잔여를 생략하거나 현재의 부재 검증으로 대체하지 않는다. 다음은 해당 계좌·원계획/추가·부분 청산·재진입·병행 배분의 실행 연결이다. **전체4/5·대표3·4·5·7·9의5/11**과 대표8·11, DD/MICRO·독립 계좌/원주문 검증 및 운영 제외를 유지한다. 실계좌 주문·NAS 변경/배포·자료 이전·T0·실제 권한 인계·push는 수행하지 않았다.
+
+<a id="section12-leader-current-order-management"></a>
+
+### 11.285 S12-05 대표1 선행 · 돌파 현재 주문 재판단·정정과 실제 보호 — 2026-11-06
+
+사용자의 현재 조건 재판단·정정 우선을 **대표1의 접수 주문 관리 선행 연결**에 구현했다. 새 명시 `mock-unfilled-execution-policy/v2`는 기존 native 계획 모드만 사용하며 최초 전송 TTL 뒤에도 원래 관리/구조 유효 기간 안에서 현재 주도·돌파·대금/가격·계좌·실제 잔량을 다시 판단한다. 유효한 접수 잔량은 가격 정정을 우선하고 조건 실효는 취소한다. 원래 승인만으로 새 매수·정정을 허용하지 않는다. 기존 가격/자금/정정 횟수 한도를 유지하고 새 매매 수치나 배분 기본값을 만들지 않았다. v1 문서·hash·기존 동작은 비교/복구로 보존하고 자동 이행하지 않는다.
+
+실제 READY/명시 정책 파일·화면 선택 → 같은 Episode/계좌 monitor·Gateway/Runtime → 순수 `leader_order_management` → 기존 native AMEND/CANCEL과 물리 주문 원장을 연결했다. 원셋업/계획·원래 진입/청산 근거와 현재 Risk/head/control/lease를 native 저장 직전 다시 대조한다. 순수 돌파 판단기가 Risk/저장에 역의존하지 않도록 실행 근거만 별도 모듈에 두었으며 새 Manager·worker·권한·schema·공개 QueryStore 메서드·라이브러리는 없다. 기존 공통 물리/계좌 검사를 재사용하고 두 신규 store 소비/한 전달 edge만 근거와 함께 원장에 추가했다. 기준선·기존 미결을 초기화하지 않았다.
+
+가짜 브로커 BUY5의 원 TTL 뒤 정정3, 서로 다른 물리 주문의 같은 raw FILL ID로 실제3/잔여2, 원부모 잔량 정정·현재 설정 OFF 취소를 확인했다. 정정/취소 응답 미확정은 재전송하지 않는다. 일부2 뒤 취소 UNKNOWN 중 늦은1은 원계획 실제3으로 복구·보호한다. 일반/첫 손절 확정 SELL5는 Shadow OFF와 가격 반등에도 원래 청산 이유를 보존하고 현재 실제 잔량만 정정하며, 상세2 뒤 잔량3 체결로 최종0이다. 정정 BUY의 모든 물리 부모·자식도 보호한다. 같은 체결을 다시 조회한 시각이 보호 청산을 계속 밀지 않도록 마지막 실제 FILL 이후의 종료 확인 근거를 보존하고, 최신 계좌·물리 주문 대사는 별도로 유지한다.
+
+source `1f3cda2408c5b45f0cd6923d827f5ee5165333e5c5f4876e3c0aaf7d0a1e5517`에서 **Windows541건/11모듈 + 실제 격리 PostgreSQL36건(새9·기존27)**, 같은 소스/실제 ID의 증분 대조가 통과했다. 구조1329지점/위반0·QueryStore125/135/130·소비392/delta0, 검사7335정의/301기록·원49미결 보존이다. 같은 입력의 두 추가 advance에서 가짜 브로커 재조회는 **2→0**이며 새 입력·FILL·계좌/제어 변화는 다시 처리한다. 시장 처리량·실제 TR 지연이나 과거 수익 성과의 개선을 주장하지 않는다. 최초383/23 통과 뒤 기존 공용 자료 소비 원장이 요구한 미실행Windows158/PG13을 추가 실행했다. 제품 소스와 기대값은 바꾸지 않았으며 최초 증분 거절도 별도 보존했다. 추가PG 최초 실행은 일부 ID에 모듈 전체 선택도 지정한 실행 오류로 별도 보존하고 수락에서 제외했다. 종료·정리 확인 뒤 정확한13개 ID만 실행했다. 모든 검사 작업·TEMP/HKCU와 세 최종 PG 작업의 DB·포트·비밀 임시 자료 정리를 확인했다. [수락/정리](../../tmp/s12-05-leader-current/acceptance.json) · [Windows 묶음](../../tmp/s12-05-leader-current/windows-acceptance.json) · [새PG](../../tmp/s12-03-pg-baseline/s12-05-leader-current-leader-final-v4/postgres-run.json) · [기존PG](../../tmp/s12-03-pg-baseline/s12-05-leader-current-regression-final-v4/postgres-run.json) · [증분](../../tmp/s12-05-leader-current/review-verified-v4.json).
+
+비용 조회가 실패해도 확인된 FILL0과 미확인 손익은 다른 상태다. 기존 flat 최초 BUY의 취소가 전자의 완료 여부에 묶여 대기하던 두 실패도 dd3196a에서 재현했다. 완전히 대사된 계좌/미체결의 취소만 허용하며 일손익·비용을 0으로 승격하지 않는다. 원래 유효한 비용 모형과 실제 조회 복구로 native 취소 직전 손익0이 확인되면 현재 위험 허용을 다시 판단해 앞선 비용 미확인만으로 취소하지 않는다. 원래 한 번 취소·ABANDON·UNKNOWN/잔고·aggregate 거절 기대를 유지했다. 이는 대표1 선행의 직접 연결이며 대표8 전체의 수락으로 계산하지 않는다.
+
+최초 실패는 보존한다. dd3196a에서도 동일하게 재현된 제로 FILL의 옛 기대와 취소 대기의 혼동은 확인된 ACCEPTED와 CANCEL_PENDING을 분리했다. 원래 취소 claim의 Risk와 이후 실제 복구 Risk를 구분하며 취소 후 불완전·한 번 전송·늦은 체결 기대는 유지했다. 반복 조회 비용은 같은 입력으로 수정 전후를 대조했다. 코드 부재 검사는 자식 stderr가 없을 때 성공 조건 평가 전 오류 문자열 조립이 실패했고, 반환값0/성공 marker와 제품 코드는 그대로 둔 진단식 수정으로 검증했다. 과거 실패를 현재 통과로 바꾸지 않았다. [직접 원인](../../tmp/s12-05-leader-current/zero-cancel-cause.json) · [출력 진단](../../tmp/s12-05-panic/s12-05-leader-current-lifecycle-diagnostic.json).
+
+**대표1 전체는 진행이다.** 진짜 추가 매수·물량별 부분 청산의 새 행동 근거/수량과 실제 귀속, 대표2 재진입·대표6 병행 배분 및 대표10 새 spec 교체가 남는다. 원래 취소/잔량 재요청 `ADD/REDUCE`를 새 물량 개발로 계산하지 않는다. 전체4/5·대표3/4/5/7/9의5/11과 대표8·11, DD/MICRO·독립 계좌/원주문 검증을 유지한다. 실제 주문·운영 NAS 변경/배포·자료 이전·T0·권한 인계·push는 수행하지 않았다.
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

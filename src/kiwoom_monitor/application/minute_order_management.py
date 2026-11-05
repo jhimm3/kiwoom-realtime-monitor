@@ -59,7 +59,8 @@ def acknowledged_minute_quote(spec, quote, decided_at, now):
 def assess_current_minute_order(spec, *, run_id, record, head, order_events, recovery, risk,
         quote, decided_at, now, entry_enabled, terms, management_version, entry_proof_id,
         signal_reference_price, entry_deadline, capital_limit, invalid_entry_price=None,
-        protection_notice=None, protection_reason=None, exit_anchor=None):
+        protection_notice=None, protection_reason=None, exit_anchor=None,
+        validate_quote=acknowledged_minute_quote):
     """One reconciled current remainder; no new intent, broker call or mutable state."""
     age = spec.maximum_data_gap_seconds
     account = recovery.account
@@ -113,7 +114,7 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
             return None
         if quote is None:
             return None
-        current_quote = acknowledged_minute_quote(spec, quote, decided_at, now)
+        current_quote = validate_quote(spec, quote, decided_at, now)
         price = current_quote['price_won']
         if record.intent.side is OrderSide.BUY:
             pending = sum(item.remaining_quantity for item in legs)

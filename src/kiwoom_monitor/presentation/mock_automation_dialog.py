@@ -756,6 +756,8 @@ class MockAutomationDialog(QDialog):
             label = f"{spec.get('strategy_ref', '')} · {row.get('readiness', 'BLOCKED')}"
             if spec.get("execution_plan_mode") == LEADER_NATIVE_PLAN_MODE:
                 label += " · 계획형 0B 모의"
+                if (spec.get('unfilled_execution_policy') or {}).get('version') == 'mock-unfilled-execution-policy/v2':
+                    label += " · 현재 조건 재판단·정정 우선"
             elif spec.get('execution_plan_mode') == PANIC_NATIVE_PLAN_MODE:
                 terms = spec.get('panic_execution_policy', {})
                 management = ('원래 계획 취소·청산 유지' if terms.get('stopped_management') == 'continue_original_plan/v1'

@@ -63,7 +63,7 @@ class BrokerBook:
 
     def cancel(self, intent, number, quantity=0):
         event = self.context.execution.events(intent.intent_id)[-1]
-        assert event['event_type'] == 'CANCEL_STARTED' and event['close_order_management_claim']['action'] == 'CANCEL'
+        assert event['event_type'] == 'CANCEL_STARTED' and event[getattr(self.context, 'management_field', 'close_order_management_claim')]['action'] == 'CANCEL'
         self.mutations.append(('CANCEL', number, quantity))
         self.rows[number]['remaining'] = 0
         self.rows[number]['state'] = OrderState.CANCELLED

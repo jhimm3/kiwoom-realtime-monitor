@@ -255,6 +255,29 @@ def _planned_leader_execution_quote(observation, *, spec, run_id, leader_config,
             "input_ref": raw["input_ref"], "durable": False, "market_status": "TRADABLE"}
 
 
+def planned_leader_root_confirmation_time(root, events):
+    """Last material FILL followed by a confirmed terminal cut, not a later reread."""
+    if (root.state not in {OrderState.FILLED, OrderState.CANCELLED}
+            or not root.last_broker_as_of or not root.detailed_filled_quantity
+            or root.detailed_filled_quantity != root.filled_quantity
+            or root.broker_reported_filled_quantity != root.detailed_filled_quantity):
+        raise ValueError('planned_leader_material_confirmation_unavailable')
+    fills = [(index, row) for index, row in enumerate(events)
+             if row['event_type'] == 'FILL' and row['broker_execution_id']]
+    if (not fills or sum(row['quantity'] for _, row in fills) != root.detailed_filled_quantity
+            or tuple(row['broker_execution_id'] for _, row in fills) != root.fill_ids):
+        raise ValueError('planned_leader_material_fills_changed')
+    last_fill = fills[-1][0]
+    terminal = next((row for row in events[last_fill + 1:] if row['event_type'] == 'BROKER_RECONCILED'
+        and row['state'] == root.state.value and row.get('broker_as_of')), None)
+    if terminal is None:
+        raise ValueError('planned_leader_material_terminal_unconfirmed')
+    at = max(datetime.fromisoformat(terminal['broker_as_of']), datetime.fromisoformat(fills[-1][1]['received_at']))
+    if at > root.last_broker_as_of:
+        raise ValueError('planned_leader_material_confirmation_from_future')
+    return at
+
+
 def prepare_planned_leader_protection_exit(
     spec, *, run_id, control_revision, notice, plan, observation, risk, plan_position, leader_config,
     position_proof, confirmed_root_state, confirmed_root_at, now, reservation_claimed=False,
@@ -1017,13 +1040,15 @@ def _confirmed_zero_fill_orders(recovery, active_intents):
     """Known, accepted native BUY reservations are not missing position/FILL evidence."""
     expected = {}
     for record in active_intents:
-        if (record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED, OrderState.CANCEL_PENDING}
+        if (record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
                 or record.intent.side is not OrderSide.BUY or record.filled_quantity
                 or record.detailed_filled_quantity or record.broker_reported_filled_quantity
                 or record.amendment is not None and record.amendment.reconciliation_pending):
             return False
         for leg in execution_broker_legs(record):
             if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity:
+                if leg.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
+                    return False
                 if leg.broker_order_id in expected:
                     return False
                 expected[leg.broker_order_id] = (record.intent.symbol, leg.remaining_quantity)
@@ -1031,7 +1056,7 @@ def _confirmed_zero_fill_orders(recovery, active_intents):
     actual = {order.broker_order_id: (order.symbol, order.remaining_quantity) for order in working}
     return bool(expected) and len(actual) == len(working) and actual == expected and all(
         order.account_ref == recovery.account.account_ref and order.filled_quantity == 0
-        and order.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED, OrderState.CANCEL_PENDING}
+        and order.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
         for order in working)
 
 

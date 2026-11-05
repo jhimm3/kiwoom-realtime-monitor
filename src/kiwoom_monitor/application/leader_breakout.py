@@ -455,6 +455,17 @@ def leader_evaluation(*, run_id, config, raw, state, context=None):
     return StrategyEvaluation(snapshot, decision, event, after)
 
 
+def leader_current_entry_matches(config, proof, settings, now):
+    """A former entry approval cannot stand in for the currently applied thesis."""
+    if not settings or settings.get('shadow_candidate_enabled') is not True:
+        return False
+    policy = LeaderBreakoutPolicy.from_dict(settings['shadow_candidate_config'])
+    context = LeaderBreakoutContext(**proof['context'])
+    return (LeaderBreakoutConfig.from_dict(policy.to_dict()).rules_hash == config.rules_hash
+            and context in policy.contexts and context.leader_eligible is True
+            and _time(context.available_at) <= now < _time(context.valid_until))
+
+
 def evaluate_leader_breakout_bar(*, run_id, evaluation_bar, bar_history, universe_frames, config, state,
                                position_context=None, original_observation=None):
     """Pure Family adapter. History supplies observed closes, never fabricated ticks."""

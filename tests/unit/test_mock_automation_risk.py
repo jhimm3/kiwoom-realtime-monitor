@@ -165,6 +165,8 @@ class MockAutomationRiskTests(unittest.TestCase):
         order = BrokerOrderSnapshot('accepted-buy', ACCOUNT, intent.symbol, OrderState.ACCEPTED, 0, 2, now)
         for orders, records, expected in (((order,), (record,), True), ((order,), (), False),
                 ((replace(order, state=OrderState.SUBMISSION_UNKNOWN),), (record,), False),
+                ((order,), (replace(record, state=OrderState.CANCEL_PENDING),), False),
+                ((replace(order, state=OrderState.CANCEL_PENDING),), (record,), False),
                 ((order, order), (record,), False), ((replace(order, remaining_quantity=1),), (record,), False)):
             with self.subTest(orders=orders, mapped=bool(records)):
                 recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT, 1_000, 200, {}, now), orders)

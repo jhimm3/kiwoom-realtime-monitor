@@ -29,6 +29,7 @@ CLOSE_INPUT_PROTOCOL = "close-shadow-native-plan/v1"
 PANIC_INPUT_PROTOCOL = "panic-shadow-native-plan/v1"
 CLOSE_ORDER_MANAGEMENT_VERSION = "close-current-order-management/v1"
 PANIC_ORDER_MANAGEMENT_VERSION = "panic-current-order-management/v1"
+LEADER_ORDER_MANAGEMENT_VERSION = "leader-current-order-management/v1"
 CLOSE_ENTRY_COLLECTION = "execution_close_entry_evidence"
 CLOSE_EXIT_COLLECTION = "execution_close_exit_evidence"
 PANIC_ENTRY_COLLECTION = "execution_panic_entry_evidence"
@@ -244,7 +245,7 @@ class MockUnfilledExecutionPolicy:
     protective_cancel_retry_delay_seconds: int = 0
 
     def __post_init__(self):
-        if self.version != "mock-unfilled-execution-policy/v1":
+        if self.version not in {"mock-unfilled-execution-policy/v1", "mock-unfilled-execution-policy/v2"}:
             raise ValueError("unsupported mock unfilled execution policy")
         for name, minimum, maximum in (
             ("maximum_reprices", 0, 64), ("maximum_adverse_slippage_bps", 0, 10000),
@@ -266,6 +267,10 @@ class MockUnfilledExecutionPolicy:
                 or (self.maximum_protective_cancel_retries > 0
                     and not 1 <= self.protective_cancel_retry_delay_seconds <= self.maximum_management_seconds)):
             raise ValueError('invalid protective cancel retry policy')
+
+    @property
+    def accepted_order_management(self):
+        return 'reassess_then_amend_price/v1' if self.version == 'mock-unfilled-execution-policy/v2' else None
 
     @property
     def policy_id(self):
@@ -334,6 +339,9 @@ class MockAutomationOperatingSpec:
         if self.unfilled_execution_policy is not None:
             if not isinstance(self.unfilled_execution_policy, MockUnfilledExecutionPolicy):
                 raise ValueError("mock unfilled execution policy must be typed")
+            if (self.unfilled_execution_policy.accepted_order_management is not None
+                    and self.execution_plan_mode != LEADER_NATIVE_PLAN_MODE):
+                raise ValueError("current leader order management requires native plan mode")
             if (self.maximum_data_gap_seconds is not None
                     and self.unfilled_execution_policy.max_snapshot_age_seconds > self.maximum_data_gap_seconds):
                 raise ValueError("mock unfilled freshness exceeds operating limit")

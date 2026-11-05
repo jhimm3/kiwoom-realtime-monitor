@@ -3208,6 +3208,20 @@
         "tests/unit/test_panic_mock_execution.py",
         "tests/integration/test_panic_mock_execution_postgres.py"
       ]
+    },
+    {
+      "id": "S12-05-current-leader-remainder-and-material-confirmation-20261106",
+      "reason": "S12-05 original representative1 prerequisite and user clarification: reassess current conditions before keeping/amending/cancelling accepted leader remainders. Existing v1 frozen policy/old proof behavior remains reproducible. New explicit unfilled policy v2 uses the original native plan, account owner, Risk/control/lease and physical ledger, not a new entry or tranche.",
+      "connection": "Existing READY policy-file parser/server DTO/native mode and selected UI label -> same Episode/actual monitor/command-serial Gateway/Runtime -> shared pure account/remainder checks with the leader actual0B validator -> original native AMEND/CANCEL transaction and recovery/FILL head. A dedicated leader_order_management module owns these execution claims, so the pure leader kernel does not import native Risk/persistence and no cycle/Manager/worker/public QueryStore method/schema is added. Current stop preparation uses a real terminal receipt after the latest material FILL, while current account/physical order evidence remains fresh. Unchanged account/quote input acknowledges the refreshed observation revision to avoid repeated reads.",
+      "validation": "Independent BrokerBook records actual request kind, physical parent/child, explicit price and quantity. Actual READY/admission and Runner restoration use the real monitor/Risk listener, SQLite or isolated PostgreSQL writer. BUY5 after first TTL -> AMEND3 at1002; same raw FILL id across physical orders gives actual3 and remaining2, then original remainder1 is amended and current context OFF cancels only physical remainders. Unknown amendment/cancellation never resends. Current price1000 at original1000 reference cancels, native context change between preparation and claim leaves all post-refresh ledger events unchanged and transport0. Ordinary and typed first-stop SELL5 amend, partial2 then remaining3 -> final0 with only original BUY/SELL; amended BUY protection covers all physical parents/children, and cancelUNKNOWN/late1 after partial2 protects exactly3. Repeated terminal query timestamps originally blocked first-stop preparation; actual last material FILL/terminal receipt now remains fixed and native physical/current Risk checks reproduce it. Explicit maximum3 amendments still blocks a fourth while condition-failure cancellation remains enabled. Two unchanged advances originally caused broker reads7->9 and now add0. UI reads exact explicit v1/v2 policy documents and projects the saved selected version; legacy canonical keys remain unchanged.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_leader_order_management_claim|cursor.execute": 1
+      },
+      "evidence": [
+        "tests/unit/test_leader_order_management.py",
+        "tests/integration/test_leader_order_management_postgres.py",
+        "tests/unit/test_mock_automation_dialog.py"
+      ]
     }
   ]
 }

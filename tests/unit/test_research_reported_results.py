@@ -335,7 +335,7 @@ print('producer-absent-native-result-pass')
 '''
             completed = subprocess.run([sys.executable, "-c", script, json.dumps(result_document())], cwd=directory,
                 env=dict(os.environ, PYTHONPATH=str(target), PYTHONDONTWRITEBYTECODE="1"), capture_output=True, text=True, timeout=30)
-            self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+            self.assertEqual(0, completed.returncode, (completed.stdout or '') + (completed.stderr or ''))
             self.assertIn("producer-absent-native-result-pass", completed.stdout)
 
     def test_strict_selected_candidate_receiver_without_engine_uses_process_wire_and_native_receipt(self):

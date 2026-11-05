@@ -453,7 +453,10 @@ class MockAutomationEpisode:
         self._leader_plan_root = None
         self._leader_plan_deadline = None
         self._leader_plan_cancel_attempt = None
+        self._leader_management_input = None
+        self._leader_management_records = None
         self._leader_plan_refresh_quote = None
+        self._leader_plan_confirmation = None
         self._leader_plan_reprepare_requested = None
         self._planned_protection_restore = None
         self._planned_protection_readback = None
@@ -1290,6 +1293,8 @@ class MockAutomationEpisode:
         stop = notice.get("planned_leader_stop") if notice.get("state") == "PENDING" else None
         gateway = getattr(self._bundle, "gateway", None)
         execution = self._bundle.repository
+        if await self._manage_current_leader_order(control, root, notice):
+            return True
         if root.state is OrderState.QUEUED and now >= root.intent.expires_at:
             await drain_thread_call(self._bundle.runtime.cancel, root.intent.intent_id)
         if gateway is not None and root.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
@@ -1305,6 +1310,87 @@ class MockAutomationEpisode:
         if status != self._status or self._checkpoint.pending:
             self._status = status
             await drain_thread_call(self._save_checkpoint)
+        return True
+
+    async def _manage_current_leader_order(self, control, root, notice):
+        """Selected current management uses the existing command owner and native claim."""
+        terms = self._spec.unfilled_execution_policy
+        if (root is None or terms is None or terms.accepted_order_management is None
+                or self._bundle.gateway is None):
+            return False
+        execution = self._bundle.repository
+        revision = self._bundle.runtime.observation_revision
+        if self._leader_management_records is None or self._leader_management_records[0] != revision:
+            active = await drain_thread_call(execution.active_intents, 'mock', self._bundle.account_ref, self._bundle.run_id)
+            self._leader_management_records = (revision, active)
+        active = self._leader_management_records[1]
+        if not active:
+            return False
+        if (len(active) != 1 or not isinstance(active[0].intent, PlannedOrderIntent)
+                or (active[0].intent.plan.plan_id, active[0].intent.plan.policy_ref)
+                != (root.intent.plan.plan_id, root.intent.plan.policy_ref)):
+            self._status = {'state': 'BLOCKED', 'reason': 'leader_current_order_account_coverage', 'orders_enabled': False}
+            return True
+        record = active[0]
+        if record.state is OrderState.QUEUED:
+            return False  # The original unsent TTL/claim path still owns this order.
+        if record.state is OrderState.SUBMISSION_UNKNOWN:
+            self._bundle.monitor.request_automation_execution_recovery()
+            self._status = {'state': 'WAITING_ORDER', 'reason': record.state.value, 'orders_enabled': False,
+                            'pending_intent_id': record.intent.intent_id, 'input_mode': '0B'}
+            return True
+        if record.state is OrderState.CANCEL_PENDING:
+            self._bundle.monitor.request_automation_execution_recovery()
+        current = self._leader_context_source() if self._leader_context_source is not None else None
+        quote = self._strategy_inputs.latest_stop_quote
+        if quote is not None and not self._strategy_inputs.stop_quote_generation_is_current(quote):
+            quote = None
+        now = self._now()
+        deadline = min(datetime.fromisoformat(self._leader_position_proof['context']['valid_until']),
+                       record.intent.created_at + timedelta(seconds=terms.maximum_management_seconds))
+        token = (revision, record.intent.intent_id, control.control_revision,
+                 current.get('revision') if isinstance(current, Mapping) else None,
+                 quote.raw['input_ref'] if quote is not None else None,
+                 quote is not None and 0 <= (now - quote.envelope.received_at).total_seconds() <= terms.max_snapshot_age_seconds,
+                 now >= deadline, notice.get('revision') if notice.get('state') == 'PENDING' else None)
+        if self._leader_management_input == token:
+            return True
+        protection = notice if notice.get('state') == 'PENDING' and 'planned_leader_stop' in notice else None
+        if protection is not None:
+            await drain_thread_call(self._save_checkpoint, force=True)
+        outcome = {}
+        def prepare(updated, cut):
+            from kiwoom_monitor.application.leader_breakout import leader_current_entry_matches
+            from kiwoom_monitor.application.leader_order_management import prepare_leader_order_management_claim
+            settings = (self._store.load_document('server_operational_settings', 'global', 'current')
+                        if updated.intent.side is OrderSide.BUY else None)
+            enabled = (control.desired_state.value == 'RUNNING' and not control.entry_resume_required
+                and updated.intent.side is OrderSide.BUY and leader_current_entry_matches(self._config,
+                    self._leader_position_proof, settings['document'] if settings else None, self._now()))
+            current_quote = self._strategy_inputs.latest_stop_quote
+            if current_quote is not None and not self._strategy_inputs.stop_quote_generation_is_current(current_quote):
+                current_quote = None
+            claim = prepare_leader_order_management_claim(self._store, self._bundle.runtime, execution, self._spec,
+                updated, config=self._config, quote=current_quote, recovery=cut['recovery'], risk=cut['risk'],
+                entry_enabled=enabled, protection_notice=protection)
+            if claim is not None:
+                outcome.update(claim.assessment)
+            return claim
+        try:
+            updated = await self._bundle.gateway.manage_close_order(record, spec_id=self._spec.spec_id,
+                control_revision=control.control_revision, prepare_management=prepare)
+        except (ValueError, RuntimeError) as error:
+            self._status = {'state': 'BLOCKED', 'reason': str(error), 'orders_enabled': False,
+                            'pending_intent_id': record.intent.intent_id, 'input_mode': '0B'}
+            await drain_thread_call(self._save_checkpoint)
+            return True
+        # Account refresh itself can advance observation_revision. A WAIT must
+        # acknowledge that resulting cut rather than immediately refresh it again.
+        self._leader_management_input = ((self._bundle.runtime.observation_revision, *token[1:])
+            if outcome.get('action') not in {'AMEND', 'CANCEL'} else None)
+        self._status = {'state': 'WAITING_ORDER', 'reason': outcome.get('reason', updated.state.value),
+                        'orders_enabled': False, 'pending_intent_id': updated.intent.intent_id, 'input_mode': '0B'}
+        await drain_thread_call(self._save_checkpoint)
         return True
 
     async def _cancel_leader_plan_root(self, control, root, notice, now, gateway, execution):
@@ -1349,8 +1435,10 @@ class MockAutomationEpisode:
         if quote is None:
             quote = self._strategy_inputs.latest_stop_quote
         stop = notice["planned_leader_stop"]["stop_loss"]
+        confirmed_at = (self._leader_plan_confirmation[1] if self._spec.unfilled_execution_policy.accepted_order_management is not None
+                        and self._leader_plan_confirmation is not None else root.last_broker_as_of)
         if (quote is None or quote.envelope.received_at <= datetime.fromisoformat(stop["available_at"])
-                or root.last_broker_as_of is None or quote.envelope.received_at < root.last_broker_as_of):
+                or confirmed_at is None or quote.envelope.received_at < confirmed_at):
             return
         if cut is None or cut["risk"].observed_at < quote.envelope.received_at:
             if self._leader_plan_refresh_quote is None:
@@ -1374,7 +1462,7 @@ class MockAutomationEpisode:
                                "run_id": self._bundle.run_id, "symbol": head.symbol, "quantity": head.quantity,
                                "fill_cursor": head.fill_cursor, "unreconciled_sell_quantity": head.unreconciled_sell_quantity},
                 leader_config=self._config, position_proof=self._leader_position_proof,
-                confirmed_root_state=root.state.value, confirmed_root_at=root.last_broker_as_of, now=now,
+                confirmed_root_state=root.state.value, confirmed_root_at=confirmed_at, now=now,
             )
             plan, decision = read_planned_leader_protection_checkpoint(workflow, notice, self._spec, self._bundle.run_id)
             await drain_thread_call(record_mock_automation_recovery_from_risk, self._repository, self._bundle.runtime,
@@ -2149,8 +2237,10 @@ class MockAutomationEpisode:
             'native-unfilled-target/v1', registration['registration_id'], observation.input_ref, observation.input_ref,
             policy.max_snapshot_age_seconds, observation.reconciliation_complete, observation.open_orders_complete, cost)
         thesis_until = min(policy.wait_until, policy.anchor_available_at + timedelta(seconds=policy.max_snapshot_age_seconds))
+        flat_unknown_pnl = (risk.daily_net_pnl_won is None
+                            and self._flat_unfilled_buy_cancel_cut(policy, observation, risk))
         assessment = UnfilledOrderAssessment(True if record.intent.side is OrderSide.BUY else None, None,
-            not protecting, protecting, 'original-decision:' + registration['root_intent']['decision_id'],
+            not protecting and not flat_unknown_pnl, protecting, 'original-decision:' + registration['root_intent']['decision_id'],
             policy.anchor_available_at, thesis_until, 'native-risk:' + risk.snapshot_id, risk.observed_at,
             risk.observed_at + timedelta(seconds=policy.max_snapshot_age_seconds),
             'TRADABLE' if available else 'UNKNOWN', price['price_won'] if available else None,
@@ -2316,10 +2406,11 @@ class MockAutomationEpisode:
 
     @staticmethod
     def _flat_unfilled_buy_cancel_cut(policy, observation, risk):
-        # The first accepted BUY has no exact fill history, so native Risk keeps
-        # PnL/recovery unverified. A full, mapped, flat account may cancel its
-        # known unfilled BUY; this never admits a replacement or clears Risk.
-        return (policy.purpose == 'BUY_OPPORTUNITY' and not risk.reconciliation_complete
+        # A known zero-FILL reservation can have complete position evidence
+        # while account PnL is unavailable. This cut permits cancellation only;
+        # it never upgrades Risk or admits a replacement/new BUY.
+        return (policy.purpose == 'BUY_OPPORTUNITY'
+                and (not risk.reconciliation_complete or risk.daily_net_pnl_won is None)
                 and observation.open_orders_complete and observation.reconciliation_complete
                 and not observation.unmapped_broker_order_ids
                 and not risk.submission_unknown_count and not risk.balance_mismatch_count
@@ -2662,7 +2753,12 @@ class MockAutomationEpisode:
             broker = replace(inputs['broker_snapshot'], as_of=current.last_broker_as_of)
             target = replace(inputs['target'], decision_time=now, account_input_ref=observation.input_ref,
                              orders_input_ref=observation.input_ref)
+            risk_allows_new_risk = inputs['assessment'].risk_allows_new_risk
+            if (inputs['risk'].daily_net_pnl_won is None and self._flat_unfilled_buy_cancel_cut(
+                    inputs['policy'], inputs['observation'], inputs['risk'])):
+                risk_allows_new_risk = risk.daily_net_pnl_won is not None
             assessment = replace(inputs['assessment'], risk_input_ref='native-risk:' + risk.snapshot_id,
+                risk_allows_new_risk=risk_allows_new_risk,
                 risk_available_at=risk.observed_at,
                 risk_valid_until=min(inputs['policy'].valid_until, risk.observed_at + timedelta(seconds=age)),
                 protection_required=inputs['assessment'].protection_required or self._protection_pending() or trigger is not None)
@@ -2782,6 +2878,17 @@ class MockAutomationEpisode:
                 policy = anchored_unfilled_policy(intent, self._spec.unfilled_execution_policy, "BUY_OPPORTUNITY")
                 self._leader_plan_deadline = min(signal_until, policy.wait_until)
         self._leader_plan_root = (pin["entry_intent_id"], revision, root)
+        if (root is not None and self._spec.unfilled_execution_policy.accepted_order_management is not None
+                and root.state in {OrderState.FILLED, OrderState.CANCELLED} and root.detailed_filled_quantity):
+            from kiwoom_monitor.application.mock_automation_risk import planned_leader_root_confirmation_time
+            from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
+
+            key = (root.intent.intent_id, root.state, root.detailed_filled_quantity,
+                   tuple((leg.broker_order_id, leg.state, leg.filled_quantity, leg.remaining_quantity)
+                         for leg in execution_broker_legs(root)))
+            if self._leader_plan_confirmation is None or self._leader_plan_confirmation[0] != key:
+                self._leader_plan_confirmation = (key, planned_leader_root_confirmation_time(root,
+                    execution.events(root.intent.intent_id, **({} if _reader is None else {'_reader': _reader}))))
 
     def _apply_fills_and_read_control(self, execution: ExecutionRepository):
         with self._repository.mock_automation_read_scope() as reader:
@@ -2835,6 +2942,10 @@ class MockAutomationEpisode:
                 if stopped and self._leader:
                     self._strategy_inputs.reset("user_stopped")
                 projection = self._planned_protection_readback
+                if not stopped and self._leader_plan_mode:
+                    root = self._leader_plan_root[2] if self._leader_plan_root is not None else None
+                    if await self._manage_current_leader_order(control, root, self._protection_snapshot() or {}):
+                        return 0
                 if (self._leader_plan_mode and not stopped and projection is not None
                         and projection[1]["state"] == "PREPARED_NO_INTENT"):
                     await self._reprepare_unclaimed_leader_protection(control, projection[1], execution)
