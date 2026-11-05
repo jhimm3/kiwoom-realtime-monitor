@@ -28,6 +28,12 @@ from kiwoom_monitor.domain.news_observation import (
     stable_document_hash,
 )
 from kiwoom_monitor.domain.research_contract import ThemeSnapshotSource
+from kiwoom_monitor.domain.selected_order_evidence import (
+    COLLECTION as OFFLINE_ORDER_EVIDENCE_COLLECTION,
+    OWNER as OFFLINE_ORDER_EVIDENCE_OWNER,
+    RECOVERY_REQUIRED,
+    encode_selected_order_evidence,
+)
 from kiwoom_monitor.application.journal_enrichment import (
     JOURNAL_ANALYSIS_REVISION_COLLECTION,
     JournalAnalysisRevisionConflict,
@@ -162,6 +168,8 @@ def _validate_journal_generic_write(collection: str) -> None:
         raise ValueError("use accept_journal_analysis_revisions for immutable journal analysis")
     if collection == REPORTED_RESEARCH_RESULT_COLLECTION:
         raise ValueError("use accept_research_result for immutable reported research results")
+    if collection == OFFLINE_ORDER_EVIDENCE_COLLECTION:
+        raise ValueError("use accept_selected_order_evidence for immutable offline order evidence")
 
 
 def _accept_research_result(cursor, owner: str, document: dict[str, Any], received_at: datetime,
@@ -265,6 +273,50 @@ class SQLiteDocumentStoreMixin:
             connection.execute("BEGIN IMMEDIATE")
             accepted = _accept_research_result(connection.cursor(), owner, document, self._now_provider(), "?")
         return accepted  # The native commit finishes before the HTTP ACK.
+
+    def accept_selected_order_evidence(
+        self, packet: dict[str, Any], *, expected_sha256: str, account_ref: str, run_id: str,
+    ) -> dict[str, Any]:
+        encoded, digest = encode_selected_order_evidence(packet)
+        packet = json.loads(encoded)
+        if digest != expected_sha256:
+            raise ValueError("selected-order evidence digest changed")
+        if (packet["account_ref"], packet["run_id"]) != (account_ref, run_id):
+            raise ValueError("selected-order evidence crossed the expected account and run")
+        if self._memory_uri or not self._path.is_file():
+            raise ValueError("initialize a durable offline SQLite target before accepting order evidence")
+        operation_id = packet["operation_id"]
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.cursor()
+            row = _scoped_document_row(cursor, OFFLINE_ORDER_EVIDENCE_COLLECTION,
+                                       OFFLINE_ORDER_EVIDENCE_OWNER, operation_id, "?")
+            if row is not None:
+                previous = document_result_rows((row,))[0]["document"]
+                receipt = previous["receipt"]
+                if previous["packet"] != packet or receipt["sha256"] != digest:
+                    raise ValueError("immutable selected-order evidence conflict")
+                return {"receipt": receipt, "replayed": True}
+            if cursor.execute(
+                "SELECT 1 FROM central_execution_intents UNION ALL "
+                "SELECT 1 FROM central_execution_events UNION ALL "
+                "SELECT 1 FROM central_execution_runtime_leases UNION ALL "
+                "SELECT 1 FROM central_documents WHERE collection IN "
+                "('execution_mock_automation_control', 'execution_mock_plan_positions') LIMIT 1",
+            ).fetchone() is not None:
+                raise ValueError("selected-order evidence requires a target with empty execution state")
+            accepted_at = as_kst(self._now_provider())
+            receipt = {"operation_id": operation_id, "sha256": digest, "accepted_at": accepted_at.isoformat(),
+                       "status": RECOVERY_REQUIRED, "order_authority": False}
+            row = document_value_rows(OFFLINE_ORDER_EVIDENCE_COLLECTION, [{
+                "owner": OFFLINE_ORDER_EVIDENCE_OWNER, "key": operation_id,
+                "document": {"receipt": receipt, "packet": packet},
+            }], accepted_at.timestamp())[0]
+            cursor.execute(
+                "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                "VALUES(?,?,?,?,?)", row,
+            )
+        return {"receipt": receipt, "replayed": False}
 
     def load_current_theme_snapshot(self) -> dict[str, Any]:
         with self._lock, self._connection() as connection:

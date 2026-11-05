@@ -348,3 +348,27 @@ class PlannedLeaderPostgresTests(unittest.IsolatedAsyncioTestCase):
         from tests.unit.test_mock_automation_specification import PlannedLeaderNativeTests
 
         await PlannedLeaderNativeTests.test_explicit_leader_plan_replays_pinned_0b_proof_and_protects_the_fill_after_restart(self)
+
+
+class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
+        if not url:
+            raise unittest.SkipTest("dedicated diagnostic PostgreSQL URL is required")
+        self._native_fixture_store = PostgresQueryStore(self.enterContext(isolated_observation_schema(url)))
+        PlannedLeaderPartialProtectionTests.setUp(self)
+        self._head = PlannedLeaderPartialProtectionTests._head.__get__(self)
+        self._risk_cut = PlannedLeaderPartialProtectionTests._risk_cut.__get__(self)
+        self._verify_partial_buy_protection = PlannedLeaderPartialProtectionTests._verify_partial_buy_protection.__get__(self)
+
+    async def test_typed_partial_buy_cancel_and_protective_sell_use_resolved_late_fill_after_restart(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_typed_partial_buy_cancel_and_protective_sell_use_resolved_late_fill_after_restart(self)
+
+    async def test_typed_protection_accepts_full_detailed_fill_before_cancel(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_typed_protection_accepts_full_detailed_fill_before_cancel(self)

@@ -165,6 +165,31 @@ class ResearchDialogTests(unittest.TestCase):
                 dialog.stop()
                 dialog.deleteLater()
 
+    def test_dd_native_setup_displays_frozen_evidence_without_order_or_holding_columns(self):
+        result = {
+            "status": "ok", "kind": "daily_decline_experiment", "run_id": "dd-run",
+            "section12": {"family": "daily_decline/v1", "source_kind": "frozen_native_daily_observations",
+                          "execution_scope": "native_setup_assessment", "frozen_dataset_id": "daily-input",
+                          "frozen_manifest_sha256": "frozen-hash", "revision_ids_hash": "revision-hash"},
+            "result": {"symbol": "005930", "setup": {"status": "QUALIFIED", "reason": "decline_confirmed",
+                       "drawdown_bps": 2500, "relative_decline_bps": 1618, "volatility_bps": 909}},
+            "order_authorized": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            dialog = ResearchDialog(Path(directory))
+            try:
+                dialog._apply_result(result)
+                self.assertIn("DD 셋업 평가", dialog._summary.text())
+                self.assertIn("계좌 주문 없음", dialog._summary.text())
+                self.assertIn("동결 자료 ID daily-input", dialog._summary.toolTip())
+                self.assertEqual(("절대 낙폭", "시장 대비 낙폭", "변동성"),
+                                 tuple(dialog._table.horizontalHeaderItem(i).text() for i in (2, 3, 4)))
+                self.assertEqual(("QUALIFIED", "2,500bp", "1,618bp", "909bp", "동결 일봉", "decline_confirmed"),
+                                 tuple(dialog._table.item(0, i).text() for i in range(1, 7)))
+            finally:
+                dialog.stop()
+                dialog.deleteLater()
+
     def test_market_regime_summary_keeps_unknown_reason_visible(self) -> None:
         text = format_market_regime_summary({
             "value": {

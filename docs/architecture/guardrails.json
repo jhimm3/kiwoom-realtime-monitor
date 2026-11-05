@@ -2927,6 +2927,33 @@
       "limits": {
         "db|src/kiwoom_monitor/infrastructure/persistence/journal_schema.py|_add_execution_projection_order_plan|connection.execute": 1
       }
+    },
+    {
+      "id": "S12-04-planned-leader-first-protection-20261105",
+      "reason": "A planned leader's first protective order needs native proof of the original stop, root order, detailed fills and current plan before transport.",
+      "connection": "The existing SQLite and PostgreSQL claim transactions recheck the same account and plan, including exact root events and current protection authority. The collector callback adds no DB reads.",
+      "validation": "The isolated fake broker fixture cancels the correct root once, reconciles a late detailed fill after restart, rejects planless exit, and sends only the proved plan quantity at the fresh approved 0B price.",
+      "evidence": [
+        "tests/unit/test_mock_automation_specification.py",
+        "tests/integration/test_observation_bootstrap_postgres.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_planned_leader_cancel|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_planned_leader_protection_claim|cursor.execute": 3
+      }
+    },
+    {
+      "id": "S12-05-offline-selected-order-evidence-20261105",
+      "reason": "The selected unresolved order and its source cursor need an immutable first receipt in a dedicated offline SQLite transaction.",
+      "connection": "The existing SQLite document owner checks an empty target execution namespace and saves only the isolated evidence packet. No live ledger, authority or runtime reader is added.",
+      "validation": "The isolated selection test proves source byte identity, original FILL and cursor, rollback before COMMIT, receipt replay after lost ACK and zero target execution state.",
+      "evidence": [
+        "tests/unit/test_preserve_current_settings.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.accept_selected_order_evidence|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.accept_selected_order_evidence|cursor.execute": 2
+      }
     }
   ]
 }

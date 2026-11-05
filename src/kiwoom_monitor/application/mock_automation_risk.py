@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.application.trade_cost_service import DailyTradeCost
-from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+from kiwoom_monitor.domain.order_contract import OrderPlanRef, TERMINAL_ORDER_STATES
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
     AccountExecutionEvent,
@@ -23,6 +23,242 @@ MOCK_AUTOMATION_RISK_VERSION = "mock_automation_risk_snapshot/v1"
 VERIFIED_DAILY_PNL_SOURCE = "account_scoped_fifo_broker_cost/v1"
 KST = ZoneInfo("Asia/Seoul")
 PROTECTION_EXIT_VERSION = 'mock-protection-exit/v1'
+PLANNED_LEADER_STOP_VERSION = "planned-leader-stop/v1"
+PLANNED_LEADER_PROTECTION_EXIT_VERSION = "planned-leader-protection-exit/v1"
+
+
+@dataclass(frozen=True)
+class PlannedLeaderStop:
+    """The sticky, historical stop cut. It cannot authorize today's price or size."""
+
+    plan_id: str
+    policy_ref: str
+    risk_snapshot_id: str
+    risk_reconciliation_revision: int
+    observation: Mapping[str, Any]
+    stop_loss: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.plan_id, str) or not self.plan_id.strip()
+                or not isinstance(self.policy_ref, str) or not self.policy_ref.strip()
+                or type(self.risk_reconciliation_revision) is not int or self.risk_reconciliation_revision < 1
+                or not isinstance(self.observation, Mapping) or not isinstance(self.stop_loss, Mapping)):
+            raise ValueError("invalid planned leader stop")
+        _require_sha256(self.risk_snapshot_id, "planned leader original Risk")
+
+    def _body(self) -> dict[str, Any]:
+        return {"version": PLANNED_LEADER_STOP_VERSION, **asdict(self)}
+
+    @property
+    def trigger_id(self) -> str:
+        return _sha256(self._body())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self._body(), "trigger_id": self.trigger_id}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> PlannedLeaderStop:
+        body = dict(value)
+        trigger_id = body.pop("trigger_id", None)
+        if body.pop("version", None) != PLANNED_LEADER_STOP_VERSION:
+            raise ValueError("unsupported planned leader stop")
+        try:
+            trigger = cls(**body)
+        except TypeError as error:
+            raise ValueError("invalid planned leader stop") from error
+        if trigger_id != trigger.trigger_id:
+            raise ValueError("invalid planned leader stop identity")
+        return trigger
+
+
+@dataclass(frozen=True)
+class PlannedLeaderCancelClaim:
+    """The current native revision and the acknowledged historical notice."""
+
+    plan: OrderPlanRef
+    trigger_id: str
+    notice_revision: int
+    risk_snapshot_id: str
+    risk_reconciliation_revision: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan, OrderPlanRef):
+            raise ValueError("planned leader cancellation requires a typed plan")
+        _require_sha256(self.trigger_id, "planned leader stop trigger")
+        _require_sha256(self.risk_snapshot_id, "planned leader current Risk")
+        if any(type(value) is not int or value < 1
+               for value in (self.notice_revision, self.risk_reconciliation_revision)):
+            raise ValueError("planned leader cancellation requires positive revisions")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> PlannedLeaderCancelClaim:
+        try:
+            body = dict(value)
+            body["plan"] = OrderPlanRef(**body["plan"])
+            return cls(**body)
+        except (KeyError, TypeError) as error:
+            raise ValueError("invalid planned leader cancellation claim") from error
+
+
+def validate_planned_leader_stop(
+    trigger: PlannedLeaderStop, *, spec, leader_config, position_proof, original_risk,
+    original_fill_quantity: int,
+) -> None:
+    """Reproduce the approved original 0B stop against the original Risk and FILL cut."""
+    from kiwoom_monitor.application.leader_breakout import (
+        evaluate_leader_breakout_trade,
+        validate_leader_position_proof,
+    )
+
+    context = validate_leader_position_proof(position_proof, leader_config, spec, original_risk.execution_run_id)
+    validate_mock_stop_loss_proof(
+        trigger.stop_loss, spec, original_risk, leader_config=leader_config, position_proof=position_proof,
+    )
+    observation = trigger.observation
+    if ((trigger.plan_id, trigger.policy_ref) != (position_proof["entry_intent_id"], position_proof["proof_id"])
+            or (trigger.risk_snapshot_id, trigger.risk_reconciliation_revision)
+            != (original_risk.snapshot_id, original_risk.reconciliation_revision)
+            or original_risk.account_ref != spec.account_scope.account_ref
+            or original_risk.binding_revision != spec.binding_revision
+            or not original_risk.reconciliation_complete or original_risk.submission_unknown_count
+            or original_risk.balance_mismatch_count
+            or original_fill_quantity != trigger.stop_loss["quantity"]
+            or observation.get("approved") is not True or not observation.get("source")
+            or not isinstance(observation.get("payload"), Mapping)):
+        raise ValueError("planned leader stop scope or original Risk/FILL changed")
+    available_at = datetime.fromisoformat(trigger.stop_loss["available_at"])
+    decided_at = datetime.fromisoformat(observation["decided_at"])
+    age = spec.maximum_data_gap_seconds
+    if (not original_risk.account_as_of <= available_at <= decided_at or age is None
+            or any(not 0 <= (decided_at - at).total_seconds() <= age for at in (
+                original_risk.account_as_of, original_risk.observed_at,
+            ))):
+        raise ValueError("planned leader stop used unavailable Risk or price")
+    raw, _ = evaluate_leader_breakout_trade(
+        leader_config.policy, observation["payload"], received_at=datetime.fromisoformat(observation["received_at"]),
+        source=observation["source"], decision_time=decided_at, position_open=True, position_context=context,
+    )
+    if (raw["status"] != "HARD_EXIT" or raw["input_ref"] != trigger.stop_loss["input_ref"]
+            or raw["signal_reference_price"] != trigger.stop_loss["price_won"]
+            or datetime.fromisoformat(raw["available_at"]) != available_at):
+        raise ValueError("planned leader stop did not reproduce")
+
+
+def validate_planned_leader_current_cut(
+    plan: OrderPlanRef, *, spec, run_id: str, symbol: str, risk, plan_position: Mapping[str, Any],
+    now: datetime, price: Mapping[str, Any] | None = None,
+) -> int:
+    """Validate the current quantity and optional fresh quote independently of the trigger."""
+    quantity = plan_position["quantity"]
+    cursor = plan_position["fill_cursor"]
+    age = spec.maximum_data_gap_seconds
+    if ((plan_position["plan_id"], plan_position["policy_ref"], plan_position["revision"],
+         plan_position["run_id"], plan_position["symbol"]) != (plan.plan_id, plan.policy_ref,
+         plan.expected_revision, run_id, symbol)
+            or plan_position.get("version") != "mock_plan_position/v1"
+            or type(quantity) is not int or quantity <= 0 or plan_position.get("unreconciled_sell_quantity")
+            or type(cursor) is not int or not 0 < cursor <= risk.execution_event_high_watermark
+            or (risk.account_ref, risk.execution_run_id, risk.binding_revision)
+            != (spec.account_scope.account_ref, run_id, spec.binding_revision)
+            or not risk.reconciliation_complete or risk.submission_unknown_count or risk.balance_mismatch_count
+            or risk.pending_sell_quantities or dict(risk.owned_position_quantities) != {symbol: quantity}
+            or age is None or any(not 0 <= (now - at).total_seconds() <= age for at in (
+                risk.observed_at, risk.account_as_of,
+            ))):
+        raise ValueError("planned leader current quantity or Risk is unconfirmed")
+    if price is not None and (
+        type(price.get("price_won")) is not int or price["price_won"] <= 0
+        or price.get("durable") is not False or price.get("market_status") != "TRADABLE"
+        or not price.get("input_ref") or not str(price["input_ref"]).startswith("0B:")
+        or not isinstance(price.get("available_at"), datetime) or price["available_at"].tzinfo is None
+        or price["available_at"] > risk.observed_at or not 0 <= (now - price["available_at"]).total_seconds() <= age
+    ):
+        raise ValueError("planned leader current execution quote is unconfirmed")
+    return quantity
+
+
+def _planned_leader_execution_quote(observation, *, spec, run_id, leader_config, position_proof):
+    from .leader_breakout import evaluate_leader_breakout_trade, validate_leader_position_proof
+
+    context = validate_leader_position_proof(position_proof, leader_config, spec, run_id)
+    if (observation.get("approved") is not True or not observation.get("source")
+            or not isinstance(observation.get("payload"), Mapping)
+            or observation["payload"].get("market", "KRX") != spec.supported_venue):
+        raise ValueError("planned leader protection requires an approved raw 0B execution quote")
+    received_at = datetime.fromisoformat(observation["received_at"])
+    decided_at = datetime.fromisoformat(observation["decided_at"])
+    if received_at.tzinfo is None or decided_at.tzinfo is None:
+        raise ValueError("planned leader execution quote has no time zone")
+    raw, _ = evaluate_leader_breakout_trade(
+        leader_config.policy, observation["payload"], received_at=received_at, source=observation["source"],
+        decision_time=decided_at, position_open=True, position_context=context,
+    )
+    if raw["status"] not in {"HARD_EXIT", "INVALIDATED", "HOLD"}:
+        raise ValueError("planned leader execution quote is unavailable")
+    return {"price_won": raw["signal_reference_price"], "available_at": received_at,
+            "observed_at": datetime.fromisoformat(raw["observed_at"]),
+            "input_ref": raw["input_ref"], "durable": False, "market_status": "TRADABLE"}
+
+
+def prepare_planned_leader_protection_exit(
+    spec, *, run_id, control_revision, notice, plan, observation, risk, plan_position, leader_config,
+    position_proof, confirmed_root_state, confirmed_root_at, now, reservation_claimed=False,
+):
+    """Freeze a candidate. The native owner must prove terminal BUY and both cuts before transport."""
+    from .breakout_strategy import StrategyState
+    from .mock_automation_session_clock import content_id
+
+    trigger = PlannedLeaderStop.from_dict(notice["planned_leader_stop"])
+    if (not isinstance(plan, OrderPlanRef) or spec.unfilled_execution_policy is None
+            or confirmed_root_state not in {"CANCELLED", "FILLED"} or confirmed_root_at.tzinfo is None
+            or notice.get("state") != "PENDING" or notice.get("order_authorized") is not False
+            or notice.get("transport_state") != "OFF"
+            or (notice.get("spec_id"), notice.get("account_ref"), notice.get("execution_run_id"))
+            != (spec.spec_id, spec.account_scope.account_ref, run_id)
+            or notice.get("input_ref") != trigger.stop_loss["input_ref"]
+            or (plan.plan_id, plan.policy_ref) != (trigger.plan_id, trigger.policy_ref)
+            or (plan.plan_id, plan.policy_ref) != (position_proof["entry_intent_id"], position_proof["proof_id"])):
+        raise ValueError("planned leader protection request changed")
+    price = _planned_leader_execution_quote(
+        observation, spec=spec, run_id=run_id, leader_config=leader_config, position_proof=position_proof,
+    )
+    if (price["available_at"] <= datetime.fromisoformat(trigger.stop_loss["available_at"])
+            or price["available_at"] < confirmed_root_at
+            or datetime.fromisoformat(observation["decided_at"]) > risk.observed_at):
+        raise ValueError("planned leader protection requires an independent later execution quote")
+    age = leader_config.max_data_age_seconds
+    if age is None or any(not 0 <= (now - price[field]).total_seconds() <= age for field in ("observed_at", "available_at")):
+        raise ValueError("planned leader execution quote is stale at the native claim")
+    symbol = position_proof["context"]["symbol"]
+    quantity = validate_planned_leader_current_cut(
+        replace(plan, expected_revision=plan.expected_revision + 1) if reservation_claimed else plan,
+        spec=spec, run_id=run_id, symbol=symbol, risk=risk, plan_position=plan_position, now=now, price=price,
+    )
+    age = spec.unfilled_execution_policy.max_snapshot_age_seconds
+    if any(not 0 <= (now - at).total_seconds() <= age for at in (
+        risk.observed_at, risk.account_as_of, price["available_at"],
+    )):
+        raise ValueError("planned leader protection cut is stale")
+    state = StrategyState(
+        status="open", symbol=symbol, entry_price=dict(risk.owned_entry_prices).get(symbol),
+        position_quantity=quantity, opened_at=position_proof["entry_decided_at"],
+    ).to_dict()
+    snapshot = {"version": PLANNED_LEADER_PROTECTION_EXIT_VERSION, "spec_id": spec.spec_id,
+                "execution_run_id": run_id, "account_ref": spec.account_scope.account_ref,
+                "control_revision": control_revision, "notice_revision": notice["revision"],
+                "trigger_id": trigger.trigger_id, "plan": asdict(plan), "observation": dict(observation),
+                "confirmed_root_state": confirmed_root_state, "confirmed_root_at": confirmed_root_at.isoformat(),
+                "risk_snapshot_id": risk.snapshot_id, "risk_reconciliation_revision": risk.reconciliation_revision}
+    body = {"run_id": run_id, "snapshot_id": content_id("protection_snapshot", snapshot), "symbol": symbol,
+            "proposal": "EXIT", "final_action": "EXIT", "quantity": quantity,
+            "signal_reference_price": price["price_won"], "required_capital_won": 0,
+            "reasons": ("native_risk:SYMBOL_STOP_LOSS_REACHED",), "constraints": (PROTECTION_EXIT_VERSION,),
+            "state_before": state, "state_after": state, "decided_at": risk.observed_at.isoformat()}
+    workflow = {"snapshot": snapshot, "decision": {**body, "decision_id": content_id("decision", body)}}
+    return json.loads(json.dumps({**workflow, "workflow_id": content_id("protection_exit", workflow)}))
 
 
 def gross_price_stop_reached(price, entry, stop_loss_bps):

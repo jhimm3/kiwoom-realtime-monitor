@@ -4280,14 +4280,15 @@ class CentralServerAppTests(unittest.TestCase):
                     }
                 config = {"version": MINUTE_SHADOW_VERSION, "strategy": strategy, "signal_valid_seconds": 30}
 
-                def save_bar(store, minute, price, turnover, *, native=True):
+                def save_bar(store, minute, price, turnover, *, native=True, received_at=None):
                     bar_start = start + timedelta(minutes=minute)
                     bar_end = bar_start + timedelta(minutes=1)
                     value = {
                         "trading_date": start.date().isoformat(), "minute": bar_start.strftime("%H:%M"),
                         "code": "005930", "market": "KRX", "open": price, "high": price,
                         "low": price, "close": price, "volume": 100, "trade_value_million_won": turnover,
-                        "updated_at": (bar_end + timedelta(seconds=2)).timestamp(), "operation_id": f"delta-{minute}",
+                        "updated_at": (received_at or bar_end + timedelta(seconds=2)).timestamp(),
+                        "operation_id": f"delta-{minute}",
                     }
                     obs = minute_bar_observation(
                         value, origin=ObservationOrigin.REALTIME if native else ObservationOrigin.QUERY,
@@ -4356,6 +4357,11 @@ class CentralServerAppTests(unittest.TestCase):
                         [again] = client.get(candidates_url, headers=headers).json()["events"]
                         self.assertEqual(event, again)
                         self.assertEqual(config, client.get(settings_url, headers=headers).json()["shadow_candidate_config"])
+                        clock[0] += timedelta(seconds=1)
+                        save_bar(store, 1, 1150, 10, native=False, received_at=clock[0])
+                        restored.run_once()
+                        [invalidated] = client.get(candidates_url, headers=headers).json()["events"]
+                        self.assertEqual({**event, "status": "INVALIDATED"}, invalidated)
                         disabled = client.put(settings_url, headers=headers, json={"shadow_candidate_enabled": False})
                         self.assertEqual(200, disabled.status_code, disabled.text)
                         [inactive] = client.get(candidates_url, headers=headers).json()["events"]

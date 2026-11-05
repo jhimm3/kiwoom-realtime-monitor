@@ -9,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
-from typing import Any, Awaitable, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator
 
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
@@ -26,6 +26,9 @@ from kiwoom_monitor.domain.order_contract import (
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord, ExecutionRepository
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 from .market_observations import KST, as_kst
+
+if TYPE_CHECKING:
+    from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderCancelClaim
 
 
 class ExecutionRuntime:
@@ -202,9 +205,10 @@ class ExecutionRuntime:
         """Submit one approved automation intent without leaving the account gate open."""
         with self._operation_lock, self._observe_operation():
             if isinstance(intent, PlannedOrderIntent):
-                if replacement_claim is not None or protection_claim is not None:
+                if replacement_claim is not None:
                     raise ValueError("planned orders require their own exact approval")
-                return self._submit_planned(intent, account, spec_id, control_revision, plan_recovery)
+                return self._submit_planned(intent, account, spec_id, control_revision, plan_recovery,
+                                            protection_claim=protection_claim)
             if plan_recovery is not None:
                 raise ValueError("plan recovery requires a planned order")
             self._require_active(intent)
@@ -232,7 +236,7 @@ class ExecutionRuntime:
 
     def _submit_planned(
         self, intent: PlannedOrderIntent, account: AccountSnapshot, spec_id: str, control_revision: int,
-        recovery: MockAccountRecovery | None,
+        recovery: MockAccountRecovery | None, *, protection_claim: dict | None = None,
     ) -> ExecutionRecord:
         self._require_active(intent)
         if self._new_orders_enabled:
@@ -248,6 +252,7 @@ class ExecutionRuntime:
             raise ValueError("planned order requires the exact broker recovery snapshot")
         self._repository.bind_automation_control(
             spec_id=spec_id, control_revision=control_revision, plan_recovery=recovery,
+            **({"protection_claim": protection_claim} if protection_claim is not None else {}),
         )
         try:
             record, first_claim = self._lifecycle.queue_planned(intent)
@@ -295,6 +300,7 @@ class ExecutionRuntime:
         self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
+        planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
     ) -> ExecutionRecord:
         """One guarded cancellation claim for the exact assessed native order.
 
@@ -303,6 +309,8 @@ class ExecutionRuntime:
         protective retry proof; default callers retain once-only cancellation.
         """
         with self._operation_lock:
+            if planned_cancel_claim is not None and cancel_retry_claim is not None:
+                raise ValueError("execution_claim_purposes_conflict")
             self._require_active(expected.intent)
             if self._new_orders_enabled:
                 raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
@@ -342,6 +350,11 @@ class ExecutionRuntime:
                 if cancel_retry_claim is not None:
                     self._repository.bind_automation_control(spec_id=spec_id,control_revision=control_revision,
                         cancel_retry_claim=cancel_retry_claim)
+                if planned_cancel_claim is not None:
+                    self._repository.bind_automation_control(
+                        spec_id=spec_id, control_revision=control_revision,
+                        planned_cancel_claim=planned_cancel_claim.to_dict(),
+                    )
                 with self._observe_operation():
                     return self._lifecycle.cancel(
                         record.intent.intent_id, 0,
@@ -483,18 +496,21 @@ class ManualMockOrderGateway:
         self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
+        planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
     ) -> ExecutionRecord:
         """Reuse account refresh, command serialization and credential drain."""
         return await self._command(lambda: self._cancel_automation_intent(
             expected, spec_id=spec_id, control_revision=control_revision,
             before_cancel_claim=before_cancel_claim,
             **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
+            **({"planned_cancel_claim": planned_cancel_claim} if planned_cancel_claim is not None else {}),
         ))
 
     async def _cancel_automation_intent(
         self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
+        planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
     ) -> ExecutionRecord:
         async with self._command_lock:
             current, history = await asyncio.to_thread(self._read_automation_cancel, expected)
@@ -506,6 +522,7 @@ class ManualMockOrderGateway:
                 spec_id=spec_id, control_revision=control_revision,
                 before_cancel_claim=before_cancel_claim,
                 **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
+                **({"planned_cancel_claim": planned_cancel_claim} if planned_cancel_claim is not None else {}),
             )
 
     def _read_automation_cancel(self, expected: ExecutionRecord) -> tuple[ExecutionRecord, tuple[dict, ...]]:

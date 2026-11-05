@@ -108,6 +108,59 @@ class FakeStore:
 
 
 class CandidateMonitorTests(unittest.TestCase):
+    def test_section12_breakout_and_theme_shadow_use_only_cut_eligible_context(self):
+        from kiwoom_monitor.application.section12_minute_research import (
+            BREAKOUT_STUDY_FAMILY, THEME_STUDY_FAMILY, MINUTE_SHADOW_VERSION,
+        )
+        from tests.unit.test_breakout_theme_research import BreakoutThemeResearchTests
+
+        fixture = BreakoutThemeResearchTests()
+        fixture.setUp()
+        rows = []
+        for index in range(12):
+            price, high = (104, 110) if index == 11 else (100, 101)
+            row = _bar(index + 1, index, price, high, day=fixture.first.date().isoformat())
+            row.update(subject="123456:KRX", origin="realtime", source_id="kiwoom-websocket-0B")
+            row["payload"].update(code="123456", trade_value_million_won=2 if index == 11 else 1)
+            rows.append(row)
+
+        market = fixture.market_proof()
+        daily = fixture.entry_proof("daily_headroom", 115)
+        news = fixture.entry_proof("catalyst", "supported")
+        for family, policy, field, proofs, missing_reason in (
+            (BREAKOUT_STUDY_FAMILY, fixture.filtered("B2"), "entry_proofs", (market,),
+             "breakout_market_turnover_unavailable"),
+            (BREAKOUT_STUDY_FAMILY, fixture.filtered("B3"), "entry_proofs", (market, daily, news),
+             "breakout_market_turnover_unavailable"),
+            (THEME_STUDY_FAMILY, fixture.theme, "theme_proofs", (fixture.proof,),
+             "theme_role_not_known_at_signal"),
+        ):
+            for late in (False, True):
+                with self.subTest(variant=policy.variant, late=late):
+                    selected = [asdict(proof) for proof in proofs]
+                    if late:
+                        selected[0]["available_at"] = datetime.fromisoformat(fixture.signal.available_at) + timedelta(seconds=1)
+                    config = {
+                        "version": MINUTE_SHADOW_VERSION, "family": family, "symbols": ["123456"],
+                        "signal_valid_seconds": 30, "strategy": {
+                            "capital_won": 100_000, "policy": asdict(policy), field: selected,
+                        },
+                    }
+                    store = FakeStore(rows)
+                    monitor = CandidateMonitor.from_json(
+                        store, json.dumps(config, default=lambda value: value.isoformat()),
+                        poll_seconds=2, universe_max_age_seconds=90,
+                    )
+                    monitor.run_once()
+                    monitor.run_once()
+                    if late:
+                        self.assertEqual([], store.candidates)
+                        self.assertEqual(missing_reason, monitor.quality["reason"])
+                    else:
+                        [event] = store.candidates
+                        self.assertEqual(policy.variant, event["strategy_variant"])
+                        self.assertTrue({proof.revision for proof in proofs} <= set(event["input_revision_refs"]))
+
     def test_section12_close_and_ipo_use_only_calendar_and_listing_available_at_cut(self):
         from kiwoom_monitor.application.section12_minute_research import (
             CLOSE_FAMILY, IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MINUTE_SHADOW_VERSION,

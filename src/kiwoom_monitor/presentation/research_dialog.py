@@ -52,6 +52,7 @@ _SECTION12_SCOPES = {
     "paper": "동결 연구 · Paper 체결 모의",
     "shadow_only": "동결 Shadow 재생 · 판단만 기록",
     "synthetic_evidence": "합성 증거 재생",
+    "native_setup_assessment": "동결 일봉 · DD 셋업 평가",
 }
 _SECTION12_MINUTE_COLUMNS = ("구간·역할", "평가 상태", "순손익", "제출/체결", "미완료·거절", "무거래", "사유")
 
@@ -1237,6 +1238,7 @@ class ResearchDialog(QDialog):
         kind = result.get("kind")
         context = result.get("section12")
         has_context = isinstance(context, Mapping) and bool(context)
+        native_dd = kind == "daily_decline_experiment" and has_context and context.get("execution_scope") == "native_setup_assessment"
         minute_result = kind == "single_run" and (has_context or result.get("shadow_only") is True)
         if kind in {"leader_breakout", "leader_breakout_campaign"}:
             self._table.setHorizontalHeaderLabels(("분 종료·종목", "상태", "기준가격", "분봉 종가", "판단", "자료", "사유"))
@@ -1247,6 +1249,8 @@ class ResearchDialog(QDialog):
             self._table.setHorizontalHeaderLabels(("실험", "상태", "최대 낙폭", "손익", "완료 거래", "활성일", "사유"))
         elif kind == "account_risk_experiment":
             self._table.setHorizontalHeaderLabels(("실험", "평가 상태", "현금", "예약", "평가 자산", "최대 낙폭", "낙폭 하한"))
+        elif native_dd:
+            self._table.setHorizontalHeaderLabels(("전략·종목", "셋업 상태", "절대 낙폭", "시장 대비 낙폭", "변동성", "자료", "사유"))
         elif kind in EVIDENCE_EXPERIMENT_FAMILIES:
             self._table.setHorizontalHeaderLabels(("전략·변형", "재생 상태", "보유 수량", "미완료 주문", "증거 상태", "자료", "사유"))
         elif minute_result:
@@ -1257,7 +1261,10 @@ class ResearchDialog(QDialog):
             self._summary.setText(_section12_result_summary(context, result.get("report")))
             references = [f"{label} {value}" for key, label in (
                 ("input_dataset_id", "자료 ID"), ("input_revision_ids_hash", "자료 판본 SHA256"),
-                ("strategy_reference_sha256", "근거 SHA256"), ("dataset_sha256", "합성 자료 SHA256"),
+                ("strategy_reference_sha256", "근거 SHA256"),
+                ("dataset_sha256", "입력 명세 SHA256" if native_dd else "합성 자료 SHA256"),
+                ("frozen_dataset_id", "동결 자료 ID"), ("revision_ids_hash", "자료 판본 SHA256"),
+                ("frozen_manifest_sha256", "동결 자료 SHA256"),
             ) if (value := context.get(key))]
             if result.get("run_id"):
                 references.append(f"실행 ID {result['run_id']}")
@@ -1347,7 +1354,8 @@ def _section12_result_summary(context: Mapping[str, Any], report: object) -> str
     variants = context.get("variants")
     variant = " → ".join(variants) if isinstance(variants, (list, tuple)) else context.get("variant")
     scope = _SECTION12_SCOPES.get(context.get("execution_scope"))
-    source = {"historical_reconstruction": "역사 자료 재구성", "historical_replay": "동결 관측 자료"}.get(context.get("source_kind"))
+    source = {"historical_reconstruction": "역사 자료 재구성", "historical_replay": "동결 관측 자료",
+              "frozen_native_daily_observations": "동결 일봉 원본"}.get(context.get("source_kind"))
     clock = {"reconstructed_completed_bar_end_proxy": "재구성 완료봉 종료시각 기준",
              "observation_available_at": "기록된 관측 가용시각 기준"}.get(context.get("source_clock"))
     range_text = ""
@@ -1361,8 +1369,10 @@ def _section12_result_summary(context: Mapping[str, Any], report: object) -> str
     quality_text = ""
     if isinstance(quality, Mapping):
         quality_text = f"자료 품질 {quality.get('status', '미확인')} · 재현성 {quality.get('reproducibility', '미확인')}"
+    event_groups = context.get("source_event_group_count")
+    events_text = f"분할을 확인한 검토 사건 {event_groups}개" if type(event_groups) is int else ""
     return " · ".join(str(value) for value in (
-        family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text,
+        family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text, events_text,
     ) if value)
 
 
@@ -1387,6 +1397,18 @@ def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, .
         trace = result.get("result")
         if not isinstance(trace, Mapping):
             return ()
+        context = result.get("section12")
+        if (kind == "daily_decline_experiment" and isinstance(context, Mapping)
+                and context.get("execution_scope") == "native_setup_assessment"):
+            setup = trace.get("setup")
+            if not isinstance(setup, Mapping):
+                return ()
+            identity = " · ".join(str(value) for value in (EVIDENCE_EXPERIMENT_FAMILIES[kind], trace.get("symbol")) if value)
+            values = tuple(f"{value:,}bp" if type(value) is int else "N/A" for value in (
+                setup.get("drawdown_bps"), setup.get("relative_decline_bps"), setup.get("volatility_bps"),
+            ))
+            return ((identity, str(setup.get("status", "미확인")), *values,
+                     "동결 일봉", str(setup.get("reason", ""))),)
         summary = trace.get("summary", trace)
         if not isinstance(summary, Mapping):
             return ()

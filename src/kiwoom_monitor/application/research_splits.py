@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 from kiwoom_monitor.application.market_session_schedule import SUPPORTED_RESEARCH_SESSION_PROFILES
 
@@ -43,6 +43,35 @@ class ResearchFoldSpec:
 
 
 @dataclass(frozen=True)
+class ResearchSourceEventLink:
+    """Reviewed event identity, source occurrences, and their frozen market revisions."""
+
+    event_id: str
+    source_occurrence_refs: tuple[str, ...]
+    revision_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.event_id, str) or not self.event_id.strip():
+            raise ValueError("source event identity is required")
+        for values in (self.source_occurrence_refs, self.revision_ids):
+            if (not values or not all(isinstance(value, str) and value.strip() for value in values)
+                    or len(set(values)) != len(values)):
+                raise ValueError("source event link requires unique occurrence and revision references")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"event_id": self.event_id, "source_occurrence_refs": list(self.source_occurrence_refs),
+                "revision_ids": list(self.revision_ids)}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ResearchSourceEventLink:
+        if (not isinstance(value, Mapping) or set(value) != {"event_id", "source_occurrence_refs", "revision_ids"}
+                or not isinstance(value["source_occurrence_refs"], list)
+                or not isinstance(value["revision_ids"], list)):
+            raise ValueError("invalid source event link")
+        return cls(value["event_id"], tuple(value["source_occurrence_refs"]), tuple(value["revision_ids"]))
+
+
+@dataclass(frozen=True)
 class ResearchEvaluationSpec:
     version: str
     folds: tuple[ResearchFoldSpec, ...]
@@ -56,12 +85,17 @@ class ResearchEvaluationSpec:
     fit_policy: str = FIT_POLICY
     final_holdout_accessed_at: str = ""
     final_holdout_access_reason: str = ""
+    source_event_links: tuple[ResearchSourceEventLink, ...] = ()
 
     def __post_init__(self) -> None:
         if self.version != SPLIT_SPEC_VERSION:
             raise ValueError(f"unregistered research split spec: {self.version}")
         if not self.folds:
             raise ValueError("at least one chronological research fold is required")
+        if self.source_event_links and (
+            self.final_holdout_accessed_at or any(fold.role == "OOS" for fold in self.folds)
+        ):
+            raise ValueError("source event links require development folds without final holdout")
         if len({fold.name for fold in self.folds}) != len(self.folds):
             raise ValueError("research fold names must be unique")
         if min(
@@ -102,6 +136,10 @@ class ResearchEvaluationSpec:
     def to_dict(self) -> dict[str, Any]:
         document = asdict(self)
         document["folds"] = [fold.to_dict() for fold in self.folds]
+        if self.source_event_links:
+            document["source_event_links"] = [link.to_dict() for link in self.source_event_links]
+        else:
+            document.pop("source_event_links")
         return document
 
     @classmethod
@@ -111,6 +149,9 @@ class ResearchEvaluationSpec:
             raise ValueError("evaluation spec folds must be a list")
         if any(not isinstance(row, Mapping) for row in raw_folds):
             raise ValueError("each evaluation fold must be an object")
+        links = value.get("source_event_links", [])
+        if not isinstance(links, list):
+            raise ValueError("source event links must be a list")
         return cls(
             version=str(value.get("version", "")),
             folds=tuple(ResearchFoldSpec(
@@ -129,6 +170,7 @@ class ResearchEvaluationSpec:
             fit_policy=str(value.get("fit_policy", FIT_POLICY)),
             final_holdout_accessed_at=str(value.get("final_holdout_accessed_at", "")),
             final_holdout_access_reason=str(value.get("final_holdout_access_reason", "")),
+            source_event_links=tuple(ResearchSourceEventLink.from_dict(link) for link in links),
         )
 
 
@@ -319,6 +361,42 @@ def assign_interval_to_fold(
                 return FoldAssignment(fold.name, "PURGED", "result_crosses_fold_purge_boundary")
             return FoldAssignment(fold.name, "INCLUDED", "")
     return FoldAssignment("", "OUTSIDE", "sample_start_outside_evaluation_folds")
+
+
+def validate_source_event_folds(
+    spec: ResearchEvaluationSpec, observations: Iterable[Mapping[str, Any]],
+) -> None:
+    """Reject an explicitly linked event spanning multiple evaluation folds or purge time."""
+    if not spec.source_event_links:
+        return
+    groups: dict[str, set[str]] = {}
+    occurrence_owner: dict[str, str] = {}
+    revision_owner: dict[str, str] = {}
+    for link in spec.source_event_links:
+        for ref in link.source_occurrence_refs:
+            if occurrence_owner.setdefault(ref, link.event_id) != link.event_id:
+                raise ValueError("source occurrence belongs to multiple reviewed events")
+        for revision_id in link.revision_ids:
+            if revision_owner.setdefault(revision_id, link.event_id) != link.event_id:
+                raise ValueError("frozen revision belongs to multiple reviewed events")
+        groups.setdefault(link.event_id, set()).update(link.revision_ids)
+
+    instants: dict[str, datetime] = {}
+    for observation in observations:
+        revision_id = observation.get("revision_id")
+        if not isinstance(revision_id, str) or revision_id not in revision_owner:
+            continue
+        if revision_id in instants:
+            raise ValueError("linked frozen revision has ambiguous identity")
+        instants[revision_id] = _aware_datetime(observation.get("available_at")).astimezone(timezone.utc)
+    if instants.keys() != revision_owner.keys():
+        raise ValueError("linked source event revision is absent from the frozen input")
+
+    for revision_ids in groups.values():
+        times = tuple(instants[revision_id] for revision_id in revision_ids)
+        assignment = assign_interval_to_fold(spec, min(times).isoformat(), max(times).isoformat())
+        if assignment.status != "INCLUDED":
+            raise ValueError("reviewed source event crosses or lies outside an eligible evaluation fold")
 
 
 def warmup_start(spec: ResearchEvaluationSpec) -> datetime:

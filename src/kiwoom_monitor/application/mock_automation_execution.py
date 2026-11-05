@@ -689,8 +689,6 @@ def dispatch_mock_automation_decision(
     protection_exit_id: str | None = None,
     plan: OrderPlanRef | None = None,
 ) -> tuple[MockAutomationDecisionGate, ExecutionRecord | None, MockAutomationDispatchReceipt | None]:
-    if plan is not None and protection_exit_id is not None:
-        raise ValueError("planned orders require their own exact approval")
     spec, profile, admission, lease, recovered, latest_stop, control = _load_context(
         repository, account_ref, spec_id,
     )

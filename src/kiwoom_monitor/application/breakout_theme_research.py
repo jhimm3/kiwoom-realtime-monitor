@@ -261,6 +261,7 @@ class BreakoutThemeDecision:
     reason: str
     setup: BreakoutThemeSetup | None = None
     evidence_refs: tuple[str, ...] = ()
+    preceding_revision_id: str | None = None
 
 
 def evaluate_breakout_theme(
@@ -329,7 +330,8 @@ def evaluate_breakout_theme(
         policy, bar.code, bar.research_session, bar.schedule_version, start, cutoff,
         exit_at, level, bar.open, proof, refs, **filtered_setup,
     )
-    return BreakoutThemeDecision("ENTER", policy.quantity, "breakout_first_completed_crossing", setup, refs)
+    return BreakoutThemeDecision("ENTER", policy.quantity, "breakout_first_completed_crossing", setup, refs,
+                                 preceding_revision_id=preceding[0].revision_id if preceding else None)
 
 
 def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs):

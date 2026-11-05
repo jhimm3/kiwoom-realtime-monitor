@@ -427,6 +427,8 @@ DB 스키마 변경 없이 내부 쓰기 메서드의 선택 ownership 인자로
 
 중앙 `central_documents`는 여러 로컬 스키마를 그대로 복제하지 않고 버전 가능한 문서로 동기화한다. 테마는 삭제 전파 때문에 컬렉션 전체 교체를 지원하고, 나머지는 upsert/증분 병합한다. 테마 이력은 세 projection의 중간 상태를 조합하지 않고 `ThemeBackupService.export_document()`가 만든 `theme_metadata(default,full)` 하나만 사용한다. 이 문서 교체와 이력 append는 한 DB 트랜잭션이며, 연속해서 같은 내용 hash가 오면 재전송으로 보고 새 행을 만들지 않는다. 과거 이력 행을 갱신하는 저장소 API는 없다.
 
+SQLite의 `offline_selected_order_evidence`는 선별한 원주문과 불변 이벤트의 원본 커서, 계획 수량 및 최초 수락 영수증을 담는다. 명시 보존 명령만 쓸 수 있으며 상태는 `OFFLINE_RECOVERY_REQUIRED`다. 주문·체결 원장이나 계좌 권한을 생성하지 않으며 기존 실행 경로는 이 자료를 주문 승인에 사용하지 않는다.
+
 `news_article/news_ai`는 기존 UI와 동기화 호환을 위한 최신 projection으로 유지한다. 기사 projection과 기사 revision 및 BODY job은 한 트랜잭션으로 저장한다. 같은 수집기의 같은 내용 재전송만 합치므로 다른 수집기의 최초 NAS 수신은 별도 revision으로 남는다. NAS `received_at/available_at`은 서버가 수락할 때 정하며 로컬 `first_seen_at`이나 projection `updated_at`을 복사하지 않는다. BODY/AI 원장은 범용 콘텐츠 동기화 upsert 대상이 아니며, AI latest projection·AI revision·일일 사용량은 한 트랜잭션으로 저장한다.
 
 본문 revision과 RULE job도 한 트랜잭션으로 저장한다. RULE은 `SUPPLY_CONTRACT`만 기록하며 MOU/논의/기대, 해지/부인, 가격 반응, 외화·조건부 금액과 제목-본문 충돌을 삭제하지 않는다. 같은 기사 identity의 정정 또는 상대방+금액 근거가 같은 진행은 기존 event ID의 새 revision이 되고, 관계가 부족하거나 상대방이 다르면 새 event ID와 `possible_related` 후보를 남긴다. 규칙 원장은 generic `central_documents` upsert를 거치지 않으며 AI·수동 분석·주문 경로를 변경하지 않는다.

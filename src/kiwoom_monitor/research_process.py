@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, Mapping, Callable
 
 from kiwoom_monitor.application.research_families import (
@@ -42,8 +42,13 @@ from kiwoom_monitor.application.research_hypotheses import (
     build_development_evidence_snapshot,
     generate_followup_hypotheses,
 )
-from kiwoom_monitor.application.research_splits import (ResearchEvaluationSpec, DevelopmentPartitionSpec,
-    DevelopmentSymbolPartitionSpec, FinalHoldoutBatchSpec)
+from kiwoom_monitor.application.research_splits import (
+    DevelopmentPartitionSpec,
+    DevelopmentSymbolPartitionSpec,
+    FinalHoldoutBatchSpec,
+    ResearchEvaluationSpec,
+    validate_source_event_folds,
+)
 from kiwoom_monitor.application.research_search import (
     ExperimentSpec,
     TrialAttemptInterrupted,
@@ -115,12 +120,20 @@ class ResearchProcessRequest:
     shadow_only: bool = False
     breakout_variants: tuple[MinuteExperiment, ...] = ()
 
+    def __post_init__(self) -> None:
+        if self.evaluation.source_event_links and (
+            not isinstance(self.strategy, MinuteExperiment) or self.mode != "single_run"
+            or self.development_partition is not None
+        ):
+            raise ValueError("source event links require a Section 12 development single_run")
+
 
 EVIDENCE_EXPERIMENT_FAMILIES = {
     "micro_experiment": "micro_execution/v1",
     "daily_decline_experiment": "daily_decline/v1",
     "account_risk_experiment": "account_risk_study/v1",
 }
+DAILY_DECLINE_NATIVE_SETUP_VERSION = "dd-native-setup-evidence/v1"
 BREAKOUT_COMPARISON_MODE = "breakout_filter_comparison"
 
 
@@ -1154,12 +1167,14 @@ def execute_process_request(
         if campaign_cycle is not None:
             raise ValueError("evidence experiments run outside a campaign")
         return _execute_evidence_experiment(request, resource_guard, cancelled)
-    resource_guard.preflight(research_input_encoded_bytes(request.dataset))
+    linked_development = isinstance(request, ResearchProcessRequest) and bool(request.evaluation.source_event_links)
+    resource_guard.preflight(research_input_encoded_bytes(request.dataset, development_only=linked_development))
     def loading_checkpoint():
         if cancelled is not None and cancelled():
             raise ResearchRunCancelled('research input loading cancellation requested')
         resource_guard.checkpoint()
-    dataset = load_research_input(request.dataset, session_profile=request.session_profile, checkpoint=loading_checkpoint)
+    dataset = load_research_input(request.dataset, session_profile=request.session_profile,
+                                  checkpoint=loading_checkpoint, development_only=linked_development)
     if isinstance(request, LeaderBreakoutProcessRequest):
         if campaign_cycle is not None:
             return _execute_leader_decision_campaign(request, dataset, campaign_cycle, loading_checkpoint)
@@ -1178,6 +1193,7 @@ def execute_process_request(
                 "reason": "unconfigured:" + ",".join(missing), "configuration_missing": list(missing),
                 "performance_verified": False, "order_authorized": False}
     request, dataset = _prepare_development_request(request, dataset, loading_checkpoint)
+    validate_source_event_folds(request.evaluation, dataset.observations)
     strategy_references = None
     if request.strategy_references is not None:
         if request.mode not in {"single_run", BREAKOUT_COMPARISON_MODE} or request.session_profile is None or request.development_partition is not None:
@@ -1512,7 +1528,114 @@ def _section12_minute_result(repository: ResearchRepository, run_id: str, varian
         fields["source_range"] = manifest["captured_range"]
     if "strategy_references" in spec:
         fields["strategy_reference_sha256"] = spec["strategy_references"]["sha256"]
+    source_event_links = spec.get("evaluation_spec", {}).get("source_event_links", ())
+    if source_event_links:
+        fields["source_event_group_count"] = len({link["event_id"] for link in source_event_links})
     return fields
+
+
+def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, guard, checkpoint):
+    from kiwoom_monitor.application.daily_decline import (
+        DailyDeclineBasis, DailyDeclineBenchmark, DailyDeclineCatalyst, DailyDeclineSpec,
+        evaluate_daily_decline_shadow,
+    )
+    from kiwoom_monitor.application.market_session_schedule import decode_strategy_references
+
+    required = {"version", "frozen_dataset", "symbol", "venue", "signal_day", "cut",
+                "strategy_references", "basis", "benchmark"}
+    if not required <= scenario.keys() or scenario.keys() - required - {"catalyst"}:
+        raise ValueError("invalid DD native setup descriptor")
+    reference = _mapping(scenario["frozen_dataset"], "frozen_dataset")
+    manifest_sha = reference.get("manifest_sha256")
+    if (set(reference) != {"path", "manifest_sha256"} or not isinstance(reference["path"], str)
+            or not isinstance(manifest_sha, str) or len(manifest_sha) != 64
+            or any(char not in "0123456789abcdef" for char in manifest_sha)):
+        raise ValueError("DD native setup requires a frozen manifest path and lowercase SHA256")
+    dataset_root = _request_path(request.dataset.parent, reference["path"], "frozen_dataset.path")
+    if (any(_is_within(path, dataset_root) for path in (request.database, request.runs_dir))
+            or _is_within(dataset_root, request.runs_dir)):
+        raise ValueError("DD research outputs must not overlap frozen input")
+    manifest_path = dataset_root / "manifest.json"
+    manifest_size = manifest_path.stat().st_size
+    if manifest_size > 1024 * 1024:
+        raise ResearchResourceBlocked("input_manifest_too_large")
+    guard.preflight(descriptor_size + manifest_size)
+    pinned = manifest_path.read_bytes()
+    if hashlib.sha256(pinned).hexdigest() != manifest_sha:
+        raise ValueError("DD frozen manifest SHA256 does not match")
+    manifest = _mapping(json.loads(pinned), "DD frozen manifest")
+    # This preflight rejects marked final sources, including bundle children,
+    # before load_research_input opens any observations file.
+    guard.preflight(descriptor_size + research_input_encoded_bytes(dataset_root, development_only=True))
+    frozen = load_research_input(dataset_root, session_profile="krx-regular/v1", checkpoint=checkpoint,
+                                 development_only=True)
+    if manifest_path.read_bytes() != pinned:
+        raise ValueError("DD frozen manifest changed during load")
+    if manifest.get("bundle_version") is None:
+        if (frozen.manifest != manifest or manifest.get("replay_profile") != "observed_replay"
+                or manifest.get("schema_version") != 1 or not manifest.get("fixed_watermark")):
+            raise ValueError("DD setup requires an observed frozen export")
+    elif len(manifest["children"]) == 1:
+        child_bytes = json.dumps(frozen.manifest, ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":")).encode()
+        if hashlib.sha256(child_bytes).hexdigest() != manifest["children"][0]["manifest_hash"]:
+            raise ValueError("DD frozen child changed during load")
+    else:
+        children = [{key: value for key, value in child.items() if key != "path"} for child in manifest["children"]]
+        if frozen.manifest.get("dataset_id") != manifest["bundle_id"] or frozen.manifest.get("children") != children:
+            raise ValueError("DD frozen bundle changed during load")
+
+    symbol, venue = scenario["symbol"], scenario["venue"]
+    if not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isascii() or not symbol.isalnum() or venue != "KRX":
+        raise ValueError("DD native setup requires a scoped KRX stock code")
+    subject = f"{symbol}:{venue}"
+    if (frozen.manifest.get("kinds") != ["daily_bar"] or frozen.manifest.get("subject") != subject
+            or not frozen.manifest.get("dataset_id")):
+        raise ValueError("DD frozen export scope differs from the requested subject and kind")
+
+    for row in frozen.observations:
+        checkpoint()
+        if (row.get("kind"), row.get("subject"), row.get("source_id"), row.get("origin")) != (
+            "daily_bar", subject, "kiwoom-ka10081", "query",
+        ):
+            raise ValueError("DD setup requires native daily query provenance")
+
+    def proof(name, proof_type, *dates):
+        raw = scenario.get(name)
+        if raw is None:
+            return None
+        value = dict(_mapping(raw, name))
+        for key in dates:
+            value[key] = date.fromisoformat(value[key])
+        value["available_at"] = datetime.fromisoformat(value["available_at"])
+        return proof_type(**value)
+
+    try:
+        policy = dict(request.policy)
+        for name in ("tranche_weights_bps", "tranche_drop_units_bps"):
+            policy[name] = tuple(policy[name])
+        spec = DailyDeclineSpec(**policy)
+        signal_day = date.fromisoformat(scenario["signal_day"])
+        cut = datetime.fromisoformat(scenario["cut"])
+        calendar, _ = decode_strategy_references(scenario["strategy_references"])
+        decision = evaluate_daily_decline_shadow(
+            frozen.observations, spec=spec, symbol=symbol, venue=venue, signal_day=signal_day, cut=cut, calendar=calendar,
+            basis=proof("basis", DailyDeclineBasis, "first_day", "last_day"),
+            benchmark=proof("benchmark", DailyDeclineBenchmark, "trading_date"),
+            catalyst=proof("catalyst", DailyDeclineCatalyst),
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError("invalid DD native setup proof or policy") from error
+
+    setup = {"status": decision.status, "reason": decision.reason}
+    if (qualified := decision.setup) is not None:
+        setup.update(setup_id=qualified.plan_id, drawdown_bps=qualified.drawdown_bps,
+                     relative_decline_bps=qualified.relative_decline_bps, volatility_bps=qualified.volatility_bps,
+                     catalyst_state=qualified.catalyst_state, evidence_ids=list(qualified.evidence_ids))
+    identity = {"frozen_manifest_sha256": manifest_sha, "frozen_dataset_id": frozen.manifest["dataset_id"],
+                "revision_ids_hash": frozen.manifest["revision_ids_hash"]}
+    return {"version": "dd-native-setup-result/v1", "symbol": symbol, "venue": venue,
+            "signal_day": signal_day.isoformat(), "cut": cut.isoformat(), "setup": setup}, identity
 
 
 def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
@@ -1527,19 +1650,25 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
     if hashlib.sha256(encoded).hexdigest() != request.dataset_sha256:
         raise ValueError("evidence dataset hash does not match")
     scenario = _mapping(json.loads(encoded), "evidence dataset")
-    if request.mode == "micro_experiment":
-        from kiwoom_monitor.application.micro_execution_evidence import replay_micro_execution as replay
-    elif request.mode == "daily_decline_experiment":
-        from kiwoom_monitor.application.daily_decline import replay_daily_decline as replay
+    identity = {}
+    source_kind, scope = "synthetic", "synthetic_evidence"
+    if request.mode == "daily_decline_experiment" and scenario.get("version") == DAILY_DECLINE_NATIVE_SETUP_VERSION:
+        result, identity = _evaluate_frozen_daily_decline_setup(request, scenario, len(encoded), guard, checkpoint)
+        source_kind, scope = "frozen_native_daily_observations", "native_setup_assessment"
     else:
-        from kiwoom_monitor.application.account_risk_research import replay_account_risk_experiment as replay
+        if request.mode == "micro_experiment":
+            from kiwoom_monitor.application.micro_execution_evidence import replay_micro_execution as replay
+        elif request.mode == "daily_decline_experiment":
+            from kiwoom_monitor.application.daily_decline import replay_daily_decline as replay
+        else:
+            from kiwoom_monitor.application.account_risk_research import replay_account_risk_experiment as replay
+        result = replay(scenario, request.policy, checkpoint=checkpoint)
 
-    result = replay(scenario, request.policy, checkpoint=checkpoint)
     checkpoint()
     spec = {
         "family": EVIDENCE_EXPERIMENT_FAMILIES[request.mode], "mode": request.mode,
         "code_hash": research_implementation_hash("krx-regular/v1"), "parameters": dict(request.policy),
-        "dataset_sha256": request.dataset_sha256, "source_kind": "synthetic",
+        "dataset_sha256": request.dataset_sha256, "source_kind": source_kind, **identity,
     }
     spec_bytes = json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     run_id = "run_" + hashlib.sha256(spec_bytes).hexdigest()
@@ -1547,14 +1676,15 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
     result_hash = hashlib.sha256(result_bytes).hexdigest()
     manifest = request.runs_dir / run_id / "manifest.json"
     repository = ResearchRepository(request.database)
-    repository.start_run(run_id, spec, {"dataset_id": request.dataset_sha256, "source_kind": "synthetic"})
+    repository.start_run(run_id, spec, {"dataset_id": identity.get("frozen_dataset_id", request.dataset_sha256),
+                                       "source_kind": source_kind, **identity})
     _write_immutable_json(manifest, {
         "format": "kiwoom-monitor-evidence-experiment", "version": 1, "run_id": run_id,
         "spec": spec, "logical_result_hash": result_hash, "result": result, "order_authorized": False,
     })
     repository.finish_run(run_id, result_hash)
     context = {"family": spec["family"], "source_kind": spec["source_kind"],
-               "dataset_sha256": spec["dataset_sha256"], "execution_scope": "synthetic_evidence"}
+               "dataset_sha256": spec["dataset_sha256"], "execution_scope": scope, **identity}
     if isinstance(result.get("variant"), str):
         context["variant"] = result["variant"]
     return {"status": "ok", "kind": request.mode, "run_id": run_id, "manifest": str(manifest),
@@ -2544,6 +2674,23 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                     if reference_path in outputs:
                         parser.error("research result/cancel must not overwrite the strategy reference")
             mode = request_header.get("mode")
+            if mode == "daily_decline_experiment" and isinstance(request_header.get("dataset"), str):
+                # Fence the nested frozen input even when the descriptor digest
+                # later fails and the CLI would otherwise write an error result.
+                frozen_root = None
+                try:
+                    descriptor_path = _request_path(request_path.parent, request_header["dataset"], "dataset")
+                    ResearchResourceGuard(ResearchResourceLimits(memory_mb=4096)).preflight(descriptor_path.stat().st_size)
+                    descriptor = _mapping(json.loads(descriptor_path.read_bytes()), "evidence dataset")
+                    if descriptor.get("version") == DAILY_DECLINE_NATIVE_SETUP_VERSION:
+                        frozen_reference = _mapping(descriptor.get("frozen_dataset"), "frozen_dataset")
+                        frozen_root = _request_path(descriptor_path.parent, frozen_reference.get("path"), "frozen_dataset.path")
+                except ResearchResourceBlocked as error:
+                    parser.error(str(error))
+                except (OSError, TypeError, ValueError):
+                    pass  # The request loader reports malformed input separately.
+                if frozen_root is not None and any(_is_within(path, frozen_root) for path in outputs):
+                    parser.error("research result/cancel must not overwrite the DD frozen dataset")
             if mode in EVIDENCE_EXPERIMENT_FAMILIES or mode == BREAKOUT_COMPARISON_MODE:
                 runs_dir = request_header.get("runs_dir")
                 if isinstance(runs_dir, str) and runs_dir.strip():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing, redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -16,13 +16,153 @@ import unittest
 from unittest.mock import patch
 
 from scripts import preserve_current_settings as operator
+from scripts import preserve_selected_order_evidence as order_preservation
+from kiwoom_monitor.application.mock_automation_execution import (
+    dispatch_mock_automation_decision_from_risk, emergency_stop_mock_automation,
+)
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.domain.order_contract import BrokerFill, BrokerOrderSnapshot, OrderPlanRef, OrderState
+from kiwoom_monitor.domain.selected_order_evidence import COLLECTION, RECOVERY_REQUIRED, encode_selected_order_evidence
+from kiwoom_monitor.domain.strategy_contract import StrategyDecision
 from kiwoom_monitor.domain.time_basis import KST
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsRepository
 from kiwoom_monitor.infrastructure.persistence.column_settings_repository import ColumnSettingsRepository
 from kiwoom_monitor.infrastructure.persistence.settings_backup import SettingsBackupError
 from kiwoom_monitor.infrastructure.persistence.sqlite_read_snapshot import SQLiteSnapshotContractError
 
 NOW = datetime(2026, 10, 24, 10, 0, tzinfo=KST)
+
+
+class PreservedSelectedOrderEvidenceTests(unittest.TestCase):
+    def test_frozen_source_and_immutable_offline_first_receipt_after_commit_ack_loss(self):
+        from tests.unit.test_mock_automation_specification import (
+            ACCOUNT_REF, _automation_decision, _planned_execution_fixture, mock_specification_inputs,
+        )
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        source, target = root / "source.sqlite3", root / "offline.sqlite3"
+        store = self.enterContext(closing(SQLiteQueryStore(source)))
+        store.initialize()
+        fixture = _planned_execution_fixture(self, store, mock_specification_inputs(store))
+        clock, runtime = fixture.clock, fixture.runtime
+        body = _automation_decision(fixture.run_id, "ENTER", clock[0]).to_dict()
+        body.pop("decision_id")
+        body.update(quantity=2, required_capital_won=140_000)
+        identity = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True,
+                                             separators=(",", ":")).encode()).hexdigest()
+        _, initial, _ = dispatch_mock_automation_decision_from_risk(
+            fixture.repository, runtime, StrategyDecision(decision_id="decision_" + identity, **body),
+            fixture.recovery, fixture.risk, plan=OrderPlanRef("fixture-plan", "fixture-policy/v1", 0),
+            **fixture.scope,
+        )
+        intent_id = initial.intent.intent_id
+        clock[0] += timedelta(seconds=1)
+        fill = BrokerFill("original-broker-fill", 1, 70_000, clock[0])
+        runtime.reconcile(intent_id, BrokerOrderSnapshot(
+            initial.broker_order_id, ACCOUNT_REF, initial.intent.symbol, OrderState.PARTIALLY_FILLED,
+            1, 1, clock[0], (fill,),
+        ))
+        with patch.object(fixture.transport, "cancel", side_effect=SubmissionUnknown("private raw reply")) as cancel:
+            self.assertEqual(OrderState.CANCEL_PENDING, runtime.cancel(intent_id).state)
+        self.assertEqual(1, cancel.call_count)
+        scope = {"account_ref": ACCOUNT_REF, "run_id": fixture.run_id}
+        selection = {"source": source, "source_instance": "fixture-source", "operation_id": "fixture-operation",
+                     "intent_id": intent_id, **scope}
+        with self.assertRaisesRegex(ValueError, "must be stopped"):
+            order_preservation.capture_selected_order_evidence(**selection)
+        emergency_stop_mock_automation(fixture.repository, runtime, account_ref=ACCOUNT_REF,
+                                       spec_id=fixture.spec.spec_id, stopped_at=clock[0], reason="fixture drain")
+        with self.assertRaisesRegex(ValueError, "still holds a runtime lease"):
+            order_preservation.capture_selected_order_evidence(**selection)
+        self.assertTrue(runtime.stop())
+        native_events = store.load_execution_events(intent_id)
+        self.assertIn("mock_plan_approval", store.load_execution_intent(intent_id))
+        source_before = source.read_bytes()
+        with self.assertRaisesRegex(ValueError, "must be stopped"):
+            order_preservation.capture_selected_order_evidence(**{**selection, "run_id": "foreign-run"})
+        with self.assertRaisesRegex(ValueError, "no unambiguous original unresolved intent"):
+            order_preservation.capture_selected_order_evidence(**{**selection, "intent_id": "missing-intent"})
+        packet, digest = order_preservation.capture_selected_order_evidence(**selection)
+        self.assertEqual(source_before, source.read_bytes())
+        self.assertEqual(("CANCEL_PENDING", initial.broker_order_id, [fill.execution_id]),
+                         (packet["order"]["state"], packet["order"]["broker_order_id"], packet["order"]["fill_ids"]))
+        self.assertNotIn("mock_plan_approval", packet["order"])
+        self.assertEqual([event["event_id"] for event in native_events], [event["event_id"] for event in packet["events"]])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [event["accepted_sequence"] for event in packet["events"]])
+        self.assertEqual((7, 4, 1), (packet["source_cursor"], packet["plan_position"]["fill_cursor"],
+                                    packet["plan_position"]["quantity"]))
+        send = next(event for event in packet["events"] if event["event_type"] == "SUBMISSION_STARTED")
+        self.assertEqual("", send["broker_order_id"])
+        self.assertEqual(["CANCEL_STARTED", "CANCEL_RESPONSE_UNKNOWN"],
+                         [event["event_type"] for event in packet["events"][-2:]])
+        self.assertNotIn("reason", packet["events"][-1])
+
+        with closing(SQLiteQueryStore(target)) as target_store:
+            target_store.initialize()
+            selected_settings = {"owner": "desktop", "key": "rank_query_type", "document": {"value": "5"}}
+            target_store.upsert_documents("app_settings", [selected_settings])
+        request = {"target": target, "packet": packet, "expected_sha256": digest, **scope}
+        absent = root / "must-not-create.sqlite3"
+        with self.assertRaisesRegex(ValueError, "initialize a durable offline SQLite target"):
+            order_preservation.accept_selected_order_evidence(**{**request, "target": absent})
+        self.assertFalse(absent.exists())
+        with self.assertRaisesRegex(ValueError, "target with empty execution state"):
+            order_preservation.accept_selected_order_evidence(**{**request, "target": source})
+        with self.assertRaisesRegex(ValueError, "expected account and run"):
+            order_preservation.accept_selected_order_evidence(**{**request, "account_ref": "foreign-account"})
+
+        real_connect = sqlite3.connect
+
+        def accept_with_failed_commit(*, commit_first):
+            class CommitFailure(sqlite3.Connection):
+                def commit(self):
+                    if commit_first:
+                        super().commit()
+                    raise OSError("injected native commit failure")
+
+            with patch.object(sqlite3, "connect", side_effect=lambda *a, **k: real_connect(*a, factory=CommitFailure, **k)):
+                with self.assertRaisesRegex(OSError, "injected native commit failure"):
+                    order_preservation.accept_selected_order_evidence(**request, now_provider=lambda: NOW)
+
+        accept_with_failed_commit(commit_first=False)
+        self.assertIsNone(order_preservation.inspect_selected_order_evidence(target=target,
+                                                                             operation_id=selection["operation_id"]))
+        accept_with_failed_commit(commit_first=True)
+        with patch.object(order_preservation, "readonly_sqlite_snapshot", side_effect=AssertionError("source reread")):
+            first = order_preservation.accept_selected_order_evidence(
+                **request, now_provider=lambda: self.fail("retry changed accepted-at"),
+            )
+        expected_receipt = {"status": RECOVERY_REQUIRED, "operation_id": selection["operation_id"],
+                            "sha256": digest, "accepted_at": NOW.isoformat(), "order_authority": False}
+        self.assertEqual({"receipt": expected_receipt, "replayed": True}, first)
+        self.assertEqual({"packet": packet, "receipt": expected_receipt},
+                         order_preservation.inspect_selected_order_evidence(target=target,
+                                                                            operation_id=selection["operation_id"]))
+        changed = {**packet, "source_instance": "different-source"}
+        with self.assertRaisesRegex(ValueError, "digest changed"):
+            order_preservation.accept_selected_order_evidence(**{**request, "packet": changed})
+        with self.assertRaisesRegex(ValueError, "immutable selected-order evidence conflict"):
+            order_preservation.accept_selected_order_evidence(
+                **{**request, "packet": changed, "expected_sha256": encode_selected_order_evidence(changed)[1]},
+            )
+        injected = {**packet, "events": [*packet["events"][:-1], {**packet["events"][-1], "lease_token": "private"}]}
+        with self.assertRaisesRegex(ValueError, "invalid selected-order evidence fields"):
+            order_preservation.accept_selected_order_evidence(**{**request, "packet": injected})
+        with closing(SQLiteQueryStore(target)) as target_store:
+            self.assertIsNone(target_store.load_execution_intent(intent_id))
+            self.assertIsNone(target_store.load_mock_automation_control(ACCOUNT_REF))
+            self.assertEqual([], target_store.load_execution_events(intent_id))
+            self.assertEqual(selected_settings["document"], target_store.load_document(
+                "app_settings", selected_settings["owner"], selected_settings["key"],
+            )["document"])
+            with self.assertRaisesRegex(ValueError, "immutable offline order evidence"):
+                target_store.upsert_documents(COLLECTION, [])
+        with closing(sqlite3.connect(target)) as reader:
+            self.assertEqual(0, reader.execute("SELECT COUNT(*) FROM central_execution_runtime_leases").fetchone()[0])
+            self.assertEqual(1, reader.execute("SELECT COUNT(*) FROM central_documents WHERE collection=?",
+                                               (COLLECTION,)).fetchone()[0])
+        self.assertEqual(source_before, source.read_bytes())
 
 
 class PreservedCurrentSettingsTests(unittest.TestCase):

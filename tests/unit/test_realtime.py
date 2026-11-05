@@ -6,8 +6,8 @@ from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScop
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     parse_account_balance_changes, parse_market_index_ticks, parse_market_operation_ticks,
-    parse_order_executions,
-    parse_program_trade_ticks, parse_stock_price_references, parse_trade_ticks,
+    OrderBookLevel, parse_order_book_ticks, parse_order_executions,
+    parse_program_trade_ticks, parse_stock_price_references, parse_trade_quote_observations, parse_trade_ticks,
     parse_vi_events,
 )
 
@@ -30,6 +30,8 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual((), parse_program_trade_ticks(message))
         self.assertEqual((), parse_stock_price_references(message))
         self.assertEqual((), parse_vi_events(message))
+        self.assertEqual((), parse_trade_quote_observations(message))
+        self.assertEqual((), parse_order_book_ticks(message))
 
     def test_reads_0s_market_operation_code_without_reinterpreting_it(self) -> None:
         ticks = parse_market_operation_ticks({
@@ -101,6 +103,73 @@ class RealtimeTests(unittest.TestCase):
 
         self.assertEqual(("005930", "SOR"), (ticks[0].code, ticks[0].market))
         self.assertEqual(("005930", "SOR"), (programs[0].code, programs[0].market))
+
+    def test_0b_quote_and_reported_venue_do_not_change_legacy_trade_payload(self) -> None:
+        values = {"10": "+20800", "15": "+82", "20": "165208"}
+        source = {"type": "0B", "item": "005930_AL"}
+        old = {"trnm": "REAL", "data": [source | {"values": values}]}
+        message = {"trnm": "REAL", "data": [source | {"values": values | {
+            "27": "-20800", "28": "-20700", "9081": "NXT",
+        }}]}
+        quote, = parse_trade_quote_observations(message)
+        self.assertEqual(("005930", "SOR", "NXT", "NXT", "165208", "second", 20_800, 20_700), (
+            quote.code, quote.subscription_market, quote.reported_venue, quote.raw_reported_venue,
+            quote.trade_time, quote.time_precision, quote.best_ask_won, quote.best_bid_won,
+        ))
+        self.assertEqual(parse_trade_ticks(old), parse_trade_ticks(message))
+        self.assertEqual("SOR", parse_trade_ticks(message)[0].market)
+        missing, = parse_trade_quote_observations(old)
+        self.assertEqual((None, None, None), (missing.best_ask_won, missing.best_bid_won, missing.reported_venue))
+
+    def test_0b_quote_preserves_unknown_reported_venue_without_guessing_missing_values(self) -> None:
+        quote, = parse_trade_quote_observations({"trnm": "REAL", "data": [
+            {"type": "0C", "item": "005930", "values": {"27": "20800", "28": "20700"}},
+            {"type": "0B", "item": "005930", "values": {"20": "091211123", "27": "0", "28": "+1_2", "9081": "9"}},
+        ]})
+        self.assertEqual((None, None, None, None, "9"), (
+            quote.trade_time, quote.best_ask_won, quote.best_bid_won, quote.reported_venue, quote.raw_reported_venue,
+        ))
+
+    def test_0d_preserves_level_sides_sizes_and_indicative_fields_separately(self) -> None:
+        fields = {
+            "21": "165207", "41": "-20800", "61": "82", "50": "+21350", "70": "19",
+            "51": "-20700", "71": "23847", "60": "-20250", "80": "25",
+            "6044": "4", "6053": "5", "6054": "6", "6063": "7",
+            "6066": "8", "6075": "9", "6076": "10", "6085": "11",
+            "121": "12622527", "125": "14453430", "23": "20850", "24": "332941", "291": "20860", "292": "20",
+        }
+        message = {"trnm": "REAL", "data": [{"type": "0D", "item": "005930", "values": fields}]}
+        book, = parse_order_book_ticks(message, subscription_item="005930")
+        self.assertEqual(("005930", "005930", "KRX", "165207", "second"), (
+            book.code, book.item, book.subscription_market, book.quote_time, book.time_precision,
+        ))
+        self.assertEqual((10, 10), (len(book.asks), len(book.bids)))
+        self.assertEqual((OrderBookLevel(20_800, 82), OrderBookLevel(21_350, 19)), (book.asks[0], book.asks[9]))
+        self.assertEqual((OrderBookLevel(20_700, 23_847), OrderBookLevel(20_250, 25)), (book.bids[0], book.bids[9]))
+        venue_quantities = (book.krx_ask_quantities, book.krx_bid_quantities, book.nxt_ask_quantities, book.nxt_bid_quantities)
+        self.assertEqual([(4, 5), (6, 7), (8, 9), (10, 11)], [(levels[0], levels[9]) for levels in venue_quantities])
+        self.assertEqual((12_622_527, 14_453_430, 20_850, 332_941, 20_860, 20), (
+            book.total_ask_quantity, book.total_bid_quantity, book.indicative_price_won, book.indicative_quantity,
+            book.auction_indicative_price_won, book.auction_indicative_quantity,
+        ))
+        self.assertIsNone(parse_order_book_ticks(message)[0].subscription_market)
+        self.assertIsNone(parse_order_book_ticks(message, subscription_item="005930_NX")[0].subscription_market)
+
+    def test_0d_missing_and_invalid_sizes_do_not_replace_reported_zero_or_infer_time(self) -> None:
+        fields = {"21": "256100", "20": "091211", "41": "20800", "61": "0", "42": "20850", "62": "-2",
+                  "51": "20700", "71": True, "52": "20650", "72": "", "23": "0", "24": "0"}
+        message = {"trnm": "REAL", "data": [
+            {"type": "0H", "item": "005930", "values": fields},
+            {"type": "0D", "item": "005930_NX", "values": fields},
+            {"type": "0D", "item": "005930_AL", "values": fields},
+            {"type": "0D", "item": "005930_XX", "values": fields},
+        ]}
+        nxt, sor = parse_order_book_ticks(message)
+        self.assertEqual(("005930", "NXT", "SOR"), (nxt.code, nxt.subscription_market, sor.subscription_market))
+        self.assertEqual((None, None, 0), (nxt.quote_time, nxt.indicative_price_won, nxt.indicative_quantity))
+        self.assertEqual((OrderBookLevel(20_800, 0), OrderBookLevel(20_850, None)), nxt.asks[:2])
+        self.assertEqual((OrderBookLevel(20_700, None), OrderBookLevel(20_650, None)), nxt.bids[:2])
+        self.assertEqual((), parse_order_book_ticks(message | {"trnm": "REG"}))
 
     def test_reads_only_completed_order_execution(self) -> None:
         message = {

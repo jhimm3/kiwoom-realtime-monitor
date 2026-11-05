@@ -472,6 +472,132 @@ class ThemeGenerationSyncTests(unittest.TestCase):
         self.assertEqual(original_state, self.state())
         self.assertEqual(pending_marker, (self.root / ".pending").read_bytes())
 
+    def test_fresh_and_selective_full_roots_reopen_rank_and_pending_save(self):
+        from hashlib import sha256
+
+        from kiwoom_monitor.infrastructure.app_paths import AppPaths
+        from kiwoom_monitor.infrastructure.persistence.strict_restore import AppDataLease, StrictRestoreCoordinator
+        from scripts import export_preserved_rank_history as rank_export, import_preserved_rank_history as rank_import
+        from scripts import preserve_current_settings as settings_operator
+        from tests.unit.test_export_preserved_rank_history import seed_rank_fixture
+        from tests.unit.test_import_preserved_rank_history import sqlite_rows
+
+        role, sync_key = "full-local", ThemeBackupService.SYNC_STATE_KEY
+        fresh = AppPaths.for_full_role(self.root / "fresh")
+        self.assertEqual("FRESH", Database(fresh.database_path).initialize_full_role(role=role)["seed_kind"])
+        with closing(SQLiteQueryStore(fresh.central_database_path)) as store:
+            store.initialize()
+            self.assertEqual([], store.load_dataset_snapshots("ranking", "5"))
+        self.assertEqual("FRESH", Database(fresh.database_path).initialize_full_role(role=role, allow_create=False)["seed_kind"])
+        self.assertEqual("missing", Database(fresh.database_path).settings.get(sync_key, "missing"))
+
+        source_central = self.root / "central.sqlite3"
+        seed_rank_fixture(self.store)
+        self.backup.import_document(theme_document())
+        settings = Database(self.main, now_provider=lambda: NOW).settings
+        settings.set_many({"theme_active_profile": "기본 테마", "decimal_strength": "3", "fixture_archive_only": "retain"})
+        self.service.replace_themes(self.main)
+        self.themes.create_profile("selected manual edit")
+        owner = self.dispatcher()
+        self.client.lose_ack = True
+        with patch.object(owner, "_schedule_locked"):
+            self.assertFalse(owner.flush_pending(force=True))
+        owner.close()
+        self.assertTrue(owner.has_pending)
+        raw = settings.get(sync_key)
+        settings.set(sync_key, raw)
+        prepared = json.loads(raw)["prepared"]
+        first_ack = self.store.load_accepted_theme_snapshot(snapshot_id=prepared["publication_id"])
+        peer = self.peer()
+        protected = {path: path.read_bytes() for path in (self.main, source_central, self.root / ".pending")}
+
+        rank_artifact, state_artifact = self.root / "rank-cut", self.root / "settings-cut"
+        with AppDataLease(self.root, exclusive=True):
+            rank_export.export_rank_history(source_instance="fixture-rank", output=rank_artifact,
+                database=source_central, sqlite_frozen=True, artifact_now=NOW)
+            settings_operator.capture_current_state(database=self.main, source_instance="fixture-settings",
+                source_owner="fixture-owner", operation_id="closed-cut", output=state_artifact,
+                sqlite_frozen=True, artifact_now=NOW)
+        manifest, records, digest = settings_operator.verified_current_state_rows(state_artifact)
+        entries = []
+        for record_id, item in records.items():
+            relation = item["relation"]
+            chosen = relation not in settings_operator.TABLES or (
+                relation in {"settings", "central_setting_versions"}
+                and settings_operator.decode_value(item["row"][0]) in {"theme_active_profile", "decimal_strength", sync_key}
+            )
+            entries.append(dict(record_id=record_id, placement="TRANSFER" if chosen else "RETAIN_SOURCE",
+                                **({"target_role": role} if chosen else {})))
+        selection = dict(format="current-state-selection/v1", source_instance=manifest["source_instance"],
+            source_owner=manifest["source_owner"], operation_id=manifest["operation_id"], manifest_sha256=digest,
+            target_role=role, target_layout="full", records=entries)
+        rank_dir = self.root / "rank-offline"
+        rank_receipt = rank_import.import_artifact(rank_artifact, source_instance="fixture-rank",
+            manifest_sha256=sha256((rank_artifact / "manifest.json").read_bytes()).hexdigest(),
+            destination_uuid="4b92a437f7de4c3fb0bbc5f7ec2f28aa", operation_id="rank-install",
+            directory=rank_dir, create=True, now_provider=lambda: NOW)["receipt"]
+        self.assertFalse(rank_receipt["runtime_admission"])
+
+        selected = AppPaths.for_full_role(self.root / "selected")
+        install = dict(artifact=state_artifact, selection=selection, target=selected.database_path,
+                       operation_id="settings-install", target_id="selected-full", layout="full", receipt_now=NOW)
+        with AppDataLease(selected.data_dir, exclusive=True):
+            with patch.object(settings_operator, "_clock", side_effect=RuntimeError("fixture first receipt failed")):
+                with self.assertRaisesRegex(RuntimeError, "first receipt failed"):
+                    settings_operator.install_current_state(**install)
+            with closing(sqlite3.connect(selected.database_path)) as connection:
+                self.assertEqual([], connection.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall())
+            self.assertFalse(selected.central_database_path.exists())
+            receipt = settings_operator.install_current_state(**install)
+            self.assertEqual("SELECTED_USER_STATE", receipt["seed_kind"])
+            self.assertFalse(receipt["order_authority"])
+            rank_file = rank_dir / "rank.sqlite3"
+            self.assertFalse(any(rank_file.with_name(rank_file.name + suffix).exists() for suffix in ("-wal", "-shm")))
+            shutil.copyfile(rank_file, selected.central_database_path)
+
+        coordinator = StrictRestoreCoordinator(selected.database_path, selected.news_database_path)
+        lease, restored = coordinator.enter_main(allow_restore=False)
+        try:
+            self.assertIsNone(restored)
+            self.assertEqual(sqlite_rows(source_central), sqlite_rows(selected.central_database_path))
+            target_settings = Database(selected.database_path).settings
+            self.assertEqual(("3", raw, "missing"), (target_settings.get("decimal_strength"), target_settings.get(sync_key),
+                                                      target_settings.get("fixture_archive_only", "missing")))
+            target_owner = CentralThemeSyncDispatcher(self.service, selected.database_path)
+            before = len(self.client.calls)
+            try:
+                self.assertFalse(target_owner.has_pending)  # Source sidecar remains with its own writer.
+                with patch.object(target_owner, "_schedule_locked"):
+                    self.assertTrue(target_owner.flush_pending(force=True))
+            finally:
+                target_owner.close()
+            self.assertEqual([("PUT", {key: prepared[key] for key in (
+                "publication_id", "expected_snapshot_id", "effective_at", "origin_device")}, prepared["document"])],
+                self.client.calls[before:])
+            self.assertEqual(peer, self.store.load_accepted_theme_snapshot())
+        finally:
+            lease.close()
+
+        lease, restored = coordinator.enter_main(allow_restore=False)
+        try:
+            self.assertIsNone(restored)
+            reopened = Database(selected.database_path).initialize_full_role(role=role, allow_create=False)
+            self.assertEqual(receipt["receipt"], reopened["receipt"])
+            recovered = json.loads(Database(selected.database_path).settings.get(sync_key))
+            self.assertIsNone(recovered["prepared"])
+            self.assertEqual(first_ack, recovered["ack"]["snapshot"])
+            self.assertIn("selected manual edit", {item["name"] for item in ThemeBackupService(selected.database_path).export_document()["profiles"]})
+            with closing(SQLiteQueryStore(selected.central_database_path)) as store:
+                self.assertTrue(store.load_dataset_snapshots("ranking", "5"))
+                self.assertEqual([], store.load_dataset_snapshots("market_state", "OTHER"))
+                self.assertEqual(rank_receipt, store.load_document("data_transition_receipts", rank_receipt["destination_uuid"], "rank-install")["document"])
+            with closing(sqlite3.connect(selected.central_database_path.as_uri() + "?mode=ro", uri=True)) as connection:
+                for table in ("central_execution_intents", "central_execution_events", "central_execution_runtime_leases"):
+                    self.assertEqual((0,), connection.execute(f"SELECT count(*) FROM {table}").fetchone())
+        finally:
+            lease.close()
+        self.assertEqual(protected, {path: path.read_bytes() for path in protected})
+
     def test_full_settings_backup_preserves_unfinished_publication_recovery_state(self):
         self.client.lose_ack = True
         with self.assertRaises(RuntimeError): self.service.replace_themes(self.main)

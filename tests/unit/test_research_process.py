@@ -593,6 +593,111 @@ class ResearchProcessTests(unittest.TestCase):
                 execute_process_request(pinned_request)
 
 
+    def test_section12_normal_request_rejects_cross_fold_reviewed_event_before_result_storage(self):
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_empty_dataset(root)
+            rows = [
+                {"kind": "top20_membership", "ordinal": index, "accepted_sequence": index,
+                 "revision_id": revision_id, "observation_key": stamp, "available_at": stamp,
+                 "payload": {"codes": ["005930"]}}
+                for index, (revision_id, stamp) in enumerate((
+                    ("train-revision", "2026-09-10T09:00:00+09:00"),
+                    ("validation-revision", "2026-09-11T09:00:00+09:00"),
+                ), 1)
+            ]
+            encoded = ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+            (root / "dataset/observations.jsonl").write_bytes(encoded)
+            manifest_path = root / "dataset/manifest.json"
+            manifest = json.loads(manifest_path.read_bytes())
+            manifest.update(revision_count=2, observations_file_hash=hashlib.sha256(encoded).hexdigest(),
+                            revision_ids_hash=hashlib.sha256(b"train-revision\nvalidation-revision").hexdigest())
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            references = b'{"version":"strategy-reference/v1","calendar":[],"listings":[]}'
+            (root / "references.json").write_bytes(references)
+            request = _request_document()
+            request.update(mode="single_run", family="breakout_study/v1", session_profile="krx-regular/v1",
+                           strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()},
+                           strategy={"capital_won": 1000, "policy": {"variant": "B0", "quantity": 1,
+                               "exit_at_kst": "15:18", "theme_id": None, "theme_role": None,
+                               "exit_on_dependency_loss": False}})
+            request["execution"].update(version="completed_close_then_next_open/v1", same_bar_path_version="no_intrabar_fill/v1")
+            request["evaluation"]["folds"] = [
+                {"name": name, "role": name.upper(), "start": f"2026-09-{day}T09:00:00+09:00",
+                 "end": f"2026-09-{day}T15:00:00+09:00"}
+                for name, day in (("train", 10), ("validation", 11))
+            ]
+            links = [
+                {"event_id": "review:case-1", "source_occurrence_refs": [f"source:{number}:case-1"],
+                 "revision_ids": [revision]}
+                for number, revision in enumerate(("train-revision", "validation-revision"), 1)
+            ]
+            request["evaluation"]["source_event_links"] = links
+            path = root / "request.json"
+
+            def execute():
+                path.write_text(json.dumps(request), encoding="utf-8")
+                return execute_process_request(load_research_process_request(path))
+
+            with self.assertRaisesRegex(ValueError, "eligible evaluation fold"):
+                execute()
+            self.assertFalse((root / request["database"]).exists())
+            self.assertFalse((root / request["runs_dir"]).exists())
+            links[1]["event_id"] = "review:case-2"
+            result = execute()
+            self.assertEqual("ok", result["status"])
+            self.assertEqual(2, result["section12"]["source_event_group_count"])
+            repository = ResearchRepository(root / request["database"])
+            spec = repository.load_run(result["run_id"])["spec"]
+            self.assertEqual(links, spec["evaluation_spec"]["source_event_links"])
+            with self.assertRaisesRegex(ValueError, "Section 12 development single_run"):
+                replace(load_research_process_request(path), mode="rank_comparison")
+            request["evaluation"]["folds"][1]["role"] = "OOS"
+            with self.assertRaisesRegex(ValueError, "without final holdout"):
+                execute()
+
+    def test_section12_linked_development_refuses_marked_final_before_observation_open(self):
+        from kiwoom_monitor.infrastructure.research_data_source import BUNDLE_VERSION
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "dataset"
+            sealed = dataset / "sealed"
+            sealed.mkdir(parents=True)
+            request = _request_document()
+            request.update(mode="single_run", family="breakout_study/v1", session_profile="krx-regular/v1",
+                           strategy={"capital_won": 1000, "policy": {"variant": "B0", "quantity": 1,
+                               "exit_at_kst": "15:18", "theme_id": None, "theme_role": None,
+                               "exit_on_dependency_loss": False}})
+            request["execution"].update(version="completed_close_then_next_open/v1", same_bar_path_version="no_intrabar_fill/v1")
+            request["evaluation"]["source_event_links"] = [{
+                "event_id": "review:case-1", "source_occurrence_refs": ["source:01:case-1"],
+                "revision_ids": ["linked-fixture-revision"],
+            }]
+            path = root / "request.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
+            parsed = load_research_process_request(path)
+            final = {"runtime_input_version": "independent_final_holdout_input/v1",
+                     "observations_file": "not-present.jsonl"}
+            (sealed / "manifest.json").write_text(json.dumps(final), encoding="utf-8")
+            bundle = {"bundle_version": BUNDLE_VERSION, "children": [{"path": "sealed"}]}
+            for manifest in (final, bundle):
+                with self.subTest(manifest=manifest):
+                    (dataset / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                    with patch("kiwoom_monitor.research_process.load_research_input", side_effect=AssertionError) as loader:
+                        with self.assertRaisesRegex(ValueError, "cannot open final holdout input"):
+                            execute_process_request(parsed)
+                    loader.assert_not_called()
+                    # The actual read still rejects the marker if the manifest
+                    # was replaced after the separate resource preflight.
+                    with patch("kiwoom_monitor.research_process.research_input_encoded_bytes", return_value=0):
+                        with self.assertRaisesRegex(ValueError, "cannot open final holdout input"):
+                            execute_process_request(parsed)
+                    self.assertFalse((root / request["database"]).exists())
+                    self.assertFalse((root / request["runs_dir"]).exists())
+
     def test_section12_close_and_ipo_requests_preserve_actual_filled_quantity(self) -> None:
         from datetime import datetime, timedelta
 
@@ -817,6 +922,113 @@ class ResearchProcessTests(unittest.TestCase):
             self.assertEqual((0, 0, 2, -520), (trace["summary"]["owned_quantity"], trace["summary"]["reserved_won"],
                                                trace["summary"]["fill_count"], trace["summary"]["realized_pnl_won"]))
             self.assertFalse(result["order_authorized"])
+            self.assertEqual("synthetic_evidence", result["section12"]["execution_scope"])
+
+    def test_section12_dd_native_setup_request_consumes_pinned_frozen_daily_rows_only(self) -> None:
+        from dataclasses import asdict
+        from datetime import datetime, time, timedelta
+        from kiwoom_monitor import research_process
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+        from kiwoom_monitor.domain.time_basis import KST
+        from kiwoom_monitor.infrastructure.research_data_source import (
+            FINAL_INPUT_VERSION, export_daily_dataset, write_frozen_research_bundle,
+        )
+        from tests.unit.test_daily_decline import BARS, CUT, HISTORY, SIGNAL_DAY, SINGLE, synthetic_scenario
+        from tests.unit.test_research_data_source import _StoreClient
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "daily-bundle"
+            now = CUT
+            store = SQLiteQueryStore(root / "native.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            ingest = MarketDataIngestor(store, now_provider=lambda: now)
+
+            def write(day, row, mode="1"):
+                ingest.ingest("ka10081", {"stk_cd": "005930", "upd_stkpc_tp": mode}, {
+                    "stk_dt_pole_chart_qry": [{"dt": day.strftime("%Y%m%d"), "open_pric": str(row["open"]),
+                                                "high_pric": str(row["high"]), "low_pric": str(row["low"]),
+                                                "cur_prc": str(row["close"])}],
+                })
+
+            days = (*HISTORY, SIGNAL_DAY)
+            for day, row in zip(days, BARS, strict=True):
+                now = datetime.combine(day, time(20, 1), KST)
+                write(day, row["payload"])
+            now = CUT + timedelta(minutes=1)
+            write(SIGNAL_DAY, BARS[-1]["payload"], mode="0")
+            for day in days:
+                start = datetime.combine(day, time(), KST)
+                export_daily_dataset(_StoreClient(store), start, start + timedelta(days=1), ("daily_bar",),
+                                     "005930:KRX", dataset / day.isoformat(), session_profile="krx-regular/v1",
+                                     theme_history={"snapshots": []})
+            store.close()
+            write_frozen_research_bundle(dataset, tuple(day.isoformat() for day in days))
+
+            fixture = synthetic_scenario()
+            manifest_sha = hashlib.sha256((dataset / "manifest.json").read_bytes()).hexdigest()
+            descriptor = {"version": "dd-native-setup-evidence/v1",
+                          "frozen_dataset": {"path": dataset.name, "manifest_sha256": manifest_sha},
+                          "strategy_references": {"version": "strategy-reference/v1", "calendar": fixture["calendar"],
+                                                  "listings": []},
+                          **{name: fixture[name] for name in ("symbol", "venue", "signal_day", "cut", "basis", "benchmark")}}
+            evidence = root / "dd-setup.json"
+            request_path = root / "request.json"
+
+            def request(changes):
+                encoded = json.dumps({**descriptor, **changes}).encode()
+                evidence.write_bytes(encoded)
+                request_path.write_text(json.dumps({
+                    "mode": "daily_decline_experiment", "dataset": evidence.name,
+                    "dataset_sha256": hashlib.sha256(encoded).hexdigest(), "policy": asdict(SINGLE),
+                    "database": "research.sqlite3", "runs_dir": "runs",
+                }), encoding="utf-8")
+                return load_research_process_request(request_path)
+
+            prepared = request({})
+            result = execute_process_request(prepared)
+            trace = result["result"]
+            self.assertEqual("dd-native-setup-result/v1", trace["version"])
+            self.assertEqual(("QUALIFIED", 2_500, 1_618), (trace["setup"]["status"], trace["setup"]["drawdown_bps"],
+                                                         trace["setup"]["relative_decline_bps"]))
+            self.assertNotIn("events", trace)
+            self.assertNotIn("summary", trace)
+            self.assertFalse(result["order_authorized"])
+            self.assertEqual("frozen_native_daily_observations", result["section12"]["source_kind"])
+            self.assertEqual("native_setup_assessment", result["section12"]["execution_scope"])
+            self.assertEqual(manifest_sha, result["section12"]["frozen_manifest_sha256"])
+            manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+            self.assertEqual(prepared.dataset_sha256, manifest["spec"]["dataset_sha256"])
+            self.assertEqual(manifest_sha, manifest["spec"]["frozen_manifest_sha256"])
+            self.assertEqual(result["run_id"], execute_process_request(prepared)["run_id"])
+
+            cli_result = root / "cli-result.json"
+            cli_args = ["--request", str(request_path), "--result", str(cli_result)]
+            with patch("sys.stdout"):
+                self.assertEqual(0, research_process._run_research_process(cli_args))
+            self.assertEqual(result["run_id"], json.loads(cli_result.read_text(encoding="utf-8"))["run_id"])
+            frozen_manifest = dataset / "manifest.json"
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                research_process._run_research_process(["--request", str(request_path), "--result", str(frozen_manifest)])
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                research_process._run_research_process([*cli_args, "--cancel", str(frozen_manifest)])
+            self.assertEqual(manifest_sha, hashlib.sha256(frozen_manifest.read_bytes()).hexdigest())
+
+            later = execute_process_request(request({"cut": now.isoformat()}))
+            self.assertEqual("daily_window_unavailable", later["result"]["setup"]["reason"])
+            self.assertNotEqual(result["run_id"], later["run_id"])
+            with self.assertRaisesRegex(ValueError, "frozen manifest SHA256"):
+                execute_process_request(request({"frozen_dataset": {"path": dataset.name, "manifest_sha256": "0" * 64}}))
+
+            child_path = dataset / SIGNAL_DAY.isoformat() / "manifest.json"
+            child_manifest = json.loads(child_path.read_text(encoding="utf-8"))
+            child_manifest.update(runtime_input_version=FINAL_INPUT_VERSION, observations_file="missing.jsonl")
+            child_path.write_text(json.dumps(child_manifest), encoding="utf-8")
+            with patch.object(research_process, "load_research_input") as load:
+                with self.assertRaisesRegex(ValueError, "final holdout input"):
+                    execute_process_request(request({}))
+                load.assert_not_called()
 
     def test_section12_breakout_and_theme_studies_share_entry_but_close_on_their_own_evidence(self) -> None:
         from datetime import datetime, timedelta

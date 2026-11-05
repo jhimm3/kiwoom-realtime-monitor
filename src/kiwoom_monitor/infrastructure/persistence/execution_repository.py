@@ -22,6 +22,7 @@ from kiwoom_monitor.domain.order_contract import (
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 
 
+
 class ExecutionStore(Protocol):
     def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
@@ -159,6 +160,7 @@ class ExecutionRepository:
     def bind_automation_control(self, *, spec_id: str, control_revision: int,
                                 replacement_claim: dict | None = None, protection_claim: dict | None = None,
                                 cancel_retry_claim: dict | None = None,
+                                planned_cancel_claim: dict | None = None,
                                 plan_recovery: MockAccountRecovery | None = None) -> None:
         if self._ownership is None:
             raise RuntimeError("EXECUTION_REPOSITORY_OWNER_REQUIRED")
@@ -178,6 +180,10 @@ class ExecutionRepository:
             if replacement_claim is not None or protection_claim is not None:
                 raise ValueError('execution_claim_purposes_conflict')
             self._automation_control['cancel_retry_claim']=dict(cancel_retry_claim)
+        if planned_cancel_claim is not None:
+            if any(value is not None for value in (replacement_claim, protection_claim, cancel_retry_claim, plan_recovery)):
+                raise ValueError("execution_claim_purposes_conflict")
+            self._automation_control["planned_cancel_claim"] = dict(planned_cancel_claim)
         if plan_recovery is not None:
             self._automation_control["plan_recovery"] = plan_recovery
 

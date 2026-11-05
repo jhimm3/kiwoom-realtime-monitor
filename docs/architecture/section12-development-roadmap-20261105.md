@@ -180,3 +180,16 @@ S12-01에서는 명시 해시로 고정한 별도 거래일·상장 근거를 �
 현재 소스 `93339ef6`에서 Windows 변경·직접 영향 32건, 같은 파일의 기존 검토 사례 363건, 공용 검사 자료의 소비자 53건, 격리 PostgreSQL 13건이 통과했다. 총 461건과 구조·증분 대조를 확인했다. 판단 모듈을 물리적으로 제거한 서버에서 연구 결과 수신·저장도 확인했다. 앞선 26모듈 997건 실행은 응답 기준표 두 검사와 조회 전용 구성 한 검사가 실패한 이전 소스의 기록이다. 기준표 두 검사는 변경 전 `defe6bb`에서도 실패해, 기존 S12 계획 원장의 진단 범위와 일봉 내보내기 종류만 반영했다. 조회 전용 서버는 판단 모듈 없이 태그를 읽을 수 있게 고쳤다. [변경·직접 영향](../../tmp/s12-04-shadow/current-exact-v1/evidence.json) · [기존 검토](../../tmp/s12-04-shadow/prior-reviewed-exact-v1/evidence.json) · [공용 검사 자료](../../tmp/s12-04-shadow/prior-support-exact-v1/evidence.json) · [격리 PostgreSQL](../../tmp/s12-03-pg-baseline/s12-04-native-shadow-journal-current/postgres-run.json) · [증분 대조](../../tmp/s12-04-shadow/current-review-v3.json) · [변경 전 응답 검사](../../tmp/s12-04-shadow/baseline-defe6bb/cases.log).
 
 별도 빈 설치·선별 설치 표본은 순위와 명시 설정·수동 테마·미완료 저장을 이전하고 재기동 뒤 최초 영수증을 복구했다. 미확정 주문과 계좌 소유권 복구는 별도다. 계획형 부분 체결 표본은 취소 응답 유실 뒤 새 실행 소유자가 취소를 재전송하지 않고 늦은 FILL을 대사했다. 최초 보호 근거와 최신 계획 잔량을 함께 검증해 매도하는 실제 제품 경로는 남아 있다. [설치 검증](../../tmp/s12-05-selective-install/run.json) · [부분 체결 재현](../../tmp/s12-planned-leader-product-design/prove_partial_protection.py).
+
+<a id="s12-protection-lineage-and-retention"></a>
+
+### S12-04 계획 보호와 S12-05 사건 분할·선별 보존
+
+- 계획형 0B는 최초 손절 시점의 증거와 현재 계획 잔량·가격을 구분한다. 합성 격리 경로에서 취소 응답 유실 후 늦은 상세 FILL을 복구하고, 같은 계획의 2주 보호 주문을 한 번 전송했다. 취소 전에 전량 체결된 경우 상세 체결이 모두 대사된 뒤 3주를 한 번 전송한다. 누적 수량만 확인된 상태, 다른 계획, 계획을 뺀 일반 청산은 전송 전에 거절한다. 일반 실행 명세의 활성화와 후속 보호 주문은 남아 있다.
+- 완료봉 Shadow의 활성 상태는 후보를 만든 봉과 앞선 교차 확인의 판본을 체크포인트에서 복구한다. 정정이 오면 기존 이벤트를 변경하지 않고 활성 표시를 해제한다. B2/B3와 TH는 명시한 시장·일봉·재료·테마가 판단 컷에 확인된 경우에만 해당 후보를 만든다. 실시간 자동 공급과 부족한 실증 자료는 별도다.
+- Section 12의 개발 `single_run`은 선택 `evaluation.source_event_links`에 검토한 사건 ID, 출처 사례 참조, 동결 관측 판본 ID를 받는다. 명시한 동일 사건의 가용 구간은 하나의 학습 또는 검증 구간 안에 있어야 한다. 최종평가 표시가 있는 원본이나 묶음 하위 자료는 관측 파일을 열기 전에 거절한다. 이 판정 범위는 한 요청 안에서 사용자가 명시한 연결이다.
+- `daily_decline_experiment`는 `dd-native-setup-evidence/v1` 설명 파일의 SHA256과 동결 매니페스트 SHA256을 각각 확인한다. 동결한 KRX `ka10081` 일봉, 거래일, 수정주가 기준과 시장 벤치마크를 사용해 셋업 상태를 표시한다. 합성 거래 결과와 분리하며 원주가 보호, 체결별 비용 및 실제 분할 실행은 별도다.
+- MICRO용 오프라인 해석기는 0B의 선택 최우선 호가·보고 거래소와 0D의 가격·수량·호가 시각을 분리한다. 예상 체결가는 체결가와 구분하며, 거래소가 불명확한 응답에 임의의 장소·교차 자료 순서를 부여하지 않는다. 실시간 호가 공급, 종목 거래 가능 상태와 VI 해제 체결가는 별도 검증이 필요하다. [키움 공식 실시간 명세](https://github.com/Kiwoom-Securities/Kiwoom-REST-API/blob/main/kiwoom/_data/kiwoom_api_spec.json#L97852).
+- 빈 설치와 선별 설치는 순위·현재 설정·미완료 저장의 최초 영수증을 각각 검증한다. 종료한 합성 계좌의 미확정 주문 한 건은 원본 이벤트 ID·커서·계획 판본과 함께 `OFFLINE_RECOVERY_REQUIRED`로 보존한다. 같은 증거의 재시도는 최초 영수증을 반환하고 대상의 주문·승인·lease를 만들지 않는다. 실제 복구에는 신규 소유자의 계좌·브로커 재대사와 명시 관리 승인 절차가 필요하다.
+
+현재 소스 `0524cfaf`에서 변경 및 영향 Windows 384건과 격리 PostgreSQL 15건이 통과했다. PostgreSQL에서 늦은 상세 체결을 복구하는 두 경로를 확인했고 임시 작업자와 연결을 종료했다. [Windows 실행](../../tmp/s12-04-shadow/protection-lineage-exact-v1/evidence.json) · [PostgreSQL 실행](../../tmp/s12-03-pg-baseline/s12-04-protection-lineage-current/postgres-run.json) · [증분 대조](../../tmp/s12-04-shadow/protection-lineage-review.json).

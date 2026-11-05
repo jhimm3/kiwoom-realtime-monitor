@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 from kiwoom_monitor.domain.order_contract import AccountScope, LEGACY_ACCOUNT_SCOPE
 
@@ -42,6 +43,49 @@ class TradeTick:
     market: str = "KRX"
     execution_strength: float | None = None
     session_type: str = ""
+
+
+@dataclass(frozen=True)
+class TradeQuoteObservation:
+    """Optional BBO fields carried by the same 0B row as a trade."""
+
+    code: str
+    subscription_market: str
+    trade_time: str | None
+    best_ask_won: int | None
+    best_bid_won: int | None
+    reported_venue: str | None
+    raw_reported_venue: str | None
+    time_precision: ClassVar[str] = "second"
+
+
+@dataclass(frozen=True)
+class OrderBookLevel:
+    price_won: int | None
+    quantity: int | None
+
+
+@dataclass(frozen=True)
+class OrderBookTick:
+    """One 0D book message, with no inferred execution or source sequence."""
+
+    code: str
+    item: str
+    subscription_market: str | None
+    quote_time: str | None
+    asks: tuple[OrderBookLevel, ...]
+    bids: tuple[OrderBookLevel, ...]
+    krx_ask_quantities: tuple[int | None, ...]
+    krx_bid_quantities: tuple[int | None, ...]
+    nxt_ask_quantities: tuple[int | None, ...]
+    nxt_bid_quantities: tuple[int | None, ...]
+    total_ask_quantity: int | None
+    total_bid_quantity: int | None
+    indicative_price_won: int | None
+    indicative_quantity: int | None
+    auction_indicative_price_won: int | None
+    auction_indicative_quantity: int | None
+    time_precision: ClassVar[str] = "second"
 
 
 @dataclass(frozen=True)
@@ -196,6 +240,106 @@ def parse_trade_ticks(message: dict[str, Any]) -> tuple[TradeTick, ...]:
             )
         )
     return tuple(ticks)
+
+
+def parse_trade_quote_observations(message: dict[str, Any]) -> tuple[TradeQuoteObservation, ...]:
+    """Decode 0B FIDs 20, 27, 28 and 9081 without changing the TradeTick contract."""
+    if str(message.get("trnm", "")).upper() != "REAL":
+        return ()
+    observations = []
+    for entry in message.get("data") or ():
+        if not isinstance(entry, dict) or entry.get("type") != "0B":
+            continue
+        code, values = _code(entry), entry.get("values")
+        if not code or not isinstance(values, dict):
+            continue
+        raw_venue = values.get("9081")
+        raw_venue = raw_venue if isinstance(raw_venue, str) else None
+        reported = raw_venue.strip() if raw_venue is not None else None
+        observations.append(TradeQuoteObservation(
+            code=code, subscription_market=_market(entry), trade_time=_quote_clock(values.get("20")),
+            best_ask_won=_quote_number(values.get("27"), price=True),
+            best_bid_won=_quote_number(values.get("28"), price=True),
+            reported_venue=reported if reported in {"KRX", "NXT"} else None,
+            raw_reported_venue=raw_venue,
+        ))
+    return tuple(observations)
+
+
+def parse_order_book_ticks(
+    message: dict[str, Any], *, subscription_item: str | None = None,
+) -> tuple[OrderBookTick, ...]:
+    """Decode raw 0D levels. A bare response item needs confirmed KRX scope.
+
+    The caller can supply the exact approved registration item when independently
+    known. A suffix describes a subscription view, with SOR kept separate from
+    either execution venue. Venue quantity arrays have no inferred price pairing.
+    Fields 23/24 and 291/292 remain indicative.
+    """
+    if str(message.get("trnm", "")).upper() != "REAL":
+        return ()
+    books = []
+    for entry in message.get("data") or ():
+        if not isinstance(entry, dict) or entry.get("type") != "0D":
+            continue
+        item, values = entry.get("item"), entry.get("values")
+        if not isinstance(item, str) or not isinstance(values, dict):
+            continue
+        code = item.removesuffix("_NX").removesuffix("_AL")
+        if len(code) != 6 or not code.isascii() or not code.isalnum():
+            continue
+        market = None
+        if item == subscription_item or (subscription_item is None and item != code):
+            market = _market(entry)
+        books.append(OrderBookTick(
+            code=code, item=item, subscription_market=market, quote_time=_quote_clock(values.get("21")),
+            asks=_quote_levels(values, 41, 61), bids=_quote_levels(values, 51, 71),
+            krx_ask_quantities=_quote_quantities(values, 6044), krx_bid_quantities=_quote_quantities(values, 6054),
+            nxt_ask_quantities=_quote_quantities(values, 6066), nxt_bid_quantities=_quote_quantities(values, 6076),
+            total_ask_quantity=_quote_number(values.get("121")), total_bid_quantity=_quote_number(values.get("125")),
+            indicative_price_won=_quote_number(values.get("23"), price=True),
+            indicative_quantity=_quote_number(values.get("24")),
+            auction_indicative_price_won=_quote_number(values.get("291"), price=True),
+            auction_indicative_quantity=_quote_number(values.get("292")),
+        ))
+    return tuple(books)
+
+
+def _quote_levels(values: dict[str, Any], price_fid: int, size_fid: int) -> tuple[OrderBookLevel, ...]:
+    return tuple(OrderBookLevel(
+        price_won=_quote_number(values.get(str(price_fid + index)), price=True),
+        quantity=_quote_number(values.get(str(size_fid + index))),
+    ) for index in range(10))
+
+
+def _quote_quantities(values: dict[str, Any], first_fid: int) -> tuple[int | None, ...]:
+    return tuple(_quote_number(values.get(str(fid))) for fid in range(first_fid, first_fid + 10))
+
+
+def _quote_number(value: object, *, price: bool = False) -> int | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    digits = raw[1:] if raw.startswith(("+", "-")) else raw
+    if not digits.isascii() or not digits.isdigit():
+        return None
+    try:
+        number = int(raw)
+    except ValueError:
+        return None
+    if price:
+        return abs(number) or None
+    return number if number >= 0 else None
+
+
+def _quote_clock(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) != 6 or not value.isascii() or not value.isdigit():
+        return None
+    try:
+        time(int(value[:2]), int(value[2:4]), int(value[4:]))
+    except ValueError:
+        return None
+    return value
 
 
 def parse_order_executions(

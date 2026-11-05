@@ -345,7 +345,15 @@ class CentralResearchDataSource:
         return FrozenResearchDataset(manifest, tuple(observations))
 
 
-def load_frozen_research_export(path: Path, *, checkpoint: Callable[[], None] = lambda: None) -> FrozenResearchDataset:
+def _require_development_manifest(manifest: Mapping[str, Any]) -> None:
+    if (manifest.get("runtime_input_version") == FINAL_INPUT_VERSION
+            or manifest.get("source_runtime_input_version") == FINAL_INPUT_VERSION
+            or "final_holdout_partition" in manifest or manifest.get("oos_included") is True):
+        raise ValueError("linked development cannot open final holdout input")
+
+
+def load_frozen_research_export(path: Path, *, checkpoint: Callable[[], None] = lambda: None,
+                                development_only: bool = False) -> FrozenResearchDataset:
     """D2가 만든 불변 디렉터리를 hash와 ordinal까지 다시 검증해 읽는다."""
     root = Path(path)
     checkpoint()
@@ -356,6 +364,8 @@ def load_frozen_research_export(path: Path, *, checkpoint: Callable[[], None] = 
         raise ValueError("research manifest cannot be read") from exc
     if not isinstance(manifest, dict):
         raise ValueError("research manifest must be an object")
+    if development_only:
+        _require_development_manifest(manifest)
     if manifest.get("bundle_version") is not None:
         raise ValueError("research bundle requires the bundle reader or load_research_input")
     file_name = str(manifest.get("observations_file", ""))
@@ -549,7 +559,8 @@ def write_frozen_research_bundle(root: Path, child_paths: tuple[str, ...], *, re
     return FrozenResearchBundle(manifest, tuple(dataset for _, dataset in children))
 
 
-def load_frozen_research_bundle(root: Path, *, checkpoint: Callable[[], None] = lambda: None) -> FrozenResearchBundle:
+def load_frozen_research_bundle(root: Path, *, checkpoint: Callable[[], None] = lambda: None,
+                                development_only: bool = False) -> FrozenResearchBundle:
     root = Path(root)
     try:
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -557,11 +568,14 @@ def load_frozen_research_bundle(root: Path, *, checkpoint: Callable[[], None] = 
         raise ValueError("research bundle manifest cannot be read") from exc
     if not isinstance(manifest, dict) or manifest.get("bundle_version") != BUNDLE_VERSION:
         raise ValueError("research bundle version is unsupported")
+    if development_only:
+        _require_development_manifest(manifest)
     entries = manifest.get("children")
     if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
         raise ValueError("research bundle children contract is invalid")
     children = [(str(entry.get("path", "")), load_frozen_research_export(
-        _bundle_child_path(root, str(entry.get("path", ""))), checkpoint=checkpoint)) for entry in entries]
+        _bundle_child_path(root, str(entry.get("path", ""))), checkpoint=checkpoint,
+        development_only=development_only)) for entry in entries]
     if _bundle_manifest(children, checkpoint=checkpoint) != manifest:
         raise ValueError("research bundle manifest does not match its daily inputs")
     return FrozenResearchBundle(manifest, tuple(dataset for _, dataset in children))
@@ -580,7 +594,8 @@ def research_observation_order(value: dict[str, Any]) -> tuple[datetime, int, st
 
 
 def load_research_input(root: Path, *, session_profile: str | None = None,
-                        checkpoint: Callable[[], None] = lambda: None) -> FrozenResearchDataset:
+                        checkpoint: Callable[[], None] = lambda: None,
+                        development_only: bool = False) -> FrozenResearchDataset:
     """Adapt a verified bundle to the existing continuous run; never rewrite daily files."""
     try:
         manifest = json.loads((Path(root) / "manifest.json").read_text(encoding="utf-8"))
@@ -588,9 +603,11 @@ def load_research_input(root: Path, *, session_profile: str | None = None,
         raise ValueError("research manifest cannot be read") from exc
     if not isinstance(manifest, dict):
         raise ValueError("research manifest must be an object")
+    if development_only:
+        _require_development_manifest(manifest)
     if manifest.get("bundle_version") is None:
-        return load_frozen_research_export(root, checkpoint=checkpoint)
-    bundle = load_frozen_research_bundle(root, checkpoint=checkpoint)
+        return load_frozen_research_export(root, checkpoint=checkpoint, development_only=development_only)
+    bundle = load_frozen_research_bundle(root, checkpoint=checkpoint, development_only=development_only)
     first = bundle.datasets[0]
     if session_profile is None or not research_session_profile_contract_matches(
         first.manifest["research_session_profile"], session_profile,
@@ -660,7 +677,7 @@ def campaign_input_fingerprint(dataset: FrozenResearchDataset, *, checkpoint=lam
     return digest.hexdigest()
 
 
-def research_input_encoded_bytes(root: Path) -> int:
+def research_input_encoded_bytes(root: Path, *, development_only: bool = False) -> int:
     """Inspect bounded manifests/file sizes before decoding the frozen dataset."""
     seen: set[Path] = set()
     def size(directory: Path, child=False):
@@ -671,6 +688,8 @@ def research_input_encoded_bytes(root: Path) -> int:
         document = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(document, dict):
             raise ValueError('research manifest must be an object')
+        if development_only:
+            _require_development_manifest(document)
         if document.get('bundle_version') is not None:
             if child:
                 raise ValueError('nested research bundles are unsupported')
