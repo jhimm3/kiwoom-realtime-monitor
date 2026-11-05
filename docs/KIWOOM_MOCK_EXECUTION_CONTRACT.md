@@ -125,3 +125,5 @@
 모의투자 직접 수신값은 이후 NAS 경유 수신값과의 도착 지연, 누락·중복, 정규화 차이를 감사하는 독립 비교원으로 사용할 수 있다. 비교 기능을 만들기 전까지 모의 값을 실전/NAS 주 데이터에 합치거나 자동 보정값으로 사용하지 않는다.
 
 S12-05 공통 미체결 정정의 선행 전송 경계는 `KiwoomMockExecutionTransport.amend`다. 명시한 KRX mock LIMIT 원주문의 수량/가격을 기존 `request_once`로1회 보낸다. `BrokerAmendmentSubmission`은 응답의 새 주문번호·모주문번호·보고 수량/접수 시각을 보존한다. 이는 실제 체결/잔여 보유의 확인이 아니다. 거절은 기존 주문을 유지하는 기존 오류 계약이며, 모호한 응답의 보고 주문번호는 `AmendmentResponseUnknown`에 보존해 대사 자료로 남긴다. 자동 재전송·취소/신규 우회는 없다. 현재 조건 재판단→native 사전 저장/권한·예약→정정/부분 체결·ACK 유실/재개를 같은 수명에 연결하는 단계는 아직 남아 있다. 이 메서드 추가로 자동 정정이나 운영 권한을 열지 않는다. [전송 선행 검증](architecture/section12-development-roadmap-20261105.md#s12-amendment-transport).
+
+기존 계좌 reader의 ka10075/ka10076 응답은 원주문 번호·매수/매도 정정 방향도 optional order_details에 보존한다. 추가 조회는 없고 원번호의 선행0을 유지하며 누락/0을 추정하지 않는다. 기존 snapshot/FILL·원장 귀속은 바꾸지 않으며 원/새 번호별 상세 체결·ACK 유실 복구는 native 연결 후 검증한다. [현재 입력 보존 근거](architecture/section12-development-roadmap-20261105.md#s12-amendment-account-input).

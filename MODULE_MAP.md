@@ -7,7 +7,7 @@
 **S12-05 신규주 현재 연결:** 기존 `close_and_ipo.py`가 순수 정책/원셋업을, `research_process`/`research_run`이 final 수명을, `mock_automation_candidate.py`가 원본 계보를, `mock_automation_specification.py`/기존 Qt 화면이 두 방식의 명시 READY 게시/선택을 소유한다. 같은 native 어댑터/계좌 owner와 Episode/ClosePlanManagement가 원래 계획·부분/잔여·당일/익일·첫0B 구조 보호·재개를 관리하며 새 worker/권한/schema는 없다. 단계 동률의 domain 정렬 키를 native writer와 repository reader가 공유하고 원시각/ID를 유지한다. 정상 READY→공개 기동을 격리 검증했고 게시만으로 주문하지 않는다. 원계획의 실제 상세 체결→별도 일지 재개/재요청→화면 조회를 수락했다. 현재 조건 재판단/정정 우선은 S12-05 공통 실행 후속이다. [항목4 수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-acceptance-ipo-four).
 
 
-**S12-05 공통 정정 전송 선행:** `domain/order_contract.py`의 추가 응답 자료형이 원/새 주문번호·보고 수량을 보존하고, 기존 `infrastructure/kiwoom_rest/mock_execution.py`가 같은 단일 요청/보정 시계·거절/UNKNOWN 계약으로 kt10002를 전송한다. 아직 native/Gateway/Episode 자동 정정 수명은 연결하지 않았으며 새 계층/권한 owner·DB는 없다. [현재 근거·남은 연결](docs/architecture/section12-development-roadmap-20261105.md#s12-amendment-transport).
+**S12-05 공통 정정 전송 선행:** `domain/order_contract.py`의 추가 응답 자료형이 원/새 주문번호·보고 수량을 보존하고, 기존 `infrastructure/kiwoom_rest/mock_execution.py`가 같은 단일 요청/보정 시계·거절/UNKNOWN 계약으로 kt10002를 전송한다. 기존 `mock_account.py`는 같은 조회 페이지의 원주문 번호/정정 방향을 optional order_details에 보존한다. 아직 native/Gateway/Episode 자동 정정 수명은 미연결이며 새 계층/권한 owner·DB는 없다. [현재 근거·남은 연결](docs/architecture/section12-development-roadmap-20261105.md#s12-amendment-account-input).
 
 > **지도 읽는 순서.** 현재 진입점은 아래 기능별 코드 경로를 확인한다. 초기 국소 통합의 완료·차단 표현은 판본별 기록이며 전체 진행은 AR 정본에 있다. [관련 계약](docs/architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
 

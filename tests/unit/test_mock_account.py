@@ -55,6 +55,58 @@ class _Broker:
 
 
 class MockAccountTests(unittest.TestCase):
+    def test_amended_orders_keep_parent_side_and_reservation_from_existing_paged_reads(self):
+        from kiwoom_monitor.domain.order_contract import OrderSide
+
+        class AmendedBroker(_Broker):
+            async def request(self, api_id, path, body, **kwargs):
+                response = await super().request(api_id, path, body, **kwargs)
+                for key in ('oso', 'cntr'):
+                    for row in response.payload.get(key, ()):
+                        buy = row['ord_no'] == '0001'
+                        row.update(ord_no='0000140' if buy else '0000142',
+                            orig_ord_no='0000139' if buy else '0000141',
+                            io_tp_nm='+매수정정' if buy else '-매도정정', stex_tp='1',
+                            ord_pric='70000' if buy else '120000')
+                return response
+
+        async def scenario():
+            for reader_type, environment, expected_calls in (
+                (KiwoomMockAccountReader, 'mock', 5), (KiwoomRealAccountReader, 'real', 6),
+            ):
+                with self.subTest(environment=environment):
+                    broker = AmendedBroker()
+                    recovery = await reader_type(broker, environment=environment, account_ref='account',
+                                                 now_provider=lambda: NOW).read()
+                    self.assertEqual(expected_calls, len(broker.calls))
+                    self.assertEqual({'ka10075', 'ka10076', 'kt00018', 'kt00001'},
+                                     {call[0] for call in broker.calls})
+                    details = {detail.broker_order_id: detail for detail in recovery.order_details}
+                    self.assertEqual(('0000139', OrderSide.BUY),
+                        (details['0000140'].original_broker_order_id, details['0000140'].side))
+                    self.assertEqual(('0000141', OrderSide.SELL),
+                        (details['0000142'].original_broker_order_id, details['0000142'].side))
+                    self.assertEqual((140000, 640000, {'005930': 10}),
+                        (recovery.account.reserved_open_buy_won, recovery.account.available_cash_won,
+                         recovery.account.positions))
+                    self.assertEqual({'0000140', '0000142'}, {order.broker_order_id for order in recovery.orders})
+                    self.assertEqual(('fill-1',), tuple(fill.execution_id for fill in recovery.orders[0].fills))
+        asyncio.run(scenario())
+
+    def test_missing_parent_remains_unknown_without_changing_snapshot_or_synthesizing_fills(self):
+        for parser, table in ((parse_unfilled_orders, 'oso'), (parse_filled_orders, 'cntr')):
+            for parent in (None, '', '0000000', '0000139'):
+                with self.subTest(parser=parser.__name__, parent=parent):
+                    row = {'ord_no': '0000140', 'stk_cd': '005930', 'ord_qty': '2',
+                           'oso_qty': '1', 'cntr_qty': '1', 'ord_pric': '70100', 'io_tp_nm': '+매수정정'}
+                    if parent is not None:
+                        row['orig_ord_no'] = parent
+                    details = []
+                    snapshot, = parser({table: [row]}, 'account', NOW, _details=details)
+                    self.assertEqual(parent if parent == '0000139' else None, details[0].original_broker_order_id)
+                    self.assertEqual(('0000140', 1, 1, ()),
+                        (snapshot.broker_order_id, snapshot.filled_quantity, snapshot.remaining_quantity, snapshot.fills))
+
     def test_alphanumeric_stock_code_survives_mock_and_real_recovery_and_unit_fill(self):
         class AlphaBroker(_Broker):
             async def request(self, *args, **kwargs):

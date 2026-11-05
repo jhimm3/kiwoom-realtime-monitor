@@ -70,6 +70,7 @@ class BrokerOrderDetails:
     limit_price: int | None
     venue: str
     reasons: tuple[str, ...] = ()
+    original_broker_order_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,7 +275,8 @@ def parse_filled_orders(
 def _broker_order_details(row, ordered, default_venue):
     """Keep optional sizing evidence; incomplete metadata never breaks legacy recovery."""
     raw_side = str(row.get("io_tp_nm") or "").strip().lstrip("+-")
-    side = {"매수": OrderSide.BUY, "매도": OrderSide.SELL, "BUY": OrderSide.BUY, "SELL": OrderSide.SELL}.get(raw_side)
+    side = {"매수": OrderSide.BUY, "매도": OrderSide.SELL, "BUY": OrderSide.BUY, "SELL": OrderSide.SELL,
+            "매수정정": OrderSide.BUY, "매도정정": OrderSide.SELL}.get(raw_side)
     reasons = [] if side is not None else ["broker_order_side_unknown"]
     raw_price = row.get("ord_pric")
     try:
@@ -285,7 +287,9 @@ def _broker_order_details(row, ordered, default_venue):
     venue_value = str(row.get("stex_tp") or row.get("stex_tp_txt") or "").strip()
     venue = {"1": "KRX", "KRX": "KRX", "2": "NXT", "NXT": "NXT"}.get(venue_value,
                 default_venue if not venue_value else "UNKNOWN")
-    return BrokerOrderDetails(str(row.get("ord_no") or "").strip(), ordered, side, price or None, venue, tuple(reasons))
+    original = str(row.get('orig_ord_no') or '').strip()
+    return BrokerOrderDetails(str(row.get("ord_no") or "").strip(), ordered, side, price or None, venue, tuple(reasons),
+                              original if original and set(original) != {'0'} else None)
 
 
 def merge_order_snapshots(
