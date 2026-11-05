@@ -337,18 +337,41 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                     'eligibility_receipt': {'status': 'ELIGIBLE'}}
                 self.context.update(candidate_publications=[candidate], specs=[], selected_spec_id='')
                 self.dialog._completed('refresh', self.context)
-                self.assertIn(label + ' 연구 적격', self.dialog._candidate.currentText())
-                self.assertEqual(label + ' Shadow 대조', self.dialog._publish.text())
+                self.assertIn(label + ' · ELIGIBLE', self.dialog._candidate.currentText())
+                self.assertEqual(label + ' READY 명세 작성', self.dialog._publish.text())
                 event = {'event_id': 'stored-ipo-event', 'available_at': '2026-09-11T15:17:02+09:00'}
                 context = {**self.context, 'publication_candidate': candidate, 'shadow_events': [event]}
                 with (patch('kiwoom_monitor.presentation.mock_automation_dialog.matching_shadow_events', return_value=(event,)),
                       patch('kiwoom_monitor.presentation.mock_automation_dialog.MockAutomationPublicationDialog') as modal):
                     self.dialog._publish_prepared_candidate(context)
-                    modal.assert_not_called()
-                self.assertIn(label + ' Shadow 일치 1건', self.dialog._message.text())
-                self.assertIn('모의 주문 연결 개발 중', self.dialog._message.text())
+                    modal.assert_called_once_with(candidate, context['candidate_binding'],
+                        context['selected_profile']['profile_id'], (event,), self.dialog)
                 self.assertEqual(0, self.dialog._spec.count())
                 self.assertFalse(self.dialog._start.isEnabled())
+
+    def test_ipo_ready_review_requires_explicit_prices_and_preserves_its_family(self):
+        from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationPublicationDialog
+
+        for family in ('ipo_close/v1', 'ipo_breakout/v1'):
+            candidate = {'package': {'candidate_spec': {'version': CLOSE_FINAL_CANDIDATE_VERSION, 'family': family}}}
+            dialog = MockAutomationPublicationDialog(candidate, {}, 'profile', ({'event_id': 'shadow'},), self.dialog)
+            self.addCleanup(dialog.deleteLater)
+            with patch('kiwoom_monitor.presentation.mock_automation_dialog.build_mock_automation_publication_documents') as build:
+                with self.assertRaisesRegex(ValueError, '명시하세요'):
+                    dialog.publication_values()
+                self.assertEqual(0, build.call_count)
+                dialog._close_inputs['maximum_adverse_slippage_bps'].setText('100')
+                dialog._close_inputs['protective_slippage_bps'].setText('200')
+                with self.assertRaisesRegex(ValueError, '명시하세요'):
+                    dialog.publication_values()
+                dialog._close_management.setCurrentIndex(2)
+                dialog.publication_values()
+                self.assertEqual(candidate, build.call_args.kwargs['candidate_publication'])
+                self.assertEqual(CLOSE_NATIVE_PLAN_MODE, build.call_args.kwargs['execution_plan_mode'])
+                self.assertEqual('continue_original_plan/v1', build.call_args.kwargs['close_execution_policy'].stopped_management)
+                self.assertIsNone(build.call_args.kwargs['unfilled_execution_policy'])
 
     def test_close_ready_review_requires_explicit_prices_and_stopped_management(self):
         from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
@@ -1043,8 +1066,9 @@ class MockCandidateFileWorkflowTests(unittest.TestCase):
 
 
 class DailyInputCandidateDialogTests(unittest.TestCase):
-    from tests.unit.test_historical_baseline_requests import DailyDevelopmentRequestTests
-    setUp = DailyDevelopmentRequestTests.setUp
+    def setUp(self):
+        from tests.unit.test_historical_baseline_requests import DailyDevelopmentRequestTests
+        DailyDevelopmentRequestTests.setUp(self)
 
     @classmethod
     def setUpClass(cls):

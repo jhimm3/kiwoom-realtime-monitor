@@ -36,10 +36,10 @@ from kiwoom_monitor.domain.execution_activation import (
     strategy_stage_revision,
 )
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
-from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION, CLOSE_IPO_FINAL_CANDIDATE_FAMILIES
 from .leader_breakout import LeaderBreakoutConfig, validate_leader_shadow_event
 from .close_and_ipo import matches_close_shadow
-from .section12_minute_research import CLOSE_FAMILY, MinuteExperiment
+from .section12_minute_research import MinuteExperiment
 
 
 MOCK_AUTOMATION_LIMIT_FIELDS = (
@@ -53,7 +53,7 @@ MOCK_AUTOMATION_LIMIT_FIELDS = (
 def _candidate_family_contract(package):
     family_id = str(package.candidate_spec.get("family", ""))
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
-        if family_id != CLOSE_FAMILY:
+        if family_id not in CLOSE_IPO_FINAL_CANDIDATE_FAMILIES:
             raise ValueError("CLOSE candidate family does not match its version")
         MinuteExperiment.from_document(family_id, _mapping(package.candidate_spec, "parameters"))
         return family_id, (family_id,)
@@ -122,8 +122,6 @@ def build_mock_automation_publication_documents(
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
-    if package.candidate_spec.get('family') in {'ipo_close/v1', 'ipo_breakout/v1'}:
-        raise ValueError('IPO READY publication requires its native order policy and runner')
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
         execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or not isinstance(close_execution_policy, CloseMockExecutionPolicy)
     ):
@@ -267,8 +265,6 @@ def publish_ready_mock_automation_spec(
     )
     if package is None:
         raise ValueError("mock automation candidate package is not stored")
-    if package.candidate_spec.get('family') in {'ipo_close/v1', 'ipo_breakout/v1'}:
-        raise ValueError('IPO READY publication requires its native order policy and runner')
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
         spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE
         or not isinstance(spec.close_execution_policy, CloseMockExecutionPolicy)

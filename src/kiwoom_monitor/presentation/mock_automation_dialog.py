@@ -34,7 +34,7 @@ def _is_close_research_publication(publication: Any) -> bool:
     package = publication.get("package") if isinstance(publication, dict) else None
     spec = package.get("candidate_spec") if isinstance(package, dict) else None
     return (isinstance(spec, dict) and spec.get("version") == CLOSE_FINAL_CANDIDATE_VERSION
-            and spec.get('family') not in {'ipo_close/v1', 'ipo_breakout/v1'})
+            and spec.get('family') in {None, 'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'})
 
 
 def _ipo_research_label(publication: Any) -> str:
@@ -312,8 +312,9 @@ class MockAutomationPublicationDialog(QDialog):
         self._close_inputs = {}
         self._close_management = None
         if _is_close_research_publication(candidate):
-            for name, label in (("maximum_adverse_slippage_bps", "종가 진입 가격 허용 범위(bp)"),
-                                ("protective_slippage_bps", "종가 청산 가격 허용 범위(bp)")):
+            kind = _ipo_research_label(candidate) or '종가베팅'
+            for name, label in (("maximum_adverse_slippage_bps", kind + " 진입 가격 허용 범위(bp)"),
+                                ("protective_slippage_bps", kind + " 청산 가격 허용 범위(bp)")):
                 field = QLineEdit()
                 field.setPlaceholderText("0~9999 정수 · 100bp = 1%")
                 self._close_inputs[name] = field
@@ -322,7 +323,7 @@ class MockAutomationPublicationDialog(QDialog):
             self._close_management.addItem("중지 후 관리 방식을 선택하세요", None)
             self._close_management.addItem("신규 주문 중지·대사만 유지 (v1)", "close-mock-execution-policy/v1")
             self._close_management.addItem("신규 진입 중지·원래 계획의 취소·청산 유지 (v2)", "close-mock-execution-policy/v2")
-            top.addRow("종가베팅 중지 후 관리", self._close_management)
+            top.addRow(kind + " 중지 후 관리", self._close_management)
         self._plan_policy_path = None
         package = candidate.get("package")
         candidate_spec = package.get("candidate_spec") if isinstance(package, dict) else None
@@ -614,7 +615,7 @@ class MockAutomationDialog(QDialog):
     def _update_candidate_action(self) -> None:
         candidate = self._candidate.currentData()
         ipo_label = _ipo_research_label(candidate)
-        self._publish.setText(ipo_label + ' Shadow 대조' if ipo_label else
+        self._publish.setText(ipo_label + ' READY 명세 작성' if ipo_label else
             '종가베팅 READY 명세 작성' if _is_close_research_publication(candidate) else '새 READY 명세 작성')
 
     def _publish_prepared_candidate(self, context: dict[str, Any]) -> None:
@@ -631,9 +632,6 @@ class MockAutomationDialog(QDialog):
         )
         if not events:
             self._message.setText("이 후보 설정과 일치하는 실제 Shadow 후보 기록이 아직 없습니다.")
-            return
-        if ipo_label := _ipo_research_label(candidate):
-            self._message.setText(f'{ipo_label} Shadow 일치 {len(events)}건 · 모의 주문 연결 개발 중')
             return
         dialog = MockAutomationPublicationDialog(
             candidate, binding, str(selected["profile_id"]), events, self,
@@ -734,7 +732,7 @@ class MockAutomationDialog(QDialog):
             finished = source.get("finished_at", "") if isinstance(source, dict) else ""
             label = "종가베팅 · " + status if _is_close_research_publication(publication) else status
             if ipo_label := _ipo_research_label(publication):
-                label = ipo_label + ' 연구 적격'
+                label = ipo_label + ' · ' + status
             self._candidate.addItem(
                 f"{package.get('strategy_ref', '')} · {label} · {format_kst_time(finished, missing='')}", publication,
             )
@@ -753,7 +751,10 @@ class MockAutomationDialog(QDialog):
                 close_policy = spec.get("close_execution_policy", {})
                 management = ("중지 후 원계획 관리" if close_policy.get("stopped_management") == "continue_original_plan/v1"
                               else "중지 후 대사만 유지")
-                label += " · 종가베팅 모의 · " + management
+                candidate = next((item for item in self._context.get('candidate_publications', ())
+                    if isinstance(item, dict) and isinstance(item.get('package'), dict)
+                    and item['package'].get('package_hash') == spec.get('candidate_package_hash')), None)
+                label += " · " + (_ipo_research_label(candidate) or '종가베팅') + " 모의 · " + management
             self._spec.addItem(label, spec.get("spec_id", ""))
         index = self._spec.findData(selected_spec_id)
         self._spec.setCurrentIndex(index if index >= 0 else 0)

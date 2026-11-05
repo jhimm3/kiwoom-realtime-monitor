@@ -20,7 +20,7 @@ from typing import Any, Callable
 from kiwoom_monitor.domain.time_basis import kst_now, as_kst
 from kiwoom_monitor.domain.news_ai_contract import decode_news_ai_provenance
 from kiwoom_monitor.domain.execution_activation import (
-    StrategyLifecycleStage, stage_revision_from_dict,
+    StrategyLifecycleStage, stage_revision_from_dict, strategy_stage_revision_sort_key,
 )
 
 from kiwoom_monitor.domain.news_observation import (
@@ -114,7 +114,7 @@ def _insert_strategy_stage_revision(
     )
     rows = cursor.fetchall()
     revisions = [stage_revision_from_dict(json_mapping(raw)) for _, raw in rows]
-    latest = max(revisions, key=lambda item: (item.decided_at, item.revision_id), default=None)
+    latest = max(revisions, key=strategy_stage_revision_sort_key, default=None)
     current = latest.stage if latest is not None else StrategyLifecycleStage.DRAFT
     if current is not value.previous_stage:
         raise ValueError(f"strategy stage changed: expected {value.previous_stage.value}, found {current.value}")

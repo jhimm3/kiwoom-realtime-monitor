@@ -478,8 +478,7 @@ class FinalExecutionTests(unittest.TestCase):
                 for key, value in (('listing_refs', ['unknown-listing']), ('listing_phase', 'unknown')):
                     changed = {**event, 'close_ipo_entry_setup': {**event['close_ipo_entry_setup'], key: value}}
                     self.assertEqual((), matching_shadow_events(publication, (changed,)))
-            with self.assertRaisesRegex(ValueError, 'explicit CLOSE execution policy' if candidate.family == 'close_betting/v1'
-                                        else 'IPO READY publication requires its native'):
+            with self.assertRaisesRegex(ValueError, 'explicit CLOSE execution policy'):
                 build_mock_automation_publication_documents(candidate_publication=publication,
                     binding=inputs.binding, credential_profile_id=PROFILE_ID, shadow_event=event,
                     evaluation_start=inputs.profile.evaluation_start, evaluation_end=inputs.profile.evaluation_end,
@@ -493,11 +492,44 @@ class FinalExecutionTests(unittest.TestCase):
                     candidate_package_hash=documents['package']['package_hash'], execution_plan_mode=CLOSE_NATIVE_PLAN_MODE,
                     close_execution_policy=CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
                         'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1'))
-                with self.assertRaisesRegex(ValueError, 'IPO READY publication requires its native'):
+                with self.assertRaisesRegex(ValueError, 'candidate final lineage does not match'):
                     publish_ready_mock_automation_spec(inputs.repository, spec=attempted,
                         profile=inputs.profile, stage_revisions=inputs.stages, shadow_event=event,
                         current_binding=inputs.binding)
                 self.assertIsNone(inputs.repository.load_mock_automation_spec(ACCOUNT_REF, attempted.spec_id))
+                # The actual frozen final lineage can publish READY; publication itself starts no orders.
+                from kiwoom_monitor.domain.execution_activation import (
+                    forward_spec_from_dict, stage_revision_from_dict, mock_automation_spec_from_dict,
+                )
+                frozen_at = max(datetime.fromisoformat(str(inputs.binding['verified_at'])),
+                    datetime.fromisoformat(documents['package']['source_final']['finished_at']),
+                    datetime.fromisoformat(event['available_at']))
+                ready_documents = build_mock_automation_publication_documents(candidate_publication=publication,
+                    binding=inputs.binding, credential_profile_id=PROFILE_ID, shadow_event=event,
+                    evaluation_start=frozen_at, evaluation_end=frozen_at + timedelta(days=7), frozen_at=frozen_at,
+                    criteria=inputs.profile.criteria, limits={name: getattr(inputs.spec, name) for name in (
+                        'maximum_concurrent_strategies', 'maximum_concurrent_positions', 'maximum_capital_won',
+                        'maximum_daily_loss_won', 'maximum_data_gap_seconds', 'maximum_submission_unknown_count',
+                        'maximum_reconnect_count', 'maximum_balance_mismatch_count')},
+                    execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=attempted.close_execution_policy)
+                operating = mock_automation_spec_from_dict(ready_documents['operating_spec'])
+                ready_profile = forward_spec_from_dict(ready_documents['forward_profile'])
+                stages = tuple(stage_revision_from_dict(value) for value in ready_documents['stage_revisions'])
+                for expected_change in (True, False):
+                    readiness, changed = publish_ready_mock_automation_spec(inputs.repository, spec=operating,
+                        profile=ready_profile, stage_revisions=stages, shadow_event=event, current_binding=inputs.binding)
+                    self.assertEqual(('READY', expected_change), (readiness.status.value, changed))
+                    self.assertEqual(candidate.family, ready_profile.family_version)
+                response = client.post('/api/v1/research/mock-automation-specs', json=ready_documents)
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual(('unchanged', 'READY', False),
+                    (response.json()['status'], response.json()['readiness'], response.json()['orders_started']))
+                listed = client.get('/api/v1/research/mock-automation-specs/' + ACCOUNT_REF)
+                self.assertEqual(200, listed.status_code)
+                saved, = listed.json()['specs']
+                self.assertEqual(('READY', operating.to_dict()), (saved['readiness'], saved['spec']))
+                bad_binding = {**ready_documents, 'expected_binding_revision': inputs.binding['binding_revision'] + 1}
+                self.assertEqual(409, client.post('/api/v1/research/mock-automation-specs', json=bad_binding).status_code)
             if isinstance(store, SQLiteQueryStore):
                 with store._connection() as connection:
                     self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM central_execution_intents').fetchone()[0])

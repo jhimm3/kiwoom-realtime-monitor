@@ -549,6 +549,11 @@ class StrategyStageRevision:
         }
 
 
+def strategy_stage_revision_sort_key(revision: StrategyStageRevision):
+    """Equal-time stage evidence follows its lifecycle, without rewriting event times or IDs."""
+    return revision.decided_at, tuple(StrategyLifecycleStage).index(revision.stage), revision.revision_id
+
+
 _NEXT_STAGE = {
     StrategyLifecycleStage.DRAFT: StrategyLifecycleStage.EVALUATED,
     StrategyLifecycleStage.EVALUATED: StrategyLifecycleStage.VALIDATED,

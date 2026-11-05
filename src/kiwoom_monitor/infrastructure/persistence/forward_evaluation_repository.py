@@ -1104,7 +1104,9 @@ class ForwardEvaluationRepository:
     def load_stage_revisions(self, strategy_ref: str) -> tuple[StrategyStageRevision, ...]:
         rows = self._store.load_documents(self.STAGE_COLLECTION, strategy_ref, 10_000)
         revisions = [stage_revision_from_dict(_document(row)) for row in rows]
-        return tuple(sorted(revisions, key=lambda item: (item.decided_at, item.revision_id)))
+        from kiwoom_monitor.domain.execution_activation import strategy_stage_revision_sort_key
+
+        return tuple(sorted(revisions, key=strategy_stage_revision_sort_key))
 
     def latest_stage(self, strategy_ref: str) -> StrategyLifecycleStage:
         revisions = self.load_stage_revisions(strategy_ref)

@@ -1,4 +1,4 @@
-"""Internal IPO native claims; public READY and owned Runner integration remain separate."""
+"""IPO READY publication and original native plan/owned Runner contracts."""
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, time, timedelta
@@ -73,25 +73,30 @@ def prepare_ipo_execution(case, store, family, phase, *, runner=False):
     repository = inputs.repository
     repository.publish_mock_automation_candidate(package, eligibility, receipt, credential_profile_id=fixtures.PROFILE_ID,
                                                  expected_binding_revision=inputs.binding['binding_revision'])
-    profile = replace(inputs.profile, family_version=family, factor_versions=(family,), policy_version=eligibility.policy_id,
-                      evaluation_start=clock[0], evaluation_end=example.following.ends_at, frozen_at=clock[0])
-    stages = tuple(fixtures.strategy_stage_revision(strategy_ref=stage.strategy_ref,
-        previous_stage=stage.previous_stage, stage=stage.stage, reason=stage.reason,
-        evidence_refs=(ref,), decided_at=at) for stage, ref, at in zip(inputs.stages,
-        (package.package_hash, receipt.receipt_id, event['event_id']),
-        (package.source_run_finished_at, max(receipt.evaluated_at,
-            package.source_run_finished_at + timedelta(microseconds=1)), clock[0]), strict=True))
     terms = CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
         'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1')
-    spec = replace(inputs.spec, candidate_package_hash=package.package_hash, forward_profile_id=profile.profile_id,
-                   frozen_at=clock[0], shadow_evidence_ref=stages[-1].revision_id,
-                   execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=terms)
-    # An explicit internal synthetic spec exercises native claims before enabling the public Runner.
-    # This deliberately does not claim that the public READY publication is connected.
-    repository.save_profile(profile)
-    for stage in stages:
-        repository.save_stage_revision(stage)
-    repository.save_mock_automation_spec(spec)
+    documents = fixtures.build_mock_automation_publication_documents(
+        candidate_publication={'package': package.to_dict(), 'eligibility_policy': eligibility.to_dict(),
+                               'eligibility_receipt': receipt.to_dict()},
+        binding=inputs.binding, credential_profile_id=fixtures.PROFILE_ID, shadow_event=event,
+        evaluation_start=clock[0], evaluation_end=example.following.ends_at, frozen_at=clock[0],
+        criteria=inputs.profile.criteria, limits={name: getattr(inputs.spec, name) for name in (
+            'maximum_concurrent_strategies', 'maximum_concurrent_positions', 'maximum_capital_won',
+            'maximum_daily_loss_won', 'maximum_data_gap_seconds', 'maximum_submission_unknown_count',
+            'maximum_reconnect_count', 'maximum_balance_mismatch_count')},
+        execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=terms)
+    from kiwoom_monitor.domain.execution_activation import (
+        forward_spec_from_dict, stage_revision_from_dict, mock_automation_spec_from_dict,
+    )
+    profile = forward_spec_from_dict(documents['forward_profile'])
+    stages = tuple(stage_revision_from_dict(value) for value in documents['stage_revisions'])
+    spec = mock_automation_spec_from_dict(documents['operating_spec'])
+    case.assertEqual(stages[0].decided_at, stages[1].decided_at)  # Same source time is preserved, never fabricated.
+    for expected_change in (True, False):
+        readiness, changed = fixtures.publish_ready_mock_automation_spec(repository, profile=profile,
+            stage_revisions=stages, spec=spec, shadow_event=event, current_binding=inputs.binding)
+        case.assertEqual(('READY', expected_change), (readiness.status.value, changed))
+        case.assertEqual(stages, repository.load_stage_revisions(spec.strategy_ref))
     execution = fixtures.ExecutionRepository(store)
     transport = fixtures._FakeBrokerTransport(lambda: clock[0])
     run_id = fixtures.execution_run_id_for_spec(spec.spec_id)
