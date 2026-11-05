@@ -1002,9 +1002,106 @@ def _require_planned_leader_cancel(cursor, ownership, value, event, p, *, stored
     return {**event, "planned_leader_cancel_claim": claim.to_dict()}
 
 
+def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *, stored, now_provider):
+    """Cancel the exact originally approved, unfilled BUY after its admitted wait expires."""
+    from kiwoom_monitor.application.leader_breakout import _id
+    from kiwoom_monitor.application.mock_automation_execution import (
+        MockAutomationGateStatus, _validate_decision_identity, mock_automation_decision_gate_from_dict,
+    )
+    from kiwoom_monitor.application.mock_automation_risk import (
+        PlannedLeaderExpiredEntryCancelClaim, mock_automation_risk_account_revision,
+        mock_automation_risk_snapshot_from_dict,
+    )
+    from kiwoom_monitor.application.order_lifecycle import anchored_unfilled_policy
+    from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+    from kiwoom_monitor.domain.strategy_contract import StrategyDecision
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document
+
+    claim = PlannedLeaderExpiredEntryCancelClaim.from_dict(ownership["planned_cancel_claim"], ownership.get("plan_recovery"))
+    if (stored is None or event.get("event_type") != "CANCEL_STARTED" or value["state"] != "CANCEL_PENDING"
+            or event.get("intent_id") != value["intent_id"] or ownership.get("control_revision") is None
+            or stored["state"] != "ACCEPTED" or stored["side"] != "BUY" or not stored["broker_order_id"]
+            or stored["policy_version"] != "leader_execution_adapter/v1" or not stored.get("mock_plan_approval")
+            or stored["intent_id"] != claim.plan.plan_id or stored["fill_ids"]
+            or any(stored[name] != 0 for name in ("filled_quantity", "detailed_filled_quantity", "broker_reported_filled_quantity"))
+            or (stored.get("plan") or {}).get("plan_id") != claim.plan.plan_id
+            or (stored.get("plan") or {}).get("policy_ref") != claim.plan.policy_ref):
+        raise RuntimeError("PLANNED_LEADER_EXPIRY_ROOT_CHANGED")
+    account, run_id = value["account_ref"], value["run_id"]
+
+    def document(collection, key):
+        row = _plan_document(cursor, p, collection, account, key)
+        if row is None:
+            raise RuntimeError("PLANNED_LEADER_EXPIRY_PROOF_MISSING")
+        return row
+
+    spec = mock_automation_spec_from_dict(document("execution_mock_automation_specs", ownership["active_spec_id"]))
+    gate = mock_automation_decision_gate_from_dict(document("execution_mock_automation_approved_gates", claim.plan.plan_id))
+    root = _record_from_document(stored)
+    source = document("execution_leader_decisions", root.intent.decision_id)
+    pin = document("execution_leader_position_context", claim.plan.plan_id)
+    decision = StrategyDecision(**source["decision"])
+    _validate_decision_identity(decision)
+    feature = source["snapshot"]["feature_values"][0]
+    if (spec.unfilled_execution_policy is None or gate.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+            or (gate.gate_id, gate.plan, gate.action, gate.intent_id, gate.strategy_decision_id, gate.spec_id,
+                gate.execution_run_id, gate.account_ref) != (stored["mock_plan_approval"], root.intent.plan, "ENTER",
+                root.intent.intent_id, root.intent.decision_id, spec.spec_id, run_id, account)
+            or decision.decision_id != root.intent.decision_id
+            or decision.snapshot_id != _id("leader-snapshot/v1", [run_id, feature, decision.state_before])
+            or source.get("position_proof") != pin
+            or (pin["entry_intent_id"], pin["proof_id"]) != (claim.plan.plan_id, claim.plan.policy_ref)):
+        raise RuntimeError("PLANNED_LEADER_EXPIRY_ORIGINAL_APPROVAL_CHANGED")
+    signal_until = datetime.fromisoformat(feature["value"]["valid_until"])
+    policy = anchored_unfilled_policy(root.intent, spec.unfilled_execution_policy, "BUY_OPPORTUNITY")
+    now = kst_now() if now_provider is None else now_provider()
+    if signal_until.tzinfo is None or now < min(signal_until, policy.wait_until):
+        raise RuntimeError("PLANNED_LEADER_ENTRY_WAIT_NOT_EXPIRED")
+
+    risk = mock_automation_risk_snapshot_from_dict(document("execution_mock_automation_current_risk", account))
+    head = document(PLAN_POSITION_COLLECTION, claim.plan.plan_id)
+    broker_account = claim.recovery.account
+    orders = [order for order in claim.recovery.orders if order.state not in TERMINAL_ORDER_STATES]
+    age = spec.unfilled_execution_policy.max_snapshot_age_seconds
+    if ((risk.snapshot_id, risk.reconciliation_revision) != (claim.risk_snapshot_id, claim.risk_reconciliation_revision)
+            or (risk.account_ref, risk.execution_run_id, risk.binding_revision, risk.data_path)
+            != (account, run_id, spec.binding_revision, spec.data_path)
+            or risk.account_revision != mock_automation_risk_account_revision(claim.recovery)
+            or (broker_account.account_ref, broker_account.as_of) != (account, risk.account_as_of)
+            or any(broker_account.positions.values()) or risk.owned_position_quantities or risk.pending_sell_quantities
+            or risk.submission_unknown_count or risk.balance_mismatch_count
+            or any(not 0 <= (now - at).total_seconds() <= age for at in (risk.account_as_of, risk.observed_at))
+            or (head["version"], head["plan_id"], head["policy_ref"], head["revision"], head["run_id"], head["symbol"],
+                head["quantity"], head["fill_cursor"]) != ("mock_plan_position/v1", claim.plan.plan_id, claim.plan.policy_ref,
+                claim.plan.expected_revision, run_id, value["symbol"], 0, 0)
+            or head.get("unreconciled_sell_quantity") or len(orders) != 1):
+        raise RuntimeError("PLANNED_LEADER_EXPIRY_FLAT_CUT_UNCONFIRMED")
+    # Risk may be incomplete for a flat first BUY with no fills. This exception
+    # can cancel just this mapped order and cannot approve a new order.
+    order = orders[0]
+    if ((order.account_ref, order.broker_order_id, order.symbol, order.state.value, order.filled_quantity,
+         order.remaining_quantity, order.as_of) != (account, root.broker_order_id, root.intent.symbol, "ACCEPTED",
+         0, root.intent.quantity, root.last_broker_as_of) or order.fills
+            or not 0 <= (now - order.as_of).total_seconds() <= age):
+        raise RuntimeError("PLANNED_LEADER_EXPIRY_BROKER_ORDER_CHANGED")
+    active = _account_active_execution_rows(cursor, "mock", account, 2, p)
+    if len(active) != 1 or _json_document(active[0][0]) != stored:
+        raise RuntimeError("PLANNED_LEADER_EXPIRY_ACCOUNT_ORDER_CHANGED")
+    event_type = "document_json->>'event_type'" if p == "%s" else "json_extract(document_json,'$.event_type')"
+    cursor.execute(f"SELECT 1 FROM central_execution_events WHERE intent_id={p} "
+                   f"AND {event_type} IN ('CANCEL_STARTED','FILL','BROKER_FILL_AGGREGATE') LIMIT 1", (claim.plan.plan_id,))
+    if cursor.fetchone() is not None:
+        raise RuntimeError("PLANNED_LEADER_EXPIRY_ROOT_HISTORY_CHANGED")
+    return {**event, "planned_leader_cancel_claim": claim.to_dict()}
+
+
 def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provider=None, stored=None):
     """Fence a protective retry in the same native CANCEL_STARTED transaction."""
     if ownership is not None and ownership.get("planned_cancel_claim") is not None:
+        if ownership["planned_cancel_claim"].get("version") == "planned-leader-expired-entry-cancel/v1":
+            return _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, stored=stored,
+                                                         now_provider=now_provider)
         return _require_planned_leader_cancel(cursor, ownership, value, event, p, stored=stored,
                                               now_provider=now_provider)
     claim = ownership.get('cancel_retry_claim') if ownership else None

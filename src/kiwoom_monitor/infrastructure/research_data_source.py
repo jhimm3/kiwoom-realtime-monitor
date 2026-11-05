@@ -7,10 +7,13 @@ import json
 import tempfile
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, Callable, Mapping
 
+from kiwoom_monitor.application.breakout_theme_research import (
+    RECONSTRUCTED_MARKET_PROXY_SCOPES, RECONSTRUCTED_MARKET_PROXY_VERSION, ReconstructedMarketTurnoverRatio,
+)
 from kiwoom_monitor.application.market_session_schedule import (
     KST, TradingDayEvidence, decode_strategy_references,
     research_session_profile_document, research_session_profile_contract_matches,
@@ -68,6 +71,124 @@ BUNDLE_VERSION = "research_dataset_bundle/v1"
 BUNDLE_BOUNDARY_POLICY = "continuous_no_forced_close/v1"
 DEVELOPMENT_INPUT_VERSION = 'independent_development_input/v1'
 FINAL_INPUT_VERSION = 'independent_final_holdout_input/v1'
+
+
+@dataclass(frozen=True)
+class FrozenReconstructedMarketProxy:
+    sha256: str
+    scope: str
+    dataset_id: str
+    baseline_sessions: int
+    comparison_threshold_bps: int
+    values: Mapping[datetime, ReconstructedMarketTurnoverRatio]
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "version": RECONSTRUCTED_MARKET_PROXY_VERSION,
+            "sha256": self.sha256,
+            "scope": self.scope,
+            "baseline_sessions": self.baseline_sessions,
+            "clock_basis": "historical_bar_close",
+            "market_unit": "provider_raw_unspecified",
+        }
+
+
+def load_reconstructed_market_proxy(
+    path: Path, *, expected_sha256: str, scope: str, dataset: FrozenResearchDataset,
+    dataset_path: Path, evaluation: ResearchEvaluationSpec, checkpoint: Callable[[], None] = lambda: None,
+) -> FrozenReconstructedMarketProxy:
+    """Read a frozen, provider-relative ratio only for its reconstructed development cut."""
+    manifest = dataset.manifest
+    folds = evaluation.folds
+    if (manifest.get("runtime_input_version") != DEVELOPMENT_INPUT_VERSION
+            or manifest.get("source_runtime_input_version") != "historical_reconstruction_strategy/v1"
+            or manifest.get("not_contemporaneous_top20") is not True
+            or len(folds) != 1 or folds[0].role not in {"TRAIN", "VALIDATION"}
+            or scope not in RECONSTRUCTED_MARKET_PROXY_SCOPES):
+        raise ValueError("reconstructed market proxy requires an isolated reconstructed development dataset")
+    checkpoint()
+    try:
+        encoded = path.read_bytes()
+        manifest_bytes = (dataset_path / "manifest.json").read_bytes()
+    except OSError as exc:
+        raise ValueError("reconstructed market proxy artifact or dataset manifest cannot be read") from exc
+    checkpoint()
+    digest = hashlib.sha256(encoded).hexdigest()
+    if digest != expected_sha256:
+        raise ValueError("reconstructed market proxy artifact hash does not match")
+    try:
+        document = json.loads(encoded)
+        checkpoint()
+        if (document["version"] != RECONSTRUCTED_MARKET_PROXY_VERSION or document["input_basis"] != "reconstructed"
+                or document["replay_clock_basis"] != "historical_bar_close"
+                or document["market_unit"] != "provider_raw_unspecified"):
+            raise ValueError("incorrect reconstructed market basis")
+        fold = folds[0]
+        start = datetime.fromisoformat(fold.start).astimezone(KST)
+        end = datetime.fromisoformat(fold.end).astimezone(KST)
+        binding = document["dataset"]
+        dataset_identity = {key: manifest[key] for key in (
+            "dataset_id", "observations_file_hash", "revision_ids_hash",
+        )}
+        if (any(binding[key] != value for key, value in dataset_identity.items())
+                or binding["manifest_file_sha256"] != hashlib.sha256(manifest_bytes).hexdigest()
+                or binding["partition_role"] != fold.role
+                or binding["trading_date"] != start.date().isoformat()
+                or end.date() != start.date()):
+            raise ValueError("reconstructed market proxy dataset binding does not match")
+        settings = document["settings"]
+        baseline_sessions = settings["baseline_sessions"]
+        threshold = settings["comparison_threshold_bps"]
+        if (baseline_sessions != 20 or type(baseline_sessions) is not int
+                or type(threshold) is not int or threshold < 0
+                or settings["measure"] != "same_kst_minute_amount/v1"
+                or settings["baseline_estimator"] != "even_median_middle_sum_over_two/v1"):
+            raise ValueError("unknown reconstructed market proxy experiment settings")
+        dates = [date.fromisoformat(value) for value in document["baseline_dates"]]
+        if len(dates) != baseline_sessions or dates != sorted(set(dates)) or dates[-1] >= start.date():
+            raise ValueError("invalid preceding market baseline dates")
+
+        pages = document["source_pages"]
+        values = {}
+        for index, row in enumerate(document["values"]):
+            if index % 64 == 0:
+                checkpoint()
+            if row["scope"] != scope:
+                continue
+            raw_refs = [row["current_source_ref"], *row["baseline_source_refs"]]
+            evidence_refs = [f"market_proxy:{digest}"]
+            recorded_at = datetime.fromisoformat(row["archive_recorded_at"])
+            observed = []
+            if len(raw_refs) != baseline_sessions + 1:
+                raise ValueError("market proxy source row count differs from the pinned baseline")
+            for page_id, row_hash in raw_refs:
+                page = pages[page_id]
+                if (page["provider"] != "daishin_creon" or page["kind"] != "index_1m"
+                        or page["code"] != scope.rsplit(":", 1)[-1]
+                        or page["field_ids"] != [0, 1, 2, 3, 4, 5, 8, 9]
+                        or len(row_hash) != 64 or any(char not in "0123456789abcdef" for char in row_hash)):
+                    raise ValueError("unexpected reconstructed market source reference")
+                evidence_refs.append(f"daishin_creon:StockChart:{page_id}:{row_hash}")
+                observed.append(datetime.fromisoformat(page["observed_at"]))
+            if max(observed) != recorded_at or len(evidence_refs) != len(set(evidence_refs)):
+                raise ValueError("invalid reconstructed market archival lineage")
+            value = ReconstructedMarketTurnoverRatio(
+                scope, datetime.fromisoformat(row["minute_end"]),
+                datetime.fromisoformat(row["replay_available_at_proxy"]), recorded_at,
+                row["observed_raw"], row["baseline_middle_sum_raw"], tuple(evidence_refs),
+            )
+            if value.minute_end in values:
+                raise ValueError("duplicate reconstructed market proxy cut")
+            values[value.minute_end] = value
+
+        first_cut = datetime.combine(start.date(), time(9, 1), KST)
+        if set(values) != {first_cut + timedelta(minutes=i) for i in range(380)}:
+            raise ValueError("incomplete reconstructed regular market minute coverage")
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid reconstructed market proxy artifact: {exc}") from exc
+    return FrozenReconstructedMarketProxy(
+        digest, scope, dataset_identity["dataset_id"], baseline_sessions, threshold, values,
+    )
 
 
 def prepare_development_partition(dataset: FrozenResearchDataset, partition: DevelopmentPartitionSpec,

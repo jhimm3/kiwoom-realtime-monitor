@@ -55,6 +55,7 @@ _SECTION12_SCOPES = {
     "native_setup_assessment": "동결 일봉 · DD 셋업 평가",
 }
 _SECTION12_MINUTE_COLUMNS = ("구간·역할", "평가 상태", "순손익", "제출/체결", "미완료·거절", "무거래", "사유")
+_BREAKOUT_COMPARISON_COLUMNS = ("변형·구간", "평가 상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익")
 
 
 def _research_process_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -1055,6 +1056,7 @@ class ResearchDialog(QDialog):
         minute_experiment = isinstance(request.strategy, MinuteExperiment)
         self._table.setHorizontalHeaderLabels(
             _SECTION12_MINUTE_COLUMNS if minute_experiment and request.mode == "single_run" else
+            _BREAKOUT_COMPARISON_COLUMNS if request.mode == BREAKOUT_COMPARISON_MODE else
             ("구간", "상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익")
         )
         folds = ", ".join(f"{fold.name}({fold.role})" for fold in request.evaluation.folds)
@@ -1070,9 +1072,15 @@ class ResearchDialog(QDialog):
             variants = " → ".join(config.policy.variant for config in (request.strategy, *request.breakout_variants))
             scope = _SECTION12_SCOPES["shadow_only" if request.shadow_only else "paper"]
             identity = f"{MINUTE_EXPERIMENT_LABELS[request.family]} ({request.family}) · {variants} · {scope} · 계좌 주문 없음"
+            references = []
             if request.strategy_references is not None:
                 reference_path, digest = request.strategy_references
-                self._summary.setToolTip(f"요청 근거 {reference_path.name} · SHA256 {digest}")
+                references.append(f"요청 근거 {reference_path.name} · SHA256 {digest}")
+            if request.reconstructed_market_proxy is not None:
+                proxy_path, digest = request.reconstructed_market_proxy
+                identity += f" · B2/B3 복원 시장비율 ({request.breakout_variants[1].policy.entry_filters.market_scope})"
+                references.append(f"복원 시장비율 {proxy_path.name} · SHA256 {digest}")
+            self._summary.setToolTip("\n".join(references))
         self._summary.setText(f"{identity} · 데이터 {request.dataset.name} · 구간 {folds}{search_text}"
                               f" · 비용 {cost.rate_basis if cost else '없음'} / {cost.source if cost else ''}")
         labels = {
@@ -1253,6 +1261,8 @@ class ResearchDialog(QDialog):
             self._table.setHorizontalHeaderLabels(("전략·종목", "셋업 상태", "절대 낙폭", "시장 대비 낙폭", "변동성", "자료", "사유"))
         elif kind in EVIDENCE_EXPERIMENT_FAMILIES:
             self._table.setHorizontalHeaderLabels(("전략·변형", "재생 상태", "보유 수량", "미완료 주문", "증거 상태", "자료", "사유"))
+        elif kind == BREAKOUT_COMPARISON_MODE:
+            self._table.setHorizontalHeaderLabels(_BREAKOUT_COMPARISON_COLUMNS)
         elif minute_result:
             self._table.setHorizontalHeaderLabels(_SECTION12_MINUTE_COLUMNS)
         elif kind == "single_run":
@@ -1266,6 +1276,15 @@ class ResearchDialog(QDialog):
                 ("frozen_dataset_id", "동결 자료 ID"), ("revision_ids_hash", "자료 판본 SHA256"),
                 ("frozen_manifest_sha256", "동결 자료 SHA256"),
             ) if (value := context.get(key))]
+            if kind == BREAKOUT_COMPARISON_MODE:
+                market_proxy = context.get("reconstructed_market_proxy")
+                if isinstance(market_proxy, Mapping) and market_proxy.get("sha256"):
+                    references.append(f"복원 시장비율 SHA256 {market_proxy['sha256']}")
+                references.extend(
+                    f"{run['variant']} 실행 ID {run['run_id']} · 후보 {_section12_count(run.get('candidate_count'))}"
+                    for run in result.get("runs", ())
+                    if isinstance(run, Mapping) and run.get("variant") and run.get("run_id")
+                )
             if result.get("run_id"):
                 references.append(f"실행 ID {result['run_id']}")
             self._summary.setToolTip("\n".join(references))
@@ -1371,8 +1390,12 @@ def _section12_result_summary(context: Mapping[str, Any], report: object) -> str
         quality_text = f"자료 품질 {quality.get('status', '미확인')} · 재현성 {quality.get('reproducibility', '미확인')}"
     event_groups = context.get("source_event_group_count")
     events_text = f"분할을 확인한 검토 사건 {event_groups}개" if type(event_groups) is int else ""
+    market_proxy = context.get("reconstructed_market_proxy")
+    market_text = ""
+    if isinstance(market_proxy, Mapping) and market_proxy.get("scope"):
+        market_text = f"B2/B3 복원 시장비율 {market_proxy['scope']} · 공급자 원단위 상대값"
     return " · ".join(str(value) for value in (
-        family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text, events_text,
+        family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text, events_text, market_text,
     ) if value)
 
 

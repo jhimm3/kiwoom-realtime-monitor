@@ -2040,6 +2040,105 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_typed_stop_uses_refreshed_risk_and_protects_full_fill_after_unknown_cancel(self):
         await self._verify_partial_buy_protection(cancel_before_terminal=True, full_fill_after_cancel=True)
 
+    async def test_expired_zero_fill_plan_cancels_once_without_position_authority(self):
+        await self._verify_expired_plan_cancel(late_fill=False)
+
+    async def test_expired_zero_fill_plan_keeps_late_detail_without_stop_authority(self):
+        await self._verify_expired_plan_cancel(late_fill=True)
+
+    async def _verify_expired_plan_cancel(self, *, late_fill):
+        from dataclasses import asdict
+
+        from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
+
+        with patch("kiwoom_monitor.central_server.mock_automation_episode.dispatch_mock_automation_decision_from_risk",
+                   side_effect=self._dispatch_with_plan):
+            await self.deliver(990)
+            await self.deliver(1001)
+        pin = self.runner.episode._leader_position_proof
+        root = self.execution.load(pin["entry_intent_id"])
+        self.assertEqual(OrderState.ACCEPTED, root.state)
+        self.assertEqual(0, root.detailed_filled_quantity)
+        source = self.store.load_document("execution_leader_decisions", ACCOUNT_REF, root.intent.decision_id)["document"]
+        raw = source["snapshot"]["feature_values"][0]["value"]
+        deadline = min(datetime.fromisoformat(raw["valid_until"]), root.intent.expires_at,
+                       root.intent.created_at + timedelta(seconds=self.spec.unfilled_execution_policy.maximum_management_seconds))
+        control = self.repository.load_mock_automation_control(ACCOUNT_REF)
+        plan = replace(root.intent.plan, expected_revision=self._head(root.intent.plan.plan_id)["revision"])
+        case = self
+
+        class Reader:
+            calls = 0
+
+            async def read(self):
+                self.calls += 1
+                account = AccountSnapshot(ACCOUNT_REF, case.cash, root.intent.quantity * root.intent.limit_price, {}, case.clock)
+                order = BrokerOrderSnapshot(root.broker_order_id, ACCOUNT_REF, root.intent.symbol, OrderState.ACCEPTED,
+                                            0, root.intent.quantity, case.clock)
+                return MockAccountRecovery(account, (order,))
+
+            async def read_trade_cost_pages(self, *_args):
+                return ()
+
+        reader = Reader()
+        monitor = MockAccountMonitor(
+            reader, self.runtime, self.execution, now_provider=lambda: self.clock,
+            automation_risk_repository=self.repository, automation_binding_revision=self.spec.binding_revision,
+            automation_account_scope=self.spec.account_scope,
+        )
+        monitor.set_automation_execution_inputs_enabled(True)
+        self.addAsyncCleanup(monitor.close)
+        gateway = ManualMockOrderGateway(self.runtime, self.execution, monitor.refresh_account,
+                                         automation_execution_cut=lambda: monitor.latest_automation_execution_cut)
+        self.addAsyncCleanup(gateway.close)
+
+        async def expire():
+            return await gateway.cancel_automation_intent(root, spec_id=self.spec.spec_id,
+                                                          control_revision=control.control_revision, expired_entry_plan=plan)
+
+        with patch.object(self.transport, "cancel", side_effect=SubmissionUnknown("fixture lost cancel ACK")) as broker:
+            self.clock = deadline - timedelta(milliseconds=1)
+            with self.assertRaisesRegex(RuntimeError, "PLANNED_LEADER_ENTRY_WAIT_NOT_EXPIRED"):
+                await expire()
+            feature = source["snapshot"]["feature_values"][0]
+            tampered = {**feature, "value": {**raw, "valid_until": self.clock.isoformat()}}
+            changed = {**source, "snapshot": {**source["snapshot"], "feature_values": [tampered]}}
+            self.store.upsert_documents("execution_leader_decisions", [{"owner": ACCOUNT_REF,
+                "key": root.intent.decision_id, "document": changed}])
+            with self.assertRaisesRegex(RuntimeError, "PLANNED_LEADER_EXPIRY_ORIGINAL_APPROVAL_CHANGED"):
+                await expire()
+            self.store.upsert_documents("execution_leader_decisions", [{"owner": ACCOUNT_REF,
+                "key": root.intent.decision_id, "document": source}])
+            broker.assert_not_called()
+            risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+            self.assertEqual((False, (), 0), (risk.reconciliation_complete, risk.owned_position_quantities, risk.balance_mismatch_count))
+            self.clock = deadline
+            pending = await expire()
+            fresh = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+            self.assertEqual((False, (), 0), (fresh.reconciliation_complete, fresh.owned_position_quantities, fresh.balance_mismatch_count))
+            self.assertEqual(OrderState.CANCEL_PENDING, pending.state)
+            self.assertEqual((pending, 3), (await expire(), reader.calls))
+            broker.assert_called_once_with(root.intent, root.broker_order_id, 0)
+        events = self.execution.events(root.intent.intent_id)
+        self.assertEqual(["CANCEL_STARTED", "CANCEL_RESPONSE_UNKNOWN"], [event["event_type"] for event in events[-2:]])
+        self.assertEqual({"version": "planned-leader-expired-entry-cancel/v1", "plan": asdict(plan),
+                          "risk_snapshot_id": fresh.snapshot_id, "risk_reconciliation_revision": fresh.reconciliation_revision},
+                         events[-2]["planned_leader_cancel_claim"])
+        self.assertEqual((0, 1), (self._head(plan.plan_id)["quantity"], self._head(plan.plan_id)["revision"]))
+        self.assertEqual((pending,), self.runtime.load_active_intents())
+
+        self.clock += timedelta(seconds=1)
+        fills = (BrokerFill("expired-plan-late-detail", 1, root.intent.limit_price, self.clock),) if late_fill else ()
+        result = self.runtime.reconcile(root.intent.intent_id, BrokerOrderSnapshot(
+            root.broker_order_id, ACCOUNT_REF, root.intent.symbol, OrderState.CANCELLED, len(fills), 0, self.clock, fills,
+        ))
+        self.assertEqual((OrderState.CANCELLED, len(fills)), (result.state, result.detailed_filled_quantity))
+        self.assertEqual(((), True), self.runtime.load_account_active_intents())
+        self.assertEqual((len(fills), 2 + len(fills)),
+                         (self._head(plan.plan_id)["quantity"], self._head(plan.plan_id)["revision"]))
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+        self.assertIsNone(self.runner.episode._protection_snapshot())
+
     async def _verify_partial_buy_protection(self, *, cancel_before_terminal, full_fill_after_cancel=False):
         from kiwoom_monitor.application.market_session_schedule import KST
         from kiwoom_monitor.application.mock_automation_risk import (

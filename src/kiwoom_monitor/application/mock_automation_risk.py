@@ -24,6 +24,7 @@ VERIFIED_DAILY_PNL_SOURCE = "account_scoped_fifo_broker_cost/v1"
 KST = ZoneInfo("Asia/Seoul")
 PROTECTION_EXIT_VERSION = 'mock-protection-exit/v1'
 PLANNED_LEADER_STOP_VERSION = "planned-leader-stop/v1"
+PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION = "planned-leader-expired-entry-cancel/v1"
 PLANNED_LEADER_PROTECTION_EXIT_VERSION = "planned-leader-protection-exit/v1"
 
 
@@ -115,6 +116,37 @@ class PlannedLeaderStopCancelRequest:
         return PlannedLeaderCancelClaim(
             self.plan, self.trigger_id, self.notice_revision, risk.snapshot_id, risk.reconciliation_revision,
         )
+
+
+@dataclass(frozen=True)
+class PlannedLeaderExpiredEntryCancelClaim:
+    plan: OrderPlanRef
+    risk_snapshot_id: str
+    risk_reconciliation_revision: int
+    recovery: MockAccountRecovery
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan, OrderPlanRef) or not isinstance(self.recovery, MockAccountRecovery):
+            raise ValueError("expired planned entry requires exact plan and broker recovery")
+        _require_sha256(self.risk_snapshot_id, "expired planned entry current Risk")
+        if type(self.risk_reconciliation_revision) is not int or self.risk_reconciliation_revision < 1:
+            raise ValueError("expired planned entry requires a positive Risk revision")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"version": PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION, "plan": asdict(self.plan),
+                "risk_snapshot_id": self.risk_snapshot_id,
+                "risk_reconciliation_revision": self.risk_reconciliation_revision}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any], recovery: MockAccountRecovery) -> PlannedLeaderExpiredEntryCancelClaim:
+        body = dict(value)
+        if body.pop("version", None) != PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION:
+            raise ValueError("unsupported expired planned entry cancellation")
+        try:
+            body["plan"] = OrderPlanRef(**body["plan"])
+            return cls(**body, recovery=recovery)
+        except (KeyError, TypeError) as error:
+            raise ValueError("invalid expired planned entry cancellation claim") from error
 
 
 def validate_planned_leader_stop(
@@ -667,6 +699,20 @@ def position_cost_fifo(exact_fills, costs, trading_date, *, cost_query_complete=
     return lots, realized, missing_costs, unmatched_sell
 
 
+def mock_automation_risk_account_revision(recovery: MockAccountRecovery) -> str:
+    account = recovery.account
+    positions = {str(symbol): int(quantity) for symbol, quantity in account.positions.items() if int(quantity) > 0}
+    return _sha256({
+        "account_ref": account.account_ref,
+        "available_cash_won": account.available_cash_won,
+        "reserved_open_buy_won": account.reserved_open_buy_won,
+        "positions": sorted(positions.items()),
+        "as_of": account.as_of.isoformat(),
+        "orders": sorted((order.broker_order_id, order.state.value, order.filled_quantity,
+                          order.remaining_quantity, order.as_of.isoformat()) for order in recovery.orders),
+    })
+
+
 def build_mock_automation_risk_snapshot(
     recovery: MockAccountRecovery,
     events: Sequence[AccountExecutionEvent],
@@ -733,15 +779,7 @@ def build_mock_automation_risk_snapshot(
         for value in sorted(costs, key=lambda item: (item.fill_date, item.stock_code, item.side))
     ]
     cost_revision = _sha256(cost_document)
-    account_revision = _sha256({
-        "account_ref": account.account_ref,
-        "available_cash_won": account.available_cash_won,
-        "reserved_open_buy_won": account.reserved_open_buy_won,
-        "positions": sorted(broker_positions.items()),
-        "as_of": account.as_of.isoformat(),
-        "orders": sorted((order.broker_order_id, order.state.value, order.filled_quantity,
-                          order.remaining_quantity, order.as_of.isoformat()) for order in recovery.orders),
-    })
+    account_revision = mock_automation_risk_account_revision(recovery)
     body = {
         **({'owned_entry_prices':[list(v) for v in sorted(entry_prices.items())]} if entry_prices else {}),
         "version": MOCK_AUTOMATION_RISK_VERSION,

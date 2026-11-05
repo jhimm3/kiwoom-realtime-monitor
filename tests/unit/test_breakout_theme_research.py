@@ -8,6 +8,7 @@ from kiwoom_monitor.application.breakout_theme_research import (
     BreakoutEntryProof,
     BreakoutThemePolicy,
     BreakoutThemePosition,
+    ReconstructedMarketTurnoverRatio,
     ThemeRole,
     ThemeRoleProof,
     evaluate_breakout_theme,
@@ -231,6 +232,32 @@ class BreakoutThemeResearchTests(unittest.TestCase):
                                  self.decide(policy=policy, bar=bar, entry_proofs=unavailable).reason)
         weak = self.decide(policy=policy, bar=bar, entry_proofs=(self.market_proof(149),))
         self.assertEqual("breakout_market_relative_turnover_below_threshold", weak.reason)
+
+    def test_reconstructed_b2_proxy_requires_the_exact_replay_cut_and_preserves_pit_default(self):
+        scope = "daishin_creon:StockChart:U001"
+        policy = self.filtered("B2", market_scope=scope)
+        end = datetime.fromisoformat(self.signal.bar_end)
+        archive_at = end + timedelta(days=10)
+        proxy = ReconstructedMarketTurnoverRatio(scope, end, end, archive_at, 151, 201, ("archived-row",))
+        replay = replace(self.signal, available_at=self.signal.bar_end, trade_value_million_won=2,
+                         finalization_source="daishin_completed_history_job")
+
+        def decide(bar, value):
+            return evaluate_breakout_theme(policy, bar=bar, history=self.prior, proofs=(), position=None, setup=None,
+                                           reconstructed_market_proxy=value)
+
+        accepted = decide(replay, proxy)
+        self.assertEqual(("ENTER", (proxy,)), (accepted.action, accepted.setup.entry_proofs))
+        self.assertIn("archived-row", accepted.evidence_refs)
+        self.assertEqual("breakout_market_relative_turnover_below_threshold",
+                         decide(replay, replace(proxy, observed_raw=150)).reason)
+        self.assertEqual("breakout_market_turnover_unavailable",
+                         decide(replay, replace(proxy, scope="daishin_creon:StockChart:U201")).reason)
+        self.assertEqual("breakout_market_turnover_unavailable",
+                         decide(replace(replay, available_at=self.signal.available_at), proxy).reason)
+        self.assertEqual("breakout_market_turnover_unavailable",
+                         decide(replace(replay, finalization_source="fixture-native"), proxy).reason)
+        self.assertEqual("breakout_market_turnover_unavailable", decide(replay, None).reason)
 
     def test_b3_compares_context_separately_and_never_uses_late_or_reconstructed_context(self):
         bar = replace(self.signal, trade_value_million_won=2)

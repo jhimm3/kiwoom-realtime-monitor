@@ -362,6 +362,7 @@ class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCa
         self._head = PlannedLeaderPartialProtectionTests._head.__get__(self)
         self._risk_cut = PlannedLeaderPartialProtectionTests._risk_cut.__get__(self)
         self._verify_partial_buy_protection = PlannedLeaderPartialProtectionTests._verify_partial_buy_protection.__get__(self)
+        self._verify_expired_plan_cancel = PlannedLeaderPartialProtectionTests._verify_expired_plan_cancel.__get__(self)
 
     async def test_typed_partial_buy_cancel_and_protective_sell_use_resolved_late_fill_after_restart(self):
         from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
@@ -377,3 +378,13 @@ class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCa
         from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
 
         await PlannedLeaderPartialProtectionTests.test_typed_stop_uses_refreshed_risk_and_protects_full_fill_after_unknown_cancel(self)
+
+    async def test_expired_zero_fill_plan_cancels_once_without_position_authority(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_expired_zero_fill_plan_cancels_once_without_position_authority(self)
+
+    async def test_expired_zero_fill_plan_keeps_late_detail_without_stop_authority(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_expired_zero_fill_plan_keeps_late_detail_without_stop_authority(self)

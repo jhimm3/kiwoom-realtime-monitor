@@ -181,7 +181,9 @@ class ExecutionRepository:
                 raise ValueError('execution_claim_purposes_conflict')
             self._automation_control['cancel_retry_claim']=dict(cancel_retry_claim)
         if planned_cancel_claim is not None:
-            if any(value is not None for value in (replacement_claim, protection_claim, cancel_retry_claim, plan_recovery)):
+            expiry_cancel = planned_cancel_claim.get("version") == "planned-leader-expired-entry-cancel/v1"
+            if (any(value is not None for value in (replacement_claim, protection_claim, cancel_retry_claim))
+                    or (plan_recovery is not None) != expiry_cancel):
                 raise ValueError("execution_claim_purposes_conflict")
             self._automation_control["planned_cancel_claim"] = dict(planned_cancel_claim)
         if plan_recovery is not None:

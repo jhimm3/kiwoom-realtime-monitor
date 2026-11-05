@@ -1371,6 +1371,14 @@ class LeaderBreakoutSelectionTests(unittest.TestCase):
 
         self.dialog._append_event({"strategy_id": "breakout_study", "strategy_variant": "B1", "symbol": "005930"})
         self.assertEqual("Section 12 완료봉 돌파 · B1", self.dialog._table.item(0, 6).text())
+        self.dialog._apply_page({"initial_sync": True, "quality": {
+            "status": "READY", "input_mode": "section12_completed_minute", "strategy_variant": "B2",
+            "candidate_universe_scope": "explicit_symbols", "last_decision_at": "2026-09-14T00:13:02+00:00",
+            "reason": "breakout_market_turnover_unavailable",
+        }, "events": []})
+        self.assertEqual("breakout_market_turnover_unavailable", self.dialog._quality.toolTip())
+        for text in ("B2", "명시 종목", "09-14 09:13:02", "동일 범위 시장 대금"):
+            self.assertIn(text, self.dialog._quality.text())
 
     def test_missing_server_config_uses_unconfigured_new_policy(self):
         self.dialog._apply_operational_settings({"revision": 5})

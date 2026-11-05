@@ -122,6 +122,35 @@ class MarketTurnoverValues:
         _require_nonnegative(self.observed_turnover_won, self.baseline_median_turnover_won)
 
 
+RECONSTRUCTED_MARKET_PROXY_VERSION = "reconstructed_daishin_index_turnover_ratio/v1"
+RECONSTRUCTED_MARKET_PROXY_SCOPES = frozenset(
+    f"daishin_creon:StockChart:{code}" for code in ("U001", "U201")
+)
+
+
+@dataclass(frozen=True)
+class ReconstructedMarketTurnoverRatio:
+    scope: str
+    minute_end: datetime
+    replay_available_at_proxy: datetime
+    archive_recorded_at: datetime
+    observed_raw: int
+    baseline_middle_sum_raw: int
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.scope not in RECONSTRUCTED_MARKET_PROXY_SCOPES:
+            raise ValueError("unknown reconstructed market scope")
+        if any(moment.utcoffset() is None for moment in (
+                self.minute_end, self.replay_available_at_proxy, self.archive_recorded_at)):
+            raise ValueError("reconstructed market times must include their timezone")
+        if self.minute_end != self.replay_available_at_proxy or self.archive_recorded_at <= self.minute_end:
+            raise ValueError("reconstructed market availability and archival receipt are distinct")
+        _require_nonnegative(self.observed_raw, self.baseline_middle_sum_raw)
+        if min(self.observed_raw, self.baseline_middle_sum_raw) <= 0 or not self.evidence_refs:
+            raise ValueError("reconstructed market ratio requires positive raw values and evidence")
+
+
 @dataclass(frozen=True)
 class BreakoutEntryProof:
     kind: Literal["market_relative_turnover", "daily_headroom", "catalyst"]
@@ -239,7 +268,7 @@ class FilteredBreakoutThemeSetup(BreakoutThemeSetup):
     previous_close_won: int
     signal_turnover_million_won: int
     prior_turnover_sum_million_won: int
-    entry_proofs: tuple[BreakoutEntryProof, ...]
+    entry_proofs: tuple[BreakoutEntryProof | ReconstructedMarketTurnoverRatio, ...]
 
 
 @dataclass(frozen=True)
@@ -273,6 +302,7 @@ def evaluate_breakout_theme(
     position: BreakoutThemePosition | None,
     setup: BreakoutThemeSetup | None,
     entry_proofs: Iterable[BreakoutEntryProof] = (),
+    reconstructed_market_proxy: ReconstructedMarketTurnoverRatio | None = None,
 ) -> BreakoutThemeDecision:
     """Return a decision at receipt. The next eligible open belongs to execution."""
     start, end, cutoff = _bar_times(bar)
@@ -305,7 +335,9 @@ def evaluate_breakout_theme(
     filtered_setup = {}
     setup_type = BreakoutThemeSetup
     if isinstance(policy, FilteredBreakoutThemePolicy):
-        reason, selected, refs = _filter_entry(policy.entry_filters, bar, prior, end, cutoff, entry_proofs, refs)
+        reason, selected, refs = _filter_entry(
+            policy.entry_filters, bar, prior, end, cutoff, entry_proofs, refs, reconstructed_market_proxy,
+        )
         if reason:
             return BreakoutThemeDecision("WAIT", 0, reason, evidence_refs=refs)
         turnover, observations = selected
@@ -334,7 +366,7 @@ def evaluate_breakout_theme(
                                  preceding_revision_id=preceding[0].revision_id if preceding else None)
 
 
-def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs):
+def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs, reconstructed_market_proxy):
     # Completed history and native receipts both carry bar turnover. The run
     # records separately whether the decision clock was reconstructed.
     if any(type(row.trade_value_million_won) is not int or row.trade_value_million_won < 0
@@ -352,14 +384,24 @@ def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs):
         return "", (turnover, ()), refs
 
     evidence = tuple(evidence)
-    market = _entry_proof_at(evidence, "market_relative_turnover", filters.market_scope, cutoff, effective_at=end)
-    if market is None:
-        return "breakout_market_turnover_unavailable", None, refs
-    refs = _proof_refs(refs, market)
-    values = market.value
-    if not isinstance(values, MarketTurnoverValues) or values.baseline_median_turnover_won <= 0:
-        return "breakout_market_turnover_unavailable", None, refs
-    if values.observed_turnover_won * 10_000 < values.baseline_median_turnover_won * filters.minimum_market_relative_turnover_bps:
+    if reconstructed_market_proxy is not None:
+        market = reconstructed_market_proxy
+        if (bar.finalization_source != "daishin_completed_history_job"
+                or market.scope != filters.market_scope or market.minute_end != end
+                or market.replay_available_at_proxy != cutoff):
+            return "breakout_market_turnover_unavailable", None, refs
+        refs = tuple(dict.fromkeys((*refs, *market.evidence_refs)))
+        observed, median = 2 * market.observed_raw, market.baseline_middle_sum_raw
+    else:
+        market = _entry_proof_at(evidence, "market_relative_turnover", filters.market_scope, cutoff, effective_at=end)
+        if market is None:
+            return "breakout_market_turnover_unavailable", None, refs
+        refs = _proof_refs(refs, market)
+        values = market.value
+        if not isinstance(values, MarketTurnoverValues) or values.baseline_median_turnover_won <= 0:
+            return "breakout_market_turnover_unavailable", None, refs
+        observed, median = values.observed_turnover_won, values.baseline_median_turnover_won
+    if observed * 10_000 < median * filters.minimum_market_relative_turnover_bps:
         return "breakout_market_relative_turnover_below_threshold", None, refs
 
     selected = [market]

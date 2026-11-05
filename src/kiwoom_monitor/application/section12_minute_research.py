@@ -167,9 +167,10 @@ class MinuteShadowConfig:
 class MinuteExperimentRun:
     """Keep observed setups and actual paper fills together for one run."""
 
-    def __init__(self, config: MinuteExperiment, references) -> None:
+    def __init__(self, config: MinuteExperiment, references, *, reconstructed_market_values=None) -> None:
         self.config = config
         self.references = references
+        self.reconstructed_market_values = reconstructed_market_values
         self.setups: dict[str, Any] = {}
         self.armed: dict[str, Any] = {}
         self.reduced: dict[str, int] = {}
@@ -224,7 +225,10 @@ class MinuteExperimentRun:
             holding = (BreakoutThemePosition(position.quantity, position.entry_price, datetime.fromisoformat(position.opened_at))
                        if position is not None else None)
             decision = evaluate_breakout_theme(self.config.policy, bar=bar, history=bars, proofs=self.config.theme_proofs,
-                                               entry_proofs=self.config.breakout_entry_proofs, position=holding, setup=setup)
+                                               entry_proofs=self.config.breakout_entry_proofs, position=holding, setup=setup,
+                                               reconstructed_market_proxy=self.reconstructed_market_values.get(
+                                                   datetime.fromisoformat(bar.bar_end),
+                                               ) if self.reconstructed_market_values is not None else None)
             action, reason, setup = decision.action, decision.reason, decision.setup
             quantity, refs = decision.quantity, decision.evidence_refs
         else:

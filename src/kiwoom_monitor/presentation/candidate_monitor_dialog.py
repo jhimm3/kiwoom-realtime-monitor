@@ -385,7 +385,14 @@ class CandidateMonitorDialog(QDialog):
         self._render_document_baselines(quality)
         status = _quality_status(quality.get("status", "UNKNOWN"))
         reason = _quality_reason(quality.get("reason", ""))
-        self._quality.setText(f"NAS 후보: {status}" + (f" · {reason}" if reason else ""))
+        if quality.get("input_mode") == "section12_completed_minute":
+            strategy = _minute_shadow_label(quality.get("strategy_variant"))
+            scope = {"explicit_symbols": "명시 종목", "top20_membership": "당시 TOP20"}.get(
+                quality.get("candidate_universe_scope"), "관찰 범위 미확인")
+            at = _display_time(quality.get("last_decision_at")) if quality.get("last_decision_at") else ""
+            self._quality.setText(" · ".join(value for value in (strategy, scope, status, at, reason) if value))
+        else:
+            self._quality.setText(f"NAS 후보: {status}" + (f" · {reason}" if reason else ""))
         self._quality.setToolTip(str(quality.get('reason','')))
         initial = bool(page.get("initial_sync"))
         self._settings.setValue(
@@ -1540,6 +1547,15 @@ def _quality_reason(value: object) -> str:
         "candidate_universe_missing": "실시간 순위 자료를 기다리는 중입니다",
         "fresh": "자료가 정상입니다",
         "outside_krx_regular_strategy_session": "현재는 이 전략의 관찰 시간 밖입니다",
+        "complete_regular_minute_unavailable": "확정된 정규장 분봉 근거가 부족합니다",
+        "breakout_prior_ten_minutes_unavailable": "연속된 이전 10개 분봉이 필요합니다",
+        "breakout_market_turnover_unavailable": "판단 시점의 동일 범위 시장 대금 근거가 없습니다",
+        "breakout_daily_headroom_unavailable": "판단 시점의 일봉 상승 여백 근거가 없습니다",
+        "breakout_catalyst_unavailable": "판단 시점의 재료 근거가 없습니다",
+        "theme_role_not_known_at_signal": "판단 시점의 테마 내 역할이 확인되지 않았습니다",
+        "close_or_next_open_evidence_unavailable": "종가 단일가 또는 다음 거래일 개장 근거가 없습니다",
+        "listing_unknown": "판단 시점의 상장 근거가 확인되지 않았습니다",
+        "panic_news_unresolved": "급락 시점에 확인된 재료 판단이 없습니다",
     }
     if reason.startswith("candidate_universe_stale:"):
         return "사용할 최신 순위 자료가 아직 없습니다"

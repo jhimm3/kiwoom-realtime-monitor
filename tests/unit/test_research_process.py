@@ -1154,6 +1154,101 @@ class ResearchProcessTests(unittest.TestCase):
             b1_manifest = json.loads(Path(reconstructed["runs"][1]["manifest"]).read_text(encoding="utf-8"))
             self.assertEqual("reconstructed_completed_bar_end_proxy", b1_manifest["spec"]["observation_clock_basis"])
 
+            from kiwoom_monitor.application.research_splits import DevelopmentPartitionSpec
+            from kiwoom_monitor.infrastructure.research_data_source import load_research_input, prepare_development_partition
+
+            request["evaluation"]["folds"][0]["end"] = at(15)
+            path.write_text(json.dumps(request), encoding="utf-8")
+            evaluation = load_research_process_request(path).evaluation
+            prepared = prepare_development_partition(
+                load_research_input(root / "dataset"),
+                DevelopmentPartitionSpec("development_partition/v2", evaluation.folds[0].name),
+                evaluation,
+            )
+            frozen = root / "frozen-development"
+            frozen.mkdir()
+            manifest_path = frozen / "manifest.json"
+            encoded = "\n".join(json.dumps(row) for row in prepared.observations).encode()
+            (frozen / "observations.jsonl").write_bytes(encoded)
+            manifest = {**prepared.manifest, "observations_file": "observations.jsonl",
+                        "observations_file_hash": hashlib.sha256(encoded).hexdigest()}
+            manifest_bytes = json.dumps(manifest).encode()
+            manifest_path.write_bytes(manifest_bytes)
+            request["dataset"] = frozen.name
+            request["evaluation"] = manifest["development_partition"]["evaluation"]
+            archive_at = at(400)
+            scopes = ("daishin_creon:StockChart:U001", "daishin_creon:StockChart:U201")
+            source_pages, proxy_rows = {}, []
+            for scope, value in zip(scopes, (151, 150)):
+                code = scope.rsplit(":", 1)[-1]
+                source_pages[code] = {
+                    "provider": "daishin_creon", "kind": "index_1m", "code": code,
+                    "field_ids": [0, 1, 2, 3, 4, 5, 8, 9], "observed_at": archive_at,
+                }
+                for minute in range(1, 381):
+                    refs = [[code, hashlib.sha256(f"{minute}:{index}".encode()).hexdigest()] for index in range(21)]
+                    proxy_rows.append({
+                        "scope": scope, "minute_end": at(minute), "replay_available_at_proxy": at(minute),
+                        "archive_recorded_at": archive_at, "observed_raw": value, "baseline_middle_sum_raw": 201,
+                        "current_source_ref": refs[0], "baseline_source_refs": refs[1:],
+                    })
+            proxy = {
+                "version": "reconstructed_daishin_index_turnover_ratio/v1", "input_basis": "reconstructed",
+                "replay_clock_basis": "historical_bar_close", "market_unit": "provider_raw_unspecified",
+                "dataset": {
+                    **{key: manifest[key] for key in ("dataset_id", "observations_file_hash", "revision_ids_hash")},
+                    "manifest_file_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                    "partition_role": evaluation.folds[0].role, "trading_date": first.date().isoformat(),
+                },
+                "settings": {"baseline_sessions": 20, "comparison_threshold_bps": 15000,
+                             "measure": "same_kst_minute_amount/v1",
+                             "baseline_estimator": "even_median_middle_sum_over_two/v1"},
+                "baseline_dates": [(first.date() - timedelta(days=day)).isoformat() for day in range(20, 0, -1)],
+                "source_pages": source_pages, "values": proxy_rows,
+            }
+            proxy_bytes = json.dumps(proxy).encode()
+            (root / "market-proxy.json").write_bytes(proxy_bytes)
+            proxy_hash = hashlib.sha256(proxy_bytes).hexdigest()
+            request["reconstructed_market_proxy"] = {"path": "market-proxy.json", "sha256": proxy_hash}
+            path.write_text(json.dumps(request), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "without other market proofs"):
+                load_research_process_request(path)
+
+            scope_results = []
+            for scope, expected_count in zip(scopes, (1, 0)):
+                for variant in request["breakout_variants"][1:]:
+                    variant["policy"]["entry_filters"]["market_scope"] = scope
+                    variant.pop("entry_proofs", None)
+                path.write_text(json.dumps(request), encoding="utf-8")
+                result = execute_process_request(load_research_process_request(path))
+                self.assertEqual([1, 1, expected_count, 0], [run["candidate_count"] for run in result["runs"]])
+                for index, run in enumerate(result["runs"]):
+                    spec = repository.load_run(run["run_id"])["spec"]
+                    if index < 2:
+                        self.assertNotIn("reconstructed_market_proxy", spec)
+                    else:
+                        reference = spec["reconstructed_market_proxy"]
+                        self.assertEqual((scope, proxy_hash, 20), (reference["scope"], reference["sha256"],
+                                                                    reference["baseline_sessions"]))
+                scope_results.append([run["run_id"] for run in result["runs"]])
+            self.assertEqual(scope_results[0][:2], scope_results[1][:2])
+            self.assertNotEqual(scope_results[0][2:], scope_results[1][2:])
+            proxy_path = root / "market-proxy.json"
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                research_process._run_research_process(["--request", str(path), "--result", str(proxy_path)])
+            self.assertEqual(proxy_bytes, proxy_path.read_bytes())
+            proxy_path.write_bytes(proxy_bytes + b" ")
+            with self.assertRaisesRegex(ValueError, "artifact hash does not match"):
+                execute_process_request(load_research_process_request(path))
+
+            from kiwoom_monitor.application.research_resources import ResearchResourceBlocked
+            request["resource_budget"] = {"memory_mb": 128}
+            path.write_text(json.dumps(request), encoding="utf-8")
+            with proxy_path.open("ab") as large_proxy:
+                large_proxy.truncate(16 * 1024 * 1024 + 1)
+            with self.assertRaisesRegex(ResearchResourceBlocked, "input_memory_estimate_exceeds_limit"):
+                execute_process_request(load_research_process_request(path))
+
     def test_section12_account_risk_request_compares_equal_capital_reservations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -39,7 +39,7 @@ from kiwoom_monitor.application.section12_minute_research import (
 from kiwoom_monitor.domain.simulation_contract import COMPLETED_CLOSE_EXECUTION_VERSION
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import (
-    FrozenResearchDataset, FrozenStrategyReferences, research_observation_order,
+    FrozenResearchDataset, FrozenStrategyReferences, FrozenReconstructedMarketProxy, research_observation_order,
     development_partition_start, final_holdout_partition_start,
     DEVELOPMENT_INPUT_VERSION, FINAL_INPUT_VERSION,
 )
@@ -90,6 +90,7 @@ def execute_research(
     position_action_study=None, position_study_case=None,position_study_cohort=None,position_study_context=None,
     strategy_references: FrozenStrategyReferences | None = None,
     shadow_only: bool = False,
+    reconstructed_market_proxy: FrozenReconstructedMarketProxy | None = None,
 ) -> ResearchRunResult:
     leader = isinstance(config, LeaderBreakoutConfig)
     section12 = isinstance(config, MinuteExperiment)
@@ -104,7 +105,21 @@ def execute_research(
     if section12 and (session_profile != KRX_REGULAR_RESEARCH_PROFILE or (strategy_references is None and not historical_breakout)
                       or position_target_plan is not None or unfilled_action_plan is not None or position_action_study is not None):
         raise ValueError("minute experiments require pinned references and their own KRX regular execution")
-    experiment = MinuteExperimentRun(config, strategy_references) if section12 else None
+    if reconstructed_market_proxy is not None:
+        if (not historical_breakout or shadow_only or execution_scope is not None
+                or config.policy.variant not in {"B2", "B3"}
+                or dataset.manifest.get("runtime_input_version") != DEVELOPMENT_INPUT_VERSION
+                or dataset.manifest.get("dataset_id") != reconstructed_market_proxy.dataset_id
+                or config.policy.entry_filters.market_scope != reconstructed_market_proxy.scope
+                or config.policy.entry_filters.minimum_market_relative_turnover_bps
+                != reconstructed_market_proxy.comparison_threshold_bps
+                or any(proof.kind == "market_relative_turnover" for proof in config.breakout_entry_proofs)):
+            raise ValueError("reconstructed market proxy requires its own B2/B3 development proof source")
+    experiment = MinuteExperimentRun(
+        config, strategy_references, reconstructed_market_values=(
+            reconstructed_market_proxy.values if reconstructed_market_proxy is not None else None
+        ),
+    ) if section12 else None
     if strategy_references is not None and (
         session_profile is None or execution_scope is not None or leader
     ):
@@ -194,7 +209,8 @@ def execute_research(
                                         position_target_plan=position_target_plan,unfilled_action_plan=unfilled_action_plan,
                                         position_action_study=position_action_study,position_study_case=position_study_case,
                                         position_study_cohort=position_study_cohort,position_study_context=position_study_context,
-                                        strategy_references=strategy_references, shadow_only=shadow_only)
+                                        strategy_references=strategy_references, shadow_only=shadow_only,
+                                        reconstructed_market_proxy=reconstructed_market_proxy)
     if expected_code_hash is not None and spec['code_hash'] != expected_code_hash:
         raise ValueError('research implementation changed during locked validation')
     if final_scope:
@@ -561,6 +577,7 @@ def execute_rank_comparison(
 def execute_breakout_filter_comparison(
     dataset, repository, runs_dir, configs, execution_config, evaluation_spec,
     cancel_requested, session_profile, resource_guard, *, strategy_references,
+    reconstructed_market_proxy: FrozenReconstructedMarketProxy | None = None,
 ) -> tuple[tuple[ResearchRunResult, ...], tuple[ResearchComparisonResult, ...]]:
     """Compare each added entry filter against its immediate predecessor."""
     if (len(evaluation_spec.folds) != 1 or evaluation_spec.folds[0].role == "OOS"
@@ -584,6 +601,7 @@ def execute_breakout_filter_comparison(
     runs = tuple(execute_research(
         dataset, repository, runs_dir, config, execution_config, evaluation_spec,
         cancel_requested, session_profile, resource_guard, strategy_references=strategy_references,
+        reconstructed_market_proxy=reconstructed_market_proxy if config.policy.variant in {"B2", "B3"} else None,
     ) for config in configs)
     conditions = ("breakout_price_turnover_filter", "breakout_market_turnover_filter", "breakout_daily_context_filter")
     comparisons = tuple(_save_research_pair(
@@ -642,7 +660,8 @@ def _save_research_pair(
 def research_run_identity(dataset, config, execution_config, evaluation_spec, *, session_profile=None, execution_scope=None,
                           position_target_plan=None, unfilled_action_plan=None,
                           position_action_study=None,position_study_case=None,position_study_cohort=None,position_study_context=None,
-                          strategy_references: FrozenStrategyReferences | None = None, shadow_only: bool = False):
+                          strategy_references: FrozenStrategyReferences | None = None, shadow_only: bool = False,
+                          reconstructed_market_proxy: FrozenReconstructedMarketProxy | None = None):
     """Shared scientific identity; default legacy run identity is unchanged."""
     if execution_scope not in (None, 'independent_development_validation/v1', 'independent_final_holdout/v1'):
         raise ValueError('unsupported research execution scope')
@@ -653,6 +672,8 @@ def research_run_identity(dataset, config, execution_config, evaluation_spec, *,
     spec = _run_spec(dataset.manifest, config, execution_config, evaluation_spec, session_profile=session_profile)
     if strategy_references is not None:
         spec['strategy_references'] = {'version': 'strategy-reference/v1', 'sha256': strategy_references.sha256}
+    if reconstructed_market_proxy is not None:
+        spec["reconstructed_market_proxy"] = reconstructed_market_proxy.identity()
     if shadow_only:
         spec['observation_mode'] = 'shadow-replay/v1'
     if execution_scope is not None:

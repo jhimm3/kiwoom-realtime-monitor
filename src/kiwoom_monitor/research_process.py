@@ -73,7 +73,8 @@ from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_
 from kiwoom_monitor.domain.simulation_contract import COMPLETED_CLOSE_EXECUTION_VERSION
 from kiwoom_monitor.infrastructure.research_storage import validate_research_storage_root
 from kiwoom_monitor.infrastructure.research_data_source import (prepare_development_partition,
-    prepare_final_holdout_partition, final_holdout_partition_start, FrozenResearchDataset)
+    prepare_final_holdout_partition, final_holdout_partition_start, FrozenResearchDataset,
+    load_reconstructed_market_proxy)
 from kiwoom_monitor.application.research_resources import ResearchResourceGuard, ResearchResourceLimits, ResearchResourceBlocked
 from kiwoom_monitor.application.research_implementation import research_implementation_hash
 from kiwoom_monitor.research_run import (
@@ -119,6 +120,7 @@ class ResearchProcessRequest:
     strategy_references: tuple[Path, str] | None = None
     shadow_only: bool = False
     breakout_variants: tuple[MinuteExperiment, ...] = ()
+    reconstructed_market_proxy: tuple[Path, str] | None = None
 
     def __post_init__(self) -> None:
         if self.evaluation.source_event_links and (
@@ -126,6 +128,13 @@ class ResearchProcessRequest:
             or self.development_partition is not None
         ):
             raise ValueError("source event links require a Section 12 development single_run")
+        if self.reconstructed_market_proxy is not None and (
+                self.mode != BREAKOUT_COMPARISON_MODE or self.family != BREAKOUT_STUDY_FAMILY
+                or self.shadow_only or self.development_partition is not None
+                or len(self.breakout_variants) != 3
+                or any(proof.kind == "market_relative_turnover" for config in self.breakout_variants
+                       for proof in config.breakout_entry_proofs)):
+            raise ValueError("reconstructed market proxy requires a breakout development comparison without other market proofs")
 
 
 EVIDENCE_EXPERIMENT_FAMILIES = {
@@ -679,6 +688,8 @@ def load_research_process_request(path: Path) -> ResearchProcessRequest | Leader
 
 def research_process_request_from_document(document: Mapping[str, Any], root: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest | EvidenceExperimentRequest:
     mode = str(document.get("mode", ""))
+    if "reconstructed_market_proxy" in document and mode != BREAKOUT_COMPARISON_MODE:
+        raise ValueError("reconstructed_market_proxy requires breakout_filter_comparison")
     if mode in EVIDENCE_EXPERIMENT_FAMILIES:
         required = {"mode", "dataset", "dataset_sha256", "policy", "database", "runs_dir"}
         if not required <= set(document) or set(document) - required - {"resource_budget"}:
@@ -788,6 +799,18 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         breakout_variants = _breakout_filter_variants(strategy, document.get("breakout_variants"))
     elif "breakout_variants" in document:
         raise ValueError("breakout_variants requires breakout_filter_comparison")
+    reconstructed_market_proxy = None
+    if "reconstructed_market_proxy" in document:
+        reference = _mapping(document["reconstructed_market_proxy"], "reconstructed_market_proxy")
+        digest = reference.get("sha256")
+        if (set(reference) != {"path", "sha256"} or not isinstance(reference["path"], str)
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError("reconstructed_market_proxy requires a path and lowercase SHA256")
+        path = _request_path(root, reference["path"], "reconstructed_market_proxy.path")
+        if path == database or _is_within(path, runs_dir):
+            raise ValueError("research outputs must not overwrite the reconstructed market proxy")
+        reconstructed_market_proxy = (path, digest)
     search = None
     if mode == "limited_search":
         search_raw = _mapping(document.get("search"), "search")
@@ -827,6 +850,7 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         strategy_references=references,
         shadow_only=shadow_only,
         breakout_variants=breakout_variants,
+        reconstructed_market_proxy=reconstructed_market_proxy,
         session_profile=session_profile,
         search=search,
         resource_limits=ResearchResourceLimits(
@@ -1167,14 +1191,19 @@ def execute_process_request(
         if campaign_cycle is not None:
             raise ValueError("evidence experiments run outside a campaign")
         return _execute_evidence_experiment(request, resource_guard, cancelled)
-    linked_development = isinstance(request, ResearchProcessRequest) and bool(request.evaluation.source_event_links)
-    resource_guard.preflight(research_input_encoded_bytes(request.dataset, development_only=linked_development))
+    development_only = isinstance(request, ResearchProcessRequest) and bool(
+        request.evaluation.source_event_links or request.reconstructed_market_proxy
+    )
+    encoded_bytes = research_input_encoded_bytes(request.dataset, development_only=development_only)
+    if isinstance(request, ResearchProcessRequest) and request.reconstructed_market_proxy is not None:
+        encoded_bytes += request.reconstructed_market_proxy[0].stat().st_size
+    resource_guard.preflight(encoded_bytes)
     def loading_checkpoint():
         if cancelled is not None and cancelled():
             raise ResearchRunCancelled('research input loading cancellation requested')
         resource_guard.checkpoint()
     dataset = load_research_input(request.dataset, session_profile=request.session_profile,
-                                  checkpoint=loading_checkpoint, development_only=linked_development)
+                                  checkpoint=loading_checkpoint, development_only=development_only)
     if isinstance(request, LeaderBreakoutProcessRequest):
         if campaign_cycle is not None:
             return _execute_leader_decision_campaign(request, dataset, campaign_cycle, loading_checkpoint)
@@ -1200,6 +1229,17 @@ def execute_process_request(
             raise ValueError("pinned strategy references require ordered research without a separate partition request")
         path, digest = request.strategy_references
         strategy_references = load_frozen_strategy_references(path, expected_sha256=digest)
+    market_proxy = None
+    if request.reconstructed_market_proxy is not None:
+        path, digest = request.reconstructed_market_proxy
+        market_filters = request.breakout_variants[1].policy.entry_filters
+        market_proxy = load_reconstructed_market_proxy(
+            path, expected_sha256=digest, scope=market_filters.market_scope,
+            dataset=dataset, dataset_path=request.dataset, evaluation=request.evaluation,
+            checkpoint=loading_checkpoint,
+        )
+        if market_filters.minimum_market_relative_turnover_bps != market_proxy.comparison_threshold_bps:
+            raise ValueError("reconstructed market proxy differs from the pinned market threshold")
     if campaign_cycle is not None:
         if request.search is None or request.search.to_dict() != campaign_cycle.get('request') or build_research_job_identity(request.search).job_id != campaign_cycle.get('job_id'):
             raise ValueError('stored campaign identity does not match its execution request')
@@ -1468,8 +1508,11 @@ def execute_process_request(
         runs, pairs = execute_breakout_filter_comparison(
             dataset, repository, request.runs_dir, configs, request.execution, request.evaluation,
             cancelled, request.session_profile, resource_guard, strategy_references=strategy_references,
+            reconstructed_market_proxy=market_proxy,
         )
         context = _section12_minute_result(repository, runs[0].run_id, tuple(config.policy.variant for config in configs))
+        if market_proxy is not None:
+            context["reconstructed_market_proxy"] = market_proxy.identity()
         return {
             "status": "ok", "kind": BREAKOUT_COMPARISON_MODE, "order_authorized": False,
             "section12": context,
@@ -2664,15 +2707,16 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                 if any(path == input_path or (name == "dataset" and _is_within(path, input_path))
                        for path in outputs):
                     parser.error("research result/cancel must not overwrite database or frozen dataset")
-            reference_header = request_header.get("strategy_references")
-            if isinstance(reference_header, dict) and isinstance(reference_header.get("path"), str):
-                try:
-                    reference_path = _request_path(request_path.parent, reference_header["path"], "strategy_references.path")
-                except (OSError, ValueError):
-                    pass  # The request loader reports malformed paths to a separate result.
-                else:
-                    if reference_path in outputs:
-                        parser.error("research result/cancel must not overwrite the strategy reference")
+            for field in ("strategy_references", "reconstructed_market_proxy"):
+                reference_header = request_header.get(field)
+                if isinstance(reference_header, dict) and isinstance(reference_header.get("path"), str):
+                    try:
+                        reference_path = _request_path(request_path.parent, reference_header["path"], f"{field}.path")
+                    except (OSError, ValueError):
+                        pass  # The request loader reports malformed paths to a separate result.
+                    else:
+                        if reference_path in outputs:
+                            parser.error(f"research result/cancel must not overwrite {field}")
             mode = request_header.get("mode")
             if mode == "daily_decline_experiment" and isinstance(request_header.get("dataset"), str):
                 # Fence the nested frozen input even when the descriptor digest

@@ -17,6 +17,7 @@ from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot,
     BrokerOrderSnapshot,
     OrderIntent,
+    OrderPlanRef,
     OrderSide,
     OrderState,
     OrderType,
@@ -28,7 +29,9 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRe
 from .market_observations import KST, as_kst
 
 if TYPE_CHECKING:
-    from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderCancelClaim, PlannedLeaderStopCancelRequest
+    from kiwoom_monitor.application.mock_automation_risk import (
+        PlannedLeaderCancelClaim, PlannedLeaderExpiredEntryCancelClaim, PlannedLeaderStopCancelRequest,
+    )
 
 
 class ExecutionRuntime:
@@ -301,7 +304,9 @@ class ExecutionRuntime:
         before_cancel_claim: Callable[[], None] | None = None,
         cancel_retry_claim: dict | None = None,
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
-        build_planned_cancel_claim: Callable[[ExecutionRecord], PlannedLeaderCancelClaim] | None = None,
+        build_planned_cancel_claim: Callable[
+            [ExecutionRecord], PlannedLeaderCancelClaim | PlannedLeaderExpiredEntryCancelClaim,
+        ] | None = None,
     ) -> ExecutionRecord:
         """One guarded cancellation claim for the exact assessed native order.
 
@@ -357,9 +362,13 @@ class ExecutionRuntime:
                     if planned_cancel_claim is None:
                         raise ValueError("planned stop cancellation claim is missing")
                 if planned_cancel_claim is not None:
+                    from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderExpiredEntryCancelClaim
+
                     self._repository.bind_automation_control(
                         spec_id=spec_id, control_revision=control_revision,
                         planned_cancel_claim=planned_cancel_claim.to_dict(),
+                        **({"plan_recovery": planned_cancel_claim.recovery}
+                           if isinstance(planned_cancel_claim, PlannedLeaderExpiredEntryCancelClaim) else {}),
                     )
                 with self._observe_operation():
                     return self._lifecycle.cancel(
@@ -506,6 +515,7 @@ class ManualMockOrderGateway:
         cancel_retry_claim: dict | None = None,
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
         planned_stop_cancel_request: PlannedLeaderStopCancelRequest | None = None,
+        expired_entry_plan: OrderPlanRef | None = None,
     ) -> ExecutionRecord:
         """Reuse account refresh, command serialization and credential drain."""
         return await self._command(lambda: self._cancel_automation_intent(
@@ -514,6 +524,7 @@ class ManualMockOrderGateway:
             **({'cancel_retry_claim':cancel_retry_claim} if cancel_retry_claim is not None else {}),
             **({"planned_cancel_claim": planned_cancel_claim} if planned_cancel_claim is not None else {}),
             **({"planned_stop_cancel_request": planned_stop_cancel_request} if planned_stop_cancel_request is not None else {}),
+            **({"expired_entry_plan": expired_entry_plan} if expired_entry_plan is not None else {}),
         ))
 
     async def _cancel_automation_intent(
@@ -522,29 +533,33 @@ class ManualMockOrderGateway:
         cancel_retry_claim: dict | None = None,
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
         planned_stop_cancel_request: PlannedLeaderStopCancelRequest | None = None,
+        expired_entry_plan: OrderPlanRef | None = None,
     ) -> ExecutionRecord:
         async with self._command_lock:
-            if planned_stop_cancel_request is not None and (planned_cancel_claim is not None or cancel_retry_claim is not None):
+            if sum(claim is not None for claim in (
+                planned_stop_cancel_request, expired_entry_plan, planned_cancel_claim, cancel_retry_claim,
+            )) > 1:
                 raise ValueError("execution_claim_purposes_conflict")
             current, history = await asyncio.to_thread(self._read_automation_cancel, expected)
             already_claimed = any(event.get("event_type") == "CANCEL_STARTED" for event in history)
             build_claim = None
             account, cut = None, None
-            if planned_stop_cancel_request is not None:
-                plan = planned_stop_cancel_request.plan
+            plan = planned_stop_cancel_request.plan if planned_stop_cancel_request is not None else expired_entry_plan
+            if plan is not None:
                 if (not isinstance(current.intent, PlannedOrderIntent) or current.intent.intent_id != plan.plan_id
                         or (plan.plan_id, plan.policy_ref) != (current.intent.plan.plan_id, current.intent.plan.policy_ref)):
                     raise ValueError("planned stop cancellation root changed")
+                state = OrderState.ACCEPTED if expired_entry_plan is not None else OrderState.PARTIALLY_FILLED
                 if (not already_claimed and current.state not in TERMINAL_ORDER_STATES
-                        and (current.state is not OrderState.PARTIALLY_FILLED or self._automation_execution_cut is None)):
-                    raise ValueError("planned stop cancellation requires a refreshed owner cut")
+                        and (current.state is not state or self._automation_execution_cut is None)):
+                    raise ValueError("planned cancellation requires a refreshed owner cut")
             if (current.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
                     and (cancel_retry_claim is not None or not already_claimed)):
                 account = await self._account_refresh()
-                if planned_stop_cancel_request is not None:
+                if plan is not None:
                     cut = self._automation_execution_cut()
 
-            if planned_stop_cancel_request is not None:
+            if plan is not None:
                 def build_claim(record):
                     observation = cut.get("observation") if cut is not None else None
                     risk = cut.get("risk") if cut is not None else None
@@ -552,8 +567,14 @@ class ManualMockOrderGateway:
                             or observation.account != account or risk.account_as_of != account.as_of
                             or not observation.reconciliation_complete or not observation.open_orders_complete
                             or observation.unmapped_broker_order_ids or observation.open_orders != (record,)):
-                        raise ValueError("planned stop cancellation requires a refreshed owner cut")
-                    return planned_stop_cancel_request.claim_from(risk)
+                        raise ValueError("planned cancellation requires a refreshed owner cut")
+                    if planned_stop_cancel_request is not None:
+                        return planned_stop_cancel_request.claim_from(risk)
+                    from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderExpiredEntryCancelClaim
+
+                    return PlannedLeaderExpiredEntryCancelClaim(
+                        plan, risk.snapshot_id, risk.reconciliation_revision, cut["recovery"],
+                    )
             return await asyncio.to_thread(
                 self._runtime.cancel_automation_intent, expected,
                 spec_id=spec_id, control_revision=control_revision,
