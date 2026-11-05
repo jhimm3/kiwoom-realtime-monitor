@@ -199,11 +199,33 @@ def _save_final_minute_revision_postgres(
             now_provider=now_provider,
         )
 
+
+def _daily_query_revision_sources(
+    observations: list[tuple[str, MarketDataObservation[object]]],
+) -> list[ObservationRevisionSource]:
+    sources = []
+    for key, observation in observations:
+        value = observation.value
+        # Existing cache writers can supply metadata without a source request.
+        # Only a captured query response is evidence for immutable replay.
+        if not isinstance(value, dict) or "adjustment_mode" not in value:
+            continue
+        payload = {field: value[field] for field in (
+            "trading_date", "code", "market", "open", "high", "low", "close", "volume",
+            "trade_value_million_won", "adjustment_mode",
+        )}
+        payload["version"] = "daily_bar/v1"
+        sources.append(ObservationRevisionSource.from_observation(
+            "daily_bar", observation.subject, key, payload, observation,
+        ))
+    return sources
+
+
 def _load_sqlite_latest_revisions(
     connection: sqlite3.Connection,
     sources: list[ObservationRevisionSource],
 ) -> dict[tuple[str, str, str], tuple[object, object] | None]:
-    """Load the current revision for each minute key using bounded queries."""
+    """Load the current revision for each bar key using bounded queries."""
     keys = sorted({(source.kind, source.subject, source.observation_key, source.source_id)
                    for source in sources})
     latest_by_key: dict[tuple[str, str, str], tuple[object, object] | None] = {
@@ -563,7 +585,7 @@ def _load_postgres_latest_revisions(
     timings: dict[str, float] | None = None,
     lock_scopes: bool = True,
 ) -> dict[tuple[str, str, str], tuple[object, object] | None]:
-    """Read one latest revision per logical key, holding each source/subject writer scope.
+    """Read latest revisions for one bar kind, holding each source/subject writer scope.
 
     Query-response pages for a stock use one scope. Sorting the scopes keeps
     overlapping multi-stock batches from taking transaction locks out of order.
@@ -571,6 +593,8 @@ def _load_postgres_latest_revisions(
     Finalization already owns the stock/day locks used by all minute writers;
     it can reuse the lookup without acquiring a new source/subject lock scope.
     """
+    if not sources:
+        return {}
     keys = sorted({(source.subject, source.observation_key, source.source_id)
                    for source in sources})
     lock_started = monotonic()
@@ -582,13 +606,14 @@ def _load_postgres_latest_revisions(
     if timings is not None:
         timings["lock_seconds"] = monotonic() - lock_started
     lookup_started = monotonic()
+    kind_predicate = "kind='daily_bar'" if sources[0].kind == "daily_bar" else "kind='minute_bar'"
     cursor.execute(
         "SELECT k.subject,k.observation_key,k.source_id,r.revision_id,r.payload_hash "
         "FROM unnest(%s::text[],%s::text[],%s::text[]) "
         "AS k(subject,observation_key,source_id) "
         "LEFT JOIN LATERAL ("
         "SELECT revision_id,payload_hash FROM central_observation_revisions "
-        "WHERE kind='minute_bar' AND subject=k.subject "
+        f"WHERE {kind_predicate} AND subject=k.subject "
         "AND observation_key=k.observation_key AND source_id=k.source_id "
         "ORDER BY accepted_sequence DESC LIMIT 1"
         ") AS r ON true",
@@ -1132,6 +1157,7 @@ class SQLiteMarketBarStoreMixin:
                 connection, observations, multirow=True,
                 changed_bar_keys={_bar_metadata_key(row, minute=minute) for row in changed_bar_rows},
             )
+            revision_sources = []
             if minute and observations and self._observation_history_enabled:
                 revision_sources = [
                     ObservationRevisionSource.from_observation(
@@ -1152,6 +1178,9 @@ class SQLiteMarketBarStoreMixin:
                     )
                     for value, (key, observation) in zip(values, observations, strict=True)
                 ]
+            elif observations and self._observation_history_enabled:
+                revision_sources = _daily_query_revision_sources(observations)
+            if revision_sources:
                 latest_by_key = _load_sqlite_latest_revisions(connection, revision_sources)
                 _insert_sqlite_observation_revisions_batch(
                     connection, revision_sources, latest_by_key,
@@ -1729,6 +1758,7 @@ class PostgresMarketBarStoreMixin:
         bar_write_ms = metadata_ms = revision_ms = commit_ms = close_ms = 0
         revision_lookup_statements = revision_lookup_keys = revision_insert_statements = 0
         revision_sources_ms = revision_locks_ms = revision_lookup_ms = 0
+        daily_revision_prepare_ms = 0
         revision_rows_ms = revision_insert_execute_ms = 0
         revision_insert_rows = 0
         commit_wait_samples: list[dict[str, object]] = []
@@ -1778,8 +1808,20 @@ class PostgresMarketBarStoreMixin:
                         True, bar_statement_diagnostics,
                     ) if capture_enabled else cursor
                 )
+                revision_sources = []
+                revision_timings: dict[str, float] = {}
+                daily_latest_revisions = {}
                 if minute:
                     _lock_postgres_minute_day_scopes(cursor, values)
+                elif observations and self._observation_history_enabled:
+                    phase_started = monotonic()
+                    revision_sources = _daily_query_revision_sources(observations)
+                    revision_sources_ms = round((monotonic() - phase_started) * 1000)
+                    if revision_sources:
+                        daily_latest_revisions = _load_postgres_latest_revisions(
+                            cursor, revision_sources, timings=revision_timings,
+                        )
+                    daily_revision_prepare_ms = round((monotonic() - phase_started) * 1000)
                 phase_started = monotonic()
                 bar_rows = bar_value_rows(values, minute=minute)
                 changed_bar_rows: list[tuple[Any, ...]] = []
@@ -1846,9 +1888,10 @@ class PostgresMarketBarStoreMixin:
                         for value, (key, observation) in zip(values, observations, strict=True)
                     ]
                     revision_sources_ms = round((monotonic() - phase_started) * 1000)
-                    revision_timings: dict[str, float] = {}
-                    latest_by_key = _load_postgres_latest_revisions(
-                        cursor, revision_sources, timings=revision_timings,
+                if revision_sources:
+                    latest_by_key = (
+                        _load_postgres_latest_revisions(cursor, revision_sources, timings=revision_timings)
+                        if minute else daily_latest_revisions
                     )
                     revision_locks_ms = round(revision_timings.get("lock_seconds", 0.0) * 1000)
                     revision_lookup_ms = round(revision_timings.get("lookup_seconds", 0.0) * 1000)
@@ -1866,7 +1909,7 @@ class PostgresMarketBarStoreMixin:
                     revision_insert_execute_ms = round(insert_execute_seconds[0] * 1000)
                 else:
                     revision_insert_rows = 0
-                revision_ms = round((monotonic() - phase_started) * 1000)
+                revision_ms = daily_revision_prepare_ms + round((monotonic() - phase_started) * 1000)
 
             # During an explicitly enabled diagnostic capture, sample this exact
             # backend while COMMIT is in progress. WAL timing was enabled locally

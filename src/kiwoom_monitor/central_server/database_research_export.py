@@ -158,7 +158,7 @@ def _observation_export_inputs(
         raise ValueError("research export range is limited to one session (24 hours)")
     normalized_kinds = tuple(dict.fromkeys(str(kind).strip() for kind in kinds if str(kind).strip()))
     if not normalized_kinds or any(kind not in RESEARCH_OBSERVATION_KINDS for kind in normalized_kinds):
-        raise ValueError("research export kinds must be ranking, top20_membership, or minute_bar")
+        raise ValueError("research export kinds must be ranking, top20_membership, minute_bar, or daily_bar")
     return normalized_start, normalized_end, normalized_kinds
 
 
@@ -186,8 +186,9 @@ def _observation_export_manifest(
         "kinds": list(kinds),
         "subject": subject,
         "universe_rule": (
-            "top20-membership-with-minute-bars-v1"
-            if "minute_bar" in kinds else "top20_membership-v1"
+            "no-universe-observations-v1" if "daily_bar" in kinds and "top20_membership" not in kinds
+            else "top20-membership-with-minute-bars-v1" if "minute_bar" in kinds
+            else "top20_membership-v1"
         ),
         "timezone": "UTC",
         "order_policy_version": "available_at-ingest_sequence-revision_id-v1",

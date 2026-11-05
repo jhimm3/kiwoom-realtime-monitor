@@ -29,7 +29,8 @@ from kiwoom_monitor.presentation.process_control import (
 )
 from kiwoom_monitor.research_process import (load_research_process_request,
     load_independent_comparison_request, load_development_validation_request,
-    load_final_holdout_execution_request, FinalHoldoutExposureRequest)
+    load_final_holdout_execution_request, FinalHoldoutExposureRequest, EvidenceExperimentRequest,
+    EVIDENCE_EXPERIMENT_FAMILIES)
 from kiwoom_monitor.application.research_queue import ResearchCampaignPolicy, campaign_worker_retry_delay_ms
 from kiwoom_monitor.application.research_search import ExperimentSpec
 from kiwoom_monitor.application.research_evaluation import DevelopmentEvidence
@@ -1029,6 +1030,14 @@ class ResearchDialog(QDialog):
             self._run.setEnabled(not self._manager.is_running and self._registration is None)
             self._settings.setValue("request_path", str(path))
             return True
+        if isinstance(request, EvidenceExperimentRequest):
+            label = {"micro_experiment": "MICRO", "daily_decline_experiment": "DD",
+                     "account_risk_experiment": "계좌 자금·위험"}[request.mode]
+            self._summary.setText(f"{label} · 해시로 고정한 합성 입력 · {request.dataset.name}")
+            self._run.setText("합성 자료 재생")
+            self._run.setEnabled(not self._manager.is_running and self._registration is None)
+            self._settings.setValue("request_path", str(path))
+            return True
         self._table.setHorizontalHeaderLabels(("구간", "상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익"))
         folds = ", ".join(f"{fold.name}({fold.role})" for fold in request.evaluation.folds)
         cost = request.execution.cost_model
@@ -1039,7 +1048,7 @@ class ResearchDialog(QDialog):
             if search is not None else ""
         )
         self._summary.setText(
-            f"{request.mode} · {RESEARCH_FAMILY_LABELS[request.family]} ({request.family})"
+            f"{request.mode} · {RESEARCH_FAMILY_LABELS.get(request.family, request.family)} ({request.family})"
             f" · 데이터 {request.dataset.name} · 구간 {folds}"
             f"{search_text} · "
             f"비용 {cost.rate_basis if cost else '없음'} / {cost.source if cost else ''}"
@@ -1211,6 +1220,8 @@ class ResearchDialog(QDialog):
             self._table.setHorizontalHeaderLabels(("실행 준비", "상태", "성과", "성과", "", "입력", "미정 조건"))
         elif kind == "limited_search":
             self._table.setHorizontalHeaderLabels(("실험", "상태", "최대 낙폭", "손익", "완료 거래", "활성일", "사유"))
+        elif kind in EVIDENCE_EXPERIMENT_FAMILIES:
+            self._table.setHorizontalHeaderLabels(("실험", "재생 상태", "보유 수량", "", "", "자료", "사유"))
         if kind != "leader_breakout_performance" and (status == 'resource_blocked' or result.get('job_status') == 'resource_blocked'):
             self._status.setText('자원 한도 도달 · 메모리/CPU 예산을 확인한 뒤 다시 실행하세요')
             self._table.setRowCount(0)
@@ -1288,6 +1299,19 @@ class ResearchDialog(QDialog):
 
 
 def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, ...], ...]:
+    kind = result.get("kind")
+    if kind in EVIDENCE_EXPERIMENT_FAMILIES:
+        trace = result.get("result")
+        if not isinstance(trace, Mapping):
+            return ()
+        summary = trace.get("summary", trace)
+        if not isinstance(summary, Mapping):
+            return ()
+        setup = trace.get("setup", {})
+        setup_status = setup.get("status", "") if isinstance(setup, Mapping) else ""
+        return ((str(kind), str(summary.get("status", setup_status)),
+                 str(summary.get("position_quantity", summary.get("owned_quantity", ""))),
+                 "", "", "합성", str(summary.get("reason", ""))),)
     if result.get("kind") == "leader_breakout_performance" and result.get("status") == "blocked":
         return tuple(("실행 준비", "BLOCKED", "미산출", "미산출", "", "분봉", str(reason))
                      for reason in result.get("configuration_missing", ()))

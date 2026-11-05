@@ -160,6 +160,14 @@
     }
   ],
   "profiles": {
+    "section12-research": [
+      "tests.unit.test_close_and_ipo",
+      "tests.unit.test_breakout_theme_research",
+      "tests.unit.test_account_risk_research",
+      "tests.unit.test_daily_decline",
+      "tests.unit.test_micro_execution_evidence",
+      "tests.unit.test_panic_rebound"
+    ],
     "recorded-workload-p0": [
       "tests.unit.test_observation_delivery",
       "tests.unit.test_observation_frame_recovery",

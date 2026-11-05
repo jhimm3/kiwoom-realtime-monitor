@@ -11,6 +11,8 @@ COST_MODEL_VERSION = "fixed_bps/v1"
 COST_MODEL_DECIMAL_VERSION = "fixed_bps/v2"
 EXECUTION_MODEL_VERSION = "next_tradable_bar_open/v1"
 SAME_BAR_PATH_VERSION = "conservative_with_optimistic_bound/v1"
+COMPLETED_CLOSE_EXECUTION_VERSION = "completed_close_then_next_open/v1"
+NO_INTRABAR_PATH_VERSION = "no_intrabar_fill/v1"
 
 
 def _aware_datetime(value: object) -> datetime:
@@ -84,9 +86,13 @@ class SimulationExecutionConfig:
     cost_model: SimulationCostModel | None
 
     def __post_init__(self) -> None:
-        if self.version != EXECUTION_MODEL_VERSION:
+        path_models = {
+            EXECUTION_MODEL_VERSION: SAME_BAR_PATH_VERSION,
+            COMPLETED_CLOSE_EXECUTION_VERSION: NO_INTRABAR_PATH_VERSION,
+        }
+        if self.version not in path_models:
             raise ValueError(f"unregistered execution model: {self.version}")
-        if self.same_bar_path_version != SAME_BAR_PATH_VERSION:
+        if self.same_bar_path_version != path_models[self.version]:
             raise ValueError(f"unregistered same-bar path model: {self.same_bar_path_version}")
         if self.initial_cash_won <= 0:
             raise ValueError("initial_cash_won must be positive")

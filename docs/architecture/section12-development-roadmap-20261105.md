@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~03 수락 · 완료 3/5 · 다음 S12-04. 사용자 추가 범위는 별도 단계로 늘리지 않고 S12-01의 입력, S12-04의 전략·연구, S12-05의 검증에 포함한다.
+**현재 상태.** S12-01~03 수락 · 완료 3/5 · S12-04 진행 중. 사용자 추가 범위는 별도 단계로 늘리지 않고 S12-01의 입력, S12-04의 전략·연구, S12-05의 검증에 포함한다.
 
 ## 1. 착수 기준과 선행 작업
 
@@ -133,3 +133,21 @@ S12-01에서는 명시 해시로 고정한 별도 거래일·상장 근거를 �
 최종 소스 `0c51666c`에서 Windows 9모듈 480건과 PostgreSQL 17.11의 주문 원장·권한·구형 복구·새 계획 14건이 통과했다. 구조 검사와 증분 원장의 실행 대조가 통과했고 PG 격리 프로세스와 포트가 종료됐다. 앞선 병렬 Windows 시도의 제한 시간 초과는 통과 건수에서 제외했다. [Windows 회귀](../../tmp/s12-03-first-review/ledger-final/run.json) · [PostgreSQL 회귀](../../tmp/s12-03-pg-baseline/planned-native-bootstrap/postgres-run.json) · [격리 종료](../../tmp/s12-03-pg-baseline/planned-native-bootstrap/owned-job.json) · [증분 검증](../../tmp/s12-03-first-review/review-execution-final.json).
 
 두 매수는 계좌가 비어 있을 때 같은 승인 명세에서 미리 수락한 합성 표본이다. 보유 중 새 매수와 여러 운용군의 정책·보호 연결은 S12-04에서 판단한다. 새 전략 권한 승계와 운영 계좌의 미귀속 보유 대사는 운영 전환의 별도 경계다.
+
+### S12-04 연구 입력 연결 작업 기록
+
+- 기존 분봉 단일 연구 요청은 선택한 거래일 근거 파일의 SHA256을 실행 ID에 묶고, 분봉의 원래 가용시각별로 달력 판본을 선택한다. 같은 자료에서 정정 전 관측은 남고 정정 이후 관측만 제외되는지, 자료 변조와 출력 경로 충돌을 거부하는지 확인했다. 직접 관련 연구 회귀 36건이 통과했다. [연구 검사](../../tmp/s12-04-pinned-replay/research-module.log).
+- DD의 일봉 수집은 명시적인 `ka10081` 요청에서 가용시각·완결·수정주가 모드를 불변 판본으로 남긴다. SQLite와 격리 PostgreSQL에서 재수신·정정·고정 export 및 실패 롤백을 확인했다. [PostgreSQL 검사](../../tmp/s12-03-pg-baseline/s12-04-daily-first/postgres-run.json).
+- MICRO의 VI 원시 시각 해석은 발동·해제의 서로 다른 FID를 사용하고 원본 영수증을 보존한다. 결측·늦은 근거와 과거 보완 자료를 분리했다. VI 모듈 10건이 통과했다. 실시간 전략 소비자와 실제 호가·체결 교차 순서의 입증은 남아 있다. [VI 검사](../../tmp/s12-04-micro-vi-clock/test-market-events-native.log).
+
+<a id="s12-04-frozen-strategy-experiments"></a>
+
+### S12-04 동결 자료의 전략 연구 실행
+
+기존 연구 명령의 `single_run`으로 `breakout_study/v1`, `theme_leader_study/v1`, `close_betting/v1`, `ipo_breakout/v1`, `ipo_close/v1`, `panic_rebound/v1`을 실행한다. `krx-regular/v1`, 해시를 고정한 `strategy_references`, `completed_close_then_next_open/v1`과 `no_intrabar_fill/v1`을 명시한다. 거래일·상장·뉴스·테마는 각 판단 시점의 증거를 적용한다. 완료봉에서 제안하고 확인된 후속 시가와 유효 비용을 쓰는 모형이며, 갭으로 초기 위험거리가 사라진 돌파는 체결을 평가하지 않는다. `shadow_only: true`를 선택한 동결 재생은 판단과 후보를 보존하며 주문·체결 실행기를 호출하지 않는다.
+
+`daily_decline_experiment`, `micro_experiment`, `account_risk_experiment`는 `dataset` JSON 파일, `dataset_sha256`, `policy`, `database`, `runs_dir`를 명시한다. 자료·정책·구현 지문을 연구 실행 ID에 묶고, 상세 결과는 실행별 `manifest.json`에 보존한다. DD는 완료 일봉·시장 대비 낙폭·거래일·원주가 보호를 연결하고, MICRO는 순서가 입증된 VI·호가·체결과 명시 영수증을 사용한다. 계좌 위험 비교는 같은 총예산 아래 예약 경쟁과 체결 귀속을 기록한다. 자세한 요청과 기대 결과는 기존 연구 명령의 연결 검사로 재현할 수 있다. [분봉·합성 연구 요청 검사](../../tests/unit/test_research_process.py).
+
+8개 실험군의 합성 요청을 실행할 수 있다. 돌파 B1~B3 비교, EX-RISK의 가격 평가·MDD, 사건군을 분리한 실증 자료 비교, 전략별 실행 근거를 실제 Shadow와 단일 계좌 모의 승인·복구에 연결하는 작업이 남아 있다. S12-04와 S12-05는 진행률에 합산하지 않는다.
+
+현재 소스 `2c3bcae3`에서 Windows 25모듈 633건과 격리 PostgreSQL 12건이 통과했다. 기존 Shadow 198건과 주도주 돌파 86건, 새 동결 Shadow의 주문 호출 0건을 포함한다. 구조와 증분 원장 대조를 통과했고 PostgreSQL 임시 프로세스와 포트 종료를 확인했다. [직접 회귀 542건](../../tmp/s12-04-strategy-wiring/related/run.json) · [기존 소비자 91건](../../tmp/s12-04-strategy-wiring/prior-dialog-fixtures/run.json) · [PostgreSQL 12건](../../tmp/s12-03-pg-baseline/s12-04-native-research/postgres-run.json) · [증분 실행 대조](../../tmp/s12-04-strategy-wiring/review-execution-final.json).

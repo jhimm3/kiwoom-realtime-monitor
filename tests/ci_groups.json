@@ -25,6 +25,12 @@
     "main-observation-delivery-contracts"
   ],
   "required_windows_additions": [
+    "tests.unit.test_close_and_ipo",
+    "tests.unit.test_breakout_theme_research",
+    "tests.unit.test_account_risk_research",
+    "tests.unit.test_daily_decline",
+    "tests.unit.test_micro_execution_evidence",
+    "tests.unit.test_panic_rebound",
     "tests.unit.test_live_0b_minute_transition",
     "tests.unit.test_live_0b_allocation_dialog",
     "tests.unit.test_position_study_cohort",

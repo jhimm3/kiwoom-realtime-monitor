@@ -526,6 +526,394 @@ class ResearchProcessTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported research session profile"):
                 load_research_process_request(path)
 
+    def test_single_run_uses_pinned_calendar_at_each_original_receipt(self) -> None:
+        from kiwoom_monitor import research_process
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_empty_dataset(root)
+            dates = [f"2026-10-16T09:0{i}:00+09:00" for i in range(3)]
+            rows = [{"ordinal": 1, "revision_id": "members", "kind": "top20_membership",
+                     "available_at": dates[0], "accepted_sequence": 1, "payload": {"codes": ["005930"]}}]
+            for i in range(2):
+                rows.append({
+                    "ordinal": i + 2, "accepted_sequence": i + 2, "revision_id": f"bar-{i}",
+                    "kind": "minute_bar", "venue": "KRX", "subject": "005930:KRX", "observation_key": dates[i],
+                    "available_at": dates[i + 1], "completeness": "complete", "value_kind": "actual",
+                    "payload": {
+                        "market": "KRX", "code": "005930", "bar_start": dates[i], "bar_end": dates[i + 1],
+                        "open": 1000, "high": 1010, "low": 990, "close": 1000, "volume": 10,
+                        "trade_value_million_won": 1, "window_closed": True, "capture_quality": "complete",
+                    },
+                })
+            encoded = "\n".join(json.dumps(row) for row in rows).encode()
+            (root / "dataset/observations.jsonl").write_bytes(encoded)
+            manifest_path = root / "dataset/manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.update({
+                "revision_count": len(rows), "end": dates[-1],
+                "observations_file_hash": hashlib.sha256(encoded).hexdigest(),
+                "revision_ids_hash": hashlib.sha256(b"members\nbar-0\nbar-1").hexdigest(),
+            })
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            known_open = {
+                "venue": "KRX", "trading_date": "2026-10-16", "available_at": dates[0],
+                "revision_id": "opening", "evidence_ref": "fixture-opening-notice", "sessions": [{
+                    "session": "KRX_REGULAR", "phase": "CONTINUOUS", "support": "SUPPORTED",
+                    "starts_at": dates[0], "ends_at": "2026-10-16T15:20:00+09:00",
+                    "schedule_version": "fixture/v1",
+                }],
+            }
+            correction = {**known_open, "available_at": dates[-1], "revision_id": "closure", "sessions": []}
+            reference_bytes = json.dumps({"version": "strategy-reference/v1", "listings": [],
+                                          "calendar": [known_open, correction]}).encode()
+            reference_path = root / "references.json"
+            reference_path.write_bytes(reference_bytes)
+            digest = hashlib.sha256(reference_bytes).hexdigest()
+            document = {**_request_document(), "mode": "single_run", "session_profile": "krx-regular/v1"}
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(document), encoding="utf-8")
+            baseline = execute_process_request(load_research_process_request(request_path))
+            document["strategy_references"] = {"path": reference_path.name, "sha256": digest}
+            request_path.write_text(json.dumps(document), encoding="utf-8")
+            pinned_request = load_research_process_request(request_path)
+            pinned = execute_process_request(pinned_request)
+            baseline_manifest = json.loads(Path(baseline["manifest"]).read_text(encoding="utf-8"))
+            pinned_manifest = json.loads(Path(pinned["manifest"]).read_text(encoding="utf-8"))
+            self.assertNotEqual(baseline["run_id"], pinned["run_id"])
+            self.assertEqual((2, 1), (baseline_manifest["decision_count"], pinned_manifest["decision_count"]))
+            self.assertEqual({"version": "strategy-reference/v1", "sha256": digest},
+                             pinned_manifest["spec"]["strategy_references"])
+            self.assertEqual(pinned["run_id"], execute_process_request(pinned_request)["run_id"])
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
+                research_process._run_research_process(["--request", str(request_path), "--result", str(reference_path)])
+            self.assertEqual(reference_bytes, reference_path.read_bytes())
+            reference_path.write_bytes(reference_bytes + b" ")
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                execute_process_request(pinned_request)
+
+
+    def test_section12_close_and_ipo_requests_preserve_actual_filled_quantity(self) -> None:
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_empty_dataset(root)
+            friday = "2026-10-16"
+            monday = "2026-10-19"
+
+            def stamp(day, clock):
+                return f"{day}T{clock}:00+09:00"
+
+            def session(day, start, end, name, phase):
+                return {"session": name, "phase": phase, "support": "SUPPORTED", "schedule_version": "fixture/v1",
+                        "starts_at": stamp(day, start), "ends_at": stamp(day, end)}
+
+            rows = [{"revision_id": "universe", "kind": "top20_membership", "available_at": stamp(friday, "09:00"),
+                     "payload": {"codes": ["005930"]}}]
+            bars = [(friday, clock, price, price) for clock, price in (
+                ("15:14", 100), ("15:15", 100), ("15:16", 105), ("15:17", 105),
+                ("15:18", 106), ("15:19", 106), ("15:29", 110),
+            )] + [(monday, clock, open_price, close) for clock, open_price, close in (
+                ("10:00", 103, 103), ("10:01", 102, 102), ("10:02", 101, 90), ("10:03", 89, 89),
+            )]
+            for day, clock, open_price, close in bars:
+                start = stamp(day, clock)
+                end = (datetime.fromisoformat(start) + timedelta(minutes=1)).isoformat()
+                rows.append({"revision_id": f"{day}-{clock}", "kind": "minute_bar", "venue": "KRX", "subject": "005930:KRX",
+                             "observation_key": start, "available_at": end, "completeness": "complete", "value_kind": "actual",
+                             "payload": {"market": "KRX", "code": "005930", "bar_start": start, "bar_end": end,
+                                         "open": open_price, "high": max(open_price, close), "low": 1, "close": close,
+                                         "volume": 20, "trade_value_million_won": 1, "window_closed": True,
+                                         "capture_quality": "complete"}})
+            for index, row in enumerate(rows, 1):
+                row.update(ordinal=index, accepted_sequence=index)
+            encoded = "\n".join(json.dumps(row) for row in rows).encode()
+            (root / "dataset/observations.jsonl").write_bytes(encoded)
+            (root / "dataset/manifest.json").write_text(json.dumps({
+                "dataset_id": "section12-close-fixture", "revision_count": len(rows), "end": stamp(monday, "10:04"),
+                "observations_file": "observations.jsonl", "observations_file_hash": hashlib.sha256(encoded).hexdigest(),
+                "revision_ids_hash": hashlib.sha256("\n".join(row["revision_id"] for row in rows).encode()).hexdigest(),
+            }), encoding="utf-8")
+            calendar = [{"venue": "KRX", "trading_date": day, "available_at": stamp(friday, "08:00"),
+                         "revision_id": day, "evidence_ref": "fixture-calendar", "sessions": windows} for day, windows in (
+                (friday, [session(friday, "09:00", "15:20", "KRX_REGULAR", "CONTINUOUS"),
+                          session(friday, "15:29", "15:30", "KRX_CLOSING_AUCTION", "AUCTION_ORDER_ENTRY")]),
+                ("2026-10-17", []), ("2026-10-18", []),
+                (monday, [session(monday, "10:00", "15:20", "KRX_REGULAR", "CONTINUOUS")]),
+            )]
+            listing = {"symbol": "005930", "listing_date": friday, "listing_type": "ipo", "available_at": stamp(friday, "08:00"),
+                       "source": "fixture-listing", "revision": "listed", "evidence_id": "listing-1", "completeness": "complete"}
+            references = json.dumps({"version": "strategy-reference/v1", "calendar": calendar, "listings": [listing]}).encode()
+            (root / "references.json").write_bytes(references)
+            request = _request_document()
+            request.update(mode="single_run", session_profile="krx-regular/v1",
+                           strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()})
+            request["execution"].update(version="completed_close_then_next_open/v1", same_bar_path_version="no_intrabar_fill/v1")
+            request["execution"]["cost_model"].update(commission_bps=0, sell_tax_bps=0, slippage_bps=0,
+                                                       valid_from=stamp(friday, "08:00"), valid_to=stamp(monday, "16:00"))
+            request["evaluation"]["folds"][0].update(start=stamp(friday, "09:00"), end=stamp(monday, "16:00"))
+            close = {"quantity": 4, "entry_window_minutes": 10, "lookback_bars": 2, "minimum_close_return_bps": 200,
+                     "adverse_gap_bps": 500, "protection_loss_bps": 1000, "exit_minutes_after_open": 8,
+                     "ipo_reduction_quantity": None, "listing_phases": []}
+            breakout = {"quantity": 4, "lookback_bars": 2, "breakout_buffer_bps": 100, "protection_loss_bps": 1000,
+                        "exit_minutes_before_close": 1, "listing_phases": ["listing_day"]}
+            cases = (
+                ("close_betting/v1", close, [("BUY", 4, 105), ("SELL", 4, 102)]),
+                ("ipo_close/v1", {**close, "ipo_reduction_quantity": 2, "listing_phases": ["listing_day"]},
+                 [("BUY", 4, 105), ("SELL", 2, 102), ("SELL", 2, 89)]),
+                ("ipo_breakout/v1", breakout, [("BUY", 4, 105), ("SELL", 4, 106)]),
+            )
+            repository = ResearchRepository(root / request["database"])
+            for family, policy, expected in cases:
+                with self.subTest(family=family):
+                    request.update(family=family, strategy={"capital_won": 1000, "policy": policy})
+                    path = root / "request.json"
+                    path.write_text(json.dumps(request), encoding="utf-8")
+                    result = execute_process_request(load_research_process_request(path))
+                    events = repository.load_execution_events(result["run_id"])
+                    fills = [(event["side"], event["quantity"], event["price"]) for event in events if event["event_type"] == "FILL"]
+                    self.assertEqual(expected, fills)
+                    self.assertNotIn("RISK_FILL", {event["event_type"] for event in events})
+            request["shadow_only"] = True
+            request.update(family="close_betting/v1", strategy={"capital_won": 1000, "policy": close})
+            path.write_text(json.dumps(request), encoding="utf-8")
+            with patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_decision", side_effect=AssertionError), \
+                    patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_bar", side_effect=AssertionError):
+                result = execute_process_request(load_research_process_request(path))
+            self.assertTrue(result["shadow_only"])
+            self.assertFalse(result["order_authorized"])
+            self.assertEqual((), repository.load_execution_events(result["run_id"]))
+            manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+            self.assertGreater(manifest["candidate_count"], 0)
+
+    def test_section12_panic_request_uses_each_variant_entry_cut_and_completed_close_exit(self) -> None:
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_empty_dataset(root)
+            opening = datetime.fromisoformat("2026-09-10T09:00:00+09:00")
+            at = lambda minute: (opening + timedelta(minutes=minute)).isoformat()
+            rows = [{"kind": "top20_membership", "revision_id": "members", "available_at": at(0),
+                     "payload": {"codes": ["123456"]}}]
+            for minute, (open_price, close) in enumerate(((1000, 1000), (990, 990), (980, 980), (900, 900),
+                                                            (905, 910), (915, 915), (920, 950), (940, 940))):
+                rows.append({"kind": "minute_bar", "venue": "KRX", "subject": "123456:KRX", "revision_id": f"bar-{minute}",
+                             "observation_key": at(minute), "available_at": at(minute + 1), "completeness": "complete",
+                             "value_kind": "actual", "payload": {"code": "123456", "market": "KRX", "bar_start": at(minute),
+                             "bar_end": at(minute + 1), "open": open_price, "close": close, "high": max(open_price, close),
+                             "low": 800 if minute == 5 else min(open_price, close) - 5, "volume": 20,
+                             "trade_value_million_won": 1, "window_closed": True, "capture_quality": "complete"}})
+            for ordinal, row in enumerate(rows, 1):
+                row.update(ordinal=ordinal, accepted_sequence=ordinal)
+            encoded = "\n".join(json.dumps(row) for row in rows).encode()
+            (root / "dataset/observations.jsonl").write_bytes(encoded)
+            (root / "dataset/manifest.json").write_text(json.dumps({
+                "dataset_id": "section12-panic-fixture", "revision_count": len(rows), "end": at(8),
+                "observations_file": "observations.jsonl", "observations_file_hash": hashlib.sha256(encoded).hexdigest(),
+                "revision_ids_hash": hashlib.sha256("\n".join(row["revision_id"] for row in rows).encode()).hexdigest(),
+            }), encoding="utf-8")
+            references = json.dumps({"version": "strategy-reference/v1", "listings": [], "calendar": [{
+                "venue": "KRX", "trading_date": "2026-09-10", "available_at": at(-15), "revision_id": "krx-session",
+                "evidence_ref": "fixture-calendar", "sessions": [{"session": "KRX_REGULAR", "phase": "CONTINUOUS",
+                "support": "SUPPORTED", "schedule_version": "fixture/v1", "starts_at": at(0), "ends_at": at(380)}],
+            }]}).encode()
+            (root / "references.json").write_bytes(references)
+            proof = {"symbol": "123456", "source": "reviewed-fixture", "assessment_id": "assessment", "revision": "first",
+                     "effective_at": at(2), "available_at": at(3), "disposition": "supported_nonfundamental",
+                     "evidence_refs": ["article-r1", "body-r1", "rule-r1"]}
+            adverse = {**proof, "revision": "adverse", "available_at": "2026-09-10T09:04:30+09:00",
+                       "disposition": "fundamental_adverse"}
+            request = _request_document()
+            request.update(mode="single_run", family="panic_rebound/v1", session_profile="krx-regular/v1",
+                           strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()})
+            request["execution"].update(version="completed_close_then_next_open/v1", same_bar_path_version="no_intrabar_fill/v1")
+            request["execution"]["cost_model"].update(commission_bps=0, sell_tax_bps=0, slippage_bps=0,
+                                                       valid_from=at(-10), valid_to=at(380))
+            request["evaluation"]["folds"][0].update(start=at(0), end=at(8))
+            repository = ResearchRepository(root / request["database"])
+            for variant, proofs, expected in (("P0", [proof, adverse], [("BUY", 905), ("SELL", 940)]),
+                                               ("P1", [proof], [("BUY", 915), ("SELL", 940)]),
+                                               ("P1", [proof, adverse], [])):
+                with self.subTest(variant=variant, count=len(proofs)):
+                    request["strategy"] = {"quantity": 1, "capital_won": 2000, "news_proofs": proofs,
+                                           "policy": {"variant": variant, "lookback_minutes": 3, "decline_bps": 1000,
+                                           "minimum_turnover_won": 3_000_000, "max_input_age_seconds": 10,
+                                           "rebound_target_bps": 500, "max_hold_minutes": 5}}
+                    path = root / "request.json"
+                    path.write_text(json.dumps(request), encoding="utf-8")
+                    result = execute_process_request(load_research_process_request(path))
+                    events = repository.load_execution_events(result["run_id"])
+                    self.assertEqual(expected, [(event["side"], event["price"]) for event in events if event["event_type"] == "FILL"])
+                    self.assertNotIn("RISK_FILL", {event["event_type"] for event in events})
+
+    def test_section12_micro_request_pins_receipts_and_persists_the_result(self) -> None:
+        from kiwoom_monitor import research_process
+        from tests.unit.test_micro_execution_evidence import _entry_market, _event, _policy, _scenario
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scenario = _scenario(_entry_market() + [
+                _event("ORDER_ARRIVED", "arrive", 4, order_id="entry"),
+                _event("FILL", "filled", 5, order_id="entry", price_won=104, quantity=2),
+                _event("CANCELLED", "cancelled", 6, order_id="entry", filled_quantity=2),
+            ])
+            evidence = root / "micro.json"
+            encoded = json.dumps(scenario).encode()
+            evidence.write_bytes(encoded)
+            digest = hashlib.sha256(encoded).hexdigest()
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps({
+                "mode": "micro_experiment", "dataset": evidence.name, "dataset_sha256": digest,
+                "policy": _policy(), "database": "research.sqlite3", "runs_dir": "runs",
+            }), encoding="utf-8")
+            result_path = root / "result.json"
+            with patch("sys.stdout"):
+                self.assertEqual(0, research_process._run_research_process([
+                    "--request", str(request_path), "--result", str(result_path),
+                ]))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+            self.assertEqual(("OPEN", 2, 2), (result["result"]["status"], result["result"]["position_quantity"],
+                                             result["result"]["protected_quantity"]))
+            self.assertEqual(digest, manifest["spec"]["dataset_sha256"])
+            self.assertFalse(manifest["order_authorized"])
+            parsed = load_research_process_request(request_path)
+            self.assertEqual(result["run_id"], execute_process_request(parsed)["run_id"])
+            evidence.write_bytes(encoded + b" ")
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                execute_process_request(parsed)
+
+    def test_section12_daily_decline_request_records_only_explicit_late_session_fills(self) -> None:
+        from dataclasses import asdict
+        from tests.unit.test_daily_decline import SPLIT, quote, quote_receipt, synthetic_scenario
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = quote(1000)
+            exit_quote = quote(740, session=2)
+            rows = []
+            for raw, label, price, session in ((entry, "entry", 1000, 1), (exit_quote, "exit", 740, 2)):
+                rows.extend((quote_receipt(raw),
+                             {"kind": "ACCEPT", "available_at": raw.available_at, "quote_ref": raw.evidence_id, "order_ref": label},
+                             {"kind": "FILL", "available_at": raw.available_at, "order_ref": label, "fill_id": f"{label}-1",
+                              "quantity": 2, "price_won": price, "fee_won": 0, "session_index": session},
+                             {"kind": "TERMINAL", "available_at": raw.available_at, "order_ref": label}))
+            evidence = root / "daily.json"
+            encoded = json.dumps(synthetic_scenario(*rows)).encode()
+            evidence.write_bytes(encoded)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps({
+                "mode": "daily_decline_experiment", "dataset": evidence.name,
+                "dataset_sha256": hashlib.sha256(encoded).hexdigest(), "policy": asdict(SPLIT),
+                "database": "research.sqlite3", "runs_dir": "runs",
+            }), encoding="utf-8")
+            result = execute_process_request(load_research_process_request(request_path))
+            trace = result["result"]
+            self.assertEqual("QUALIFIED", trace["setup"]["status"])
+            self.assertEqual(0, trace["events"][0]["owned_quantity"])
+            self.assertEqual(2, trace["events"][2]["owned_quantity"])
+            self.assertEqual((0, 0, 2, -520), (trace["summary"]["owned_quantity"], trace["summary"]["reserved_won"],
+                                               trace["summary"]["fill_count"], trace["summary"]["realized_pnl_won"]))
+            self.assertFalse(result["order_authorized"])
+
+    def test_section12_breakout_and_theme_studies_share_entry_but_close_on_their_own_evidence(self) -> None:
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_empty_dataset(root)
+            first = datetime.fromisoformat("2026-09-11T09:00:00+09:00")
+            at = lambda minute: (first + timedelta(minutes=minute)).isoformat()
+            rows = [{"kind": "top20_membership", "revision_id": "members", "available_at": at(0),
+                     "payload": {"codes": ["123456"]}}]
+            prices = [(100, 100)] * 10 + [(100, 110), (105, 107), (106, 99), (98, 98)]
+            for minute, (opening, close) in enumerate(prices):
+                rows.append({"kind": "minute_bar", "venue": "KRX", "subject": "123456:KRX", "revision_id": f"bar-{minute}",
+                             "observation_key": at(minute), "available_at": at(minute + 1), "completeness": "complete",
+                             "value_kind": "actual", "payload": {"code": "123456", "market": "KRX", "bar_start": at(minute),
+                             "bar_end": at(minute + 1), "open": opening, "close": close, "high": max(opening, close),
+                             "low": min(opening, close), "volume": 20, "trade_value_million_won": 1,
+                             "window_closed": True, "capture_quality": "complete"}})
+            for ordinal, row in enumerate(rows, 1):
+                row.update(ordinal=ordinal, accepted_sequence=ordinal)
+
+            def write_rows():
+                encoded = "\n".join(json.dumps(row) for row in rows).encode()
+                (root / "dataset/observations.jsonl").write_bytes(encoded)
+                (root / "dataset/manifest.json").write_text(json.dumps({
+                    "dataset_id": "section12-breakout-fixture", "revision_count": len(rows), "end": at(14),
+                    "observations_file": "observations.jsonl", "observations_file_hash": hashlib.sha256(encoded).hexdigest(),
+                    "revision_ids_hash": hashlib.sha256("\n".join(row["revision_id"] for row in rows).encode()).hexdigest(),
+                }), encoding="utf-8")
+
+            write_rows()
+            references = json.dumps({"version": "strategy-reference/v1", "listings": [], "calendar": [{
+                "venue": "KRX", "trading_date": "2026-09-11", "available_at": at(-15), "revision_id": "session",
+                "evidence_ref": "fixture-calendar", "sessions": [{"session": "KRX_REGULAR", "phase": "CONTINUOUS",
+                "support": "SUPPORTED", "schedule_version": "fixture/v1", "starts_at": at(0), "ends_at": at(380)}],
+            }]}).encode()
+            (root / "references.json").write_bytes(references)
+            request = _request_document()
+            request.update(mode="single_run", session_profile="krx-regular/v1",
+                           strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()})
+            request["execution"].update(version="completed_close_then_next_open/v1", same_bar_path_version="no_intrabar_fill/v1")
+            request["execution"]["cost_model"].update(commission_bps=0, sell_tax_bps=0, slippage_bps=0,
+                                                       valid_from=at(-10), valid_to=at(380))
+            request["evaluation"]["folds"][0].update(start=at(0), end=at(14))
+            base = {"variant": "B0", "quantity": 1, "exit_at_kst": "15:18", "theme_id": None,
+                    "theme_role": None, "exit_on_dependency_loss": False}
+            first_role = {"symbol": "123456", "theme_id": "theme", "role": "dependent_follower", "leader_symbol": "654321",
+                          "effective_at": at(1), "available_at": at(1), "source": "fixture", "revision": "known",
+                          "evidence_refs": ["membership-r1", "turnover-r1"], "basis": "point_in_time", "dependency_valid": True}
+            loss = {**first_role, "effective_at": at(12), "available_at": at(12), "revision": "lost", "dependency_valid": False}
+            theme = {**base, "variant": "TH", "theme_id": "theme", "theme_role": "dependent_follower", "exit_on_dependency_loss": True}
+            path = root / "request.json"
+            repository = ResearchRepository(root / request["database"])
+
+            def run(family, policy, **data):
+                request.update(family=family, strategy={"capital_won": 1000, "policy": policy, **data})
+                path.write_text(json.dumps(request), encoding="utf-8")
+                result = execute_process_request(load_research_process_request(path))
+                return repository.load_execution_events(result["run_id"])
+
+            for events, expected in (
+                (run("breakout_study/v1", base), [("BUY", 105), ("SELL", 98)]),
+                (run("theme_leader_study/v1", theme, theme_proofs=[first_role, loss]), [("BUY", 105), ("SELL", 106)]),
+            ):
+                self.assertEqual(expected, [(event["side"], event["price"]) for event in events if event["event_type"] == "FILL"])
+            rows[12]["payload"].update(open=100, low=100)
+            write_rows()
+            events = run("breakout_study/v1", base)
+            self.assertFalse(any(event["event_type"] == "FILL" for event in events))
+            self.assertIn("next_open_has_no_positive_initial_risk_distance", {event["reason"] for event in events})
+
+    def test_section12_account_risk_request_compares_equal_capital_reservations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events = [{"sequence": index, "kind": "PROPOSE", "order_id": order_id, "plan_id": plan,
+                       "symbol": "005930", "side": "BUY", "tranche": tranche, "quantity": quantity,
+                       "limit_price_won": 10, "fee_budget_won": 0}
+                      for index, (order_id, plan, tranche, quantity) in enumerate((
+                          ("a0", "a", 0, 6), ("a1", "a", 1, 4), ("b0", "b", 0, 4)), 1)]
+            encoded = json.dumps({"version": "account-risk-scenario/v1", "initial_cash_won": 100,
+                                  "plan_budget_won": 100, "events": events}).encode()
+            (root / "risk.json").write_bytes(encoded)
+            request = {"mode": "account_risk_experiment", "dataset": "risk.json",
+                       "dataset_sha256": hashlib.sha256(encoded).hexdigest(), "database": "research.sqlite3", "runs_dir": "runs"}
+            run_ids = []
+            for tranches, accepted in (([10000], ["a0", "b0"]), ([6000, 4000], ["a0", "a1"])):
+                request["policy"] = {"version": "account-risk-allocation/v1", "tranche_bps": tranches}
+                path = root / "request.json"
+                path.write_text(json.dumps(request), encoding="utf-8")
+                result = execute_process_request(load_research_process_request(path))
+                trace = result["result"]
+                self.assertEqual(accepted, [order["order_id"] for order in trace["orders"] if order["reserved_cash_won"]])
+                self.assertEqual((100, 100, 0, []), (trace["plan_budget_won"], trace["reserved_cash_won"],
+                                                    trace["available_cash_won"], trace["positions"]))
+                run_ids.append(result["run_id"])
+            self.assertNotEqual(*run_ids)
 
     def test_cli_reuses_parsed_request_with_native_input_and_result_oracles(self) -> None:
         from io import StringIO

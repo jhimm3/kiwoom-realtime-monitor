@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · 모의 계획 주문의 S12-03 수락**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-04의 동결 전략 연구 실행 연결**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~03을 수락했다. 다음은 S12-04의 네 운용군과 추가 DD·MICRO의 전략·연구·Shadow 연결이다. 운영 전환은 별도다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-01](#section12-input-baseline) · [S12-02](#section12-library-comparison) · [S12-03](#section12-native-planned-orders) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~03을 수락했다. S12-04의 동결 전략 연구와 격리 Shadow 재생을 연결했다. 전략별 실제 Shadow·모의 실행 연결과 실증 비교는 진행 중이다. 운영 전환은 별도다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-01](#section12-input-baseline) · [S12-02](#section12-library-comparison) · [S12-03](#section12-native-planned-orders) · [S12-04](#section12-frozen-strategy-research) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4586,6 +4586,14 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 - 명시적 계획 주문은 원래 Risk·control·lease와 승인 판본에 결합된다. SQLite와 PostgreSQL의 기존 주문 저장 트랜잭션이 계좌 한도와 계획 판본을 확인해 최초 예약을 저장한다. 기존 주문의 자료 형식과 실행 경로는 보존한다. 새 계획 projection은 native writer가 소유한다.
 - 실제 상세 FILL만 계획 수량과 수락 cursor를 갱신한다. 같은 종목의 계획별 수량과 수동분을 구분한다. 전송 전 취소·만료는 네트워크 없이 예약을 해제한다. 제출이 미확정인 주문은 원주문 대사를 계속한다.
 - 동일 계좌/종목을 쓰는 합성 주문은 한 명세에서 계좌가 비었을 때 명시적으로 미리 승인했다. 동일 소스의 관련 Windows 480건과 격리 PostgreSQL 14건, 구조 검사와 증분 실행 대조를 수락했다. 운용군별 정책과 계획 조회의 소비자 연결은 다음 단계다. [로드맵과 검증](section12-development-roadmap-20261105.md#s12-03-native-order-work).
+
+<a id="section12-frozen-strategy-research"></a>
+
+### 11.243 S12-04 동결 전략 연구 실행 — 2026-11-05
+
+- 돌파·테마 주도권·일반 및 신규주 종가베팅·신규주 돌파·낙주를 기존 연구 실행기와 결과 저장소에 연결했다. 확인된 완료봉에서 판단하고 후속 시가로 체결을 모의한다. 명시 비용의 적용 기간과 실제 보유량을 적용한다. 격리 Shadow 재생은 같은 판단으로 후보를 기록하며 주문 호출은 0건이다.
+- DD·MICRO·EX-RISK는 해시를 고정한 명시 영수증을 재생한다. 수정주가 일봉의 판단 기준과 원주가의 보호 기준을 구분하고, VI·호가·체결의 순서와 계좌 예약·귀속을 확인한다. 조건이 불명확한 자료와 실제로 기록된 체결을 별도 상태로 남긴다.
+- 합성 연구 요청 및 결과는 8개 실험군에 마련했다. 실증 자료 비교와 기존 실시간 Shadow·모의 계좌 승인 및 일지 연결은 후속 검증이다. [요청 형식·현재 범위](section12-development-roadmap-20261105.md#s12-04-frozen-strategy-experiments).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

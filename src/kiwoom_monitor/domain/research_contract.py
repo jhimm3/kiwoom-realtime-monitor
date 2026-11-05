@@ -16,7 +16,8 @@ from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
 THEME_BACKUP_FORMAT = "kiwoom-realtime-monitor-theme-db"
 THEME_BACKUP_VERSION = 1
 OBSERVATION_REVISION_SCHEMA_VERSION = 1
-RESEARCH_OBSERVATION_KINDS = frozenset({"ranking", "top20_membership", "minute_bar"})
+DATASET_SNAPSHOT_RESEARCH_KINDS = frozenset({"ranking", "top20_membership", "minute_bar"})
+RESEARCH_OBSERVATION_KINDS = DATASET_SNAPSHOT_RESEARCH_KINDS | {"daily_bar"}
 REPORTED_RESEARCH_RESULT_KIND = "research-run-report"
 REPORTED_RESEARCH_RESULT_COLLECTION = "reported_research_results"
 # Reuse the existing bounded research-publication document contract (256 KiB).
@@ -34,6 +35,13 @@ RESEARCH_IMPLEMENTATION_PATHS = (
     "src/kiwoom_monitor/application/theme_leadership.py",
     "src/kiwoom_monitor/application/breakout_strategy.py",
     "src/kiwoom_monitor/application/leader_breakout.py",
+    "src/kiwoom_monitor/application/breakout_theme_research.py",
+    "src/kiwoom_monitor/application/account_risk_research.py",
+    "src/kiwoom_monitor/application/close_and_ipo.py",
+    "src/kiwoom_monitor/application/panic_rebound.py",
+    "src/kiwoom_monitor/application/daily_decline.py",
+    "src/kiwoom_monitor/application/micro_execution_evidence.py",
+    "src/kiwoom_monitor/application/section12_minute_research.py",
     "src/kiwoom_monitor/application/pullback_reacceleration_strategy.py",
     "src/kiwoom_monitor/application/research_families.py",
     "src/kiwoom_monitor/infrastructure/persistence/research_repository.py",

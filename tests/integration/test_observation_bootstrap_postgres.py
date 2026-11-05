@@ -17,9 +17,10 @@ from kiwoom_monitor.application.breakout_strategy import StrategyState
 from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitor
 from kiwoom_monitor.central_server.database import PostgresQueryStore
 from kiwoom_monitor.central_server.database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL
+from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
 from kiwoom_monitor.central_server.market_observations import bar_observation_key, minute_bar_observation
 from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
-from kiwoom_monitor.domain.market_data_contract import DataCompleteness, DataValueKind, ObservationOrigin
+from kiwoom_monitor.domain.market_data_contract import DataCompleteness, DataValueKind, MarketDatasetKind, ObservationOrigin
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
 from tests.integration.postgres_test_support import isolated_observation_schema
@@ -57,6 +58,62 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
         store = PostgresQueryStore(url)
         store.initialize()
         verify_native_planned_sell_isolation(self, store, mock_specification_inputs(store))
+
+    def test_daily_query_revision_chain_and_export_roll_back_with_latest_in_postgres(self):
+        url = self.enterContext(isolated_observation_schema(os.environ['KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL']))
+        first_cut = datetime(2026, 9, 14, 19, 59, tzinfo=timezone(timedelta(hours=9)))
+        final_cut = first_cut + timedelta(minutes=2)
+        correction_cut = final_cut + timedelta(minutes=1)
+        now = first_cut
+        store = PostgresQueryStore(url, now_provider=lambda: now)
+        store.initialize()
+        ingest = MarketDataIngestor(store, now_provider=lambda: now)
+        subject, day = '005930:KRX', '2026-09-14'
+
+        def write(close):
+            ingest.ingest('ka10081', {'stk_cd': '005930', 'upd_stkpc_tp': '1'}, {
+                'stk_dt_pole_chart_qry': [{
+                    'dt': '20260914', 'open_pric': '100', 'high_pric': '110',
+                    'low_pric': '90', 'cur_prc': str(close),
+                }],
+            })
+
+        write(100)
+        now += timedelta(seconds=15)
+        write(100)
+        now = final_cut
+        write(100)
+        self.assertEqual(first_cut.timestamp(), store.load_daily_bars('005930', 'KRX')[0]['updated_at'])
+        self.assertEqual(final_cut, store.load_market_data_metadata(MarketDatasetKind.DAILY_BAR, subject, day).available_at)
+        export_end = correction_cut + timedelta(minutes=2)
+        export = store.create_observation_export(first_cut, export_end, ('daily_bar',), subject)
+        now = correction_cut
+        write(101)
+        corrected, final, first = store.load_observation_revisions('daily_bar', subject)
+        self.assertEqual([first_cut, final_cut, correction_cut], [
+            datetime.fromisoformat(row['available_at']) for row in (first, final, corrected)
+        ])
+        self.assertEqual(['in_progress', 'complete', 'complete'], [
+            row['completeness'] for row in (first, final, corrected)
+        ])
+        self.assertEqual(first['revision_id'], final['revision_of'])
+        self.assertEqual(final['revision_id'], corrected['revision_of'])
+        self.assertEqual((101, '1', None), tuple(corrected['payload'][field]
+                                               for field in ('close', 'adjustment_mode', 'volume')))
+        frozen = store.load_observation_export_page(export['fixed_watermark'], 0, 10)
+        self.assertEqual([first['revision_id'], final['revision_id']],
+                         [row['revision_id'] for row in frozen['observations']])
+
+        with store._connect() as connection:
+            connection.execute("ALTER TABLE central_observation_revisions ADD CONSTRAINT dd_fixture_reject_102 "
+                               "CHECK (kind <> 'daily_bar' OR NOT (payload_json @> '{\"close\":102}'::jsonb))")
+        now += timedelta(minutes=1)
+        with self.assertRaises(self.pg.errors.CheckViolation):
+            write(102)
+        self.assertEqual(101, store.load_daily_bars('005930', 'KRX')[0]['close'])
+        self.assertEqual(correction_cut, store.load_market_data_metadata(MarketDatasetKind.DAILY_BAR, subject, day).available_at)
+        self.assertEqual([corrected, final, first], store.load_observation_revisions('daily_bar', subject))
+        self.assertEqual(frozen, store.load_observation_export_page(export['fixed_watermark'], 0, 10))
 
     def _exercise(self, *, mock=False, bootstrap_during_gap=True, normalized=False,
                   legacy=False, recovery_ack_loss=False):

@@ -18,6 +18,7 @@ from kiwoom_monitor.application.market_session_schedule import (
 from kiwoom_monitor.application.research_splits import DevelopmentPartitionSpec, ResearchEvaluationSpec, FinalHoldoutBatchSpec, warmup_start
 from kiwoom_monitor.application.research_resources import ResearchResourceBlocked
 from kiwoom_monitor.domain.market_data_contract import DataCompleteness, ListingEvidence, ListingType
+from kiwoom_monitor.domain.research_contract import RESEARCH_OBSERVATION_KINDS
 from kiwoom_monitor.infrastructure.research_storage import (
     write_research_storage_marker, research_storage_remaining_bytes, research_storage_text_bytes,
     validate_research_storage_root,
@@ -501,7 +502,7 @@ def _bundle_manifest(children: list[tuple[str, FrozenResearchDataset]], *,
             end = datetime.fromisoformat(captured["end"])
             raw_kinds = manifest["kinds"]
             if not isinstance(raw_kinds, list) or not raw_kinds or not all(
-                kind in {"ranking", "top20_membership", "minute_bar"} for kind in raw_kinds
+                kind in RESEARCH_OBSERVATION_KINDS for kind in raw_kinds
             ):
                 raise ValueError("unsupported bundle observation kinds")
             kinds = tuple(sorted(raw_kinds))

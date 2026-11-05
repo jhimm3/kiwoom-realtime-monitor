@@ -63,7 +63,9 @@ from kiwoom_monitor.infrastructure.persistence.research_repository import Resear
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient, CentralContentHttpError, CentralContentUnavailableError
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
-from kiwoom_monitor.infrastructure.research_data_source import load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
+from kiwoom_monitor.infrastructure.research_data_source import load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
+from kiwoom_monitor.application.section12_minute_research import MINUTE_EXPERIMENT_LABELS, MinuteExperiment
+from kiwoom_monitor.domain.simulation_contract import COMPLETED_CLOSE_EXECUTION_VERSION
 from kiwoom_monitor.infrastructure.research_storage import validate_research_storage_root
 from kiwoom_monitor.infrastructure.research_data_source import (prepare_development_partition,
     prepare_final_holdout_partition, final_holdout_partition_start, FrozenResearchDataset)
@@ -71,6 +73,7 @@ from kiwoom_monitor.application.research_resources import ResearchResourceGuard,
 from kiwoom_monitor.application.research_implementation import research_implementation_hash
 from kiwoom_monitor.research_run import (
     ResearchRunCancelled,
+    _write_immutable_json,
     execute_rank_comparison,
     execute_research,
     research_run_identity,
@@ -107,6 +110,26 @@ class ResearchProcessRequest:
     search: ExperimentSpec | None = None
     resource_limits: ResearchResourceLimits = ResearchResourceLimits()
     development_partition: DevelopmentPartitionSpec | None = None
+    strategy_references: tuple[Path, str] | None = None
+    shadow_only: bool = False
+
+
+EVIDENCE_EXPERIMENT_FAMILIES = {
+    "micro_experiment": "micro_execution/v1",
+    "daily_decline_experiment": "daily_decline/v1",
+    "account_risk_experiment": "account_risk_study/v1",
+}
+
+
+@dataclass(frozen=True)
+class EvidenceExperimentRequest:
+    mode: str
+    dataset: Path
+    dataset_sha256: str
+    policy: Mapping[str, Any]
+    database: Path
+    runs_dir: Path
+    resource_limits: ResearchResourceLimits
 
 
 def final_candidate_spec_document(
@@ -114,7 +137,7 @@ def final_candidate_spec_document(
 ) -> dict[str, Any]:
     """Preserve v1 identities; use v2 for the explicitly configured leader Family."""
     if (not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run'
-            or request.search is not None or request.development_partition is not None
+            or request.search is not None or request.development_partition is not None or request.strategy_references is not None
             or request.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES):
         raise ValueError('final candidate requires a fixed registered single-run strategy')
     if (not isinstance(implementation_hash, str) or len(implementation_hash) != 64
@@ -627,7 +650,7 @@ def execute_final_holdout_exposure(request: FinalHoldoutExposureRequest, *,
             'state': 'EXPOSED_DEVELOPMENT', 'recorded': recorded}
 
 
-def load_research_process_request(path: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest:
+def load_research_process_request(path: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest | EvidenceExperimentRequest:
     request_path = Path(path)
     try:
         document = json.loads(request_path.read_text(encoding="utf-8"))
@@ -638,8 +661,28 @@ def load_research_process_request(path: Path) -> ResearchProcessRequest | Leader
     return research_process_request_from_document(document, request_path.resolve().parent)
 
 
-def research_process_request_from_document(document: Mapping[str, Any], root: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest:
+def research_process_request_from_document(document: Mapping[str, Any], root: Path) -> ResearchProcessRequest | LeaderBreakoutProcessRequest | EvidenceExperimentRequest:
     mode = str(document.get("mode", ""))
+    if mode in EVIDENCE_EXPERIMENT_FAMILIES:
+        required = {"mode", "dataset", "dataset_sha256", "policy", "database", "runs_dir"}
+        if not required <= set(document) or set(document) - required - {"resource_budget"}:
+            raise ValueError("evidence experiment requires a pinned dataset, policy, database and runs_dir")
+        dataset = _request_path(root, document["dataset"], "dataset")
+        database = _request_path(root, document["database"], "database")
+        runs_dir = _request_path(root, document["runs_dir"], "runs_dir")
+        digest = document["dataset_sha256"]
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError("evidence dataset SHA256 must be lowercase hexadecimal")
+        if dataset == database or _is_within(dataset, runs_dir):
+            raise ValueError("research outputs must not overwrite the evidence dataset")
+        if not dataset.is_file():
+            raise ValueError("research evidence dataset file does not exist")
+        budget = _mapping(document.get("resource_budget", {}), "resource_budget")
+        return EvidenceExperimentRequest(
+            mode, dataset, digest, dict(_mapping(document["policy"], "policy")), database, runs_dir,
+            ResearchResourceLimits(int(budget.get("memory_mb", 512)), int(budget.get("cpu_duty_percent", 50))),
+        )
     if mode == "leader_breakout":
         from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy
         if set(document) - {"mode", "dataset", "policy", "policies", "session_profile", "resource_budget", "database", "runs_dir"}:
@@ -679,13 +722,19 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
     dataset = _request_path(root, document.get("dataset"), "dataset")
     database = _request_path(root, document.get("database"), "database")
     runs_dir = _request_path(root, document.get("runs_dir"), "runs_dir")
-    strategy = parse_strategy_config(family, strategy_raw)
+    minute_experiment = family in MINUTE_EXPERIMENT_LABELS
+    if minute_experiment and (mode != "single_run" or session_profile != "krx-regular/v1"):
+        raise ValueError("Section 12 minute experiments require a KRX regular single_run")
+    strategy = (MinuteExperiment.from_document(family, strategy_raw) if minute_experiment
+                else parse_strategy_config(family, strategy_raw))
     execution = SimulationExecutionConfig(
         version=str(execution_raw.get("version", "")),
         same_bar_path_version=str(execution_raw.get("same_bar_path_version", "")),
         initial_cash_won=int(execution_raw.get("initial_cash_won", 0)),
         cost_model=SimulationCostModel(**dict(cost_raw)),
     )
+    if minute_experiment != (execution.version == COMPLETED_CLOSE_EXECUTION_VERSION):
+        raise ValueError("completed-close execution and a Section 12 minute experiment must be selected together")
     evaluation = ResearchEvaluationSpec.from_dict(evaluation_raw)
     partition_raw = document.get('development_partition')
     partition = DevelopmentPartitionSpec.from_dict(_mapping(partition_raw, 'development_partition')) if partition_raw is not None else None
@@ -693,6 +742,27 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         if session_profile is None:
             raise ValueError('development partition requires an explicit session profile')
         partition.evaluation_for(evaluation)
+    references = None
+    if "strategy_references" in document:
+        if mode != "single_run" or session_profile is None or partition is not None:
+            raise ValueError("pinned strategy references require ordinary ordered single_run")
+        reference = _mapping(document["strategy_references"], "strategy_references")
+        digest = reference.get("sha256")
+        if set(reference) != {"path", "sha256"} or not isinstance(digest, str) or len(digest) != 64 or any(
+            char not in "0123456789abcdef" for char in digest
+        ):
+            raise ValueError("strategy_references requires a path and lowercase SHA256")
+        if not isinstance(reference["path"], str):
+            raise ValueError("strategy_references.path must be a path string")
+        reference_path = _request_path(root, reference["path"], "strategy_references.path")
+        if reference_path == database or _is_within(reference_path, runs_dir):
+            raise ValueError("research outputs must not overwrite the strategy reference")
+        references = (reference_path, digest)
+    if minute_experiment and references is None:
+        raise ValueError("Section 12 minute experiments require pinned strategy_references")
+    shadow_only = document.get("shadow_only", False)
+    if type(shadow_only) is not bool or (shadow_only and not minute_experiment):
+        raise ValueError("shadow_only requires a Section 12 minute experiment")
     search = None
     if mode == "limited_search":
         search_raw = _mapping(document.get("search"), "search")
@@ -729,6 +799,8 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         execution=execution,
         evaluation=evaluation,
         development_partition=partition,
+        strategy_references=references,
+        shadow_only=shadow_only,
         session_profile=session_profile,
         search=search,
         resource_limits=ResearchResourceLimits(
@@ -1027,7 +1099,7 @@ def _next_nas_rolling_range(source, scope, spec, now):
 
 
 def execute_process_request(
-    request: ResearchProcessRequest | LeaderBreakoutProcessRequest,
+    request: ResearchProcessRequest | LeaderBreakoutProcessRequest | EvidenceExperimentRequest,
     *,
     cancel_path: Path | None = None,
     cancel_requested: Callable[[], bool] | None = None,
@@ -1042,6 +1114,10 @@ def execute_process_request(
         or (cancel_requested is not None and cancel_requested())
     )
     resource_guard = ResearchResourceGuard(request.resource_limits)
+    if isinstance(request, EvidenceExperimentRequest):
+        if campaign_cycle is not None:
+            raise ValueError("evidence experiments run outside a campaign")
+        return _execute_evidence_experiment(request, resource_guard, cancelled)
     resource_guard.preflight(research_input_encoded_bytes(request.dataset))
     def loading_checkpoint():
         if cancelled is not None and cancelled():
@@ -1066,6 +1142,12 @@ def execute_process_request(
                 "reason": "unconfigured:" + ",".join(missing), "configuration_missing": list(missing),
                 "performance_verified": False, "order_authorized": False}
     request, dataset = _prepare_development_request(request, dataset, loading_checkpoint)
+    strategy_references = None
+    if request.strategy_references is not None:
+        if request.mode != "single_run" or request.session_profile is None or request.development_partition is not None:
+            raise ValueError("pinned strategy references require ordinary ordered single_run")
+        path, digest = request.strategy_references
+        strategy_references = load_frozen_strategy_references(path, expected_sha256=digest)
     if campaign_cycle is not None:
         if request.search is None or request.search.to_dict() != campaign_cycle.get('request') or build_research_job_identity(request.search).job_id != campaign_cycle.get('job_id'):
             raise ValueError('stored campaign identity does not match its execution request')
@@ -1334,6 +1416,8 @@ def execute_process_request(
         request.execution, request.evaluation, cancelled,
         request.session_profile,
         resource_guard,
+        strategy_references=strategy_references,
+        shadow_only=request.shadow_only,
     )
     document = {
         "status": "ok", "kind": "single_run", "run_id": result.run_id,
@@ -1341,11 +1425,55 @@ def execute_process_request(
         "report": repository.load_research_report(result.run_id),
         "market_regime": result.market_regime,
     }
+    if request.shadow_only:
+        document.update(shadow_only=True, order_authorized=False)
     if reported_result_target is not None:
         from kiwoom_monitor.research_result_delivery import attach_result_delivery
         document = attach_result_delivery(document, request.database, request.runs_dir, result.run_id,
                                           reported_result_target, cancel_requested=cancelled)
     return document
+
+
+def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
+    def checkpoint():
+        if cancelled():
+            raise ResearchRunCancelled("research evidence replay cancelled")
+        guard.checkpoint()
+
+    checkpoint()
+    guard.preflight(request.dataset.stat().st_size)
+    encoded = request.dataset.read_bytes()
+    if hashlib.sha256(encoded).hexdigest() != request.dataset_sha256:
+        raise ValueError("evidence dataset hash does not match")
+    scenario = _mapping(json.loads(encoded), "evidence dataset")
+    if request.mode == "micro_experiment":
+        from kiwoom_monitor.application.micro_execution_evidence import replay_micro_execution as replay
+    elif request.mode == "daily_decline_experiment":
+        from kiwoom_monitor.application.daily_decline import replay_daily_decline as replay
+    else:
+        from kiwoom_monitor.application.account_risk_research import replay_account_risk_experiment as replay
+
+    result = replay(scenario, request.policy, checkpoint=checkpoint)
+    checkpoint()
+    spec = {
+        "family": EVIDENCE_EXPERIMENT_FAMILIES[request.mode], "mode": request.mode,
+        "code_hash": research_implementation_hash("krx-regular/v1"), "parameters": dict(request.policy),
+        "dataset_sha256": request.dataset_sha256, "source_kind": "synthetic",
+    }
+    spec_bytes = json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    run_id = "run_" + hashlib.sha256(spec_bytes).hexdigest()
+    result_bytes = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    result_hash = hashlib.sha256(result_bytes).hexdigest()
+    manifest = request.runs_dir / run_id / "manifest.json"
+    repository = ResearchRepository(request.database)
+    repository.start_run(run_id, spec, {"dataset_id": request.dataset_sha256, "source_kind": "synthetic"})
+    _write_immutable_json(manifest, {
+        "format": "kiwoom-monitor-evidence-experiment", "version": 1, "run_id": run_id,
+        "spec": spec, "logical_result_hash": result_hash, "result": result, "order_authorized": False,
+    })
+    repository.finish_run(run_id, result_hash)
+    return {"status": "ok", "kind": request.mode, "run_id": run_id, "manifest": str(manifest),
+            "result": result, "order_authorized": False}
 
 
 def execute_campaign_cycle(
@@ -2321,6 +2449,21 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                 if any(path == input_path or (name == "dataset" and _is_within(path, input_path))
                        for path in outputs):
                     parser.error("research result/cancel must not overwrite database or frozen dataset")
+            reference_header = request_header.get("strategy_references")
+            if isinstance(reference_header, dict) and isinstance(reference_header.get("path"), str):
+                try:
+                    reference_path = _request_path(request_path.parent, reference_header["path"], "strategy_references.path")
+                except (OSError, ValueError):
+                    pass  # The request loader reports malformed paths to a separate result.
+                else:
+                    if reference_path in outputs:
+                        parser.error("research result/cancel must not overwrite the strategy reference")
+            if request_header.get("mode") in EVIDENCE_EXPERIMENT_FAMILIES:
+                runs_dir = request_header.get("runs_dir")
+                if isinstance(runs_dir, str) and runs_dir.strip() and any(
+                    _is_within(path, _request_path(request_path.parent, runs_dir, "runs_dir")) for path in outputs
+                ):
+                    parser.error("research result/cancel must not overwrite experiment artifacts")
     try:
         if args.register_campaign and args.request is None:
             raise ValueError('--register-campaign requires --request')
@@ -2347,6 +2490,8 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                 if isinstance(request_header, dict) else load_research_process_request(args.request)
             )
             if args.register_campaign:
+                if isinstance(request, EvidenceExperimentRequest):
+                    raise ValueError("evidence experiments run outside a campaign")
                 if request.database is None:
                     raise ValueError("campaign registration requires an explicit database and runs_dir")
                 result = register_campaign_request(ResearchRepository(request.database), args.register_campaign, request,

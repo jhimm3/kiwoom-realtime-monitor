@@ -289,30 +289,35 @@ class MarketDataIngestor:
                 )
 
     def _ingest_daily(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
-        from kiwoom_monitor.application.daily_bar_coverage import normalize_source_daily_bar
+        from kiwoom_monitor.application.daily_bar_coverage import normalize_source_daily_bar, source_integer
         raw_code = str(body.get("stk_cd", "")).strip()
         code, market = _code_and_market(raw_code)
         records = payload.get("stk_dt_pole_chart_qry", payload.get("stk_ddwkmm", []))
         if not code or not isinstance(records, list):
             return
         now = self._now()
+        received_epoch = now.timestamp()
+        raw_adjustment_mode = body.get("upd_stkpc_tp", "")
+        adjustment_mode = str(raw_adjustment_mode).strip() if raw_adjustment_mode is not None else ""
         values: list[dict[str, Any]] = []
+        observations = []
         for record in records:
             if not isinstance(record, dict):
                 continue
             normalized = normalize_source_daily_bar(record)
             if normalized is None:
                 continue
-            values.append({
+            value = {
                 **normalized, "code": code, "market": market,
-                "updated_at": now.timestamp(),
-            })
-        observations = []
-        for value in values:
-            completeness = _daily_completeness(
-                str(value["trading_date"]), str(value["market"]), now
+                "updated_at": received_epoch,
+            }
+            values.append(value)
+            observed = {**value, "adjustment_mode": adjustment_mode or None,
+                        "volume": source_integer(record.get("trde_qty"))}
+            observation = daily_bar_observation(
+                observed, completeness=_daily_completeness(value["trading_date"], market, now),
+                now_provider=self._now,
             )
-            observation = daily_bar_observation(value, completeness=completeness, now_provider=self._now)
             observations.append((bar_observation_key(observation), observation))
         try:
             changed = self._store.replace_daily_bars(values, observations=observations)

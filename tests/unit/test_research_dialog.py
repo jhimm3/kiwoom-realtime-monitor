@@ -48,6 +48,34 @@ class ResearchDialogTests(unittest.TestCase):
         self.assertEqual("1,234원", rows[0][3])
         self.assertEqual("", rows[0][2])
 
+    def test_evidence_request_preview_and_result_keep_partial_holding_visible(self) -> None:
+        import hashlib
+        import json
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "micro.json"
+            source.write_bytes(b"{}")
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "mode": "micro_experiment", "dataset": source.name, "dataset_sha256": hashlib.sha256(b"{}").hexdigest(),
+                "policy": {}, "database": "research.sqlite3", "runs_dir": "runs",
+            }), encoding="utf-8")
+            dialog = ResearchDialog(root)
+            try:
+                dialog.activate_startup()
+                dialog._request_path.setText(str(request))
+                self.assertTrue(dialog._preview_request())
+                self.assertIn("micro.json", dialog._summary.text())
+                self.assertTrue(dialog._run.isEnabled())
+                dialog._apply_result({"status": "ok", "kind": "micro_experiment",
+                                      "result": {"status": "OPEN", "position_quantity": 2, "reason": "partial"}})
+                self.assertEqual("보유 수량", dialog._table.horizontalHeaderItem(2).text())
+                self.assertEqual(("OPEN", "2"), tuple(dialog._table.item(0, index).text() for index in (1, 2)))
+            finally:
+                dialog.stop()
+                dialog.deleteLater()
+
     def test_market_regime_summary_keeps_unknown_reason_visible(self) -> None:
         text = format_market_regime_summary({
             "value": {

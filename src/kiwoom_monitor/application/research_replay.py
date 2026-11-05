@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import (
@@ -112,20 +112,25 @@ def replay_candidate_universe(
     )))
 
 
+def _krx_calendar_by_day(evidence: Iterable[TradingDayEvidence]) -> dict[date, list[TradingDayEvidence]]:
+    by_day: dict[date, list[TradingDayEvidence]] = {}
+    for revision in evidence:
+        if revision.venue == "KRX":
+            by_day.setdefault(revision.trading_date, []).append(revision)
+    return by_day
+
+
 def replay_krx_minute_bars(
     observations: Iterable[Mapping[str, Any]], *, as_of: datetime | None = None,
     strict: bool = True,
     session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
-    calendar_evidence: Iterable[TradingDayEvidence] | None = None,
+    calendar_evidence: Iterable[TradingDayEvidence] | Mapping[date, Iterable[TradingDayEvidence]] | None = None,
 ) -> tuple[KrxMinuteBarFrame, ...]:
     """Read latest KRX minute revisions with their original availability cut."""
     cutoff = _utc_cutoff(as_of)
-    calendar_by_day = {}
+    calendar_by_day = (calendar_evidence if isinstance(calendar_evidence, Mapping)
+                       else _krx_calendar_by_day(calendar_evidence or ()))
     calendar_at_receipt = {}
-    if calendar_evidence is not None:
-        for evidence in calendar_evidence:
-            if evidence.venue == "KRX":
-                calendar_by_day.setdefault(evidence.trading_date, []).append(evidence)
     latest: dict[tuple[str, str], Mapping[str, Any]] = {}
     for value in observations:
         if value.get("kind") != "minute_bar" or value.get("venue") != "KRX":
@@ -230,11 +235,13 @@ class ResearchReplayCursor:
     def __init__(
         self, observations, *, session_profile, checkpoint=lambda: None,
         universe_kinds: tuple[str, ...] = ("top20_membership",),
+        calendar_evidence: Iterable[TradingDayEvidence] | None = None,
     ):
         self.observations = observations
         self.session_profile = session_profile
         self.checkpoint = checkpoint
         self.universe_kinds = universe_kinds
+        self.calendar_by_day = _krx_calendar_by_day(calendar_evidence) if calendar_evidence is not None else None
         self.offset = 0
         self.latest = {}
         self.latest_by_code_day = {}
@@ -253,9 +260,11 @@ class ResearchReplayCursor:
         if current is None or current.revision_id != str(observation.get('revision_id', '')):
             return None, (), tuple(self.universe)
         group = self._bar_group(current)
-        bars = tuple(sorted(self.latest_by_code_day[group].values(),
+        return current, self.bars_for_date(*group), tuple(self.universe)
+
+    def bars_for_date(self, code: str, trading_date: date) -> tuple[KrxMinuteBarFrame, ...]:
+        return tuple(sorted(self.latest_by_code_day.get((code, trading_date), {}).values(),
                             key=lambda row: (row.bar_start, row.code, row.revision_id)))
-        return current, bars, tuple(self.universe)
 
     @staticmethod
     def _bar_group(frame):
@@ -278,7 +287,10 @@ class ResearchReplayCursor:
             if not isinstance(payload, Mapping) or str(payload.get('market')) != 'KRX' or not payload.get('window_closed'):
                 continue
             key = (str(value.get('subject', '')), str(value.get('observation_key', '')))
-            frames = replay_krx_minute_bars((value,), strict=True, session_profile=self.session_profile)
+            frames = replay_krx_minute_bars(
+                (value,), strict=True, session_profile=self.session_profile,
+                calendar_evidence=self.calendar_by_day,
+            )
             # A latest invalid correction hides its older valid revision, just as full replay does.
             previous = self.latest.get(key)
             if previous is not None:

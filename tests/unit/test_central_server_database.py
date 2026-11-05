@@ -49,6 +49,7 @@ from kiwoom_monitor.central_server.database import (
     _uses_async_dataset_commit,
     create_query_store,
 )
+from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
 from kiwoom_monitor.central_server.market_observations import (
     bar_observation_key, daily_bar_observation, market_state_observation, minute_bar_observation,
 )
@@ -1731,6 +1732,90 @@ class CentralServerDatabaseTests(unittest.TestCase):
         self.assertEqual(corrected_observation.metadata.available_at.isoformat(), corrected_metadata[0])
         self.assertEqual(70060, changed["close"])
         self.assertEqual(corrected["updated_at"], changed["updated_at"])
+
+    def test_daily_query_history_keeps_finality_and_correction_at_fixed_export_cut(self) -> None:
+        kst = ZoneInfo("Asia/Seoul")
+        first_cut = datetime(2026, 9, 14, 19, 59, tzinfo=kst)
+        final_cut = first_cut + timedelta(minutes=2)
+        correction_cut = final_cut + timedelta(minutes=1)
+        now = first_cut
+        request = {"stk_cd": "005930", "upd_stkpc_tp": "1"}
+        response_row = {
+            "dt": "20260914", "open_pric": "100", "high_pric": "110",
+            "low_pric": "90", "cur_prc": "100",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            ingest = MarketDataIngestor(store, now_provider=lambda: now)
+            ingest.ingest("ka10081", request, {"stk_dt_pole_chart_qry": [response_row]})
+            now += timedelta(seconds=15)
+            ingest.ingest("ka10081", request, {"stk_dt_pole_chart_qry": [response_row]})
+            now = final_cut
+            ingest.ingest("ka10081", request, {"stk_dt_pole_chart_qry": [response_row]})
+            self.assertEqual(first_cut.timestamp(), store.load_daily_bars("005930", "KRX")[0]["updated_at"])
+            self.assertEqual(final_cut, store.load_market_data_metadata(
+                MarketDatasetKind.DAILY_BAR, "005930:KRX", "2026-09-14",
+            ).available_at)
+
+            export = store.create_observation_export(first_cut, correction_cut + timedelta(minutes=1),
+                                                     ("daily_bar",), "005930:KRX")
+            now = correction_cut
+            ingest.ingest("ka10081", {**request, "upd_stkpc_tp": 0}, {
+                "stk_dt_pole_chart_qry": [{**response_row, "cur_prc": "101", "trde_qty": "0"}],
+            })
+            corrected, final, first = store.load_observation_revisions("daily_bar", "005930:KRX")
+            self.assertEqual([first_cut, final_cut, correction_cut], [
+                datetime.fromisoformat(row["available_at"]) for row in (first, final, corrected)
+            ])
+            self.assertEqual(["in_progress", "complete", "complete"], [
+                row["completeness"] for row in (first, final, corrected)
+            ])
+            self.assertIsNone(first["revision_of"])
+            self.assertEqual(first["revision_id"], final["revision_of"])
+            self.assertEqual(final["revision_id"], corrected["revision_of"])
+            self.assertEqual("daily_bar/v1", first["payload"]["version"])
+            self.assertEqual("kiwoom-ka10081", first["source_id"])
+            self.assertEqual("1", first["payload"]["adjustment_mode"])
+            self.assertIsNone(first["payload"]["volume"])
+            self.assertEqual((101, "0", 0), tuple(corrected["payload"][field]
+                                                  for field in ("close", "adjustment_mode", "volume")))
+            page = store.load_observation_export_page(export["fixed_watermark"], 0, 10)
+            self.assertEqual("no-universe-observations-v1", page["manifest"]["universe_rule"])
+            self.assertEqual([first["revision_id"], final["revision_id"]],
+                             [row["revision_id"] for row in page["observations"]])
+            store.close()
+
+    def test_daily_query_revision_failure_rolls_back_latest_bar_and_metadata(self) -> None:
+        now = datetime(2026, 9, 14, 20, 1, tzinfo=ZoneInfo("Asia/Seoul"))
+        request = {"stk_cd": "005930"}
+        response_row = {
+            "dt": "20260914", "open_pric": "100", "high_pric": "110",
+            "low_pric": "90", "cur_prc": "100",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "monitor.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            ingest = MarketDataIngestor(store, now_provider=lambda: now)
+            ingest.ingest("ka10081", request, {"stk_dt_pole_chart_qry": [response_row]})
+            original = store.load_observation_revisions("daily_bar", "005930:KRX")
+            original_bar = store.load_daily_bars("005930", "KRX")
+            original_meta = store.load_market_data_metadata(MarketDatasetKind.DAILY_BAR, "005930:KRX", "2026-09-14")
+            self.assertIsNone(original[0]["payload"]["adjustment_mode"])
+
+            now += timedelta(minutes=1)
+            with patch("kiwoom_monitor.central_server.database_market_bars._insert_sqlite_observation_revisions_batch",
+                       side_effect=sqlite3.IntegrityError("revision insert failed")):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "revision insert failed"):
+                    ingest.ingest("ka10081", request, {
+                        "stk_dt_pole_chart_qry": [{**response_row, "cur_prc": "101"}],
+                    })
+            self.assertEqual(original, store.load_observation_revisions("daily_bar", "005930:KRX"))
+            self.assertEqual(original_bar, store.load_daily_bars("005930", "KRX"))
+            self.assertEqual(original_meta, store.load_market_data_metadata(
+                MarketDatasetKind.DAILY_BAR, "005930:KRX", "2026-09-14",
+            ))
+            store.close()
 
     def test_minute_bar_metadata_replay_preserves_time_until_state_or_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

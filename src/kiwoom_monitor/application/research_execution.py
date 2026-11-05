@@ -5,6 +5,7 @@ from __future__ import annotations
 from kiwoom_monitor.domain.simulation_contract import (
     COST_MODEL_VERSION, COST_MODEL_DECIMAL_VERSION, EXECUTION_MODEL_VERSION,
     SAME_BAR_PATH_VERSION, SimulationCostModel, SimulationExecutionConfig, _aware_datetime,
+    COMPLETED_CLOSE_EXECUTION_VERSION,
 )
 
 import hashlib
@@ -339,10 +340,14 @@ class PaperExecutionEngine:
         self.strategy = strategy
         from .leader_breakout import LeaderBreakoutConfig
         self._leader = isinstance(strategy, LeaderBreakoutConfig)
+        self._completed_close = execution.version == COMPLETED_CLOSE_EXECUTION_VERSION
+        if self._completed_close and session_profile != KRX_REGULAR_RESEARCH_PROFILE:
+            raise ValueError("completed-close execution requires an explicit KRX regular profile")
         if self._leader and strategy.execution_missing("1m"):
             raise ValueError("leader performance blocked:" + ",".join(strategy.execution_missing("1m")))
         self.session_profile = session_profile
         self._last_processed_bar = None
+        self._entry_failure: tuple[str, int] | None = None
         self._native_study = None
         self.strategy_state = StrategyState()
         self.portfolio = SimulationPortfolio(
@@ -391,6 +396,8 @@ class PaperExecutionEngine:
         if self.portfolio.position is not None and (
             self.portfolio.position.symbol == normalize_stock_code(bar.code)
         ):
+            if self._completed_close and bar.market_phase != MarketPhase.CONTINUOUS.value:
+                return tuple(events)
             deadline_unproven = (self.strategy.session_exit_policy
                 and (regular_session_time_rejection(_aware_datetime(bar.bar_start))
                      or _aware_datetime(bar.bar_end) >= regular_session_fill_deadline(
@@ -408,7 +415,7 @@ class PaperExecutionEngine:
                 ))
                 return tuple(events)
             risk_pending = self.portfolio.pending_order
-            risk_event = None if self._leader else self._apply_intrabar_risk(bar)
+            risk_event = None if self._leader or self._completed_close else self._apply_intrabar_risk(bar)
             if risk_event is not None:
                 events.append(risk_event)
                 if risk_pending is not None and (risk_pending.target_execution_version == POSITION_TARGET_EXECUTION_VERSION
@@ -424,12 +431,30 @@ class PaperExecutionEngine:
 
     def process_decision(
         self, decision: StrategyDecision, resulting_state: StrategyState,
-        *, source_bar: KrxMinuteBarFrame | None = None,
+        *, source_bar: KrxMinuteBarFrame | None = None, minimum_fill_exclusive: int | None = None,
     ) -> tuple[ExecutionEvent, ...]:
         self.strategy_state = resulting_state
-        if decision.final_action not in {"ENTER", "EXIT"}:
+        action = decision.final_action
+        if action not in {"ENTER", "EXIT"} and not (self._completed_close and action in {"ADD", "REDUCE"}):
             return ()
-        side = "BUY" if decision.final_action == "ENTER" else "SELL"
+        side = "BUY" if action in {"ENTER", "ADD"} else "SELL"
+        if minimum_fill_exclusive is not None and (not self._completed_close or action != "ENTER"
+                                                  or type(minimum_fill_exclusive) is not int or minimum_fill_exclusive <= 0):
+            raise ValueError("only a completed-close entry can pin a positive failure price")
+        position = self.portfolio.position
+        if self._completed_close:
+            if (source_bar is None or source_bar.code != decision.symbol
+                    or source_bar.capture_quality != "complete" or source_bar.market_phase != MarketPhase.CONTINUOUS.value
+                    or _aware_datetime(source_bar.available_at) != _aware_datetime(decision.decided_at)):
+                return (self._notice(decision, side, "ORDER_REJECTED", "completed_close_evidence_required"),)
+            if position is not None and position.symbol != decision.symbol:
+                return (self._notice(decision, side, "ORDER_REJECTED", "position_symbol_mismatch"),)
+            if action == "ADD" and position is None:
+                return (self._notice(decision, side, "ORDER_REJECTED", "position_missing"),)
+            if side == "SELL" and position is not None and (
+                decision.quantity > position.quantity or (action == "EXIT" and decision.quantity != position.quantity)
+            ):
+                return (self._notice(decision, side, "ORDER_REJECTED", "position_quantity_mismatch"),)
         preempted = ()
         owned = self.portfolio.pending_order
         if (side=='SELL' and owned is not None and (owned.target_execution_version==POSITION_TARGET_EXECUTION_VERSION
@@ -443,7 +468,7 @@ class PaperExecutionEngine:
                 reason='strategy_exit_preempted_target'),)
         if self.portfolio.pending_order is not None:
             return (self._notice(decision, side, "ORDER_REJECTED", "pending_order_exists"),)
-        if side == "BUY" and self.portfolio.position is not None:
+        if side == "BUY" and position is not None and action != "ADD":
             return (self._notice(decision, side, "ORDER_REJECTED", "position_already_open"),)
         if side == "SELL" and self.portfolio.position is None:
             return (self._notice(decision, side, "ORDER_REJECTED", "position_missing"),)
@@ -453,12 +478,17 @@ class PaperExecutionEngine:
                 self.strategy_state = StrategyState(emitted_candidate_keys=resulting_state.emitted_candidate_keys)
                 return (self._notice(decision, side, "ORDER_REJECTED", reason),)
         quantity = (
-            decision.quantity if side == "BUY" else self.portfolio.position.quantity
+            decision.quantity if side == "BUY" or self._completed_close else position.quantity
         )
         if quantity <= 0:
             return (self._notice(decision, side, "ORDER_REJECTED", "invalid_quantity"),)
         reserved = self._estimated_buy_cash(decision.signal_reference_price, quantity) if side == "BUY" else 0
         available_cash = self.portfolio.cash_won - self.portfolio.reserved_cash_won
+        cash_buffer = 0
+        if self._completed_close and side == "BUY":
+            spent = position.entry_notional + position.entry_commission if position is not None else 0
+            available_cash = min(available_cash, self.strategy.capital_won - spent)
+            cash_buffer = self.portfolio.cash_won - available_cash
         if side == "BUY" and reserved > available_cash:
             self.strategy_state = StrategyState(
                 emitted_candidate_keys=resulting_state.emitted_candidate_keys,
@@ -477,6 +507,7 @@ class PaperExecutionEngine:
             submitted_at=decision.decided_at,
             eligible_after=decision.decided_at,
             reserved_cash_won=reserved,
+            cash_buffer_won=cash_buffer,
             session_profile=self.session_profile or "",
             research_session=(
                 source_bar.research_session
@@ -487,6 +518,8 @@ class PaperExecutionEngine:
                 ) or ""
             ),
         )
+        if minimum_fill_exclusive is not None:
+            self._entry_failure = (intent_id, minimum_fill_exclusive)
         self.portfolio = SimulationPortfolio(
             cash_won=self.portfolio.cash_won,
             reserved_cash_won=reserved,
@@ -583,6 +616,14 @@ class PaperExecutionEngine:
             return "next_tradable_bar_gap"
         if bar.market_phase != MarketPhase.CONTINUOUS.value:
             return "minute_bar_phase_cannot_prove_next_open_fill"
+        if self._completed_close:
+            cost = self.execution.cost_model
+            if (cost is None or not cost.valid_from or cost.rate_basis == "unspecified" or not cost.source.strip()
+                    or not _aware_datetime(cost.valid_from) <= bar_start < _aware_datetime(cost.valid_to)):
+                return "next_open_cost_evidence_unavailable"
+            if (self._entry_failure is not None and self._entry_failure[0] == pending.intent_id
+                    and _slipped_price(bar.open, "BUY", cost.slippage_bps) <= self._entry_failure[1]):
+                return "next_open_has_no_positive_initial_risk_distance"
         return ""
 
     def _limit_open_crosses(self, pending, bar):

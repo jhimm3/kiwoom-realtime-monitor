@@ -603,6 +603,8 @@ S1 PC Top20 표시창 geometry는 명시 role INI를 사용한다. NAS index/out
 <a id="shadow"></a>
 ## 공유 판단과 Shadow — F11/F12/F13
 
+**S12-04 동결 전략 연구.** 기존 연구 실행기가 시점별 자료 판본을 공급하고 Paper 실행기가 후속 시가·비용·보유량을 처리한다. 동결 Shadow 재생은 같은 판단의 후보와 근거를 저장한다. 실시간 Shadow 및 승인 모의 실행으로의 연결은 별도다. [정본](app-target-20261023.md#section12-frozen-strategy-research).
+
 **S12-02 F13 0B 가격·대금 창 분류.** 기존 시장 계산에서 승인 관측을 정렬한 뒤 종목과 두 창에 한 번 나눈다. 개별 같은 초 체결·원래 증거 순서·시장 범위·결측 판정과 기존 가격/대금 계산을 보존한다. 합성 동일 입력 비교와 관련 413건의 범위를 확인했다. [비교 근거](app-target-20261023.md#section12-library-comparison).
 
 **MAIN157 선택창 시작수명(F13·F15 소비):** CandidateMonitorDialog는constructor에서poll/상태timer를시작하지않고게시된MainWindow의명시startup에서자기작업을한번시작한다. persisted alert=True·원candidate출력/알림·RAM선택조회·stop후늦은입장차단을현재query8및불변candidate33/관련소비범위로확인했다. 판단kernel/입력/주문권한·수집기는변경0이며C12전체종료/운영은별도다. [국소수락](../../tmp/ar-v1-wave51-20261029/integration157/acceptance157-c11.json).
