@@ -216,6 +216,27 @@ def publish_gap_observations(store, example, clock):
 
 
 class CloseDeadlineExecutionTests(unittest.TestCase):
+    def test_v1_stopped_policy_does_not_gain_protective_cancel_authority(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-v1-stopped.sqlite3'
+        verify_close_stop_native_fences(self, lambda: SQLiteQueryStore(db), stopped=True)
+
+    def test_stopped_management_requires_explicit_v2_policy_and_preserves_v1_identity(self):
+        from dataclasses import replace
+        from kiwoom_monitor.domain.execution_activation import CloseMockExecutionPolicy
+
+        original = CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
+            'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1')
+        self.assertNotIn('stopped_management', original.to_dict())
+        self.assertEqual(original, CloseMockExecutionPolicy(**original.to_dict()))
+        with self.assertRaisesRegex(ValueError, 'unsupported CLOSE execution policy'):
+            replace(original, stopped_management='continue_original_plan/v1')
+        with self.assertRaisesRegex(ValueError, 'unsupported CLOSE execution policy'):
+            replace(original, version='close-mock-execution-policy/v2')
+        chosen = replace(original, version='close-mock-execution-policy/v2', stopped_management='continue_original_plan/v1')
+        self.assertEqual(chosen, CloseMockExecutionPolicy(**chosen.to_dict()))
+
     def test_native_stop_rejects_changed_checkpoint_and_later_fill_cut_before_cancel(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
@@ -247,7 +268,7 @@ class CloseDeadlineExecutionTests(unittest.TestCase):
         verify_close_deadline(self, lambda: SQLiteQueryStore(db), partial=True, gap=True)
 
 
-def verify_close_stop_native_fences(case, store_factory):
+def verify_close_stop_native_fences(case, store_factory, *, stopped=False):
     from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests, ACCOUNT_REF
     from kiwoom_monitor.application.close_mock_execution import prepare_close_entry_deadline_claim
     from kiwoom_monitor.application.mock_automation_risk import build_mock_automation_risk_snapshot, mock_automation_stop_loss_trigger
@@ -284,6 +305,17 @@ def verify_close_stop_native_fences(case, store_factory):
         parameters=context.parameters, event=context.event, recovery=recovery, risk=risk, protection_notice=notice)
     revision = repository.load_mock_automation_control(ACCOUNT_REF).control_revision
     before = execution.events(buy.intent.intent_id)
+    if stopped:
+        from kiwoom_monitor.application.mock_automation_execution import emergency_stop_mock_automation
+
+        emergency_stop_mock_automation(repository, runtime, account_ref=ACCOUNT_REF, spec_id=context.spec.spec_id,
+            stopped_at=clock[0], reason='synthetic v1 reconciliation-only stop', expected_control_revision=revision)
+        revision += 1
+        with patch.object(context.transport, 'cancel', side_effect=AssertionError('v1 stop reached transport')):
+            with case.assertRaisesRegex(RuntimeError, 'MOCK_AUTOMATION_CONTROL_CHANGED'):
+                runtime.cancel_automation_intent(current, spec_id=context.spec.spec_id, control_revision=revision, planned_cancel_claim=claim)
+        case.assertEqual(before, execution.events(buy.intent.intent_id))
+        return
     with patch.object(context.transport, 'cancel', side_effect=AssertionError('invalid stop reached transport')):
         changed = deepcopy(checkpoint)
         changed['protection_review']['revision'] += 1
@@ -328,7 +360,7 @@ def verify_close_legacy_entry(case, store_factory):
     case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
 
 
-async def verify_close_runner(case, store_factory, *, protective=False):
+async def verify_close_runner(case, store_factory, *, protective=False, stopped=False):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
@@ -345,7 +377,11 @@ async def verify_close_runner(case, store_factory, *, protective=False):
     store = store_factory()
     case.addCleanup(store.close)
     store.initialize()
-    context = MockAutomationSpecificationTests._verify_close_entry_claim(case, store, prepare_only=True)
+    from kiwoom_monitor.domain.execution_activation import CloseMockExecutionPolicy
+    terms = (CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1', 'cancel_at_entry_deadline/v1',
+        'acknowledged_0B_bounded_slippage/v1', version='close-mock-execution-policy/v2',
+        stopped_management='continue_original_plan/v1') if stopped else None)
+    context = MockAutomationSpecificationTests._verify_close_entry_claim(case, store, prepare_only=True, close_terms=terms)
     clock, quotes = context.clock, {context.event['symbol']: context.quote}
     broker_orders, broker_positions = {}, {}
     execution, repository, runtime = context.execution, context.repository, context.runtime
@@ -444,6 +480,23 @@ async def verify_close_runner(case, store_factory, *, protective=False):
     clock[0] += timedelta(seconds=1)
     await monitor.refresh_recovery()
     deadline = datetime.fromisoformat(proof['snapshot']['candidate']['close_ipo_entry_setup']['entry_deadline'])
+    if stopped:
+        from kiwoom_monitor.application.mock_automation_execution import emergency_stop_mock_automation
+
+        control = repository.load_mock_automation_control(ACCOUNT_REF)
+        emergency_stop_mock_automation(repository, runtime, account_ref=ACCOUNT_REF, spec_id=context.spec.spec_id,
+            stopped_at=clock[0], reason='synthetic explicit original-plan management',
+            expected_control_revision=control.control_revision)
+        stopped_control = repository.load_mock_automation_control(ACCOUNT_REF)
+        case.assertEqual('STOPPED', stopped_control.desired_state.value)
+        clock[0] += timedelta(seconds=1)
+        await monitor.refresh_recovery()
+        execution.bind_automation_control(spec_id=context.spec.spec_id, control_revision=stopped_control.control_revision)
+        try:
+            with case.assertRaisesRegex(RuntimeError, 'MOCK_AUTOMATION_CONTROL_CHANGED'):
+                execution.create(replace(buy.intent, intent_id=buy.intent.intent_id + '-forbidden-new-entry'))
+        finally:
+            execution.clear_automation_control()
     if not protective:
         clock[0] = deadline
     cancellations = []
@@ -549,10 +602,25 @@ async def verify_close_runner(case, store_factory, *, protective=False):
     case.assertEqual((0, 0), (head.quantity, head.unreconciled_sell_quantity))
     case.assertEqual(['BUY', 'SELL'], [row[1] for row in context.transport.calls])
     case.assertEqual(((), True), runtime.load_account_active_intents())
+    if stopped:
+        case.assertEqual(stopped_control, repository.load_mock_automation_control(ACCOUNT_REF))
+        case.assertEqual('STOPPED', runner.episode._close_management.status['state'])
     await supervisor.close()
 
 
 class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_stopped_plan_management_keeps_deadline_and_gap_exit_without_price_stop(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-stopped-gap.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), stopped=True)
+
+    async def test_explicit_stopped_plan_management_cancels_and_exits_without_resuming_entries(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-stopped.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), protective=True, stopped=True)
+
     async def test_first_0B_stop_cancels_partial_buy_and_survives_rebound_late_fill_and_restart(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 

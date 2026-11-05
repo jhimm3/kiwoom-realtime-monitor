@@ -57,8 +57,19 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         )
         control_row = cursor.fetchone()
         control = _json_document(control_row[0]) if control_row else {}
+        stopped_close_management = False
+        if (control.get('desired_state') == 'STOPPED' and value.get('plan') is not None
+                and value.get('policy_version') == 'close_execution_adapter/v1'
+                and (value.get('side') == 'SELL'
+                     or (ownership.get('planned_cancel_claim') or {}).get('version') in {
+                         'close-entry-deadline-cancel/v1', 'close-entry-protective-cancel/v1'})):
+            from kiwoom_monitor.domain.execution_activation import allows_stopped_close_management, mock_automation_spec_from_dict
+
+            spec_doc = _plan_document(cursor, p, 'execution_mock_automation_specs', value['account_ref'],
+                                       ownership.get('active_spec_id'))
+            stopped_close_management = spec_doc is not None and allows_stopped_close_management(mock_automation_spec_from_dict(spec_doc))
         if control_revision is not None and (
-            control.get("desired_state") != "RUNNING"
+            (control.get("desired_state") != "RUNNING" and not stopped_close_management)
             or int(control.get("control_revision", 0)) != int(control_revision)
             or control.get("active_spec_id") != ownership.get("active_spec_id")
             or control.get("execution_run_id") != ownership["run_id"]

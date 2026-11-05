@@ -4,6 +4,16 @@ import unittest
 
 
 class CloseDeadlinePostgresTests(unittest.TestCase):
+    def test_v1_stopped_policy_does_not_gain_protective_cancel_authority(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        from tests.unit.test_close_mock_execution import verify_close_stop_native_fences
+
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        scoped = self.enterContext(isolated_observation_schema(url))
+        verify_close_stop_native_fences(self, lambda: PostgresQueryStore(scoped), stopped=True)
+
     def test_native_stop_rejects_changed_checkpoint_and_later_fill_cut_before_cancel(self):
         from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
         from tests.unit.test_close_mock_execution import verify_close_stop_native_fences
@@ -45,6 +55,26 @@ class CloseDeadlinePostgresTests(unittest.TestCase):
 
 
 class CloseRunnerPostgresTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_stopped_plan_management_keeps_deadline_and_gap_exit_without_price_stop(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        from tests.unit.test_close_mock_execution import verify_close_runner
+
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        scoped = self.enterContext(isolated_observation_schema(url))
+        await verify_close_runner(self, lambda: PostgresQueryStore(scoped), stopped=True)
+
+    async def test_explicit_stopped_plan_management_cancels_and_exits_without_resuming_entries(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        from tests.unit.test_close_mock_execution import verify_close_runner
+
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        scoped = self.enterContext(isolated_observation_schema(url))
+        await verify_close_runner(self, lambda: PostgresQueryStore(scoped), protective=True, stopped=True)
+
     async def test_first_0B_stop_cancels_partial_buy_and_survives_rebound_late_fill_and_restart(self):
         from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
         from tests.unit.test_close_mock_execution import verify_close_runner

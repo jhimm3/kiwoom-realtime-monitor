@@ -1202,7 +1202,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
     def test_close_entry_uses_native_shadow_quote_policy_and_one_plan(self):
         self._verify_close_entry_claim(self.store)
 
-    def _verify_close_entry_claim(self, store, *, prepare_only=False):
+    def _verify_close_entry_claim(self, store, *, prepare_only=False, close_terms=None):
         from dataclasses import asdict
         from datetime import time
         from kiwoom_monitor.application.close_mock_execution import (
@@ -1281,7 +1281,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         stages = (evaluated, validated, shadow)
         for stage in stages:
             repository.save_stage_revision(stage)
-        terms = CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
+        terms = close_terms or CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
                                         'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1')
         # Explicit isolated kernel approval. Product READY publication remains
         # unavailable until the CLOSE runner and complete position management connect.

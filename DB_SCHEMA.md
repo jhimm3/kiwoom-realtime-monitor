@@ -10,6 +10,8 @@
 
 첫 종가베팅 0B 손절은 기존 checkpoint의 `protection_review`에 보존한다. `close-entry-protective-cancel/v1`은 원래 매수의 마감 전 잔량 취소에 그 요청을 결속하며 기존 deadline/v1의 문서는 그대로 해석한다. `close_exit_snapshot/v2`는 같은 요청과 최초 가격을 보존하고 실제 매도에는 별도의 최신 0B 가격을 사용한다. native 취소·청산 트랜잭션은 checkpoint, 불변 Risk 원장과 그 커서까지의 원매수 체결을 대조한다. 새 테이블·스키마 전환이나 매 틱 DB 쓰기는 없다. [수락 범위](docs/architecture/section12-development-roadmap-20261105.md#s12-close-sticky-stop).
 
+종가베팅 실행 정책 v1은 기존 JSON·spec/plan ID와 중지 권한을 보존한다. v2는 `stopped_management: continue_original_plan/v1`을 명시해야 저장할 수 있으며 그 선택은 내용 hash에 포함한다. 중지 중 원래 계획의 취소·청산만 해당 native control fence를 통과할 수 있다. 계좌·run·spec·revision·lease·최신 대사와 원체결 검증은 공통 원장에 남고 신규 진입은 계속 거절한다. 스키마 변경이나 기존 명세의 일괄 변환은 없다.
+
 ## 새 명시full 로컬 저장 계약 — AR04/05 source253·기동/복원 연결257
 
 **실제사본265 검증:** source267의현재고유30 중실제1case에서같은full root의3owner를소비했다. 닫힌monitor/중앙2.3GB는공개소비후원사본전체bytes와같고journal3는신규native원자수락/원raw·판본·receipt/noop을보존했다. 새schema변경/원source SQL0이며기존journal11/central24/ownedfull 계약은그대로다. 실제sourcecut/T0·연구HTTP/설치소비는별도다. [실제수락·근거](docs/architecture/app-target-20261023.md#ar05-joint-native-copy265).

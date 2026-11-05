@@ -3062,6 +3062,18 @@
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|_close_native_stop_risk|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-close-explicit-stopped-management-20261105",
+      "reason": "Existing v1 STOPPED semantics cannot silently acquire protective order authority; an explicit frozen CLOSE v2 policy must permit original-plan management without resuming entries.",
+      "connection": "Reuse the existing application EXIT gate and native account/control/lease fence. Only a stopped typed CLOSE SELL lifecycle or typed original BUY cancellation reads the frozen spec once more in the same native transaction to confirm its explicit management policy. Native original-plan proof and fresh Risk checks remain at creation/submission. No new query owner, worker or per-tick I/O is introduced; existing static SQL limits are unchanged.",
+      "validation": "SQLite/PostgreSQL actual Runner scenarios retain STOPPED through partial cancellation, late fills, DB reopen and protective or completed-gap exit. A new BUY is rejected; v1 stopped cancellation remains rejected and v1 serialized identity is preserved.",
+      "evidence": [
+        "tests/unit/test_close_mock_execution.py",
+        "tests/integration/test_close_mock_execution_postgres.py",
+        "tests/unit/test_mock_automation_specification.py"
+      ],
+      "limits": {}
     }
   ]
 }

@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 종가베팅 첫 손절 보존·부분 체결 보호 취소**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 명시한 종가베팅 정책의 중지 후 관리**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 실행기는 새 후보 진입·잔량 취소·DB 재개방·익일 갭 청산·실제 잔량 0과 첫 0B 손절 보존·부분 체결 보호 취소를 연결했다. 가격 회복·늦은 체결·재시작 뒤에도 최초 근거를 유지한다. 중지 제어하 관리·실제 완전한 동시호가 공급과 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 첫 손절](#section12-close-sticky-stop) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 계획 수명·첫 손절·부분 체결 보호와 명시한 v2 정책의 중지 후 관리를 연결했다. 기존 v1 중지 권한과 새 진입 차단은 보존한다. 실제 완전한 동시호가 공급과 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 중지 관리](#section12-close-stopped-management) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4739,6 +4739,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.265 S12-05 종가베팅 첫 손절 보존과 부분 체결 보호 취소 — 2026-11-05
 
 - 기존 RAM 가격 callback과 보호 요청·checkpoint를 재사용한다. 첫 0B 손절을 원래 불변 Risk·상세 체결 기준에 묶고 저장 수락 뒤 마감 전 매수 잔량을 취소한다. 가격 회복·늦은 체결·실제 DB 재개방 뒤에도 그 근거를 유지하며 매도에는 현재 가격과 실제 잔량을 쓴다. native 트랜잭션은 같은 checkpoint와 원매수의 당시 체결 커서를 독립 대조한다. 현재 소스 `a9054555`의 Windows 93건과 PostgreSQL 고유 14건, 구조·소비·증분 대조를 수락했다. 중지 제어·실제 완전한 동시호가 공급·일반 READY/UI 등 항목 3 잔여는 진행이다. [검증·반례·잔여](section12-development-roadmap-20261105.md#s12-close-sticky-stop).
+
+<a id="section12-close-stopped-management"></a>
+
+### 11.266 S12-05 명시한 종가베팅 정책의 중지 후 원계획 관리 — 2026-11-05
+
+- 기존 실행 정책 v1의 JSON·ID·중지 권한을 보존한다. v2는 중지 후 원계획 관리 계속을 명시해야 한다. application EXIT gate와 native control fence에서 같은 선택을 확인하며, 같은 계좌/run/spec/revision·lease·최신 대사·Risk·원체결 검사를 유지한다. STOPPED를 재개하지 않고 원래 잔량 취소·청산을 완료하며 새 BUY는 거절한다. 현재 소스 `b762960b`의 Windows 336건과 PostgreSQL 17건, 구조·소비·증분 대조를 수락했다. 실제 동시호가 공급·일반 READY/UI 등 항목 3 잔여와 전체 대표 연결은 계속 진행이다. [명시 정책·검증·잔여](section12-development-roadmap-20261105.md#s12-close-stopped-management).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

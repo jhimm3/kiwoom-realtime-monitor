@@ -34,9 +34,12 @@ class CloseMockExecutionPolicy:
     entry_remainder_policy: str
     exit_price_basis: str
     version: str = "close-mock-execution-policy/v1"
+    stopped_management: str | None = None
 
     def __post_init__(self) -> None:
-        if (self.version != "close-mock-execution-policy/v1"
+        if (self.version not in {"close-mock-execution-policy/v1", 'close-mock-execution-policy/v2'}
+                or self.stopped_management != (None if self.version == 'close-mock-execution-policy/v1'
+                                               else 'continue_original_plan/v1')
                 or self.entry_price_basis != "acknowledged_0B_bounded_by_signal/v1"
                 or self.entry_remainder_policy != "cancel_at_entry_deadline/v1"
                 or self.exit_price_basis != "acknowledged_0B_bounded_slippage/v1"):
@@ -47,7 +50,15 @@ class CloseMockExecutionPolicy:
             raise ValueError("CLOSE slippage bounds must be explicit integer basis points")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if self.stopped_management is None:
+            value.pop('stopped_management')
+        return value
+
+
+def allows_stopped_close_management(spec) -> bool:
+    return (spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE and spec.close_execution_policy is not None
+            and spec.close_execution_policy.stopped_management == 'continue_original_plan/v1')
 
 
 class StrategyLifecycleStage(StrEnum):

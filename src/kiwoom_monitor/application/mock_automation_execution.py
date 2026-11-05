@@ -29,7 +29,9 @@ from kiwoom_monitor.application.mock_automation_risk import (
     MockAutomationRiskSnapshot,
     VERIFIED_DAILY_PNL_SOURCE,
 )
-from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, ForwardEvaluationSpec, MockAutomationOperatingSpec
+from kiwoom_monitor.domain.execution_activation import (
+    LEADER_NATIVE_PLAN_MODE, ForwardEvaluationSpec, MockAutomationOperatingSpec, allows_stopped_close_management,
+)
 from kiwoom_monitor.domain.order_contract import (
     TERMINAL_ORDER_STATES,
     AccountSnapshot,
@@ -478,7 +480,10 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
     if control is None:
         reasons.append("AUTOMATION_CONTROL_MISSING")
     elif (
-        control.desired_state is not MockAutomationDesiredState.RUNNING
+        (control.desired_state is not MockAutomationDesiredState.RUNNING
+         and not (control.desired_state is MockAutomationDesiredState.STOPPED and is_exit
+                  and allows_stopped_close_management(spec)
+                  and decision.final_action == 'EXIT' and decision.constraints == ('close_execution_adapter/v1',)))
         or control.active_spec_id != spec.spec_id
         or control.execution_run_id != admission.execution_run_id
     ):
