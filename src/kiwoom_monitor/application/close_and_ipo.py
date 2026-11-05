@@ -92,6 +92,24 @@ class IpoBreakoutPolicy:
     def variant(self) -> str:
         return "IPO_BREAKOUT"
 
+    @classmethod
+    def from_document(cls, document: Mapping) -> IpoBreakoutPolicy:
+        return cls(**{**document, 'listing_phases': tuple(ListingPhase(value) for value in document['listing_phases'])})
+
+    def to_dict(self) -> dict:
+        return {**asdict(self), 'listing_phases': [value.value for value in self.listing_phases]}
+
+
+def close_ipo_policy_from_document(family: str, document: Mapping) -> ClosePolicy | IpoBreakoutPolicy:
+    """Parse shared policy data without importing the research run adapter."""
+    variants = {'close_betting/v1': 'CLOSE', 'ipo_close/v1': 'IPO_CLOSE', 'ipo_breakout/v1': 'IPO_BREAKOUT'}
+    if family not in variants:
+        raise ValueError('unsupported close/IPO family')
+    policy = IpoBreakoutPolicy.from_document(document) if family == 'ipo_breakout/v1' else ClosePolicy.from_document(document)
+    if policy.variant != variants[family]:
+        raise ValueError('minute experiment policy differs from the selected family')
+    return policy
+
 
 @dataclass(frozen=True)
 class CloseIpoSetup:
@@ -136,13 +154,18 @@ class CloseIpoSetup:
         return cls(**values)
 
 
-def matches_close_shadow(parameters: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+def matches_close_shadow(parameters: Mapping[str, Any], event: Mapping[str, Any], *,
+                         family: str = "close_betting/v1") -> bool:
     """Compare the frozen rule, while each stored Shadow setup keeps its own calendar."""
+    variants = {"close_betting/v1": "CLOSE", "ipo_close/v1": "IPO_CLOSE", "ipo_breakout/v1": "IPO_BREAKOUT"}
+    if family not in variants:
+        return False
+    variant = variants[family]
     setup = event.get("close_ipo_entry_setup")
-    if (event.get("strategy_id") != "close_betting" or event.get("strategy_version") != "v1"
-            or event.get("strategy_variant") != "CLOSE" or event.get("shadow_scope") != MINUTE_SHADOW_VERSION
+    if (event.get("strategy_id") != family.split("/")[0] or event.get("strategy_version") != "v1"
+            or event.get("strategy_variant") != variant or event.get("shadow_scope") != MINUTE_SHADOW_VERSION
             or event.get("transition") != "flat_to_candidate"
-            or event.get("decision_reasons") != ["preclose_return_setup"]
+            or event.get("decision_reasons") != (["ipo_prior_high_breakout"] if variant == "IPO_BREAKOUT" else ["preclose_return_setup"])
             or not str(event.get("run_id", "")).startswith("section12-minute-shadow:")
             or any(not isinstance(event.get(key), str) or not event[key]
                    for key in ("event_id", "snapshot_id", "decision_id"))
@@ -151,6 +174,30 @@ def matches_close_shadow(parameters: Mapping[str, Any], event: Mapping[str, Any]
             or event["quantity"] != parameters["policy"]["quantity"]):
         return False
     refs, bars = event.get("input_revision_refs"), setup.get("entry_bar_refs")
+    if variant != "CLOSE":
+        listing_refs = setup.get("listing_refs")
+        if (not isinstance(listing_refs, list) or not listing_refs
+                or not isinstance(refs, list) or any(not isinstance(ref, str) or not ref or ref not in refs for ref in listing_refs)
+                or setup.get("listing_phase") not in parameters["policy"]["listing_phases"]):
+            return False
+    if variant == "IPO_BREAKOUT":
+        if (not isinstance(refs, list) or not isinstance(bars, list) or not bars
+                or bars[-1] != event.get("reference_revision_id")
+                or any(not isinstance(ref, str) or not ref or ref not in refs for ref in bars)
+                or not isinstance(setup.get("entry_calendar_ref"), str) or not setup["entry_calendar_ref"]
+                or type(setup.get("breakout_level")) is not int or setup["breakout_level"] <= 0
+                or any(setup.get(key) is not None for key in
+                       ("close_auction", "next_date", "next_open_at", "next_calendar_ref", "next_session"))):
+            return False
+        try:
+            available, cutoff, expiry, deadline = (datetime.fromisoformat(value) for value in
+                (event["available_at"], event["input_cutoff"], event["expires_at"], setup["entry_deadline"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (all(value.utcoffset() is not None for value in (available, cutoff, expiry, deadline))
+                and available == cutoff and available < expiry <= deadline
+                and available.astimezone(KST).date().isoformat() == setup.get("entry_date")
+                and deadline.astimezone(KST).date().isoformat() == setup.get("entry_date"))
     auction = setup.get("close_auction")
     if (not isinstance(refs, list) or not isinstance(bars, list) or not bars
             or bars[-1] != event.get("reference_revision_id")

@@ -326,6 +326,30 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         self.assertEqual(0, self.dialog._spec.count())
         self.assertFalse(self.dialog._start.isEnabled())
 
+    def test_ipo_candidates_have_distinct_shadow_review_without_borrowing_close_authority(self):
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+
+        for family, label in (('ipo_close/v1', '신규주 종가베팅'), ('ipo_breakout/v1', '신규주 돌파')):
+            with self.subTest(family=family):
+                candidate = {'package': {'strategy_ref': 'ipo-test',
+                    'candidate_spec': {'version': CLOSE_FINAL_CANDIDATE_VERSION, 'family': family},
+                    'source_final': {'finished_at': '2026-09-21T07:00:00+00:00'}},
+                    'eligibility_receipt': {'status': 'ELIGIBLE'}}
+                self.context.update(candidate_publications=[candidate], specs=[], selected_spec_id='')
+                self.dialog._completed('refresh', self.context)
+                self.assertIn(label + ' 연구 적격', self.dialog._candidate.currentText())
+                self.assertEqual(label + ' Shadow 대조', self.dialog._publish.text())
+                event = {'event_id': 'stored-ipo-event', 'available_at': '2026-09-11T15:17:02+09:00'}
+                context = {**self.context, 'publication_candidate': candidate, 'shadow_events': [event]}
+                with (patch('kiwoom_monitor.presentation.mock_automation_dialog.matching_shadow_events', return_value=(event,)),
+                      patch('kiwoom_monitor.presentation.mock_automation_dialog.MockAutomationPublicationDialog') as modal):
+                    self.dialog._publish_prepared_candidate(context)
+                    modal.assert_not_called()
+                self.assertIn(label + ' Shadow 일치 1건', self.dialog._message.text())
+                self.assertIn('모의 주문 연결 개발 중', self.dialog._message.text())
+                self.assertEqual(0, self.dialog._spec.count())
+                self.assertFalse(self.dialog._start.isEnabled())
+
     def test_close_ready_review_requires_explicit_prices_and_stopped_management(self):
         from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
         from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION

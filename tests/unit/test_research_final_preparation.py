@@ -21,8 +21,8 @@ from kiwoom_monitor.infrastructure.research_data_source import (
     FINAL_INPUT_VERSION, FrozenResearchDataset, development_partition_start, load_research_input,
     prepare_development_partition, prepare_final_holdout_partition,
 )
-from test_research_bundle_execution import KST, PROFILE, child, rows_for
-from research_test_support import research_request_document as _request_document
+from tests.unit.test_research_bundle_execution import KST, PROFILE, child, rows_for
+from tests.unit.research_test_support import research_request_document as _request_document
 
 
 class FinalPreparationTests(unittest.TestCase):

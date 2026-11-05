@@ -3,6 +3,24 @@ import os
 import unittest
 
 
+class IpoFinalCandidatePostgresTests(unittest.TestCase):
+    def test_ipo_final_candidate_publication_preserves_both_variants_and_phases_without_order_authority(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        from tests.unit.test_research_final_execution import FinalExecutionTests
+
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        case = FinalExecutionTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        for family in ('ipo_close/v1', 'ipo_breakout/v1'):
+            for phase in ('listing_day', 'after_listing_day'):
+                with self.subTest(family=family, phase=phase), isolated_observation_schema(url) as scoped:
+                    case._native_final_publication_factory = lambda path, now: PostgresQueryStore(scoped, now_provider=now)
+                    case._verify_section12_final(family, phase)
+
+
 class CloseDeadlinePostgresTests(unittest.TestCase):
     def test_v1_stopped_policy_does_not_gain_protective_cancel_authority(self):
         from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore

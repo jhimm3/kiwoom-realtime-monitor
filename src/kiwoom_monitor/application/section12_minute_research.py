@@ -100,13 +100,9 @@ class MinuteExperiment:
             return cls(family, capital, policy.quantity, policy, theme_proofs=tuple(
                 ThemeRoleProof.from_document(row) for row in proofs
             ), breakout_entry_proofs=tuple(BreakoutEntryProof.from_document(row) for row in entry_proofs))
-        from kiwoom_monitor.application.close_and_ipo import ClosePolicy, IpoBreakoutPolicy
+        from kiwoom_monitor.application.close_and_ipo import close_ipo_policy_from_document
 
-        policy_document["listing_phases"] = tuple(ListingPhase(value) for value in policy_document["listing_phases"])
-        policy = IpoBreakoutPolicy(**policy_document) if family == IPO_BREAKOUT_FAMILY else ClosePolicy.from_document(policy_document)
-        variants = {CLOSE_FAMILY: "CLOSE", IPO_CLOSE_FAMILY: "IPO_CLOSE", IPO_BREAKOUT_FAMILY: "IPO_BREAKOUT"}
-        if policy.variant != variants[family]:
-            raise ValueError("minute experiment policy differs from the selected family")
+        policy = close_ipo_policy_from_document(family, policy_document)
         return cls(family, capital, policy.quantity, policy)
 
     def to_dict(self) -> dict[str, Any]:

@@ -33,7 +33,16 @@ from kiwoom_monitor.presentation.mock_automation_candidate_dialog import MockAut
 def _is_close_research_publication(publication: Any) -> bool:
     package = publication.get("package") if isinstance(publication, dict) else None
     spec = package.get("candidate_spec") if isinstance(package, dict) else None
-    return isinstance(spec, dict) and spec.get("version") == CLOSE_FINAL_CANDIDATE_VERSION
+    return (isinstance(spec, dict) and spec.get("version") == CLOSE_FINAL_CANDIDATE_VERSION
+            and spec.get('family') not in {'ipo_close/v1', 'ipo_breakout/v1'})
+
+
+def _ipo_research_label(publication: Any) -> str:
+    package = publication.get('package') if isinstance(publication, dict) else None
+    spec = package.get('candidate_spec') if isinstance(package, dict) else None
+    if not isinstance(spec, dict) or spec.get('version') != CLOSE_FINAL_CANDIDATE_VERSION:
+        return ''
+    return {'ipo_close/v1': '신규주 종가베팅', 'ipo_breakout/v1': '신규주 돌파'}.get(spec.get('family'), '')
 
 
 def available_mock_profiles(document: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -603,8 +612,10 @@ class MockAutomationDialog(QDialog):
         worker.start()
 
     def _update_candidate_action(self) -> None:
-        close_research = _is_close_research_publication(self._candidate.currentData())
-        self._publish.setText("종가베팅 READY 명세 작성" if close_research else "새 READY 명세 작성")
+        candidate = self._candidate.currentData()
+        ipo_label = _ipo_research_label(candidate)
+        self._publish.setText(ipo_label + ' Shadow 대조' if ipo_label else
+            '종가베팅 READY 명세 작성' if _is_close_research_publication(candidate) else '새 READY 명세 작성')
 
     def _publish_prepared_candidate(self, context: dict[str, Any]) -> None:
         selected = context["selected_profile"]
@@ -620,6 +631,9 @@ class MockAutomationDialog(QDialog):
         )
         if not events:
             self._message.setText("이 후보 설정과 일치하는 실제 Shadow 후보 기록이 아직 없습니다.")
+            return
+        if ipo_label := _ipo_research_label(candidate):
+            self._message.setText(f'{ipo_label} Shadow 일치 {len(events)}건 · 모의 주문 연결 개발 중')
             return
         dialog = MockAutomationPublicationDialog(
             candidate, binding, str(selected["profile_id"]), events, self,
@@ -719,6 +733,8 @@ class MockAutomationDialog(QDialog):
             source = package.get("source_final", {})
             finished = source.get("finished_at", "") if isinstance(source, dict) else ""
             label = "종가베팅 · " + status if _is_close_research_publication(publication) else status
+            if ipo_label := _ipo_research_label(publication):
+                label = ipo_label + ' 연구 적격'
             self._candidate.addItem(
                 f"{package.get('strategy_ref', '')} · {label} · {format_kst_time(finished, missing='')}", publication,
             )

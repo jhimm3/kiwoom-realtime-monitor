@@ -69,9 +69,10 @@ from kiwoom_monitor.infrastructure.central_content_client import CentralContentC
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
 from kiwoom_monitor.infrastructure.research_data_source import FrozenStrategyReferences, load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
-from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, CLOSE_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
+from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
 from kiwoom_monitor.domain.research_contract import (
     CLOSE_FINAL_CANDIDATE_VERSION,
+    CLOSE_IPO_FINAL_CANDIDATE_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FAMILIES as EVIDENCE_EXPERIMENT_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FORMAT,
 )
@@ -160,7 +161,7 @@ class EvidenceExperimentRequest:
 def final_candidate_spec_document(
     request: ResearchProcessRequest, implementation_hash: str,
 ) -> dict[str, Any]:
-    """Preserve legacy identities and bind CLOSE's pinned calendar to its research identity."""
+    """Bind supported close/IPO calendar and listing references, preserving old identities."""
     if (not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run'
             or request.search is not None or request.development_partition is not None or request.shadow_only
             or request.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES):
@@ -168,10 +169,10 @@ def final_candidate_spec_document(
     if (not isinstance(implementation_hash, str) or len(implementation_hash) != 64
             or any(char not in '0123456789abcdef' for char in implementation_hash)):
         raise ValueError('final candidate requires a scientific implementation SHA256')
-    close = isinstance(request.strategy, MinuteExperiment) and request.strategy.family == CLOSE_FAMILY
+    close = isinstance(request.strategy, MinuteExperiment) and request.strategy.family in CLOSE_IPO_FINAL_CANDIDATE_FAMILIES
     references = request.strategy_references
     if close:
-        if (request.family != CLOSE_FAMILY or request.session_profile != 'krx-regular/v1'
+        if (request.family != request.strategy.family or request.session_profile != 'krx-regular/v1'
                 or not isinstance(references, tuple) or len(references) != 2 or not isinstance(references[0], Path)
                 or not references[0].is_absolute()
                 or not isinstance(references[1], str) or len(references[1]) != 64

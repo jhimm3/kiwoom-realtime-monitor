@@ -68,7 +68,8 @@ def matching_shadow_events(
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
         parameters = package.candidate_spec["parameters"]
         return tuple(sorted(
-            (dict(event) for event in events if matches_close_shadow(parameters, event)),
+            (dict(event) for event in events if matches_close_shadow(
+                parameters, event, family=package.candidate_spec['family'])),
             key=lambda event: (datetime.fromisoformat(event["available_at"]), event["event_id"]), reverse=True,
         ))
     family_id = str(package.candidate_spec.get("family", ""))
@@ -121,6 +122,8 @@ def build_mock_automation_publication_documents(
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
+    if package.candidate_spec.get('family') in {'ipo_close/v1', 'ipo_breakout/v1'}:
+        raise ValueError('IPO READY publication requires its native order policy and runner')
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
         execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or not isinstance(close_execution_policy, CloseMockExecutionPolicy)
     ):
@@ -264,6 +267,8 @@ def publish_ready_mock_automation_spec(
     )
     if package is None:
         raise ValueError("mock automation candidate package is not stored")
+    if package.candidate_spec.get('family') in {'ipo_close/v1', 'ipo_breakout/v1'}:
+        raise ValueError('IPO READY publication requires its native order policy and runner')
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION and (
         spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE
         or not isinstance(spec.close_execution_policy, CloseMockExecutionPolicy)

@@ -95,7 +95,7 @@ def execute_research(
     leader = isinstance(config, LeaderBreakoutConfig)
     section12 = isinstance(config, MinuteExperiment)
     final_scope = execution_scope == 'independent_final_holdout/v1'
-    final_close = final_scope and section12 and config.family == CLOSE_FAMILY
+    final_close_ipo = final_scope and section12 and config.family in {CLOSE_FAMILY, IPO_CLOSE_FAMILY, IPO_BREAKOUT_FAMILY}
     historical_reconstruction = _is_historical_reconstruction(dataset.manifest)
     historical_breakout = (section12 and config.family == BREAKOUT_STUDY_FAMILY and historical_reconstruction
                            and session_profile == KRX_REGULAR_RESEARCH_PROFILE
@@ -126,7 +126,7 @@ def execute_research(
         research_context=not shadow_only and execution_scope is None,
     ) if section12 else None
     if strategy_references is not None and (
-        session_profile is None or (execution_scope is not None and not final_close) or leader
+        session_profile is None or (execution_scope is not None and not final_close_ipo) or leader
     ):
         raise ValueError("pinned strategy references require ordered minute research or a final CLOSE candidate")
     calendar_evidence = strategy_references.calendar if strategy_references is not None else None

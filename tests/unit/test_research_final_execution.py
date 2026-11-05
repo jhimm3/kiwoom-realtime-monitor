@@ -9,7 +9,7 @@ from threading import Barrier
 import unittest
 from unittest.mock import patch
 
-import test_research_final_preparation as fixtures
+from tests.unit import test_research_final_preparation as fixtures
 from kiwoom_monitor import research_process as rp
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.research_data_source import FrozenResearchDataset
@@ -24,8 +24,9 @@ from datetime import datetime, timedelta
 
 
 class CandidateFinalPreparationReviewTests(unittest.TestCase):
-    from tests.unit.test_historical_baseline_requests import DailyDevelopmentRequestTests
-    setUp = DailyDevelopmentRequestTests.setUp
+    def setUp(self):
+        from tests.unit.test_historical_baseline_requests import DailyDevelopmentRequestTests
+        DailyDevelopmentRequestTests.setUp(self)
 
     def prepare(self):
         from scripts.prepare_historical_baseline_requests import prepare_daily_requests
@@ -245,9 +246,19 @@ class FinalExecutionTests(unittest.TestCase):
         return rp.execute_final_holdout_evaluation(self.prepared, owner_token=self.owner, **kwargs)
 
     def test_section12_close_final_locks_calendar_and_preserves_overnight_paper_fills(self):
+        self._verify_section12_final('close_betting/v1', 'listing_day')
+
+    def test_ipo_final_candidates_bind_both_variants_and_listing_phases_without_order_authority(self):
+        for family in ('ipo_close/v1', 'ipo_breakout/v1'):
+            for phase in ('listing_day', 'after_listing_day'):
+                with self.subTest(family=family, phase=phase):
+                    self._verify_section12_final(family, phase)
+
+    def _verify_section12_final(self, family, phase):
         from kiwoom_monitor.infrastructure.research_data_source import load_research_input, write_frozen_research_bundle
 
-        root = self.fixture.root
+        root = self.fixture.root / (family.split('/')[0] + '-' + phase)
+        root.mkdir()
         source = root / 'close-source'
         friday, monday = '2026-09-18', '2026-09-21'
 
@@ -266,10 +277,11 @@ class FinalExecutionTests(unittest.TestCase):
 
         paths = (
             fixtures.child(source, datetime.fromisoformat(friday).date(), bars(friday, (
-                ('15:14', 100), ('15:15', 100), ('15:16', 105), ('15:17', 105), ('15:29', 110),
+                ('15:14', 100), ('15:15', 100), ('15:16', 105), ('15:17', 105),
+                ('15:18', 106), ('15:19', 106), ('15:29', 110),
             ))),
             fixtures.child(source, datetime.fromisoformat(monday).date(), bars(monday, (
-                ('10:00', 103), ('10:01', 102), ('10:02', 101),
+                ('10:00', 103), ('10:01', 102), ('10:02', 89), ('10:03', 89),
             ))),
         )
         write_frozen_research_bundle(source, paths)
@@ -291,19 +303,30 @@ class FinalExecutionTests(unittest.TestCase):
         calendar.append({**calendar[0], 'revision_id': 'after-close', 'available_at': stamp(friday, '16:00'),
                          'sessions': []})
         reference = root / 'close-calendar.json'
-        encoded = json.dumps({'version': 'strategy-reference/v1', 'calendar': calendar, 'listings': []}).encode()
+        listing = {'symbol': '005930', 'listing_date': friday if phase == 'listing_day' else '2026-09-17',
+                   'listing_type': 'ipo', 'available_at': stamp(friday, '08:00'), 'source': 'fixture-listing',
+                   'revision': 'listed', 'evidence_id': 'listing-before-entry', 'completeness': 'complete'}
+        correction = {**listing, 'listing_type': 'spac', 'available_at': stamp(friday, '15:18'),
+                      'revision': 'corrected', 'evidence_id': 'listing-correction-after-entry'}
+        encoded = json.dumps({'version': 'strategy-reference/v1', 'calendar': calendar,
+                              'listings': [] if family == 'close_betting/v1' else [listing, correction]}).encode()
         digest = hashlib.sha256(encoded).hexdigest()
         reference.write_bytes(encoded)
 
         candidate_path, _, _ = self.candidate_cli_paths()
         document = json.loads(candidate_path.read_text(encoding='utf-8'))
-        document.update(family='close_betting/v1', dataset=str(source), database=str(root / 'close.sqlite3'),
+        document.update(family=family, dataset=str(source), database=str(root / 'close.sqlite3'),
                         runs_dir=str(root / 'close-runs'), strategy_references={'path': str(reference), 'sha256': digest},
                         strategy={'capital_won': 1000, 'policy': {
                             'quantity': 4, 'entry_window_minutes': 10, 'lookback_bars': 2,
                             'minimum_close_return_bps': 200, 'adverse_gap_bps': 500, 'protection_loss_bps': 1000,
                             'exit_minutes_after_open': 8, 'ipo_reduction_quantity': None, 'listing_phases': [],
                         }})
+        if family == 'ipo_close/v1':
+            document['strategy']['policy'].update(ipo_reduction_quantity=2, listing_phases=[phase])
+        elif family == 'ipo_breakout/v1':
+            document['strategy']['policy'] = {'quantity': 4, 'lookback_bars': 2, 'breakout_buffer_bps': 100,
+                'protection_loss_bps': 1000, 'exit_minutes_before_close': 1, 'listing_phases': [phase]}
         document['execution'].update(version='completed_close_then_next_open/v1', same_bar_path_version='no_intrabar_fill/v1')
         document['execution']['cost_model'].update(commission_bps=0, sell_tax_bps=0, slippage_bps=0,
                                                   valid_from=stamp(friday, '08:00'), valid_to=stamp(monday, '16:00'))
@@ -334,9 +357,26 @@ class FinalExecutionTests(unittest.TestCase):
         repo = ResearchRepository(candidate.database)
         self.assertEqual(digest, repo.load_run(result['run_id'])['spec']['strategy_references']['sha256'])
         fills = [row for row in repo.load_execution_events(result['run_id']) if row['event_type'] == 'FILL']
-        self.assertEqual([('BUY', 4, 105), ('SELL', 4, 102)],
-                         [(row['side'], row['quantity'], row['price']) for row in fills])
-        self.assertEqual([friday, monday], [row['occurred_at'][:10] for row in fills])
+        expected = {'close_betting/v1': [('BUY', 4, 105), ('SELL', 4, 102)],
+                    'ipo_close/v1': [('BUY', 4, 105), ('SELL', 2, 102), ('SELL', 2, 89)],
+                    'ipo_breakout/v1': [('BUY', 4, 105), ('SELL', 4, 106)]}[family]
+        self.assertEqual(expected, [(row['side'], row['quantity'], row['price']) for row in fills])
+        self.assertEqual([friday, friday] if family == 'ipo_breakout/v1' else
+                         [friday] + [monday] * (len(expected) - 1), [row['occurred_at'][:10] for row in fills])
+        if family != 'close_betting/v1':
+            with closing(sqlite3.connect(candidate.database)) as connection:
+                snapshots = {identity: json.loads(value)['feature_values'][0]['setup']
+                    for identity, value in connection.execute(
+                        'SELECT snapshot_id,document_json FROM research_feature_snapshots WHERE run_id=?',
+                        (result['run_id'],))}
+            entry, = repo.load_candidate_events(result['run_id'])
+            original_setup = snapshots[entry['snapshot_id']]
+            self.assertEqual((phase, ['listing-before-entry']),
+                             (original_setup['listing_phase'], original_setup['listing_refs']))
+            managed = [decision for decision in repo.load_evaluations(result['run_id'])
+                       if decision['final_action'] in {'HOLD', 'REDUCE', 'EXIT'}]
+            self.assertTrue(managed)
+            self.assertTrue(all(snapshots[decision['snapshot_id']] == original_setup for decision in managed))
         repeated = rp.execute_final_holdout_request(parsed)['candidates'][0]
         self.assertEqual(('CACHED', result['run_id'], result['logical_result_hash']),
                          (repeated['state'], repeated['run_id'], repeated['logical_result_hash']))
@@ -377,15 +417,22 @@ class FinalExecutionTests(unittest.TestCase):
 
         fixture = CloseAndIpoTests()
         fixture.setUp()
+        if candidate.family != 'close_betting/v1':
+            phase, = candidate.strategy.policy.listing_phases
+            fixture.listing = replace(fixture.listing, listing_date=fixture.friday if phase.value == 'listing_day'
+                                      else fixture.friday - timedelta(days=1))
         cut = datetime.fromisoformat(fixture.signal.available_at)
         entry = replace(fixture.entry, schedule_version=session_window_at(cut, venue='KRX').schedule_version)
         calendar = (replace(fixture.calendar[0], sessions=(entry, fixture.auction)), *fixture.calendar[1:])
         config = {
             'version': MINUTE_SHADOW_VERSION, 'family': candidate.family, 'signal_valid_seconds': 30,
             'symbols': [fixture.symbol], 'strategy': candidate.strategy.to_dict(),
-            'references': {'version': 'strategy-reference/v1', 'calendar': [asdict(day) for day in calendar], 'listings': []},
+            'references': {'version': 'strategy-reference/v1', 'calendar': [asdict(day) for day in calendar],
+                           'listings': [] if candidate.family == 'close_betting/v1' else [asdict(fixture.listing)]},
         }
-        with closing(SQLiteQueryStore(root / 'close-publication.sqlite3', now_provider=lambda: cut)) as store:
+        factory = getattr(self, '_native_final_publication_factory',
+                          lambda path, now: SQLiteQueryStore(path, now_provider=now))
+        with closing(factory(root / 'close-publication.sqlite3', lambda: cut)) as store:
             store.initialize()
             inputs = mock_specification_inputs(store, publish_candidate=False)
             app = FastAPI()
@@ -427,14 +474,37 @@ class FinalExecutionTests(unittest.TestCase):
             ):
                 with self.subTest(changed=changed):
                     self.assertEqual((), matching_shadow_events(publication, (changed,)))
-            with self.assertRaisesRegex(ValueError, 'approved native order policy and runner'):
+            if candidate.family != 'close_betting/v1':
+                for key, value in (('listing_refs', ['unknown-listing']), ('listing_phase', 'unknown')):
+                    changed = {**event, 'close_ipo_entry_setup': {**event['close_ipo_entry_setup'], key: value}}
+                    self.assertEqual((), matching_shadow_events(publication, (changed,)))
+            with self.assertRaisesRegex(ValueError, 'explicit CLOSE execution policy' if candidate.family == 'close_betting/v1'
+                                        else 'IPO READY publication requires its native'):
                 build_mock_automation_publication_documents(candidate_publication=publication,
                     binding=inputs.binding, credential_profile_id=PROFILE_ID, shadow_event=event,
                     evaluation_start=inputs.profile.evaluation_start, evaluation_end=inputs.profile.evaluation_end,
                     frozen_at=inputs.spec.frozen_at, criteria=inputs.profile.criteria, limits={})
             self.assertEqual((), inputs.repository.load_stage_revisions(policy.strategy_ref))
-            with store._connection() as connection:
-                self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM central_execution_intents').fetchone()[0])
+            if candidate.family != 'close_betting/v1':
+                from kiwoom_monitor.application.mock_automation_specification import publish_ready_mock_automation_spec
+                from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, CloseMockExecutionPolicy
+
+                attempted = replace(inputs.spec, strategy_ref=policy.strategy_ref,
+                    candidate_package_hash=documents['package']['package_hash'], execution_plan_mode=CLOSE_NATIVE_PLAN_MODE,
+                    close_execution_policy=CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
+                        'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1'))
+                with self.assertRaisesRegex(ValueError, 'IPO READY publication requires its native'):
+                    publish_ready_mock_automation_spec(inputs.repository, spec=attempted,
+                        profile=inputs.profile, stage_revisions=inputs.stages, shadow_event=event,
+                        current_binding=inputs.binding)
+                self.assertIsNone(inputs.repository.load_mock_automation_spec(ACCOUNT_REF, attempted.spec_id))
+            if isinstance(store, SQLiteQueryStore):
+                with store._connection() as connection:
+                    self.assertEqual(0, connection.execute('SELECT COUNT(*) FROM central_execution_intents').fetchone()[0])
+            else:
+                with store._connect() as connection, connection.cursor() as cursor:
+                    cursor.execute('SELECT COUNT(*) FROM central_execution_intents')
+                    self.assertEqual(0, cursor.fetchone()[0])
 
     def candidate_cli_paths(self):
         root = self.fixture.root
