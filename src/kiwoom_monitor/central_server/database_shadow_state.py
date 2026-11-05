@@ -23,9 +23,10 @@ def _same_candidate_document(stored: str, candidate: dict[str, Any], encoded: st
         return True
     # An existing event already commits to its setup via snapshot_id. A retry
     # may supply the new projection, while the original row stays immutable.
-    if "close_ipo_entry_setup" in candidate:
+    setup_field = "panic_entry_setup" if candidate.get("strategy_id") == "panic_rebound" else "close_ipo_entry_setup"
+    if setup_field in candidate:
         previous_shape = dict(candidate)
-        del previous_shape["close_ipo_entry_setup"]
+        del previous_shape[setup_field]
         return stored == _canonical_document(previous_shape)
     return False
 

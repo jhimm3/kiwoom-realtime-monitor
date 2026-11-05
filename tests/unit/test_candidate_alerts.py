@@ -63,11 +63,18 @@ class CandidateAlertTests(unittest.TestCase):
             },
         }
         legacy = _event("legacy", 3) | {"strategy_id": "close_betting", "strategy_variant": "CLOSE"}
+        panic = _event("panic", 4) | {
+            "strategy_id": "panic_rebound", "strategy_variant": "P1",
+            "panic_entry_setup": {
+                "trigger_available_at": "2026-09-12T00:04:02+00:00",
+                "trigger_revision_id": "bar<5>", "trigger_close": 900, "failure_price": 890, "target_price": 945,
+            },
+        }
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
             try:
-                dialog._apply_page({"initial_sync": True, "events": [close, ipo, legacy]})
-                close_cell, ipo_cell, legacy_cell = (dialog._table.item(row, 6) for row in range(3))
+                dialog._apply_page({"initial_sync": True, "events": [close, ipo, legacy, panic]})
+                close_cell, ipo_cell, legacy_cell, panic_cell = (dialog._table.item(row, 6) for row in range(4))
                 self.assertEqual(close_cell.text(), legacy_cell.text())
                 self.assertIn("2026-09-15 10:00:00 KST", close_cell.toolTip())
                 self.assertIn("krx-next-r1", close_cell.toolTip())
@@ -75,6 +82,10 @@ class CandidateAlertTests(unittest.TestCase):
                 self.assertIn("exchange&lt;listing-r1&gt;", ipo_cell.toolTip())
                 self.assertNotIn("다음 거래일", ipo_cell.toolTip())
                 self.assertEqual("", legacy_cell.toolTip())
+                self.assertIn("2026-09-12 09:04:02 KST", panic_cell.toolTip())
+                self.assertIn("bar&lt;5&gt;", panic_cell.toolTip())
+                self.assertIn("실패선 · 890원", panic_cell.toolTip())
+                self.assertIn("반등 목표가 · 945원", panic_cell.toolTip())
 
                 tooltip = close_cell.toolTip()
                 dialog._apply_page({"status_only": True, "events": [close | {"status": "EXPIRED"}]})

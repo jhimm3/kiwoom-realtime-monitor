@@ -478,7 +478,10 @@ class CandidateMonitorDialog(QDialog):
         )
         for column, value in enumerate(values):
             self._table.setItem(row, column, QTableWidgetItem(value))
-        details = _close_ipo_entry_details(event.get("close_ipo_entry_setup"))
+        if event.get("strategy_id") == "panic_rebound":
+            details = _panic_entry_details(event.get("panic_entry_setup"))
+        else:
+            details = _close_ipo_entry_details(event.get("close_ipo_entry_setup"))
         if details:
             self._table.item(row, len(values) - 1).setToolTip("<qt>" + "<br>".join(map(escape, details)) + "</qt>")
 
@@ -1546,6 +1549,23 @@ def _close_ipo_entry_details(setup: object) -> list[str]:
     if setup.get("listing_refs"):
         details.append("상장 근거 · " + ", ".join(setup["listing_refs"]))
     return ["최초 후보 근거", *details] if details else []
+
+
+def _panic_entry_details(setup: object) -> list[str]:
+    if not isinstance(setup, dict):
+        return []
+    from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
+    details = []
+    if setup.get("trigger_available_at"):
+        details.append("급락 판단 시각 · " + format_kst_time(setup["trigger_available_at"]))
+    if setup.get("trigger_revision_id"):
+        details.append(f"급락 봉 판본 · {setup['trigger_revision_id']}")
+    for key, label in (("trigger_close", "급락 확인가"), ("failure_price", "실패선"), ("target_price", "반등 목표가")):
+        value = setup.get(key)
+        if type(value) is int and value > 0:
+            details.append(f"{label} · {value:,}원")
+    return ["최초 낙주 후보 근거", *details] if details else []
 
 
 def _quality_status(value: object) -> str:

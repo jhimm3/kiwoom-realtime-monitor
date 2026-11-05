@@ -372,7 +372,8 @@ class CandidateMonitorTests(unittest.TestCase):
                     correction["payload"]["capture_quality"] = "partial"
                     store.observations.append(correction)
                 store.observations.append({**rows[-1], "accepted_sequence": 7})
-                restarted.run_once()
+                with patch.object(store, "save_shadow_evaluation", wraps=store.save_shadow_evaluation) as writes:
+                    restarted.run_once()
                 reason = "panic_trigger_revised_or_unproven" if partial else "panic_next_completed_close_recovered"
                 self.assertEqual((reason,), store.decisions[-1]["reasons"])
                 self.assertNotIn("panic_armed", store.checkpoints[first.monitor_id])
@@ -381,6 +382,33 @@ class CandidateMonitorTests(unittest.TestCase):
                     self.assertEqual(("panic_rebound", "P1"), (store.candidates[0]["strategy_id"],
                                                                 store.candidates[0]["strategy_variant"]))
                     self.assertIn("assessment-r1", store.candidates[0]["input_revision_refs"])
+                    receipt, = (call.args for call in writes.call_args_list if call.args[2] is not None)
+                    monitor_id, decision, original, expiry = receipt
+                    setup = original["panic_entry_setup"]
+                    self.assertEqual(("bar-5", 900, 890, 945), (
+                        setup["trigger_revision_id"], setup["trigger_close"], setup["failure_price"], setup["target_price"],
+                    ))
+                    self.assertEqual(decision["snapshot_id"], original["snapshot_id"])
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "panic-shadow.sqlite3"
+                        with closing(SQLiteQueryStore(path)) as native:
+                            native.initialize()
+                            native.save_shadow_evaluation(*receipt)
+                            changed = {**original, "panic_entry_setup": {**setup, "failure_price": 891}}
+                            with self.assertRaisesRegex(ValueError, "candidate id already has different immutable content"):
+                                native.save_shadow_evaluation(monitor_id, decision, changed, expiry)
+                        with closing(SQLiteQueryStore(path)) as reopened:
+                            reopened.initialize()
+                            event, = reopened.load_shadow_candidates()["events"]
+                            self.assertEqual((original["event_id"], original["snapshot_id"], setup),
+                                             (event["event_id"], event["snapshot_id"], event["panic_entry_setup"]))
+                        with closing(SQLiteQueryStore(Path(directory) / "older-candidate.sqlite3")) as previous:
+                            previous.initialize()
+                            old = {key: value for key, value in original.items() if key != "panic_entry_setup"}
+                            previous.save_shadow_evaluation(monitor_id, decision, old, expiry)
+                            before = previous.load_shadow_candidates()
+                            previous.save_shadow_evaluation(*receipt)
+                            self.assertEqual(before, previous.load_shadow_candidates())
 
     def test_operational_freshness_expires_without_changing_last_evaluation_or_storage(self):
         from datetime import datetime, timezone

@@ -1101,4 +1101,6 @@ R3c 로컬 소스의 `/health.mock_account_available`은 실제 모의 bundle �
 
 Section 12 완료봉 Shadow는 `PUT /api/v1/settings/operations`의 `shadow_candidate_config`에 `version: "section12-minute-shadow/v1"`, `strategy`, 양의 정수 `signal_valid_seconds`를 전달해 선택한다. `family` 생략 시 `breakout_study/v1`이며, 종가베팅과 신규주 두 조합은 `references`에 `strategy-reference/v1` 문서를 요구한다. `symbols`를 명시하면 해당 목록의 종목만 보고, 생략하면 당시 가용한 TOP20을 사용한다. 후보는 `shadow_scope`, `strategy_variant`, `observation_key`, `input_cutoff`, `input_revision_refs`를 보존한다. 조회는 현재 모니터 교체·비활성, 입력 복구, 마감 판본 정정을 각각 `SUPERSEDED`, `WARMUP`, `INVALIDATED`로 표시할 수 있다.
 
+새 낙주 후보의 `panic_entry_setup`은 최초 급락 봉의 판본·가용시각·확인가, 실패선·반등 목표가를 후보 `snapshot_id`와 함께 보존한다. P1의 확인 봉은 별도의 후보 판본이며 최초 급락 판본을 대체하지 않는다. 기존 후보에 이 필드가 없어도 조회할 수 있다.
+
 일반 Paper `single_run`의 `panic_rebound/v1` 요청은 `strategy.panic_allow_unresolved_news: true`로 뉴스 미확인 표본을 포함한 비교를 선택할 수 있다. 당시 근거가 있는 악재와 충돌은 신규 진입을 제한한다. 컷 이후 자료는 해당 컷에서 제외한다. 뉴스 미확인 진입은 `panic_price_setup_news_unresolved`로 기록하고, 선택한 비교는 실행 명세와 `section12.panic_allow_unresolved_news`에 남긴다. 선택을 생략하면 확인된 뉴스 근거를 요구한다. Shadow는 기존 뉴스 판정으로 동작한다.

@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~03 수락 · 완료 3/5 · S12-04 진행 중. 기존 실행기의 계획형 0B 모의 실행과 명시 재개, 종가베팅·신규주 후보 근거 조회를 연결했다. 낙주 일반 Paper에서 뉴스 미확인 표본을 분리해 비교할 수 있다. [낙주 비교](#s12-paper-panic) · [계획형 실행](#s12-native-plan-runner) · [12.12 잔여 조건](#s12-acceptance-remaining).
+**현재 상태.** S12-01~03 수락 · 완료 3/5 · S12-04 진행 중. 기존 실행기의 계획형 0B 모의 실행과 명시 재개, 종가베팅·신규주·낙주 후보 근거 조회를 연결했다. 낙주 일반 Paper에서 뉴스 미확인 표본을 분리해 비교할 수 있다. [낙주 후보](#s12-panic-shadow-readback) · [낙주 비교](#s12-paper-panic) · [계획형 실행](#s12-native-plan-runner) · [12.12 잔여 조건](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -270,6 +270,14 @@ U001의 실제 훈련 자료에서 시장 근거를 09:01~10:30의 90분으로 �
 고려아연의 동결된 2024-10-04 분봉과 복원 정규장 시각에서 P0·P1을 각각 같은 자료와 조건으로 재생했다. 뉴스 확인을 요구한 두 실행에는 후보가 없었다. 미확인 표본을 허용하면 P0는 후보 1건과 Paper 매수·매도 각 1건이 기록됐고 P1은 후보 0건이었다. 사례는 사후 선택된 TRAIN 자료이며 결과는 조건별 연구 경로 점검이다. [한국거래소 매매 안내](https://global.krx.co.kr/contents/GLB/01/0109/0109000000/guide_to_trading_in_the_korean_stock_market.pdf) · [비교 요청과 결과](../../tmp/s12-05-verification-matrix/panic-coverage-main/coverage.json).
 
 현재 소스 `63a3aa5d`의 Windows 영향 검사 62건과 구조·저장소 호출·증분 원장 대조를 통과했다. 동일 분봉의 확인형과 미확인 허용형, 컷 이전·이후 악재, Shadow 요청 거절, 화면과 저장 결과를 대조했다. [정확한 실행 ID와 종료 기록](../../tmp/s12-04-shadow/panic-paper-final/evidence.json) · [증분 대조](../../tmp/s12-04-shadow/panic-paper-final-review.json).
+
+<a id="s12-panic-shadow-readback"></a>
+
+### S12-05 낙주 Shadow의 최초 후보 근거
+
+P1이 재시작 후 확인 봉에서 후보를 내면 최초 급락 봉의 판본·가용시각·확인가, 실패선·목표가를 같은 후보에 보존한다. 조회와 후보 화면에서 이 값을 읽고, 최초 판단을 바꾸는 동일 ID 재저장을 거절한다. 예전 후보는 원본 문서로 조회하고 재전달로 소급 갱신하지 않는다. 부분 체결과 반등 후 잔량 취소가 결합된 계획 주문은 추가 수락 조건으로 남는다.
+
+소스 `f526bbab`의 Windows 영향 검사 89건과 격리 PostgreSQL의 공통 후보 저장·재시작 검사 1건이 통과했다. 낙주 재시작 검사는 최초 급락 봉과 실패선 890원·목표가 945원을 SQLite 재조회와 화면까지 대조했고, PostgreSQL 검사는 같은 저장 계약을 쓰는 종가베팅의 기존 후보 호환성을 확인했다. 구조·저장소 호출·증분 원장 대조도 통과했다. [Windows](../../tmp/s12-04-shadow/panic-shadow-readback-final/evidence.json) · [격리 PostgreSQL](../../tmp/s12-03-pg-baseline/s12-05-panic-shadow-readback-pg/postgres-run.json) · [증분 대조](../../tmp/s12-04-shadow/panic-shadow-readback-final-review.json).
 
 <a id="s12-acceptance-remaining"></a>
 
