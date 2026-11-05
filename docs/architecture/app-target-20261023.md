@@ -8,7 +8,7 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 기존 Episode의 종가베팅 계획 수명 연결**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 종가베팅 계획 수명과 청산 후 상태**. AR 판정과 선행 개발은 11절에 둔다.
 
 **현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 실행기는 기존 Supervisor·Episode·계좌 owner로 새 후보 진입·잔량 취소·DB 재개방·익일 갭 청산·실제 잔량 0을 연결했다. 순서 있는 0B 보호 고정·중지 제어하 관리·실제 완전한 동시호가 공급과 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 내부 실행기](#section12-close-episode) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
@@ -4729,6 +4729,10 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.263 S12-05 기존 Episode의 종가베팅 계획 수명 연결 — 2026-11-05
 
 - 종가베팅 내부 계획 수명을 기존 Episode/Runner/Supervisor와 계좌 monitor/Gateway/runtime에 연결했다. v2는 원래 후보를 보존하고 v1은 원래 계획·영수증을 유지한다. 실제 내부 조립·기동으로 새 Shadow 매수, 부분 체결 취소·늦은 체결, DB 재개방 후 보유 복원, native 갭 청산과 잔량 0을 두 DB에서 검증했다. schema 25는 고정 봉 구간 조회 인덱스만 추가한다. 현재 소스 `23095b39`의 Windows 374건과 PostgreSQL 12건, 구조·소비·증분 대조를 수락했다. 순서 있는 0B 보호·중지 제어·실제 동시호가 공급·일반 READY/UI와 전체 대표 연결의 수락은 남아 있다. [구현·검증·잔여](section12-development-roadmap-20261105.md#s12-close-episode).
+
+### 11.264 S12-05 종가베팅 청산 후 상태 정리 — 2026-11-05
+
+- 실제 계획이 모두 끝나고 새 후보도 없으면 이전 주문 전송 표시와 pending intent를 제거한다. 변경 전 실패를 재현했고 현재 소스 `9756ee1b`의 직접 회귀 6건, 구조·소비·증분 실행 대조를 확인했다. 공용 fixture AST와 native 주문 경로는 변경하지 않았다. 과거 fixture 목록까지 확장한 151건 시도의 긴 Supervisor 묶음 제한 시간 초과는 원보고서에 보존하고 통과로 계산하지 않았다. 항목 3과 S12-05 전체는 계속 진행이다. [근거와 잔여](section12-development-roadmap-20261105.md#s12-close-flat-status).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

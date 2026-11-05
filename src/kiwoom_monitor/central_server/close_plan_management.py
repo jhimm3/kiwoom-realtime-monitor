@@ -164,6 +164,7 @@ class ClosePlanManagement:
             self.status = {'state': 'STOPPED' if control.desired_state.value != 'RUNNING' else 'PROTECTION_REVIEW_REQUIRED',
                            'reason': 'new_close_entries_disabled', 'orders_enabled': False}
             return 0
+        self.status = {'state': 'RUNNING', 'reason': 'awaiting_new_close_shadow', 'orders_enabled': False}
         page = await drain_thread_call(self._store.load_shadow_candidates, self._cursor, limit)
         consumed = 0
         for event in page['events']:

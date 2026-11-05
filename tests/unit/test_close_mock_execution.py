@@ -449,6 +449,18 @@ async def verify_close_runner(case, store_factory):
 
 
 class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flat_runner_clears_previous_pending_order_without_new_shadow(self):
+        from types import SimpleNamespace
+        from kiwoom_monitor.central_server.close_plan_management import ClosePlanManagement
+
+        store = SimpleNamespace(load_shadow_candidates=lambda *_: {'events': [], 'high_watermark': 7})
+        management = ClosePlanManagement(store, None, None, None, parameters={}, price_source=None, now_provider=None)
+        management.status = {'state': 'ORDER_SUBMITTED', 'pending_intent_id': 'already-filled', 'orders_enabled': False}
+        control = SimpleNamespace(desired_state=SimpleNamespace(value='RUNNING'))
+        self.assertEqual(0, await management.advance(control, limit=10, allow_entry=lambda: True))
+        self.assertEqual('RUNNING', management.status['state'])
+        self.assertNotIn('pending_intent_id', management.status)
+
     async def test_runner_enters_cancels_restores_retained_plan_and_exits_native_gap(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
