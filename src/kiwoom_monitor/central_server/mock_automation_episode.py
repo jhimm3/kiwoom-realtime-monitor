@@ -53,7 +53,7 @@ from kiwoom_monitor.application.leader_breakout import (
 from kiwoom_monitor.application.research_replay import (
     KrxMinuteBarFrame, MinuteStrategyInputs,
 )
-from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, MockAutomationOperatingSpec
+from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, LEADER_NATIVE_PLAN_MODE, MockAutomationOperatingSpec
 from kiwoom_monitor.domain.order_contract import OrderIntent, OrderPlanRef, OrderSide, OrderState, OrderType, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
@@ -275,6 +275,11 @@ class MockAutomationInputProgress:
     def restore_cursor(self, value) -> None:
         self._cursor = max(0, int(value))
 
+    def use_native_protocol(self, protocol):
+        self._bootstrap_pending = False
+        self._delivery_protocol = protocol
+        self._frame_recovery = None
+
     def restore_metadata(self, document, *, leader, inputs) -> None:
         self._delivery_protocol = document.get("delivery_protocol")
         self._frame_recovery_receipt = document.get("input_recovery")
@@ -433,6 +438,8 @@ class MockAutomationEpisode:
         self._strategy_inputs = None
         self._leader_position_proof = None
         self._leader_plan_mode = self._spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE
+        self._close_plan_mode = self._spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE
+        self._close_management = None
         self._leader_plan_root = None
         self._leader_plan_deadline = None
         self._leader_plan_cancel_attempt = None
@@ -506,7 +513,7 @@ class MockAutomationEpisode:
 
     @property
     def needs_native_execution_inputs(self) -> bool:
-        return self._spec.unfilled_execution_policy is not None
+        return self._close_plan_mode or self._spec.unfilled_execution_policy is not None
 
     def bind_execution_callbacks(self, *, scheduled_task_present, capture_wake) -> None:
         # Narrow lifecycle queries only: neither returns a Runner or Task.
@@ -599,6 +606,9 @@ class MockAutomationEpisode:
         try:self._position_policy_implementation = native_study_policy_implementation_ref()
         except (OSError,ValueError):self._position_policy_implementation = None
         family_id = str(candidate.get("family", ""))
+        if self._close_plan_mode:
+            self._prepare_close(candidate)
+            return
         self._family = get_research_family(family_id)
         self._config = parse_strategy_config(family_id, candidate.get("parameters", {}))
         self._leader = isinstance(self._config, LeaderBreakoutConfig)
@@ -645,6 +655,40 @@ class MockAutomationEpisode:
                 restored_clock = dict(clock)
         self._restore_or_bootstrap(runner_document)
         self._session_clock = restored_clock
+
+    def _prepare_close(self, candidate):
+        from kiwoom_monitor.application.section12_minute_research import CLOSE_FAMILY, MinuteExperiment
+        from .close_plan_management import CLOSE_INPUT_PROTOCOL, ClosePlanManagement
+
+        if candidate.get('family') != CLOSE_FAMILY or not isinstance(self._bundle.repository, ExecutionRepository):
+            raise ValueError('native CLOSE plan requires the existing CLOSE execution owner')
+        self._config = MinuteExperiment.from_document(CLOSE_FAMILY, candidate['parameters'])
+        self._strategy_inputs = MinuteStrategyInputs(session_profile=self._spec.session_profile,
+            keep_bars=self._config.policy.lookback_bars + 2, universe_horizon=self._spec.maximum_data_gap_seconds)
+        self._input_progress.use_native_protocol(CLOSE_INPUT_PROTOCOL)
+        self._close_management = ClosePlanManagement(self._store, self._bundle, self._spec, self._repository,
+            parameters=candidate['parameters'], price_source=self._price_source, now_provider=self._now)
+        rows = self._store.load_documents('execution_mock_automation_runner_current', self._bundle.account_ref, 1)
+        document = rows[0]['document'] if rows else None
+        matching = isinstance(document, Mapping) and (
+            document.get('version'), document.get('spec_id'), document.get('execution_run_id'), document.get('candidate_package_hash')
+        ) == (RUNNER_CHECKPOINT_VERSION, self._spec.spec_id, self._bundle.run_id, self._spec.candidate_package_hash)
+        if matching:
+            if document.get('delivery_protocol') != CLOSE_INPUT_PROTOCOL:
+                raise ValueError('unsupported CLOSE input protocol')
+            self._episode_position.restore_fill_cursor(document.get('fill_cursor', 0))
+            self._episode_position.restore_strategy_state(document.get('strategy_state', {}))
+            self._episode_position.restore_seen_fill_ids(document.get('seen_fill_ids', ()))
+            self._checkpoint.restore_revision(document.get('checkpoint_revision', 0))
+            notice = document.get('protection_review')
+            if notice is not None:
+                self._validate_protection_review(notice)
+                self._protection_review = deepcopy(notice)
+        self._close_management.prepare(document.get('close_management') if matching else None)
+        self._episode_position.apply_new_fills(self._bundle.repository, leader=False, config=self._config,
+                                               position_time=self._position_state_time)
+        self._status = dict(self._close_management.status)
+        self._save_checkpoint()
 
 
 
@@ -796,7 +840,8 @@ class MockAutomationEpisode:
                 'account_input_ref':observation.input_ref,'risk_snapshot_ref':risk.snapshot_id,
                 'account_observed_at':observation.observed_at.isoformat(),'state_available_at':available.isoformat(),
                 'state_revision':revision,'runtime_observation_revision':runtime_revision,'fill_cursor':cursor,
-                'risk_event_high_watermark':risk.execution_event_high_watermark,'family':self._family.family_id,
+                'risk_event_high_watermark':risk.execution_event_high_watermark,
+                'family':self._config.family if self._close_plan_mode else self._family.family_id,
                 'parameters':self._config.to_dict(),'session_profile':self._spec.session_profile,
                 'registered_implementation_hash':self._position_registered_implementation,
                 'candidate_package_hash':self._spec.candidate_package_hash,'strategy_state':state.to_dict(),
@@ -949,6 +994,8 @@ class MockAutomationEpisode:
             input_ref="native-risk:" + risk.snapshot_id, requested_at=now, risk_trigger=trigger)
 
     def _stop_validation_terms(self):
+        if self._close_plan_mode:
+            return {'stop_loss_bps': self._config.policy.protection_loss_bps}
         if self._leader:
             return {"leader_config": self._config, "position_proof": self._leader_position_proof}
         return {"stop_loss_bps": self._config.stop_loss_bps}
@@ -2771,6 +2818,14 @@ class MockAutomationEpisode:
                     self._status = status
                     await drain_thread_call(self._save_checkpoint)
                 return 0
+            if self._close_management is not None:
+                if self._checkpoint.pending:
+                    await drain_thread_call(self._save_checkpoint)
+                count = await self._close_management.advance(control, limit=limit,
+                    allow_entry=lambda: not self._closing and not self._protection_pending())
+                self._status = dict(self._close_management.status)
+                await drain_thread_call(self._save_checkpoint)
+                return count
             if control.desired_state.value != "RUNNING":
                 if self._leader:
                     self._strategy_inputs.reset("user_stopped")
@@ -3403,6 +3458,8 @@ class MockAutomationEpisode:
         if self._leader:
             content["leader_position_proof"] = deepcopy(self._leader_position_proof)
         content.update(self._input_progress.checkpoint_protocol_fields(recovery=recovery))
+        if self._close_management is not None:
+            content['close_management'] = self._close_management.checkpoint_fields()
         if self._unfilled_preflight is not None:
             content["unfilled_management_preflight"] = deepcopy(self._unfilled_preflight)
         if self._unfilled_registration is not None:

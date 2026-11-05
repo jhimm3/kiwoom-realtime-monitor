@@ -4,6 +4,10 @@
 
 **AR04/07 시각조회273:** schema24/원시각/hash/판본은유지한다. SQLite 연구export는기존index용보수범위뒤exact microsecond key로같은순간을선택·정렬하며frozen목록metadata만원transaction에저장한다. 원자료변환/DBmigration·PG변경없음. [현구현·검증·한계](docs/architecture/app-target-20261023.md#ar04-ar07-time-query270).
 
+**S12-05 중앙 schema 25:** 소스의 SQLite·PostgreSQL 계획에 `close_gap_observation_windows`를 추가했다. 기존 관측 원장의 `kind/subject/effective_at` 구간 조회용 인덱스 하나이며 SQLite는 `datetime(effective_at)`, PostgreSQL은 native 시각 열을 사용한다. 원값·테이블·체결은 다시 쓰지 않는다. 격리 DB의 새 설치·재개방을 검증했고 운영 DB 적용은 실행하지 않았다. [현재 구현·검증](docs/architecture/section12-development-roadmap-20261105.md#s12-close-episode).
+
+종가베팅 신규 진입은 `close_entry_snapshot/v2`에 원래 후보·셋업·만료를 함께 보존한다. 공개 페이지의 `accepted_sequence`는 운송 커서라 제외하고 만료 시각은 같은 순간의 KST ISO로 정규화한다. 기존 v1의 해시·계획·영수증은 그대로 해석하며 다시 쓰지 않는다. 실행기 checkpoint의 `close_management`에는 `close-shadow-native-plan/v1`과 `shadow_cursor`를 저장하고 보유·미확정 주문·잔량은 native 계획·상세 체결에서 복원한다. 신규 v2 보유를 복원할 때 공개 Shadow 이력을 다시 검색하지 않는다.
+
 ## 새 명시full 로컬 저장 계약 — AR04/05 source253·기동/복원 연결257
 
 **실제사본265 검증:** source267의현재고유30 중실제1case에서같은full root의3owner를소비했다. 닫힌monitor/중앙2.3GB는공개소비후원사본전체bytes와같고journal3는신규native원자수락/원raw·판본·receipt/noop을보존했다. 새schema변경/원source SQL0이며기존journal11/central24/ownedfull 계약은그대로다. 실제sourcecut/T0·연구HTTP/설치소비는별도다. [실제수락·근거](docs/architecture/app-target-20261023.md#ar05-joint-native-copy265).

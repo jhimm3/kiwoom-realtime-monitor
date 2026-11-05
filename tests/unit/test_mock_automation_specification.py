@@ -1202,7 +1202,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
     def test_close_entry_uses_native_shadow_quote_policy_and_one_plan(self):
         self._verify_close_entry_claim(self.store)
 
-    def _verify_close_entry_claim(self, store):
+    def _verify_close_entry_claim(self, store, *, prepare_only=False):
         from dataclasses import asdict
         from datetime import time
         from kiwoom_monitor.application.close_mock_execution import (
@@ -1310,6 +1310,10 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         quote = {'price_won': 104, 'available_at': cut, 'input_ref': 'collector-trade:fixture:1:005930:1',
                  'durable': False, 'market_status': 'TRADABLE'}
         call = dict(parameters=parameters, event=event, quote=quote, recovery=recovery, risk=risk)
+        if prepare_only:
+            return SimpleNamespace(store=store, example=example, spec=spec, parameters=parameters, event=event,
+                repository=repository, runtime=runtime, execution=execution, clock=clock, quote=quote,
+                transport=transport, settings=settings, monitor=monitor)
         with self.assertRaisesRegex(ValueError, 'approved signal slippage'):
             dispatch_close_entry(repository, runtime, spec, **{**call, 'quote': {**quote, 'price_won': 106}})
         save_settings({**settings, 'shadow_candidate_enabled': False})

@@ -519,6 +519,7 @@ class ManualMockOrderGateway:
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
         planned_stop_cancel_request: PlannedLeaderStopCancelRequest | None = None,
         expired_entry_plan: OrderPlanRef | None = None,
+        prepare_plan_cancel: Callable[[ExecutionRecord, Mapping[str, Any]], Any] | None = None,
     ) -> ExecutionRecord:
         """Reuse account refresh, command serialization and credential drain."""
         return await self._command(lambda: self._cancel_automation_intent(
@@ -528,6 +529,7 @@ class ManualMockOrderGateway:
             **({"planned_cancel_claim": planned_cancel_claim} if planned_cancel_claim is not None else {}),
             **({"planned_stop_cancel_request": planned_stop_cancel_request} if planned_stop_cancel_request is not None else {}),
             **({"expired_entry_plan": expired_entry_plan} if expired_entry_plan is not None else {}),
+            **({"prepare_plan_cancel": prepare_plan_cancel} if prepare_plan_cancel is not None else {}),
         ))
 
     async def _cancel_automation_intent(
@@ -537,10 +539,11 @@ class ManualMockOrderGateway:
         planned_cancel_claim: PlannedLeaderCancelClaim | None = None,
         planned_stop_cancel_request: PlannedLeaderStopCancelRequest | None = None,
         expired_entry_plan: OrderPlanRef | None = None,
+        prepare_plan_cancel: Callable[[ExecutionRecord, Mapping[str, Any]], Any] | None = None,
     ) -> ExecutionRecord:
         async with self._command_lock:
             if sum(claim is not None for claim in (
-                planned_stop_cancel_request, expired_entry_plan, planned_cancel_claim, cancel_retry_claim,
+                planned_stop_cancel_request, expired_entry_plan, planned_cancel_claim, cancel_retry_claim, prepare_plan_cancel,
             )) > 1:
                 raise ValueError("execution_claim_purposes_conflict")
             current, history = await asyncio.to_thread(self._read_automation_cancel, expected)
@@ -560,9 +563,21 @@ class ManualMockOrderGateway:
             if (current.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
                     and (cancel_retry_claim is not None or not already_claimed)):
                 account = await self._account_refresh()
-                if plan is not None:
+                if plan is not None or prepare_plan_cancel is not None:
+                    if self._automation_execution_cut is None:
+                        raise ValueError('planned cancellation requires a refreshed owner cut')
                     cut = self._automation_execution_cut()
 
+            if prepare_plan_cancel is not None:
+                def build_claim(record):
+                    observation = cut.get('observation') if cut is not None else None
+                    risk = cut.get('risk') if cut is not None else None
+                    if (account is None or observation is None or risk is None
+                            or observation.risk_snapshot != risk or observation.account != account
+                            or risk.account_as_of != account.as_of or not observation.open_orders_complete
+                            or observation.unmapped_broker_order_ids or observation.open_orders != (record,)):
+                        raise ValueError('planned cancellation requires a refreshed owner cut')
+                    return prepare_plan_cancel(record, cut)
             if plan is not None:
                 def build_claim(record):
                     observation = cut.get("observation") if cut is not None else None

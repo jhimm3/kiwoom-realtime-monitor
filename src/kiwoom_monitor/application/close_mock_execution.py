@@ -73,7 +73,13 @@ def _close_quote(spec, quote, decided_at, now):
             "input_ref": quote["input_ref"], "durable": False, "market_status": "TRADABLE"}
 
 
-def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decided_at, now):
+def frozen_close_candidate(event):
+    value = {key: item for key, item in event.items() if key != 'accepted_sequence'}
+    value['expires_at'] = datetime.fromisoformat(value['expires_at']).astimezone(KST).isoformat()
+    return value
+
+
+def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decided_at, now, retain_candidate=True):
     """Freeze a sized Decision. Native claim independently repeats this pure check."""
     terms = spec.close_execution_policy
     if spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or terms is None:
@@ -92,10 +98,12 @@ def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decide
     if (type(signal_price) is not int or signal_price <= 0
             or quote["price_won"] * 10_000 > signal_price * (10_000 + terms.maximum_adverse_slippage_bps)):
         raise ValueError("CLOSE entry quote exceeds the approved signal slippage bound")
-    snapshot = {"version": "close_entry_snapshot/v1", "spec_id": spec.spec_id,
+    snapshot = {"version": "close_entry_snapshot/v2" if retain_candidate else "close_entry_snapshot/v1", "spec_id": spec.spec_id,
                 "candidate_package_hash": spec.candidate_package_hash, "account_ref": spec.account_scope.account_ref,
                 "execution_run_id": run_id, "candidate_event_id": event["event_id"],
                 "candidate_snapshot_id": event["snapshot_id"], "quote": frozen_quote}
+    if retain_candidate:
+        snapshot['candidate'] = frozen_close_candidate(event)
     state = StrategyState().to_dict()
     body = {"run_id": run_id, "snapshot_id": content_id("snapshot", snapshot), "symbol": event["symbol"],
             "proposal": "ENTER", "final_action": "ENTER", "quantity": event["quantity"],
@@ -124,14 +132,16 @@ def dispatch_close_entry(repository, runtime, spec, *, parameters, event, quote,
 
     if saved is not None:
         evidence, decision, plan = build_close_entry_evidence(spec, run_id=runtime.run_id, parameters=parameters,
-            event=event, quote=quote, decided_at=decided_at, now=decided_at)
+            event=event, quote=quote, decided_at=decided_at, now=decided_at,
+            retain_candidate=saved['snapshot']['version'] != 'close_entry_snapshot/v1')
         if evidence != previous:
             raise ValueError("stored CLOSE entry evidence changed")
         if runtime.load_intent(mock_automation_intent_id(spec.spec_id, decision.decision_id)) is not None:
             return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk,
                 plan=plan, **scope)
     evidence, decision, plan = build_close_entry_evidence(spec, run_id=runtime.run_id, parameters=parameters,
-        event=event, quote=quote, decided_at=decided_at, now=now)
+        event=event, quote=quote, decided_at=decided_at, now=now,
+        retain_candidate=saved is None or saved['snapshot']['version'] != 'close_entry_snapshot/v1')
     # A new proof is retained only after the ordinary current Risk gate approves it.
     if runtime.load_intent(mock_automation_intent_id(spec.spec_id, decision.decision_id)) is None:
         gate = assess_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
@@ -153,7 +163,8 @@ def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evid
 
     entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
     expected, decision, plan = build_close_entry_evidence(spec, run_id=run_id, parameters=parameters,
-        event=event, quote=entry_evidence["snapshot"]["quote"], decided_at=entered_at, now=entered_at)
+        event=event, quote=entry_evidence["snapshot"]["quote"], decided_at=entered_at, now=entered_at,
+        retain_candidate=entry_evidence['snapshot']['version'] != 'close_entry_snapshot/v1')
     if (expected != entry_evidence or root is None
             or root.state.value not in {"ACCEPTED", "PARTIALLY_FILLED"}
             or (root.intent.intent_id, root.intent.account_ref, root.intent.run_id, root.intent.environment,
@@ -196,18 +207,23 @@ def validate_close_entry_deadline(spec, *, run_id, parameters, event, entry_evid
         raise ValueError("CLOSE deadline native fill or cancellation history changed")
 
 
+def prepare_close_entry_deadline_claim(repository, runtime, execution, spec, root, *, parameters, event, recovery, risk):
+    entry = repository.load_close_entry_evidence(runtime.account_ref, root.intent.plan.plan_id)
+    head = execution.load_plan_position(runtime.account_ref, runtime.run_id, root.intent.symbol, root.intent.plan)
+    if entry is None:
+        raise ValueError("CLOSE original entry evidence is missing")
+    validate_close_entry_deadline(spec, run_id=runtime.run_id, parameters=parameters, event=event,
+        entry_evidence=entry, root=root, head=head, fill_events=execution.events(root.intent.intent_id),
+        recovery=recovery, risk=risk, now=runtime.server_now())
+    return CloseEntryDeadlineCancelClaim(head.plan, risk.snapshot_id, risk.reconciliation_revision, recovery)
+
+
 def cancel_close_entry_deadline(repository, runtime, execution, spec, expected, *, parameters, event,
                                 recovery, risk, control_revision):
     """Claim once through the existing cancel primitive; late broker fills remain authoritative."""
     def build_claim(root):
-        entry = repository.load_close_entry_evidence(runtime.account_ref, root.intent.plan.plan_id)
-        head = execution.load_plan_position(runtime.account_ref, runtime.run_id, root.intent.symbol, root.intent.plan)
-        if entry is None:
-            raise ValueError("CLOSE original entry evidence is missing")
-        validate_close_entry_deadline(spec, run_id=runtime.run_id, parameters=parameters, event=event,
-            entry_evidence=entry, root=root, head=head, fill_events=execution.events(root.intent.intent_id),
-            recovery=recovery, risk=risk, now=runtime.server_now())
-        return CloseEntryDeadlineCancelClaim(head.plan, risk.snapshot_id, risk.reconciliation_revision, recovery)
+        return prepare_close_entry_deadline_claim(repository, runtime, execution, spec, root,
+            parameters=parameters, event=event, recovery=recovery, risk=risk)
 
     return runtime.cancel_automation_intent(expected, spec_id=spec.spec_id, control_revision=control_revision,
                                           build_planned_cancel_claim=build_claim)
@@ -249,7 +265,8 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     """Manage only the original plan's detailed fills, independently of new-entry settings."""
     entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
     expected_entry, entry_decision, original_plan = build_close_entry_evidence(spec, run_id=run_id,
-        parameters=parameters, event=event, quote=entry_evidence["snapshot"]["quote"], decided_at=entered_at, now=entered_at)
+        parameters=parameters, event=event, quote=entry_evidence["snapshot"]["quote"], decided_at=entered_at, now=entered_at,
+        retain_candidate=entry_evidence['snapshot']['version'] != 'close_entry_snapshot/v1')
     from .mock_automation_execution import mock_automation_intent_id
 
     if (entry_evidence != expected_entry or root is None or root.state not in TERMINAL_ORDER_STATES

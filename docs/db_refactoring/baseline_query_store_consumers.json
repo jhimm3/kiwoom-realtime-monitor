@@ -5083,6 +5083,72 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/close_plan_management.py",
+      "ClosePlanManagement._load_context",
+      "self._store",
+      "load_shadow_candidates",
+      "direct_call",
+      "self._store.load_shadow_candidates",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/close_plan_management.py",
+      "ClosePlanManagement._manage",
+      "self._store",
+      "load_close_gap_observations",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/close_plan_management.py",
+      "ClosePlanManagement.advance",
+      "self._store",
+      "load_shadow_candidates",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/close_plan_management.py",
+      "ClosePlanManagement.prepare",
+      "self._store",
+      "load_documents",
+      "direct_call",
+      "self._store.load_documents",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/close_plan_management.py",
+      "ClosePlanManagement.prepare",
+      "self._store",
+      "load_shadow_candidates",
+      "direct_call",
+      "self._store.load_shadow_candidates",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._prepare_close",
+      "self._store",
+      "load_documents",
+      "direct_call",
+      "self._store.load_documents",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [
@@ -6152,6 +6218,17 @@
       "",
       "",
       "forward-evaluation-repository"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._prepare_close",
+      "ClosePlanManagement",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-mock-episode-store"
     ]
   ],
   "contracts": {
@@ -6289,7 +6366,8 @@
       "load_news_body_job_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner', annotation=Name(id='str', ctx=Load())), arg(arg='key', annotation=Name(id='str', ctx=Load())), arg(arg='attempts', annotation=Name(id='int', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "save_news_body_revision_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "mock_automation_read_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwonlyargs=[arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[Constant(value=None)])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))), arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))), arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "QueryStore": {
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -6415,7 +6493,8 @@
       "load_news_body_job_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner', annotation=Name(id='str', ctx=Load())), arg(arg='key', annotation=Name(id='str', ctx=Load())), arg(arg='attempts', annotation=Name(id='int', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_news_body_revision_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "mock_automation_read_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='AbstractContextManager', ctx=Load()), slice=Name(id='Any', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "SQLiteQueryStore": {
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Attribute(value=Name(id='sqlite3', ctx=Load()), attr='Connection', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -6546,7 +6625,8 @@
       "save_news_body_revision_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "mock_automation_read_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "accept_selected_order_evidence": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='run_id', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "accept_selected_order_evidence": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='run_id', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     }
   }
 }

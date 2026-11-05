@@ -567,7 +567,8 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
             raise RuntimeError("CLOSE_CURRENT_SHADOW_CHANGED")
         expected, decision, plan = build_close_entry_evidence(spec, run_id=value["run_id"],
             parameters=package.candidate_spec["parameters"], event=event, quote=proof["snapshot"]["quote"],
-            decided_at=datetime.fromisoformat(value["created_at"]), now=now)
+            decided_at=datetime.fromisoformat(value["created_at"]), now=now,
+            retain_candidate=proof['snapshot']['version'] != 'close_entry_snapshot/v1')
     else:
         plan = OrderPlanRef(**value["plan"])
         exit_proof = _plan_document(cursor, p, CLOSE_EXIT_COLLECTION, account, close_exit_key(plan))

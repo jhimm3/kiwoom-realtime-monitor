@@ -3,6 +3,15 @@
   "purpose": "Reviewed static receiver bindings; this is source evidence, not runtime reachability proof.",
   "reviewed_bindings": [
     {
+      "id": "s12-close-plan-management-store",
+      "file": "src/kiwoom_monitor/central_server/close_plan_management.py",
+      "owner_prefix": "ClosePlanManagement",
+      "receiver": "self._store",
+      "backend_scope": "Same Episode/Supervisor-injected native QueryStore. No independent connection, transaction, worker or lease owner.",
+      "reason": "Read the current run's plan heads once at restore, retain the Shadow input cursor, resolve only legacy v1 source context through the existing page, and read two pinned gap windows. New v2 entry proof retains its original candidate and avoids history rescans on restore.",
+      "evidence": "tests/unit/test_close_mock_execution.py; tests/integration/test_close_mock_execution_postgres.py"
+    },
+    {
       "id": "central-morning-brief-constructor",
       "file": "src/kiwoom_monitor/central_server/morning_market_brief.py",
       "owner": "MorningMarketBrief.__init__",

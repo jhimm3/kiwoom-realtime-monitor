@@ -54,6 +54,7 @@ CENTRAL_INDEXES = (
     "idx_central_dataset_lookup",
     "idx_central_rank_slot_current",
     "idx_central_observation_lookup",
+    "idx_central_observation_window",
     "idx_central_observation_available",
     "idx_central_shadow_candidate_available",
     "idx_central_theme_snapshot_available",
@@ -80,9 +81,9 @@ CENTRAL_INDEXES = (
     "idx_central_account_scope_alias_target",
 )
 
-CENTRAL_SCHEMA_VERSION = 24
+CENTRAL_SCHEMA_VERSION = 25
 # PostgreSQL-only trailing migrations must not advance unchanged SQLite DBs.
-CENTRAL_SQLITE_SCHEMA_VERSION = 24
+CENTRAL_SQLITE_SCHEMA_VERSION = 25
 CENTRAL_SCHEMA_BASELINE_NAME = "current_central_storage_baseline"
 CENTRAL_MARKET_METADATA_MIGRATION_NAME = "market_data_observation_metadata"
 CENTRAL_MARKET_STATE_TIME_REPAIR_MIGRATION_NAME = "repair_market_state_special_trade_time"
@@ -854,6 +855,11 @@ def central_schema_migrations(dialect: str = "postgres"):
         ),
         CentralSchemaMigration(24, "rank_current_revision_heads",
                                _rank_current_head_schema("sqlite"), _rank_current_head_schema("postgres")),
+        CentralSchemaMigration(25, "close_gap_observation_windows",
+            ("CREATE INDEX IF NOT EXISTS idx_central_observation_window ON "
+             "central_observation_revisions(kind,subject,datetime(effective_at))",),
+            ("CREATE INDEX IF NOT EXISTS idx_central_observation_window ON "
+             "central_observation_revisions(kind,subject,effective_at)",)),
     )
     return migrations[:CENTRAL_SQLITE_SCHEMA_VERSION] if dialect == "sqlite" else migrations
 

@@ -3034,6 +3034,21 @@
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|_close_native_gap_observations|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-close-plan-runner-and-window-reader-20261105",
+      "reason": "The CLOSE Episode must restore its original candidate and manage one native plan through fresh owner cuts; gap input lookup must read the two pinned windows rather than scan a capped history.",
+      "connection": "The existing Episode lock, task, checkpoint, account monitor and serialized Gateway remain the lifecycle and authority owners. ClosePlanManagement owns only its Shadow cursor and retained plan inputs. New v2 entry snapshots retain the canonical original candidate, while v1 hashes retain their original interpretation. One indexed observation read per backend selects the two windows and resolves availability in Python at full precision. Migration 25 adds only the lookup index.",
+      "validation": "The same SQLite and PostgreSQL fixture assembles the actual Supervisor runner, ignores historical Shadow seed, submits a new four-share BUY, cancels the partial remainder through a fresh Gateway cut, reopens the DB with Shadow disabled, restores v2 context without history rescan, exits three actual shares using native gap rows and current 0B 103, and reconciles to flat. Existing lifecycle and source contracts remain in regression scope.",
+      "evidence": [
+        "tests/unit/test_close_mock_execution.py",
+        "tests/integration/test_close_mock_execution_postgres.py",
+        "tests/unit/test_central_schema.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_observation_readers.py|SQLiteObservationReaderStoreMixin.load_close_gap_observations|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_observation_readers.py|PostgresObservationReaderStoreMixin.load_close_gap_observations|cursor.execute": 1
+      }
     }
   ]
 }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from threading import Lock
 from time import monotonic
 from typing import Any
@@ -96,7 +97,57 @@ def _observation_revision_select(placeholder: str, *, postgres: bool = False) ->
     )
 
 
+def _close_gap_windows(closing_start, closing_end, next_open, as_of):
+    if any(value.utcoffset() is None for value in (closing_start, closing_end, next_open, as_of)):
+        raise ValueError('CLOSE gap lookup requires timezone-aware pinned windows')
+    if not closing_start < closing_end < next_open:
+        raise ValueError('CLOSE gap lookup windows are out of order')
+    return ((closing_start, closing_end, min(next_open, as_of)),
+            (next_open, next_open + timedelta(minutes=1), as_of))
+
+
+def _select_close_gap_rows(rows, windows):
+    selected = []
+    for start, end, cut in windows:
+        by_key = {}
+        for row in rows:
+            payload = row['payload']
+            try:
+                at = datetime.fromisoformat(row['available_at'])
+                bar_start, bar_end = (datetime.fromisoformat(payload[key]) for key in ('bar_start', 'bar_end'))
+                if (any(value.utcoffset() is None for value in (at, bar_start, bar_end))
+                        or (bar_start, bar_end) != (start, end) or at > cut
+                        or payload.get('window_closed') is not True):
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue
+            previous = by_key.get(row['observation_key'])
+            if previous is None or (at, row['accepted_sequence']) > (previous[0], previous[1]['accepted_sequence']):
+                by_key[row['observation_key']] = (at, row)
+        if not by_key:
+            return ()
+        latest_at = max(at for at, row in by_key.values())
+        latest = [row for at, row in by_key.values() if at == latest_at]
+        if len(latest) != 1:
+            return ()  # Preserve a conflicting same-time source as unavailable.
+        row = latest[0]
+        if (row['value_kind'] != 'actual' or row['completeness'] != 'complete'
+                or row['payload'].get('capture_quality') != 'complete'):
+            return ()
+        selected.append(row)
+    return tuple(selected)
+
+
 class SQLiteObservationReaderStoreMixin:
+    def load_close_gap_observations(self, symbol: str, closing_start: datetime, closing_end: datetime,
+                                    next_open: datetime, as_of: datetime) -> tuple[dict[str, Any], ...]:
+        windows = _close_gap_windows(closing_start, closing_end, next_open, as_of)
+        sql = _observation_revision_select('?') + " AND subject=? AND venue='KRX' " \
+            "AND datetime(effective_at) IN (datetime(?),datetime(?))"
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(sql, ('minute_bar', symbol, closing_start.isoformat(), next_open.isoformat())).fetchall()
+        return _select_close_gap_rows(observation_revision_result_rows(rows), windows)
+
     def load_observation_revisions(
         self, kind: str, subject: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -164,6 +215,19 @@ class SQLiteObservationReaderStoreMixin:
 
 
 class PostgresObservationReaderStoreMixin:
+    def load_close_gap_observations(self, symbol: str, closing_start: datetime, closing_end: datetime,
+                                    next_open: datetime, as_of: datetime) -> tuple[dict[str, Any], ...]:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        windows = _close_gap_windows(closing_start, closing_end, next_open, as_of)
+        sql = _observation_revision_select('%s', postgres=True) + " AND subject=%s AND venue='KRX' AND effective_at IN (%s,%s)"
+        context = DBWriterContext(writer_family='read.close_gap', writer_kind='observation_revision',
+                                  operation='load_close_gap_observations', access_mode='read')
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
+            cursor.execute(sql, ('minute_bar', symbol, closing_start, next_open))
+            rows = cursor.fetchall()
+        return _select_close_gap_rows(observation_revision_result_rows(rows), windows)
+
     def _observation_safe_frontier(self, cursor, connection) -> tuple[int | None, bool]:
         from psycopg import sql
 

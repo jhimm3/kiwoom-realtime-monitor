@@ -158,7 +158,10 @@ class CentralSchemaTests(unittest.TestCase):
         self.assertIn("body_processor_owner", "\n".join(migrations[22].sqlite_statements))
         self.assertIn("body_input_ref", "\n".join(migrations[22].postgres_statements))
         self.assertEqual(24, migrations[23].version)
-        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[23].version)
+        self.assertEqual(CENTRAL_SCHEMA_VERSION, migrations[24].version)
+        self.assertEqual("close_gap_observation_windows", migrations[24].name)
+        self.assertIn("datetime(effective_at)", migrations[24].sqlite_statements[0])
+        self.assertIn("subject,effective_at)", migrations[24].postgres_statements[0])
         self.assertEqual("rank_current_revision_heads", migrations[23].name)
         for statements in (migrations[23].sqlite_statements, migrations[23].postgres_statements):
             self.assertIn("revision_id", "\n".join(statements))
