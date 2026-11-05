@@ -36,9 +36,10 @@ from kiwoom_monitor.domain.execution_activation import (
     strategy_stage_revision,
 )
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
-from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION, CLOSE_IPO_FINAL_CANDIDATE_FAMILIES
+from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION, MINUTE_FINAL_CANDIDATE_FAMILIES
 from .leader_breakout import LeaderBreakoutConfig, validate_leader_shadow_event
 from .close_and_ipo import matches_close_shadow
+from .panic_rebound import matches_panic_shadow
 from .section12_minute_research import MinuteExperiment
 
 
@@ -53,9 +54,9 @@ MOCK_AUTOMATION_LIMIT_FIELDS = (
 def _candidate_family_contract(package):
     family_id = str(package.candidate_spec.get("family", ""))
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
-        if family_id not in CLOSE_IPO_FINAL_CANDIDATE_FAMILIES:
+        if family_id not in MINUTE_FINAL_CANDIDATE_FAMILIES:
             raise ValueError("CLOSE candidate family does not match its version")
-        MinuteExperiment.from_document(family_id, _mapping(package.candidate_spec, "parameters"))
+        MinuteExperiment.from_document(family_id, _mapping(package.candidate_spec, "parameters"), paper_request=True)
         return family_id, (family_id,)
     family = get_research_family(family_id)
     return family.family_id, family.factor_ids
@@ -68,8 +69,9 @@ def matching_shadow_events(
     if package.candidate_spec["version"] == CLOSE_FINAL_CANDIDATE_VERSION:
         parameters = package.candidate_spec["parameters"]
         return tuple(sorted(
-            (dict(event) for event in events if matches_close_shadow(
-                parameters, event, family=package.candidate_spec['family'])),
+            (dict(event) for event in events if (
+                matches_panic_shadow(parameters, event) if package.candidate_spec['family'] == 'panic_rebound/v1'
+                else matches_close_shadow(parameters, event, family=package.candidate_spec['family']))),
             key=lambda event: (datetime.fromisoformat(event["available_at"]), event["event_id"]), reverse=True,
         ))
     family_id = str(package.candidate_spec.get("family", ""))

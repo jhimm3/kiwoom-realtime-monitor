@@ -1,5 +1,7 @@
 # 현재 모듈 지도
 
+**S12-05 낙주 결과/Shadow:** 기존 `panic_rebound`가 P0/P1 정책/뉴스 parse·canonical 표현과 원래 Shadow 대조를, `section12_minute_research`가 같은 설정/상태를, `research_process`/`research_run`이 기존 final 소유/캐시·Paper/unknown 연구를, 기존 후보 publisher가 원본 계보/immutable 게시를 소유한다. `candidate_monitor`의 원래 panic_entry_setup을 소비하며 새 order owner/worker/schema는 없다. 실제 주문/READY·부분/당일 미완료 관리는 후속이다. [근거·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-panic-final-shadow).
+
 **S12-05 선별 정정 보존:** 기존 `preserve_selected_order_evidence` CLI가 정지한 원본 cut/선택을, domain `selected_order_evidence` codec이 v1/v2 원장 사실·물리 부모/수량/FILL·미귀속 marker와 canonical bytes를, 기존 SQLite document native writer가 offline 최초 영수증/재전달을 소유한다. 실제 실행 원장/권한으로 채우지 않으며 원본·구형 미정정 v1은 유지한다. [수락·독립 계좌 인계 잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-selected-amendment-evidence).
 
 **S12-05 종가베팅 실행 연결:** `central_server/close_plan_management.py`는 Shadow 커서와 원래 계획 입력을 소유한다. 갭 자료는 청산 전 기존 제한 주기의 현재 cut으로 조회하며 HOLD 판본을 영구 캐시하지 않는다. 현재 계좌 대사 후 계획 head를 다시 읽고 native CAS를 유지한다. 기존 Episode/Runner/Supervisor가 잠금·checkpoint·task·조립·종료를, 기존 계좌 monitor/Gateway/runtime/native 저장소가 fresh cut·명령 직렬화·권한과 주문/FILL을 소유한다. `application/close_mock_execution.py`가 최초/청산 근거와 typed 취소를 만들고 `database_observation_readers.py`가 고정된 두 봉 구간을 조회한다. 새 worker나 주문 권한 owner는 없다. [현재 수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-close-episode).

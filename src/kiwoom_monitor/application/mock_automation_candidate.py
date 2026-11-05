@@ -16,7 +16,7 @@ from kiwoom_monitor.domain.simulation_contract import (
     SimulationExecutionConfig,
 )
 from kiwoom_monitor.application.market_session_schedule import KRX_REGULAR_RESEARCH_PROFILE, research_session_profile_contract_matches
-from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION, CLOSE_IPO_FINAL_CANDIDATE_FAMILIES
+from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION, MINUTE_FINAL_CANDIDATE_FAMILIES
 from kiwoom_monitor.domain.strategy_contract import parse_strategy_config
 from kiwoom_monitor.application.research_splits import ResearchEvaluationSpec
 
@@ -343,19 +343,23 @@ def _validate_candidate_spec(value: Mapping[str, Any], expected_hash: str) -> No
     parameters = _mapping(value.get("parameters"), "candidate parameters")
     if close:
         from kiwoom_monitor.application.close_and_ipo import close_ipo_policy_from_document
+        from kiwoom_monitor.application.panic_rebound import canonical_panic_parameters
 
-        if family not in CLOSE_IPO_FINAL_CANDIDATE_FAMILIES:
+        if family not in MINUTE_FINAL_CANDIDATE_FAMILIES:
             raise ValueError("final close/IPO research candidate requires a supported family")
         reference = _mapping(value.get("strategy_references"), "CLOSE strategy references")
         if (set(reference) != {"version", "sha256"} or reference["version"] != "strategy-reference/v1"
                 or not isinstance(reference["sha256"], str)):
             raise ValueError("final CLOSE candidate requires its frozen calendar reference")
         _require_sha256(str(reference["sha256"]), "CLOSE calendar reference")
-        if (set(parameters) != {"capital_won", "policy"}
-                or type(parameters["capital_won"]) is not int or parameters["capital_won"] <= 0):
-            raise ValueError("final CLOSE candidate requires explicit positive capital")
-        config = close_ipo_policy_from_document(family, _mapping(parameters['policy'], 'CLOSE/IPO policy'))
-        canonical_parameters = {'capital_won': parameters['capital_won'], 'policy': config.to_dict()}
+        if family == 'panic_rebound/v1':
+            canonical_parameters = canonical_panic_parameters(parameters, paper_request=True)
+        else:
+            if (set(parameters) != {"capital_won", "policy"}
+                    or type(parameters["capital_won"]) is not int or parameters["capital_won"] <= 0):
+                raise ValueError("final CLOSE candidate requires explicit positive capital")
+            config = close_ipo_policy_from_document(family, _mapping(parameters['policy'], 'CLOSE/IPO policy'))
+            canonical_parameters = {'capital_won': parameters['capital_won'], 'policy': config.to_dict()}
     else:
         config = parse_strategy_config(family, parameters)
         from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutConfig

@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 현재 조건 재판단/정정 우선의 종가베팅·신규주 v3/v4 연결을 로컬 수락했고, 정정 주문의 선별 보존 소비자도 v2로 연결했다. 원/새 물리 주문·같은 raw ID·미귀속 관측/marker를 보존하고 대상은 계속 주문 권한 없는 최초 영수증만 가진다. 다음은 낙주 native 연결과 기존 대표7개·DD/MICRO의 잔여다. 독립 계좌/원주문 검증과 실제 운영 인계는 별도이며 완료 기준은 유지한다. [정정 실행](#s12-close-current-order-management) · [선별 정정 보존](#s12-selected-amendment-evidence) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 종가베팅·신규주의 현재 재판단/정정과 선별 보존 v2에 이어, 낙주 P0/P1의 독립 최종 Paper→후보 게시→원래 native Shadow 대조를 Windows34/실제PG2건으로 연결했다. 뉴스 미확인은 최종 연구에도 보존하며 실시간 승인과 구분한다. 다음은 낙주의 명시 실행 정책/READY→native 주문·부분/늦은 체결·당일 미완료 수명이다. 대표7개·DD/MICRO·독립 계좌/원주문 검증과 운영 제외 및 완료 기준을 유지한다. [낙주 결과/Shadow](#s12-panic-final-shadow) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -655,3 +655,17 @@ source `352bc279fd41b3679b187ca6e0802ed1154d0e18f28a4de3c9362385507b79a3`에서 
 최초3건 실패는 보존 기능의 실제 누락을 보여준다. 첫 수정의2통과/1오류는 원장에 있는 `broker_revision=...;amendment_parent=...`를 그대로 읽도록 맞춰 관련3건을 통과시킨 뒤, 복구 관측/실제 FILL 분리와 CLI를 추가해 최종5건을 대조했다. 기존 시계·native 수량/권한·검사 기대값을 완화하지 않았다. [수정 전](../../tmp/s12-05-current-management/preservation-before.json) · [첫 수정](../../tmp/s12-05-current-management/preservation-after.json) · [관련 재검증](../../tmp/s12-05-current-management/preservation-after-v2.json).
 
 이는 항목11의 선별 자료 보존 소비자 수락이며 독립 컴퓨터의 계좌/원주문 검증이나 운영 관리 인계 수락이 아니다. 최초 영수증은 계속 `OFFLINE_RECOVERY_REQUIRED`, `order_authority=false`다. 신뢰할 원본·대상의 계좌 연결/namespace, fresh target 계좌·일자/원주문·상세 체결/coverage 근거와 원본/대상 좌표 구분은 기존 재개 조건으로 남긴다. 전체4/5·대표3/4/7/9의4/11과 다른7개·DD/MICRO의 잔여를 유지한다. 다음 독립 개발은 낙주 native 진입/부분 체결·반등·잔량 취소/당일 미완료 연결이며 운영·실계좌·NAS·T0/실제 권한 인계·push는 실행하지 않는다.
+
+<a id="s12-panic-final-shadow"></a>
+
+### S12-05 항목5 선행 · 낙주 P0/P1 최종 후보와 원래 Shadow — 2026-11-06
+
+기존 P0/P1 급락·확인·뉴스 판단과 CandidateMonitor의 `panic_entry_setup` 보존은 재사용하고, 끊겨 있던 **독립 최종 Paper→canonical 후보→immutable 게시→실제 native Shadow 대조**를 연결했다. 기존 generic `final_research_candidate/v1`에 지원 분봉 집합을 별도로 두어 PANIC만 추가하고 CLOSE/IPO 집합·문서 형식은 유지한다. 기존 final claim/owner·동결 reference·원본/구현 hash·캐시·평가 분할·비용·warmup을 그대로 사용한다. 원래 셋업과 P1 다음 완료봉 확인·뉴스 당시 가용 판본을 대조하며, 미래 뉴스나 후속 봉으로 최초 신호를 만들지 않는다. 파라미터/뉴스의 parse와 canonical 표현은 기존 `panic_rebound`에 모아 분봉 설정과 후보 reader가 공유한다. 후보 reader가 분봉 실행 어댑터를 거꾸로 참조하던 새 cycle을 제거했으며 새 계층·worker·DB schema/권한 owner·라이브러리는 없다.
+
+명시한 `panic_allow_unresolved_news` 최종 Paper도 일반 Paper와 같이 연구할 수 있게 했다. flag/미확인 reason·원래 입력과 실제 후속 봉 체결을 그대로 보존한다. 연구 후보의 ELIGIBLE 판정은 실시간 승인과 별개이며, 해당 설정을 기존 native Shadow로 구성하는 것은 계속 거절한다. 새 근거·임계값을 실행 기본값으로 넣지 않았고, 실제 PANIC READY/주문 수명은 다음 연결이다.
+
+source `2c347d86cc95be9e797c7fe98c4a61199ec5e1598c4e84a2479bc7b8a991a299`의 **Windows34건/9모듈 + 실제 격리 PostgreSQL2건**이 통과했다. 신규 unit3/PG1은 P0/P1 최종 실행→캐시→실제 후보 게시→순서 있는 native 분봉 Shadow를 연결하고 원셋업900/실패895/목표945·P1 확인910, quantity4, 실제 수신 이후의 후속 시가920/925와 청산960을 대조한다. 모두 합성 연구 표본이며 숫자는 제품 기본값이나 실증 수익이 아니다. 원래 수신보다 빠른 시가를 체결로 쓰지 않으며, 후기 악재는 cut 이후면 배제하고 cut에 들어오면 진입 대조를 거절한다. target/수량/변형/뉴스 ref와 원실행 parameters 변조도 거절한다. native 게시/Shadow만으로 execution intent/events/lease는0이다. 뉴스 미확인 연구의 실제 final 완료·원래 reason/flag와 native Shadow 구성 거절을 따로 확인했다. 기존 PANIC6건, 일반 Paper/armed 복구·정정, CLOSE/IPO final/READY HTTP·후보, final 소유/캐시/자료/비용 회귀와 처리 코드 부재의 조회 수신/새 서버2건을 재사용했다. [현재32건](../../tmp/s12-04-shadow/s12-05-panic-final/evidence.json) · [조회2건](../../tmp/s12-04-shadow/s12-05-panic-query/evidence.json) · [PG2건](../../tmp/s12-03-pg-baseline/s12-05-panic-final/postgres-run.json) · [증분](../../tmp/s12-05-panic/review-verified-final.json) · [정리](../../tmp/s12-05-panic/cleanup.json).
+
+구조1328·위반0/consumer delta0, 증분7288정의/290기록·기존미결49를 보존했고 worker9/TEMP 및 PG DB/port/private 정리를 대조했다. 초기 probe는 실제 final family 차단과 ordinary-Paper 전용 unknown 제한을 재현했다. 새 fixture의 참조 파일에는 기존 필수 빈 listings를 넣었고, available=end+2초에 맞는 실제 후속 시가와 명시한 초기2분 warmup을 사용했다. 기존 engine/평가 기대값·warmup120·한도/skip/CI를 바꾸지 않았다. 새 cycle은 허용 목록을 늘리지 않고 기존 PANIC parser 책임으로 해소했다. [첫 final 차단](../../tmp/s12-05-panic/probe-v2.json) · [입력 순서 확인](../../tmp/s12-05-panic/probe-v3.json) · [warmup 확인](../../tmp/s12-05-panic/probe-v7.json) · [연결 probe](../../tmp/s12-05-panic/probe-v9.json).
+
+이는 **S12-05 항목5의 선행 결과/Shadow 연결**이며 낙주 native 주문·부분 체결/반등·잔량 취소/늦은 FILL·당일 미완료 관리·일지/READY UI 수락은 아니다. 다음은 이 원래 셋업과 명시 실행 정책을 같은 계좌 owner/native claim·현재 조건 재판단/정정 우선·기존 Episode에 연결한다. 전체4/5·대표3/4/7/9의4/11, 다른7개·DD/MICRO와 독립 계좌 인계의 기존 잔여/운영 제외를 유지한다. 실제 주문·NAS 변경/배포·권한 인계·T0·push는 실행하지 않았다.

@@ -65,6 +65,37 @@ class PanicNewsProof:
             raise ValueError("PANIC news evidence references must be nonempty")
 
 
+def parse_panic_parameters(document: Mapping, *, paper_request: bool = False):
+    fields = {'capital_won', 'quantity', 'policy', 'news_proofs'}
+    if paper_request and 'panic_allow_unresolved_news' in document:
+        fields.add('panic_allow_unresolved_news')
+    if set(document) != fields or not isinstance(document['policy'], Mapping):
+        raise ValueError('invalid minute experiment fields')
+    capital, quantity = document['capital_won'], document['quantity']
+    if type(capital) is not int or capital <= 0:
+        raise ValueError('minute experiment capital_won must be a positive integer')
+    if type(quantity) is not int or quantity <= 0 or not isinstance(document['news_proofs'], list):
+        raise ValueError('panic research requires explicit quantity and news proofs')
+    allow = document.get('panic_allow_unresolved_news', False)
+    if type(allow) is not bool:
+        raise ValueError('panic_allow_unresolved_news must be boolean')
+    proofs = tuple(PanicNewsProof(**{**row,
+        'effective_at': datetime.fromisoformat(row['effective_at']) if row['effective_at'] is not None else None,
+        'available_at': datetime.fromisoformat(row['available_at']) if row['available_at'] is not None else None,
+        'evidence_refs': tuple(row['evidence_refs'])}) for row in document['news_proofs'])
+    return capital, quantity, PanicReboundRules(**document['policy']), proofs, allow
+
+
+def canonical_panic_parameters(document: Mapping, *, paper_request: bool = False):
+    capital, quantity, rules, proofs, allow = parse_panic_parameters(document, paper_request=paper_request)
+    value = {'capital_won': capital, 'quantity': quantity, 'policy': dict(vars(rules)), 'news_proofs': [
+        {**vars(proof), 'evidence_refs': list(proof.evidence_refs),
+         'effective_at': proof.effective_at.isoformat() if proof.effective_at is not None else None,
+         'available_at': proof.available_at.isoformat() if proof.available_at is not None else None} for proof in proofs]}
+    if allow: value['panic_allow_unresolved_news'] = True
+    return value
+
+
 @dataclass(frozen=True)
 class PanicSetup:
     symbol: str
@@ -120,7 +151,7 @@ def evaluate_panic_rebound(
         result = _confirm_setup(bar, start, cutoff, rules, setup, history)
         if result.action != "ENTER":
             return result
-        return _with_news(result, bar, cutoff, news_proofs, allow_unresolved_news)
+        return _with_news(result, bar.code, cutoff, news_proofs, allow_unresolved_news)
 
     window = _complete_window(history, start, rules.lookback_minutes)
     if not window:
@@ -141,7 +172,7 @@ def evaluate_panic_rebound(
     if rules.variant == "P1":
         return PanicReboundDecision("ARM", "panic_waiting_for_next_completed_close", setup, refs)
     result = PanicReboundDecision("ENTER", "panic_decline_reached", setup, refs)
-    return _with_news(result, bar, cutoff, news_proofs, allow_unresolved_news)
+    return _with_news(result, bar.code, cutoff, news_proofs, allow_unresolved_news)
 
 
 def _bar_times(bar: KrxMinuteBarFrame) -> tuple[datetime, datetime, datetime]:
@@ -229,12 +260,12 @@ def _confirm_setup(
 
 
 def _with_news(
-    decision: PanicReboundDecision, bar: KrxMinuteBarFrame, cutoff: datetime, proofs: Iterable[PanicNewsProof],
+    decision: PanicReboundDecision, symbol: str, cutoff: datetime, proofs: Iterable[PanicNewsProof],
     allow_unresolved: bool,
 ) -> PanicReboundDecision:
     eligible: list[tuple[datetime, PanicNewsProof]] = []
     for row in proofs:
-        if row.symbol != bar.code:
+        if row.symbol != symbol:
             continue
         if row.effective_at is not None:
             effective = row.effective_at.astimezone(KST)
@@ -266,6 +297,50 @@ def _with_news(
     if allow_unresolved:
         return PanicReboundDecision("ENTER", "panic_price_setup_news_unresolved", decision.setup, refs)
     return PanicReboundDecision("NO_TRADE", "panic_news_unresolved", input_refs=refs)
+
+
+def matches_panic_shadow(parameters: Mapping, event: Mapping) -> bool:
+    """Match a retained minute setup and its point-in-time news; never infer ticks or approval."""
+    try:
+        if (parameters.get('panic_allow_unresolved_news', False) is not False
+                or set(parameters) != {'capital_won', 'quantity', 'policy', 'news_proofs'}):
+            return False  # Unresolved-news research remains a research artifact.
+        _, _, rules, proofs, _ = parse_panic_parameters(parameters)
+        setup = PanicSetup.from_dict(event['panic_entry_setup'])
+        available, cutoff, expires = (aware_iso_kst(event[name]) for name in ('available_at', 'input_cutoff', 'expires_at'))
+        quantity, price = event['quantity'], event['signal_reference_price']
+        refs = event['input_revision_refs']
+        if (type(parameters['capital_won']) is not int or parameters['capital_won'] <= 0
+                or type(quantity) is not int or quantity <= 0 or quantity != parameters['quantity']
+                or type(price) is not int or price <= 0 or quantity * price > parameters['capital_won']
+                or (event['strategy_id'], event['strategy_version'], event['strategy_variant'], event['shadow_scope'])
+                != ('panic_rebound', 'v1', rules.variant, 'section12-minute-shadow/v1')
+                or any(not isinstance(event.get(name), str) or not event[name] for name in
+                       ('event_id', 'run_id', 'snapshot_id', 'decision_id', 'observation_key', 'reference_revision_id'))
+                or setup.symbol != event['symbol'] or setup.research_session != f'{cutoff.date().isoformat()}:KRX_REGULAR'
+                or available != cutoff or not available < expires or setup.trigger_available_at > available
+                or setup.trigger_bar_start + _MINUTE > setup.trigger_available_at
+                or any(type(value) is not int or value <= 0 for value in
+                       (setup.trigger_close, setup.failure_price, setup.target_price))
+                or setup.failure_price > setup.trigger_close
+                or setup.target_price != (setup.trigger_close * (10_000 + rules.rebound_target_bps) + 9_999) // 10_000
+                or not isinstance(refs, list) or not setup.input_refs or setup.trigger_revision_id not in setup.input_refs
+                or any(not isinstance(ref, str) or not ref or ref not in refs for ref in setup.input_refs)
+                or event['reference_revision_id'] not in refs):
+            return False
+        reason = 'panic_decline_reached' if rules.variant == 'P0' else 'panic_next_completed_close_recovered'
+        if rules.variant == 'P0':
+            if (price, available, event['reference_revision_id']) != (
+                    setup.trigger_close, setup.trigger_available_at, setup.trigger_revision_id):
+                return False
+        elif (price <= setup.trigger_close or event['reference_revision_id'] == setup.trigger_revision_id
+                or cutoff < setup.trigger_bar_start + 2 * _MINUTE):
+            return False
+        expected = _with_news(PanicReboundDecision('ENTER', reason, setup, setup.input_refs), setup.symbol, cutoff, proofs, False)
+        return (expected.action == 'ENTER' and event['decision_reasons'] == [reason]
+                and all(ref in refs for ref in expected.input_refs))
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _manage_position(

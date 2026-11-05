@@ -72,7 +72,7 @@ from kiwoom_monitor.infrastructure.research_data_source import FrozenStrategyRef
 from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
 from kiwoom_monitor.domain.research_contract import (
     CLOSE_FINAL_CANDIDATE_VERSION,
-    CLOSE_IPO_FINAL_CANDIDATE_FAMILIES,
+    MINUTE_FINAL_CANDIDATE_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FAMILIES as EVIDENCE_EXPERIMENT_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FORMAT,
 )
@@ -161,7 +161,7 @@ class EvidenceExperimentRequest:
 def final_candidate_spec_document(
     request: ResearchProcessRequest, implementation_hash: str,
 ) -> dict[str, Any]:
-    """Bind supported close/IPO calendar and listing references, preserving old identities."""
+    """Bind supported minute-strategy references, preserving old scientific identities."""
     if (not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run'
             or request.search is not None or request.development_partition is not None or request.shadow_only
             or request.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES):
@@ -169,7 +169,7 @@ def final_candidate_spec_document(
     if (not isinstance(implementation_hash, str) or len(implementation_hash) != 64
             or any(char not in '0123456789abcdef' for char in implementation_hash)):
         raise ValueError('final candidate requires a scientific implementation SHA256')
-    close = isinstance(request.strategy, MinuteExperiment) and request.strategy.family in CLOSE_IPO_FINAL_CANDIDATE_FAMILIES
+    close = isinstance(request.strategy, MinuteExperiment) and request.strategy.family in MINUTE_FINAL_CANDIDATE_FAMILIES
     references = request.strategy_references
     if close:
         if (request.family != request.strategy.family or request.session_profile != 'krx-regular/v1'
@@ -178,7 +178,7 @@ def final_candidate_spec_document(
                 or not isinstance(references[1], str) or len(references[1]) != 64
                 or any(char not in '0123456789abcdef' for char in references[1])):
             raise ValueError('final CLOSE candidate requires its pinned KRX calendar reference')
-        parameters = MinuteExperiment.from_document(request.family, request.strategy.to_dict()).to_dict()
+        parameters = MinuteExperiment.from_document(request.family, request.strategy.to_dict(), paper_request=True).to_dict()
     else:
         if references is not None or isinstance(request.strategy, MinuteExperiment):
             raise ValueError('final candidate requires a fixed registered single-run strategy')

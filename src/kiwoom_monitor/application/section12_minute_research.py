@@ -69,21 +69,10 @@ class MinuteExperiment:
             raise ValueError("minute experiment capital_won must be a positive integer")
         policy_document = dict(document["policy"])
         if family == PANIC_FAMILY:
-            from kiwoom_monitor.application.panic_rebound import PanicNewsProof, PanicReboundRules
+            from kiwoom_monitor.application.panic_rebound import parse_panic_parameters
 
-            quantity = document["quantity"]
-            if type(quantity) is not int or quantity <= 0 or not isinstance(document["news_proofs"], list):
-                raise ValueError("panic research requires explicit quantity and news proofs")
-            allow_unresolved = document.get("panic_allow_unresolved_news", False)
-            if type(allow_unresolved) is not bool:
-                raise ValueError("panic_allow_unresolved_news must be boolean")
-            proofs = tuple(PanicNewsProof(**{
-                **row,
-                "effective_at": datetime.fromisoformat(row["effective_at"]) if row["effective_at"] is not None else None,
-                "available_at": datetime.fromisoformat(row["available_at"]) if row["available_at"] is not None else None,
-                "evidence_refs": tuple(row["evidence_refs"]),
-            }) for row in document["news_proofs"])
-            return cls(family, capital, quantity, PanicReboundRules(**policy_document), proofs,
+            capital, quantity, rules, proofs, allow_unresolved = parse_panic_parameters(document, paper_request=paper_request)
+            return cls(family, capital, quantity, rules, proofs,
                        panic_allow_unresolved_news=allow_unresolved)
         if family in BREAKOUT_STUDY_FAMILIES:
             from kiwoom_monitor.application.breakout_theme_research import BreakoutEntryProof, BreakoutThemePolicy, ThemeRoleProof

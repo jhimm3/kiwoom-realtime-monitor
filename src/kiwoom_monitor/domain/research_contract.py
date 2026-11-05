@@ -24,6 +24,7 @@ REPORTED_RESEARCH_RESULT_KIND = "research-run-report"
 REPORTED_RESEARCH_RESULT_COLLECTION = "reported_research_results"
 CLOSE_FINAL_CANDIDATE_VERSION = "final_research_candidate/v1"
 CLOSE_IPO_FINAL_CANDIDATE_FAMILIES = frozenset({'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'})
+MINUTE_FINAL_CANDIDATE_FAMILIES = CLOSE_IPO_FINAL_CANDIDATE_FAMILIES | {'panic_rebound/v1'}
 SECTION12_EVIDENCE_EXPERIMENT_FORMAT = "kiwoom-monitor-evidence-experiment"
 SECTION12_EVIDENCE_EXPERIMENT_FAMILIES = {
     "micro_experiment": "micro_execution/v1",

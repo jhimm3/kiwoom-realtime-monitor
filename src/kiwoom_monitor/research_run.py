@@ -95,15 +95,16 @@ def execute_research(
     leader = isinstance(config, LeaderBreakoutConfig)
     section12 = isinstance(config, MinuteExperiment)
     final_scope = execution_scope == 'independent_final_holdout/v1'
-    final_close_ipo = final_scope and section12 and config.family in {CLOSE_FAMILY, IPO_CLOSE_FAMILY, IPO_BREAKOUT_FAMILY}
+    from kiwoom_monitor.domain.research_contract import MINUTE_FINAL_CANDIDATE_FAMILIES
+    final_minute = final_scope and section12 and config.family in MINUTE_FINAL_CANDIDATE_FAMILIES
     historical_reconstruction = _is_historical_reconstruction(dataset.manifest)
     historical_breakout = (section12 and config.family == BREAKOUT_STUDY_FAMILY and historical_reconstruction
                            and session_profile == KRX_REGULAR_RESEARCH_PROFILE
                            and research_session_profile_contract_matches(dataset.manifest.get("research_session_profile"), session_profile))
     if shadow_only and not section12:
         raise ValueError("shadow replay requires a Section 12 minute experiment")
-    if section12 and config.panic_allow_unresolved_news and (shadow_only or execution_scope is not None):
-        raise ValueError("unresolved PANIC news is only supported in ordinary Paper research")
+    if section12 and config.panic_allow_unresolved_news and (shadow_only or execution_scope is not None and not final_minute):
+        raise ValueError("unresolved PANIC news is supported only in Paper research")
     if section12 != (execution_config.version == COMPLETED_CLOSE_EXECUTION_VERSION):
         raise ValueError("completed-close execution and a Section 12 minute experiment must be selected together")
     if section12 and (session_profile != KRX_REGULAR_RESEARCH_PROFILE or (strategy_references is None and not historical_breakout)
@@ -123,10 +124,10 @@ def execute_research(
         config, strategy_references, reconstructed_market_values=(
             reconstructed_market_proxy.values if reconstructed_market_proxy is not None else None
         ),
-        research_context=not shadow_only and execution_scope is None,
+        research_context=not shadow_only and (execution_scope is None or final_minute),
     ) if section12 else None
     if strategy_references is not None and (
-        session_profile is None or (execution_scope is not None and not final_close_ipo) or leader
+        session_profile is None or (execution_scope is not None and not final_minute) or leader
     ):
         raise ValueError("pinned strategy references require ordered minute research or a final CLOSE candidate")
     calendar_evidence = strategy_references.calendar if strategy_references is not None else None
